@@ -130,10 +130,18 @@ impl Player {
         self.duration_secs
     }
 
+    /// Indice del frame sorgente corrispondente alla posizione attuale
+    /// (nello spazio frame del media, fps nativo — non ancora traslato per
+    /// il trim `source_in` di una clip, vedi nota in vv-app::main sul
+    /// player non ancora trim-aware).
+    pub fn current_source_frame(&self) -> FrameIdx {
+        (self.position_secs() * self.fps).round() as FrameIdx
+    }
+
     /// Frame corrente da mostrare nel viewer, se già decodificato. Aggiorna
     /// anche il target del decode-ahead alla posizione corrente.
     pub fn current_frame(&self) -> Option<Arc<FrameRgba>> {
-        let idx = (self.position_secs() * self.fps).round() as FrameIdx;
+        let idx = self.current_source_frame();
         self.decode_ahead.set_target(idx);
         self.decode_ahead.cache().get(idx)
     }

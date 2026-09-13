@@ -184,11 +184,13 @@ vibevideo/
    tempo" per il rendering multi-track.
 4. ✅ **Ripple delete** globale multi-traccia (Shift+Del / pulsante
    dedicato, accanto al normal delete Del/Backspace della milestone 3).
-5. 🟡 **Trasformazioni**: crop, zoom, gain — **valori statici fatti**
-   (compositor GPU wgpu per crop/zoom, gain realtime nel callback audio,
-   sliders nel pannello proprietà, tutto con undo/redo). **Keyframe non
-   ancora fatti**: il modello dati li supporta già (`Keyframed<T>`), manca
-   l'interpolazione a runtime e la UI per aggiungerli/rimuoverli.
+5. ✅ **Trasformazioni**: crop, zoom, gain, statici e a keyframe.
+   Compositor GPU wgpu per crop/zoom, gain realtime nel callback audio
+   (control-rate ~60Hz per l'automazione keyframeata, non ancora
+   sample-accurate — sufficiente per l'anteprima, l'export potrà fare di
+   meglio se servirà), pannello proprietà con toggle diamante per
+   animare/aggiungere/rimuovere un keyframe al frame corrente, tutto con
+   undo/redo. Interpolazione Hold/Linear/EaseInOut in `Keyframed::value_at`.
 6. **SolidColor + Text overlay**.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.

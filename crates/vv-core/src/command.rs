@@ -1,7 +1,7 @@
 //! Command pattern per undo/redo. Ogni comando cattura da sé lo stato
 //! necessario a invertirsi nel momento in cui viene applicato.
 
-use crate::model::{Clip, ClipId, FrameIdx, Project, TimelineId, Transform};
+use crate::model::{Clip, ClipId, FrameIdx, Interpolation, Project, TimelineId, Transform};
 
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
@@ -414,6 +414,178 @@ impl Command for SetClipGain {
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
             clip.effects.gain_db.default = old_value;
+        }
+    }
+}
+
+/// Il parametro animabile a cui si applica un `UpsertKeyframe`/
+/// `RemoveKeyframe`. Due soli comandi invece di uno per parametro: quando
+/// arriveranno altri parametri keyframeable (es. speed) basterà aggiungere
+/// una variante qui, non un'altra coppia di comandi.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyframeValue {
+    Transform(Transform),
+    Gain(f32),
+}
+
+/// Inserisce o sostituisce un keyframe di `effects.transform` o
+/// `effects.gain_db` al frame indicato (milestone 5, seconda parte).
+#[derive(Debug)]
+pub struct UpsertKeyframe {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub frame: FrameIdx,
+    pub value: KeyframeValue,
+    pub interpolation: Interpolation,
+    /// Valore/interpolazione che c'era prima a questo stesso frame, se
+    /// c'era: `None` significa che il frame non aveva un keyframe, quindi
+    /// l'undo deve rimuoverlo anziché ripristinarne uno vecchio.
+    previous: Option<(KeyframeValue, Interpolation)>,
+}
+
+impl UpsertKeyframe {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        frame: FrameIdx,
+        value: KeyframeValue,
+        interpolation: Interpolation,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            frame,
+            value,
+            interpolation,
+            previous: None,
+        }
+    }
+}
+
+impl Command for UpsertKeyframe {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        match self.value {
+            KeyframeValue::Transform(v) => {
+                self.previous = clip
+                    .effects
+                    .transform
+                    .keyframe_at(self.frame)
+                    .map(|(v, i)| (KeyframeValue::Transform(v), i));
+                clip.effects
+                    .transform
+                    .upsert(self.frame, v, self.interpolation);
+            }
+            KeyframeValue::Gain(v) => {
+                self.previous = clip
+                    .effects
+                    .gain_db
+                    .keyframe_at(self.frame)
+                    .map(|(v, i)| (KeyframeValue::Gain(v), i));
+                clip.effects
+                    .gain_db
+                    .upsert(self.frame, v, self.interpolation);
+            }
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        match &self.previous {
+            Some((KeyframeValue::Transform(v), i)) => {
+                clip.effects.transform.upsert(self.frame, *v, *i);
+            }
+            Some((KeyframeValue::Gain(v), i)) => {
+                clip.effects.gain_db.upsert(self.frame, *v, *i);
+            }
+            None => match self.value {
+                KeyframeValue::Transform(_) => {
+                    clip.effects.transform.remove_at(self.frame);
+                }
+                KeyframeValue::Gain(_) => {
+                    clip.effects.gain_db.remove_at(self.frame);
+                }
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum KeyframeTarget {
+    Transform,
+    Gain,
+}
+
+/// Rimuove il keyframe di `target` esattamente al frame indicato, se c'è.
+#[derive(Debug)]
+pub struct RemoveKeyframe {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub target: KeyframeTarget,
+    pub frame: FrameIdx,
+    removed: Option<(KeyframeValue, Interpolation)>,
+}
+
+impl RemoveKeyframe {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        target: KeyframeTarget,
+        frame: FrameIdx,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            target,
+            frame,
+            removed: None,
+        }
+    }
+}
+
+impl Command for RemoveKeyframe {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.removed = match self.target {
+            KeyframeTarget::Transform => clip
+                .effects
+                .transform
+                .remove_at(self.frame)
+                .map(|(v, i)| (KeyframeValue::Transform(v), i)),
+            KeyframeTarget::Gain => clip
+                .effects
+                .gain_db
+                .remove_at(self.frame)
+                .map(|(v, i)| (KeyframeValue::Gain(v), i)),
+        };
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some((value, interp)) = self.removed else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        match value {
+            KeyframeValue::Transform(v) => clip.effects.transform.upsert(self.frame, v, interp),
+            KeyframeValue::Gain(v) => clip.effects.gain_db.upsert(self.frame, v, interp),
         }
     }
 }

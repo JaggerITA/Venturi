@@ -2,8 +2,9 @@ pub mod command;
 pub mod model;
 
 pub use command::{
-    Command, History, InsertClip, LiftDelete, MoveClip, RippleDeleteAllTracks, SetClipGain,
-    SetClipTransform, SplitClip,
+    Command, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete, MoveClip,
+    RemoveKeyframe, RippleDeleteAllTracks, SetClipGain, SetClipTransform, SplitClip,
+    UpsertKeyframe,
 };
 pub use model::*;
 
@@ -241,5 +242,146 @@ mod tests {
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         assert_eq!(clip.effects.transform.default.zoom, 1.0);
+    }
+
+    #[test]
+    fn upsert_keyframe_gain_then_undo_removes_it_again() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 20);
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                5,
+                command::KeyframeValue::Gain(-6.0),
+                Interpolation::Linear,
+            )),
+        );
+
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects.gain_db.keyframe_at(5),
+            Some((-6.0, Interpolation::Linear))
+        );
+        assert_eq!(clip.effects.gain_db.value_at(5), -6.0);
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert!(clip.effects.gain_db.is_constant());
+    }
+
+    #[test]
+    fn upsert_keyframe_replacing_existing_one_undoes_to_old_value() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 20);
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                5,
+                command::KeyframeValue::Gain(-6.0),
+                Interpolation::Linear,
+            )),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                5,
+                command::KeyframeValue::Gain(3.0),
+                Interpolation::Hold,
+            )),
+        );
+
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects.gain_db.keyframe_at(5),
+            Some((3.0, Interpolation::Hold))
+        );
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects.gain_db.keyframe_at(5),
+            Some((-6.0, Interpolation::Linear)),
+            "l'undo deve ripristinare il keyframe precedente, non rimuoverlo"
+        );
+    }
+
+    #[test]
+    fn remove_keyframe_then_undo_reinserts_it() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 20);
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                5,
+                command::KeyframeValue::Transform(Transform {
+                    zoom: 2.0,
+                    ..Transform::default()
+                }),
+                Interpolation::Linear,
+            )),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::RemoveKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                command::KeyframeTarget::Transform,
+                5,
+            )),
+        );
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert!(clip.effects.transform.is_constant());
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.transform.keyframe_at(5).unwrap().0.zoom, 2.0);
     }
 }

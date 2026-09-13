@@ -90,6 +90,98 @@ impl<T: Clone> Keyframed<T> {
     pub fn keyframes(&self) -> &[(FrameIdx, T, Interpolation)] {
         &self.keyframes
     }
+
+    /// Inserisce o sostituisce il keyframe a `frame`, mantenendo l'ordine.
+    pub fn upsert(&mut self, frame: FrameIdx, value: T, interpolation: Interpolation) {
+        match self.keyframes.binary_search_by_key(&frame, |(f, _, _)| *f) {
+            Ok(idx) => self.keyframes[idx] = (frame, value, interpolation),
+            Err(idx) => self.keyframes.insert(idx, (frame, value, interpolation)),
+        }
+    }
+
+    /// Rimuove il keyframe esattamente a `frame`, se esiste. Restituisce il
+    /// valore rimosso (utile per l'undo).
+    pub fn remove_at(&mut self, frame: FrameIdx) -> Option<(T, Interpolation)> {
+        let idx = self
+            .keyframes
+            .binary_search_by_key(&frame, |(f, _, _)| *f)
+            .ok()?;
+        let (_, value, interp) = self.keyframes.remove(idx);
+        Some((value, interp))
+    }
+
+    /// Il keyframe esattamente a `frame`, se esiste.
+    pub fn keyframe_at(&self, frame: FrameIdx) -> Option<(T, Interpolation)> {
+        let idx = self
+            .keyframes
+            .binary_search_by_key(&frame, |(f, _, _)| *f)
+            .ok()?;
+        let (_, value, interp) = &self.keyframes[idx];
+        Some((value.clone(), *interp))
+    }
+}
+
+/// Interpolazione lineare componente-per-componente tra due valori di un
+/// parametro animabile. `Keyframed::value_at` ne ha bisogno per calcolare
+/// il valore a un frame arbitrario tra due keyframe.
+pub trait Lerp {
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self;
+}
+
+impl Lerp for f32 {
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        a + (b - a) * t
+    }
+}
+
+impl Lerp for Transform {
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        let mut crop = [0.0; 4];
+        for ((c, ca), cb) in crop.iter_mut().zip(a.crop).zip(b.crop) {
+            *c = f32::lerp(&ca, &cb, t);
+        }
+        Self {
+            crop,
+            zoom: f32::lerp(&a.zoom, &b.zoom, t),
+            position: [
+                f32::lerp(&a.position[0], &b.position[0], t),
+                f32::lerp(&a.position[1], &b.position[1], t),
+            ],
+        }
+    }
+}
+
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+impl<T: Lerp + Clone> Keyframed<T> {
+    /// Valore del parametro al frame dato: `default` se non ci sono
+    /// keyframe; prima del primo/dopo l'ultimo tiene il valore estremo;
+    /// altrimenti interpola tra i due keyframe che lo racchiudono secondo
+    /// l'`Interpolation` del keyframe di partenza.
+    pub fn value_at(&self, frame: FrameIdx) -> T {
+        if self.keyframes.is_empty() {
+            return self.default.clone();
+        }
+        match self.keyframes.binary_search_by_key(&frame, |(f, _, _)| *f) {
+            Ok(idx) => self.keyframes[idx].1.clone(),
+            Err(0) => self.keyframes[0].1.clone(),
+            Err(idx) if idx == self.keyframes.len() => {
+                self.keyframes[self.keyframes.len() - 1].1.clone()
+            }
+            Err(idx) => {
+                let (f0, v0, interp) = &self.keyframes[idx - 1];
+                let (f1, v1, _) = &self.keyframes[idx];
+                let t = (frame - f0) as f32 / (f1 - f0) as f32;
+                match interp {
+                    Interpolation::Hold => v0.clone(),
+                    Interpolation::Linear => T::lerp(v0, v1, t),
+                    Interpolation::EaseInOut => T::lerp(v0, v1, smoothstep(t)),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -221,5 +313,115 @@ impl Project {
         let id = ClipId(self.next_clip_id);
         self.next_clip_id += 1;
         id
+    }
+}
+
+#[cfg(test)]
+mod keyframe_tests {
+    use super::*;
+
+    #[test]
+    fn value_at_returns_default_when_no_keyframes() {
+        let k: Keyframed<f32> = Keyframed::constant(5.0);
+        assert_eq!(k.value_at(0), 5.0);
+        assert_eq!(k.value_at(1000), 5.0);
+    }
+
+    #[test]
+    fn value_at_holds_extremes_before_first_and_after_last() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(10, 100.0, Interpolation::Linear);
+        k.upsert(20, 200.0, Interpolation::Linear);
+
+        assert_eq!(k.value_at(0), 100.0, "prima del primo: valore del primo");
+        assert_eq!(k.value_at(30), 200.0, "dopo l'ultimo: valore dell'ultimo");
+    }
+
+    #[test]
+    fn value_at_interpolates_linearly_between_two_keyframes() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(0, 0.0, Interpolation::Linear);
+        k.upsert(10, 100.0, Interpolation::Linear);
+
+        assert_eq!(k.value_at(0), 0.0);
+        assert_eq!(k.value_at(5), 50.0);
+        assert_eq!(k.value_at(10), 100.0);
+    }
+
+    #[test]
+    fn value_at_hold_steps_instead_of_interpolating() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(0, 0.0, Interpolation::Hold);
+        k.upsert(10, 100.0, Interpolation::Hold);
+
+        assert_eq!(k.value_at(5), 0.0, "Hold mantiene il valore di partenza");
+        assert_eq!(k.value_at(9), 0.0);
+        assert_eq!(
+            k.value_at(10),
+            100.0,
+            "sul keyframe stesso vale il suo valore"
+        );
+    }
+
+    #[test]
+    fn value_at_ease_in_out_matches_endpoints_and_stays_monotonic() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(0, 0.0, Interpolation::EaseInOut);
+        k.upsert(10, 100.0, Interpolation::EaseInOut);
+
+        assert_eq!(k.value_at(0), 0.0);
+        assert_eq!(k.value_at(10), 100.0);
+        let mid = k.value_at(5);
+        assert!((0.0..=100.0).contains(&mid));
+        // Monotonicità: valori crescenti col tempo.
+        let mut last = k.value_at(0);
+        for f in 1..=10 {
+            let v = k.value_at(f);
+            assert!(v >= last, "value_at deve crescere monotonamente");
+            last = v;
+        }
+    }
+
+    #[test]
+    fn upsert_replaces_existing_keyframe_at_same_frame() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(5, 1.0, Interpolation::Linear);
+        k.upsert(5, 2.0, Interpolation::Hold);
+
+        assert_eq!(k.keyframes().len(), 1);
+        assert_eq!(k.keyframe_at(5), Some((2.0, Interpolation::Hold)));
+    }
+
+    #[test]
+    fn remove_at_deletes_and_returns_the_keyframe() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(5, 42.0, Interpolation::Linear);
+
+        let removed = k.remove_at(5);
+        assert_eq!(removed, Some((42.0, Interpolation::Linear)));
+        assert!(k.is_constant());
+        assert_eq!(
+            k.remove_at(5),
+            None,
+            "rimuovere due volte non deve fare nulla"
+        );
+    }
+
+    #[test]
+    fn transform_lerp_interpolates_each_field() {
+        let a = Transform {
+            crop: [0.0, 0.0, 1.0, 1.0],
+            zoom: 1.0,
+            position: [0.0, 0.0],
+        };
+        let b = Transform {
+            crop: [0.2, 0.2, 0.8, 0.8],
+            zoom: 3.0,
+            position: [1.0, -1.0],
+        };
+        let mid = Transform::lerp(&a, &b, 0.5);
+        assert_eq!(mid.crop, [0.1, 0.1, 0.9, 0.9]);
+        assert_eq!(mid.zoom, 2.0);
+        assert_eq!(mid.position, [0.5, -0.5]);
     }
 }

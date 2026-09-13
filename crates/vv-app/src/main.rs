@@ -28,6 +28,18 @@ enum PoolAction {
     AddToTimeline(MediaId),
 }
 
+/// Azione differita sugli effetti di una clip, raccolta durante il disegno
+/// del pannello proprietà (che prende in prestito `self` immutabilmente) e
+/// applicata subito dopo — stesso schema di `timeline_ui::PendingAction`.
+enum PendingEffectChange {
+    SetTransformDefault(usize, ClipId, vv_core::Transform),
+    SetGainDefault(usize, ClipId, f32),
+    UpsertTransformKeyframe(usize, ClipId, FrameIdx, vv_core::Transform),
+    UpsertGainKeyframe(usize, ClipId, FrameIdx, f32),
+    RemoveTransformKeyframe(usize, ClipId, FrameIdx),
+    RemoveGainKeyframe(usize, ClipId, FrameIdx),
+}
+
 struct VibeVideoApp {
     project: vv_core::Project,
     history: vv_core::History,
@@ -274,6 +286,81 @@ fn file_label(path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// Bottone diamante per il toggle keyframe di un parametro, allo stile
+/// standard delle NLE: vuoto se il parametro non è animato (click = crea il
+/// primo keyframe qui), pieno se c'è già un keyframe esattamente al frame
+/// corrente (click = rimuovilo), vuoto-ma-animato altrimenti (click =
+/// aggiungine uno qui).
+fn keyframe_button(
+    ui: &mut egui::Ui,
+    is_constant: bool,
+    has_keyframe_here: bool,
+) -> egui::Response {
+    let (symbol, tooltip) = if is_constant {
+        ("◇", "Anima: crea il primo keyframe qui")
+    } else if has_keyframe_here {
+        ("◆", "Rimuovi il keyframe qui")
+    } else {
+        ("◇", "Aggiungi un keyframe qui")
+    };
+    ui.button(symbol).on_hover_text(tooltip)
+}
+
+/// Traduce un'azione differita del pannello proprietà nel comando
+/// `vv-core` corrispondente. Funzione libera (non un metodo) apposta:
+/// testabile senza passare da un `egui::Context`.
+fn build_effect_command(
+    timeline_id: TimelineId,
+    change: PendingEffectChange,
+) -> Box<dyn vv_core::Command> {
+    match change {
+        PendingEffectChange::SetTransformDefault(track_index, clip_id, v) => Box::new(
+            vv_core::SetClipTransform::new(timeline_id, track_index, clip_id, v),
+        ),
+        PendingEffectChange::SetGainDefault(track_index, clip_id, v) => Box::new(
+            vv_core::SetClipGain::new(timeline_id, track_index, clip_id, v),
+        ),
+        PendingEffectChange::UpsertTransformKeyframe(track_index, clip_id, frame, v) => {
+            Box::new(vv_core::UpsertKeyframe::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                frame,
+                vv_core::KeyframeValue::Transform(v),
+                vv_core::Interpolation::Linear,
+            ))
+        }
+        PendingEffectChange::UpsertGainKeyframe(track_index, clip_id, frame, v) => {
+            Box::new(vv_core::UpsertKeyframe::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                frame,
+                vv_core::KeyframeValue::Gain(v),
+                vv_core::Interpolation::Linear,
+            ))
+        }
+        PendingEffectChange::RemoveTransformKeyframe(track_index, clip_id, frame) => {
+            Box::new(vv_core::RemoveKeyframe::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                vv_core::KeyframeTarget::Transform,
+                frame,
+            ))
+        }
+        PendingEffectChange::RemoveGainKeyframe(track_index, clip_id, frame) => {
+            Box::new(vv_core::RemoveKeyframe::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                vv_core::KeyframeTarget::Gain,
+                frame,
+            ))
+        }
+    }
+}
+
 impl eframe::App for VibeVideoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(player) = &mut self.preview_player {
@@ -284,6 +371,18 @@ impl eframe::App for VibeVideoApp {
             && let Some((track_index, clip_id)) = self.timeline_state.selected
         {
             self.preview_clip(track_index, clip_id);
+        }
+
+        // Gain keyframeato: va aggiornato a ogni frame UI in base alla
+        // posizione corrente del player (control-rate ~60Hz, non
+        // sample-accurate: sufficiente per l'automazione in anteprima,
+        // l'export a milestone 9 potrà fare di meglio se servirà).
+        if let Some(effects) = self.active_clip_effects()
+            && !effects.gain_db.is_constant()
+            && let Some(player) = &self.preview_player
+        {
+            let gain = effects.gain_db.value_at(player.current_source_frame());
+            player.set_gain_db(gain);
         }
 
         ui.input(|i| {
@@ -362,9 +461,14 @@ impl eframe::App for VibeVideoApp {
             });
         });
 
+        let source_frame = self
+            .preview_player
+            .as_ref()
+            .map(|p| p.current_source_frame())
+            .unwrap_or(0);
+
         let mut pool_action = None;
-        let mut pending_transform = None;
-        let mut pending_gain = None;
+        let mut pending_effect = None;
         egui::Panel::left("media_pool")
             .default_size(260.0)
             .show(ui, |ui| {
@@ -416,19 +520,66 @@ impl eframe::App for VibeVideoApp {
                                 (
                                     c.timeline_start,
                                     c.timeline_len(),
-                                    c.effects.transform.default,
-                                    c.effects.gain_db.default,
+                                    c.effects.transform.is_constant(),
+                                    c.effects.transform.keyframe_at(source_frame).is_some(),
+                                    c.effects.transform.value_at(source_frame),
+                                    c.effects.gain_db.is_constant(),
+                                    c.effects.gain_db.keyframe_at(source_frame).is_some(),
+                                    c.effects.gain_db.value_at(source_frame),
                                 )
                             })
                     });
 
-                    if let Some((start, len, mut transform, mut gain)) = clip_info {
+                    if let Some((
+                        start,
+                        len,
+                        transform_constant,
+                        transform_kf_here,
+                        mut transform,
+                        gain_constant,
+                        gain_kf_here,
+                        mut gain,
+                    )) = clip_info
+                    {
                         ui.label(format!("Track: {track_index}"));
                         ui.label(format!("Start: {start} frame"));
                         ui.label(format!("Durata: {len} frame"));
+                        ui.label(format!("Frame corrente (source): {source_frame}"));
 
                         ui.separator();
-                        ui.label("Crop (normalizzato sul source)");
+                        ui.horizontal(|ui| {
+                            ui.label("Crop / zoom / posizione");
+                            if keyframe_button(ui, transform_constant, transform_kf_here).clicked()
+                            {
+                                pending_effect = Some(if transform_kf_here {
+                                    PendingEffectChange::RemoveTransformKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                    )
+                                } else {
+                                    PendingEffectChange::UpsertTransformKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                        transform,
+                                    )
+                                });
+                            }
+                        });
+                        if !transform_constant {
+                            ui.small(format!(
+                                "{} keyframe · animato",
+                                self.timeline_id
+                                    .and_then(|tid| self.project.timelines[tid].tracks[track_index]
+                                        .clips
+                                        .iter()
+                                        .find(|c| c.id == clip_id))
+                                    .map(|c| c.effects.transform.keyframes().len())
+                                    .unwrap_or(0)
+                            ));
+                        }
+
                         let mut transform_changed = false;
                         transform_changed |= ui
                             .add(
@@ -474,16 +625,56 @@ impl eframe::App for VibeVideoApp {
                             transform_changed = true;
                         }
                         if transform_changed {
-                            pending_transform = Some((track_index, clip_id, transform));
+                            pending_effect = Some(if transform_constant {
+                                PendingEffectChange::SetTransformDefault(
+                                    track_index,
+                                    clip_id,
+                                    transform,
+                                )
+                            } else {
+                                PendingEffectChange::UpsertTransformKeyframe(
+                                    track_index,
+                                    clip_id,
+                                    source_frame,
+                                    transform,
+                                )
+                            });
                         }
 
                         ui.separator();
-                        ui.label("Gain audio (dB)");
+                        ui.horizontal(|ui| {
+                            ui.label("Gain audio (dB)");
+                            if keyframe_button(ui, gain_constant, gain_kf_here).clicked() {
+                                pending_effect = Some(if gain_kf_here {
+                                    PendingEffectChange::RemoveGainKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                    )
+                                } else {
+                                    PendingEffectChange::UpsertGainKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                        gain,
+                                    )
+                                });
+                            }
+                        });
                         if ui
                             .add(egui::Slider::new(&mut gain, -60.0..=12.0).text("dB"))
                             .changed()
                         {
-                            pending_gain = Some((track_index, clip_id, gain));
+                            pending_effect = Some(if gain_constant {
+                                PendingEffectChange::SetGainDefault(track_index, clip_id, gain)
+                            } else {
+                                PendingEffectChange::UpsertGainKeyframe(
+                                    track_index,
+                                    clip_id,
+                                    source_frame,
+                                    gain,
+                                )
+                            });
                         }
                     }
                 }
@@ -495,31 +686,9 @@ impl eframe::App for VibeVideoApp {
                 PoolAction::AddToTimeline(id) => self.add_media_to_timeline(id),
             }
         }
-        if let (Some(timeline_id), Some((track_index, clip_id, transform))) =
-            (self.timeline_id, pending_transform)
-        {
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::SetClipTransform::new(
-                    timeline_id,
-                    track_index,
-                    clip_id,
-                    transform,
-                )),
-            );
-        }
-        if let (Some(timeline_id), Some((track_index, clip_id, gain))) =
-            (self.timeline_id, pending_gain)
-        {
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::SetClipGain::new(
-                    timeline_id,
-                    track_index,
-                    clip_id,
-                    gain,
-                )),
-            );
+        if let (Some(timeline_id), Some(change)) = (self.timeline_id, pending_effect) {
+            let cmd = build_effect_command(timeline_id, change);
+            self.history.do_command(&mut self.project, cmd);
             self.apply_active_clip_gain();
         }
 
@@ -551,9 +720,14 @@ impl eframe::App for VibeVideoApp {
         egui::CentralPanel::default().show(ui, |ui| {
             let current = self.preview_player.as_ref().and_then(|p| p.current_frame());
             if let Some(frame) = current {
+                let source_frame = self
+                    .preview_player
+                    .as_ref()
+                    .map(|p| p.current_source_frame())
+                    .unwrap_or(0);
                 let transform = self
                     .active_clip_effects()
-                    .map(|e| e.transform.default)
+                    .map(|e| e.transform.value_at(source_frame))
                     .unwrap_or_default();
                 let composited = self.compositor.render_frame(
                     &frame.data,
@@ -794,5 +968,83 @@ mod tests {
                 db,
             )),
         );
+    }
+
+    #[test]
+    fn build_effect_command_upsert_gain_keyframe_applies_correctly() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+
+        let cmd = build_effect_command(
+            timeline_id,
+            PendingEffectChange::UpsertGainKeyframe(0, clip_id, 5, -9.0),
+        );
+        app.history.do_command(&mut app.project, cmd);
+
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects.gain_db.keyframe_at(5),
+            Some((-9.0, vv_core::Interpolation::Linear))
+        );
+    }
+
+    #[test]
+    fn build_effect_command_remove_transform_keyframe_applies_correctly() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+
+        let transform = vv_core::Transform {
+            zoom: 2.5,
+            ..vv_core::Transform::default()
+        };
+        app.history.do_command(
+            &mut app.project,
+            build_effect_command(
+                timeline_id,
+                PendingEffectChange::UpsertTransformKeyframe(0, clip_id, 3, transform),
+            ),
+        );
+        app.history.do_command(
+            &mut app.project,
+            build_effect_command(
+                timeline_id,
+                PendingEffectChange::RemoveTransformKeyframe(0, clip_id, 3),
+            ),
+        );
+
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert!(clip.effects.transform.is_constant());
+    }
+
+    #[test]
+    fn build_effect_command_set_defaults_applies_correctly() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.history.do_command(
+            &mut app.project,
+            build_effect_command(
+                timeline_id,
+                PendingEffectChange::SetGainDefault(0, clip_id, -3.0),
+            ),
+        );
+        let transform = vv_core::Transform {
+            zoom: 1.5,
+            ..vv_core::Transform::default()
+        };
+        app.history.do_command(
+            &mut app.project,
+            build_effect_command(
+                timeline_id,
+                PendingEffectChange::SetTransformDefault(0, clip_id, transform),
+            ),
+        );
+
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert_eq!(clip.effects.gain_db.default, -3.0);
+        assert_eq!(clip.effects.transform.default.zoom, 1.5);
     }
 }
