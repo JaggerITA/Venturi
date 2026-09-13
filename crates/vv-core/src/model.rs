@@ -3,7 +3,7 @@
 //! dai keyframe, mai "bake-ate" nei frame cachati (vedi ARCHITECTURE.md).
 
 use serde::{Deserialize, Serialize};
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use std::path::PathBuf;
 
 new_key_type! {

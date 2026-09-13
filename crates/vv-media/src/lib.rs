@@ -8,6 +8,7 @@ pub mod probe;
 pub mod proxy;
 pub mod waveform;
 
+pub use decode::{FrameRgba, decode_first_frame};
 pub use probe::probe;
 
 #[derive(Debug, thiserror::Error)]

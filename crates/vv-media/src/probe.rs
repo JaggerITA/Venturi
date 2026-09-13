@@ -7,7 +7,7 @@ use vv_core::{MediaMeta, Rational};
 
 static INIT: Once = Once::new();
 
-fn ensure_init() {
+pub(crate) fn ensure_init() {
     INIT.call_once(|| {
         ffmpeg::init().expect("impossibile inizializzare ffmpeg");
     });
