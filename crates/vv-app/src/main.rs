@@ -19,7 +19,7 @@ mod player;
 mod timeline_ui;
 
 use player::Player;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
@@ -28,6 +28,13 @@ use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 /// `add_media_to_timeline`): il compositing multi-track vero e proprio
 /// resta per una milestone successiva.
 const VIDEO_TRACK: usize = 0;
+
+/// Un'"unità" da rimuovere con un solo `RippleDeleteAllTracks` in
+/// `ripple_delete_selected`: la clip primaria (track, id), il suo
+/// `timeline_start` (per ordinare le unità da destra a sinistra) e le
+/// clip da rimuovere con lei senza shiftarle (la sua gemella collegata,
+/// se c'è).
+type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
 
 enum PoolAction {
     Preview(MediaId),
@@ -109,6 +116,13 @@ struct VibeVideoApp {
     /// tagli/ripple-delete in rapida successione senza dover ricliccare
     /// ogni volta la clip.
     selection_follows_playhead: bool,
+
+    /// Il pannello proprietà (a destra del viewer) è visibile? Attivo di
+    /// default; l'utente può nasconderlo (✕ nel pannello, o la checkbox in
+    /// toolbar) e farlo ricomparire al bisogno. Da non confondere con "non
+    /// c'è nulla di selezionato": in quel caso il pannello resta visibile
+    /// ma mostra informazioni sulla timeline invece che su una clip.
+    properties_panel_open: bool,
 }
 
 impl Default for VibeVideoApp {
@@ -129,6 +143,7 @@ impl Default for VibeVideoApp {
             last_synced_playhead: 0,
             browsing_media: None,
             selection_follows_playhead: true,
+            properties_panel_open: true,
         }
     }
 }
@@ -195,16 +210,18 @@ impl VibeVideoApp {
     }
 
     /// Se "selection follows playhead" è attivo, allinea la selezione alla
-    /// clip sulla track video sotto al playhead corrente (`None` se il
-    /// playhead è su un vuoto). No-op se la funzionalità è disattivata
-    /// dalle impostazioni.
+    /// clip sulla track video sotto al playhead corrente (selezione vuota
+    /// se il playhead è su un vuoto): collassa sempre a una singola clip,
+    /// anche se prima della sync la selezione era multipla. No-op se la
+    /// funzionalità è disattivata dalle impostazioni.
     fn sync_selection_to_playhead(&mut self) {
         if !self.selection_follows_playhead {
             return;
         }
-        self.timeline_state.selected = self
+        let clip = self
             .clip_at(VIDEO_TRACK, self.timeline_state.playhead)
             .map(|id| (VIDEO_TRACK, id));
+        self.timeline_state.set_single_selection(clip);
     }
 
     /// Carica `clip_id` (sulla track video) nel player, posizionandosi al
@@ -583,63 +600,97 @@ impl VibeVideoApp {
         }
     }
 
-    /// Normal delete: rimuove la clip selezionata, lascia un vuoto al suo
-    /// posto sulla track. Le altre track non si muovono.
-    /// Normal delete: rimuove la clip selezionata *e la sua gemella
-    /// collegata* (se c'è), lasciando un vuoto al loro posto. Le altre
-    /// track non si muovono. Un solo passo di history per entrambe.
+    /// Normal delete: rimuove *tutte* le clip selezionate (e la gemella
+    /// collegata di ciascuna, se c'è), lasciando un vuoto al loro posto.
+    /// Le altre track non si muovono. Un solo passo di history per tutte
+    /// insieme. L'ordine non conta: `LiftDelete` non sposta nient'altro.
     fn delete_selected(&mut self) {
-        let (Some(timeline_id), Some((track_index, clip_id))) =
-            (self.timeline_id, self.timeline_state.selected)
-        else {
+        let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let linked = self.linked_partner(timeline_id, track_index, clip_id);
-
-        let mut commands: Vec<Box<dyn vv_core::Command>> = vec![Box::new(
-            vv_core::LiftDelete::new(timeline_id, track_index, clip_id),
-        )];
-        if let Some((linked_track, linked_id)) = linked {
-            commands.push(Box::new(vv_core::LiftDelete::new(
-                timeline_id,
-                linked_track,
-                linked_id,
-            )));
+        if self.timeline_state.selected.is_empty() {
+            return;
         }
+        let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
+        let mut to_delete: BTreeSet<(usize, ClipId)> = selected.iter().copied().collect();
+        for &(track_index, clip_id) in &selected {
+            if let Some(partner) = self.linked_partner(timeline_id, track_index, clip_id) {
+                to_delete.insert(partner);
+            }
+        }
+
+        let commands: Vec<Box<dyn vv_core::Command>> = to_delete
+            .into_iter()
+            .map(|(track_index, clip_id)| {
+                Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id))
+                    as Box<dyn vv_core::Command>
+            })
+            .collect();
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
-        self.timeline_state.selected = None;
+        self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
     }
 
-    /// Ripple delete: rimuove la clip selezionata *e la sua gemella
-    /// collegata* (se c'è) e chiude il gap su *tutte* le track,
+    /// Ripple delete: rimuove *tutte* le clip selezionate (e la gemella
+    /// collegata di ciascuna, se c'è) e chiude i gap su *tutte* le track,
     /// mantenendo il sync audio/video (vedi ARCHITECTURE.md § Ripple
-    /// delete — comportamento scelto: sempre globale, nessun toggle). Le
-    /// dimensioni del gap sono quelle della clip selezionata: la gemella
-    /// viene rimossa insieme a lei, non shiftata (altrimenti resterebbe
-    /// audio orfano non corrispondente a nessun video, o viceversa).
+    /// delete — comportamento scelto: sempre globale, nessun toggle).
+    ///
+    /// Ogni clip selezionata (+ gemella, se non già anch'essa selezionata
+    /// esplicitamente) è un'"unità" rimossa con un proprio
+    /// `RippleDeleteAllTracks`; le unità vengono processate da destra a
+    /// sinistra (per `timeline_start` decrescente) così che rimuoverne una
+    /// non alteri la posizione — e quindi l'ordinamento già calcolato —
+    /// delle altre non ancora processate: stesso principio già usato in
+    /// `split_all_at_playhead` per evitare doppi spostamenti.
     fn ripple_delete_selected(&mut self) {
-        let (Some(timeline_id), Some((track_index, clip_id))) =
-            (self.timeline_id, self.timeline_state.selected)
-        else {
+        let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let also_remove = self
-            .linked_partner(timeline_id, track_index, clip_id)
+        if self.timeline_state.selected.is_empty() {
+            return;
+        }
+        let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
+
+        let mut processed: BTreeSet<(usize, ClipId)> = BTreeSet::new();
+        let mut units: Vec<RippleUnit> = Vec::new();
+        for &(track_index, clip_id) in &selected {
+            if !processed.insert((track_index, clip_id)) {
+                continue;
+            }
+            let start = self.project.timelines[timeline_id].tracks[track_index]
+                .clips
+                .iter()
+                .find(|c| c.id == clip_id)
+                .map(|c| c.timeline_start)
+                .unwrap_or(0);
+            let mut also_remove = Vec::new();
+            if let Some(partner) = self.linked_partner(timeline_id, track_index, clip_id) {
+                processed.insert(partner);
+                also_remove.push(partner);
+            }
+            units.push(((track_index, clip_id), start, also_remove));
+        }
+        units.sort_by_key(|(_, start, _)| std::cmp::Reverse(*start));
+
+        let commands: Vec<Box<dyn vv_core::Command>> = units
             .into_iter()
+            .map(|((track_index, clip_id), _, also_remove)| {
+                Box::new(
+                    vv_core::RippleDeleteAllTracks::new(timeline_id, track_index, clip_id)
+                        .with_also_remove(also_remove),
+                ) as Box<dyn vv_core::Command>
+            })
             .collect();
 
         self.history.do_command(
             &mut self.project,
-            Box::new(
-                vv_core::RippleDeleteAllTracks::new(timeline_id, track_index, clip_id)
-                    .with_also_remove(also_remove),
-            ),
+            Box::new(vv_core::CompositeCommand::new(commands)),
         );
-        self.timeline_state.selected = None;
+        self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
     }
 
@@ -931,6 +982,7 @@ impl eframe::App for VibeVideoApp {
                     .on_hover_text(
                         "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
                     );
+                ui.checkbox(&mut self.properties_panel_open, "Pannello proprietà");
 
                 ui.separator();
                 if ui.button("Undo (Ctrl+Z)").clicked() {
@@ -961,9 +1013,14 @@ impl eframe::App for VibeVideoApp {
         // effettivamente riproducendo il player, così modificare le
         // proprietà di una clip diversa da quella attiva resta coerente
         // con quello che si vede scorrendo la timeline fin lì.
-        let source_frame = self
-            .timeline_state
-            .selected
+        // Il pannello proprietà mostra l'editor completo solo quando la
+        // selezione è di *una* clip sola: con selezione multipla o vuota
+        // non c'è un singolo `source_frame`/set di effetti da modificare
+        // (vedi il pannello "properties" più sotto).
+        let single_selected = (self.timeline_state.selected.len() == 1)
+            .then(|| *self.timeline_state.selected.iter().next().unwrap());
+
+        let source_frame = single_selected
             .and_then(|(track_index, clip_id)| {
                 let timeline_id = self.timeline_id?;
                 let clip = self.project.timelines[timeline_id]
@@ -1015,87 +1072,192 @@ impl eframe::App for VibeVideoApp {
                         });
                     }
                 });
+            });
 
-                if let Some((track_index, clip_id)) = self.timeline_state.selected {
-                    ui.separator();
-                    ui.heading("Clip selezionata");
-
-                    let clip_info = self.timeline_id.and_then(|timeline_id| {
-                        self.project.timelines[timeline_id]
-                            .tracks
-                            .get(track_index)?
-                            .clips
-                            .iter()
-                            .find(|c| c.id == clip_id)
-                            .map(|c| ClipPanelInfo {
-                                start: c.timeline_start,
-                                len: c.timeline_len(),
-                                is_solid_color: matches!(c.source, vv_core::ClipSource::SolidColor),
-                                transform_constant: c.effects.transform.is_constant(),
-                                transform_kf_here: c
-                                    .effects
-                                    .transform
-                                    .keyframe_at(source_frame)
-                                    .is_some(),
-                                transform: c.effects.transform.value_at(source_frame),
-                                gain_constant: c.effects.gain_db.is_constant(),
-                                gain_kf_here: c.effects.gain_db.keyframe_at(source_frame).is_some(),
-                                gain: c.effects.gain_db.value_at(source_frame),
-                                color_constant: c
-                                    .effects
-                                    .color
-                                    .as_ref()
-                                    .is_none_or(|k| k.is_constant()),
-                                color_kf_here: c
-                                    .effects
-                                    .color
-                                    .as_ref()
-                                    .and_then(|k| k.keyframe_at(source_frame))
-                                    .is_some(),
-                                color: c
-                                    .effects
-                                    .color
-                                    .as_ref()
-                                    .map(|k| k.value_at(source_frame))
-                                    .unwrap_or(vv_core::Rgba {
-                                        r: 0.6,
-                                        g: 0.6,
-                                        b: 0.6,
-                                        a: 1.0,
-                                    }),
-                            })
+        if self.properties_panel_open {
+            egui::Panel::right("properties")
+                .resizable(true)
+                .default_size(300.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Proprietà");
+                        if ui
+                            .small_button("✕")
+                            .on_hover_text("Nascondi pannello")
+                            .clicked()
+                        {
+                            self.properties_panel_open = false;
+                        }
                     });
+                    ui.separator();
 
-                    if let Some(ClipPanelInfo {
-                        start,
-                        len,
-                        is_solid_color,
-                        transform_constant,
-                        transform_kf_here,
-                        mut transform,
-                        gain_constant,
-                        gain_kf_here,
-                        mut gain,
-                        color_constant,
-                        color_kf_here,
-                        mut color,
-                    }) = clip_info
-                    {
-                        ui.label(format!("Track: {track_index}"));
-                        ui.label(format!("Start: {start} frame"));
-                        ui.label(format!("Durata: {len} frame"));
-                        ui.label(format!("Frame corrente (source): {source_frame}"));
+                    let selected_count = self.timeline_state.selected.len();
+                    if let Some((track_index, clip_id)) = single_selected {
+                        ui.heading("Clip selezionata");
 
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Crop / zoom / posizione");
-                            if keyframe_button(ui, transform_constant, transform_kf_here).clicked()
-                            {
-                                pending_effect = Some(if transform_kf_here {
-                                    PendingEffectChange::RemoveTransformKeyframe(
+                        let clip_info = self.timeline_id.and_then(|timeline_id| {
+                            self.project.timelines[timeline_id]
+                                .tracks
+                                .get(track_index)?
+                                .clips
+                                .iter()
+                                .find(|c| c.id == clip_id)
+                                .map(|c| ClipPanelInfo {
+                                    start: c.timeline_start,
+                                    len: c.timeline_len(),
+                                    is_solid_color: matches!(
+                                        c.source,
+                                        vv_core::ClipSource::SolidColor
+                                    ),
+                                    transform_constant: c.effects.transform.is_constant(),
+                                    transform_kf_here: c
+                                        .effects
+                                        .transform
+                                        .keyframe_at(source_frame)
+                                        .is_some(),
+                                    transform: c.effects.transform.value_at(source_frame),
+                                    gain_constant: c.effects.gain_db.is_constant(),
+                                    gain_kf_here: c
+                                        .effects
+                                        .gain_db
+                                        .keyframe_at(source_frame)
+                                        .is_some(),
+                                    gain: c.effects.gain_db.value_at(source_frame),
+                                    color_constant: c
+                                        .effects
+                                        .color
+                                        .as_ref()
+                                        .is_none_or(|k| k.is_constant()),
+                                    color_kf_here: c
+                                        .effects
+                                        .color
+                                        .as_ref()
+                                        .and_then(|k| k.keyframe_at(source_frame))
+                                        .is_some(),
+                                    color: c
+                                        .effects
+                                        .color
+                                        .as_ref()
+                                        .map(|k| k.value_at(source_frame))
+                                        .unwrap_or(vv_core::Rgba {
+                                            r: 0.6,
+                                            g: 0.6,
+                                            b: 0.6,
+                                            a: 1.0,
+                                        }),
+                                })
+                        });
+
+                        if let Some(ClipPanelInfo {
+                            start,
+                            len,
+                            is_solid_color,
+                            transform_constant,
+                            transform_kf_here,
+                            mut transform,
+                            gain_constant,
+                            gain_kf_here,
+                            mut gain,
+                            color_constant,
+                            color_kf_here,
+                            mut color,
+                        }) = clip_info
+                        {
+                            ui.label(format!("Track: {track_index}"));
+                            ui.label(format!("Start: {start} frame"));
+                            ui.label(format!("Durata: {len} frame"));
+                            ui.label(format!("Frame corrente (source): {source_frame}"));
+
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Crop / zoom / posizione");
+                                if keyframe_button(ui, transform_constant, transform_kf_here)
+                                    .clicked()
+                                {
+                                    pending_effect = Some(if transform_kf_here {
+                                        PendingEffectChange::RemoveTransformKeyframe(
+                                            track_index,
+                                            clip_id,
+                                            source_frame,
+                                        )
+                                    } else {
+                                        PendingEffectChange::UpsertTransformKeyframe(
+                                            track_index,
+                                            clip_id,
+                                            source_frame,
+                                            transform,
+                                        )
+                                    });
+                                }
+                            });
+                            if !transform_constant {
+                                ui.small(format!(
+                                    "{} keyframe · animato",
+                                    self.timeline_id
+                                        .and_then(|tid| self.project.timelines[tid].tracks
+                                            [track_index]
+                                            .clips
+                                            .iter()
+                                            .find(|c| c.id == clip_id))
+                                        .map(|c| c.effects.transform.keyframes().len())
+                                        .unwrap_or(0)
+                                ));
+                            }
+
+                            let mut transform_changed = false;
+                            transform_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut transform.crop[0], 0.0..=0.99)
+                                        .text("sinistra"),
+                                )
+                                .changed();
+                            transform_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut transform.crop[1], 0.0..=0.99)
+                                        .text("alto"),
+                                )
+                                .changed();
+                            transform_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut transform.crop[2], 0.01..=1.0)
+                                        .text("destra"),
+                                )
+                                .changed();
+                            transform_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut transform.crop[3], 0.01..=1.0)
+                                        .text("basso"),
+                                )
+                                .changed();
+                            // Margine minimo per non invertire il rettangolo di crop.
+                            transform.crop[0] = transform.crop[0].min(transform.crop[2] - 0.01);
+                            transform.crop[1] = transform.crop[1].min(transform.crop[3] - 0.01);
+
+                            transform_changed |= ui
+                                .add(egui::Slider::new(&mut transform.zoom, 0.1..=5.0).text("zoom"))
+                                .changed();
+                            transform_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut transform.position[0], -1.0..=1.0)
+                                        .text("posizione X"),
+                                )
+                                .changed();
+                            transform_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut transform.position[1], -1.0..=1.0)
+                                        .text("posizione Y"),
+                                )
+                                .changed();
+                            if ui.button("Reset transform").clicked() {
+                                transform = vv_core::Transform::default();
+                                transform_changed = true;
+                            }
+                            if transform_changed {
+                                pending_effect = Some(if transform_constant {
+                                    PendingEffectChange::SetTransformDefault(
                                         track_index,
                                         clip_id,
-                                        source_frame,
+                                        transform,
                                     )
                                 } else {
                                     PendingEffectChange::UpsertTransformKeyframe(
@@ -1106,91 +1268,33 @@ impl eframe::App for VibeVideoApp {
                                     )
                                 });
                             }
-                        });
-                        if !transform_constant {
-                            ui.small(format!(
-                                "{} keyframe · animato",
-                                self.timeline_id
-                                    .and_then(|tid| self.project.timelines[tid].tracks[track_index]
-                                        .clips
-                                        .iter()
-                                        .find(|c| c.id == clip_id))
-                                    .map(|c| c.effects.transform.keyframes().len())
-                                    .unwrap_or(0)
-                            ));
-                        }
 
-                        let mut transform_changed = false;
-                        transform_changed |= ui
-                            .add(
-                                egui::Slider::new(&mut transform.crop[0], 0.0..=0.99)
-                                    .text("sinistra"),
-                            )
-                            .changed();
-                        transform_changed |= ui
-                            .add(egui::Slider::new(&mut transform.crop[1], 0.0..=0.99).text("alto"))
-                            .changed();
-                        transform_changed |= ui
-                            .add(
-                                egui::Slider::new(&mut transform.crop[2], 0.01..=1.0)
-                                    .text("destra"),
-                            )
-                            .changed();
-                        transform_changed |= ui
-                            .add(
-                                egui::Slider::new(&mut transform.crop[3], 0.01..=1.0).text("basso"),
-                            )
-                            .changed();
-                        // Margine minimo per non invertire il rettangolo di crop.
-                        transform.crop[0] = transform.crop[0].min(transform.crop[2] - 0.01);
-                        transform.crop[1] = transform.crop[1].min(transform.crop[3] - 0.01);
-
-                        transform_changed |= ui
-                            .add(egui::Slider::new(&mut transform.zoom, 0.1..=5.0).text("zoom"))
-                            .changed();
-                        transform_changed |= ui
-                            .add(
-                                egui::Slider::new(&mut transform.position[0], -1.0..=1.0)
-                                    .text("posizione X"),
-                            )
-                            .changed();
-                        transform_changed |= ui
-                            .add(
-                                egui::Slider::new(&mut transform.position[1], -1.0..=1.0)
-                                    .text("posizione Y"),
-                            )
-                            .changed();
-                        if ui.button("Reset transform").clicked() {
-                            transform = vv_core::Transform::default();
-                            transform_changed = true;
-                        }
-                        if transform_changed {
-                            pending_effect = Some(if transform_constant {
-                                PendingEffectChange::SetTransformDefault(
-                                    track_index,
-                                    clip_id,
-                                    transform,
-                                )
-                            } else {
-                                PendingEffectChange::UpsertTransformKeyframe(
-                                    track_index,
-                                    clip_id,
-                                    source_frame,
-                                    transform,
-                                )
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Gain audio (dB)");
+                                if keyframe_button(ui, gain_constant, gain_kf_here).clicked() {
+                                    pending_effect = Some(if gain_kf_here {
+                                        PendingEffectChange::RemoveGainKeyframe(
+                                            track_index,
+                                            clip_id,
+                                            source_frame,
+                                        )
+                                    } else {
+                                        PendingEffectChange::UpsertGainKeyframe(
+                                            track_index,
+                                            clip_id,
+                                            source_frame,
+                                            gain,
+                                        )
+                                    });
+                                }
                             });
-                        }
-
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Gain audio (dB)");
-                            if keyframe_button(ui, gain_constant, gain_kf_here).clicked() {
-                                pending_effect = Some(if gain_kf_here {
-                                    PendingEffectChange::RemoveGainKeyframe(
-                                        track_index,
-                                        clip_id,
-                                        source_frame,
-                                    )
+                            if ui
+                                .add(egui::Slider::new(&mut gain, -60.0..=12.0).text("dB"))
+                                .changed()
+                            {
+                                pending_effect = Some(if gain_constant {
+                                    PendingEffectChange::SetGainDefault(track_index, clip_id, gain)
                                 } else {
                                     PendingEffectChange::UpsertGainKeyframe(
                                         track_index,
@@ -1200,33 +1304,42 @@ impl eframe::App for VibeVideoApp {
                                     )
                                 });
                             }
-                        });
-                        if ui
-                            .add(egui::Slider::new(&mut gain, -60.0..=12.0).text("dB"))
-                            .changed()
-                        {
-                            pending_effect = Some(if gain_constant {
-                                PendingEffectChange::SetGainDefault(track_index, clip_id, gain)
-                            } else {
-                                PendingEffectChange::UpsertGainKeyframe(
-                                    track_index,
-                                    clip_id,
-                                    source_frame,
-                                    gain,
-                                )
-                            });
-                        }
 
-                        if is_solid_color {
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label("Colore");
-                                if keyframe_button(ui, color_constant, color_kf_here).clicked() {
-                                    pending_effect = Some(if color_kf_here {
-                                        PendingEffectChange::RemoveColorKeyframe(
+                            if is_solid_color {
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("Colore");
+                                    if keyframe_button(ui, color_constant, color_kf_here).clicked()
+                                    {
+                                        pending_effect = Some(if color_kf_here {
+                                            PendingEffectChange::RemoveColorKeyframe(
+                                                track_index,
+                                                clip_id,
+                                                source_frame,
+                                            )
+                                        } else {
+                                            PendingEffectChange::UpsertColorKeyframe(
+                                                track_index,
+                                                clip_id,
+                                                source_frame,
+                                                color,
+                                            )
+                                        });
+                                    }
+                                });
+                                let mut rgba = [color.r, color.g, color.b, color.a];
+                                if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                                    color = vv_core::Rgba {
+                                        r: rgba[0],
+                                        g: rgba[1],
+                                        b: rgba[2],
+                                        a: rgba[3],
+                                    };
+                                    pending_effect = Some(if color_constant {
+                                        PendingEffectChange::SetColorDefault(
                                             track_index,
                                             clip_id,
-                                            source_frame,
+                                            color,
                                         )
                                     } else {
                                         PendingEffectChange::UpsertColorKeyframe(
@@ -1237,34 +1350,49 @@ impl eframe::App for VibeVideoApp {
                                         )
                                     });
                                 }
-                            });
-                            let mut rgba = [color.r, color.g, color.b, color.a];
-                            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
-                                color = vv_core::Rgba {
-                                    r: rgba[0],
-                                    g: rgba[1],
-                                    b: rgba[2],
-                                    a: rgba[3],
-                                };
-                                pending_effect = Some(if color_constant {
-                                    PendingEffectChange::SetColorDefault(
-                                        track_index,
-                                        clip_id,
-                                        color,
-                                    )
-                                } else {
-                                    PendingEffectChange::UpsertColorKeyframe(
-                                        track_index,
-                                        clip_id,
-                                        source_frame,
-                                        color,
-                                    )
-                                });
                             }
                         }
+                    } else if selected_count > 1 {
+                        ui.heading(format!("{selected_count} clip selezionate"));
+                        ui.separator();
+                        if let Some(timeline_id) = self.timeline_id {
+                            for &(track_index, clip_id) in &self.timeline_state.selected {
+                                if let Some(clip) = self.project.timelines[timeline_id]
+                                    .tracks
+                                    .get(track_index)
+                                    .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                                {
+                                    ui.label(format!(
+                                        "Track {track_index} · start {} · durata {} frame",
+                                        clip.timeline_start,
+                                        clip.timeline_len()
+                                    ));
+                                }
+                            }
+                        }
+                    } else if let Some(timeline_id) = self.timeline_id {
+                        let tl = &self.project.timelines[timeline_id];
+                        ui.heading("Timeline");
+                        ui.label(tl.name.clone());
+                        ui.label(format!(
+                            "{}x{} · {:.2} fps",
+                            tl.resolution.0,
+                            tl.resolution.1,
+                            tl.fps.as_f64()
+                        ));
+                        ui.label(format!("{} track", tl.tracks.len()));
+                        let playhead_secs =
+                            self.timeline_state.playhead as f64 / tl.fps.as_f64().max(1.0);
+                        ui.label(format!(
+                            "Playhead: frame {} ({playhead_secs:.2}s)",
+                            self.timeline_state.playhead
+                        ));
+                        ui.small("Nessuna clip selezionata.");
+                    } else {
+                        ui.label("Importa un media per creare la timeline.");
                     }
-                }
-            });
+                });
+        }
 
         if let Some(action) = pool_action {
             match action {
@@ -1286,7 +1414,7 @@ impl eframe::App for VibeVideoApp {
             self.apply_active_clip_gain();
         }
 
-        let selected_before_timeline_ui = self.timeline_state.selected;
+        let selected_before_timeline_ui = self.timeline_state.selected.clone();
         let playhead_before_timeline_ui = self.timeline_state.playhead;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
@@ -1443,6 +1571,26 @@ impl eframe::App for VibeVideoApp {
         if self.preview_player.as_ref().is_some_and(Player::is_playing) {
             ui.ctx().request_repaint();
         }
+
+        // Bug: ridimensionare il pannello timeline trascinando il bordo
+        // tornava alla dimensione precedente al rilascio del mouse. Causa:
+        // egui persiste la nuova dimensione di un `Panel` ridimensionabile
+        // con un ritardo di un frame rispetto al rilascio (per come
+        // risolve l'interazione di resize leggendo la `Response` del
+        // frame precedente); senza repaint continui, se il rilascio non è
+        // seguito da nessun altro input il frame che committerebbe la
+        // dimensione finale non arriva mai e il pannello resta arrotolato
+        // sull'ultimo valore salvato. Richiedere un repaint mentre un
+        // pulsante è premuto (drag in corso, incluso il ridimensionamento
+        // di un pannello) e per un frame dopo il rilascio risolve la
+        // classe intera di bug "il drag/resize non si conferma al
+        // rilascio se non muovo più il mouse".
+        if ui
+            .ctx()
+            .input(|i| i.pointer.any_down() || i.pointer.any_released())
+        {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -1520,14 +1668,14 @@ mod tests {
         let _audio_b = make_timeline_with_clip(&mut app, 1, 10, 10);
         let timeline_id = app.timeline_id.unwrap();
 
-        app.timeline_state.selected = Some((0, video_b));
+        app.timeline_state.selected = BTreeSet::from([(0, video_b)]);
         app.ripple_delete_selected();
 
         // "Selection follows playhead" (attivo di default) riseleziona
         // quel che ora si trova sotto al playhead (fermo a 0): video_a,
         // che era già lì. Comodo per incatenare più ripple-delete senza
         // dover ricliccare la prossima clip ogni volta.
-        assert_eq!(app.timeline_state.selected, Some((0, video_a)));
+        assert_eq!(app.timeline_state.selected, BTreeSet::from([(0, video_a)]));
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[0].clips[0].id, video_a);
@@ -1548,10 +1696,68 @@ mod tests {
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
 
-        app.timeline_state.selected = Some((0, video_b));
+        app.timeline_state.selected = BTreeSet::from([(0, video_b)]);
         app.ripple_delete_selected();
 
-        assert_eq!(app.timeline_state.selected, None);
+        assert!(app.timeline_state.selected.is_empty());
+    }
+
+    /// Multi-selezione: cancellare due clip non adiacenti insieme (bug
+    /// "voglio selezionare più clip con ctrl+click/shift+click") deve
+    /// chiudere entrambi i gap correttamente, non solo il primo.
+    #[test]
+    fn delete_selected_removes_every_selected_clip() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let b = make_timeline_with_clip(&mut app, 0, 10, 10);
+        let c = make_timeline_with_clip(&mut app, 0, 20, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, a), (0, c)]);
+        app.delete_selected();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[0].clips[0].id, b);
+        assert_eq!(
+            tl.tracks[0].clips[0].timeline_start, 10,
+            "delete normale non shifta nulla"
+        );
+    }
+
+    /// Ripple-delete con due clip selezionate non adiacenti: elaborandole
+    /// da destra a sinistra (per `timeline_start` decrescente), ogni
+    /// rimozione non deve alterare la posizione, già calcolata, dell'altra
+    /// non ancora processata — altrimenti si otterrebbe un doppio
+    /// spostamento o un gap non chiuso correttamente.
+    #[test]
+    fn ripple_delete_selected_multiple_clips_closes_every_gap() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
+        let b = make_timeline_with_clip(&mut app, 0, 10, 10); // [10,20), da rimuovere
+        let c = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30)
+        let d = make_timeline_with_clip(&mut app, 0, 30, 10); // [30,40), da rimuovere
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, b), (0, d)]);
+        app.ripple_delete_selected();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+        assert_eq!(tl.tracks[0].clips[0].id, a);
+        assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
+        assert_eq!(tl.tracks[0].clips[1].id, c);
+        assert_eq!(
+            tl.tracks[0].clips[1].timeline_start, 10,
+            "c deve scivolare fino a chiudere il gap lasciato da b, non restare a 20 né finire oltre"
+        );
+
+        // Un solo undo ripristina tutto: entrambe le clip e le posizioni originali.
+        app.history.undo(&mut app.project);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 4);
+        assert_eq!(tl.tracks[0].clips[2].id, c);
+        assert_eq!(tl.tracks[0].clips[2].timeline_start, 20);
     }
 
     #[test]
@@ -1563,7 +1769,7 @@ mod tests {
         make_timeline_with_clip(&mut app, 1, 10, 10);
         let timeline_id = app.timeline_id.unwrap();
 
-        app.timeline_state.selected = Some((0, video_b));
+        app.timeline_state.selected = BTreeSet::from([(0, video_b)]);
         app.delete_selected();
 
         let tl = &app.project.timelines[timeline_id];
@@ -1619,7 +1825,7 @@ mod tests {
         app.add_media_to_timeline(media_id);
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
-        app.timeline_state.selected = Some((0, clip_id));
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
         app.load_video_clip(clip_id);
 
         assert_eq!(app.active_clip, Some((0, clip_id)));
@@ -1836,7 +2042,7 @@ mod tests {
         app.add_media_to_timeline(media_id);
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
-        app.timeline_state.selected = Some((0, clip_id));
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
         app.load_video_clip(clip_id);
         // Il player appena aperto non ha ancora un frame in cache: il primo
         // sync forza comunque il seek verso il playhead (0 qui, no-op).
@@ -1966,7 +2172,7 @@ mod tests {
         let media_id = app.project.media_pool.iter().next().unwrap().0;
         app.add_media_to_timeline(media_id);
 
-        assert_eq!(app.timeline_state.selected, None);
+        assert!(app.timeline_state.selected.is_empty());
         assert_eq!(app.active_clip, None);
 
         app.toggle_playback();
@@ -1992,7 +2198,7 @@ mod tests {
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
-        assert_eq!(app.timeline_state.selected, None);
+        assert!(app.timeline_state.selected.is_empty());
         app.timeline_state.playhead = 8;
         app.split_all_at_playhead();
 
@@ -2056,7 +2262,10 @@ mod tests {
         // "Selection follows playhead" seleziona la metà destra (il
         // playhead è esattamente al suo inizio): il video appena isolato,
         // pronto per un ripple-delete immediato.
-        assert_eq!(app.timeline_state.selected, Some((0, video_right.id)));
+        assert_eq!(
+            app.timeline_state.selected,
+            BTreeSet::from([(0, video_right.id)])
+        );
 
         // Un solo undo annulla i due tagli *e* i due ricollegamenti.
         app.history.undo(&mut app.project);
@@ -2118,7 +2327,7 @@ mod tests {
             )),
         );
 
-        app.timeline_state.selected = Some((0, video_id));
+        app.timeline_state.selected = BTreeSet::from([(0, video_id)]);
         app.delete_selected();
 
         let tl = &app.project.timelines[timeline_id];
@@ -2127,7 +2336,7 @@ mod tests {
             tl.tracks[1].clips.is_empty(),
             "la clip audio collegata deve sparire insieme al video"
         );
-        assert_eq!(app.timeline_state.selected, None);
+        assert!(app.timeline_state.selected.is_empty());
 
         // Un solo undo ripristina entrambe (CompositeCommand).
         app.history.undo(&mut app.project);

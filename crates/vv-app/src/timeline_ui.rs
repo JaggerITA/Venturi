@@ -1,12 +1,18 @@
-//! Widget timeline multi-traccia: disegna tracce/clip, gestisce selezione,
-//! drag orizzontale (con clip collegate che si muovono insieme, vedi
-//! `Clip::linked`), menu contestuale per collegare/scollegare, e il
-//! playhead. Ogni mutazione passa da `History::do_command`, mai da una
-//! modifica diretta del `Project`.
+//! Widget timeline multi-traccia: disegna tracce/clip, gestisce
+//! multi-selezione (click semplice, ctrl+click per aggiungere/togglere,
+//! shift+click per un range, rettangolo di selezione trascinando da
+//! un'area vuota), drag orizzontale (con clip collegate che si muovono
+//! insieme, vedi `Clip::linked`), menu contestuale per collegare/scollegare,
+//! e il playhead. Ogni mutazione del progetto passa da
+//! `History::do_command`, mai da una modifica diretta del `Project`; i
+//! cambi di sola selezione invece mutano `TimelineState` direttamente,
+//! visto che non toccano `project`/`history`.
 //!
 //! Disegno "immediate mode" a basso livello (painter diretto, non widget
 //! egui nidificati): per una griglia densa di rettangoli come una timeline
 //! dà più controllo e meno overhead dei container annidati.
+
+use std::collections::{BTreeSet, HashSet};
 
 use vv_core::{Clip, ClipId, FrameIdx, History, Project, TimelineId, Track, TrackKind};
 
@@ -15,11 +21,35 @@ const RULER_HEIGHT: f32 = 20.0;
 const MIN_TIMELINE_SECS: f64 = 20.0;
 const TRAILING_MARGIN_SECS: f64 = 5.0;
 
+/// (indice track, id clip): coppia usata ovunque per identificare univocamente
+/// una clip nella timeline (l'id da solo non basta, la stessa clip non può
+/// stare su più track ma l'id è comunque solo un contatore globale, non scoped
+/// per track).
+type ClipKey = (usize, ClipId);
+
 pub struct TimelineState {
-    pub selected: Option<(usize, ClipId)>,
+    /// Clip selezionate. Vuoto se nessuna clip è selezionata (non deve
+    /// essere confuso con "nessuna timeline": qui è solo lo stato della
+    /// selezione dentro una timeline esistente).
+    pub selected: BTreeSet<ClipKey>,
+    /// Ultima clip toccata da un click semplice o da un ctrl+click: origine
+    /// del range per il prossimo shift+click. Uno shift+click *non* sposta
+    /// l'ancora, così shift+click ripetuti restano relativi alla stessa
+    /// origine (come nei file manager).
+    selection_anchor: Option<ClipKey>,
     pub playhead: FrameIdx,
     pixels_per_sec: f32,
     drag: Option<DragState>,
+    /// Rettangolo di selezione in corso, in coordinate locali al contenuto
+    /// scrollabile (senza l'offset di `origin`, così resta valido anche se
+    /// lo scroll cambia): un drag avviato da un'area vuota della timeline
+    /// (non su una clip, non sul righello) lo popola.
+    marquee: Option<MarqueeDrag>,
+}
+
+struct MarqueeDrag {
+    start: egui::Pos2,
+    current: egui::Pos2,
 }
 
 struct DragState {
@@ -42,11 +72,30 @@ struct DragState {
 impl Default for TimelineState {
     fn default() -> Self {
         Self {
-            selected: None,
+            selected: BTreeSet::new(),
+            selection_anchor: None,
             playhead: 0,
             pixels_per_sec: 60.0,
             drag: None,
+            marquee: None,
         }
+    }
+}
+
+impl TimelineState {
+    /// Imposta la selezione a una singola clip (o a nessuna), aggiornando
+    /// anche l'ancora di conseguenza: usato da "selection follows
+    /// playhead" (in `main.rs`), che deve sempre collassare a una clip
+    /// sola anche se la selezione precedente era multipla.
+    pub fn set_single_selection(&mut self, clip: Option<ClipKey>) {
+        self.selected = clip.into_iter().collect();
+        self.selection_anchor = clip;
+    }
+
+    /// Svuota la selezione.
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.selection_anchor = None;
     }
 }
 
@@ -59,12 +108,12 @@ struct ClipVisual {
 
 /// Comando differito: raccolto durante il disegno (che prende in prestito
 /// `project` immutabilmente) e applicato subito dopo, per evitare un
-/// conflitto di borrow con `history.do_command(project, ...)`.
+/// conflitto di borrow con `history.do_command(project, ...)`. I cambi di
+/// sola selezione non passano di qui: mutano `state` direttamente, dato
+/// che non serve né `project` né `history`.
 enum PendingAction {
     /// (clip_id, track_index, new_start) per una o due clip (collegate).
     Move(Vec<(ClipId, usize, FrameIdx)>),
-    Select(usize, ClipId),
-    ClearSelection,
     Unlink(usize, ClipId),
     Link(usize, ClipId, usize, ClipId),
 }
@@ -115,6 +164,13 @@ pub fn show_timeline(
             );
             let painter = ui.painter_at(rect);
             let origin = rect.min;
+            let to_local = |pos: egui::Pos2| egui::pos2(pos.x - origin.x, pos.y - origin.y);
+            let press_over_a_clip = |pos: egui::Pos2| {
+                let local = to_local(pos);
+                visuals
+                    .iter()
+                    .any(|v| clip_local_rect(v, px_per_frame).contains(local))
+            };
 
             // Ruler: click/drag per spostare il playhead.
             let ruler_rect =
@@ -129,8 +185,20 @@ pub fn show_timeline(
                 let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                 state.playhead = frame;
             }
+            if ruler_resp.clicked() {
+                state.clear_selection();
+            }
 
-            // Sfondo delle track (alternato per leggibilità).
+            // Sfondo delle track (alternato per leggibilità), e sopra,
+            // un'unica regione interagibile per tutta l'area sotto al
+            // righello: cattura click/drag partiti da uno spazio vuoto
+            // (marquee-select o "svuota selezione"). Le clip, interagite
+            // più avanti nel loop, sono "sopra" a questa nell'hit-test di
+            // egui (un rettangolo grande sotto + rettangoli piccoli sopra
+            // è un pattern che risolve correttamente da solo), e in più il
+            // controllo `press_over_a_clip` la rende no-op se il punto di
+            // partenza è comunque dentro una clip: doppia sicurezza contro
+            // un click che "ruba" l'interazione a una clip.
             for track_index in 0..track_count {
                 let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
                 let track_rect = egui::Rect::from_min_size(
@@ -144,6 +212,61 @@ pub fn show_timeline(
                 };
                 painter.rect_filled(track_rect, 0.0, bg);
             }
+            let track_area_rect = egui::Rect::from_min_size(
+                egui::pos2(origin.x, origin.y + RULER_HEIGHT),
+                egui::vec2(content_width, content_height - RULER_HEIGHT),
+            );
+            let marquee_resp = ui.interact(
+                track_area_rect,
+                ui.id().with("timeline_marquee"),
+                egui::Sense::click_and_drag(),
+            );
+            if marquee_resp.drag_started() {
+                if let Some(pos) = marquee_resp.interact_pointer_pos()
+                    && !press_over_a_clip(pos)
+                {
+                    let local = to_local(pos);
+                    state.marquee = Some(MarqueeDrag {
+                        start: local,
+                        current: local,
+                    });
+                }
+            } else if marquee_resp.dragged() {
+                if let (Some(m), Some(pos)) =
+                    (&mut state.marquee, marquee_resp.interact_pointer_pos())
+                {
+                    m.current = to_local(pos);
+                }
+            } else if marquee_resp.drag_stopped() {
+                if let Some(m) = state.marquee.take() {
+                    let rect = egui::Rect::from_two_pos(m.start, m.current);
+                    let hits = clips_intersecting_rect(&visuals, px_per_frame, rect);
+                    state.selected = hits.iter().copied().collect();
+                    state.selection_anchor = hits.first().copied();
+                }
+            } else if marquee_resp.clicked()
+                && let Some(pos) = marquee_resp.interact_pointer_pos()
+                && !press_over_a_clip(pos)
+            {
+                state.clear_selection();
+            }
+            if let Some(m) = &state.marquee {
+                let marquee_rect = egui::Rect::from_two_pos(
+                    origin + m.start.to_vec2(),
+                    origin + m.current.to_vec2(),
+                );
+                painter.rect_filled(
+                    marquee_rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                );
+                painter.rect_stroke(
+                    marquee_rect,
+                    0.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                    egui::StrokeKind::Inside,
+                );
+            }
 
             // Posizione (clampata) della clip primaria in trascinamento,
             // calcolata una sola volta e riusata sia per lei sia per
@@ -153,10 +276,11 @@ pub fn show_timeline(
                 (raw.round() as FrameIdx).clamp(d.min_start, d.max_start)
             });
 
-            // La gemella collegata della clip selezionata va evidenziata
-            // insieme a lei (le clip audio+video sono collegate di
-            // default): calcolato una volta sola, non per ogni clip.
-            let selected_linked_id = selected_linked_clip_id(&visuals, state.selected);
+            // Le gemelle collegate di tutte le clip selezionate vanno
+            // evidenziate insieme a loro (le clip audio+video sono
+            // collegate di default): calcolato una volta sola, non per
+            // ogni clip.
+            let linked_ids = selected_linked_clip_ids(&visuals, &state.selected);
 
             // Clip.
             for visual in &visuals {
@@ -185,8 +309,10 @@ pub fn show_timeline(
                 let id = ui.id().with("clip").with(visual.clip.id.0);
                 let resp = ui.interact(clip_rect, id, egui::Sense::click_and_drag());
 
-                let is_selected = state.selected == Some((visual.track_index, visual.clip.id))
-                    || selected_linked_id == Some(visual.clip.id);
+                let is_selected = state
+                    .selected
+                    .contains(&(visual.track_index, visual.clip.id))
+                    || linked_ids.contains(&visual.clip.id);
                 let stroke = if is_selected {
                     egui::Stroke::new(2.0, egui::Color32::WHITE)
                 } else {
@@ -247,7 +373,17 @@ pub fn show_timeline(
                         pending = Some(PendingAction::Move(moves));
                     }
                 } else if resp.clicked() {
-                    pending = Some(PendingAction::Select(visual.track_index, visual.clip.id));
+                    let modifiers = click_modifiers(ui.input(|i| i.modifiers));
+                    let (selected, anchor) = apply_click_selection(
+                        &state.selected,
+                        state.selection_anchor,
+                        (visual.track_index, visual.clip.id),
+                        modifiers,
+                        &visuals,
+                        px_per_frame,
+                    );
+                    state.selected = selected;
+                    state.selection_anchor = anchor;
                 }
 
                 resp.context_menu(|ui| {
@@ -257,38 +393,18 @@ pub fn show_timeline(
                                 Some(PendingAction::Unlink(visual.track_index, visual.clip.id));
                             ui.close();
                         }
-                    } else {
-                        let candidate = visuals.iter().find(|v| {
-                            v.clip.id != visual.clip.id
-                                && v.track_index != visual.track_index
-                                && v.clip.linked.is_none()
-                                && v.clip.timeline_start == visual.clip.timeline_start
-                        });
-                        match candidate {
-                            Some(candidate) => {
-                                if ui
-                                    .button(format!("Collega con \"{}\"", candidate.label))
-                                    .clicked()
-                                {
-                                    pending = Some(PendingAction::Link(
-                                        visual.track_index,
-                                        visual.clip.id,
-                                        candidate.track_index,
-                                        candidate.clip.id,
-                                    ));
-                                    ui.close();
-                                }
-                            }
-                            None => {
-                                ui.label("Nessuna clip allineata da collegare");
-                            }
+                    } else if state.selected.len() == 2 {
+                        if ui.button("Collega").clicked() {
+                            let mut two = state.selected.iter().copied();
+                            let a = two.next().expect("len() == 2");
+                            let b = two.next().expect("len() == 2");
+                            pending = Some(PendingAction::Link(a.0, a.1, b.0, b.1));
+                            ui.close();
                         }
+                    } else {
+                        ui.label("Seleziona esattamente 2 clip per collegarle");
                     }
                 });
-            }
-
-            if ruler_resp.clicked() {
-                pending = Some(PendingAction::ClearSelection);
             }
 
             // Playhead.
@@ -313,12 +429,6 @@ pub fn show_timeline(
                     project,
                     Box::new(vv_core::MoveClips::new(timeline_id, moves)),
                 );
-            }
-            PendingAction::Select(track_index, clip_id) => {
-                state.selected = Some((track_index, clip_id));
-            }
-            PendingAction::ClearSelection => {
-                state.selected = None;
             }
             PendingAction::Unlink(track_index, clip_id) => {
                 history.do_command(
@@ -359,6 +469,97 @@ fn clip_label_and_color(
             "Solid Color".to_string(),
             egui::Color32::from_rgb(200, 170, 90),
         ),
+    }
+}
+
+/// Rettangolo occupato da una clip nel disegno della timeline, in
+/// coordinate locali al contenuto scrollabile (senza l'offset di
+/// `origin`): condiviso dal disegno vero e proprio e dai test di
+/// intersezione (marquee-select, shift+click), così i due usano
+/// esattamente la stessa geometria.
+fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32) -> egui::Rect {
+    let x = visual.clip.timeline_start as f32 * px_per_frame;
+    let y = RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
+    let w = (visual.clip.timeline_len() as f32 * px_per_frame).max(2.0);
+    egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0))
+}
+
+/// Le clip il cui rettangolo interseca `rect` (coordinate locali): nucleo
+/// condiviso da marquee-select e shift+click (che usa il rettangolo che
+/// unisce l'ancora e la clip cliccata).
+fn clips_intersecting_rect(
+    visuals: &[ClipVisual],
+    px_per_frame: f32,
+    rect: egui::Rect,
+) -> Vec<ClipKey> {
+    visuals
+        .iter()
+        .filter(|v| clip_local_rect(v, px_per_frame).intersects(rect))
+        .map(|v| (v.track_index, v.clip.id))
+        .collect()
+}
+
+/// I due comportamenti richiesti per il click con modificatori: `Toggle`
+/// (ctrl+click) aggiunge/rimuove *solo* la clip cliccata dalla selezione
+/// corrente; `Range` (shift+click) seleziona tutte le clip nel rettangolo
+/// che unisce l'ancora e la clip cliccata, sostituendo la selezione
+/// corrente. `Plain` (nessun modificatore) sostituisce la selezione con la
+/// sola clip cliccata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickModifiers {
+    Plain,
+    Toggle,
+    Range,
+}
+
+fn click_modifiers(modifiers: egui::Modifiers) -> ClickModifiers {
+    if modifiers.shift {
+        ClickModifiers::Range
+    } else if modifiers.command {
+        ClickModifiers::Toggle
+    } else {
+        ClickModifiers::Plain
+    }
+}
+
+/// Applica un click (con eventuali modificatori) sulla clip `clicked`,
+/// data la selezione e l'ancora correnti. Funzione pura, senza alcun
+/// `egui::Ui`: testabile con dati semplici.
+fn apply_click_selection(
+    current: &BTreeSet<ClipKey>,
+    anchor: Option<ClipKey>,
+    clicked: ClipKey,
+    modifiers: ClickModifiers,
+    visuals: &[ClipVisual],
+    px_per_frame: f32,
+) -> (BTreeSet<ClipKey>, Option<ClipKey>) {
+    match modifiers {
+        ClickModifiers::Plain => (BTreeSet::from([clicked]), Some(clicked)),
+        ClickModifiers::Toggle => {
+            let mut set = current.clone();
+            if !set.remove(&clicked) {
+                set.insert(clicked);
+            }
+            (set, Some(clicked))
+        }
+        ClickModifiers::Range => {
+            let effective_anchor = anchor.unwrap_or(clicked);
+            let anchor_rect = visuals
+                .iter()
+                .find(|v| (v.track_index, v.clip.id) == effective_anchor)
+                .map(|v| clip_local_rect(v, px_per_frame));
+            let clicked_rect = visuals
+                .iter()
+                .find(|v| (v.track_index, v.clip.id) == clicked)
+                .map(|v| clip_local_rect(v, px_per_frame));
+            let set = match (anchor_rect, clicked_rect) {
+                (Some(a), Some(c)) => clips_intersecting_rect(visuals, px_per_frame, a.union(c))
+                    .into_iter()
+                    .collect(),
+                _ => BTreeSet::from([clicked]),
+            };
+            (set, Some(effective_anchor))
+        }
     }
 }
 
@@ -417,18 +618,18 @@ fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (F
     )
 }
 
-/// L'id della gemella collegata della clip attualmente selezionata, se
-/// c'è: usato per evidenziarla insieme alla selezione (bug: "seleziono il
-/// video ma non l'audio collegato").
-fn selected_linked_clip_id(
+/// Gli id delle gemelle collegate di tutte le clip selezionate: vanno
+/// evidenziate insieme alla selezione (le clip audio+video sono collegate
+/// di default) anche se non fanno formalmente parte di `selected`.
+fn selected_linked_clip_ids(
     visuals: &[ClipVisual],
-    selected: Option<(usize, ClipId)>,
-) -> Option<ClipId> {
-    let (track_index, clip_id) = selected?;
+    selected: &BTreeSet<ClipKey>,
+) -> HashSet<ClipId> {
     visuals
         .iter()
-        .find(|v| v.track_index == track_index && v.clip.id == clip_id)
-        .and_then(|v| v.clip.linked)
+        .filter(|v| selected.contains(&(v.track_index, v.clip.id)))
+        .filter_map(|v| v.clip.linked)
+        .collect()
 }
 
 /// Range valido per il `timeline_start` di `clip_id`, combinato con quello
@@ -501,28 +702,163 @@ mod tests {
     }
 
     #[test]
-    fn selected_linked_clip_id_finds_the_partner() {
+    fn selected_linked_clip_ids_finds_the_partners() {
         let visuals = vec![visual_linked(0, 1, 0, 10, 2), visual_linked(1, 2, 0, 10, 1)];
+        let selected = BTreeSet::from([(0, ClipId(1))]);
         assert_eq!(
-            selected_linked_clip_id(&visuals, Some((0, ClipId(1)))),
-            Some(ClipId(2)),
+            selected_linked_clip_ids(&visuals, &selected),
+            HashSet::from([ClipId(2)]),
             "selezionando il video deve trovare l'audio collegato"
         );
+        let selected = BTreeSet::from([(1, ClipId(2))]);
         assert_eq!(
-            selected_linked_clip_id(&visuals, Some((1, ClipId(2)))),
-            Some(ClipId(1)),
+            selected_linked_clip_ids(&visuals, &selected),
+            HashSet::from([ClipId(1)]),
             "e viceversa, selezionando l'audio deve trovare il video"
         );
     }
 
     #[test]
-    fn selected_linked_clip_id_is_none_when_unlinked_or_unselected() {
+    fn selected_linked_clip_ids_is_empty_when_unlinked_or_unselected() {
         let visuals = vec![visual(0, 1, 0, 10)];
+        assert!(selected_linked_clip_ids(&visuals, &BTreeSet::from([(0, ClipId(1))])).is_empty());
+        assert!(selected_linked_clip_ids(&visuals, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn selected_linked_clip_ids_collects_partners_of_every_selected_clip() {
+        // Due coppie collegate indipendenti, entrambe selezionate: le
+        // gemelle di *entrambe* vanno evidenziate.
+        let visuals = vec![
+            visual_linked(0, 1, 0, 10, 2),
+            visual_linked(1, 2, 0, 10, 1),
+            visual_linked(0, 3, 20, 10, 4),
+            visual_linked(1, 4, 20, 10, 3),
+        ];
+        let selected = BTreeSet::from([(0, ClipId(1)), (0, ClipId(3))]);
         assert_eq!(
-            selected_linked_clip_id(&visuals, Some((0, ClipId(1)))),
-            None
+            selected_linked_clip_ids(&visuals, &selected),
+            HashSet::from([ClipId(2), ClipId(4)])
         );
-        assert_eq!(selected_linked_clip_id(&visuals, None), None);
+    }
+
+    #[test]
+    fn apply_click_selection_plain_replaces_selection() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
+        let current = BTreeSet::from([(0, ClipId(1))]);
+        let (selected, anchor) = apply_click_selection(
+            &current,
+            Some((0, ClipId(1))),
+            (0, ClipId(2)),
+            ClickModifiers::Plain,
+            &visuals,
+            10.0,
+        );
+        assert_eq!(selected, BTreeSet::from([(0, ClipId(2))]));
+        assert_eq!(anchor, Some((0, ClipId(2))));
+    }
+
+    #[test]
+    fn apply_click_selection_toggle_adds_and_removes() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
+        let current = BTreeSet::from([(0, ClipId(1))]);
+        let (selected, _) = apply_click_selection(
+            &current,
+            Some((0, ClipId(1))),
+            (0, ClipId(2)),
+            ClickModifiers::Toggle,
+            &visuals,
+            10.0,
+        );
+        assert_eq!(selected, BTreeSet::from([(0, ClipId(1)), (0, ClipId(2))]));
+
+        // Ctrl+click su una clip già selezionata la rimuove.
+        let (selected2, _) = apply_click_selection(
+            &selected,
+            Some((0, ClipId(2))),
+            (0, ClipId(1)),
+            ClickModifiers::Toggle,
+            &visuals,
+            10.0,
+        );
+        assert_eq!(selected2, BTreeSet::from([(0, ClipId(2))]));
+    }
+
+    #[test]
+    fn apply_click_selection_range_selects_bounding_box_from_anchor() {
+        // Tre clip sulla stessa track: [0,10) [20,30) [40,50). Ancora=1,
+        // shift+click su 3 deve selezionare anche la 2 in mezzo.
+        let visuals = vec![
+            visual(0, 1, 0, 10),
+            visual(0, 2, 20, 10),
+            visual(0, 3, 40, 10),
+        ];
+        let current = BTreeSet::from([(0, ClipId(1))]);
+        let (selected, anchor) = apply_click_selection(
+            &current,
+            Some((0, ClipId(1))),
+            (0, ClipId(3)),
+            ClickModifiers::Range,
+            &visuals,
+            1.0,
+        );
+        assert_eq!(
+            selected,
+            BTreeSet::from([(0, ClipId(1)), (0, ClipId(2)), (0, ClipId(3))])
+        );
+        // L'ancora non cambia con shift+click.
+        assert_eq!(anchor, Some((0, ClipId(1))));
+    }
+
+    #[test]
+    fn apply_click_selection_range_spans_multiple_tracks() {
+        let visuals = vec![
+            visual(0, 1, 0, 10),  // video, ancora
+            visual(1, 2, 0, 10),  // audio, dentro al range (stessa colonna)
+            visual(0, 3, 20, 10), // fuori dal range orizzontale
+        ];
+        let current = BTreeSet::from([(0, ClipId(1))]);
+        let (selected, _) = apply_click_selection(
+            &current,
+            Some((0, ClipId(1))),
+            (1, ClipId(2)),
+            ClickModifiers::Range,
+            &visuals,
+            1.0,
+        );
+        assert_eq!(selected, BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]));
+    }
+
+    #[test]
+    fn apply_click_selection_range_without_prior_anchor_uses_clicked_as_anchor() {
+        let visuals = vec![visual(0, 1, 0, 10)];
+        let current = BTreeSet::new();
+        let (selected, anchor) = apply_click_selection(
+            &current,
+            None,
+            (0, ClipId(1)),
+            ClickModifiers::Range,
+            &visuals,
+            1.0,
+        );
+        assert_eq!(selected, BTreeSet::from([(0, ClipId(1))]));
+        assert_eq!(anchor, Some((0, ClipId(1))));
+    }
+
+    #[test]
+    fn clips_intersecting_rect_finds_overlapping_clips_only() {
+        let visuals = vec![
+            visual(0, 1, 0, 10),
+            visual(0, 2, 20, 10),
+            visual(1, 3, 0, 10),
+        ];
+        // Rettangolo che copre solo l'area della clip 1 e 3 (colonna
+        // iniziale, entrambe le track), non la 2.
+        let rect = clip_local_rect(&visuals[0], 1.0).union(clip_local_rect(&visuals[2], 1.0));
+        let hits: BTreeSet<_> = clips_intersecting_rect(&visuals, 1.0, rect)
+            .into_iter()
+            .collect();
+        assert_eq!(hits, BTreeSet::from([(0, ClipId(1)), (1, ClipId(3))]));
     }
 
     #[test]
@@ -646,7 +982,7 @@ mod tests {
         }
 
         let mut state = TimelineState {
-            selected: Some((0, ClipId(0))),
+            selected: BTreeSet::from([(0, ClipId(0))]),
             ..TimelineState::default()
         };
 

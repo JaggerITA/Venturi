@@ -279,6 +279,68 @@ vibevideo/
    taglia con T, la metà appena isolata viene selezionata da sola (il
    playhead è esattamente al suo inizio), si preme ripple-delete, la clip
    successiva scorre sotto al playhead e viene selezionata a sua volta.
+
+   **Fix post-milestone, round 5** (pannello proprietà spostato, resize
+   timeline che tornava indietro, multi-selezione, link tra clip
+   selezionate): il pannello proprietà non vive più incollato sotto al
+   media pool a sinistra, ma è un `egui::Panel::right("properties")`
+   ridimensionabile accanto al viewer, nascondibile (✕ nel pannello o
+   checkbox "Pannello proprietà" in toolbar) senza sparire da solo quando
+   la selezione si svuota: in quel caso mostra informazioni sulla timeline
+   (nome, risoluzione, fps, numero di track, playhead) invece del pannello
+   vuoto; con più clip selezionate mostra un riepilogo invece dell'editor
+   completo (che resta per la selezione singola).
+
+   Il resize del pannello timeline (drag del bordo) tornava alla
+   dimensione precedente al rilascio del mouse: egui persiste la nuova
+   dimensione di un `Panel` ridimensionabile con un frame di ritardo
+   rispetto al rilascio, perché risolve l'interazione di resize leggendo
+   la `Response` del frame *precedente* (per evitare un frame di latenza
+   visiva durante il drag stesso). Senza repaint continui, se il rilascio
+   non è seguito da altro input il frame che committerebbe la dimensione
+   finale non arriva mai. Fix: richiedere un repaint mentre un pulsante
+   del mouse è premuto e per un frame dopo il rilascio (oltre al caso
+   "player in riproduzione" già gestito) — copre l'intera classe di bug
+   "drag/resize non si conferma se non muovo più il mouse dopo aver
+   rilasciato".
+
+   `TimelineState.selected` è passato da `Option<(usize, ClipId)>` a
+   `BTreeSet<(usize, ClipId)>` (alias `ClipKey`) per supportare la
+   multi-selezione: click semplice sostituisce la selezione, ctrl+click
+   aggiunge/rimuove una clip sola (`ClickModifiers::Toggle`), shift+click
+   seleziona tutte le clip nel rettangolo che unisce l'"ancora" (l'ultima
+   clip toccata da un click semplice o ctrl+click, non si sposta con
+   shift+click) e la clip cliccata (`ClickModifiers::Range` — condivide
+   `clips_intersecting_rect` con il rettangolo di selezione). Trascinare
+   da un'area vuota della timeline (non su una clip, non sul righello)
+   disegna un rettangolo di selezione: un'unica regione interagibile
+   grande quanto l'area delle track, aggiunta *prima* delle clip nel
+   codice (nell'hit-test di egui "un'area grande sotto + widget piccoli
+   sopra" si risolve correttamente da sola: le clip, interagite dopo,
+   vincono sulla loro area), con un controllo esplicito aggiuntivo
+   (`press_over_a_clip`) che la rende no-op se il punto di partenza del
+   drag è comunque dentro una clip — doppia sicurezza indipendente da
+   come egui risolve l'hit-test.
+
+   `delete_selected`/`ripple_delete_selected` operano ora su *tutte* le
+   clip selezionate (più la gemella collegata di ciascuna, se non già
+   anch'essa selezionata esplicitamente — dedotta per evitare di provare
+   a cancellarla due volte). Per il ripple-delete multiplo, le "unità" da
+   rimuovere vengono ordinate ed elaborate da destra a sinistra (per
+   `timeline_start` decrescente, tipo `RippleUnit`): rimuovendo prima la
+   più a destra, ogni ripple-delete individuale non altera la posizione
+   delle unità successive non ancora processate, evitando il doppio
+   spostamento che si otterrebbe in un altro ordine (stesso principio già
+   usato per `split_all_at_playhead`). Nessuna modifica a `vv-core`: pura
+   orchestrazione in `main.rs` dei comandi già esistenti.
+
+   Il menu contestuale "Collega con «nome»" (che cercava automaticamente
+   un'unica clip allineata) è diventato "Collega", abilitato quando sono
+   selezionate esattamente 2 clip (il modello dati collega sempre e solo
+   coppie, `Clip::linked: Option<ClipId>`) e le collega qualunque esse
+   siano, indipendentemente da quale delle due si è cliccata col tasto
+   destro per aprire il menu. "Scollega" resta invariato, specifico alla
+   clip cliccata.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di
