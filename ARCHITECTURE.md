@@ -191,7 +191,13 @@ vibevideo/
    meglio se servirà), pannello proprietà con toggle diamante per
    animare/aggiungere/rimuovere un keyframe al frame corrente, tutto con
    undo/redo. Interpolazione Hold/Linear/EaseInOut in `Keyframed::value_at`.
-6. **SolidColor + Text overlay**.
+6. 🟡 **SolidColor + Text overlay** — **SolidColor fatto**: clip
+   generatore (riempimento CPU, il crop/zoom di un colore piatto è un
+   no-op quindi non serve il compositor GPU per questo), colore statico o
+   keyframeato con color picker nel pannello proprietà, valutato sul frame
+   locale alla clip derivato dal playhead della timeline (l'unico orologio
+   sensato per un generatore, che non ha un Player). **Text overlay non
+   ancora fatto**.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di

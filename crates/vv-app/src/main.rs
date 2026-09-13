@@ -28,16 +28,38 @@ enum PoolAction {
     AddToTimeline(MediaId),
 }
 
+/// Snapshot dei campi della clip selezionata che servono al pannello
+/// proprietà, valutati al `source_frame` corrente. Una struct invece di
+/// una tupla perché i campi hanno continuato a crescere con ogni nuova
+/// proprietà keyframeable (transform, gain, ora color).
+struct ClipPanelInfo {
+    start: FrameIdx,
+    len: FrameIdx,
+    is_solid_color: bool,
+    transform_constant: bool,
+    transform_kf_here: bool,
+    transform: vv_core::Transform,
+    gain_constant: bool,
+    gain_kf_here: bool,
+    gain: f32,
+    color_constant: bool,
+    color_kf_here: bool,
+    color: vv_core::Rgba,
+}
+
 /// Azione differita sugli effetti di una clip, raccolta durante il disegno
 /// del pannello proprietà (che prende in prestito `self` immutabilmente) e
 /// applicata subito dopo — stesso schema di `timeline_ui::PendingAction`.
 enum PendingEffectChange {
     SetTransformDefault(usize, ClipId, vv_core::Transform),
     SetGainDefault(usize, ClipId, f32),
+    SetColorDefault(usize, ClipId, vv_core::Rgba),
     UpsertTransformKeyframe(usize, ClipId, FrameIdx, vv_core::Transform),
     UpsertGainKeyframe(usize, ClipId, FrameIdx, f32),
+    UpsertColorKeyframe(usize, ClipId, FrameIdx, vv_core::Rgba),
     RemoveTransformKeyframe(usize, ClipId, FrameIdx),
     RemoveGainKeyframe(usize, ClipId, FrameIdx),
+    RemoveColorKeyframe(usize, ClipId, FrameIdx),
 }
 
 struct VibeVideoApp {
@@ -140,14 +162,72 @@ impl VibeVideoApp {
 
         self.active_clip = Some((track_index, clip_id));
 
-        if let vv_core::ClipSource::Media(media_id) = clip.source {
-            self.preview_media(media_id);
-            self.apply_active_clip_gain();
+        match clip.source {
+            vv_core::ClipSource::Media(media_id) => {
+                self.preview_media(media_id);
+                self.apply_active_clip_gain();
+            }
+            vv_core::ClipSource::SolidColor => {
+                // Nessun media da aprire: il viewer genera il frame colore
+                // al volo (milestone 6), non serve un Player. Ripulisco lo
+                // stato del player precedente per non mostrare un frame
+                // stantio dell'ultima clip media selezionata.
+                self.preview_player = None;
+                self.frame_texture = None;
+                self.preview_error = None;
+            }
         }
-        // ClipSource::SolidColor: nessun media da aprire nel player: il
-        // rendering di un generatore colore arriva con gli overlay
-        // (milestone 6). Il transform si applicherà comunque nel viewer
-        // una volta che ci sarà un frame da comporre.
+    }
+
+    fn ensure_timeline(&mut self) -> TimelineId {
+        if let Some(id) = self.timeline_id {
+            return id;
+        }
+        let id = self.project.timelines.insert(vv_core::Timeline {
+            name: "Timeline 1".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        self.timeline_id = Some(id);
+        id
+    }
+
+    /// Crea una clip generatore SolidColor da 5s e la accoda in fondo alla
+    /// track video 0. Il colore iniziale è grigio medio, modificabile
+    /// subito dal pannello proprietà una volta selezionata.
+    fn add_solid_color_clip(&mut self) {
+        let timeline_id = self.ensure_timeline();
+        let fps = self.project.timelines[timeline_id].fps.as_f64();
+        let default_len = (fps * 5.0).round() as FrameIdx;
+        let video_start = track_end(&self.project, timeline_id, 0);
+
+        let effects = vv_core::EffectStack {
+            color: Some(vv_core::Keyframed::constant(vv_core::Rgba {
+                r: 0.6,
+                g: 0.6,
+                b: 0.6,
+                a: 1.0,
+            })),
+            ..Default::default()
+        };
+
+        let clip = vv_core::Clip {
+            id: self.project.alloc_clip_id(),
+            source: vv_core::ClipSource::SolidColor,
+            source_in: 0,
+            source_out: default_len,
+            timeline_start: video_start,
+            effects,
+        };
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: 0,
+                clip,
+            }),
+        );
     }
 
     fn apply_active_clip_gain(&mut self) {
@@ -320,6 +400,9 @@ fn build_effect_command(
         PendingEffectChange::SetGainDefault(track_index, clip_id, v) => Box::new(
             vv_core::SetClipGain::new(timeline_id, track_index, clip_id, v),
         ),
+        PendingEffectChange::SetColorDefault(track_index, clip_id, v) => Box::new(
+            vv_core::SetClipColor::new(timeline_id, track_index, clip_id, v),
+        ),
         PendingEffectChange::UpsertTransformKeyframe(track_index, clip_id, frame, v) => {
             Box::new(vv_core::UpsertKeyframe::new(
                 timeline_id,
@@ -340,6 +423,16 @@ fn build_effect_command(
                 vv_core::Interpolation::Linear,
             ))
         }
+        PendingEffectChange::UpsertColorKeyframe(track_index, clip_id, frame, v) => {
+            Box::new(vv_core::UpsertKeyframe::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                frame,
+                vv_core::KeyframeValue::Color(v),
+                vv_core::Interpolation::Linear,
+            ))
+        }
         PendingEffectChange::RemoveTransformKeyframe(track_index, clip_id, frame) => {
             Box::new(vv_core::RemoveKeyframe::new(
                 timeline_id,
@@ -355,6 +448,15 @@ fn build_effect_command(
                 track_index,
                 clip_id,
                 vv_core::KeyframeTarget::Gain,
+                frame,
+            ))
+        }
+        PendingEffectChange::RemoveColorKeyframe(track_index, clip_id, frame) => {
+            Box::new(vv_core::RemoveKeyframe::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                vv_core::KeyframeTarget::Color,
                 frame,
             ))
         }
@@ -414,6 +516,9 @@ impl eframe::App for VibeVideoApp {
                 {
                     self.import_media(path);
                 }
+                if ui.button("Nuovo Solid Color").clicked() {
+                    self.add_solid_color_clip();
+                }
 
                 ui.separator();
                 if ui.button("Elimina (Del)").clicked() {
@@ -461,11 +566,33 @@ impl eframe::App for VibeVideoApp {
             });
         });
 
-        let source_frame = self
-            .preview_player
-            .as_ref()
-            .map(|p| p.current_source_frame())
-            .unwrap_or(0);
+        // Frame a cui vengono lette/scritte le proprietà nel pannello:
+        // per una clip Media è la posizione del player; per una clip
+        // SolidColor (che non ha un player) è la posizione sul playhead
+        // della timeline, tradotta in frame locale alla clip — lo stesso
+        // frame usato dal viewer per generare l'anteprima del colore.
+        let selected_clip_start_if_solid_color =
+            self.timeline_state
+                .selected
+                .and_then(|(track_index, clip_id)| {
+                    let timeline_id = self.timeline_id?;
+                    let clip = self.project.timelines[timeline_id]
+                        .tracks
+                        .get(track_index)?
+                        .clips
+                        .iter()
+                        .find(|c| c.id == clip_id)?;
+                    matches!(clip.source, vv_core::ClipSource::SolidColor)
+                        .then_some(clip.timeline_start)
+                });
+        let source_frame = match selected_clip_start_if_solid_color {
+            Some(clip_start) => (self.timeline_state.playhead - clip_start).max(0),
+            None => self
+                .preview_player
+                .as_ref()
+                .map(|p| p.current_source_frame())
+                .unwrap_or(0),
+        };
 
         let mut pool_action = None;
         let mut pending_effect = None;
@@ -516,35 +643,71 @@ impl eframe::App for VibeVideoApp {
                             .clips
                             .iter()
                             .find(|c| c.id == clip_id)
-                            .map(|c| {
-                                (
-                                    c.timeline_start,
-                                    c.timeline_len(),
-                                    c.effects.transform.is_constant(),
-                                    c.effects.transform.keyframe_at(source_frame).is_some(),
-                                    c.effects.transform.value_at(source_frame),
-                                    c.effects.gain_db.is_constant(),
-                                    c.effects.gain_db.keyframe_at(source_frame).is_some(),
-                                    c.effects.gain_db.value_at(source_frame),
-                                )
+                            .map(|c| ClipPanelInfo {
+                                start: c.timeline_start,
+                                len: c.timeline_len(),
+                                is_solid_color: matches!(c.source, vv_core::ClipSource::SolidColor),
+                                transform_constant: c.effects.transform.is_constant(),
+                                transform_kf_here: c
+                                    .effects
+                                    .transform
+                                    .keyframe_at(source_frame)
+                                    .is_some(),
+                                transform: c.effects.transform.value_at(source_frame),
+                                gain_constant: c.effects.gain_db.is_constant(),
+                                gain_kf_here: c.effects.gain_db.keyframe_at(source_frame).is_some(),
+                                gain: c.effects.gain_db.value_at(source_frame),
+                                color_constant: c
+                                    .effects
+                                    .color
+                                    .as_ref()
+                                    .is_none_or(|k| k.is_constant()),
+                                color_kf_here: c
+                                    .effects
+                                    .color
+                                    .as_ref()
+                                    .and_then(|k| k.keyframe_at(source_frame))
+                                    .is_some(),
+                                color: c
+                                    .effects
+                                    .color
+                                    .as_ref()
+                                    .map(|k| k.value_at(source_frame))
+                                    .unwrap_or(vv_core::Rgba {
+                                        r: 0.6,
+                                        g: 0.6,
+                                        b: 0.6,
+                                        a: 1.0,
+                                    }),
                             })
                     });
 
-                    if let Some((
+                    if let Some(ClipPanelInfo {
                         start,
                         len,
+                        is_solid_color,
                         transform_constant,
                         transform_kf_here,
                         mut transform,
                         gain_constant,
                         gain_kf_here,
                         mut gain,
-                    )) = clip_info
+                        color_constant,
+                        color_kf_here,
+                        mut color,
+                    }) = clip_info
                     {
                         ui.label(format!("Track: {track_index}"));
                         ui.label(format!("Start: {start} frame"));
                         ui.label(format!("Durata: {len} frame"));
-                        ui.label(format!("Frame corrente (source): {source_frame}"));
+                        ui.label(format!(
+                            "Frame corrente ({}): {source_frame}",
+                            if is_solid_color {
+                                "locale alla clip"
+                            } else {
+                                "source"
+                            }
+                        ));
 
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -676,6 +839,52 @@ impl eframe::App for VibeVideoApp {
                                 )
                             });
                         }
+
+                        if is_solid_color {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Colore");
+                                if keyframe_button(ui, color_constant, color_kf_here).clicked() {
+                                    pending_effect = Some(if color_kf_here {
+                                        PendingEffectChange::RemoveColorKeyframe(
+                                            track_index,
+                                            clip_id,
+                                            source_frame,
+                                        )
+                                    } else {
+                                        PendingEffectChange::UpsertColorKeyframe(
+                                            track_index,
+                                            clip_id,
+                                            source_frame,
+                                            color,
+                                        )
+                                    });
+                                }
+                            });
+                            let mut rgba = [color.r, color.g, color.b, color.a];
+                            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                                color = vv_core::Rgba {
+                                    r: rgba[0],
+                                    g: rgba[1],
+                                    b: rgba[2],
+                                    a: rgba[3],
+                                };
+                                pending_effect = Some(if color_constant {
+                                    PendingEffectChange::SetColorDefault(
+                                        track_index,
+                                        clip_id,
+                                        color,
+                                    )
+                                } else {
+                                    PendingEffectChange::UpsertColorKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                        color,
+                                    )
+                                });
+                            }
+                        }
                     }
                 }
             });
@@ -718,8 +927,57 @@ impl eframe::App for VibeVideoApp {
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
-            let current = self.preview_player.as_ref().and_then(|p| p.current_frame());
-            if let Some(frame) = current {
+            // Le clip SolidColor non hanno un media da decodificare: il
+            // colore (eventualmente keyframeato) va valutato al frame
+            // *locale alla clip* sul playhead della timeline, l'unico
+            // orologio che ha senso per un generatore (un Player non ha
+            // motivo di esistere per un riempimento uniforme).
+            let solid_color_frame_info = self.active_clip.and_then(|(track_index, clip_id)| {
+                let timeline_id = self.timeline_id?;
+                let tl = &self.project.timelines[timeline_id];
+                let clip = tl
+                    .tracks
+                    .get(track_index)?
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)?;
+                match &clip.source {
+                    vv_core::ClipSource::SolidColor => {
+                        let local_frame =
+                            (self.timeline_state.playhead - clip.timeline_start).max(0);
+                        let rgba = clip
+                            .effects
+                            .color
+                            .as_ref()
+                            .map(|k| k.value_at(local_frame))
+                            .unwrap_or(vv_core::Rgba {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            });
+                        Some((tl.resolution, rgba))
+                    }
+                    vv_core::ClipSource::Media(_) => None,
+                }
+            });
+
+            if let Some(((w, h), rgba)) = solid_color_frame_info {
+                let data = vv_render::solid_color_frame(rgba, w, h);
+                let image =
+                    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &data);
+                match &mut self.frame_texture {
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.frame_texture = Some(ui.ctx().load_texture(
+                            "current-frame",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            } else if let Some(frame) = self.preview_player.as_ref().and_then(|p| p.current_frame())
+            {
                 let source_frame = self
                     .preview_player
                     .as_ref()
@@ -1046,5 +1304,76 @@ mod tests {
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert_eq!(clip.effects.gain_db.default, -3.0);
         assert_eq!(clip.effects.transform.default.zoom, 1.5);
+    }
+
+    #[test]
+    fn add_solid_color_clip_creates_timeline_and_initialized_color() {
+        let mut app = VibeVideoApp::default();
+        assert!(app.timeline_id.is_none());
+
+        app.add_solid_color_clip();
+
+        let timeline_id = app.timeline_id.expect("doveva crearsi una timeline");
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
+        assert!(clip.effects.color.is_some());
+        assert_eq!(clip.timeline_len(), 125); // 5s a 25fps di default
+    }
+
+    #[test]
+    fn selecting_solid_color_clip_clears_preview_player_and_sets_active_clip() {
+        let mut app = VibeVideoApp::default();
+        app.add_solid_color_clip();
+        let timeline_id = app.timeline_id.unwrap();
+        let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+
+        app.preview_clip(0, clip_id);
+
+        assert_eq!(app.active_clip, Some((0, clip_id)));
+        assert!(app.preview_player.is_none());
+    }
+
+    #[test]
+    fn build_effect_command_color_upsert_and_remove_round_trip() {
+        let mut app = VibeVideoApp::default();
+        app.add_solid_color_clip();
+        let timeline_id = app.timeline_id.unwrap();
+        let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+
+        let red = vv_core::Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        app.history.do_command(
+            &mut app.project,
+            build_effect_command(
+                timeline_id,
+                PendingEffectChange::UpsertColorKeyframe(0, clip_id, 10, red),
+            ),
+        );
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects
+                .color
+                .as_ref()
+                .unwrap()
+                .keyframe_at(10)
+                .unwrap()
+                .0
+                .r,
+            1.0
+        );
+
+        app.history.do_command(
+            &mut app.project,
+            build_effect_command(
+                timeline_id,
+                PendingEffectChange::RemoveColorKeyframe(0, clip_id, 10),
+            ),
+        );
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert!(clip.effects.color.as_ref().unwrap().is_constant());
     }
 }

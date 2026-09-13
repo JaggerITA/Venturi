@@ -3,7 +3,7 @@ pub mod model;
 
 pub use command::{
     Command, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete, MoveClip,
-    RemoveKeyframe, RippleDeleteAllTracks, SetClipGain, SetClipTransform, SplitClip,
+    RemoveKeyframe, RippleDeleteAllTracks, SetClipColor, SetClipGain, SetClipTransform, SplitClip,
     UpsertKeyframe,
 };
 pub use model::*;
@@ -383,5 +383,154 @@ mod tests {
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         assert_eq!(clip.effects.transform.keyframe_at(5).unwrap().0.zoom, 2.0);
+    }
+
+    fn white() -> Rgba {
+        Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }
+    }
+
+    #[test]
+    fn set_clip_color_initializes_then_updates_then_undo_removes_entirely() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut a = make_clip(&mut project, 0, 10);
+        a.source = ClipSource::SolidColor;
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+        assert!(
+            project.timelines[timeline].tracks[0].clips[0]
+                .effects
+                .color
+                .is_none()
+        );
+
+        let red = Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipColor::new(timeline, 0, a_id, red)),
+        );
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.color.as_ref().unwrap().default.r, 1.0);
+
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipColor::new(timeline, 0, a_id, white())),
+        );
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.color.as_ref().unwrap().default.r, 1.0);
+        assert_eq!(clip.effects.color.as_ref().unwrap().default.g, 1.0);
+
+        history.undo(&mut project); // torna a rosso
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.color.as_ref().unwrap().default.g, 0.0);
+
+        history.undo(&mut project); // torna a "nessun colore"
+        assert!(
+            project.timelines[timeline].tracks[0].clips[0]
+                .effects
+                .color
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn upsert_and_remove_color_keyframe_round_trip() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut a = make_clip(&mut project, 0, 20);
+        a.source = ClipSource::SolidColor;
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipColor::new(
+                timeline,
+                0,
+                a_id,
+                Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            )),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                10,
+                command::KeyframeValue::Color(white()),
+                Interpolation::Linear,
+            )),
+        );
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects
+                .color
+                .as_ref()
+                .unwrap()
+                .keyframe_at(10)
+                .unwrap()
+                .0
+                .r,
+            1.0
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::RemoveKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                command::KeyframeTarget::Color,
+                10,
+            )),
+        );
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert!(clip.effects.color.as_ref().unwrap().is_constant());
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(
+            clip.effects
+                .color
+                .as_ref()
+                .unwrap()
+                .keyframe_at(10)
+                .unwrap()
+                .0
+                .r,
+            1.0
+        );
     }
 }

@@ -1,7 +1,9 @@
 //! Command pattern per undo/redo. Ogni comando cattura da sé lo stato
 //! necessario a invertirsi nel momento in cui viene applicato.
 
-use crate::model::{Clip, ClipId, FrameIdx, Interpolation, Project, TimelineId, Transform};
+use crate::model::{
+    Clip, ClipId, FrameIdx, Interpolation, Keyframed, Project, Rgba, TimelineId, Transform,
+};
 
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
@@ -418,14 +420,75 @@ impl Command for SetClipGain {
     }
 }
 
+/// Imposta il colore *statico* (`effects.color.default`) di una clip
+/// SolidColor. A differenza di transform/gain, `effects.color` parte
+/// `None`: il primo `SetClipColor` lo inizializza. I comandi keyframe
+/// (`UpsertKeyframe`/`RemoveKeyframe`, sotto) assumono invece che sia già
+/// inizializzato e non fanno nulla altrimenti — in pratica non è un
+/// problema perché una clip SolidColor riceve sempre un colore alla
+/// creazione (vedi vv-app).
+#[derive(Debug)]
+pub struct SetClipColor {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub new_value: Rgba,
+    old_value: Option<Option<Rgba>>,
+}
+
+impl SetClipColor {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, new_value: Rgba) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            new_value,
+            old_value: None,
+        }
+    }
+}
+
+impl Command for SetClipColor {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.old_value = Some(clip.effects.color.as_ref().map(|k| k.default));
+        match &mut clip.effects.color {
+            Some(k) => k.default = self.new_value,
+            None => clip.effects.color = Some(Keyframed::constant(self.new_value)),
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old) = self.old_value else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        match old {
+            Some(v) => {
+                if let Some(k) = &mut clip.effects.color {
+                    k.default = v;
+                }
+            }
+            None => clip.effects.color = None,
+        }
+    }
+}
+
 /// Il parametro animabile a cui si applica un `UpsertKeyframe`/
-/// `RemoveKeyframe`. Due soli comandi invece di uno per parametro: quando
-/// arriveranno altri parametri keyframeable (es. speed) basterà aggiungere
-/// una variante qui, non un'altra coppia di comandi.
+/// `RemoveKeyframe`. Comandi parametrizzati su un enum invece di uno per
+/// parametro: quando arriveranno altri parametri keyframeable (es. speed)
+/// basterà aggiungere una variante qui, non un'altra coppia di comandi.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyframeValue {
     Transform(Transform),
     Gain(f32),
+    Color(Rgba),
 }
 
 /// Inserisce o sostituisce un keyframe di `effects.transform` o
@@ -492,6 +555,15 @@ impl Command for UpsertKeyframe {
                     .gain_db
                     .upsert(self.frame, v, self.interpolation);
             }
+            KeyframeValue::Color(v) => {
+                let Some(color) = &mut clip.effects.color else {
+                    return; // nessun colore inizializzato: vedi doc di SetClipColor
+                };
+                self.previous = color
+                    .keyframe_at(self.frame)
+                    .map(|(v, i)| (KeyframeValue::Color(v), i));
+                color.upsert(self.frame, v, self.interpolation);
+            }
         }
     }
 
@@ -507,12 +579,22 @@ impl Command for UpsertKeyframe {
             Some((KeyframeValue::Gain(v), i)) => {
                 clip.effects.gain_db.upsert(self.frame, *v, *i);
             }
+            Some((KeyframeValue::Color(v), i)) => {
+                if let Some(color) = &mut clip.effects.color {
+                    color.upsert(self.frame, *v, *i);
+                }
+            }
             None => match self.value {
                 KeyframeValue::Transform(_) => {
                     clip.effects.transform.remove_at(self.frame);
                 }
                 KeyframeValue::Gain(_) => {
                     clip.effects.gain_db.remove_at(self.frame);
+                }
+                KeyframeValue::Color(_) => {
+                    if let Some(color) = &mut clip.effects.color {
+                        color.remove_at(self.frame);
+                    }
                 }
             },
         }
@@ -523,6 +605,7 @@ impl Command for UpsertKeyframe {
 pub enum KeyframeTarget {
     Transform,
     Gain,
+    Color,
 }
 
 /// Rimuove il keyframe di `target` esattamente al frame indicato, se c'è.
@@ -572,6 +655,12 @@ impl Command for RemoveKeyframe {
                 .gain_db
                 .remove_at(self.frame)
                 .map(|(v, i)| (KeyframeValue::Gain(v), i)),
+            KeyframeTarget::Color => clip
+                .effects
+                .color
+                .as_mut()
+                .and_then(|c| c.remove_at(self.frame))
+                .map(|(v, i)| (KeyframeValue::Color(v), i)),
         };
     }
 
@@ -586,6 +675,11 @@ impl Command for RemoveKeyframe {
         match value {
             KeyframeValue::Transform(v) => clip.effects.transform.upsert(self.frame, v, interp),
             KeyframeValue::Gain(v) => clip.effects.gain_db.upsert(self.frame, v, interp),
+            KeyframeValue::Color(v) => {
+                if let Some(color) = &mut clip.effects.color {
+                    color.upsert(self.frame, v, interp);
+                }
+            }
         }
     }
 }

@@ -210,6 +210,17 @@ pub struct Rgba {
     pub a: f32,
 }
 
+impl Lerp for Rgba {
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        Self {
+            r: f32::lerp(&a.r, &b.r, t),
+            g: f32::lerp(&a.g, &b.g, t),
+            b: f32::lerp(&a.b, &b.b, t),
+            a: f32::lerp(&a.a, &b.a, t),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextOverlay {
     pub content: String,
@@ -423,5 +434,23 @@ mod keyframe_tests {
         assert_eq!(mid.crop, [0.1, 0.1, 0.9, 0.9]);
         assert_eq!(mid.zoom, 2.0);
         assert_eq!(mid.position, [0.5, -0.5]);
+    }
+
+    #[test]
+    fn rgba_lerp_interpolates_each_channel() {
+        let a = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let b = Rgba {
+            r: 1.0,
+            g: 0.5,
+            b: 0.2,
+            a: 0.0,
+        };
+        let mid = Rgba::lerp(&a, &b, 0.5);
+        assert_eq!((mid.r, mid.g, mid.b, mid.a), (0.5, 0.25, 0.1, 0.5));
     }
 }
