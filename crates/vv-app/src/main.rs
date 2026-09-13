@@ -101,6 +101,14 @@ struct VibeVideoApp {
     /// applica a un'anteprima "grezza"). Si esce da questa modalità
     /// interagendo con la timeline (selezione o playhead).
     browsing_media: Option<MediaId>,
+
+    /// "Selection follows playhead": attiva di default, disattivabile
+    /// dalle impostazioni. Quando attiva, spostare il playhead (scrub o
+    /// click sul righello) o tagliare/eliminare seleziona automaticamente
+    /// la clip sulla track video sotto al playhead — comodo per fare più
+    /// tagli/ripple-delete in rapida successione senza dover ricliccare
+    /// ogni volta la clip.
+    selection_follows_playhead: bool,
 }
 
 impl Default for VibeVideoApp {
@@ -120,6 +128,7 @@ impl Default for VibeVideoApp {
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
             browsing_media: None,
+            selection_follows_playhead: true,
         }
     }
 }
@@ -183,6 +192,19 @@ impl VibeVideoApp {
             .iter()
             .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
             .map(|c| c.id)
+    }
+
+    /// Se "selection follows playhead" è attivo, allinea la selezione alla
+    /// clip sulla track video sotto al playhead corrente (`None` se il
+    /// playhead è su un vuoto). No-op se la funzionalità è disattivata
+    /// dalle impostazioni.
+    fn sync_selection_to_playhead(&mut self) {
+        if !self.selection_follows_playhead {
+            return;
+        }
+        self.timeline_state.selected = self
+            .clip_at(VIDEO_TRACK, self.timeline_state.playhead)
+            .map(|id| (VIDEO_TRACK, id));
     }
 
     /// Carica `clip_id` (sulla track video) nel player, posizionandosi al
@@ -589,6 +611,7 @@ impl VibeVideoApp {
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
         self.timeline_state.selected = None;
+        self.sync_selection_to_playhead();
     }
 
     /// Ripple delete: rimuove la clip selezionata *e la sua gemella
@@ -617,18 +640,27 @@ impl VibeVideoApp {
             ),
         );
         self.timeline_state.selected = None;
+        self.sync_selection_to_playhead();
     }
 
     /// Divide *tutte* le clip che coprono il playhead, su ogni track (tasto
     /// T): comportamento standard da "lametta", non richiede una
     /// selezione (bug: "il taglio funzionava solo sulla track
     /// selezionata"). Un solo passo di history per l'intero taglio.
+    /// Taglia con T tutte le clip sotto al playhead, su ogni track. Le
+    /// coppie collegate (`Clip::linked`) i cui *entrambi* i membri vengono
+    /// tagliati nello stesso punto restano collegate anche dopo: metà
+    /// sinistra con metà sinistra, metà destra con metà destra. Senza
+    /// questo, `SplitClip` scollegherebbe sempre entrambe le metà (comportamento
+    /// corretto quando si taglia una sola clip di una coppia, perché lì
+    /// solo un pezzo rappresenta ancora l'intera durata collegata), e
+    /// selezionare il video dopo un taglio non evidenzierebbe più l'audio.
     fn split_all_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         let playhead = self.timeline_state.playhead;
-        let targets: Vec<(usize, ClipId)> = self.project.timelines[timeline_id]
+        let targets: Vec<(usize, ClipId, Option<ClipId>)> = self.project.timelines[timeline_id]
             .tracks
             .iter()
             .enumerate()
@@ -637,27 +669,67 @@ impl VibeVideoApp {
                     .clips
                     .iter()
                     .filter(move |c| playhead > c.timeline_start && playhead < c.timeline_end())
-                    .map(move |c| (track_index, c.id))
+                    .map(move |c| (track_index, c.id, c.linked))
             })
             .collect();
         if targets.is_empty() {
             return;
         }
-        let commands = targets
-            .into_iter()
-            .map(|(track_index, clip_id)| {
-                Box::new(vv_core::SplitClip::new(
-                    timeline_id,
-                    track_index,
-                    clip_id,
-                    playhead,
-                )) as Box<dyn vv_core::Command>
+
+        let target_ids: std::collections::HashSet<ClipId> =
+            targets.iter().map(|(_, id, _)| *id).collect();
+        let track_of: std::collections::HashMap<ClipId, usize> =
+            targets.iter().map(|(t, id, _)| (*id, *t)).collect();
+
+        // Id della metà destra pre-allocato per ogni target, cosi da
+        // poterlo usare subito per i comandi di ricollegamento.
+        let new_ids: std::collections::HashMap<ClipId, ClipId> = targets
+            .iter()
+            .map(|(_, id, _)| (*id, self.project.alloc_clip_id()))
+            .collect();
+
+        let mut commands: Vec<Box<dyn vv_core::Command>> = targets
+            .iter()
+            .map(|(track_index, clip_id, _)| {
+                Box::new(
+                    vv_core::SplitClip::new(timeline_id, *track_index, *clip_id, playhead)
+                        .with_new_clip_id(new_ids[clip_id]),
+                ) as Box<dyn vv_core::Command>
             })
             .collect();
+
+        let mut relinked = std::collections::HashSet::new();
+        for (track_index, clip_id, linked) in &targets {
+            let Some(partner_id) = linked else {
+                continue;
+            };
+            if !target_ids.contains(partner_id) || relinked.contains(clip_id) {
+                continue;
+            }
+            relinked.insert(*clip_id);
+            relinked.insert(*partner_id);
+            let partner_track = track_of[partner_id];
+            commands.push(Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (*track_index, *clip_id),
+                (partner_track, *partner_id),
+            )));
+            commands.push(Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (*track_index, new_ids[clip_id]),
+                (partner_track, new_ids[partner_id]),
+            )));
+        }
+
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
+        // Il taglio non sposta il playhead, ma cambia cosa c'è esattamente
+        // sotto (ora la metà destra, appena creata): riallinea la
+        // selezione se "selection follows playhead" è attivo, cosi si può
+        // incatenare subito un ripple-delete sul pezzo appena isolato.
+        self.sync_selection_to_playhead();
     }
 }
 
@@ -854,6 +926,12 @@ impl eframe::App for VibeVideoApp {
                 {
                     self.split_all_at_playhead();
                 }
+                ui.separator();
+                ui.checkbox(&mut self.selection_follows_playhead, "Selection follows playhead")
+                    .on_hover_text(
+                        "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
+                    );
+
                 ui.separator();
                 if ui.button("Undo (Ctrl+Z)").clicked() {
                     self.history.undo(&mut self.project);
@@ -1240,6 +1318,9 @@ impl eframe::App for VibeVideoApp {
         // di quando è `drive_playback` stesso a spostare il playhead per
         // seguire la riproduzione, che non deve innescare un seek.
         let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
+        if user_scrubbed_playhead {
+            self.sync_selection_to_playhead();
+        }
 
         // Interagire con la timeline (selezionare una clip o spostare il
         // playhead) riprende il controllo del viewer dall'anteprima
@@ -1431,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn ripple_delete_selected_shifts_other_tracks_and_clears_selection() {
+    fn ripple_delete_selected_shifts_other_tracks_and_selects_clip_under_playhead() {
         let mut app = VibeVideoApp::default();
         let video_a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
@@ -1442,7 +1523,11 @@ mod tests {
         app.timeline_state.selected = Some((0, video_b));
         app.ripple_delete_selected();
 
-        assert_eq!(app.timeline_state.selected, None);
+        // "Selection follows playhead" (attivo di default) riseleziona
+        // quel che ora si trova sotto al playhead (fermo a 0): video_a,
+        // che era già lì. Comodo per incatenare più ripple-delete senza
+        // dover ricliccare la prossima clip ogni volta.
+        assert_eq!(app.timeline_state.selected, Some((0, video_a)));
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[0].clips[0].id, video_a);
@@ -1452,6 +1537,21 @@ mod tests {
         assert_eq!(tl.tracks[1].clips[0].id, audio_a);
         assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
         assert_eq!(tl.tracks[1].clips[1].timeline_start, 0);
+    }
+
+    #[test]
+    fn ripple_delete_selected_clears_selection_when_follow_playhead_disabled() {
+        let mut app = VibeVideoApp {
+            selection_follows_playhead: false,
+            ..VibeVideoApp::default()
+        };
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
+
+        app.timeline_state.selected = Some((0, video_b));
+        app.ripple_delete_selected();
+
+        assert_eq!(app.timeline_state.selected, None);
     }
 
     #[test]
@@ -1911,6 +2011,60 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    /// Bug: tagliare con T una coppia video+audio collegata scollegava
+    /// entrambe le metà (comportamento corretto per un taglio "singolo",
+    /// ma non quando entrambi i membri della coppia vengono tagliati
+    /// insieme nello stesso punto): dopo, selezionare il video non
+    /// evidenziava più l'audio. Le metà sinistra/destra devono restare
+    /// collegate tra loro.
+    #[test]
+    fn split_all_at_playhead_keeps_linked_pair_linked_on_both_halves() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (0, video_id),
+                (1, audio_id),
+            )),
+        );
+
+        app.timeline_state.playhead = 8;
+        app.split_all_at_playhead();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips.len(), 2);
+        let video_left = &tl.tracks[0].clips[0];
+        let video_right = &tl.tracks[0].clips[1];
+        let audio_left = &tl.tracks[1].clips[0];
+        let audio_right = &tl.tracks[1].clips[1];
+        assert_eq!(video_left.id, video_id);
+        assert_eq!(audio_left.id, audio_id);
+        assert_eq!(video_left.linked, Some(audio_left.id));
+        assert_eq!(audio_left.linked, Some(video_left.id));
+        assert_eq!(video_right.linked, Some(audio_right.id));
+        assert_eq!(audio_right.linked, Some(video_right.id));
+        assert_ne!(video_right.id, video_id);
+        assert_ne!(audio_right.id, audio_id);
+
+        // "Selection follows playhead" seleziona la metà destra (il
+        // playhead è esattamente al suo inizio): il video appena isolato,
+        // pronto per un ripple-delete immediato.
+        assert_eq!(app.timeline_state.selected, Some((0, video_right.id)));
+
+        // Un solo undo annulla i due tagli *e* i due ricollegamenti.
+        app.history.undo(&mut app.project);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
+        assert_eq!(tl.tracks[0].clips[0].linked, Some(audio_id));
+        assert_eq!(tl.tracks[1].clips[0].linked, Some(video_id));
     }
 
     #[test]

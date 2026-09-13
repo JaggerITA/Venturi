@@ -547,6 +547,11 @@ pub struct SplitClip {
     /// resta un'estensione futura.
     original_linked: Option<Option<ClipId>>,
     new_clip_id: Option<ClipId>,
+    /// Se impostato (`with_new_clip_id`), l'id della metà destra è questo
+    /// invece di uno allocato al volo: serve a chi orchestra più split
+    /// collegati (vedi `split_all_at_playhead`) per conoscere in anticipo
+    /// gli id delle metà e poterle ricollegare con un comando successivo.
+    preallocated_new_clip_id: Option<ClipId>,
 }
 
 impl SplitClip {
@@ -564,13 +569,26 @@ impl SplitClip {
             original_source_out: None,
             original_linked: None,
             new_clip_id: None,
+            preallocated_new_clip_id: None,
         }
+    }
+
+    pub fn with_new_clip_id(mut self, id: ClipId) -> Self {
+        self.preallocated_new_clip_id = Some(id);
+        self
+    }
+
+    /// L'id assegnato alla metà destra, noto solo dopo `apply`.
+    pub fn new_clip_id(&self) -> Option<ClipId> {
+        self.new_clip_id
     }
 }
 
 impl Command for SplitClip {
     fn apply(&mut self, project: &mut Project) {
-        let new_id = project.alloc_clip_id();
+        let new_id = self
+            .preallocated_new_clip_id
+            .unwrap_or_else(|| project.alloc_clip_id());
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
             return;

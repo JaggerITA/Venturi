@@ -249,6 +249,36 @@ vibevideo/
    playhead prima/dopo `show_timeline()` nel frame corrente) da uno
    causato da `drive_playback` stesso, e forza il seek del player solo
    nel primo caso.
+
+   **Fix post-milestone, round 4** (selezione collegata ancora invisibile
+   dopo un taglio, "selection follows playhead"): la causa reale del bug
+   #5 del round 3 non era `selected_linked_clip_id` (corretto) ma
+   `SplitClip`, che scollega *sempre* entrambe le metà di ogni clip che
+   taglia — comportamento giusto quando si taglia una sola clip di una
+   coppia (quel pezzo non rappresenta più l'intera durata collegata), ma
+   sbagliato quando `split_all_at_playhead` taglia *entrambi* i membri di
+   una coppia collegata nello stesso punto: da lì in poi non erano più
+   collegati e selezionare il video non evidenziava più l'audio.
+   `SplitClip` ora espone `with_new_clip_id`/`new_clip_id()` per
+   permettere di pre-allocare e conoscere in anticipo l'id della metà
+   destra; `split_all_at_playhead` rileva le coppie i cui due membri
+   vengono entrambi tagliati e aggiunge due `LinkClips` al
+   `CompositeCommand` (metà sinistra con metà sinistra, metà destra con
+   metà destra), così anche dopo il taglio audio e video restano
+   sincronizzati per selezione, delete e ripple-delete.
+
+   Aggiunta anche **"Selection follows playhead"**: opzione attiva di
+   default (checkbox in toolbar, disattivabile), che allinea la selezione
+   sulla track video alla clip sotto al playhead ogni volta che il
+   playhead si sposta per interazione utente (scrub/click sul righello) o
+   che un taglio/delete/ripple-delete cambia cosa c'è sotto
+   (`sync_selection_to_playhead`, chiamata da `split_all_at_playhead`,
+   `delete_selected` e `ripple_delete_selected` oltre che dal punto in cui
+   si rileva lo scrub manuale). Pensata per incatenare rapidamente più
+   tagli e ripple-delete senza dover ricliccare la clip ogni volta: si
+   taglia con T, la metà appena isolata viene selezionata da sola (il
+   playhead è esattamente al suo inizio), si preme ripple-delete, la clip
+   successiva scorre sotto al playhead e viene selezionata a sua volta.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di
