@@ -341,6 +341,52 @@ vibevideo/
    siano, indipendentemente da quale delle due si è cliccata col tasto
    destro per aprire il menu. "Scollega" resta invariato, specifico alla
    clip cliccata.
+
+   **Fix post-milestone, round 6** (tasto ripple delete, resize pannelli
+   — causa vera stavolta —, selection follows playhead durante il play,
+   selezione dopo un taglio): il ripple delete passa da Shift+Del/
+   Backspace al tasto fisico "<" (`egui::Key::IntlBackslash`: il 102°
+   tasto ISO tra Shift sinistro e Z sui layout europei/italiani, assente
+   sui layout US ANSI — dove "<" è normalmente Shift+virgola).
+
+   Il vero bug dietro al resize dei pannelli che tornava indietro al
+   rilascio **non era affatto una questione di repaint mancanti** (il
+   fix del round 5 era una diagnosi sbagliata, lasciata com'è perché
+   comunque innocua/utile per la fluidità del drag in generale, ma con
+   commento corretto): `ScrollArea` ha `auto_shrink` a `true` su entrambi
+   gli assi di default, quindi si restringe al proprio *contenuto*
+   invece di riempire lo spazio assegnato dal `Panel`. Con un contenuto
+   più piccolo dell'altezza/larghezza a cui l'utente trascina il bordo
+   (es. poche clip corte in timeline, un pannello proprietà più stretto
+   del suo contenuto), il pannello si richiude al contenuto ad ogni
+   frame successivo al drag — durante il drag stesso sembra funzionare
+   perché l'interazione forza la dimensione live. Diagnosticato con un
+   piccolo esempio headless standalone (`egui::Context::run_ui` +
+   eventi sintetici di press/drag/release) che ha isolato il
+   comportamento da tutto il resto dell'app, prima di toccare il codice
+   vero. Fix: `.auto_shrink([false, false])` sulla `ScrollArea` di
+   `show_timeline` e su quella del media pool; il pannello proprietà, che
+   non ha una `ScrollArea`, usa `ui.set_min_width(ui.available_width())`.
+   Test di regressione dedicato che verifica, su più frame senza
+   interazione, che il pannello non si restringa sotto la dimensione
+   richiesta con un contenuto reale molto più piccolo.
+
+   "Selection follows playhead" seguiva il playhead solo quando lo
+   spostava l'utente (scrub/click sul righello), non quando lo spostava
+   `drive_playback` durante la normale riproduzione: la sync ora avviene
+   anche confrontando il playhead prima/dopo `drive_playback`, non solo
+   prima/dopo `show_timeline`.
+
+   Dopo un taglio con T, "selection follows playhead" selezionava la
+   metà *destra* appena creata (conseguenza diretta di come `clip_at`
+   risolve la clip sotto al playhead: `start <= playhead < end`, e il
+   playhead sta esattamente all'inizio della metà destra) e solo sulla
+   track video. `split_all_at_playhead` ora seleziona esplicitamente,
+   invece di affidarsi al generico "clip sotto al playhead", la metà
+   *sinistra* (l'id non cambia con lo split, è la metà destra a
+   riceverne uno nuovo) sulla track video *e* la sua gemella audio
+   appena ricollegata — intento più comune dopo un taglio: rivedere o
+   eliminare ciò che sta prima del punto appena tagliato.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di

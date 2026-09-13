@@ -83,13 +83,23 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    /// Imposta selezione e ancora esplicitamente: usato da `main.rs`
+    /// quando deve costruire una selezione (anche multipla) derivata da un
+    /// comando — es. "selection follows playhead" dopo un taglio, che
+    /// seleziona la clip video appena tagliata *e* la sua gemella audio
+    /// collegata — non da un'interazione diretta con la timeline (quella
+    /// passa dai rami `Click`/marquee dentro `show_timeline`).
+    pub fn set_selection(&mut self, selected: BTreeSet<ClipKey>, anchor: Option<ClipKey>) {
+        self.selected = selected;
+        self.selection_anchor = anchor;
+    }
+
     /// Imposta la selezione a una singola clip (o a nessuna), aggiornando
     /// anche l'ancora di conseguenza: usato da "selection follows
     /// playhead" (in `main.rs`), che deve sempre collassare a una clip
     /// sola anche se la selezione precedente era multipla.
     pub fn set_single_selection(&mut self, clip: Option<ClipKey>) {
-        self.selected = clip.into_iter().collect();
-        self.selection_anchor = clip;
+        self.set_selection(clip.into_iter().collect(), clip);
     }
 
     /// Svuota la selezione.
@@ -157,6 +167,17 @@ pub fn show_timeline(
 
     egui::ScrollArea::horizontal()
         .id_salt("timeline_scroll")
+        // `auto_shrink` di default è true su entrambi gli assi: una
+        // ScrollArea si restringe al contenuto anziché riempire lo spazio
+        // assegnato. Quando il contenuto (poche track corte) è più basso
+        // dell'altezza a cui l'utente ha trascinato il pannello, questo fa
+        // sì che il pannello *stesso* si richiuda al contenuto ogni frame
+        // successivo al drag — è la causa reale del bug "il resize della
+        // timeline torna indietro al rilascio del mouse": durante il drag
+        // l'interazione forza la dimensione, ma al frame successivo lo
+        // shrink-to-content la sovrascrive di nuovo. `false` su entrambi
+        // gli assi fa riempire sempre lo spazio assegnato dal Panel.
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             let (rect, _resp) = ui.allocate_exact_size(
                 egui::vec2(content_width, content_height),
@@ -1004,5 +1025,76 @@ mod tests {
         output.textures_delta.clear();
 
         assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2);
+    }
+
+    /// Bug: il pannello timeline (`Panel::bottom` con dentro
+    /// `show_timeline`, vedi `main.rs`) tornava alla dimensione del
+    /// contenuto invece di restare a quella a cui l'utente l'aveva
+    /// ridimensionato, non appena passava un frame senza interazione.
+    /// Causa: `ScrollArea` di default si restringe al contenuto invece
+    /// di riempire lo spazio assegnato dal `Panel` (`auto_shrink` è
+    /// `true` su entrambi gli assi di default). Con poche clip corte
+    /// (contenuto reale molto più basso di 240px) il pannello, su più
+    /// frame consecutivi senza alcuna interazione, non deve restringersi
+    /// sotto la dimensione richiesta.
+    #[test]
+    fn show_timeline_panel_does_not_shrink_to_short_content() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![vv_core::Track::new(TrackKind::Video)],
+        });
+        let mut history = History::default();
+        let clip = Clip {
+            id: project.alloc_clip_id(),
+            source: vv_core::ClipSource::SolidColor,
+            source_in: 0,
+            source_out: 10,
+            timeline_start: 0,
+            effects: vv_core::EffectStack::default(),
+            linked: None,
+        };
+        history.do_command(
+            &mut project,
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: 0,
+                clip,
+            }),
+        );
+        let mut state = TimelineState::default();
+
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut last_height = 0.0_f32;
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                let panel_resp = egui::Panel::bottom("timeline_repro")
+                    .default_size(240.0)
+                    .resizable(true)
+                    .show(ui, |ui| {
+                        show_timeline(
+                            ui,
+                            &mut project,
+                            &mut history,
+                            timeline_id,
+                            &|_id| "media".to_string(),
+                            &mut state,
+                        );
+                    });
+                last_height = panel_resp.response.rect.height();
+            });
+            output.textures_delta.clear();
+        }
+        assert!(
+            last_height > 200.0,
+            "il pannello si è ristretto al contenuto ({last_height}px) invece di restare vicino ai 240px richiesti"
+        );
     }
 }

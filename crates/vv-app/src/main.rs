@@ -776,11 +776,27 @@ impl VibeVideoApp {
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
-        // Il taglio non sposta il playhead, ma cambia cosa c'è esattamente
-        // sotto (ora la metà destra, appena creata): riallinea la
-        // selezione se "selection follows playhead" è attivo, cosi si può
-        // incatenare subito un ripple-delete sul pezzo appena isolato.
-        self.sync_selection_to_playhead();
+        // "Selection follows playhead": seleziona la metà SINISTRA appena
+        // tagliata sulla track video (il suo id è invariato, la metà che
+        // ha ottenuto un nuovo id è la destra — vedi sopra) *e* la sua
+        // gemella audio collegata, esplicitamente, non tramite il
+        // generico "clip sotto al playhead" (che per costruzione
+        // sarebbe la metà destra, dato che il playhead è esattamente al
+        // suo inizio: `clip_at` usa `start <= playhead < end`). L'intento
+        // più comune dopo un taglio è rivedere/eliminare ciò che sta
+        // *prima* del punto appena tagliato, non dopo.
+        if self.selection_follows_playhead
+            && let Some((video_track, video_clip_id, _)) = targets
+                .iter()
+                .find(|(track_index, _, _)| *track_index == VIDEO_TRACK)
+        {
+            let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
+            if let Some(partner) = self.linked_partner(timeline_id, *video_track, *video_clip_id) {
+                selected.insert(partner);
+            }
+            self.timeline_state
+                .set_selection(selected, Some((*video_track, *video_clip_id)));
+        }
     }
 }
 
@@ -922,12 +938,15 @@ impl eframe::App for VibeVideoApp {
         }
 
         ui.input(|i| {
-            let delete_pressed =
-                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
-            if delete_pressed && i.modifiers.shift {
-                self.ripple_delete_selected();
-            } else if delete_pressed {
+            if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 self.delete_selected();
+            }
+            // Tasto fisico "<" (il 102° tasto ISO, tra Shift sinistro e Z
+            // sui layout europei/italiani — `IntlBackslash` in egui,
+            // assente sui layout US ANSI): dedicato al ripple delete,
+            // prima era Shift+Delete/Backspace.
+            if i.key_pressed(egui::Key::IntlBackslash) {
+                self.ripple_delete_selected();
             }
             if i.key_pressed(egui::Key::T) && !i.modifiers.command {
                 self.split_all_at_playhead();
@@ -962,7 +981,7 @@ impl eframe::App for VibeVideoApp {
                     self.delete_selected();
                 }
                 if ui
-                    .button("Ripple delete (Shift+Del)")
+                    .button("Ripple delete (<)")
                     .on_hover_text(
                         "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
                     )
@@ -1044,34 +1063,42 @@ impl eframe::App for VibeVideoApp {
                 if let Some(err) = &self.import_error {
                     ui.colored_label(egui::Color32::RED, err);
                 }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let items: Vec<(MediaId, String, vv_core::MediaMeta)> = self
-                        .project
-                        .media_pool
-                        .iter()
-                        .map(|(id, item)| (id, file_label(&item.path), item.meta.clone()))
-                        .collect();
-                    for (id, label, meta) in items {
-                        ui.group(|ui| {
-                            ui.label(&label);
-                            ui.small(format!(
-                                "{}x{} · {:.2}fps · {}",
-                                meta.width,
-                                meta.height,
-                                meta.fps.as_f64(),
-                                if meta.has_audio { "audio" } else { "muto" }
-                            ));
-                            ui.horizontal(|ui| {
-                                if ui.button("Anteprima").clicked() {
-                                    pool_action = Some(PoolAction::Preview(id));
-                                }
-                                if ui.button("Aggiungi").clicked() {
-                                    pool_action = Some(PoolAction::AddToTimeline(id));
-                                }
+                // auto_shrink([false, false]): senza, la ScrollArea (e
+                // quindi il pannello stesso) si restringe alla larghezza
+                // del contenuto invece di riempire quella assegnata dal
+                // Panel — stessa causa del bug "il resize del pannello
+                // torna indietro al rilascio", vedi il commento identico
+                // in timeline_ui::show_timeline.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let items: Vec<(MediaId, String, vv_core::MediaMeta)> = self
+                            .project
+                            .media_pool
+                            .iter()
+                            .map(|(id, item)| (id, file_label(&item.path), item.meta.clone()))
+                            .collect();
+                        for (id, label, meta) in items {
+                            ui.group(|ui| {
+                                ui.label(&label);
+                                ui.small(format!(
+                                    "{}x{} · {:.2}fps · {}",
+                                    meta.width,
+                                    meta.height,
+                                    meta.fps.as_f64(),
+                                    if meta.has_audio { "audio" } else { "muto" }
+                                ));
+                                ui.horizontal(|ui| {
+                                    if ui.button("Anteprima").clicked() {
+                                        pool_action = Some(PoolAction::Preview(id));
+                                    }
+                                    if ui.button("Aggiungi").clicked() {
+                                        pool_action = Some(PoolAction::AddToTimeline(id));
+                                    }
+                                });
                             });
-                        });
-                    }
-                });
+                        }
+                    });
             });
 
         if self.properties_panel_open {
@@ -1090,6 +1117,12 @@ impl eframe::App for VibeVideoApp {
                         }
                     });
                     ui.separator();
+                    // Senza, il pannello si restringerebbe alla larghezza
+                    // del contenuto (etichette/slider) invece di riempire
+                    // quella assegnata dal Panel — stessa causa del bug
+                    // "il resize del pannello torna indietro al rilascio",
+                    // vedi il commento in timeline_ui::show_timeline.
+                    ui.set_min_width(ui.available_width());
 
                     let selected_count = self.timeline_state.selected.len();
                     if let Some((track_index, clip_id)) = single_selected {
@@ -1459,7 +1492,21 @@ impl eframe::App for VibeVideoApp {
 
         if self.browsing_media.is_none() {
             self.ensure_active_clip_matches_playhead(user_scrubbed_playhead);
+            // `drive_playback` avanza il playhead da sé durante la
+            // riproduzione: senza questo confronto, "selection follows
+            // playhead" seguiva solo lo scrub manuale (già coperto sopra
+            // da `user_scrubbed_playhead`) e restava fermo durante il
+            // play normale (bug: "la selezione non segue durante la
+            // riproduzione"). Il confronto prima/dopo, anziché una sync
+            // incondizionata, lascia intatta un'eventuale selezione
+            // esplicita impostata nello stesso frame da altrove (es.
+            // `split_all_at_playhead`) quando il playhead in realtà non
+            // si muove (caso normale: taglio da fermo).
+            let playhead_before_playback = self.timeline_state.playhead;
             self.drive_playback();
+            if self.timeline_state.playhead != playhead_before_playback {
+                self.sync_selection_to_playhead();
+            }
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -1572,19 +1619,16 @@ impl eframe::App for VibeVideoApp {
             ui.ctx().request_repaint();
         }
 
-        // Bug: ridimensionare il pannello timeline trascinando il bordo
-        // tornava alla dimensione precedente al rilascio del mouse. Causa:
-        // egui persiste la nuova dimensione di un `Panel` ridimensionabile
-        // con un ritardo di un frame rispetto al rilascio (per come
-        // risolve l'interazione di resize leggendo la `Response` del
-        // frame precedente); senza repaint continui, se il rilascio non è
-        // seguito da nessun altro input il frame che committerebbe la
-        // dimensione finale non arriva mai e il pannello resta arrotolato
-        // sull'ultimo valore salvato. Richiedere un repaint mentre un
-        // pulsante è premuto (drag in corso, incluso il ridimensionamento
-        // di un pannello) e per un frame dopo il rilascio risolve la
-        // classe intera di bug "il drag/resize non si conferma al
-        // rilascio se non muovo più il mouse".
+        // Nota: la causa del bug "il resize di un pannello torna indietro
+        // al rilascio" era altrove (ScrollArea/contenuto che si restringe
+        // al contenuto invece di riempire lo spazio assegnato, vedi
+        // `auto_shrink` in timeline_ui::show_timeline e nel pannello
+        // media pool/proprietà qui in main.rs), non la mancanza di
+        // repaint. Questo repaint aggiuntivo resta comunque utile per
+        // tenere fluide le interazioni di drag in generale (clip nella
+        // timeline, resize dei pannelli) quando il player non sta
+        // riproducendo e quindi non ci sarebbe altrimenti un repaint
+        // continuo.
         if ui
             .ctx()
             .input(|i| i.pointer.any_down() || i.pointer.any_released())
@@ -2143,6 +2187,73 @@ mod tests {
         );
     }
 
+    /// Bug: "selection follows playhead" seguiva solo lo scrub manuale,
+    /// non l'avanzamento del playhead durante la normale riproduzione.
+    /// `ui()` chiama `sync_selection_to_playhead` anche dopo
+    /// `drive_playback` quando il playhead si è mosso: qui si riproduce
+    /// esattamente quella sequenza (senza passare da un vero frame egui).
+    #[test]
+    fn selection_follows_playhead_during_normal_playback() {
+        let dir = std::env::temp_dir().join("vv-app-selection-follows-playback-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        assert!(app.selection_follows_playhead, "attivo di default");
+        app.import_media(path);
+        let timeline_id = app.timeline_id.unwrap();
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        let first_clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+
+        app.timeline_state.playhead = 25;
+        app.split_all_at_playhead();
+        let second_clip_id = app.project.timelines[timeline_id].tracks[0].clips[1].id;
+
+        app.timeline_state.playhead = 0;
+        app.ensure_active_clip_matches_playhead(false);
+        app.toggle_playback();
+        assert_eq!(
+            app.timeline_state.selected,
+            BTreeSet::from([(0, first_clip_id)])
+        );
+
+        // Come sopra: simula il player che ha raggiunto la fine del trim
+        // della prima metà, poi replica esattamente la sequenza di `ui()`
+        // (drive_playback, e se il playhead si è mosso, risincronizza la
+        // selezione).
+        app.preview_player.as_mut().unwrap().seek_to_frame(25);
+        let playhead_before = app.timeline_state.playhead;
+        app.drive_playback();
+        assert_ne!(
+            app.timeline_state.playhead, playhead_before,
+            "il playhead deve essersi mosso"
+        );
+        app.sync_selection_to_playhead();
+
+        assert_eq!(
+            app.timeline_state.selected,
+            BTreeSet::from([(0, second_clip_id)]),
+            "la selezione deve seguire il playhead anche durante il play normale, non solo lo scrub manuale"
+        );
+    }
+
     /// Riproduce il bug segnalato: la riproduzione partiva solo se una
     /// clip era selezionata esplicitamente in timeline.
     #[test]
@@ -2259,12 +2370,12 @@ mod tests {
         assert_ne!(video_right.id, video_id);
         assert_ne!(audio_right.id, audio_id);
 
-        // "Selection follows playhead" seleziona la metà destra (il
-        // playhead è esattamente al suo inizio): il video appena isolato,
-        // pronto per un ripple-delete immediato.
+        // "Selection follows playhead" seleziona la metà SINISTRA appena
+        // tagliata (quella che si presume già rivista) e la sua gemella
+        // audio collegata, non la metà destra sotto al playhead.
         assert_eq!(
             app.timeline_state.selected,
-            BTreeSet::from([(0, video_right.id)])
+            BTreeSet::from([(0, video_id), (1, audio_id)])
         );
 
         // Un solo undo annulla i due tagli *e* i due ricollegamenti.
