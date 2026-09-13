@@ -1,17 +1,19 @@
 //! Finestra egui: media pool (sinistra), viewer (centro), timeline
 //! multi-traccia (basso), toolbar con play/pause/seek per l'anteprima.
 //!
-//! Il viewer di anteprima riusa lo stesso `Player` della milestone 2 e
-//! resta scollegato dal playhead della timeline: mostrare il frame
-//! composito dell'intera timeline (con più track, trim, trasformazioni)
-//! è compito del compositor GPU di vv-render (milestone 5), il punto
-//! giusto per risolvere "quale clip è attiva su quale track a che tempo"
-//! una volta sola — vedi ARCHITECTURE.md § Compositing GPU. Per ora la
-//! timeline è editing puro (drag, lift-delete, split) con undo/redo, e
-//! l'anteprima è per-media tramite i pulsanti nel media pool.
+//! Il viewer mostra l'anteprima del media della clip selezionata in
+//! timeline, con crop/zoom/gain (milestone 5, valori statici) applicati
+//! tramite il compositor GPU di `vv-render`. Non è ancora il compositing
+//! multi-track completo della timeline (che richiede risolvere "quale clip
+//! è attiva su quale track a che tempo" per ogni frame, milestone
+//! successiva) — qui si vede sempre e solo la clip selezionata, non il
+//! risultato finale con tutte le track sovrapposte.
 //!
 //! La texture del frame corrente viene riusata in-place a ogni frame
-//! (`TextureHandle::set`) invece di riallocarla 25-60 volte al secondo.
+//! (`TextureHandle::set`) invece di riallocarla 25-60 volte al secondo. Il
+//! compositor fa oggi un round-trip CPU->GPU->CPU per restare compatibile
+//! con questo path: passare la texture GPU direttamente a egui (zero-copy)
+//! è un'ottimizzazione futura, vedi doc di `vv_render::Compositor`.
 
 mod player;
 mod timeline_ui;
@@ -19,14 +21,13 @@ mod timeline_ui;
 use player::Player;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use vv_core::{FrameIdx, MediaId, TimelineId, Track, TrackKind};
+use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 enum PoolAction {
     Preview(MediaId),
     AddToTimeline(MediaId),
 }
 
-#[derive(Default)]
 struct VibeVideoApp {
     project: vv_core::Project,
     history: vv_core::History,
@@ -39,6 +40,31 @@ struct VibeVideoApp {
     preview_player: Option<Player>,
     preview_error: Option<String>,
     frame_texture: Option<egui::TextureHandle>,
+
+    /// Clip la cui anteprima è attualmente mostrata: guida sia il player
+    /// (quale media riprodurre) sia il transform/gain applicati (milestone
+    /// 5). `None` se non c'è ancora una clip selezionata.
+    active_clip: Option<(usize, ClipId)>,
+    compositor: vv_render::Compositor,
+}
+
+impl Default for VibeVideoApp {
+    fn default() -> Self {
+        Self {
+            project: vv_core::Project::default(),
+            history: vv_core::History::default(),
+            timeline_id: None,
+            timeline_state: timeline_ui::TimelineState::default(),
+            import_error: None,
+            preview_path: None,
+            preview_meta: None,
+            preview_player: None,
+            preview_error: None,
+            frame_texture: None,
+            active_clip: None,
+            compositor: vv_render::Compositor::new_headless(),
+        }
+    }
 }
 
 impl VibeVideoApp {
@@ -84,6 +110,53 @@ impl VibeVideoApp {
         }
         self.preview_path = Some(path);
         self.preview_meta = Some(meta);
+    }
+
+    /// Mostra l'anteprima della clip selezionata in timeline: apre il
+    /// player sul suo media e applica subito gain/transform correnti.
+    fn preview_clip(&mut self, track_index: usize, clip_id: ClipId) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let Some(clip) = self.project.timelines[timeline_id]
+            .tracks
+            .get(track_index)
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+        else {
+            return;
+        };
+
+        self.active_clip = Some((track_index, clip_id));
+
+        if let vv_core::ClipSource::Media(media_id) = clip.source {
+            self.preview_media(media_id);
+            self.apply_active_clip_gain();
+        }
+        // ClipSource::SolidColor: nessun media da aprire nel player: il
+        // rendering di un generatore colore arriva con gli overlay
+        // (milestone 6). Il transform si applicherà comunque nel viewer
+        // una volta che ci sarà un frame da comporre.
+    }
+
+    fn apply_active_clip_gain(&mut self) {
+        let Some(gain) = self.active_clip_effects().map(|e| e.gain_db.default) else {
+            return;
+        };
+        if let Some(player) = &self.preview_player {
+            player.set_gain_db(gain);
+        }
+    }
+
+    fn active_clip_effects(&self) -> Option<&vv_core::EffectStack> {
+        let (track_index, clip_id) = self.active_clip?;
+        let timeline_id = self.timeline_id?;
+        self.project.timelines[timeline_id]
+            .tracks
+            .get(track_index)?
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .map(|c| &c.effects)
     }
 
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
@@ -207,6 +280,12 @@ impl eframe::App for VibeVideoApp {
             player.tick();
         }
 
+        if self.timeline_state.selected != self.active_clip
+            && let Some((track_index, clip_id)) = self.timeline_state.selected
+        {
+            self.preview_clip(track_index, clip_id);
+        }
+
         ui.input(|i| {
             let delete_pressed =
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
@@ -284,6 +363,8 @@ impl eframe::App for VibeVideoApp {
         });
 
         let mut pool_action = None;
+        let mut pending_transform = None;
+        let mut pending_gain = None;
         egui::Panel::left("media_pool")
             .default_size(260.0)
             .show(ui, |ui| {
@@ -323,16 +404,86 @@ impl eframe::App for VibeVideoApp {
                 if let Some((track_index, clip_id)) = self.timeline_state.selected {
                     ui.separator();
                     ui.heading("Clip selezionata");
-                    if let Some(timeline_id) = self.timeline_id {
-                        let tl = &self.project.timelines[timeline_id];
-                        if let Some(clip) = tl.tracks[track_index]
+
+                    let clip_info = self.timeline_id.and_then(|timeline_id| {
+                        self.project.timelines[timeline_id]
+                            .tracks
+                            .get(track_index)?
                             .clips
                             .iter()
                             .find(|c| c.id == clip_id)
+                            .map(|c| {
+                                (
+                                    c.timeline_start,
+                                    c.timeline_len(),
+                                    c.effects.transform.default,
+                                    c.effects.gain_db.default,
+                                )
+                            })
+                    });
+
+                    if let Some((start, len, mut transform, mut gain)) = clip_info {
+                        ui.label(format!("Track: {track_index}"));
+                        ui.label(format!("Start: {start} frame"));
+                        ui.label(format!("Durata: {len} frame"));
+
+                        ui.separator();
+                        ui.label("Crop (normalizzato sul source)");
+                        let mut transform_changed = false;
+                        transform_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut transform.crop[0], 0.0..=0.99)
+                                    .text("sinistra"),
+                            )
+                            .changed();
+                        transform_changed |= ui
+                            .add(egui::Slider::new(&mut transform.crop[1], 0.0..=0.99).text("alto"))
+                            .changed();
+                        transform_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut transform.crop[2], 0.01..=1.0)
+                                    .text("destra"),
+                            )
+                            .changed();
+                        transform_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut transform.crop[3], 0.01..=1.0).text("basso"),
+                            )
+                            .changed();
+                        // Margine minimo per non invertire il rettangolo di crop.
+                        transform.crop[0] = transform.crop[0].min(transform.crop[2] - 0.01);
+                        transform.crop[1] = transform.crop[1].min(transform.crop[3] - 0.01);
+
+                        transform_changed |= ui
+                            .add(egui::Slider::new(&mut transform.zoom, 0.1..=5.0).text("zoom"))
+                            .changed();
+                        transform_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut transform.position[0], -1.0..=1.0)
+                                    .text("posizione X"),
+                            )
+                            .changed();
+                        transform_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut transform.position[1], -1.0..=1.0)
+                                    .text("posizione Y"),
+                            )
+                            .changed();
+                        if ui.button("Reset transform").clicked() {
+                            transform = vv_core::Transform::default();
+                            transform_changed = true;
+                        }
+                        if transform_changed {
+                            pending_transform = Some((track_index, clip_id, transform));
+                        }
+
+                        ui.separator();
+                        ui.label("Gain audio (dB)");
+                        if ui
+                            .add(egui::Slider::new(&mut gain, -60.0..=12.0).text("dB"))
+                            .changed()
                         {
-                            ui.label(format!("Track: {track_index}"));
-                            ui.label(format!("Start: {} frame", clip.timeline_start));
-                            ui.label(format!("Durata: {} frame", clip.timeline_len()));
+                            pending_gain = Some((track_index, clip_id, gain));
                         }
                     }
                 }
@@ -343,6 +494,33 @@ impl eframe::App for VibeVideoApp {
                 PoolAction::Preview(id) => self.preview_media(id),
                 PoolAction::AddToTimeline(id) => self.add_media_to_timeline(id),
             }
+        }
+        if let (Some(timeline_id), Some((track_index, clip_id, transform))) =
+            (self.timeline_id, pending_transform)
+        {
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::SetClipTransform::new(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                    transform,
+                )),
+            );
+        }
+        if let (Some(timeline_id), Some((track_index, clip_id, gain))) =
+            (self.timeline_id, pending_gain)
+        {
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::SetClipGain::new(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                    gain,
+                )),
+            );
+            self.apply_active_clip_gain();
         }
 
         egui::Panel::bottom("timeline")
@@ -373,9 +551,21 @@ impl eframe::App for VibeVideoApp {
         egui::CentralPanel::default().show(ui, |ui| {
             let current = self.preview_player.as_ref().and_then(|p| p.current_frame());
             if let Some(frame) = current {
+                let transform = self
+                    .active_clip_effects()
+                    .map(|e| e.transform.default)
+                    .unwrap_or_default();
+                let composited = self.compositor.render_frame(
+                    &frame.data,
+                    frame.width,
+                    frame.height,
+                    &transform,
+                    frame.width,
+                    frame.height,
+                );
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],
-                    &frame.data,
+                    &composited,
                 );
                 match &mut self.frame_texture {
                     Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
@@ -521,5 +711,88 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[0].id, video_a);
         assert_eq!(tl.tracks[1].clips.len(), 2);
         assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
+    }
+
+    /// Esercita il collegamento completo introdotto in milestone 5:
+    /// selezionare una clip in timeline apre il player sul suo media
+    /// (`preview_clip`) e il gain impostato via comando arriva davvero
+    /// all'`AudioPlayer` sottostante, senza panic.
+    #[test]
+    fn selecting_a_media_clip_opens_preview_and_applies_gain() {
+        let dir = std::env::temp_dir().join("vv-app-main-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
+        let media_id = app
+            .project
+            .media_pool
+            .iter()
+            .next()
+            .map(|(id, _)| id)
+            .expect("media importato atteso nel pool");
+
+        app.add_media_to_timeline(media_id);
+        let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+
+        app.timeline_state.selected = Some((0, clip_id));
+        app.preview_clip(0, clip_id);
+
+        assert_eq!(app.active_clip, Some((0, clip_id)));
+        assert!(app.preview_player.is_some(), "doveva aprirsi un player");
+        assert_eq!(
+            app.active_clip_effects().map(|e| e.gain_db.default),
+            Some(0.0)
+        );
+
+        self_test_set_gain(&mut app, timeline_id, 0, clip_id, -12.0);
+        assert_eq!(
+            app.active_clip_effects().map(|e| e.gain_db.default),
+            Some(-12.0)
+        );
+        // Non deve panicare anche se il player è ancora in fase di apertura.
+        app.apply_active_clip_gain();
+    }
+
+    fn self_test_set_gain(
+        app: &mut VibeVideoApp,
+        timeline_id: TimelineId,
+        track_index: usize,
+        clip_id: vv_core::ClipId,
+        db: f32,
+    ) {
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::SetClipGain::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                db,
+            )),
+        );
     }
 }

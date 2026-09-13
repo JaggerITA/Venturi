@@ -88,6 +88,14 @@ impl Player {
         self.playing
     }
 
+    /// Gain statico della clip in dB (milestone 5: `EffectStack::gain_db`).
+    /// No-op se la clip non ha audio.
+    pub fn set_gain_db(&self, db: f32) {
+        if let Some(audio) = &self.audio {
+            audio.set_gain_db(db);
+        }
+    }
+
     pub fn seek_secs(&mut self, secs: f64) {
         let secs = secs.clamp(0.0, self.duration_secs.max(0.0));
         if let Some(audio) = &self.audio {

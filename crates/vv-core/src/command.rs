@@ -1,7 +1,7 @@
 //! Command pattern per undo/redo. Ogni comando cattura da sé lo stato
 //! necessario a invertirsi nel momento in cui viene applicato.
 
-use crate::model::{Clip, ClipId, FrameIdx, Project, TimelineId};
+use crate::model::{Clip, ClipId, FrameIdx, Project, TimelineId, Transform};
 
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
@@ -320,6 +320,100 @@ impl Command for SplitClip {
         track.clips.retain(|c| c.id != new_clip_id);
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
             clip.source_out = original_source_out;
+        }
+    }
+}
+
+/// Imposta il transform (crop/zoom/position) *statico* di una clip, cioè
+/// `effects.transform.default` (milestone 5, prima parte: valori statici,
+/// i keyframe arrivano dopo — vedi ARCHITECTURE.md § Milestone 5).
+#[derive(Debug)]
+pub struct SetClipTransform {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub new_value: Transform,
+    old_value: Option<Transform>,
+}
+
+impl SetClipTransform {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        new_value: Transform,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            new_value,
+            old_value: None,
+        }
+    }
+}
+
+impl Command for SetClipTransform {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.old_value = Some(clip.effects.transform.default);
+        clip.effects.transform.default = self.new_value;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old_value) = self.old_value else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.effects.transform.default = old_value;
+        }
+    }
+}
+
+/// Imposta il gain audio *statico* di una clip (dB), stesso schema di
+/// `SetClipTransform`.
+#[derive(Debug)]
+pub struct SetClipGain {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub new_value: f32,
+    old_value: Option<f32>,
+}
+
+impl SetClipGain {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, new_value: f32) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            new_value,
+            old_value: None,
+        }
+    }
+}
+
+impl Command for SetClipGain {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.old_value = Some(clip.effects.gain_db.default);
+        clip.effects.gain_db.default = self.new_value;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old_value) = self.old_value else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.effects.gain_db.default = old_value;
         }
     }
 }

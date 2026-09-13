@@ -8,7 +8,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 pub struct AudioPlayer {
     _stream: cpal::Stream,
@@ -16,6 +16,9 @@ pub struct AudioPlayer {
     /// Posizione in *frame audio* (un campione per canale), non in byte né
     /// in campioni totali.
     position_frames: Arc<AtomicUsize>,
+    /// Guadagno lineare (non dB) codificato come bit pattern di un f32, per
+    /// poterlo leggere/scrivere via atomic dal callback realtime senza lock.
+    gain_linear_bits: Arc<AtomicU32>,
     sample_rate: u32,
     total_frames: usize,
 }
@@ -35,6 +38,7 @@ impl AudioPlayer {
 
         let playing = Arc::new(AtomicBool::new(false));
         let position_frames = Arc::new(AtomicUsize::new(0));
+        let gain_linear_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let total_frames = samples.len() / channels.max(1) as usize;
         let channels_usize = channels as usize;
 
@@ -42,6 +46,7 @@ impl AudioPlayer {
         let cb_samples = samples.clone();
         let cb_playing = playing.clone();
         let cb_position = position_frames.clone();
+        let cb_gain = gain_linear_bits.clone();
 
         let stream = device
             .build_output_stream(
@@ -51,6 +56,7 @@ impl AudioPlayer {
                         data.fill(0.0);
                         return;
                     }
+                    let gain = f32::from_bits(cb_gain.load(Ordering::Relaxed));
                     let mut pos = cb_position.load(Ordering::Relaxed);
                     for frame in data.chunks_mut(channels_usize) {
                         if pos >= total_frames {
@@ -58,7 +64,12 @@ impl AudioPlayer {
                             continue;
                         }
                         let start = pos * channels_usize;
-                        frame.copy_from_slice(&cb_samples[start..start + channels_usize]);
+                        for (dst, src) in frame
+                            .iter_mut()
+                            .zip(&cb_samples[start..start + channels_usize])
+                        {
+                            *dst = src * gain;
+                        }
                         pos += 1;
                     }
                     cb_position.store(pos, Ordering::Relaxed);
@@ -74,9 +85,18 @@ impl AudioPlayer {
             _stream: stream,
             playing,
             position_frames,
+            gain_linear_bits,
             sample_rate,
             total_frames,
         })
+    }
+
+    /// Imposta il guadagno in decibel (0.0 = invariato, -inf teorico -> 0
+    /// lineare, valori positivi amplificano). Applicato in tempo reale nel
+    /// callback audio, nessuna riconversione del buffer.
+    pub fn set_gain_db(&self, db: f32) {
+        self.gain_linear_bits
+            .store(db_to_linear(db).to_bits(), Ordering::Relaxed);
     }
 
     pub fn play(&self) {
@@ -108,5 +128,24 @@ impl AudioPlayer {
     /// `true` quando il playback ha raggiunto la fine del buffer.
     pub fn finished(&self) -> bool {
         self.position_frames.load(Ordering::Relaxed) >= self.total_frames
+    }
+}
+
+fn db_to_linear(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_to_linear_matches_known_reference_points() {
+        assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
+        // -6dB ~= dimezza l'ampiezza; +6dB ~= raddoppia.
+        assert!((db_to_linear(-6.0) - 0.5012).abs() < 1e-3);
+        assert!((db_to_linear(6.0) - 1.9953).abs() < 1e-3);
+        // -20dB = fattore 0.1 esatto.
+        assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
     }
 }

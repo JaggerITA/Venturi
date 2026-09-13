@@ -2,7 +2,8 @@ pub mod command;
 pub mod model;
 
 pub use command::{
-    Command, History, InsertClip, LiftDelete, MoveClip, RippleDeleteAllTracks, SplitClip,
+    Command, History, InsertClip, LiftDelete, MoveClip, RippleDeleteAllTracks, SetClipGain,
+    SetClipTransform, SplitClip,
 };
 pub use model::*;
 
@@ -191,5 +192,54 @@ mod tests {
         );
 
         assert_eq!(project.timelines[timeline].tracks[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn set_clip_transform_and_gain_undo_restore_defaults() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 10);
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        let new_transform = Transform {
+            crop: [0.1, 0.1, 0.9, 0.9],
+            zoom: 2.0,
+            position: [0.1, -0.1],
+        };
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipTransform::new(
+                timeline,
+                0,
+                a_id,
+                new_transform,
+            )),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipGain::new(timeline, 0, a_id, -6.0)),
+        );
+
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.transform.default.zoom, 2.0);
+        assert_eq!(clip.effects.gain_db.default, -6.0);
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.gain_db.default, 0.0);
+        assert_eq!(clip.effects.transform.default.zoom, 2.0);
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.transform.default.zoom, 1.0);
     }
 }
