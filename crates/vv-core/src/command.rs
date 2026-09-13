@@ -10,6 +10,35 @@ pub trait Command: std::fmt::Debug {
     fn undo(&self, project: &mut Project);
 }
 
+/// Raggruppa più comandi in un solo passo di history: un solo undo li
+/// riporta tutti indietro insieme. Usato per operazioni che toccano più
+/// clip in una volta sola dal punto di vista dell'utente (es. "taglia al
+/// playhead" su tutte le track).
+#[derive(Debug)]
+pub struct CompositeCommand {
+    commands: Vec<Box<dyn Command>>,
+}
+
+impl CompositeCommand {
+    pub fn new(commands: Vec<Box<dyn Command>>) -> Self {
+        Self { commands }
+    }
+}
+
+impl Command for CompositeCommand {
+    fn apply(&mut self, project: &mut Project) {
+        for cmd in &mut self.commands {
+            cmd.apply(project);
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        for cmd in self.commands.iter().rev() {
+            cmd.undo(project);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct History {
     undo_stack: Vec<Box<dyn Command>>,

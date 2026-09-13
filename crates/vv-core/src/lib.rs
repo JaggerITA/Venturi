@@ -2,9 +2,9 @@ pub mod command;
 pub mod model;
 
 pub use command::{
-    Command, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClip,
-    MoveClips, RemoveKeyframe, RippleDeleteAllTracks, SetClipColor, SetClipGain, SetClipTransform,
-    SplitClip, UnlinkClip, UpsertKeyframe,
+    Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete,
+    LinkClips, MoveClip, MoveClips, RemoveKeyframe, RippleDeleteAllTracks, SetClipColor,
+    SetClipGain, SetClipTransform, SplitClip, UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
 
@@ -692,5 +692,51 @@ mod tests {
         history.undo(&mut project);
         let tl = &project.timelines[timeline];
         assert_eq!(tl.tracks[0].clips[0].linked, Some(ClipId(999)));
+    }
+
+    #[test]
+    fn composite_command_applies_and_undoes_all_as_one_step() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let video = make_clip(&mut project, 0, 20);
+        let video_id = video.id;
+        let audio = make_clip(&mut project, 0, 20);
+        let audio_id = audio.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: video,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 1,
+                clip: audio,
+            }),
+        );
+
+        // "Taglia tutto al frame 8": due SplitClip in un solo passo di history.
+        history.do_command(
+            &mut project,
+            Box::new(command::CompositeCommand::new(vec![
+                Box::new(command::SplitClip::new(timeline, 0, video_id, 8)),
+                Box::new(command::SplitClip::new(timeline, 1, audio_id, 8)),
+            ])),
+        );
+
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips.len(), 2);
+
+        // Un solo undo riporta indietro entrambi i tagli.
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
     }
 }

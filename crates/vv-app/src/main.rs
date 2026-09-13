@@ -23,6 +23,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
+/// Unica track video supportata per ora dalla riproduzione timeline-aware
+/// (l'app crea sempre "video in track 0, audio in track 1", vedi
+/// `add_media_to_timeline`): il compositing multi-track vero e proprio
+/// resta per una milestone successiva.
+const VIDEO_TRACK: usize = 0;
+
 enum PoolAction {
     Preview(MediaId),
     AddToTimeline(MediaId),
@@ -81,11 +87,20 @@ struct VibeVideoApp {
     active_clip: Option<(usize, ClipId)>,
     compositor: vv_render::Compositor,
 
-    /// Ultimo valore di `timeline_state.playhead` sincronizzato col player
-    /// attivo: usato per distinguere "l'utente ha trascinato il playhead"
-    /// (serve un seek) da "il player sta scrivendo il playhead lui stesso
-    /// durante la riproduzione" (vedi `sync_playhead_and_player`).
+    /// Ultimo `timeline_state.playhead` già gestito da
+    /// `ensure_active_clip_matches_playhead`: usato per distinguere "il
+    /// player sta scrivendo il playhead lui stesso durante il playback"
+    /// (nessun seek da fare, lo fa già avanzare la decodifica) da "l'utente
+    /// ha trascinato il playhead da fermo" (serve un seek esplicito).
     last_synced_playhead: FrameIdx,
+
+    /// Media aperto tramite il pulsante "Anteprima" del media pool (non
+    /// ancora/non necessariamente sulla timeline): mentre è `Some`, il
+    /// viewer mostra quel media al posto di quello guidato dal playhead, e
+    /// `active_clip` resta `None` (nessun transform/gain di una clip si
+    /// applica a un'anteprima "grezza"). Si esce da questa modalità
+    /// interagendo con la timeline (selezione o playhead).
+    browsing_media: Option<MediaId>,
 }
 
 impl Default for VibeVideoApp {
@@ -104,6 +119,7 @@ impl Default for VibeVideoApp {
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
+            browsing_media: None,
         }
     }
 }
@@ -153,37 +169,52 @@ impl VibeVideoApp {
         self.preview_meta = Some(meta);
     }
 
-    /// Mostra l'anteprima della clip selezionata in timeline: apre il
-    /// player sul suo media e applica subito gain/transform correnti.
-    fn preview_clip(&mut self, track_index: usize, clip_id: ClipId) {
+    /// La clip su `track_index` che copre `frame` (nello spazio della
+    /// timeline), se c'è.
+    fn clip_at(&self, track_index: usize, frame: FrameIdx) -> Option<ClipId> {
+        let timeline_id = self.timeline_id?;
+        self.project.timelines[timeline_id]
+            .tracks
+            .get(track_index)?
+            .clips
+            .iter()
+            .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+            .map(|c| c.id)
+    }
+
+    /// Carica `clip_id` (sulla track video) nel player, posizionandosi al
+    /// frame locale corrispondente al playhead corrente — sia per lo
+    /// scrub in una clip diversa sia per il primo aggancio all'avvio della
+    /// riproduzione. Le clip SolidColor non hanno un player: il colore si
+    /// legge direttamente nel pannello centrale dal playhead.
+    fn load_video_clip(&mut self, clip_id: ClipId) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let Some(clip) = self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)
-            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+        let Some(clip) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .cloned()
         else {
             return;
         };
 
-        self.active_clip = Some((track_index, clip_id));
+        self.active_clip = Some((VIDEO_TRACK, clip_id));
 
         match clip.source {
             vv_core::ClipSource::Media(media_id) => {
                 self.preview_media(media_id);
-                self.apply_active_clip_gain();
-                // Il player appena aperto parte sempre da 0: forza il
-                // prossimo sync_playhead_and_player() a fare un seek verso
-                // la posizione corrente del playhead invece di lasciarlo a
-                // 0 (che sarebbe disallineato se il playhead era altrove).
-                self.last_synced_playhead = FrameIdx::MIN;
+                if let Some(player) = &self.preview_player {
+                    player.set_gain_db(clip.effects.gain_db.default);
+                }
+                let local = (self.timeline_state.playhead - clip.timeline_start)
+                    .clamp(0, clip.timeline_len().saturating_sub(1));
+                if let Some(player) = &mut self.preview_player {
+                    player.seek_to_frame(clip.source_in + local);
+                }
             }
             vv_core::ClipSource::SolidColor => {
-                // Nessun media da aprire: il viewer genera il frame colore
-                // al volo (milestone 6), non serve un Player. Ripulisco lo
-                // stato del player precedente per non mostrare un frame
-                // stantio dell'ultima clip media selezionata.
                 self.preview_player = None;
                 self.frame_texture = None;
                 self.preview_error = None;
@@ -191,52 +222,144 @@ impl VibeVideoApp {
         }
     }
 
-    /// Sincronizza bidirezionalmente il playhead della timeline e il
-    /// player della clip Media attiva (le clip SolidColor non hanno un
-    /// player: il loro colore legge già `timeline_state.playhead`
-    /// direttamente nel pannello centrale, vedi lì).
-    ///
-    /// - Durante la riproduzione il player avanza da solo: il playhead lo
-    ///   segue, cosicché la riga rossa nella timeline si muova con la
-    ///   riproduzione (sostituisce la vecchia barra di avanzamento).
-    /// - Da fermo, se l'utente ha trascinato il playhead (rilevato
-    ///   confrontandolo con `last_synced_playhead`), il player fa un seek
-    ///   verso la posizione corrispondente.
-    fn sync_playhead_and_player(&mut self) {
-        let Some((track_index, clip_id)) = self.active_clip else {
+    /// Se non stiamo mostrando un'anteprima "grezza" da media pool, tiene
+    /// il player agganciato a qualunque clip copra il playhead sulla track
+    /// video: ricarica solo quando cambia davvero (scrub, selezione di
+    /// un'altra zona, o dopo un avanzamento automatico).
+    fn ensure_active_clip_matches_playhead(&mut self) {
+        if self.browsing_media.is_some() || self.timeline_id.is_none() {
             return;
-        };
+        }
+        let desired = self.clip_at(VIDEO_TRACK, self.timeline_state.playhead);
+        let current = self
+            .active_clip
+            .filter(|(t, _)| *t == VIDEO_TRACK)
+            .map(|(_, id)| id);
+
+        if desired != current {
+            match desired {
+                // `load_video_clip` fa già un seek verso il playhead
+                // corrente: non serve altro qui.
+                Some(clip_id) => self.load_video_clip(clip_id),
+                None => {
+                    self.active_clip = None;
+                    self.preview_player = None;
+                    self.frame_texture = None;
+                }
+            }
+        } else if let Some(clip_id) = desired
+            && self.timeline_state.playhead != self.last_synced_playhead
+            && !self.preview_player.as_ref().is_some_and(Player::is_playing)
+        {
+            // Stessa clip, da fermo, ma il playhead si è mosso (scrub):
+            // segui con un seek nella clip già aperta.
+            self.seek_active_player_to_playhead(clip_id);
+        }
+        self.last_synced_playhead = self.timeline_state.playhead;
+    }
+
+    /// Fa un seek del player già aperto verso il punto della clip
+    /// corrispondente al playhead corrente (senza riaprirlo).
+    fn seek_active_player_to_playhead(&mut self, clip_id: ClipId) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let Some(clip) = self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)
-            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+        let Some(clip) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
         else {
             return;
         };
-        if !matches!(clip.source, vv_core::ClipSource::Media(_)) {
-            return;
+        let local = (self.timeline_state.playhead - clip.timeline_start)
+            .clamp(0, clip.timeline_len().saturating_sub(1));
+        let target = clip.source_in + local;
+        if let Some(player) = &mut self.preview_player {
+            player.seek_to_frame(target);
         }
-        let clip_start = clip.timeline_start;
-        let clip_len = clip.timeline_len();
-        let source_in = clip.source_in;
+    }
 
-        let Some(player) = &mut self.preview_player else {
+    /// Fa play/pause sulla clip sotto al playhead, senza bisogno che sia
+    /// selezionata (bug: "la riproduzione parte solo se seleziono la
+    /// clip"). Se il player non è ancora agganciato lo aggancia subito.
+    fn toggle_playback(&mut self) {
+        self.browsing_media = None;
+        self.ensure_active_clip_matches_playhead();
+        if let Some(player) = &mut self.preview_player {
+            player.toggle_play_pause();
+        }
+    }
+
+    /// Guida la riproduzione a ogni frame UI: se il player sta suonando,
+    /// il playhead lo segue; se ha raggiunto la fine del *trim* della clip
+    /// attiva (non della fine del file, che può essere più lunga), avanza
+    /// automaticamente alla prossima clip sulla track video invece di
+    /// continuare a riprodurre oltre il taglio (bug: "il playhead si
+    /// ferma al primo taglio e il riquadro continua a riprodurre la clip
+    /// per intero").
+    ///
+    /// Limite noto: se la prossima clip è un generatore SolidColor la
+    /// riproduzione si ferma lì, perché un generatore non ha un player che
+    /// faccia da orologio — avanzare il tempo "a vuoto" durante un
+    /// generatore è un'estensione futura.
+    fn drive_playback(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
             return;
         };
-
-        if player.is_playing() {
-            let local =
-                (player.current_source_frame() - source_in).clamp(0, clip_len.saturating_sub(1));
-            self.timeline_state.playhead = clip_start + local;
-        } else if self.timeline_state.playhead != self.last_synced_playhead {
-            let local =
-                (self.timeline_state.playhead - clip_start).clamp(0, clip_len.saturating_sub(1));
-            player.seek_to_frame(source_in + local);
+        let Some((track_index, clip_id)) = self.active_clip else {
+            return;
+        };
+        if track_index != VIDEO_TRACK {
+            return;
         }
-        self.last_synced_playhead = self.timeline_state.playhead;
+        let Some(clip) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(player) = &self.preview_player else {
+            return;
+        };
+        if !player.is_playing() {
+            return;
+        }
+
+        if player.current_source_frame() >= clip.source_out {
+            self.advance_playback_past(timeline_id, clip.timeline_end());
+        } else {
+            let local = player.current_source_frame() - clip.source_in;
+            self.timeline_state.playhead = clip.timeline_start + local;
+        }
+    }
+
+    /// Trova la prima clip sulla track video con inizio >= `from_frame` e
+    /// ci salta, continuando la riproduzione da lì; se non c'è nessuna
+    /// clip successiva, mette in pausa (fine del contenuto).
+    fn advance_playback_past(&mut self, timeline_id: TimelineId, from_frame: FrameIdx) {
+        let next = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+            .clips
+            .iter()
+            .filter(|c| c.timeline_start >= from_frame)
+            .min_by_key(|c| c.timeline_start)
+            .map(|c| (c.id, c.timeline_start));
+
+        match next {
+            Some((next_id, next_start)) => {
+                self.timeline_state.playhead = next_start;
+                self.load_video_clip(next_id);
+                if let Some(player) = &mut self.preview_player {
+                    player.play();
+                }
+            }
+            None => {
+                if let Some(player) = &mut self.preview_player {
+                    player.pause();
+                }
+            }
+        }
     }
 
     fn ensure_timeline(&mut self) -> TimelineId {
@@ -402,21 +525,45 @@ impl VibeVideoApp {
         }
     }
 
-    fn split_selected_at_playhead(&mut self) {
-        if let (Some(timeline_id), Some((track_index, clip_id))) =
-            (self.timeline_id, self.timeline_state.selected)
-        {
-            let playhead = self.timeline_state.playhead;
-            self.history.do_command(
-                &mut self.project,
+    /// Divide *tutte* le clip che coprono il playhead, su ogni track (tasto
+    /// T): comportamento standard da "lametta", non richiede una
+    /// selezione (bug: "il taglio funzionava solo sulla track
+    /// selezionata"). Un solo passo di history per l'intero taglio.
+    fn split_all_at_playhead(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let playhead = self.timeline_state.playhead;
+        let targets: Vec<(usize, ClipId)> = self.project.timelines[timeline_id]
+            .tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(track_index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .filter(move |c| playhead > c.timeline_start && playhead < c.timeline_end())
+                    .map(move |c| (track_index, c.id))
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let commands = targets
+            .into_iter()
+            .map(|(track_index, clip_id)| {
                 Box::new(vv_core::SplitClip::new(
                     timeline_id,
                     track_index,
                     clip_id,
                     playhead,
-                )),
-            );
-        }
+                )) as Box<dyn vv_core::Command>
+            })
+            .collect();
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
     }
 }
 
@@ -538,12 +685,6 @@ impl eframe::App for VibeVideoApp {
             player.tick();
         }
 
-        if self.timeline_state.selected != self.active_clip
-            && let Some((track_index, clip_id)) = self.timeline_state.selected
-        {
-            self.preview_clip(track_index, clip_id);
-        }
-
         // Gain keyframeato: va aggiornato a ogni frame UI in base alla
         // posizione corrente del player (control-rate ~60Hz, non
         // sample-accurate: sufficiente per l'automazione in anteprima,
@@ -565,7 +706,7 @@ impl eframe::App for VibeVideoApp {
                 self.delete_selected();
             }
             if i.key_pressed(egui::Key::T) && !i.modifiers.command {
-                self.split_selected_at_playhead();
+                self.split_all_at_playhead();
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
@@ -574,10 +715,8 @@ impl eframe::App for VibeVideoApp {
                     self.history.undo(&mut self.project);
                 }
             }
-            if i.key_pressed(egui::Key::Space)
-                && let Some(player) = &mut self.preview_player
-            {
-                player.toggle_play_pause();
+            if i.key_pressed(egui::Key::Space) {
+                self.toggle_playback();
             }
         });
 
@@ -607,8 +746,12 @@ impl eframe::App for VibeVideoApp {
                 {
                     self.ripple_delete_selected();
                 }
-                if ui.button("Dividi (T)").clicked() {
-                    self.split_selected_at_playhead();
+                if ui
+                    .button("Dividi (T)")
+                    .on_hover_text("Taglia tutte le clip sotto al playhead, su ogni track")
+                    .clicked()
+                {
+                    self.split_all_at_playhead();
                 }
                 ui.separator();
                 if ui.button("Undo (Ctrl+Z)").clicked() {
@@ -618,12 +761,13 @@ impl eframe::App for VibeVideoApp {
                     self.history.redo(&mut self.project);
                 }
 
-                if let Some(player) = &mut self.preview_player {
-                    ui.separator();
-                    let label = if player.is_playing() { "⏸" } else { "▶" };
-                    if ui.button(format!("{label} (Spazio)")).clicked() {
-                        player.toggle_play_pause();
-                    }
+                ui.separator();
+                let playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
+                let label = if playing { "⏸" } else { "▶" };
+                if ui.button(format!("{label} (Spazio)")).clicked() {
+                    self.toggle_playback();
+                }
+                if let Some(player) = &self.preview_player {
                     let duration = player.duration_secs();
                     let pos = player.position_secs();
                     ui.label(format!("{pos:.2}s / {duration:.2}s"));
@@ -632,32 +776,28 @@ impl eframe::App for VibeVideoApp {
         });
 
         // Frame a cui vengono lette/scritte le proprietà nel pannello:
-        // per una clip Media è la posizione del player; per una clip
-        // SolidColor (che non ha un player) è la posizione sul playhead
-        // della timeline, tradotta in frame locale alla clip — lo stesso
-        // frame usato dal viewer per generare l'anteprima del colore.
-        let selected_clip_start_if_solid_color =
-            self.timeline_state
-                .selected
-                .and_then(|(track_index, clip_id)| {
-                    let timeline_id = self.timeline_id?;
-                    let clip = self.project.timelines[timeline_id]
-                        .tracks
-                        .get(track_index)?
-                        .clips
-                        .iter()
-                        .find(|c| c.id == clip_id)?;
-                    matches!(clip.source, vv_core::ClipSource::SolidColor)
-                        .then_some(clip.timeline_start)
-                });
-        let source_frame = match selected_clip_start_if_solid_color {
-            Some(clip_start) => (self.timeline_state.playhead - clip_start).max(0),
-            None => self
-                .preview_player
-                .as_ref()
-                .map(|p| p.current_source_frame())
-                .unwrap_or(0),
-        };
+        // sempre il playhead della timeline tradotto nello spazio frame
+        // sorgente della clip *selezionata* (source_in + offset locale,
+        // clampato dentro la clip) — indipendente da quale clip stia
+        // effettivamente riproducendo il player, così modificare le
+        // proprietà di una clip diversa da quella attiva resta coerente
+        // con quello che si vede scorrendo la timeline fin lì.
+        let source_frame = self
+            .timeline_state
+            .selected
+            .and_then(|(track_index, clip_id)| {
+                let timeline_id = self.timeline_id?;
+                let clip = self.project.timelines[timeline_id]
+                    .tracks
+                    .get(track_index)?
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)?;
+                let local = (self.timeline_state.playhead - clip.timeline_start)
+                    .clamp(0, clip.timeline_len().saturating_sub(1));
+                Some(clip.source_in + local)
+            })
+            .unwrap_or(0);
 
         let mut pool_action = None;
         let mut pending_effect = None;
@@ -765,14 +905,7 @@ impl eframe::App for VibeVideoApp {
                         ui.label(format!("Track: {track_index}"));
                         ui.label(format!("Start: {start} frame"));
                         ui.label(format!("Durata: {len} frame"));
-                        ui.label(format!(
-                            "Frame corrente ({}): {source_frame}",
-                            if is_solid_color {
-                                "locale alla clip"
-                            } else {
-                                "source"
-                            }
-                        ));
+                        ui.label(format!("Frame corrente (source): {source_frame}"));
 
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -956,7 +1089,15 @@ impl eframe::App for VibeVideoApp {
 
         if let Some(action) = pool_action {
             match action {
-                PoolAction::Preview(id) => self.preview_media(id),
+                PoolAction::Preview(id) => {
+                    self.preview_media(id);
+                    // Anteprima "grezza" del media pool: non è (ancora)
+                    // detto che sia sulla timeline, quindi non ha un
+                    // transform/gain di clip da applicare, e il playhead
+                    // non deve strapparcela via al frame successivo.
+                    self.active_clip = None;
+                    self.browsing_media = Some(id);
+                }
                 PoolAction::AddToTimeline(id) => self.add_media_to_timeline(id),
             }
         }
@@ -966,6 +1107,8 @@ impl eframe::App for VibeVideoApp {
             self.apply_active_clip_gain();
         }
 
+        let selected_before_timeline_ui = self.timeline_state.selected;
+        let playhead_before_timeline_ui = self.timeline_state.playhead;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
             .resizable(true)
@@ -990,8 +1133,19 @@ impl eframe::App for VibeVideoApp {
                     ui.label("Importa un media per creare la timeline.");
                 }
             });
+        // Interagire con la timeline (selezionare una clip o spostare il
+        // playhead) riprende il controllo del viewer dall'anteprima
+        // "grezza" del media pool, se attiva.
+        if self.timeline_state.selected != selected_before_timeline_ui
+            || self.timeline_state.playhead != playhead_before_timeline_ui
+        {
+            self.browsing_media = None;
+        }
 
-        self.sync_playhead_and_player();
+        if self.browsing_media.is_none() {
+            self.ensure_active_clip_matches_playhead();
+            self.drive_playback();
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             // Le clip SolidColor non hanno un media da decodificare: il
@@ -1093,7 +1247,7 @@ impl eframe::App for VibeVideoApp {
                     ui.label(if self.preview_player.is_some() {
                         "Decodifica in corso..."
                     } else {
-                        "Importa un media e premi Anteprima."
+                        "Importa un media, aggiungilo alla timeline e premi Spazio."
                     });
                 });
             }
@@ -1214,11 +1368,11 @@ mod tests {
     }
 
     /// Esercita il collegamento completo introdotto in milestone 5:
-    /// selezionare una clip in timeline apre il player sul suo media
-    /// (`preview_clip`) e il gain impostato via comando arriva davvero
+    /// caricare una clip video apre il player sul suo media
+    /// (`load_video_clip`) e il gain impostato via comando arriva davvero
     /// all'`AudioPlayer` sottostante, senza panic.
     #[test]
-    fn selecting_a_media_clip_opens_preview_and_applies_gain() {
+    fn loading_a_media_clip_opens_preview_and_applies_gain() {
         let dir = std::env::temp_dir().join("vv-app-main-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
@@ -1260,7 +1414,7 @@ mod tests {
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
         app.timeline_state.selected = Some((0, clip_id));
-        app.preview_clip(0, clip_id);
+        app.load_video_clip(clip_id);
 
         assert_eq!(app.active_clip, Some((0, clip_id)));
         assert!(app.preview_player.is_some(), "doveva aprirsi un player");
@@ -1389,13 +1543,13 @@ mod tests {
     }
 
     #[test]
-    fn selecting_solid_color_clip_clears_preview_player_and_sets_active_clip() {
+    fn loading_solid_color_clip_clears_preview_player_and_sets_active_clip() {
         let mut app = VibeVideoApp::default();
         app.add_solid_color_clip();
         let timeline_id = app.timeline_id.unwrap();
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
-        app.preview_clip(0, clip_id);
+        app.load_video_clip(clip_id);
 
         assert_eq!(app.active_clip, Some((0, clip_id)));
         assert!(app.preview_player.is_none());
@@ -1477,15 +1631,15 @@ mod tests {
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
         app.timeline_state.selected = Some((0, clip_id));
-        app.preview_clip(0, clip_id);
+        app.load_video_clip(clip_id);
         // Il player appena aperto non ha ancora un frame in cache: il primo
         // sync forza comunque il seek verso il playhead (0 qui, no-op).
-        app.sync_playhead_and_player();
+        app.ensure_active_clip_matches_playhead();
 
         // L'utente trascina il playhead a metà clip (frame 25 su 50, clip
         // a 25fps/2s): il player deve seguirlo con un seek.
         app.timeline_state.playhead = 25;
-        app.sync_playhead_and_player();
+        app.ensure_active_clip_matches_playhead();
 
         let player = app.preview_player.as_ref().expect("player atteso");
         assert_eq!(
@@ -1499,10 +1653,157 @@ mod tests {
         // last_synced_playhead sia stato aggiornato, riportando il
         // playhead a un valore diverso e controllando che segua di nuovo.
         app.timeline_state.playhead = 10;
-        app.sync_playhead_and_player();
+        app.ensure_active_clip_matches_playhead();
         assert_eq!(
             app.preview_player.as_ref().unwrap().current_source_frame(),
             10
         );
+    }
+
+    /// Riproduce il bug segnalato: durante il playback, raggiunto un
+    /// taglio (fine del trim della clip), il playhead si fermava lì e il
+    /// riquadro continuava a mostrare la clip come se non fosse tagliata.
+    /// Verifica invece che si avanzi automaticamente alla clip successiva
+    /// sulla track video, restando in riproduzione.
+    #[test]
+    fn playback_auto_advances_to_next_clip_at_a_cut() {
+        let dir = std::env::temp_dir().join("vv-app-auto-advance-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let timeline_id = app.timeline_id.unwrap();
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        let first_clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+
+        // Taglia la clip (50 frame) a metà: due clip, [0,25) e [25,50).
+        app.timeline_state.playhead = 25;
+        app.split_all_at_playhead();
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(
+            tl.tracks[0].clips.len(),
+            2,
+            "il taglio doveva creare 2 clip"
+        );
+        let second_clip_id = tl.tracks[0].clips[1].id;
+        assert_ne!(first_clip_id, second_clip_id);
+
+        // Riproduci dall'inizio della prima metà.
+        app.timeline_state.playhead = 0;
+        app.ensure_active_clip_matches_playhead();
+        assert_eq!(app.active_clip, Some((0, first_clip_id)));
+        app.toggle_playback();
+        assert!(app.preview_player.as_ref().unwrap().is_playing());
+
+        // Simula "il player ha raggiunto la fine del trim della prima
+        // metà" (frame 25, cioè source_out) senza aspettare la decodifica
+        // reale: è esattamente la condizione che drive_playback controlla.
+        app.preview_player.as_mut().unwrap().seek_to_frame(25);
+        app.drive_playback();
+
+        assert_eq!(
+            app.active_clip,
+            Some((0, second_clip_id)),
+            "doveva avanzare alla clip successiva al taglio"
+        );
+        assert_eq!(app.timeline_state.playhead, 25);
+        assert!(
+            app.preview_player.as_ref().unwrap().is_playing(),
+            "la riproduzione doveva continuare, non fermarsi"
+        );
+    }
+
+    /// Riproduce il bug segnalato: la riproduzione partiva solo se una
+    /// clip era selezionata esplicitamente in timeline.
+    #[test]
+    fn toggle_playback_works_without_any_selection() {
+        let dir = std::env::temp_dir().join("vv-app-play-without-selection-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+
+        assert_eq!(app.timeline_state.selected, None);
+        assert_eq!(app.active_clip, None);
+
+        app.toggle_playback();
+
+        assert!(
+            app.active_clip.is_some(),
+            "doveva agganciare la clip sotto al playhead"
+        );
+        assert!(
+            app.preview_player.as_ref().is_some_and(Player::is_playing),
+            "la riproduzione doveva partire senza alcuna selezione"
+        );
+    }
+
+    /// Riproduce il bug segnalato: tagliare con T richiedeva di
+    /// selezionare esplicitamente la track video, e ogni track andava
+    /// tagliata separatamente. `split_all_at_playhead` non deve dipendere
+    /// dalla selezione e deve tagliare tutte le track in un colpo solo.
+    #[test]
+    fn split_all_at_playhead_cuts_every_track_without_selection() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+
+        assert_eq!(app.timeline_state.selected, None);
+        app.timeline_state.playhead = 8;
+        app.split_all_at_playhead();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 2, "track video tagliata");
+        assert_eq!(
+            tl.tracks[1].clips.len(),
+            2,
+            "track audio tagliata anche senza selezione"
+        );
+        assert_eq!(tl.tracks[0].clips[0].id, video_id);
+        assert_eq!(tl.tracks[1].clips[0].id, audio_id);
+
+        // Un solo undo annulla entrambi i tagli (CompositeCommand).
+        app.history.undo(&mut app.project);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
     }
 }

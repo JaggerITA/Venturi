@@ -199,15 +199,26 @@ vibevideo/
    sensato per un generatore, che non ha un Player). **Text overlay non
    ancora fatto**.
 
-   **Fix post-milestone (bug reali segnalati dall'utente)**: play/pause
-   con Space; tasto "dividi" spostato da S a T; clip audio+video dello
-   stesso import collegate di default (`Clip::linked`, menu contestuale
-   per collegare/scollegare — drag di una clip collegata muove anche la
-   gemella, vincolato dai limiti di *entrambe*); scrub del playhead della
-   timeline ora fa davvero il seek del player della clip attiva
-   (`sync_playhead_and_player`, bidirezionale: durante il playback il
-   playhead segue il player, sostituendo la vecchia barra di avanzamento
-   ora rimossa).
+   **Fix post-milestone, round 1** (bug reali segnalati dall'utente):
+   play/pause con Space; tasto "dividi" spostato da S a T; clip
+   audio+video dello stesso import collegate di default (`Clip::linked`,
+   menu contestuale per collegare/scollegare — drag di una clip collegata
+   muove anche la gemella, vincolato dai limiti di *entrambe*); scrub del
+   playhead della timeline che fa il seek del player della clip attiva.
+
+   **Fix post-milestone, round 2** (playback timeline-aware, altri bug
+   reali): il player non era più legato alla selezione ma al *playhead
+   sulla track video* (`ensure_active_clip_matches_playhead` +
+   `load_video_clip`), quindi Play/Spazio funziona senza selezionare
+   nulla; `drive_playback` avanza automaticamente alla clip successiva
+   sulla track video quando la riproduzione raggiunge la fine del *trim*
+   di quella attiva (non della fine del file), invece di continuare oltre
+   il taglio; il tasto T (`split_all_at_playhead`) taglia tutte le clip
+   sotto al playhead su ogni track in un colpo solo (un `CompositeCommand`,
+   un solo undo), senza bisogno di selezione. Limite noto: l'avanzamento
+   automatico si ferma se la prossima clip è un generatore SolidColor
+   (nessun player fa da orologio per un riempimento piatto — vedi
+   `drive_playback`).
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di
