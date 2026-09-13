@@ -5,7 +5,8 @@ pub mod persistence;
 pub use command::{
     Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete,
     LinkClips, MoveClip, MoveClips, RemoveKeyframe, RippleDeleteAllTracks, RippleDeleteGap,
-    SetClipColor, SetClipGain, SetClipTransform, SplitClip, UnlinkClip, UpsertKeyframe,
+    SetClipColor, SetClipGain, SetClipTransform, SplitClip, TrimClip, TrimEdge, UnlinkClip,
+    UpsertKeyframe,
 };
 pub use model::*;
 pub use persistence::{PersistenceError, load_project, save_project};
@@ -133,6 +134,85 @@ mod tests {
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 0);
         assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
+    }
+
+    #[test]
+    fn trim_start_moves_timeline_start_and_source_in_together_keeping_the_end_fixed() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 10, 20); // [10, 30), source [0, 20)
+        let a_id = a.id;
+        let original_end = a.timeline_end();
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        // Trimma il bordo sinistro: source_in passa da 0 a 5.
+        history.do_command(
+            &mut project,
+            Box::new(command::TrimClip::new(
+                timeline,
+                0,
+                a_id,
+                TrimEdge::Start,
+                5,
+            )),
+        );
+
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.source_in, 5);
+        assert_eq!(clip.timeline_start, 15, "si sposta della stessa quantità");
+        assert_eq!(
+            clip.timeline_end(),
+            original_end,
+            "la fine sulla timeline resta ferma"
+        );
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.timeline_start, 10);
+    }
+
+    #[test]
+    fn trim_end_changes_source_out_leaving_the_start_fixed() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 10, 20); // [10, 30), source [0, 20)
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::End, 15)),
+        );
+
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.source_out, 15);
+        assert_eq!(
+            clip.timeline_start, 10,
+            "l'inizio sulla timeline resta fermo"
+        );
+        assert_eq!(clip.timeline_end(), 25);
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.source_out, 20);
+        assert_eq!(clip.timeline_end(), 30);
     }
 
     #[test]

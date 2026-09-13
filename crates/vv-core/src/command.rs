@@ -430,6 +430,86 @@ impl Command for MoveClips {
     }
 }
 
+/// Quale bordo di una clip viene trimmato: `Start` cambia `source_in`
+/// *e* `timeline_start` insieme (la fine sulla timeline resta ferma,
+/// solo l'inizio si muove), `End` cambia solo `source_out` (l'inizio
+/// resta fermo, solo la fine si muove).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimEdge {
+    Start,
+    End,
+}
+
+/// Trim di un bordo di una clip (drag di una maniglia sul bordo sinistro/
+/// destro nella timeline), distinto da un semplice spostamento
+/// (`MoveClip`): cambia la *durata* della clip, non solo la sua
+/// posizione. Come `MoveClip`, non fa collision-avoidance né clamp ai
+/// limiti del sorgente da sé: il chiamante calcola `new_value` prima di
+/// emettere il comando.
+#[derive(Debug)]
+pub struct TrimClip {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub edge: TrimEdge,
+    /// Nuovo `source_in` (bordo `Start`) o `source_out` (bordo `End`).
+    pub new_value: FrameIdx,
+    old: Option<(FrameIdx, FrameIdx, FrameIdx)>, // (source_in, source_out, timeline_start) precedenti
+}
+
+impl TrimClip {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        edge: TrimEdge,
+        new_value: FrameIdx,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            edge,
+            new_value,
+            old: None,
+        }
+    }
+}
+
+impl Command for TrimClip {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.old = Some((clip.source_in, clip.source_out, clip.timeline_start));
+        match self.edge {
+            TrimEdge::Start => {
+                let delta = self.new_value - clip.source_in;
+                clip.source_in = self.new_value;
+                clip.timeline_start += delta;
+            }
+            TrimEdge::End => {
+                clip.source_out = self.new_value;
+            }
+        }
+        resort(track);
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some((source_in, source_out, timeline_start)) = self.old else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.source_in = source_in;
+            clip.source_out = source_out;
+            clip.timeline_start = timeline_start;
+        }
+        resort(track);
+    }
+}
+
 /// Scollega una clip dalla sua gemella (`Clip::linked`), se ne ha una.
 /// Cerca la gemella su tutte le track della timeline (il chiamante deve
 /// conoscere solo la track della clip cliccata, non quella della gemella).

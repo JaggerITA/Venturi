@@ -14,7 +14,10 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use vv_core::{Clip, ClipId, FrameIdx, History, Project, TimelineId, Track, TrackKind};
+use vv_core::{
+    Clip, ClipId, ClipSource, EffectStack, FrameIdx, History, Project, TimelineId, Track,
+    TrackKind, TrimEdge,
+};
 
 const ROW_HEIGHT: f32 = 40.0;
 const RULER_HEIGHT: f32 = 20.0;
@@ -53,6 +56,31 @@ pub struct TimelineState {
     /// DaVinci Resolve. Uno spazio vuoto in coda (nessuna clip dopo) non è
     /// un "vuoto" selezionabile: non c'è nulla da ravvicinare shiftandolo.
     pub selected_gap: Option<(usize, FrameIdx, FrameIdx)>,
+    /// Clip copiate (Ctrl+C in `main.rs`), pronte per essere incollate
+    /// (Ctrl+V) alla posizione del playhead. Vuoto se non è ancora mai
+    /// stato copiato nulla in questa sessione.
+    pub clipboard: Vec<ClipboardEntry>,
+    trim: Option<TrimState>,
+}
+
+/// Una clip copiata: né l'id né il `timeline_start` assoluto sopravvivono
+/// al copia/incolla — l'id va riallocato al paste (i vecchi potrebbero non
+/// esistere più, o esistere ma riferirsi a un'altra clip), e la posizione
+/// è relativa all'inizio più a sinistra tra le clip copiate insieme (così
+/// incollare un gruppo ne preserva la disposizione relativa, ancorata al
+/// playhead al momento dell'incolla).
+#[derive(Clone)]
+pub struct ClipboardEntry {
+    pub track_index: usize,
+    pub relative_start: FrameIdx,
+    pub source: ClipSource,
+    pub source_in: FrameIdx,
+    pub source_out: FrameIdx,
+    pub effects: EffectStack,
+    /// Indice in `TimelineState::clipboard` della gemella collegata copiata
+    /// insieme (se c'è): permette di ricollegare le nuove clip incollate
+    /// tra loro, dato che i `ClipId` originali non si riportano al paste.
+    pub linked_index: Option<usize>,
 }
 
 struct MarqueeDrag {
@@ -77,6 +105,42 @@ struct DragState {
     linked: Option<(ClipId, usize, FrameIdx)>,
 }
 
+/// Trim di un bordo, tenuto separato da `DragState` (mossa vera e propria)
+/// invece di forzarlo nello stesso stato: le due interazioni sono comunque
+/// mutuamente esclusive (un drag comincia o come Move o come trim, mai
+/// entrambi), ma tenerle distinte evita di dover sovraccaricare i campi di
+/// `DragState` con significati diversi a seconda del `kind`.
+struct TrimState {
+    clip_id: ClipId,
+    track_index: usize,
+    edge: TrimEdge,
+    /// Valore originale (frame, spazio timeline) della coordinata
+    /// trimmata: `timeline_start` per `Start`, `timeline_end()` per `End`.
+    original_value: FrameIdx,
+    accum_px: f32,
+    /// Range valido per il *nuovo* valore di `original_value`, già
+    /// combinato con quello della gemella collegata se presente (vedi
+    /// `combined_trim_range`).
+    min_value: FrameIdx,
+    max_value: FrameIdx,
+    /// (clip_id, track_index) della gemella collegata, se c'è: stesso
+    /// bordo viene trimmato lì con lo stesso identico `new_value` — le
+    /// clip collegate condividono lo stesso spazio numerico
+    /// `source_in`/`source_out`/`timeline_start` per costruzione (vedi
+    /// `insert_media_clip` in `main.rs`), quindi non serve un offset come
+    /// per `DragState::linked`.
+    linked: Option<(ClipId, usize)>,
+}
+
+/// Distanza (in pixel schermo) dal bordo di una clip entro cui un drag
+/// parte come trim invece che come spostamento; ridotta per le clip molto
+/// strette, altrimenti l'intera clip sarebbe "solo bordi".
+const TRIM_HANDLE_PX: f32 = 8.0;
+
+/// Limiti di zoom orizzontale della timeline (`pixels_per_sec`).
+const MIN_PIXELS_PER_SEC: f32 = 5.0;
+const MAX_PIXELS_PER_SEC: f32 = 800.0;
+
 impl Default for TimelineState {
     fn default() -> Self {
         Self {
@@ -87,6 +151,8 @@ impl Default for TimelineState {
             drag: None,
             marquee: None,
             selected_gap: None,
+            clipboard: Vec::new(),
+            trim: None,
         }
     }
 }
@@ -118,7 +184,25 @@ impl TimelineState {
         self.selection_anchor = None;
         self.selected_gap = None;
     }
+
+    /// Zoom orizzontale della timeline (moltiplica `pixels_per_sec` per un
+    /// fattore fisso a ogni passo): usato dalla shortcut da tastiera in
+    /// `main.rs`, oltre a Ctrl+scroll/pinch gestito dentro `show_timeline`.
+    pub fn zoom_in(&mut self) {
+        self.set_pixels_per_sec(self.pixels_per_sec * ZOOM_STEP);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.set_pixels_per_sec(self.pixels_per_sec / ZOOM_STEP);
+    }
+
+    fn set_pixels_per_sec(&mut self, value: f32) {
+        self.pixels_per_sec = value.clamp(MIN_PIXELS_PER_SEC, MAX_PIXELS_PER_SEC);
+    }
 }
+
+/// Fattore di zoom per passo di `zoom_in`/`zoom_out`.
+const ZOOM_STEP: f32 = 1.25;
 
 struct ClipVisual {
     track_index: usize,
@@ -135,6 +219,9 @@ struct ClipVisual {
 enum PendingAction {
     /// (clip_id, track_index, new_start) per una o due clip (collegate).
     Move(Vec<(ClipId, usize, FrameIdx)>),
+    /// (clip_id, track_index, edge, new_source_in/new_source_out) per una
+    /// o due clip (collegate).
+    Trim(Vec<(ClipId, usize, TrimEdge, FrameIdx)>),
     Unlink(usize, ClipId),
     Link(usize, ClipId, usize, ClipId),
 }
@@ -154,6 +241,23 @@ pub fn show_timeline(
     snapping_enabled: bool,
 ) -> Option<(vv_core::MediaId, FrameIdx)> {
     let mut media_drop = None;
+
+    // Zoom orizzontale (Ctrl+scroll o pinch — stesso gesto usato per lo
+    // zoom "globale" di egui, qui invece cambia solo la scala della
+    // timeline): solo se il puntatore è sopra il pannello, altrimenti
+    // scrollare con Ctrl premuto altrove (es. media pool) zoomerebbe la
+    // timeline per sbaglio.
+    let panel_rect = ui.available_rect_before_wrap();
+    let pointer_over_panel = ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| panel_rect.contains(p));
+    if pointer_over_panel {
+        let zoom = ui.input(|i| i.zoom_delta());
+        if zoom != 1.0 {
+            state.set_pixels_per_sec(state.pixels_per_sec * zoom);
+        }
+    }
+
     let fps = project.timelines[timeline_id].fps.as_f64();
     let px_per_frame = state.pixels_per_sec / fps.max(1.0) as f32;
 
@@ -450,6 +554,17 @@ pub fn show_timeline(
                 .clamp(d.min_start, d.max_start)
             });
 
+            // Stessa idea di `dragged_primary_new_start` ma per il trim di
+            // un bordo: qui cambia anche la *lunghezza* visualizzata, non
+            // solo la posizione, quindi non basta un nuovo `timeline_start`
+            // da solo (vedi il calcolo di `display_start`/`display_len`
+            // più sotto). Nessuno snap ai vicini per il trim (v1): solo il
+            // clamp già calcolato in `combined_trim_range`.
+            let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
+                let raw = t.original_value as f32 + t.accum_px / px_per_frame;
+                (raw.round() as FrameIdx).clamp(t.min_value, t.max_value)
+            });
+
             // Le gemelle collegate di tutte le clip selezionate vanno
             // evidenziate insieme a loro (le clip audio+video sono
             // collegate di default): calcolato una volta sola, non per
@@ -458,23 +573,42 @@ pub fn show_timeline(
 
             // Clip.
             for visual in &visuals {
-                let display_start = match (&state.drag, dragged_primary_new_start) {
-                    (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
-                    (Some(d), Some(new_start)) => match d.linked {
-                        Some((partner_id, partner_track, offset))
-                            if partner_id == visual.clip.id
-                                && partner_track == visual.track_index =>
-                        {
-                            new_start + offset
+                let is_trimming_this = state.trim.as_ref().is_some_and(|t| {
+                    t.clip_id == visual.clip.id
+                        || t.linked == Some((visual.clip.id, visual.track_index))
+                });
+                let (display_start, display_len) = if is_trimming_this
+                    && let (Some(t), Some(new_value)) = (&state.trim, trimmed_primary_new_value)
+                {
+                    match t.edge {
+                        TrimEdge::Start => {
+                            (new_value, (visual.clip.timeline_end() - new_value).max(1))
                         }
+                        TrimEdge::End => (
+                            visual.clip.timeline_start,
+                            (new_value - visual.clip.timeline_start).max(1),
+                        ),
+                    }
+                } else {
+                    let start = match (&state.drag, dragged_primary_new_start) {
+                        (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
+                        (Some(d), Some(new_start)) => match d.linked {
+                            Some((partner_id, partner_track, offset))
+                                if partner_id == visual.clip.id
+                                    && partner_track == visual.track_index =>
+                            {
+                                new_start + offset
+                            }
+                            _ => visual.clip.timeline_start,
+                        },
                         _ => visual.clip.timeline_start,
-                    },
-                    _ => visual.clip.timeline_start,
+                    };
+                    (start, visual.clip.timeline_len())
                 };
 
                 let x = origin.x + display_start as f32 * px_per_frame;
                 let y = origin.y + RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
-                let w = (visual.clip.timeline_len() as f32 * px_per_frame).max(2.0);
+                let w = (display_len as f32 * px_per_frame).max(2.0);
                 let clip_rect = egui::Rect::from_min_size(
                     egui::pos2(x, y + 2.0),
                     egui::vec2(w, ROW_HEIGHT - 4.0),
@@ -512,31 +646,114 @@ pub fn show_timeline(
                     painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
                 }
 
-                if resp.drag_started() {
-                    let (min_start, max_start, linked) = combined_drag_range(
-                        &visuals,
-                        visual.track_index,
-                        visual.clip.id,
-                        visual.clip.linked,
-                    );
+                // Zona di trascinamento riservata al trim, ai due bordi
+                // della clip: ridotta per le clip molto strette, altrimenti
+                // l'intera clip sarebbe "solo bordi" e non si potrebbe più
+                // spostare (Move) col drag normale dal centro.
+                let handle_px = TRIM_HANDLE_PX.min(clip_rect.width() / 3.0);
+                let edge_at = |pos: egui::Pos2| -> Option<TrimEdge> {
+                    let local_x = pos.x - clip_rect.left();
+                    if local_x < handle_px {
+                        Some(TrimEdge::Start)
+                    } else if clip_rect.width() - local_x < handle_px {
+                        Some(TrimEdge::End)
+                    } else {
+                        None
+                    }
+                };
+                if resp.hovered()
+                    && state.drag.is_none()
+                    && state.trim.is_none()
+                    && let Some(pos) = resp.hover_pos()
+                    && edge_at(pos).is_some()
+                {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
 
-                    state.drag = Some(DragState {
-                        clip_id: visual.clip.id,
-                        track_index: visual.track_index,
-                        original_start: visual.clip.timeline_start,
-                        accum_px: 0.0,
-                        min_start,
-                        max_start: max_start.max(min_start),
-                        linked,
-                    });
+                if resp.drag_started() {
+                    match resp.interact_pointer_pos().and_then(edge_at) {
+                        Some(edge) => {
+                            let (min_value, max_value, linked) = combined_trim_range(
+                                &visuals,
+                                project,
+                                visual.track_index,
+                                visual.clip.id,
+                                edge,
+                            );
+                            let original_value = match edge {
+                                TrimEdge::Start => visual.clip.timeline_start,
+                                TrimEdge::End => visual.clip.timeline_end(),
+                            };
+                            state.trim = Some(TrimState {
+                                clip_id: visual.clip.id,
+                                track_index: visual.track_index,
+                                edge,
+                                original_value,
+                                accum_px: 0.0,
+                                min_value,
+                                max_value: max_value.max(min_value),
+                                linked,
+                            });
+                        }
+                        None => {
+                            let (min_start, max_start, linked) = combined_drag_range(
+                                &visuals,
+                                visual.track_index,
+                                visual.clip.id,
+                                visual.clip.linked,
+                            );
+
+                            state.drag = Some(DragState {
+                                clip_id: visual.clip.id,
+                                track_index: visual.track_index,
+                                original_start: visual.clip.timeline_start,
+                                accum_px: 0.0,
+                                min_start,
+                                max_start: max_start.max(min_start),
+                                linked,
+                            });
+                        }
+                    }
                 } else if resp.dragged() {
-                    if let Some(d) = &mut state.drag
+                    if let Some(t) = &mut state.trim
+                        && t.clip_id == visual.clip.id
+                    {
+                        t.accum_px += resp.drag_delta().x;
+                    } else if let Some(d) = &mut state.drag
                         && d.clip_id == visual.clip.id
                     {
                         d.accum_px += resp.drag_delta().x;
                     }
                 } else if resp.drag_stopped() {
-                    if let Some(d) = state.drag.take()
+                    if let Some(t) = state.trim.take()
+                        && t.clip_id == visual.clip.id
+                    {
+                        // Stesso valore (già clampato) mostrato
+                        // nell'anteprima durante il trim: quel che si
+                        // vedeva è quel che si ottiene.
+                        let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
+                        let delta = new_value - t.original_value;
+                        let new_source_value = match t.edge {
+                            TrimEdge::Start => visual.clip.source_in + delta,
+                            TrimEdge::End => visual.clip.source_out + delta,
+                        };
+                        let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
+                        if let Some((partner_id, partner_track)) = t.linked
+                            && let Some(partner) = visuals.iter().find(|v| v.clip.id == partner_id)
+                        {
+                            let partner_new_source_value = match t.edge {
+                                TrimEdge::Start => partner.clip.source_in + delta,
+                                TrimEdge::End => partner.clip.source_out + delta,
+                            };
+                            trims.push((
+                                partner_id,
+                                partner_track,
+                                t.edge,
+                                partner_new_source_value,
+                            ));
+                        }
+                        pending = Some(PendingAction::Trim(trims));
+                    } else if let Some(d) = state.drag.take()
                         && d.clip_id == visual.clip.id
                     {
                         // Stessa posizione (già clampata e agganciata alla
@@ -622,6 +839,21 @@ pub fn show_timeline(
                     project,
                     Box::new(vv_core::MoveClips::new(timeline_id, moves)),
                 );
+            }
+            PendingAction::Trim(trims) => {
+                let commands: Vec<Box<dyn vv_core::Command>> = trims
+                    .into_iter()
+                    .map(|(clip_id, track_index, edge, new_value)| {
+                        Box::new(vv_core::TrimClip::new(
+                            timeline_id,
+                            track_index,
+                            clip_id,
+                            edge,
+                            new_value,
+                        )) as Box<dyn vv_core::Command>
+                    })
+                    .collect();
+                history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
             }
             PendingAction::Unlink(track_index, clip_id) => {
                 history.do_command(
@@ -894,6 +1126,94 @@ fn combined_drag_range(
         max_start.min(p_max - offset),
         Some((partner_id, partner.track_index, offset)),
     )
+}
+
+/// Range valido (in frame timeline) per il nuovo valore della coordinata
+/// trimmata (`timeline_start` per `Start`, `timeline_end()` per `End`),
+/// combinato con quello della gemella collegata se presente — stesso
+/// principio di `combined_drag_range`, ma per il trim: qui il vincolo è
+/// dato sia dal vicino sulla stessa track sia dal bordo del *sorgente*
+/// (non si può trimmare oltre l'inizio/la fine reale del media). Ritorna
+/// anche (clip_id, track_index) della gemella, pronti per `TrimState`.
+fn combined_trim_range(
+    visuals: &[ClipVisual],
+    project: &Project,
+    track_index: usize,
+    clip_id: ClipId,
+    edge: TrimEdge,
+) -> (FrameIdx, FrameIdx, Option<(ClipId, usize)>) {
+    let Some(visual) = visuals
+        .iter()
+        .find(|v| v.track_index == track_index && v.clip.id == clip_id)
+    else {
+        return (0, FrameIdx::MAX, None);
+    };
+    let (min1, max1) = single_trim_range(visuals, project, track_index, &visual.clip, edge);
+
+    let Some(partner_id) = visual.clip.linked else {
+        return (min1, max1, None);
+    };
+    let Some(partner) = visuals.iter().find(|v| v.clip.id == partner_id) else {
+        return (min1, max1, None);
+    };
+    let (min2, max2) =
+        single_trim_range(visuals, project, partner.track_index, &partner.clip, edge);
+
+    // Le clip collegate condividono lo stesso spazio numerico
+    // source_in/source_out/timeline_start (vedi `insert_media_clip` in
+    // main.rs): lo stesso identico `new_value` si applica a entrambe,
+    // quindi il range valido è l'intersezione dei due.
+    (
+        min1.max(min2),
+        max1.min(max2),
+        Some((partner_id, partner.track_index)),
+    )
+}
+
+fn single_trim_range(
+    visuals: &[ClipVisual],
+    project: &Project,
+    track_index: usize,
+    clip: &Clip,
+    edge: TrimEdge,
+) -> (FrameIdx, FrameIdx) {
+    let (lower, upper) = neighbor_bounds(visuals, track_index, clip.id);
+    match edge {
+        TrimEdge::Start => {
+            // Non oltre il vicino precedente sulla track, non oltre la
+            // fine meno 1 frame (deve restare almeno un frame di
+            // contenuto), e non prima dell'inizio del sorgente
+            // (source_in non può scendere sotto 0).
+            let min_value = lower.max(clip.timeline_start - clip.source_in);
+            let max_value = clip.timeline_end() - 1;
+            (min_value, max_value.max(min_value))
+        }
+        TrimEdge::End => {
+            // Non oltre il vicino successivo, non oltre l'inizio più 1
+            // frame, e non oltre la durata reale del sorgente (illimitato
+            // per un generatore SolidColor, che non ne ha una — calcolato
+            // solo se c'è davvero un bound, per non sommare a
+            // `FrameIdx::MAX` e andare in overflow).
+            let media_bound = media_duration_frames(project, clip)
+                .map(|max_source_out| clip.timeline_start + (max_source_out - clip.source_in));
+            let max_value = match media_bound {
+                Some(bound) => upper.min(bound),
+                None => upper,
+            };
+            let min_value = clip.timeline_start + 1;
+            (min_value, max_value.max(min_value))
+        }
+    }
+}
+
+fn media_duration_frames(project: &Project, clip: &Clip) -> Option<FrameIdx> {
+    match &clip.source {
+        ClipSource::Media(media_id) => project
+            .media_pool
+            .get(*media_id)
+            .map(|item| item.meta.duration_frames),
+        ClipSource::SolidColor => None,
+    }
 }
 
 /// Soglia di aggancio della calamita, in pixel schermo (non in frame:
@@ -1221,6 +1541,137 @@ mod tests {
         // vincolo gemella tradotto: primaria.max_start <= 40 - offset(5) = 35
         assert_eq!(max, 35);
         assert_eq!(linked, Some((ClipId(2), 1, 5)));
+    }
+
+    fn media_clip_visual(
+        track_index: usize,
+        id: u64,
+        start: FrameIdx,
+        source_in: FrameIdx,
+        source_out: FrameIdx,
+        media_id: vv_core::MediaId,
+    ) -> ClipVisual {
+        ClipVisual {
+            track_index,
+            clip: Clip {
+                id: ClipId(id),
+                source: ClipSource::Media(media_id),
+                source_in,
+                source_out,
+                timeline_start: start,
+                effects: EffectStack::default(),
+                linked: None,
+            },
+            label: String::new(),
+            color: egui::Color32::WHITE,
+        }
+    }
+
+    fn project_with_media(duration_frames: FrameIdx) -> (Project, vv_core::MediaId) {
+        let mut project = Project::default();
+        let media_id = project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/x.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames,
+                fps: vv_core::Rational::new(25, 1),
+                width: 100,
+                height: 100,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        (project, media_id)
+    }
+
+    #[test]
+    fn single_trim_range_start_is_clamped_by_the_previous_neighbor() {
+        let project = Project::default();
+        // La clip in trim ha source_in=8 (ampio margine per risalire):
+        // il vero limite è il vicino, non il sorgente.
+        let visuals = vec![
+            visual(0, 1, 0, 5), // finisce a 5
+            media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
+        ];
+        let (min_value, _) =
+            single_trim_range(&visuals, &project, 0, &visuals[1].clip, TrimEdge::Start);
+        assert_eq!(min_value, 5);
+    }
+
+    #[test]
+    fn single_trim_range_start_is_clamped_by_source_in() {
+        let project = Project::default();
+        // Nessun vicino, ma source_in=3: non si può risalire oltre
+        // l'inizio del sorgente, quindi timeline_start non può scendere
+        // sotto 10-3=7.
+        let visuals = vec![media_clip_visual(
+            0,
+            1,
+            10,
+            3,
+            20,
+            vv_core::MediaId::default(),
+        )];
+        let (min_value, max_value) =
+            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::Start);
+        assert_eq!(min_value, 7);
+        assert_eq!(
+            max_value, 26,
+            "timeline_end() - 1 (timeline_end = 10 + (20-3) = 27)"
+        );
+    }
+
+    #[test]
+    fn single_trim_range_end_is_clamped_by_the_next_neighbor() {
+        let project = Project::default();
+        let visuals = vec![
+            visual(0, 1, 0, 10),  // in trim: [0,10)
+            visual(0, 2, 15, 10), // vicino successivo inizia a 15
+        ];
+        let (_, max_value) =
+            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+        assert_eq!(max_value, 15);
+    }
+
+    #[test]
+    fn single_trim_range_end_is_clamped_by_media_duration() {
+        let (project, media_id) = project_with_media(25);
+        // source_out parte da 20 su un media lungo 25 frame: non si può
+        // estendere la fine oltre timeline_start + (25 - source_in) = 25.
+        let visuals = vec![media_clip_visual(0, 1, 0, 0, 20, media_id)];
+        let (_, max_value) =
+            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+        assert_eq!(max_value, 25);
+    }
+
+    #[test]
+    fn single_trim_range_end_is_unbounded_for_solid_color() {
+        let project = Project::default();
+        let visuals = vec![visual(0, 1, 0, 10)];
+        let (_, max_value) =
+            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+        assert_eq!(max_value, FrameIdx::MAX);
+    }
+
+    #[test]
+    fn combined_trim_range_intersects_both_clips_constraints() {
+        let project = Project::default();
+        // Video [10,30), collegato all'audio [10,30) sulla track 1; un
+        // vicino sulla track audio limita l'estensione della fine a 35.
+        let mut video = visual(0, 1, 10, 20);
+        video.clip.linked = Some(ClipId(2));
+        let mut audio = visual(1, 2, 10, 20);
+        audio.clip.linked = Some(ClipId(1));
+        let visuals = vec![video, audio, visual(1, 3, 35, 10)];
+
+        let (_, max_value, linked) =
+            combined_trim_range(&visuals, &project, 0, ClipId(1), TrimEdge::End);
+        assert_eq!(
+            max_value, 35,
+            "vincolo della gemella si applica anche al video"
+        );
+        assert_eq!(linked, Some((ClipId(2), 1)));
     }
 
     #[test]

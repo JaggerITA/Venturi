@@ -903,6 +903,131 @@ impl VibeVideoApp {
         self.sync_selection_to_playhead();
     }
 
+    /// Copia le clip selezionate (+ la gemella collegata di ciascuna, se
+    /// non già anch'essa selezionata esplicitamente — stesso principio di
+    /// `delete_selected`) in `timeline_state.clipboard`, pronte per
+    /// `paste_clipboard_at_playhead`. No-op se non c'è nulla di
+    /// selezionato.
+    fn copy_selected_clips(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        if self.timeline_state.selected.is_empty() {
+            return;
+        }
+        let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
+        let mut to_copy: BTreeSet<(usize, ClipId)> = selected.iter().copied().collect();
+        for &(track_index, clip_id) in &selected {
+            if let Some(partner) = self.linked_partner(timeline_id, track_index, clip_id) {
+                to_copy.insert(partner);
+            }
+        }
+
+        let tl = &self.project.timelines[timeline_id];
+        // (id originale, gemella originale, entry) — l'id e la gemella
+        // servono solo per risolvere `linked_index` qui sotto, non entrano
+        // nell'entry salvata (i vecchi ClipId non sopravvivono al paste).
+        let mut collected: Vec<(ClipId, Option<ClipId>, timeline_ui::ClipboardEntry)> = to_copy
+            .iter()
+            .filter_map(|&(track_index, clip_id)| {
+                let clip = tl
+                    .tracks
+                    .get(track_index)?
+                    .clips
+                    .iter()
+                    .find(|c| c.id == clip_id)?;
+                Some((
+                    clip_id,
+                    clip.linked,
+                    timeline_ui::ClipboardEntry {
+                        track_index,
+                        relative_start: clip.timeline_start,
+                        source: clip.source.clone(),
+                        source_in: clip.source_in,
+                        source_out: clip.source_out,
+                        effects: clip.effects.clone(),
+                        linked_index: None,
+                    },
+                ))
+            })
+            .collect();
+
+        if collected.is_empty() {
+            return;
+        }
+
+        let anchor = collected
+            .iter()
+            .map(|(_, _, e)| e.relative_start)
+            .min()
+            .unwrap_or(0);
+        for (_, _, e) in &mut collected {
+            e.relative_start -= anchor;
+        }
+        for i in 0..collected.len() {
+            if let Some(partner_id) = collected[i].1
+                && let Some(j) = collected.iter().position(|(id, _, _)| *id == partner_id)
+            {
+                collected[i].2.linked_index = Some(j);
+            }
+        }
+
+        self.timeline_state.clipboard = collected.into_iter().map(|(_, _, e)| e).collect();
+    }
+
+    /// Incolla `timeline_state.clipboard` (Ctrl+C/Ctrl+V) alla posizione
+    /// del playhead, preservando la disposizione relativa se erano state
+    /// copiate più clip insieme, e ricollegando tra loro le coppie
+    /// collegate copiate insieme. Nessuna prevenzione di sovrapposizione
+    /// (stesso comportamento del drag&drop dal media pool): il chiamante
+    /// (l'utente) può sempre spostare/annullare col comando dedicato.
+    /// No-op se non c'è ancora nulla in clipboard o nessuna timeline.
+    fn paste_clipboard_at_playhead(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        if self.timeline_state.clipboard.is_empty() {
+            return;
+        }
+        let playhead = self.timeline_state.playhead;
+        let entries = self.timeline_state.clipboard.clone();
+
+        // Pre-alloca gli id delle nuove clip: servono per risolvere i
+        // link tra loro (che devono riferire il *nuovo* id della gemella,
+        // non quello originale copiato, che potrebbe non esistere più).
+        let new_ids: Vec<ClipId> = entries
+            .iter()
+            .map(|_| self.project.alloc_clip_id())
+            .collect();
+
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        let mut new_selection = BTreeSet::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let clip = vv_core::Clip {
+                id: new_ids[i],
+                source: entry.source.clone(),
+                source_in: entry.source_in,
+                source_out: entry.source_out,
+                timeline_start: playhead + entry.relative_start,
+                effects: entry.effects.clone(),
+                linked: entry.linked_index.map(|j| new_ids[j]),
+            };
+            new_selection.insert((entry.track_index, new_ids[i]));
+            commands.push(Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: entry.track_index,
+                clip,
+            }));
+        }
+
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+        let anchor = new_selection.iter().next().copied();
+        self.timeline_state.set_selection(new_selection, anchor);
+    }
+
     /// Ripple delete: rimuove *tutte* le clip selezionate (e la gemella
     /// collegata di ciascuna, se c'è) e chiude i gap su *tutte* le track,
     /// mantenendo il sync audio/video (vedi ARCHITECTURE.md § Ripple
@@ -1363,6 +1488,24 @@ impl eframe::App for VibeVideoApp {
             if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E) {
                 self.start_export();
             }
+            // Ctrl+C / Ctrl+V: copia/incolla clip sulla timeline.
+            if i.modifiers.command && i.key_pressed(egui::Key::C) {
+                self.copy_selected_clips();
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::V) {
+                self.paste_clipboard_at_playhead();
+            }
+            // Ctrl+"+"/Ctrl+"-" (anche Ctrl+"=", stesso tasto di "+" non
+            // shiftato sulla maggior parte delle tastiere): zoom della
+            // timeline.
+            if i.modifiers.command
+                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+            {
+                self.timeline_state.zoom_in();
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::Minus) {
+                self.timeline_state.zoom_out();
+            }
         });
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
@@ -1408,6 +1551,28 @@ impl eframe::App for VibeVideoApp {
                         ui.close();
                     }
                     ui.separator();
+                    if ui
+                        .add_enabled(
+                            !self.timeline_state.selected.is_empty(),
+                            egui::Button::new("Copia (Ctrl+C)"),
+                        )
+                        .clicked()
+                    {
+                        self.copy_selected_clips();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.timeline_state.clipboard.is_empty(),
+                            egui::Button::new("Incolla (Ctrl+V)"),
+                        )
+                        .on_hover_text("Incolla alla posizione del playhead")
+                        .clicked()
+                    {
+                        self.paste_clipboard_at_playhead();
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Elimina (Del)").clicked() {
                         self.delete_selected();
                         ui.close();
@@ -1440,7 +1605,7 @@ impl eframe::App for VibeVideoApp {
                 });
 
                 ui.menu_button("Timeline", |ui| {
-                    // Checkbox: resta aperto al click, a differenza dei
+                    // Checkbox: restano aperti al click, a differenza dei
                     // pulsanti-azione altrove nei menu.
                     ui.checkbox(
                         &mut self.selection_follows_playhead,
@@ -1449,6 +1614,16 @@ impl eframe::App for VibeVideoApp {
                     .on_hover_text(
                         "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
                     );
+                    ui.separator();
+                    if ui.button("Zoom avanti (Ctrl++)").clicked() {
+                        self.timeline_state.zoom_in();
+                        ui.close();
+                    }
+                    if ui.button("Zoom indietro (Ctrl+-)").clicked() {
+                        self.timeline_state.zoom_out();
+                        ui.close();
+                    }
+                    ui.label("Ctrl+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
                 });
 
                 ui.menu_button("Visualizza", |ui| {
@@ -2972,6 +3147,101 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    #[test]
+    fn copy_then_paste_creates_a_new_clip_at_the_playhead_with_a_new_id() {
+        let mut app = VibeVideoApp::default();
+        let original_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, original_id)]);
+        app.copy_selected_clips();
+        assert_eq!(app.timeline_state.clipboard.len(), 1);
+
+        app.timeline_state.playhead = 50;
+        app.paste_clipboard_at_playhead();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 2, "l'originale + l'incollata");
+        let pasted = &tl.tracks[0].clips[1];
+        assert_ne!(pasted.id, original_id, "un id nuovo, non lo stesso");
+        assert_eq!(pasted.timeline_start, 50, "incollata al playhead");
+        assert_eq!(pasted.timeline_len(), 10);
+        assert_eq!(
+            app.timeline_state.selected,
+            BTreeSet::from([(0, pasted.id)]),
+            "la clip incollata diventa la selezione"
+        );
+    }
+
+    #[test]
+    fn copy_then_paste_relinks_a_linked_pair_to_each_other_not_to_the_originals() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (0, video_id),
+                (1, audio_id),
+            )),
+        );
+
+        // Selezionare solo il video deve comunque copiare anche l'audio
+        // collegato (stesso principio di `delete_selected`).
+        app.timeline_state.selected = BTreeSet::from([(0, video_id)]);
+        app.copy_selected_clips();
+        assert_eq!(app.timeline_state.clipboard.len(), 2);
+
+        app.paste_clipboard_at_playhead();
+
+        let tl = &app.project.timelines[timeline_id];
+        let new_video = &tl.tracks[0].clips[1];
+        let new_audio = &tl.tracks[1].clips[1];
+        assert_eq!(new_video.linked, Some(new_audio.id));
+        assert_eq!(new_audio.linked, Some(new_video.id));
+        assert_ne!(
+            new_video.linked,
+            Some(video_id),
+            "non collegata all'originale"
+        );
+    }
+
+    #[test]
+    fn copy_then_paste_multiple_clips_preserves_their_relative_spacing() {
+        let mut app = VibeVideoApp::default();
+        let a_id = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
+        let b_id = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30), 10 frame di gap da "a"
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, a_id), (0, b_id)]);
+        app.copy_selected_clips();
+
+        app.timeline_state.playhead = 100;
+        app.paste_clipboard_at_playhead();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 4);
+        let pasted: Vec<_> = tl.tracks[0].clips[2..].iter().collect();
+        let starts: BTreeSet<FrameIdx> = pasted.iter().map(|c| c.timeline_start).collect();
+        // "a" incollata a 100 (ancora = inizio più a sinistra), "b" 20
+        // frame dopo, esattamente come nell'originale.
+        assert_eq!(starts, BTreeSet::from([100, 120]));
+    }
+
+    #[test]
+    fn paste_with_an_empty_clipboard_is_a_no_op() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        assert!(app.timeline_state.clipboard.is_empty());
+        app.paste_clipboard_at_playhead();
+
+        assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
     }
 
     #[test]
