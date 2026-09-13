@@ -1,8 +1,8 @@
 //! Widget timeline multi-traccia: disegna tracce/clip, gestisce selezione,
-//! drag orizzontale (riposizionamento sulla stessa track — spostare tra
-//! track è supportato dal comando `MoveClip` ma non ancora dal drag,
-//! milestone successiva) e il playhead. Ogni mutazione passa da
-//! `History::do_command`, mai da una modifica diretta del `Project`.
+//! drag orizzontale (con clip collegate che si muovono insieme, vedi
+//! `Clip::linked`), menu contestuale per collegare/scollegare, e il
+//! playhead. Ogni mutazione passa da `History::do_command`, mai da una
+//! modifica diretta del `Project`.
 //!
 //! Disegno "immediate mode" a basso livello (painter diretto, non widget
 //! egui nidificati): per una griglia densa di rettangoli come una timeline
@@ -26,12 +26,17 @@ struct DragState {
     clip_id: ClipId,
     track_index: usize,
     original_start: FrameIdx,
-    len: FrameIdx,
     accum_px: f32,
-    /// Calcolati una sola volta all'inizio del drag, dalla posizione dei
-    /// vicini immediati sulla stessa track: la clip non può attraversarli.
-    lower_bound: FrameIdx,
-    upper_bound: FrameIdx,
+    /// Range valido per il *nuovo `timeline_start` della clip primaria*,
+    /// già combinato con quello della gemella collegata se presente (vedi
+    /// `drag_range`): min/max, non un "upper" grezzo da cui sottrarre la
+    /// lunghezza a ogni uso.
+    min_start: FrameIdx,
+    max_start: FrameIdx,
+    /// (clip_id, track_index, offset) della gemella collegata, se c'è:
+    /// `offset` è la distanza fissa `gemella.timeline_start -
+    /// primaria.timeline_start` catturata all'inizio del drag.
+    linked: Option<(ClipId, usize, FrameIdx)>,
 }
 
 impl Default for TimelineState {
@@ -56,13 +61,12 @@ struct ClipVisual {
 /// `project` immutabilmente) e applicato subito dopo, per evitare un
 /// conflitto di borrow con `history.do_command(project, ...)`.
 enum PendingAction {
-    Move {
-        clip_id: ClipId,
-        track_index: usize,
-        new_start: FrameIdx,
-    },
+    /// (clip_id, track_index, new_start) per una o due clip (collegate).
+    Move(Vec<(ClipId, usize, FrameIdx)>),
     Select(usize, ClipId),
     ClearSelection,
+    Unlink(usize, ClipId),
+    Link(usize, ClipId, usize, ClipId),
 }
 
 pub fn show_timeline(
@@ -141,19 +145,28 @@ pub fn show_timeline(
                 painter.rect_filled(track_rect, 0.0, bg);
             }
 
+            // Posizione (clampata) della clip primaria in trascinamento,
+            // calcolata una sola volta e riusata sia per lei sia per
+            // l'eventuale gemella collegata.
+            let dragged_primary_new_start = state.drag.as_ref().map(|d| {
+                let raw = d.original_start as f32 + d.accum_px / px_per_frame;
+                (raw.round() as FrameIdx).clamp(d.min_start, d.max_start)
+            });
+
             // Clip.
             for visual in &visuals {
-                let is_dragging_this = state
-                    .drag
-                    .as_ref()
-                    .is_some_and(|d| d.clip_id == visual.clip.id);
-
-                let display_start = if is_dragging_this {
-                    let d = state.drag.as_ref().unwrap();
-                    let raw = d.original_start as f32 + d.accum_px / px_per_frame;
-                    clamp_to_bounds(raw.round() as FrameIdx, d.lower_bound, d.upper_bound, d.len)
-                } else {
-                    visual.clip.timeline_start
+                let display_start = match (&state.drag, dragged_primary_new_start) {
+                    (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
+                    (Some(d), Some(new_start)) => match d.linked {
+                        Some((partner_id, partner_track, offset))
+                            if partner_id == visual.clip.id
+                                && partner_track == visual.track_index =>
+                        {
+                            new_start + offset
+                        }
+                        _ => visual.clip.timeline_start,
+                    },
+                    _ => visual.clip.timeline_start,
                 };
 
                 let x = origin.x + display_start as f32 * px_per_frame;
@@ -182,18 +195,32 @@ pub fn show_timeline(
                     egui::FontId::proportional(12.0),
                     egui::Color32::BLACK,
                 );
+                if visual.clip.linked.is_some() {
+                    painter.text(
+                        clip_rect.right_top() + egui::vec2(-4.0, 2.0),
+                        egui::Align2::RIGHT_TOP,
+                        "🔗",
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::BLACK,
+                    );
+                }
 
                 if resp.drag_started() {
-                    let (lower_bound, upper_bound) =
-                        neighbor_bounds(&visuals, visual.track_index, visual.clip.id);
+                    let (min_start, max_start, linked) = combined_drag_range(
+                        &visuals,
+                        visual.track_index,
+                        visual.clip.id,
+                        visual.clip.linked,
+                    );
+
                     state.drag = Some(DragState {
                         clip_id: visual.clip.id,
                         track_index: visual.track_index,
                         original_start: visual.clip.timeline_start,
-                        len: visual.clip.timeline_len(),
                         accum_px: 0.0,
-                        lower_bound,
-                        upper_bound,
+                        min_start,
+                        max_start: max_start.max(min_start),
+                        linked,
                     });
                 } else if resp.dragged() {
                     if let Some(d) = &mut state.drag
@@ -206,21 +233,52 @@ pub fn show_timeline(
                         && d.clip_id == visual.clip.id
                     {
                         let raw = d.original_start as f32 + d.accum_px / px_per_frame;
-                        let new_start = clamp_to_bounds(
-                            raw.round() as FrameIdx,
-                            d.lower_bound,
-                            d.upper_bound,
-                            d.len,
-                        );
-                        pending = Some(PendingAction::Move {
-                            clip_id: visual.clip.id,
-                            track_index: d.track_index,
-                            new_start,
-                        });
+                        let new_start = (raw.round() as FrameIdx).clamp(d.min_start, d.max_start);
+                        let mut moves = vec![(d.clip_id, d.track_index, new_start)];
+                        if let Some((partner_id, partner_track, offset)) = d.linked {
+                            moves.push((partner_id, partner_track, new_start + offset));
+                        }
+                        pending = Some(PendingAction::Move(moves));
                     }
                 } else if resp.clicked() {
                     pending = Some(PendingAction::Select(visual.track_index, visual.clip.id));
                 }
+
+                resp.context_menu(|ui| {
+                    if visual.clip.linked.is_some() {
+                        if ui.button("Scollega audio/video").clicked() {
+                            pending =
+                                Some(PendingAction::Unlink(visual.track_index, visual.clip.id));
+                            ui.close();
+                        }
+                    } else {
+                        let candidate = visuals.iter().find(|v| {
+                            v.clip.id != visual.clip.id
+                                && v.track_index != visual.track_index
+                                && v.clip.linked.is_none()
+                                && v.clip.timeline_start == visual.clip.timeline_start
+                        });
+                        match candidate {
+                            Some(candidate) => {
+                                if ui
+                                    .button(format!("Collega con \"{}\"", candidate.label))
+                                    .clicked()
+                                {
+                                    pending = Some(PendingAction::Link(
+                                        visual.track_index,
+                                        visual.clip.id,
+                                        candidate.track_index,
+                                        candidate.clip.id,
+                                    ));
+                                    ui.close();
+                                }
+                            }
+                            None => {
+                                ui.label("Nessuna clip allineata da collegare");
+                            }
+                        }
+                    }
+                });
             }
 
             if ruler_resp.clicked() {
@@ -240,20 +298,14 @@ pub fn show_timeline(
 
     if let Some(action) = pending {
         match action {
-            PendingAction::Move {
-                clip_id,
-                track_index,
-                new_start,
-            } => {
+            PendingAction::Move(moves) => {
+                let moves = moves
+                    .into_iter()
+                    .map(|(id, track, start)| (id, track, track, start))
+                    .collect();
                 history.do_command(
                     project,
-                    Box::new(vv_core::MoveClip::new(
-                        timeline_id,
-                        clip_id,
-                        track_index,
-                        track_index,
-                        new_start,
-                    )),
+                    Box::new(vv_core::MoveClips::new(timeline_id, moves)),
                 );
             }
             PendingAction::Select(track_index, clip_id) => {
@@ -261,6 +313,22 @@ pub fn show_timeline(
             }
             PendingAction::ClearSelection => {
                 state.selected = None;
+            }
+            PendingAction::Unlink(track_index, clip_id) => {
+                history.do_command(
+                    project,
+                    Box::new(vv_core::UnlinkClip::new(timeline_id, track_index, clip_id)),
+                );
+            }
+            PendingAction::Link(track_a, clip_a, track_b, clip_b) => {
+                history.do_command(
+                    project,
+                    Box::new(vv_core::LinkClips::new(
+                        timeline_id,
+                        (track_a, clip_a),
+                        (track_b, clip_b),
+                    )),
+                );
             }
         }
     }
@@ -322,9 +390,61 @@ fn neighbor_bounds(
     (lower_bound, upper_bound)
 }
 
-fn clamp_to_bounds(start: FrameIdx, lower: FrameIdx, upper: FrameIdx, len: FrameIdx) -> FrameIdx {
-    let max_start = upper.saturating_sub(len).max(lower);
-    start.clamp(lower, max_start)
+fn max_start_in_slot(lower: FrameIdx, upper: FrameIdx, len: FrameIdx) -> FrameIdx {
+    upper.saturating_sub(len).max(lower)
+}
+
+/// Range valido (min/max) per il nuovo `timeline_start` di una clip da
+/// sola, già risolto (non un "upper" grezzo): usato sia direttamente sia
+/// come base da combinare con quello di una gemella collegata.
+fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (FrameIdx, FrameIdx) {
+    let Some(v) = visuals
+        .iter()
+        .find(|v| v.track_index == track_index && v.clip.id == clip_id)
+    else {
+        return (0, FrameIdx::MAX);
+    };
+    let (lower, upper) = neighbor_bounds(visuals, track_index, clip_id);
+    (
+        lower,
+        max_start_in_slot(lower, upper, v.clip.timeline_len()),
+    )
+}
+
+/// Range valido per il `timeline_start` di `clip_id`, combinato con quello
+/// della sua gemella collegata (se `linked` è `Some`): il drag deve
+/// rispettare i vincoli di *entrambe*, tradotti nello spazio della clip
+/// primaria. Restituisce anche (id, track, offset) della gemella, pronti
+/// per essere salvati in `DragState`.
+fn combined_drag_range(
+    visuals: &[ClipVisual],
+    track_index: usize,
+    clip_id: ClipId,
+    linked: Option<ClipId>,
+) -> (FrameIdx, FrameIdx, Option<(ClipId, usize, FrameIdx)>) {
+    let (min_start, max_start) = drag_range(visuals, track_index, clip_id);
+
+    let Some(partner_id) = linked else {
+        return (min_start, max_start, None);
+    };
+    let Some(partner) = visuals.iter().find(|v| v.clip.id == partner_id) else {
+        return (min_start, max_start, None);
+    };
+    let Some(this_start) = visuals
+        .iter()
+        .find(|v| v.track_index == track_index && v.clip.id == clip_id)
+        .map(|v| v.clip.timeline_start)
+    else {
+        return (min_start, max_start, None);
+    };
+
+    let offset = partner.clip.timeline_start - this_start;
+    let (p_min, p_max) = drag_range(visuals, partner.track_index, partner_id);
+    (
+        min_start.max(p_min - offset),
+        max_start.min(p_max - offset),
+        Some((partner_id, partner.track_index, offset)),
+    )
 }
 
 #[cfg(test)]
@@ -341,6 +461,7 @@ mod tests {
                 source_out: len,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
+                linked: None,
             },
             label: String::new(),
             color: egui::Color32::WHITE,
@@ -365,18 +486,68 @@ mod tests {
     }
 
     #[test]
-    fn clamp_to_bounds_keeps_clip_inside_slot() {
+    fn max_start_in_slot_keeps_clip_inside_slot() {
         // slot [10, 50), clip lunga 30: può stare solo tra 10 e 20.
-        assert_eq!(clamp_to_bounds(0, 10, 50, 30), 10);
-        assert_eq!(clamp_to_bounds(15, 10, 50, 30), 15);
-        assert_eq!(clamp_to_bounds(100, 10, 50, 30), 20);
+        assert_eq!(0.clamp(10, max_start_in_slot(10, 50, 30)), 10);
+        assert_eq!(15.clamp(10, max_start_in_slot(10, 50, 30)), 15);
+        assert_eq!(100.clamp(10, max_start_in_slot(10, 50, 30)), 20);
     }
 
     #[test]
-    fn clamp_to_bounds_degenerate_slot_does_not_panic() {
+    fn max_start_in_slot_degenerate_slot_does_not_invert_range() {
         // slot più piccolo della clip: non deve produrre un range invertito.
-        let result = clamp_to_bounds(12, 10, 15, 30);
-        assert_eq!(result, 10);
+        assert_eq!(max_start_in_slot(10, 15, 30), 10);
+    }
+
+    #[test]
+    fn drag_range_matches_neighbor_bounds_minus_own_length() {
+        let visuals = vec![
+            visual(0, 1, 0, 10),  // finisce a 10
+            visual(0, 2, 20, 30), // lunga 30: può stare tra 10 e 50-30=20
+            visual(0, 3, 50, 5),
+        ];
+        assert_eq!(drag_range(&visuals, 0, ClipId(2)), (10, 20));
+    }
+
+    #[test]
+    fn combined_drag_range_unlinked_matches_plain_drag_range() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 30)];
+        let (min, max, linked) = combined_drag_range(&visuals, 0, ClipId(2), None);
+        assert_eq!((min, max), drag_range(&visuals, 0, ClipId(2)));
+        assert!(linked.is_none());
+    }
+
+    #[test]
+    fn combined_drag_range_intersects_both_clips_constraints() {
+        // Track 0: [0,10) poi la clip 2 (video, [20,50)).
+        // Track 1: la sua gemella (audio, stesso [20,50)) ma con un
+        // vicino successivo più stretto: finisce a 55 invece che libero.
+        let visuals = vec![
+            visual(0, 1, 0, 10),
+            visual(0, 2, 20, 30), // video, collegata a 3
+            visual(1, 3, 20, 30), // audio, collegata a 2
+            visual(1, 4, 55, 5),  // vincola la gemella audio a stare <= 55-30=25
+        ];
+        // Da sola track 0 permetterebbe [10, MAX-30]; la gemella sulla
+        // track 1 la restringe a max_start <= 25 (stesso offset, 0).
+        let (min, max, linked) = combined_drag_range(&visuals, 0, ClipId(2), Some(ClipId(3)));
+        assert_eq!(min, 10);
+        assert_eq!(max, 25);
+        assert_eq!(linked, Some((ClipId(3), 1, 0)));
+    }
+
+    #[test]
+    fn combined_drag_range_respects_nonzero_offset_between_linked_clips() {
+        // La gemella non è allineata: parte 5 frame dopo la primaria.
+        let visuals = vec![
+            visual(0, 1, 10, 20), // primaria, track 0, start=10
+            visual(1, 2, 15, 20), // gemella, track 1, start=15 (offset=5)
+            visual(1, 3, 60, 5),  // vincola la gemella: max_start <= 60-20=40
+        ];
+        let (_, max, linked) = combined_drag_range(&visuals, 0, ClipId(1), Some(ClipId(2)));
+        // vincolo gemella tradotto: primaria.max_start <= 40 - offset(5) = 35
+        assert_eq!(max, 35);
+        assert_eq!(linked, Some((ClipId(2), 1, 5)));
     }
 
     /// Esegue `show_timeline` per davvero dentro un `egui::Context`
@@ -405,6 +576,7 @@ mod tests {
                 source_out: len,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
+                linked: None,
             };
             history.do_command(
                 &mut project,

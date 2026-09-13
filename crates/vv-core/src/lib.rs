@@ -2,9 +2,9 @@ pub mod command;
 pub mod model;
 
 pub use command::{
-    Command, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete, MoveClip,
-    RemoveKeyframe, RippleDeleteAllTracks, SetClipColor, SetClipGain, SetClipTransform, SplitClip,
-    UpsertKeyframe,
+    Command, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClip,
+    MoveClips, RemoveKeyframe, RippleDeleteAllTracks, SetClipColor, SetClipGain, SetClipTransform,
+    SplitClip, UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
 
@@ -31,6 +31,7 @@ mod tests {
             source_out: len,
             timeline_start: start,
             effects: EffectStack::default(),
+            linked: None,
         }
     }
 
@@ -532,5 +533,164 @@ mod tests {
                 .r,
             1.0
         );
+    }
+
+    #[test]
+    fn move_clips_moves_both_atomically_and_undo_restores_both() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let video = make_clip(&mut project, 0, 10);
+        let video_id = video.id;
+        let audio = make_clip(&mut project, 0, 10);
+        let audio_id = audio.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: video,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 1,
+                clip: audio,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::MoveClips::new(
+                timeline,
+                vec![(video_id, 0, 0, 40), (audio_id, 1, 1, 40)],
+            )),
+        );
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].timeline_start, 40);
+        assert_eq!(tl.tracks[1].clips[0].timeline_start, 40);
+
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
+        assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
+    }
+
+    #[test]
+    fn unlink_clip_clears_both_sides_and_undo_restores_both() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut video = make_clip(&mut project, 0, 10);
+        let mut audio = make_clip(&mut project, 0, 10);
+        video.linked = Some(audio.id);
+        audio.linked = Some(video.id);
+        let (video_id, audio_id) = (video.id, audio.id);
+
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: video,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 1,
+                clip: audio,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::UnlinkClip::new(timeline, 0, video_id)),
+        );
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].linked, None);
+        assert_eq!(tl.tracks[1].clips[0].linked, None);
+
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].linked, Some(audio_id));
+        assert_eq!(tl.tracks[1].clips[0].linked, Some(video_id));
+    }
+
+    #[test]
+    fn link_clips_sets_both_sides_and_undo_restores_previous() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let video = make_clip(&mut project, 0, 10);
+        let video_id = video.id;
+        let audio = make_clip(&mut project, 0, 10);
+        let audio_id = audio.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: video,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 1,
+                clip: audio,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::LinkClips::new(
+                timeline,
+                (0, video_id),
+                (1, audio_id),
+            )),
+        );
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].linked, Some(audio_id));
+        assert_eq!(tl.tracks[1].clips[0].linked, Some(video_id));
+
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].linked, None);
+        assert_eq!(tl.tracks[1].clips[0].linked, None);
+    }
+
+    #[test]
+    fn split_clip_clears_link_on_both_halves_and_undo_restores_it() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut video = make_clip(&mut project, 0, 20);
+        video.linked = Some(ClipId(999)); // gemella fittizia, non serve che esista per questo test
+        let video_id = video.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: video,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::SplitClip::new(timeline, 0, video_id, 8)),
+        );
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].linked, None);
+        assert_eq!(tl.tracks[0].clips[1].linked, None);
+
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].linked, Some(ClipId(999)));
     }
 }

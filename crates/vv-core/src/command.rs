@@ -251,6 +251,228 @@ impl Command for MoveClip {
     }
 }
 
+/// Sposta più clip in un unico passo di history (un solo undo le riporta
+/// indietro tutte insieme): serve per trascinare clip collegate
+/// (`Clip::linked`, tipicamente audio+video della stessa sorgente), che
+/// devono muoversi come una singola unità agli occhi dell'utente.
+#[derive(Debug)]
+pub struct MoveClips {
+    pub timeline: TimelineId,
+    /// (clip_id, from_track, to_track, new_start)
+    pub moves: Vec<(ClipId, usize, usize, FrameIdx)>,
+    old_starts: Vec<Option<FrameIdx>>,
+}
+
+impl MoveClips {
+    pub fn new(timeline: TimelineId, moves: Vec<(ClipId, usize, usize, FrameIdx)>) -> Self {
+        Self {
+            timeline,
+            moves,
+            old_starts: Vec::new(),
+        }
+    }
+}
+
+impl Command for MoveClips {
+    fn apply(&mut self, project: &mut Project) {
+        self.old_starts.clear();
+        for &(clip_id, from_track, to_track, new_start) in &self.moves {
+            let tl = &mut project.timelines[self.timeline];
+            let from = &mut tl.tracks[from_track];
+            let Some(pos) = from.clips.iter().position(|c| c.id == clip_id) else {
+                self.old_starts.push(None);
+                continue;
+            };
+            let mut clip = from.clips.remove(pos);
+            self.old_starts.push(Some(clip.timeline_start));
+            clip.timeline_start = new_start;
+
+            let to = &mut tl.tracks[to_track];
+            let insert_at = to
+                .clips
+                .partition_point(|c| c.timeline_start < clip.timeline_start);
+            to.clips.insert(insert_at, clip);
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        for (&(clip_id, from_track, to_track, _new_start), old_start) in
+            self.moves.iter().zip(&self.old_starts)
+        {
+            let Some(old_start) = old_start else {
+                continue;
+            };
+            let tl = &mut project.timelines[self.timeline];
+            let to = &mut tl.tracks[to_track];
+            let Some(pos) = to.clips.iter().position(|c| c.id == clip_id) else {
+                continue;
+            };
+            let mut clip = to.clips.remove(pos);
+            clip.timeline_start = *old_start;
+
+            let from = &mut tl.tracks[from_track];
+            let insert_at = from
+                .clips
+                .partition_point(|c| c.timeline_start < clip.timeline_start);
+            from.clips.insert(insert_at, clip);
+        }
+    }
+}
+
+/// Scollega una clip dalla sua gemella (`Clip::linked`), se ne ha una.
+/// Cerca la gemella su tutte le track della timeline (il chiamante deve
+/// conoscere solo la track della clip cliccata, non quella della gemella).
+#[derive(Debug)]
+pub struct UnlinkClip {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    removed_link: Option<(ClipId, usize)>,
+}
+
+impl UnlinkClip {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            removed_link: None,
+        }
+    }
+}
+
+impl Command for UnlinkClip {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        let Some(partner_id) = tl
+            .tracks
+            .get(self.track_index)
+            .and_then(|t| t.clips.iter().find(|c| c.id == self.clip_id))
+            .and_then(|c| c.linked)
+        else {
+            return;
+        };
+        let partner_track = tl
+            .tracks
+            .iter()
+            .position(|t| t.clips.iter().any(|c| c.id == partner_id));
+
+        if let Some(c) = tl.tracks[self.track_index]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+        {
+            c.linked = None;
+        }
+        if let Some(pt) = partner_track
+            && let Some(c) = tl.tracks[pt].clips.iter_mut().find(|c| c.id == partner_id)
+        {
+            c.linked = None;
+        }
+        self.removed_link = partner_track.map(|pt| (partner_id, pt));
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some((partner_id, partner_track)) = self.removed_link else {
+            return;
+        };
+        let tl = &mut project.timelines[self.timeline];
+        if let Some(c) = tl.tracks[self.track_index]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+        {
+            c.linked = Some(partner_id);
+        }
+        if let Some(c) = tl.tracks[partner_track]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == partner_id)
+        {
+            c.linked = Some(self.clip_id);
+        }
+    }
+}
+
+/// Collega due clip tra loro (`Clip::linked` su entrambe). Se una delle
+/// due era già collegata a qualcos'altro, quel vecchio collegamento viene
+/// sostituito (non è a tre: un collegamento è sempre tra esattamente due
+/// clip).
+#[derive(Debug)]
+pub struct LinkClips {
+    pub timeline: TimelineId,
+    pub a: (usize, ClipId),
+    pub b: (usize, ClipId),
+    previous: Option<(Option<ClipId>, Option<ClipId>)>,
+}
+
+impl LinkClips {
+    pub fn new(timeline: TimelineId, a: (usize, ClipId), b: (usize, ClipId)) -> Self {
+        Self {
+            timeline,
+            a,
+            b,
+            previous: None,
+        }
+    }
+}
+
+impl Command for LinkClips {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        let a_prev = tl.tracks[self.a.0]
+            .clips
+            .iter()
+            .find(|c| c.id == self.a.1)
+            .map(|c| c.linked);
+        let b_prev = tl.tracks[self.b.0]
+            .clips
+            .iter()
+            .find(|c| c.id == self.b.1)
+            .map(|c| c.linked);
+        let (Some(a_prev), Some(b_prev)) = (a_prev, b_prev) else {
+            return;
+        };
+        self.previous = Some((a_prev, b_prev));
+
+        if let Some(c) = tl.tracks[self.a.0]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.a.1)
+        {
+            c.linked = Some(self.b.1);
+        }
+        if let Some(c) = tl.tracks[self.b.0]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.b.1)
+        {
+            c.linked = Some(self.a.1);
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some((a_prev, b_prev)) = self.previous else {
+            return;
+        };
+        let tl = &mut project.timelines[self.timeline];
+        if let Some(c) = tl.tracks[self.a.0]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.a.1)
+        {
+            c.linked = a_prev;
+        }
+        if let Some(c) = tl.tracks[self.b.0]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.b.1)
+        {
+            c.linked = b_prev;
+        }
+    }
+}
+
 /// Divide una clip in due al tempo di timeline `split_at`. La seconda metà
 /// riceve un nuovo `ClipId`. Assume speed=1 nel mappare `split_at` allo
 /// spazio del frame sorgente (coerente finché lo speed ramping non è
@@ -262,6 +484,12 @@ pub struct SplitClip {
     pub clip_id: ClipId,
     pub split_at: FrameIdx,
     original_source_out: Option<FrameIdx>,
+    /// Collegamento della clip originale prima dello split (per l'undo):
+    /// dividere una clip collegata la scollega, perché il collegamento
+    /// riguardava l'intera durata e ora ne resta valido solo un pezzo. Non
+    /// dividiamo anche la clip gemella: quel comportamento più complesso
+    /// resta un'estensione futura.
+    original_linked: Option<Option<ClipId>>,
     new_clip_id: Option<ClipId>,
 }
 
@@ -278,6 +506,7 @@ impl SplitClip {
             clip_id,
             split_at,
             original_source_out: None,
+            original_linked: None,
             new_clip_id: None,
         }
     }
@@ -298,12 +527,15 @@ impl Command for SplitClip {
         let split_source = clip.source_in + offset;
 
         self.original_source_out = Some(clip.source_out);
+        self.original_linked = Some(clip.linked);
         let mut second_half = clip.clone();
         clip.source_out = split_source;
+        clip.linked = None;
 
         second_half.id = new_id;
         second_half.source_in = split_source;
         second_half.timeline_start = self.split_at;
+        second_half.linked = None;
         self.new_clip_id = Some(new_id);
 
         let insert_at = track
@@ -322,6 +554,7 @@ impl Command for SplitClip {
         track.clips.retain(|c| c.id != new_clip_id);
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
             clip.source_out = original_source_out;
+            clip.linked = self.original_linked.flatten();
         }
     }
 }

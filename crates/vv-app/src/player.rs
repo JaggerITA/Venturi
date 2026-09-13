@@ -130,6 +130,12 @@ impl Player {
         self.duration_secs
     }
 
+    /// Seek per indice di frame sorgente (fps nativo del media), utile per
+    /// tradurre una posizione della timeline in una posizione del player.
+    pub fn seek_to_frame(&mut self, frame: FrameIdx) {
+        self.seek_secs(frame as f64 / self.fps.max(1e-9));
+    }
+
     /// Indice del frame sorgente corrispondente alla posizione attuale
     /// (nello spazio frame del media, fps nativo — non ancora traslato per
     /// il trim `source_in` di una clip, vedi nota in vv-app::main sul
@@ -223,5 +229,17 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         player.tick();
         assert!(!player.is_playing(), "deve auto-pausare a fine clip");
+    }
+
+    #[test]
+    fn seek_to_frame_round_trips_with_current_source_frame() {
+        let path = make_video_only_clip(2);
+        let mut player = Player::open(&path, 2.0).unwrap();
+
+        player.seek_to_frame(20);
+        assert_eq!(player.current_source_frame(), 20);
+
+        player.seek_to_frame(0);
+        assert_eq!(player.current_source_frame(), 0);
     }
 }

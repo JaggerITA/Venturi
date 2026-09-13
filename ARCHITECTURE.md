@@ -198,6 +198,16 @@ vibevideo/
    locale alla clip derivato dal playhead della timeline (l'unico orologio
    sensato per un generatore, che non ha un Player). **Text overlay non
    ancora fatto**.
+
+   **Fix post-milestone (bug reali segnalati dall'utente)**: play/pause
+   con Space; tasto "dividi" spostato da S a T; clip audio+video dello
+   stesso import collegate di default (`Clip::linked`, menu contestuale
+   per collegare/scollegare — drag di una clip collegata muove anche la
+   gemella, vincolato dai limiti di *entrambe*); scrub del playhead della
+   timeline ora fa davvero il seek del player della clip attiva
+   (`sync_playhead_and_player`, bidirezionale: durante il playback il
+   playhead segue il player, sostituendo la vecchia barra di avanzamento
+   ora rimossa).
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di

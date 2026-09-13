@@ -267,6 +267,11 @@ pub struct Clip {
     /// Posizione nello spazio della Timeline che contiene questa clip.
     pub timeline_start: FrameIdx,
     pub effects: EffectStack,
+    /// Clip "gemella" (tipicamente audio<->video dello stesso media,
+    /// collegate di default all'import): un drag nella timeline le muove
+    /// insieme. Il collegamento è simmetrico: se `a.linked == Some(b)`
+    /// allora `b.linked == Some(a)`. `None` per una clip indipendente.
+    pub linked: Option<ClipId>,
 }
 
 impl Clip {
