@@ -176,8 +176,12 @@ vibevideo/
    cache base (LRU per FrameIdx, decode-ahead su thread dedicato), audio
    sincronizzato via cpal (l'audio è il clock master; fallback a wall-clock
    se la clip non ha audio).
-3. **Timeline minima**: multi-traccia, drag delle clip, normal delete
-   (lift), split.
+3. ✅ **Timeline minima**: multi-traccia, drag delle clip (con clamp contro
+   i vicini), normal delete (lift), split, tutto con undo/redo. L'anteprima
+   video resta per-media (non ancora "segue il playhead della timeline
+   composita"): quella parte arriva naturalmente con il compositor
+   (milestone 5), che deve comunque risolvere "quale clip è attiva a che
+   tempo" per il rendering multi-track.
 4. **Ripple delete** globale multi-traccia.
 5. **Trasformazioni**: crop, zoom, gain (valori statici), poi keyframe.
 6. **SolidColor + Text overlay**.

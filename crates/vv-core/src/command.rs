@@ -177,3 +177,149 @@ impl Command for RippleDeleteAllTracks {
         }
     }
 }
+
+/// Sposta una clip a una nuova posizione, eventualmente su un'altra track
+/// (drag nella timeline). Non fa collision-avoidance da sé: il chiamante
+/// (la UI) deve clampare `new_start` prima di emettere il comando, per
+/// mantenere l'invariante "clip mai sovrapposte sulla stessa track".
+#[derive(Debug)]
+pub struct MoveClip {
+    pub timeline: TimelineId,
+    pub clip_id: ClipId,
+    pub from_track: usize,
+    pub to_track: usize,
+    pub new_start: FrameIdx,
+    old_start: Option<FrameIdx>,
+}
+
+impl MoveClip {
+    pub fn new(
+        timeline: TimelineId,
+        clip_id: ClipId,
+        from_track: usize,
+        to_track: usize,
+        new_start: FrameIdx,
+    ) -> Self {
+        Self {
+            timeline,
+            clip_id,
+            from_track,
+            to_track,
+            new_start,
+            old_start: None,
+        }
+    }
+}
+
+impl Command for MoveClip {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        let from = &mut tl.tracks[self.from_track];
+        let Some(pos) = from.clips.iter().position(|c| c.id == self.clip_id) else {
+            return;
+        };
+        let mut clip = from.clips.remove(pos);
+        self.old_start = Some(clip.timeline_start);
+        clip.timeline_start = self.new_start;
+
+        let to = &mut tl.tracks[self.to_track];
+        let insert_at = to
+            .clips
+            .partition_point(|c| c.timeline_start < clip.timeline_start);
+        to.clips.insert(insert_at, clip);
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old_start) = self.old_start else {
+            return;
+        };
+        let tl = &mut project.timelines[self.timeline];
+        let to = &mut tl.tracks[self.to_track];
+        let Some(pos) = to.clips.iter().position(|c| c.id == self.clip_id) else {
+            return;
+        };
+        let mut clip = to.clips.remove(pos);
+        clip.timeline_start = old_start;
+
+        let from = &mut tl.tracks[self.from_track];
+        let insert_at = from
+            .clips
+            .partition_point(|c| c.timeline_start < clip.timeline_start);
+        from.clips.insert(insert_at, clip);
+    }
+}
+
+/// Divide una clip in due al tempo di timeline `split_at`. La seconda metà
+/// riceve un nuovo `ClipId`. Assume speed=1 nel mappare `split_at` allo
+/// spazio del frame sorgente (coerente finché lo speed ramping non è
+/// implementato, milestone 7).
+#[derive(Debug)]
+pub struct SplitClip {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub split_at: FrameIdx,
+    original_source_out: Option<FrameIdx>,
+    new_clip_id: Option<ClipId>,
+}
+
+impl SplitClip {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        split_at: FrameIdx,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            split_at,
+            original_source_out: None,
+            new_clip_id: None,
+        }
+    }
+}
+
+impl Command for SplitClip {
+    fn apply(&mut self, project: &mut Project) {
+        let new_id = project.alloc_clip_id();
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        if self.split_at <= clip.timeline_start || self.split_at >= clip.timeline_end() {
+            return; // fuori dal corpo della clip: niente da dividere
+        }
+
+        let offset = self.split_at - clip.timeline_start;
+        let split_source = clip.source_in + offset;
+
+        self.original_source_out = Some(clip.source_out);
+        let mut second_half = clip.clone();
+        clip.source_out = split_source;
+
+        second_half.id = new_id;
+        second_half.source_in = split_source;
+        second_half.timeline_start = self.split_at;
+        self.new_clip_id = Some(new_id);
+
+        let insert_at = track
+            .clips
+            .partition_point(|c| c.timeline_start < second_half.timeline_start);
+        track.clips.insert(insert_at, second_half);
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let (Some(original_source_out), Some(new_clip_id)) =
+            (self.original_source_out, self.new_clip_id)
+        else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        track.clips.retain(|c| c.id != new_clip_id);
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.source_out = original_source_out;
+        }
+    }
+}
