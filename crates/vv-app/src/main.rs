@@ -288,6 +288,13 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
+        // Guardia contro un secondo export avviato mentre il primo è
+        // ancora in corso: il pulsante in toolbar è già disabilitato in
+        // quel caso (`add_enabled`), ma la shortcut Ctrl+Shift+E la
+        // bypasserebbe senza questo controllo qui.
+        if self.export.is_some() {
+            return;
+        }
         let Some(output_path) = rfd::FileDialog::new()
             .set_file_name("export.mp4")
             .add_filter("mp4", &["mp4"])
@@ -1352,6 +1359,10 @@ impl eframe::App for VibeVideoApp {
             if i.modifiers.command && i.key_pressed(egui::Key::O) {
                 self.open_project_dialog();
             }
+            // Ctrl+Shift+E: esporta, come il pulsante in File.
+            if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E) {
+                self.start_export();
+            }
         });
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
@@ -1378,7 +1389,7 @@ impl eframe::App for VibeVideoApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(!export_disabled, egui::Button::new("Esporta..."))
+                        .add_enabled(!export_disabled, egui::Button::new("Esporta... (Ctrl+Shift+E)"))
                         .on_hover_text("Esporta l'intera timeline in un file MP4 (H.264 + AAC)")
                         .clicked()
                     {
@@ -1428,10 +1439,9 @@ impl eframe::App for VibeVideoApp {
                     }
                 });
 
-                ui.menu_button("Visualizza", |ui| {
-                    // Checkbox: restano aperti al click (l'utente può
-                    // togglarne più di uno senza dover riaprire il menu
-                    // ogni volta), a differenza dei pulsanti-azione sopra.
+                ui.menu_button("Timeline", |ui| {
+                    // Checkbox: resta aperto al click, a differenza dei
+                    // pulsanti-azione altrove nei menu.
                     ui.checkbox(
                         &mut self.selection_follows_playhead,
                         "Selection follows playhead",
@@ -1439,6 +1449,9 @@ impl eframe::App for VibeVideoApp {
                     .on_hover_text(
                         "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
                     );
+                });
+
+                ui.menu_button("Visualizza", |ui| {
                     ui.checkbox(&mut self.properties_panel_open, "Pannello proprietà");
                 });
             });
@@ -1446,15 +1459,10 @@ impl eframe::App for VibeVideoApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
-                // ASCII invece dei simboli Unicode ⏸/▶: su alcune
-                // combinazioni piattaforma/driver (es. Asahi Linux) i
-                // font bundled di egui non li renderizzano (appaiono
-                // come quadratini vuoti).
-                let label = if playing { "||" } else { ">" };
-                if ui.button(format!("{label} (Spazio)")).clicked() {
-                    self.toggle_playback();
-                }
+                // Nessun pulsante play/pause: Spazio è implicito in ogni
+                // editor video, un pulsante dedicato è ridondante (la
+                // shortcut resta comunque attiva, vedi il blocco
+                // `ui.input` più sopra).
                 if let Some(player) = &self.preview_player {
                     let duration = player.duration_secs();
                     let pos = player.position_secs();
