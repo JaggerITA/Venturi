@@ -151,6 +151,7 @@ pub fn show_timeline(
     timeline_id: TimelineId,
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
     state: &mut TimelineState,
+    snapping_enabled: bool,
 ) -> Option<(vv_core::MediaId, FrameIdx)> {
     let mut media_drop = None;
     let fps = project.timelines[timeline_id].fps.as_f64();
@@ -272,7 +273,16 @@ pub fn show_timeline(
                 && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 && let Some(item) = project.media_pool.get(*media_id)
             {
-                let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                let raw_frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                let frame = snap_frame(
+                    raw_frame,
+                    item.meta.duration_frames,
+                    &visuals,
+                    &[],
+                    px_per_frame,
+                    snapping_enabled,
+                )
+                .max(0);
                 let ghost_height = if item.meta.has_audio {
                     2.0 * ROW_HEIGHT
                 } else {
@@ -300,7 +310,14 @@ pub fn show_timeline(
             if let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
                 && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
             {
-                let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                let raw_frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                let len = project
+                    .media_pool
+                    .get(*media_id)
+                    .map(|item| item.meta.duration_frames)
+                    .unwrap_or(0);
+                let frame = snap_frame(raw_frame, len, &visuals, &[], px_per_frame, snapping_enabled)
+                    .max(0);
                 media_drop = Some((*media_id, frame));
             }
 
@@ -396,12 +413,26 @@ pub fn show_timeline(
                 );
             }
 
-            // Posizione (clampata) della clip primaria in trascinamento,
-            // calcolata una sola volta e riusata sia per lei sia per
-            // l'eventuale gemella collegata.
+            // Posizione (clampata, e agganciata alla calamita se attiva)
+            // della clip primaria in trascinamento, calcolata una sola
+            // volta e riusata sia per lei sia per l'eventuale gemella
+            // collegata — e per l'anteprima in tempo reale durante il drag
+            // (non solo al rilascio), così l'utente vede scattare la clip
+            // mentre trascina.
             let dragged_primary_new_start = state.drag.as_ref().map(|d| {
                 let raw = d.original_start as f32 + d.accum_px / px_per_frame;
-                (raw.round() as FrameIdx).clamp(d.min_start, d.max_start)
+                let candidate = (raw.round() as FrameIdx).clamp(d.min_start, d.max_start);
+                let len = visuals
+                    .iter()
+                    .find(|v| v.clip.id == d.clip_id)
+                    .map(|v| v.clip.timeline_len())
+                    .unwrap_or(0);
+                let mut exclude = vec![d.clip_id];
+                if let Some((partner_id, _, _)) = d.linked {
+                    exclude.push(partner_id);
+                }
+                snap_frame(candidate, len, &visuals, &exclude, px_per_frame, snapping_enabled)
+                    .clamp(d.min_start, d.max_start)
             });
 
             // Le gemelle collegate di tutte le clip selezionate vanno
@@ -492,8 +523,11 @@ pub fn show_timeline(
                     if let Some(d) = state.drag.take()
                         && d.clip_id == visual.clip.id
                     {
-                        let raw = d.original_start as f32 + d.accum_px / px_per_frame;
-                        let new_start = (raw.round() as FrameIdx).clamp(d.min_start, d.max_start);
+                        // Stessa posizione (già clampata e agganciata alla
+                        // calamita) mostrata nell'anteprima durante il drag,
+                        // calcolata da `state.drag` prima del `take()` qui
+                        // sopra: quel che si vedeva è quel che si ottiene.
+                        let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
                         let mut moves = vec![(d.clip_id, d.track_index, new_start)];
                         if let Some((partner_id, partner_track, offset)) = d.linked {
                             moves.push((partner_id, partner_track, new_start + offset));
@@ -842,6 +876,58 @@ fn combined_drag_range(
     )
 }
 
+/// Soglia di aggancio della calamita, in pixel schermo (non in frame:
+/// resta la stessa distanza visiva a qualunque livello di zoom, convertita
+/// in frame da `snap_frame` in base a `px_per_frame`).
+const SNAP_THRESHOLD_PX: f32 = 10.0;
+
+/// Se la calamita è attiva, aggancia `candidate_start` (una clip lunga
+/// `len` frame) al bordo più vicino — inizio o fine — di un'altra clip
+/// della timeline, se entro `SNAP_THRESHOLD_PX` pixel: allinea o l'inizio
+/// o la fine della clip trascinata, qualunque dei due richieda lo scarto
+/// minore. Le clip in `exclude` (la clip trascinata stessa e l'eventuale
+/// gemella collegata, o nessuna per una clip nuova dal media pool) non
+/// sono bordi validi. No-op se `enabled` è `false` o se nulla è entro
+/// soglia.
+fn snap_frame(
+    candidate_start: FrameIdx,
+    len: FrameIdx,
+    visuals: &[ClipVisual],
+    exclude: &[ClipId],
+    px_per_frame: f32,
+    enabled: bool,
+) -> FrameIdx {
+    if !enabled {
+        return candidate_start;
+    }
+    let threshold = (SNAP_THRESHOLD_PX / px_per_frame).round() as FrameIdx;
+    if threshold <= 0 {
+        return candidate_start;
+    }
+    let candidate_end = candidate_start + len;
+
+    let mut best: Option<(FrameIdx, FrameIdx)> = None; // (|scarto|, nuovo candidate_start)
+    for v in visuals {
+        if exclude.contains(&v.clip.id) {
+            continue;
+        }
+        for edge in [v.clip.timeline_start, v.clip.timeline_end()] {
+            // (punto della clip trascinata da confrontare col bordo, nuovo
+            // candidate_start se questo è l'aggancio scelto)
+            for (point, new_start) in [(candidate_start, edge), (candidate_end, edge - len)] {
+                let delta = (point - edge).abs();
+                if delta > threshold {
+                    continue;
+                }
+                if best.is_none_or(|(best_delta, _)| delta < best_delta) {
+                    best = Some((delta, new_start));
+                }
+            }
+        }
+    }
+    best.map_or(candidate_start, |(_, new_start)| new_start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,6 +1203,50 @@ mod tests {
         assert_eq!(linked, Some((ClipId(2), 1, 5)));
     }
 
+    #[test]
+    fn snap_frame_snaps_start_to_nearby_clip_end() {
+        // Clip esistente [0,10): il suo bordo di fine è 10. Un candidato a
+        // 12 (entro soglia) deve agganciarsi esattamente lì.
+        let visuals = vec![visual(0, 1, 0, 10)];
+        let px_per_frame = 5.0; // soglia 10px / 5px_per_frame = 2 frame
+        let snapped = snap_frame(12, 20, &visuals, &[], px_per_frame, true);
+        assert_eq!(snapped, 10);
+    }
+
+    #[test]
+    fn snap_frame_snaps_end_of_dragged_clip_to_nearby_clip_start() {
+        // Clip esistente [50,60): la clip trascinata (lunga 20) deve
+        // agganciare la propria *fine* a 50, cioè candidate_start=30.
+        let visuals = vec![visual(0, 1, 50, 10)];
+        let snapped = snap_frame(32, 20, &visuals, &[], 5.0, true);
+        assert_eq!(snapped, 30);
+    }
+
+    #[test]
+    fn snap_frame_ignores_clips_beyond_threshold() {
+        let visuals = vec![visual(0, 1, 0, 10)];
+        // 20 frame di distanza dal bordo (10): a px_per_frame=5.0 la soglia
+        // è di soli 2 frame, quindi resta invariato.
+        let snapped = snap_frame(30, 5, &visuals, &[], 5.0, true);
+        assert_eq!(snapped, 30);
+    }
+
+    #[test]
+    fn snap_frame_disabled_is_a_no_op() {
+        let visuals = vec![visual(0, 1, 0, 10)];
+        let snapped = snap_frame(12, 20, &visuals, &[], 5.0, false);
+        assert_eq!(snapped, 12);
+    }
+
+    #[test]
+    fn snap_frame_excludes_given_clip_ids() {
+        // La clip 1 sarebbe un aggancio valido, ma è esclusa (è la clip
+        // stessa che si sta trascinando, o la sua gemella collegata).
+        let visuals = vec![visual(0, 1, 0, 10)];
+        let snapped = snap_frame(12, 20, &visuals, &[ClipId(1)], 5.0, true);
+        assert_eq!(snapped, 12);
+    }
+
     /// Esegue `show_timeline` per davvero dentro un `egui::Context`
     /// headless, con clip vere su più track: intercetta panic/bug nel
     /// codice di disegno (indici, borrow) che i test puramente logici
@@ -1170,6 +1300,7 @@ mod tests {
                     timeline_id,
                     &|_id| "media".to_string(),
                     &mut state,
+                    true,
                 );
             });
         });
@@ -1239,6 +1370,7 @@ mod tests {
                             timeline_id,
                             &|_id| "media".to_string(),
                             &mut state,
+                            true,
                         );
                     });
                 last_height = panel_resp.response.rect.height();

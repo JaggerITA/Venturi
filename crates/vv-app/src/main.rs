@@ -118,6 +118,13 @@ struct VibeVideoApp {
     /// c'è nulla di selezionato": in quel caso il pannello resta visibile
     /// ma mostra informazioni sulla timeline invece che su una clip.
     properties_panel_open: bool,
+
+    /// Calamita (toggle nella barra sotto il player): attiva di default,
+    /// come nella maggior parte degli NLE. Quando attiva, trascinare una
+    /// clip sulla timeline (o piazzarne una nuova dal media pool) scatta
+    /// sui bordi delle clip vicine entro una piccola soglia in pixel — vedi
+    /// `timeline_ui::snap_frame`.
+    snapping_enabled: bool,
 }
 
 impl Default for VibeVideoApp {
@@ -139,6 +146,7 @@ impl Default for VibeVideoApp {
             browsing_media: None,
             selection_follows_playhead: true,
             properties_panel_open: true,
+            snapping_enabled: true,
         }
     }
 }
@@ -1561,6 +1569,7 @@ impl eframe::App for VibeVideoApp {
                         timeline_id,
                         &|id| labels.get(&id).cloned().unwrap_or_default(),
                         &mut self.timeline_state,
+                        self.snapping_enabled,
                     );
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();
@@ -1578,6 +1587,22 @@ impl eframe::App for VibeVideoApp {
         if let Some((media_id, start)) = media_drop {
             self.add_media_to_timeline_at(media_id, start);
         }
+
+        // Barra di toggle sotto il player (sopra la timeline: un
+        // `Panel::bottom` mostrato *dopo* quello della timeline reclama
+        // spazio dal bordo inferiore di quel che resta, cioè appena sopra
+        // di essa). Per ora solo la calamita dello snapping; altri toggle
+        // (es. in futuro "ripple" globale on/off) troverebbero posto qui.
+        egui::Panel::bottom("view_toggles")
+            .default_size(28.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.toggle_value(&mut self.snapping_enabled, "🧲")
+                        .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
+                });
+            });
+
         // L'utente ha trascinato/cliccato il playhead in questo frame?
         // Serve per forzare un seek anche se si sta riproducendo (bug:
         // "durante il playback lo scrub veniva ignorato") — a differenza
