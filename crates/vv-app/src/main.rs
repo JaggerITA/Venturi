@@ -36,11 +36,6 @@ const VIDEO_TRACK: usize = 0;
 /// se c'è).
 type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
 
-enum PoolAction {
-    Preview(MediaId),
-    AddToTimeline(MediaId),
-}
-
 /// Snapshot dei campi della clip selezionata che servono al pannello
 /// proprietà, valutati al `source_frame` corrente. Una struct invece di
 /// una tupla perché i campi hanno continuato a crescere con ogni nuova
@@ -153,15 +148,7 @@ impl VibeVideoApp {
         match vv_media::probe(&path) {
             Ok(meta) => {
                 self.import_error = None;
-                if self.timeline_id.is_none() {
-                    let id = self.project.timelines.insert(vv_core::Timeline {
-                        name: "Timeline 1".into(),
-                        fps: meta.fps,
-                        resolution: (meta.width, meta.height),
-                        tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
-                    });
-                    self.timeline_id = Some(id);
-                }
+                self.ensure_timeline_for(&meta);
                 let media_id = self.project.media_pool.insert(vv_core::MediaItem {
                     path: path.clone(),
                     meta,
@@ -473,6 +460,25 @@ impl VibeVideoApp {
         id
     }
 
+    /// Come `ensure_timeline`, ma se la timeline va creata al volo (import,
+    /// o trascinamento di un media dal media pool sull'area timeline)
+    /// eredita framerate e risoluzione da `meta` invece dei default fissi
+    /// di `ensure_timeline` (che non ha un media da cui derivarli, es. per
+    /// Solid Color).
+    fn ensure_timeline_for(&mut self, meta: &vv_core::MediaMeta) -> TimelineId {
+        if let Some(id) = self.timeline_id {
+            return id;
+        }
+        let id = self.project.timelines.insert(vv_core::Timeline {
+            name: "Timeline 1".into(),
+            fps: meta.fps,
+            resolution: (meta.width, meta.height),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        self.timeline_id = Some(id);
+        id
+    }
+
     /// Crea una clip generatore SolidColor da 5s e la accoda in fondo alla
     /// track video 0. Il colore iniziale è grigio medio, modificabile
     /// subito dal pannello proprietà una volta selezionata.
@@ -556,13 +562,14 @@ impl VibeVideoApp {
     }
 
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
-        let Some(timeline_id) = self.timeline_id else {
-            return;
-        };
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
         let meta = item.meta.clone();
+        // Se non esiste ancora una timeline (es. primo drag&drop dal media
+        // pool), viene creata al volo ereditando fps/risoluzione da questo
+        // media.
+        let timeline_id = self.ensure_timeline_for(&meta);
 
         let video_start = track_end(&self.project, timeline_id, 0);
         let video_clip_id = self.project.alloc_clip_id();
@@ -1065,7 +1072,7 @@ impl eframe::App for VibeVideoApp {
             })
             .unwrap_or(0);
 
-        let mut pool_action = None;
+        let mut preview_action = None;
         let mut pending_effect = None;
         egui::Panel::left("media_pool")
             .default_size(260.0)
@@ -1090,24 +1097,33 @@ impl eframe::App for VibeVideoApp {
                             .map(|(id, item)| (id, file_label(&item.path), item.meta.clone()))
                             .collect();
                         for (id, label, meta) in items {
-                            ui.group(|ui| {
-                                ui.label(&label);
-                                ui.small(format!(
-                                    "{}x{} · {:.2}fps · {}",
-                                    meta.width,
-                                    meta.height,
-                                    meta.fps.as_f64(),
-                                    if meta.has_audio { "audio" } else { "muto" }
-                                ));
-                                ui.horizontal(|ui| {
-                                    if ui.button("Anteprima").clicked() {
-                                        pool_action = Some(PoolAction::Preview(id));
-                                    }
-                                    if ui.button("Aggiungi").clicked() {
-                                        pool_action = Some(PoolAction::AddToTimeline(id));
-                                    }
-                                });
-                            });
+                            let group_resp = ui
+                                .group(|ui| {
+                                    ui.label(&label);
+                                    ui.small(format!(
+                                        "{}x{} · {:.2}fps · {}",
+                                        meta.width,
+                                        meta.height,
+                                        meta.fps.as_f64(),
+                                        if meta.has_audio { "audio" } else { "muto" }
+                                    ));
+                                })
+                                .response;
+                            // Doppio click: anteprima nel player (sostituisce
+                            // il vecchio pulsante "Anteprima"). Trascinamento:
+                            // droppato sulla timeline aggiunge il media
+                            // (sostituisce il vecchio pulsante "Aggiungi"),
+                            // vedi `dnd_release_payload` in show_timeline.
+                            let interact_id = ui.id().with("media_pool_item").with(id);
+                            let resp = ui
+                                .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
+                                .on_hover_text(
+                                    "Doppio click: anteprima · trascina sulla timeline per aggiungere",
+                                );
+                            resp.dnd_set_drag_payload(id);
+                            if resp.double_clicked() {
+                                preview_action = Some(id);
+                            }
                         }
                     });
             });
@@ -1438,19 +1454,14 @@ impl eframe::App for VibeVideoApp {
                 });
         }
 
-        if let Some(action) = pool_action {
-            match action {
-                PoolAction::Preview(id) => {
-                    self.preview_media(id);
-                    // Anteprima "grezza" del media pool: non è (ancora)
-                    // detto che sia sulla timeline, quindi non ha un
-                    // transform/gain di clip da applicare, e il playhead
-                    // non deve strapparcela via al frame successivo.
-                    self.active_clip = None;
-                    self.browsing_media = Some(id);
-                }
-                PoolAction::AddToTimeline(id) => self.add_media_to_timeline(id),
-            }
+        if let Some(id) = preview_action {
+            self.preview_media(id);
+            // Anteprima "grezza" del media pool: non è (ancora) detto che
+            // sia sulla timeline, quindi non ha un transform/gain di clip
+            // da applicare, e il playhead non deve strapparcela via al
+            // frame successivo.
+            self.active_clip = None;
+            self.browsing_media = Some(id);
         }
         if let (Some(timeline_id), Some(change)) = (self.timeline_id, pending_effect) {
             let cmd = build_effect_command(timeline_id, change);
@@ -1460,10 +1471,23 @@ impl eframe::App for VibeVideoApp {
 
         let selected_before_timeline_ui = self.timeline_state.selected.clone();
         let playhead_before_timeline_ui = self.timeline_state.playhead;
+        let mut dropped_media: Option<MediaId> = None;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
             .resizable(true)
             .show(ui, |ui| {
+                // Drop zone per il trascinamento dal media pool: copre tutto
+                // il pannello timeline, sotto al contenuto, per intercettare
+                // il rilascio ovunque nell'area (non solo sulle track). Se
+                // non esiste ancora una timeline, `add_media_to_timeline` ne
+                // crea una al volo con fps/risoluzione del media droppato.
+                let drop_rect = ui.available_rect_before_wrap();
+                let drop_id = ui.id().with("timeline_drop_zone");
+                let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
+                dropped_media = drop_resp
+                    .dnd_release_payload::<MediaId>()
+                    .map(|arc| *arc);
+
                 if let Some(timeline_id) = self.timeline_id {
                     let labels: HashMap<MediaId, String> = self
                         .project
@@ -1480,9 +1504,12 @@ impl eframe::App for VibeVideoApp {
                         &mut self.timeline_state,
                     );
                 } else {
-                    ui.label("Importa un media per creare la timeline.");
+                    ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
                 }
             });
+        if let Some(media_id) = dropped_media {
+            self.add_media_to_timeline(media_id);
+        }
         // L'utente ha trascinato/cliccato il playhead in questo frame?
         // Serve per forzare un seek anche se si sta riproducendo (bug:
         // "durante il playback lo scrub veniva ignorato") — a differenza
