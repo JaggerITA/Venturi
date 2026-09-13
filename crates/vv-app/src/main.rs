@@ -47,6 +47,14 @@ struct GapPlayback {
     start_frame: FrameIdx,
     next_clip_id: ClipId,
     next_clip_start: FrameIdx,
+    /// Player della prossima clip già aperto e posizionato al suo
+    /// `source_in`, ma non ancora in play: dà al decode-ahead tutto il
+    /// tempo residuo del vuoto per popolare la cache dei frame, invece di
+    /// partire da zero solo al cambio di controllo (bug: "il primo
+    /// secondo di video resta nero, l'audio invece parte subito"). `None`
+    /// per un generatore SolidColor o se l'apertura è fallita — in quel
+    /// caso il cambio di controllo ricade su `load_video_clip`.
+    preloaded_player: Option<Player>,
 }
 
 /// Snapshot dei campi della clip selezionata che servono al pannello
@@ -756,10 +764,22 @@ impl VibeVideoApp {
             self.timeline_state.playhead = frame;
             if frame >= gap.next_clip_start {
                 let next_clip_id = gap.next_clip_id;
-                self.gap_playback = None;
-                self.load_video_clip(next_clip_id);
-                if let Some(player) = &mut self.preview_player {
-                    player.play();
+                let preloaded_player = self.gap_playback.take().and_then(|g| g.preloaded_player);
+                match preloaded_player {
+                    // Già aperto e posizionato durante il vuoto (vedi
+                    // `begin_gap_playback`): il decode-ahead ha già avuto
+                    // tempo di popolare la cache, niente hitch.
+                    Some(mut player) => {
+                        player.play();
+                        self.active_clip = Some((VIDEO_TRACK, next_clip_id));
+                        self.preview_player = Some(player);
+                    }
+                    None => {
+                        self.load_video_clip(next_clip_id);
+                        if let Some(player) = &mut self.preview_player {
+                            player.play();
+                        }
+                    }
                 }
             }
             return;
@@ -810,7 +830,9 @@ impl VibeVideoApp {
 
     /// Azzera la clip/player attivi (siamo in un vuoto: schermo nero, vedi
     /// il rendering nel viewer) e avvia l'orologio a parete di
-    /// `gap_playback` verso `next_clip_id`/`next_clip_start`.
+    /// `gap_playback` verso `next_clip_id`/`next_clip_start`, aprendo già
+    /// da subito (in background, senza suonare) il player di quella clip
+    /// — vedi doc di `GapPlayback::preloaded_player`.
     fn begin_gap_playback(
         &mut self,
         from_frame: FrameIdx,
@@ -821,12 +843,47 @@ impl VibeVideoApp {
         self.preview_player = None;
         self.frame_texture = None;
         self.timeline_state.playhead = from_frame;
+        let preloaded_player = self.preload_player_for_clip(next_clip_id);
         self.gap_playback = Some(GapPlayback {
             started_at: Instant::now(),
             start_frame: from_frame,
             next_clip_id,
             next_clip_start,
+            preloaded_player,
         });
+    }
+
+    /// Apre in anticipo (senza avviare la riproduzione) il player della
+    /// clip video `clip_id`, posizionato già al suo `source_in`: dà al
+    /// decode-ahead tutto il tempo residuo del vuoto per popolare la
+    /// cache dei frame prima del cambio di controllo a fine
+    /// `gap_playback`, invece di partire da zero solo in quel momento
+    /// (bug: audio già in RAM che parte subito, ma un secondo circa di
+    /// schermo nero finché il decoder video si scalda). `None` per un
+    /// generatore SolidColor (nessun player) o se l'apertura fallisce —
+    /// in quel caso il cambio di controllo ricade su `load_video_clip`.
+    fn preload_player_for_clip(&mut self, clip_id: ClipId) -> Option<Player> {
+        let timeline_id = self.timeline_id?;
+        let clip = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)?
+            .clone();
+        let vv_core::ClipSource::Media(media_id) = clip.source else {
+            return None;
+        };
+        let item = self.project.media_pool.get(media_id)?;
+        let path = item.path.clone();
+        let meta = item.meta.clone();
+        let duration_secs = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
+        let cached_audio = self.audio_cache.get(&path).cloned();
+        let (mut player, audio_buffer) = Player::open(&path, duration_secs, cached_audio).ok()?;
+        if let Some(buffer) = audio_buffer {
+            self.audio_cache.insert(path, buffer);
+        }
+        player.set_gain_db(clip.effects.gain_db.default);
+        player.seek_to_frame(clip.source_in);
+        Some(player)
     }
 
     /// Continua la riproduzione oltre la fine (nello spazio timeline) della
@@ -1161,13 +1218,224 @@ impl VibeVideoApp {
         self.timeline_state.clipboard = collected.into_iter().map(|(_, _, e)| e).collect();
     }
 
+    /// `(timeline_start, timeline_end, source_in)` di una clip, se esiste.
+    fn clip_bounds(
+        &self,
+        timeline_id: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+    ) -> Option<(FrameIdx, FrameIdx, FrameIdx)> {
+        let clip = self.project.timelines[timeline_id]
+            .tracks
+            .get(track_index)?
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)?;
+        Some((clip.timeline_start, clip.timeline_end(), clip.source_in))
+    }
+
+    /// Applica la modifica necessaria a *una* clip esistente che si
+    /// sovrappone a `[new_start, new_end)`: rimossa se completamente
+    /// coperta, accorciata da un bordo se sporge solo da un lato, divisa
+    /// in due se il nuovo intervallo cade nel suo mezzo (il pezzo
+    /// centrale, quello coperto, sparisce — comportamento "overwrite" di
+    /// un vero NLE). `old_start`/`old_end`/`source_in` sono lo stato
+    /// *attuale* della clip (letto dal chiamante prima di accodare
+    /// comandi, mai da uno stato immaginato). Ritorna `Some((id_sinistra,
+    /// id_destra))` solo nel caso di uno split, per permettere al
+    /// chiamante di ricollegare le due metà alla gemella coinvolta dalla
+    /// stessa operazione (vedi `make_room_for_ranges`). I comandi vengono
+    /// accodati a `commands`, non eseguiti subito.
+    fn resolve_overlap(
+        &mut self,
+        timeline_id: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        old_start: FrameIdx,
+        old_end: FrameIdx,
+        source_in: FrameIdx,
+        new_start: FrameIdx,
+        new_end: FrameIdx,
+        commands: &mut Vec<Box<dyn vv_core::Command>>,
+    ) -> Option<(ClipId, ClipId)> {
+        if old_start >= new_start && old_end <= new_end {
+            commands.push(Box::new(vv_core::LiftDelete::new(
+                timeline_id,
+                track_index,
+                clip_id,
+            )));
+            None
+        } else if old_start < new_start && old_end > new_end {
+            // Il nuovo intervallo cade nel mezzo: divide la clip in due,
+            // poi accorcia la metà destra dal suo bordo sinistro fino a
+            // `new_end` (la stessa formula usata sotto per `TrimStart`,
+            // applicata alla clip *originale*: vedi nota lì).
+            let right_id = self.project.alloc_clip_id();
+            commands.push(Box::new(
+                vv_core::SplitClip::new(timeline_id, track_index, clip_id, new_start)
+                    .with_new_clip_id(right_id),
+            ));
+            commands.push(Box::new(vv_core::TrimClip::new(
+                timeline_id,
+                track_index,
+                right_id,
+                vv_core::TrimEdge::Start,
+                source_in + (new_end - old_start),
+            )));
+            Some((clip_id, right_id))
+        } else if old_start < new_start {
+            // La coda sporge oltre `new_start`: accorcia il bordo destro
+            // (fine) fin lì. `TrimClip::new_value` per il bordo `End` è un
+            // `source_out` assoluto, non un frame di timeline — da qui la
+            // conversione via `source_in` (il bordo `Start`, invariato,
+            // resta il riferimento comune tra spazio timeline e sorgente).
+            commands.push(Box::new(vv_core::TrimClip::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                vv_core::TrimEdge::End,
+                source_in + (new_start - old_start),
+            )));
+            None
+        } else {
+            // La testa sporge prima di `new_end`: accorcia il bordo
+            // sinistro (inizio) fin lì (stessa conversione di cui sopra).
+            commands.push(Box::new(vv_core::TrimClip::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                vv_core::TrimEdge::Start,
+                source_in + (new_end - old_start),
+            )));
+            None
+        }
+    }
+
+    /// Libera `[start, end)` di ciascuna `(track_index, start, end)` in
+    /// `ranges`, per far posto a nuove clip che stanno per essere inserite
+    /// lì (paste): le clip già presenti che si sovrappongono vengono
+    /// accorciate, divise o rimosse — mai lasciate sovrapposte con la
+    /// nuova clip sopra (bug segnalato: "il player continua a riprodurre
+    /// la clip sottostante" invece di quella appena incollata, anche se
+    /// coperta visivamente).
+    ///
+    /// Dividere una clip la scollega temporaneamente dalla sua gemella
+    /// (comportamento di `SplitClip`): se la gemella è *anche lei* tra le
+    /// track coinvolte in `ranges` (il caso comune: si incolla sempre la
+    /// coppia video+audio insieme, vedi `copy_selected_clips`), viene
+    /// divisa a sua volta con lo stesso taglio e le nuove metà vengono
+    /// ricollegate subito dopo — stesso principio di
+    /// `split_all_at_playhead`. Se la gemella non è tra `ranges` (si sta
+    /// incollando solo un lato) resta scollegata: limite noto, accettabile
+    /// perché non incide sulla riproduzione.
+    ///
+    /// I comandi vengono accodati a `commands`, non eseguiti subito: il
+    /// chiamante li unisce in un'unica `CompositeCommand` insieme
+    /// all'inserimento vero e proprio, per un solo passo di undo.
+    fn make_room_for_ranges(
+        &mut self,
+        timeline_id: TimelineId,
+        ranges: &[(usize, FrameIdx, FrameIdx)],
+        commands: &mut Vec<Box<dyn vv_core::Command>>,
+    ) {
+        let mut processed: BTreeSet<(usize, ClipId)> = BTreeSet::new();
+        let range_tracks: BTreeSet<usize> = ranges.iter().map(|(t, _, _)| *t).collect();
+
+        for &(track_index, new_start, new_end) in ranges {
+            if new_start >= new_end {
+                continue;
+            }
+            let overlapping: Vec<(ClipId, FrameIdx, FrameIdx, FrameIdx, Option<ClipId>)> =
+                self.project.timelines[timeline_id]
+                    .tracks
+                    .get(track_index)
+                    .map(|t| {
+                        t.clips
+                            .iter()
+                            .filter(|c| c.timeline_start < new_end && c.timeline_end() > new_start)
+                            .map(|c| {
+                                (
+                                    c.id,
+                                    c.timeline_start,
+                                    c.timeline_end(),
+                                    c.source_in,
+                                    c.linked,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+            for (clip_id, old_start, old_end, source_in, linked) in overlapping {
+                if !processed.insert((track_index, clip_id)) {
+                    continue;
+                }
+                let split_halves = self.resolve_overlap(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                    old_start,
+                    old_end,
+                    source_in,
+                    new_start,
+                    new_end,
+                    commands,
+                );
+
+                let Some(partner_id) = linked else { continue };
+                let Some((partner_track, _)) =
+                    self.linked_partner(timeline_id, track_index, clip_id)
+                else {
+                    continue;
+                };
+                if !range_tracks.contains(&partner_track)
+                    || !processed.insert((partner_track, partner_id))
+                {
+                    continue;
+                }
+                let Some((p_start, p_end, p_source_in)) =
+                    self.clip_bounds(timeline_id, partner_track, partner_id)
+                else {
+                    continue;
+                };
+                let partner_split = self.resolve_overlap(
+                    timeline_id,
+                    partner_track,
+                    partner_id,
+                    p_start,
+                    p_end,
+                    p_source_in,
+                    new_start,
+                    new_end,
+                    commands,
+                );
+
+                if let (Some((left, right)), Some((partner_left, partner_right))) =
+                    (split_halves, partner_split)
+                {
+                    commands.push(Box::new(vv_core::LinkClips::new(
+                        timeline_id,
+                        (track_index, left),
+                        (partner_track, partner_left),
+                    )));
+                    commands.push(Box::new(vv_core::LinkClips::new(
+                        timeline_id,
+                        (track_index, right),
+                        (partner_track, partner_right),
+                    )));
+                }
+            }
+        }
+    }
+
     /// Incolla `timeline_state.clipboard` (Ctrl+C/Ctrl+V) alla posizione
     /// del playhead, preservando la disposizione relativa se erano state
     /// copiate più clip insieme, e ricollegando tra loro le coppie
-    /// collegate copiate insieme. Nessuna prevenzione di sovrapposizione
-    /// (stesso comportamento del drag&drop dal media pool): il chiamante
-    /// (l'utente) può sempre spostare/annullare col comando dedicato.
-    /// No-op se non c'è ancora nulla in clipboard o nessuna timeline.
+    /// collegate copiate insieme. Le clip incollate "vincono" per intero
+    /// il tratto che occupano: quel che già c'era lì viene accorciato,
+    /// diviso o rimosso da `make_room_for_ranges` invece di restare
+    /// sovrapposto sotto (bug segnalato). No-op se non c'è ancora nulla in
+    /// clipboard o nessuna timeline.
     fn paste_clipboard_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1187,6 +1455,19 @@ impl VibeVideoApp {
             .collect();
 
         let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+
+        let ranges: Vec<(usize, FrameIdx, FrameIdx)> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.track_index,
+                    playhead + entry.relative_start,
+                    playhead + entry.relative_start + (entry.source_out - entry.source_in),
+                )
+            })
+            .collect();
+        self.make_room_for_ranges(timeline_id, &ranges, &mut commands);
+
         let mut new_selection = BTreeSet::new();
         for (i, entry) in entries.iter().enumerate() {
             let clip = vv_core::Clip {
@@ -3311,6 +3592,7 @@ mod tests {
             start_frame: 0,
             next_clip_id: clip_b,
             next_clip_start: 100,
+            preloaded_player: None,
         });
 
         app.drive_playback();
@@ -3343,6 +3625,7 @@ mod tests {
             start_frame: 0,
             next_clip_id: clip_b,
             next_clip_start: 5,
+            preloaded_player: None,
         });
 
         app.drive_playback();
@@ -3369,6 +3652,7 @@ mod tests {
             start_frame: 10,
             next_clip_id: clip_b,
             next_clip_start: 15,
+            preloaded_player: None,
         });
 
         app.toggle_playback();
@@ -3606,6 +3890,10 @@ mod tests {
         app.copy_selected_clips();
         assert_eq!(app.timeline_state.clipboard.len(), 2);
 
+        // Playhead spostato oltre gli originali: qui si vuole verificare
+        // solo il ricollegamento, non l'"overwrite" di `make_room_for_ranges`
+        // (che ha un test dedicato più sotto).
+        app.timeline_state.playhead = 100;
         app.paste_clipboard_at_playhead();
 
         let tl = &app.project.timelines[timeline_id];
@@ -3652,6 +3940,275 @@ mod tests {
         app.paste_clipboard_at_playhead();
 
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
+    }
+
+    /// Bug segnalato: incollare una clip sopra un'altra la copriva solo
+    /// visivamente, ma il player continuava a riprodurre quella
+    /// sottostante. Se il nuovo intervallo copre *interamente* una clip
+    /// esistente, quella va rimossa del tutto (`make_room_for_ranges`).
+    #[test]
+    fn paste_over_an_existing_clip_it_fully_covers_deletes_the_underlying_clip() {
+        let mut app = VibeVideoApp::default();
+        let existing = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
+        let source = make_timeline_with_clip(&mut app, 0, 50, 10); // da copiare, stessa lunghezza
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, source)]);
+        app.copy_selected_clips();
+        app.timeline_state.playhead = 0;
+        app.paste_clipboard_at_playhead(); // nuovo range [0,10), copre "existing" per intero
+
+        let tl = &app.project.timelines[timeline_id];
+        assert!(
+            tl.tracks[0].clips.iter().all(|c| c.id != existing),
+            "la clip completamente coperta doveva essere rimossa"
+        );
+        // "source" originale (a 50) + la nuova clip incollata (a 0).
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+    }
+
+    /// La coda di una clip esistente sporge oltre l'inizio della nuova
+    /// clip incollata: va accorciata lì (bordo destro), non rimossa né
+    /// lasciata sovrapposta.
+    #[test]
+    fn paste_overlapping_the_tail_of_an_existing_clip_trims_its_end() {
+        let mut app = VibeVideoApp::default();
+        let existing = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
+        let source = make_timeline_with_clip(&mut app, 0, 50, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, source)]);
+        app.copy_selected_clips();
+        app.timeline_state.playhead = 5;
+        app.paste_clipboard_at_playhead(); // nuovo range [5,15)
+
+        let tl = &app.project.timelines[timeline_id];
+        let trimmed = tl.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == existing)
+            .expect("doveva restare, solo accorciata");
+        assert_eq!(trimmed.timeline_start, 0);
+        assert_eq!(trimmed.timeline_end(), 5);
+    }
+
+    /// La testa di una clip esistente sporge prima della fine della nuova
+    /// clip incollata: va accorciata lì (bordo sinistro).
+    #[test]
+    fn paste_overlapping_the_head_of_an_existing_clip_trims_its_start() {
+        let mut app = VibeVideoApp::default();
+        let existing = make_timeline_with_clip(&mut app, 0, 10, 10); // [10,20)
+        let source = make_timeline_with_clip(&mut app, 0, 50, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, source)]);
+        app.copy_selected_clips();
+        app.timeline_state.playhead = 5;
+        app.paste_clipboard_at_playhead(); // nuovo range [5,15)
+
+        let tl = &app.project.timelines[timeline_id];
+        let trimmed = tl.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == existing)
+            .expect("doveva restare, solo accorciata");
+        assert_eq!(trimmed.timeline_start, 15);
+        assert_eq!(trimmed.timeline_end(), 20);
+    }
+
+    /// La nuova clip incollata cade interamente nel mezzo di una clip
+    /// esistente più lunga: quella va divisa in due, con il pezzo centrale
+    /// (coperto) che sparisce.
+    #[test]
+    fn paste_inside_an_existing_clip_splits_it_in_two() {
+        let mut app = VibeVideoApp::default();
+        let existing = make_timeline_with_clip(&mut app, 0, 0, 20); // [0,20)
+        let source = make_timeline_with_clip(&mut app, 0, 50, 5);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, source)]);
+        app.copy_selected_clips();
+        app.timeline_state.playhead = 8;
+        app.paste_clipboard_at_playhead(); // nuovo range [8,13)
+
+        // Oltre a "existing" (destinata a dividersi) e alla clip appena
+        // incollata (a 8), resta in giro anche "source" (a 50, mai
+        // toccata: è il sorgente della copia, non sovrapposto a nulla).
+        // I due pezzi attesi sono esattamente a 0 e 13.
+        let tl = &app.project.timelines[timeline_id];
+        let mut halves: Vec<_> = tl.tracks[0]
+            .clips
+            .iter()
+            .filter(|c| c.timeline_start == 0 || c.timeline_start == 13)
+            .collect();
+        halves.sort_by_key(|c| c.timeline_start);
+        assert_eq!(halves.len(), 2, "la clip originale doveva dividersi in due");
+        assert_eq!(
+            halves[0].id, existing,
+            "la metà sinistra mantiene l'id originale (comportamento di SplitClip)"
+        );
+        assert_eq!(halves[0].timeline_end(), 8);
+        assert_eq!(halves[1].timeline_start, 13);
+        assert_eq!(halves[1].timeline_end(), 20);
+    }
+
+    /// Se lo split coinvolge una coppia collegata (paste della coppia
+    /// video+audio copiata insieme, che quindi taglia entrambe le track
+    /// nello stesso punto), le due metà nuove devono restare collegate
+    /// *tra loro*, non alla vecchia gemella (persa nello split).
+    #[test]
+    fn paste_splitting_a_linked_pair_relinks_the_new_halves_to_each_other() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 20); // [0,20)
+        let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20); // [0,20)
+        let timeline_id = app.timeline_id.unwrap();
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (0, video_id),
+                (1, audio_id),
+            )),
+        );
+
+        let src_video = make_timeline_with_clip(&mut app, 0, 100, 5);
+        let src_audio = make_timeline_with_clip(&mut app, 1, 100, 5);
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (0, src_video),
+                (1, src_audio),
+            )),
+        );
+        app.timeline_state.selected = BTreeSet::from([(0, src_video)]);
+        app.copy_selected_clips();
+        assert_eq!(app.timeline_state.clipboard.len(), 2);
+
+        app.timeline_state.playhead = 8;
+        app.paste_clipboard_at_playhead(); // nuovo range [8,13) su entrambe le track
+
+        // Oltre alle due metà (a 0 e 13), restano in giro anche
+        // "src_video"/"src_audio" (a 100, mai toccate: sono il sorgente
+        // della copia).
+        let tl = &app.project.timelines[timeline_id];
+        let mut video_halves: Vec<_> = tl.tracks[0]
+            .clips
+            .iter()
+            .filter(|c| c.timeline_start == 0 || c.timeline_start == 13)
+            .collect();
+        video_halves.sort_by_key(|c| c.timeline_start);
+        let mut audio_halves: Vec<_> = tl.tracks[1]
+            .clips
+            .iter()
+            .filter(|c| c.timeline_start == 0 || c.timeline_start == 13)
+            .collect();
+        audio_halves.sort_by_key(|c| c.timeline_start);
+
+        assert_eq!(video_halves.len(), 2);
+        assert_eq!(audio_halves.len(), 2);
+        assert_eq!(video_halves[0].linked, Some(audio_halves[0].id));
+        assert_eq!(audio_halves[0].linked, Some(video_halves[0].id));
+        assert_eq!(video_halves[1].linked, Some(audio_halves[1].id));
+        assert_eq!(audio_halves[1].linked, Some(video_halves[1].id));
+    }
+
+    /// Bug segnalato: dopo un vuoto, l'audio della clip successiva parte
+    /// subito ma il video resta nero per circa un secondo. Verifica il
+    /// pezzo base: `preload_player_for_clip` apre davvero un player per
+    /// una clip Media, non per un generatore SolidColor (nessun player
+    /// possibile).
+    #[test]
+    fn preload_player_for_clip_opens_a_player_only_for_media_clips() {
+        let dir = std::env::temp_dir().join("vv-app-preload-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+        let media_clip_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].id;
+
+        assert!(
+            app.preload_player_for_clip(media_clip_id).is_some(),
+            "doveva aprire un player per la clip video"
+        );
+
+        let solid_id = make_timeline_with_clip(&mut app, VIDEO_TRACK, 1000, 10);
+        assert!(app.preload_player_for_clip(solid_id).is_none());
+    }
+
+    /// Se `gap_playback` ha già un player precaricato (vedi
+    /// `begin_gap_playback`), il cambio di controllo a fine vuoto lo usa
+    /// direttamente invece di riaprirne uno da zero — verifica che parta
+    /// a suonare e che `active_clip`/`preview_player` risultino coerenti.
+    #[test]
+    fn drive_playback_hands_off_using_the_preloaded_player_when_available() {
+        let dir = std::env::temp_dir().join("vv-app-preload-handoff-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+        let _ = timeline_id;
+        let media_clip_id =
+            app.project.timelines[app.timeline_id.unwrap()].tracks[VIDEO_TRACK].clips[0].id;
+
+        let preloaded = app.preload_player_for_clip(media_clip_id);
+        assert!(preloaded.is_some());
+        app.gap_playback = Some(GapPlayback {
+            started_at: Instant::now() - std::time::Duration::from_secs(10),
+            start_frame: 0,
+            next_clip_id: media_clip_id,
+            next_clip_start: 0,
+            preloaded_player: preloaded,
+        });
+
+        app.drive_playback();
+
+        assert!(app.gap_playback.is_none());
+        assert_eq!(app.active_clip, Some((VIDEO_TRACK, media_clip_id)));
+        assert!(
+            app.preview_player.as_ref().is_some_and(Player::is_playing),
+            "il player precaricato doveva partire a suonare"
+        );
     }
 
     #[test]
