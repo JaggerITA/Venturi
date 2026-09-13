@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod cache;
 pub mod decode;
+pub mod encode;
 pub mod playback;
 pub mod probe;
 pub mod proxy;
@@ -15,6 +16,7 @@ pub mod waveform;
 pub use audio::{AudioBuffer, decode_audio_track};
 pub use cache::FrameCache;
 pub use decode::{Decoder, FrameRgba, decode_first_frame};
+pub use encode::Encoder;
 pub use playback::DecodeAhead;
 pub use probe::probe;
 

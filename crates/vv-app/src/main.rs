@@ -15,12 +15,15 @@
 //! con questo path: passare la texture GPU direttamente a egui (zero-copy)
 //! è un'ottimizzazione futura, vedi doc di `vv_render::Compositor`.
 
+mod export;
 mod player;
 mod timeline_ui;
 
 use player::Player;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 /// Unica track video supportata per ora dalla riproduzione timeline-aware
@@ -125,6 +128,20 @@ struct VibeVideoApp {
     /// sui bordi delle clip vicine entro una piccola soglia in pixel — vedi
     /// `timeline_ui::snap_frame`.
     snapping_enabled: bool,
+
+    /// Export in corso (milestone 9), se c'è: `None` quando nessun export
+    /// è attivo. Il thread lavora su uno snapshot di `Project` clonato al
+    /// click di "Esporta", non sul progetto live — vedi `export.rs`.
+    export: Option<ExportUiState>,
+}
+
+/// Stato UI di un export in corso: progresso/cancellazione condivisi col
+/// thread che sta effettivamente esportando (`export::export_timeline`),
+/// più l'handle per recuperarne l'esito a fine corsa.
+struct ExportUiState {
+    progress: std::sync::Arc<Mutex<export::ExportProgress>>,
+    cancel: std::sync::Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<Result<(), String>>,
 }
 
 impl Default for VibeVideoApp {
@@ -147,6 +164,7 @@ impl Default for VibeVideoApp {
             selection_follows_playhead: true,
             properties_panel_open: true,
             snapping_enabled: true,
+            export: None,
         }
     }
 }
@@ -176,6 +194,115 @@ impl VibeVideoApp {
             .pick_file()
         {
             self.import_media(path);
+        }
+    }
+
+    /// Apre il dialog di salvataggio e, se l'utente conferma, avvia
+    /// l'export su un thread dedicato: clona `self.project` (l'export
+    /// lavora su questo snapshot, non sul progetto live — continuare a
+    /// editare durante l'export non lo tocca) e gira
+    /// `export::export_timeline` in background, aggiornando `self.export`
+    /// con progresso/cancellazione condivisi (vedi il pannello di
+    /// progresso in `update`).
+    fn start_export(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let Some(output_path) = rfd::FileDialog::new()
+            .set_file_name("export.mp4")
+            .add_filter("mp4", &["mp4"])
+            .save_file()
+        else {
+            return;
+        };
+
+        let project = self.project.clone();
+        let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+
+        let thread_progress = progress.clone();
+        let thread_cancel = cancel.clone();
+        let handle = std::thread::spawn(move || {
+            let result = export::export_timeline(
+                &project,
+                timeline_id,
+                &output_path,
+                &thread_progress,
+                &thread_cancel,
+            );
+            // `export_timeline` aggiorna `progress.done` solo sul percorso
+            // di successo: qui si copre anche l'errore/l'annullamento, così
+            // la UI (che legge solo `progress`, non fa join per sapere se è
+            // finito) vede sempre uno stato coerente.
+            if let Err(e) = &result {
+                let mut p = thread_progress.lock().unwrap();
+                p.error = Some(e.clone());
+                p.done = true;
+            }
+            result
+        });
+
+        self.export = Some(ExportUiState {
+            progress,
+            cancel,
+            handle,
+        });
+    }
+
+    /// Piccola finestra di progresso mentre un export è in corso: barra
+    /// (letta da `ExportUiState::progress`, condiviso col thread di
+    /// export), "Annulla" finché non è finito, "Chiudi" quando lo è
+    /// (successo o errore, mostrato). No-op se nessun export è in corso.
+    fn show_export_progress(&mut self, ui: &mut egui::Ui) {
+        let Some(state) = &self.export else {
+            return;
+        };
+
+        let (current, total, done, error) = {
+            let p = state.progress.lock().unwrap();
+            (p.current_frame, p.total_frames, p.done, p.error.clone())
+        };
+
+        let mut should_close = false;
+        egui::Window::new("Export")
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                let fraction = if total > 0 {
+                    (current as f32 / total as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .text(format!("{current}/{total} frame"))
+                        .animate(!done),
+                );
+                if let Some(err) = &error {
+                    ui.colored_label(egui::Color32::RED, err);
+                } else if done {
+                    ui.label("Export completato.");
+                }
+                ui.horizontal(|ui| {
+                    if !done && ui.button("Annulla").clicked() {
+                        state.cancel.store(true, Ordering::Relaxed);
+                    }
+                    if done && ui.button("Chiudi").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        // Repaint continuo mentre è in corso, altrimenti la barra non
+        // avanzerebbe finché non arriva un altro input (stesso principio
+        // del repaint continuo durante il playback, più sotto in questo
+        // stesso metodo `update`).
+        if !done {
+            ui.ctx().request_repaint();
+        }
+
+        if should_close && let Some(state) = self.export.take() {
+            let _ = state.handle.join();
         }
     }
 
@@ -1192,8 +1319,20 @@ impl eframe::App for VibeVideoApp {
                     let pos = player.position_secs();
                     ui.label(format!("{pos:.2}s / {duration:.2}s"));
                 }
+
+                ui.separator();
+                let export_disabled = self.timeline_id.is_none() || self.export.is_some();
+                if ui
+                    .add_enabled(!export_disabled, egui::Button::new("Esporta..."))
+                    .on_hover_text("Esporta l'intera timeline in un file MP4 (H.264 + AAC)")
+                    .clicked()
+                {
+                    self.start_export();
+                }
             });
         });
+
+        self.show_export_progress(ui);
 
         // Frame a cui vengono lette/scritte le proprietà nel pannello:
         // sempre il playhead della timeline tradotto nello spazio frame

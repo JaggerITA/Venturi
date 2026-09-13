@@ -317,7 +317,7 @@ pub struct Timeline {
     pub tracks: Vec<Track>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Project {
     pub media_pool: SlotMap<MediaId, MediaItem>,
     pub timelines: SlotMap<TimelineId, Timeline>,

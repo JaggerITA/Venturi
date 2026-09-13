@@ -399,8 +399,51 @@ vibevideo/
    nella maggior parte degli NLE.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
-9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di
-   effetti e produce il file finale.
+9. ✅ **Export**: pipeline di encode via `ffmpeg-next` (H.264/libx264 +
+   AAC, MP4) che cammina l'intera timeline e applica lo stack effetti già
+   costruito nelle milestone precedenti (crop/zoom/gain keyframeati,
+   colore per le clip SolidColor), stessa identica valutazione già usata
+   dall'anteprima (`EffectStack::*.value_at`). Fatta *prima* della 7/8
+   (ancora stub) su scelta esplicita dell'utente: poter tirare fuori un
+   file finito era più urgente di speed change/proxy.
+
+   Nuovo `vv_media::Encoder` (in `vv-media/src/encode.rs`, simmetrico a
+   `Decoder`): incapsula encoder video H.264 + encoder audio AAC (opzionale)
+   + muxer MP4 dietro `write_video_frame`/`write_audio_samples`/`finish`,
+   riusando lo stesso `Scaler` della decodifica ma al contrario
+   (RGBA→YUV420P). Nuova pipeline di orchestrazione in
+   `vv-app/src/export.rs` (`export_timeline`): per ogni frame di output
+   risolve la clip attiva su ciascuna track (nuovo `active_clip_at`, stessa
+   forma di `clip_at` ma su `&Timeline` invece che su `&self`, per non
+   dipendere dall'app), decodifica/genera il frame sorgente (nuovo
+   `ActiveClipDecoder`, un `Decoder` tenuto aperto e fatto avanzare finché
+   resta la stessa clip, riaperto con un seek solo al cambio clip — non un
+   decoder nuovo ad ogni frame, troppo lento), applica il `Transform`
+   valutato al frame sorgente via un `Compositor::new_headless()` di
+   proprietà del solo thread di export (nessuna contesa col device della
+   UI). L'audio viene decodificato per intero per clip
+   (`decode_audio_track`, già esistente), tagliato al range
+   `[source_in, source_out)`, gainato a blocchi (~800 campioni,
+   `gain_db.value_at` per blocco, stessa granularità control-rate
+   dell'anteprima), ricampionato/rimixato (interpolazione lineare pura
+   Rust, non un resampler professionale: sufficiente per contenuto
+   parlato/musicale tipico di un progetto di editing) a un sample
+   rate/canali di progetto fissi (48kHz stereo) e sommato in un unico
+   buffer prima dell'encode.
+
+   Gira su un thread dedicato a partire da uno snapshot di `Project`
+   clonato al click di "Esporta" in toolbar (serviva `Clone` su `Project`,
+   unico tipo del modello a non averlo già): editare durante l'export non
+   lo tocca, e la UI resta reattiva. Barra di progresso + Annulla in una
+   finestra dedicata, che legge/scrive stato condiviso (`Mutex`/
+   `AtomicBool`) col thread.
+
+   **Limiti v1**, coerenti con lo stato attuale del progetto: tutta la
+   timeline, nessuna selezione in/out; una sola track video (0) e una sola
+   track audio (1), come tutto quel che la UI può costruire oggi
+   (`VIDEO_TRACK`); `EffectStack::speed` non applicato (nessun time-remap:
+   milestone 7 non ancora fatta, quindi l'export resta a 1x); text overlay
+   non applicabile (non implementato in nessuna parte dell'app).
 10. **Persistenza progetto** (RON) + undo/redo completo su tutte le
     operazioni sopra.
 
