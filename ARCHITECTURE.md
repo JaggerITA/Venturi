@@ -219,6 +219,36 @@ vibevideo/
    automatico si ferma se la prossima clip è un generatore SolidColor
    (nessun player fa da orologio per un riempimento piatto — vedi
    `drive_playback`).
+
+   **Fix post-milestone, round 3** (transizione tra clip non istantanea,
+   selezione collegata mancante, scrub ignorato in playback): il salto tra
+   clip che condividono lo stesso `MediaId` (es. due tagli dello stesso
+   import) riapriva sempre il `Player` da zero — chiudeva il decoder,
+   ne apriva un altro, ridecodificava tutto l'audio — causando un flash
+   nero percepibile di decine di millisecondi. `load_video_clip` ora
+   confronta il media della clip precedente e di quella nuova
+   (`can_reuse_player_for`, funzione pura testata a parte) e se coincidono
+   riusa lo stesso `Player` facendo solo un seek (e nemmeno quello se il
+   frame sorgente target coincide già con quello corrente, dato che pure
+   un seek sullo stesso player forza un flush/keyframe-seek in ffmpeg).
+   `preview_media` inoltre non azzera più `frame_texture` prima di aprire
+   il nuovo player: il viewer mostra l'ultimo frame valido finché non ne
+   arriva uno nuovo, invece di mostrare un riquadro vuoto. La selezione di
+   una clip video non evidenziava la traccia audio collegata pur
+   applicando le operazioni ad entrambe (`selected_linked_clip_id` in
+   `timeline_ui.rs`, usata per estendere l'evidenziazione della selezione
+   alla gemella `linked`); delete e ripple-delete ora agiscono sempre
+   anche sulla clip collegata (`linked_partner` + `CompositeCommand` /
+   `RippleDeleteAllTracks::with_also_remove`, che calcola lo shift una
+   sola volta per evitare il doppio spostamento che si otterrebbe
+   chiamando ripple-delete due volte in sequenza). Infine, lo scrub della
+   timeline durante la riproduzione veniva ignorato dal player attivo:
+   `ensure_active_clip_matches_playhead` accetta ora un parametro
+   `force_seek` che distingue uno spostamento del playhead causato
+   dall'utente (scrub/click sulla timeline, rilevato confrontando il
+   playhead prima/dopo `show_timeline()` nel frame corrente) da uno
+   causato da `drive_playback` stesso, e forza il seek del player solo
+   nel primo caso.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di

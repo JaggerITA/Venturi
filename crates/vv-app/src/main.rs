@@ -157,7 +157,10 @@ impl VibeVideoApp {
         let meta = item.meta.clone();
         let duration_secs = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
 
-        self.frame_texture = None;
+        // `frame_texture` non viene azzerata qui apposta: il viewer
+        // continua a mostrare l'ultimo frame finché il nuovo player non ne
+        // decodifica uno (sovrascrive la texture in-place), invece di un
+        // flash a vuoto durante il cambio media.
         self.preview_player = None;
         self.preview_error = None;
 
@@ -200,18 +203,47 @@ impl VibeVideoApp {
             return;
         };
 
+        // Se la clip precedente era sullo *stesso media*, non riaprire il
+        // player: `Player::open` rifà un decode completo della traccia
+        // audio e apre un nuovo decoder video, che sul taglio tra due
+        // pezzi della stessa sorgente (es. dopo un T) si vedeva come
+        // "il video sparisce e ricompare dopo qualche centinaio di ms".
+        // Basta un seek sul player già aperto — anzi, se il player è già
+        // esattamente al frame giusto (il caso comune: taglio netto, la
+        // riproduzione arriva già al punto di attacco), nemmeno quello:
+        // un seek è comunque un flush del decoder, evitabile del tutto.
+        let previous_media = self.active_clip.and_then(|(track_index, id)| {
+            self.project.timelines[timeline_id]
+                .tracks
+                .get(track_index)?
+                .clips
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| match c.source {
+                    vv_core::ClipSource::Media(m) => Some(m),
+                    vv_core::ClipSource::SolidColor => None,
+                })
+        });
+
         self.active_clip = Some((VIDEO_TRACK, clip_id));
 
         match clip.source {
             vv_core::ClipSource::Media(media_id) => {
-                self.preview_media(media_id);
+                let can_reuse =
+                    self.preview_player.is_some() && can_reuse_player_for(previous_media, media_id);
+                if !can_reuse {
+                    self.preview_media(media_id);
+                }
                 if let Some(player) = &self.preview_player {
                     player.set_gain_db(clip.effects.gain_db.default);
                 }
                 let local = (self.timeline_state.playhead - clip.timeline_start)
                     .clamp(0, clip.timeline_len().saturating_sub(1));
-                if let Some(player) = &mut self.preview_player {
-                    player.seek_to_frame(clip.source_in + local);
+                let target = clip.source_in + local;
+                if let Some(player) = &mut self.preview_player
+                    && player.current_source_frame() != target
+                {
+                    player.seek_to_frame(target);
                 }
             }
             vv_core::ClipSource::SolidColor => {
@@ -226,7 +258,19 @@ impl VibeVideoApp {
     /// il player agganciato a qualunque clip copra il playhead sulla track
     /// video: ricarica solo quando cambia davvero (scrub, selezione di
     /// un'altra zona, o dopo un avanzamento automatico).
-    fn ensure_active_clip_matches_playhead(&mut self) {
+    /// `force_seek` va messo a `true` quando il cambio di `playhead` di
+    /// questo frame viene da un'interazione diretta dell'utente con la
+    /// timeline (trascinamento del ruler/di una clip, click), *anche se*
+    /// il player sta riproducendo — altrimenti lo scrub durante il
+    /// playback verrebbe ignorato: il player continuerebbe a suonare da
+    /// dov'era, riscrivendo il playhead sopra al tentativo dell'utente al
+    /// frame successivo (bug: "il player mi ignora se sposto la playhead
+    /// mentre riproduce"). Quando invece il playhead si muove perché è
+    /// `drive_playback` stesso ad averlo appena spostato per seguire la
+    /// riproduzione, `force_seek` deve restare `false`: altrimenti si
+    /// farebbe un seek (con relativo flush del decoder) a ogni singolo
+    /// frame, anche se il player è già esattamente lì.
+    fn ensure_active_clip_matches_playhead(&mut self, force_seek: bool) {
         if self.browsing_media.is_some() || self.timeline_id.is_none() {
             return;
         }
@@ -249,11 +293,14 @@ impl VibeVideoApp {
             }
         } else if let Some(clip_id) = desired
             && self.timeline_state.playhead != self.last_synced_playhead
-            && !self.preview_player.as_ref().is_some_and(Player::is_playing)
         {
-            // Stessa clip, da fermo, ma il playhead si è mosso (scrub):
-            // segui con un seek nella clip già aperta.
-            self.seek_active_player_to_playhead(clip_id);
+            let is_playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
+            if force_seek || !is_playing {
+                // Stessa clip: segui con un seek nella clip già aperta,
+                // senza riaprirla. Se stavamo riproducendo, resta in
+                // riproduzione da lì (non mettere in pausa).
+                self.seek_active_player_to_playhead(clip_id);
+            }
         }
         self.last_synced_playhead = self.timeline_state.playhead;
     }
@@ -284,7 +331,7 @@ impl VibeVideoApp {
     /// clip"). Se il player non è ancora agganciato lo aggancia subito.
     fn toggle_playback(&mut self) {
         self.browsing_media = None;
-        self.ensure_active_clip_matches_playhead();
+        self.ensure_active_clip_matches_playhead(false);
         if let Some(player) = &mut self.preview_player {
             player.toggle_play_pause();
         }
@@ -435,6 +482,29 @@ impl VibeVideoApp {
             .map(|c| &c.effects)
     }
 
+    /// La gemella collegata (`Clip::linked`) di una clip, con la sua
+    /// track: `None` se non è collegata a nulla. Cerca su tutte le track
+    /// perché il chiamante conosce solo la track della clip di partenza.
+    fn linked_partner(
+        &self,
+        timeline_id: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+    ) -> Option<(usize, ClipId)> {
+        let partner_id = self.project.timelines[timeline_id]
+            .tracks
+            .get(track_index)?
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)?
+            .linked?;
+        let partner_track = self.project.timelines[timeline_id]
+            .tracks
+            .iter()
+            .position(|t| t.clips.iter().any(|c| c.id == partner_id))?;
+        Some((partner_track, partner_id))
+    }
+
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -493,36 +563,60 @@ impl VibeVideoApp {
 
     /// Normal delete: rimuove la clip selezionata, lascia un vuoto al suo
     /// posto sulla track. Le altre track non si muovono.
+    /// Normal delete: rimuove la clip selezionata *e la sua gemella
+    /// collegata* (se c'è), lasciando un vuoto al loro posto. Le altre
+    /// track non si muovono. Un solo passo di history per entrambe.
     fn delete_selected(&mut self) {
-        if let (Some(timeline_id), Some((track_index, clip_id))) =
+        let (Some(timeline_id), Some((track_index, clip_id))) =
             (self.timeline_id, self.timeline_state.selected)
-        {
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id)),
-            );
-            self.timeline_state.selected = None;
+        else {
+            return;
+        };
+        let linked = self.linked_partner(timeline_id, track_index, clip_id);
+
+        let mut commands: Vec<Box<dyn vv_core::Command>> = vec![Box::new(
+            vv_core::LiftDelete::new(timeline_id, track_index, clip_id),
+        )];
+        if let Some((linked_track, linked_id)) = linked {
+            commands.push(Box::new(vv_core::LiftDelete::new(
+                timeline_id,
+                linked_track,
+                linked_id,
+            )));
         }
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+        self.timeline_state.selected = None;
     }
 
-    /// Ripple delete: rimuove la clip selezionata e chiude il gap su
-    /// *tutte* le track, mantenendo il sync audio/video (vedi
-    /// ARCHITECTURE.md § Ripple delete — comportamento scelto: sempre
-    /// globale, nessun toggle).
+    /// Ripple delete: rimuove la clip selezionata *e la sua gemella
+    /// collegata* (se c'è) e chiude il gap su *tutte* le track,
+    /// mantenendo il sync audio/video (vedi ARCHITECTURE.md § Ripple
+    /// delete — comportamento scelto: sempre globale, nessun toggle). Le
+    /// dimensioni del gap sono quelle della clip selezionata: la gemella
+    /// viene rimossa insieme a lei, non shiftata (altrimenti resterebbe
+    /// audio orfano non corrispondente a nessun video, o viceversa).
     fn ripple_delete_selected(&mut self) {
-        if let (Some(timeline_id), Some((track_index, clip_id))) =
+        let (Some(timeline_id), Some((track_index, clip_id))) =
             (self.timeline_id, self.timeline_state.selected)
-        {
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::RippleDeleteAllTracks::new(
-                    timeline_id,
-                    track_index,
-                    clip_id,
-                )),
-            );
-            self.timeline_state.selected = None;
-        }
+        else {
+            return;
+        };
+        let also_remove = self
+            .linked_partner(timeline_id, track_index, clip_id)
+            .into_iter()
+            .collect();
+
+        self.history.do_command(
+            &mut self.project,
+            Box::new(
+                vv_core::RippleDeleteAllTracks::new(timeline_id, track_index, clip_id)
+                    .with_also_remove(also_remove),
+            ),
+        );
+        self.timeline_state.selected = None;
     }
 
     /// Divide *tutte* le clip che coprono il playhead, su ogni track (tasto
@@ -565,6 +659,13 @@ impl VibeVideoApp {
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
     }
+}
+
+/// Il player aperto per `previous_media` si può riusare (solo un seek,
+/// niente riapertura) per mostrare una clip il cui media è `next_media`?
+/// Funzione pura per poterla testare senza passare da un `Player` vero.
+fn can_reuse_player_for(previous_media: Option<MediaId>, next_media: MediaId) -> bool {
+    previous_media == Some(next_media)
 }
 
 fn track_end(project: &vv_core::Project, timeline_id: TimelineId, track_index: usize) -> FrameIdx {
@@ -1133,17 +1234,22 @@ impl eframe::App for VibeVideoApp {
                     ui.label("Importa un media per creare la timeline.");
                 }
             });
+        // L'utente ha trascinato/cliccato il playhead in questo frame?
+        // Serve per forzare un seek anche se si sta riproducendo (bug:
+        // "durante il playback lo scrub veniva ignorato") — a differenza
+        // di quando è `drive_playback` stesso a spostare il playhead per
+        // seguire la riproduzione, che non deve innescare un seek.
+        let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
+
         // Interagire con la timeline (selezionare una clip o spostare il
         // playhead) riprende il controllo del viewer dall'anteprima
         // "grezza" del media pool, se attiva.
-        if self.timeline_state.selected != selected_before_timeline_ui
-            || self.timeline_state.playhead != playhead_before_timeline_ui
-        {
+        if self.timeline_state.selected != selected_before_timeline_ui || user_scrubbed_playhead {
             self.browsing_media = None;
         }
 
         if self.browsing_media.is_none() {
-            self.ensure_active_clip_matches_playhead();
+            self.ensure_active_clip_matches_playhead(user_scrubbed_playhead);
             self.drive_playback();
         }
 
@@ -1634,12 +1740,12 @@ mod tests {
         app.load_video_clip(clip_id);
         // Il player appena aperto non ha ancora un frame in cache: il primo
         // sync forza comunque il seek verso il playhead (0 qui, no-op).
-        app.ensure_active_clip_matches_playhead();
+        app.ensure_active_clip_matches_playhead(false);
 
         // L'utente trascina il playhead a metà clip (frame 25 su 50, clip
         // a 25fps/2s): il player deve seguirlo con un seek.
         app.timeline_state.playhead = 25;
-        app.ensure_active_clip_matches_playhead();
+        app.ensure_active_clip_matches_playhead(false);
 
         let player = app.preview_player.as_ref().expect("player atteso");
         assert_eq!(
@@ -1653,7 +1759,7 @@ mod tests {
         // last_synced_playhead sia stato aggiornato, riportando il
         // playhead a un valore diverso e controllando che segua di nuovo.
         app.timeline_state.playhead = 10;
-        app.ensure_active_clip_matches_playhead();
+        app.ensure_active_clip_matches_playhead(false);
         assert_eq!(
             app.preview_player.as_ref().unwrap().current_source_frame(),
             10
@@ -1708,7 +1814,7 @@ mod tests {
 
         // Riproduci dall'inizio della prima metà.
         app.timeline_state.playhead = 0;
-        app.ensure_active_clip_matches_playhead();
+        app.ensure_active_clip_matches_playhead(false);
         assert_eq!(app.active_clip, Some((0, first_clip_id)));
         app.toggle_playback();
         assert!(app.preview_player.as_ref().unwrap().is_playing());
@@ -1801,6 +1907,75 @@ mod tests {
         assert_eq!(tl.tracks[1].clips[0].id, audio_id);
 
         // Un solo undo annulla entrambi i tagli (CompositeCommand).
+        app.history.undo(&mut app.project);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    #[test]
+    fn can_reuse_player_for_same_media_is_true() {
+        let id = MediaId::default();
+        assert!(can_reuse_player_for(Some(id), id));
+    }
+
+    #[test]
+    fn can_reuse_player_for_different_media_is_false() {
+        let mut project = vv_core::Project::default();
+        let media_a = project.media_pool.insert(dummy_media_item());
+        let media_b = project.media_pool.insert(dummy_media_item());
+        assert!(!can_reuse_player_for(Some(media_a), media_b));
+    }
+
+    #[test]
+    fn can_reuse_player_for_no_previous_is_false() {
+        assert!(!can_reuse_player_for(None, MediaId::default()));
+    }
+
+    fn dummy_media_item() -> vv_core::MediaItem {
+        vv_core::MediaItem {
+            path: "dummy.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 10,
+                fps: vv_core::Rational::new(25, 1),
+                width: 1920,
+                height: 1080,
+                has_audio: false,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            content_hash: 0,
+        }
+    }
+
+    #[test]
+    fn delete_selected_removes_linked_audio_partner_together() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::LinkClips::new(
+                timeline_id,
+                (0, video_id),
+                (1, audio_id),
+            )),
+        );
+
+        app.timeline_state.selected = Some((0, video_id));
+        app.delete_selected();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert!(tl.tracks[0].clips.is_empty());
+        assert!(
+            tl.tracks[1].clips.is_empty(),
+            "la clip audio collegata deve sparire insieme al video"
+        );
+        assert_eq!(app.timeline_state.selected, None);
+
+        // Un solo undo ripristina entrambe (CompositeCommand).
         app.history.undo(&mut app.project);
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);

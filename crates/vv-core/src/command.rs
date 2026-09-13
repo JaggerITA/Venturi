@@ -130,15 +130,21 @@ impl Command for LiftDelete {
     }
 }
 
-/// Ripple delete globale: rimuove la clip e chiude il gap su *tutte* le
-/// track della Timeline, mantenendo il sync audio/video.
+/// Ripple delete globale: rimuove la clip (ed eventuali altre indicate in
+/// `also_remove`, tipicamente la gemella collegata) e chiude il gap su
+/// *tutte* le track della Timeline, mantenendo il sync audio/video. Le
+/// dimensioni del gap sono sempre quelle della clip primaria: le clip in
+/// `also_remove` vengono semplicemente rimosse (non shiftate) insieme a
+/// lei, non allargano il gap.
 #[derive(Debug)]
 struct RippleState {
-    clip: Clip,
-    // Posizione originale (prima dello shift) di ogni clip toccata su ogni
-    // track, per un undo esatto: non si può ricostruire lo shift da una
-    // sola soglia perché, dopo aver sottratto `gap_len`, un valore shiftato
-    // può risultare identico o minore di uno non toccato (vedi test).
+    // (track_index, clip) per ciascuna clip rimossa (primaria + also_remove).
+    removed: Vec<(usize, Clip)>,
+    // Posizione originale (prima dello shift) di ogni clip *non* rimossa ma
+    // toccata su ogni track, per un undo esatto: non si può ricostruire lo
+    // shift da una sola soglia perché, dopo aver sottratto `gap_len`, un
+    // valore shiftato può risultare identico o minore di uno non toccato
+    // (vedi test).
     shifted: Vec<(usize, ClipId, FrameIdx)>, // (track_index, clip_id, original_start)
 }
 
@@ -147,6 +153,7 @@ pub struct RippleDeleteAllTracks {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
+    pub also_remove: Vec<(usize, ClipId)>,
     removed: Option<RippleState>,
 }
 
@@ -156,8 +163,16 @@ impl RippleDeleteAllTracks {
             timeline,
             track_index,
             clip_id,
+            also_remove: Vec::new(),
             removed: None,
         }
+    }
+
+    /// Altre clip da rimuovere insieme (tipicamente la gemella collegata
+    /// della clip primaria), come parte dello stesso "buco".
+    pub fn with_also_remove(mut self, also_remove: Vec<(usize, ClipId)>) -> Self {
+        self.also_remove = also_remove;
+        self
     }
 }
 
@@ -172,9 +187,20 @@ impl Command for RippleDeleteAllTracks {
         let Some(pos) = track.clips.iter().position(|c| c.id == self.clip_id) else {
             return;
         };
-        let clip = track.clips.remove(pos);
-        let gap_start = clip.timeline_start;
-        let gap_len = clip.timeline_len();
+        let primary = track.clips.remove(pos);
+        let gap_start = primary.timeline_start;
+        let gap_len = primary.timeline_len();
+
+        let mut removed = vec![(self.track_index, primary)];
+        for &(also_track, also_id) in &self.also_remove {
+            if let Some(p) = tl.tracks[also_track]
+                .clips
+                .iter()
+                .position(|c| c.id == also_id)
+            {
+                removed.push((also_track, tl.tracks[also_track].clips.remove(p)));
+            }
+        }
 
         let mut shifted = Vec::new();
         for (track_index, track) in tl.tracks.iter_mut().enumerate() {
@@ -186,7 +212,7 @@ impl Command for RippleDeleteAllTracks {
             }
             resort(track);
         }
-        self.removed = Some(RippleState { clip, shifted });
+        self.removed = Some(RippleState { removed, shifted });
     }
 
     fn undo(&self, project: &mut Project) {
@@ -201,8 +227,9 @@ impl Command for RippleDeleteAllTracks {
                 c.timeline_start = *original_start;
             }
         }
-        let track = &mut tl.tracks[self.track_index];
-        track.clips.push(state.clip.clone());
+        for (track_index, clip) in &state.removed {
+            tl.tracks[*track_index].clips.push(clip.clone());
+        }
         for track in &mut tl.tracks {
             resort(track);
         }

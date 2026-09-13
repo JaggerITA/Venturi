@@ -153,6 +153,11 @@ pub fn show_timeline(
                 (raw.round() as FrameIdx).clamp(d.min_start, d.max_start)
             });
 
+            // La gemella collegata della clip selezionata va evidenziata
+            // insieme a lei (le clip audio+video sono collegate di
+            // default): calcolato una volta sola, non per ogni clip.
+            let selected_linked_id = selected_linked_clip_id(&visuals, state.selected);
+
             // Clip.
             for visual in &visuals {
                 let display_start = match (&state.drag, dragged_primary_new_start) {
@@ -180,7 +185,8 @@ pub fn show_timeline(
                 let id = ui.id().with("clip").with(visual.clip.id.0);
                 let resp = ui.interact(clip_rect, id, egui::Sense::click_and_drag());
 
-                let is_selected = state.selected == Some((visual.track_index, visual.clip.id));
+                let is_selected = state.selected == Some((visual.track_index, visual.clip.id))
+                    || selected_linked_id == Some(visual.clip.id);
                 let stroke = if is_selected {
                     egui::Stroke::new(2.0, egui::Color32::WHITE)
                 } else {
@@ -411,6 +417,20 @@ fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (F
     )
 }
 
+/// L'id della gemella collegata della clip attualmente selezionata, se
+/// c'è: usato per evidenziarla insieme alla selezione (bug: "seleziono il
+/// video ma non l'audio collegato").
+fn selected_linked_clip_id(
+    visuals: &[ClipVisual],
+    selected: Option<(usize, ClipId)>,
+) -> Option<ClipId> {
+    let (track_index, clip_id) = selected?;
+    visuals
+        .iter()
+        .find(|v| v.track_index == track_index && v.clip.id == clip_id)
+        .and_then(|v| v.clip.linked)
+}
+
 /// Range valido per il `timeline_start` di `clip_id`, combinato con quello
 /// della sua gemella collegata (se `linked` è `Some`): il drag deve
 /// rispettare i vincoli di *entrambe*, tradotti nello spazio della clip
@@ -466,6 +486,43 @@ mod tests {
             label: String::new(),
             color: egui::Color32::WHITE,
         }
+    }
+
+    fn visual_linked(
+        track_index: usize,
+        id: u64,
+        start: FrameIdx,
+        len: FrameIdx,
+        linked: u64,
+    ) -> ClipVisual {
+        let mut v = visual(track_index, id, start, len);
+        v.clip.linked = Some(ClipId(linked));
+        v
+    }
+
+    #[test]
+    fn selected_linked_clip_id_finds_the_partner() {
+        let visuals = vec![visual_linked(0, 1, 0, 10, 2), visual_linked(1, 2, 0, 10, 1)];
+        assert_eq!(
+            selected_linked_clip_id(&visuals, Some((0, ClipId(1)))),
+            Some(ClipId(2)),
+            "selezionando il video deve trovare l'audio collegato"
+        );
+        assert_eq!(
+            selected_linked_clip_id(&visuals, Some((1, ClipId(2)))),
+            Some(ClipId(1)),
+            "e viceversa, selezionando l'audio deve trovare il video"
+        );
+    }
+
+    #[test]
+    fn selected_linked_clip_id_is_none_when_unlinked_or_unselected() {
+        let visuals = vec![visual(0, 1, 0, 10)];
+        assert_eq!(
+            selected_linked_clip_id(&visuals, Some((0, ClipId(1)))),
+            None
+        );
+        assert_eq!(selected_linked_clip_id(&visuals, None), None);
     }
 
     #[test]

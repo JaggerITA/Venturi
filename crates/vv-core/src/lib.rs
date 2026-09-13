@@ -739,4 +739,66 @@ mod tests {
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
     }
+
+    #[test]
+    fn ripple_delete_with_also_remove_removes_linked_clip_without_double_shift() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let video_a = make_clip(&mut project, 0, 10);
+        let video_b = make_clip(&mut project, 10, 10); // da rimuovere
+        let video_c = make_clip(&mut project, 20, 10);
+        let (video_a_id, video_b_id, video_c_id) = (video_a.id, video_b.id, video_c.id);
+
+        let audio_a = make_clip(&mut project, 0, 10);
+        let audio_b = make_clip(&mut project, 10, 10); // gemella di video_b, anche lei da rimuovere
+        let audio_c = make_clip(&mut project, 20, 10);
+        let audio_b_id = audio_b.id;
+
+        for (track_index, clip) in [
+            (0, video_a),
+            (0, video_b),
+            (0, video_c),
+            (1, audio_a),
+            (1, audio_b),
+            (1, audio_c),
+        ] {
+            history.do_command(
+                &mut project,
+                Box::new(command::InsertClip {
+                    timeline,
+                    track_index,
+                    clip,
+                }),
+            );
+        }
+
+        history.do_command(
+            &mut project,
+            Box::new(
+                command::RippleDeleteAllTracks::new(timeline, 0, video_b_id)
+                    .with_also_remove(vec![(1, audio_b_id)]),
+            ),
+        );
+
+        let tl = &project.timelines[timeline];
+        // Entrambe le clip "b" sono sparite, non solo shiftate.
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips.len(), 2);
+        // Lo shift è di UNA sola lunghezza di gap (10), non doppio (20):
+        // altrimenti "c" finirebbe a 10 invece che a 20-10=10... la prova
+        // vera è che "c" atterra esattamente dove stava "b" (gap chiuso
+        // una volta sola), su entrambe le track.
+        assert_eq!(tl.tracks[0].clips[0].id, video_a_id);
+        assert_eq!(tl.tracks[0].clips[1].id, video_c_id);
+        assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
+        assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
+
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips.len(), 3);
+        assert_eq!(tl.tracks[1].clips.len(), 3);
+        assert_eq!(tl.tracks[0].clips[2].timeline_start, 20);
+        assert_eq!(tl.tracks[1].clips[2].timeline_start, 20);
+    }
 }
