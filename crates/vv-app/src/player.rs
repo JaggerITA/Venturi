@@ -96,11 +96,14 @@ impl Player {
         }
     }
 
-    /// Picco lineare dell'ultimo buffer audio riprodotto, per l'audiometer
-    /// nella UI (vedi `vv_audio::AudioPlayer::peak_linear`). `0.0` se la
+    /// Picco lineare (sinistra, destra) dell'ultimo buffer audio
+    /// riprodotto, per l'audiometer stereo nella UI (vedi
+    /// `vv_audio::AudioPlayer::peak_linear_stereo`). `(0.0, 0.0)` se la
     /// clip non ha audio.
-    pub fn peak_linear(&self) -> f32 {
-        self.audio.as_ref().map_or(0.0, |a| a.peak_linear())
+    pub fn peak_linear_stereo(&self) -> (f32, f32) {
+        self.audio
+            .as_ref()
+            .map_or((0.0, 0.0), |a| a.peak_linear_stereo())
     }
 
     pub fn seek_secs(&mut self, secs: f64) {

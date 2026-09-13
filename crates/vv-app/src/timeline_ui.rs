@@ -138,7 +138,10 @@ struct TrimState {
 const TRIM_HANDLE_PX: f32 = 8.0;
 
 /// Limiti di zoom orizzontale della timeline (`pixels_per_sec`).
-const MIN_PIXELS_PER_SEC: f32 = 5.0;
+/// Estremo minimo di zoom: abbastanza basso da poter vedere per intero
+/// almeno un'ora di contenuto (3600s) anche in un pannello timeline non
+/// enorme — a 0.1px/sec, un'ora sta in 360px.
+const MIN_PIXELS_PER_SEC: f32 = 0.1;
 const MAX_PIXELS_PER_SEC: f32 = 800.0;
 
 impl Default for TimelineState {
@@ -671,7 +674,20 @@ pub fn show_timeline(
                 }
 
                 if resp.drag_started() {
-                    match resp.interact_pointer_pos().and_then(edge_at) {
+                    // `press_origin` (il punto dove il tasto è stato
+                    // premuto) invece di `interact_pointer_pos()` (dove si
+                    // trova *ora*): egui richiede un piccolo movimento
+                    // prima di dichiarare ufficialmente iniziato un drag su
+                    // un widget che sente anche il click, quindi per il
+                    // primo movimento verso l'*interno* della clip (bordo
+                    // sinistro trascinato a destra, o viceversa per quello
+                    // destro — il trim che "restringe") la posizione
+                    // corrente a quel punto è già uscita dalla zona
+                    // maniglia, mentre muoversi verso l'*esterno* (il trim
+                    // che "allarga") no: da qui l'asimmetria se si usa
+                    // `interact_pointer_pos()`.
+                    let press_pos = ui.input(|i| i.pointer.press_origin());
+                    match press_pos.and_then(edge_at) {
                         Some(edge) => {
                             let (min_value, max_value, linked) = combined_trim_range(
                                 &visuals,

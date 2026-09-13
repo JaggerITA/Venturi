@@ -147,12 +147,13 @@ struct VibeVideoApp {
     /// della timeline con il livello del player attivo. Attivo di
     /// default, come nella maggior parte degli NLE.
     audiometer_enabled: bool,
-    /// Valore mostrato dal meter, con un decadimento applicato qui (non
-    /// nel callback audio): il picco letto da `Player::peak_linear` è
-    /// istantaneo, senza smorzamento scenderebbe a zero non appena il
-    /// buffer corrente non contiene picchi, con un effetto "a scatti"
-    /// invece di una barra che scende dolcemente.
-    audiometer_level: f32,
+    /// Valori (sinistra, destra) mostrati dal meter stereo, con un
+    /// decadimento applicato qui (non nel callback audio): il picco letto
+    /// da `Player::peak_linear_stereo` è istantaneo, senza smorzamento
+    /// scenderebbe a zero non appena il buffer corrente non contiene
+    /// picchi, con un effetto "a scatti" invece di due barre che scendono
+    /// dolcemente.
+    audiometer_level: (f32, f32),
 }
 
 /// Stato UI di un export in corso: progresso/cancellazione condivisi col
@@ -188,7 +189,7 @@ impl Default for VibeVideoApp {
             current_project_path: None,
             project_error: None,
             audiometer_enabled: true,
-            audiometer_level: 0.0,
+            audiometer_level: (0.0, 0.0),
         }
     }
 }
@@ -406,55 +407,70 @@ impl VibeVideoApp {
         }
     }
 
-    /// Barra verticale col livello del player attivo, disegnata in tutto
-    /// lo spazio disponibile in `ui` (chi chiama ne ha già ritagliato una
-    /// fascia stretta, vedi il pannello "audiometer" annidato in quello
-    /// "timeline"). Non una misura professionale: solo il picco assoluto
-    /// dell'ultimo buffer audio (`Player::peak_linear`), con un
-    /// decadimento applicato qui frame per frame perché il valore
-    /// istantaneo da solo farebbe scendere la barra a scatti invece che
-    /// dolcemente.
+    /// Due barre verticali (sinistra/destra) col livello del player
+    /// attivo, disegnate in tutto lo spazio disponibile in `ui` (chi
+    /// chiama ne ha già ritagliato una fascia stretta, vedi il pannello
+    /// "audiometer" annidato in quello "timeline"). Non una misura
+    /// professionale: solo il picco assoluto per canale dell'ultimo
+    /// buffer audio (`Player::peak_linear_stereo`), con un decadimento
+    /// applicato qui frame per frame perché il valore istantaneo da solo
+    /// farebbe scendere le barre a scatti invece che dolcemente.
     fn draw_audiometer(&mut self, ui: &mut egui::Ui) {
         const DECAY: f32 = 0.85;
-        let raw = self
+        let (raw_l, raw_r) = self
             .preview_player
             .as_ref()
-            .map(Player::peak_linear)
-            .unwrap_or(0.0);
-        self.audiometer_level = raw.max(self.audiometer_level * DECAY);
-        let level = self.audiometer_level.clamp(0.0, 1.0);
+            .map(Player::peak_linear_stereo)
+            .unwrap_or((0.0, 0.0));
+        let (level_l, level_r) = &mut self.audiometer_level;
+        *level_l = raw_l.max(*level_l * DECAY);
+        *level_r = raw_r.max(*level_r * DECAY);
+        let (level_l, level_r) = (level_l.clamp(0.0, 1.0), level_r.clamp(0.0, 1.0));
 
         let rect = ui.available_rect_before_wrap();
         let painter = ui.painter();
         painter.rect_filled(rect, 2.0, egui::Color32::from_gray(20));
 
         let margin = 4.0;
-        let bar_rect = rect.shrink(margin);
-        painter.rect_filled(bar_rect, 2.0, egui::Color32::from_gray(10));
+        let gap = 2.0;
+        let full_bar_rect = rect.shrink(margin);
+        let bar_width = (full_bar_rect.width() - gap) / 2.0;
+        let left_rect = egui::Rect::from_min_size(
+            full_bar_rect.left_top(),
+            egui::vec2(bar_width, full_bar_rect.height()),
+        );
+        let right_rect = egui::Rect::from_min_size(
+            full_bar_rect.left_top() + egui::vec2(bar_width + gap, 0.0),
+            egui::vec2(bar_width, full_bar_rect.height()),
+        );
 
-        if level > 0.0 {
-            let fill_height = bar_rect.height() * level;
-            let fill_rect = egui::Rect::from_min_max(
-                egui::pos2(bar_rect.left(), bar_rect.bottom() - fill_height),
-                bar_rect.right_bottom(),
-            );
-            // Verde fino al 70%, giallo fino al 90%, rosso oltre (vicino
-            // al clipping) — stessa convenzione di un VU-meter comune.
-            let color = if level > 0.9 {
-                egui::Color32::from_rgb(220, 50, 50)
-            } else if level > 0.7 {
-                egui::Color32::from_rgb(230, 200, 50)
-            } else {
-                egui::Color32::from_rgb(60, 200, 90)
-            };
-            painter.rect_filled(fill_rect, 2.0, color);
+        for (bar_rect, level) in [(left_rect, level_l), (right_rect, level_r)] {
+            painter.rect_filled(bar_rect, 2.0, egui::Color32::from_gray(10));
+            if level > 0.0 {
+                let fill_height = bar_rect.height() * level;
+                let fill_rect = egui::Rect::from_min_max(
+                    egui::pos2(bar_rect.left(), bar_rect.bottom() - fill_height),
+                    bar_rect.right_bottom(),
+                );
+                // Verde fino al 70%, giallo fino al 90%, rosso oltre
+                // (vicino al clipping) — stessa convenzione di un VU-meter
+                // comune.
+                let color = if level > 0.9 {
+                    egui::Color32::from_rgb(220, 50, 50)
+                } else if level > 0.7 {
+                    egui::Color32::from_rgb(230, 200, 50)
+                } else {
+                    egui::Color32::from_rgb(60, 200, 90)
+                };
+                painter.rect_filled(fill_rect, 2.0, color);
+            }
         }
 
         // Repaint continuo mentre il livello sta ancora decadendo verso lo
-        // zero, altrimenti la barra resterebbe "incollata" all'ultimo
+        // zero, altrimenti le barre resterebbero "incollate" all'ultimo
         // valore finché non arriva un altro input (stesso principio del
         // repaint durante il playback/export altrove in questo file).
-        if self.audiometer_level > 0.001 {
+        if level_l > 0.001 || level_r > 0.001 {
             ui.ctx().request_repaint();
         }
     }
@@ -1554,12 +1570,19 @@ impl eframe::App for VibeVideoApp {
             if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E) {
                 self.start_export();
             }
-            // Ctrl+C / Ctrl+V: copia/incolla clip sulla timeline.
-            if i.modifiers.command && i.key_pressed(egui::Key::C) {
-                self.copy_selected_clips();
-            }
-            if i.modifiers.command && i.key_pressed(egui::Key::V) {
-                self.paste_clipboard_at_playhead();
+            // Ctrl+C / Ctrl+V: copia/incolla clip sulla timeline. Non
+            // `key_pressed(Key::C/V)`: l'integrazione (eframe/winit)
+            // intercetta Ctrl+C/Ctrl+V a monte e li consegna come eventi
+            // semantici `Copy`/`Paste`, non come normali pressioni di
+            // tasto — con `key_pressed` la scorciatoia risultava
+            // silenziosamente inattiva (il pulsante in menu, che chiama
+            // gli stessi metodi, funzionava comunque).
+            for event in &i.events {
+                match event {
+                    egui::Event::Copy => self.copy_selected_clips(),
+                    egui::Event::Paste(_) => self.paste_clipboard_at_playhead(),
+                    _ => {}
+                }
             }
             // Ctrl+"+"/Ctrl+"-" (anche Ctrl+"=", stesso tasto di "+" non
             // shiftato sulla maggior parte delle tastiere): zoom della
@@ -1771,7 +1794,7 @@ impl eframe::App for VibeVideoApp {
                     // mostrare la timeline: le ruba solo questa larghezza
                     // fissa, non la comprime in proporzione.
                     egui::Panel::right("audiometer")
-                        .default_size(28.0)
+                        .default_size(40.0)
                         .resizable(false)
                         .show(ui, |ui| {
                             self.draw_audiometer(ui);
