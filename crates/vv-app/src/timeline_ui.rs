@@ -487,13 +487,14 @@ pub fn show_timeline(
                     egui::Color32::BLACK,
                 );
                 if visual.clip.linked.is_some() {
-                    painter.text(
-                        clip_rect.right_top() + egui::vec2(-4.0, 2.0),
-                        egui::Align2::RIGHT_TOP,
-                        "🔗",
-                        egui::FontId::proportional(12.0),
-                        egui::Color32::BLACK,
-                    );
+                    // Due anelli disegnati a mano invece del glifo Unicode
+                    // "🔗": su alcune combinazioni piattaforma/driver (es.
+                    // Asahi Linux) i font bundled di egui non lo
+                    // renderizzano — appare come un quadratino vuoto.
+                    let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
+                    let ring_stroke = egui::Stroke::new(1.3, egui::Color32::BLACK);
+                    painter.circle_stroke(center + egui::vec2(-2.5, 0.0), 3.5, ring_stroke);
+                    painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
                 }
 
                 if resp.drag_started() {

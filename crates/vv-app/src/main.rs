@@ -899,19 +899,107 @@ fn file_label(path: &std::path::Path) -> String {
 /// primo keyframe qui), pieno se c'è già un keyframe esattamente al frame
 /// corrente (click = rimuovilo), vuoto-ma-animato altrimenti (click =
 /// aggiungine uno qui).
+///
+/// Disegnato a mano (non i glifi Unicode "◇"/"◆") perché su alcune
+/// combinazioni piattaforma/driver (es. Asahi Linux) i font bundled di
+/// egui non li renderizzano — appaiono come quadratini vuoti.
 fn keyframe_button(
     ui: &mut egui::Ui,
     is_constant: bool,
     has_keyframe_here: bool,
 ) -> egui::Response {
-    let (symbol, tooltip) = if is_constant {
-        ("◇", "Anima: crea il primo keyframe qui")
+    let tooltip = if is_constant {
+        "Anima: crea il primo keyframe qui"
     } else if has_keyframe_here {
-        ("◆", "Rimuovi il keyframe qui")
+        "Rimuovi il keyframe qui"
     } else {
-        ("◇", "Aggiungi un keyframe qui")
+        "Aggiungi un keyframe qui"
     };
-    ui.button(symbol).on_hover_text(tooltip)
+
+    let size = egui::vec2(20.0, 20.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        let painter = ui.painter();
+        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        let c = rect.center();
+        let r = 5.0;
+        let diamond = vec![
+            c + egui::vec2(0.0, -r),
+            c + egui::vec2(r, 0.0),
+            c + egui::vec2(0.0, r),
+            c + egui::vec2(-r, 0.0),
+        ];
+        if has_keyframe_here {
+            painter.add(egui::Shape::convex_polygon(
+                diamond,
+                visuals.fg_stroke.color,
+                egui::Stroke::NONE,
+            ));
+        } else {
+            painter.add(egui::Shape::closed_line(diamond, visuals.fg_stroke));
+        }
+    }
+    response.on_hover_text(tooltip)
+}
+
+/// Toggle "calamita" (snapping) della barra sotto il player: un ferro di
+/// cavallo disegnato a mano (due gambe + arco inferiore + poli colorati),
+/// non il glifo Unicode "🧲" — su alcune combinazioni piattaforma/driver
+/// (es. Asahi Linux) i font bundled di egui non lo renderizzano (appare
+/// come un quadratino vuoto). Evidenziato (sfondo di selezione) quando
+/// `*enabled` è vero, sullo stile di `ui.toggle_value`.
+fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *enabled = !*enabled;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, *enabled);
+        let painter = ui.painter();
+        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+
+        let c = rect.center();
+        let r: f32 = 6.0;
+        let leg_top = c.y - 6.0;
+        let arc_center_y = c.y + 1.0;
+        let stroke = egui::Stroke::new(2.0, visuals.fg_stroke.color);
+
+        painter.line_segment(
+            [egui::pos2(c.x - r, leg_top), egui::pos2(c.x - r, arc_center_y)],
+            stroke,
+        );
+        painter.line_segment(
+            [egui::pos2(c.x + r, leg_top), egui::pos2(c.x + r, arc_center_y)],
+            stroke,
+        );
+        // Arco inferiore: t=0 -> gamba sinistra, t=π -> gamba destra,
+        // passando per il punto più basso a t=π/2 (chiude la "U").
+        let arc_points: Vec<egui::Pos2> = (0..=16)
+            .map(|i| {
+                let t = std::f32::consts::PI * (i as f32 / 16.0);
+                egui::pos2(c.x - r * t.cos(), arc_center_y + r * t.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(arc_points, stroke));
+
+        // Poli alle due punte, colorati come un vero magnete a ferro di
+        // cavallo (convenzione da manuale scolastico: rosso e grigio).
+        let pole_size = egui::vec2(r + 1.0, 3.0);
+        painter.rect_filled(
+            egui::Rect::from_center_size(egui::pos2(c.x - r, leg_top - 1.0), pole_size),
+            1.0,
+            egui::Color32::from_rgb(200, 60, 60),
+        );
+        painter.rect_filled(
+            egui::Rect::from_center_size(egui::pos2(c.x + r, leg_top - 1.0), pole_size),
+            1.0,
+            egui::Color32::from_rgb(200, 200, 200),
+        );
+    }
+    response
 }
 
 /// Traduce un'azione differita del pannello proprietà nel comando
@@ -1085,7 +1173,11 @@ impl eframe::App for VibeVideoApp {
 
                 ui.separator();
                 let playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
-                let label = if playing { "⏸" } else { "▶" };
+                // ASCII invece dei simboli Unicode ⏸/▶: su alcune
+                // combinazioni piattaforma/driver (es. Asahi Linux) i
+                // font bundled di egui non li renderizzano (appaiono
+                // come quadratini vuoti).
+                let label = if playing { "||" } else { ">" };
                 if ui.button(format!("{label} (Spazio)")).clicked() {
                     self.toggle_playback();
                 }
@@ -1191,7 +1283,11 @@ impl eframe::App for VibeVideoApp {
                                     .interactable(false)
                                     .show(ui.ctx(), |ui| {
                                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                            ui.label(format!("🎬 {label}"));
+                                            // Niente icona "🎬" davanti: stesso
+                                            // motivo del label play/pause più
+                                            // sopra (Unicode astral-plane non
+                                            // renderizzato su alcune piattaforme).
+                                            ui.label(&label);
                                         });
                                     });
                             }
@@ -1206,8 +1302,10 @@ impl eframe::App for VibeVideoApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("Proprietà");
+                        // "x" ASCII invece di "✕" Unicode: stesso motivo
+                        // del label play/pause qui sopra.
                         if ui
-                            .small_button("✕")
+                            .small_button("x")
                             .on_hover_text("Nascondi pannello")
                             .clicked()
                         {
@@ -1598,7 +1696,7 @@ impl eframe::App for VibeVideoApp {
             .resizable(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.toggle_value(&mut self.snapping_enabled, "🧲")
+                    magnet_toggle(ui, &mut self.snapping_enabled)
                         .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
                 });
             });
