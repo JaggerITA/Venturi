@@ -293,7 +293,10 @@ pub fn show_timeline(
                         origin.x + frame as f32 * px_per_frame,
                         origin.y + RULER_HEIGHT,
                     ),
-                    egui::vec2(item.meta.duration_frames as f32 * px_per_frame, ghost_height),
+                    egui::vec2(
+                        item.meta.duration_frames as f32 * px_per_frame,
+                        ghost_height,
+                    ),
                 );
                 painter.rect_filled(
                     ghost_rect,
@@ -316,8 +319,15 @@ pub fn show_timeline(
                     .get(*media_id)
                     .map(|item| item.meta.duration_frames)
                     .unwrap_or(0);
-                let frame = snap_frame(raw_frame, len, &visuals, &[], px_per_frame, snapping_enabled)
-                    .max(0);
+                let frame = snap_frame(
+                    raw_frame,
+                    len,
+                    &visuals,
+                    &[],
+                    px_per_frame,
+                    snapping_enabled,
+                )
+                .max(0);
                 media_drop = Some((*media_id, frame));
             }
 
@@ -356,9 +366,7 @@ pub fn show_timeline(
                 // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
                 let local = to_local(pos);
                 let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
-                let track_index = ((local.y - RULER_HEIGHT) / ROW_HEIGHT)
-                    .floor()
-                    .max(0.0) as usize;
+                let track_index = ((local.y - RULER_HEIGHT) / ROW_HEIGHT).floor().max(0.0) as usize;
                 let track_index = track_index.min(track_count.saturating_sub(1));
                 match gap_at(&visuals, track_index, frame) {
                     Some((gap_start, gap_end)) => {
@@ -431,8 +439,15 @@ pub fn show_timeline(
                 if let Some((partner_id, _, _)) = d.linked {
                     exclude.push(partner_id);
                 }
-                snap_frame(candidate, len, &visuals, &exclude, px_per_frame, snapping_enabled)
-                    .clamp(d.min_start, d.max_start)
+                snap_frame(
+                    candidate,
+                    len,
+                    &visuals,
+                    &exclude,
+                    px_per_frame,
+                    snapping_enabled,
+                )
+                .clamp(d.min_start, d.max_start)
             });
 
             // Le gemelle collegate di tutte le clip selezionate vanno
@@ -684,7 +699,11 @@ fn clips_intersecting_rect(
 /// sulla stessa track. Un vuoto in coda (nessuna clip dopo `frame` su quella
 /// track) non conta: non c'è nulla da riavvicinare shiftandolo, quindi non
 /// ha senso selezionarlo — vedi doc di `TimelineState::selected_gap`.
-fn gap_at(visuals: &[ClipVisual], track_index: usize, frame: FrameIdx) -> Option<(FrameIdx, FrameIdx)> {
+fn gap_at(
+    visuals: &[ClipVisual],
+    track_index: usize,
+    frame: FrameIdx,
+) -> Option<(FrameIdx, FrameIdx)> {
     let mut track_clips: Vec<&Clip> = visuals
         .iter()
         .filter(|v| v.track_index == track_index)

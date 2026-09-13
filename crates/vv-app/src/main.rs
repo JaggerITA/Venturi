@@ -968,11 +968,17 @@ fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
         let stroke = egui::Stroke::new(2.0, visuals.fg_stroke.color);
 
         painter.line_segment(
-            [egui::pos2(c.x - r, leg_top), egui::pos2(c.x - r, arc_center_y)],
+            [
+                egui::pos2(c.x - r, leg_top),
+                egui::pos2(c.x - r, arc_center_y),
+            ],
             stroke,
         );
         painter.line_segment(
-            [egui::pos2(c.x + r, leg_top), egui::pos2(c.x + r, arc_center_y)],
+            [
+                egui::pos2(c.x + r, leg_top),
+                egui::pos2(c.x + r, arc_center_y),
+            ],
             stroke,
         );
         // Arco inferiore: t=0 -> gamba sinistra, t=π -> gamba destra,
@@ -1217,6 +1223,90 @@ impl eframe::App for VibeVideoApp {
                 Some(clip.source_in + local)
             })
             .unwrap_or(0);
+
+        let selected_before_timeline_ui = self.timeline_state.selected.clone();
+        let playhead_before_timeline_ui = self.timeline_state.playhead;
+        // Se esiste già una timeline, la posizione esatta del rilascio (e
+        // l'anteprima mentre si trascina) è gestita da `show_timeline`
+        // stesso, che ha accesso a fps/scala per convertire pixel->frame.
+        // Se non esiste ancora, non c'è nessuna scala a cui ancorare una
+        // posizione: qui basta un semplice drop-ovunque che la crei al volo
+        // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
+        // media a frame 0.
+        let mut media_drop: Option<(MediaId, FrameIdx)> = None;
+        let mut dropped_on_empty_timeline: Option<MediaId> = None;
+        egui::Panel::bottom("timeline")
+            .default_size(240.0)
+            .resizable(true)
+            .show(ui, |ui| {
+                if let Some(timeline_id) = self.timeline_id {
+                    let labels: HashMap<MediaId, String> = self
+                        .project
+                        .media_pool
+                        .iter()
+                        .map(|(id, item)| (id, file_label(&item.path)))
+                        .collect();
+                    media_drop = timeline_ui::show_timeline(
+                        ui,
+                        &mut self.project,
+                        &mut self.history,
+                        timeline_id,
+                        &|id| labels.get(&id).cloned().unwrap_or_default(),
+                        &mut self.timeline_state,
+                        self.snapping_enabled,
+                    );
+                } else {
+                    let drop_rect = ui.available_rect_before_wrap();
+                    let drop_id = ui.id().with("timeline_drop_zone_empty");
+                    let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
+                    dropped_on_empty_timeline = drop_resp
+                        .dnd_release_payload::<MediaId>()
+                        .map(|arc| *arc);
+                    ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
+                }
+            });
+        if let Some(media_id) = dropped_on_empty_timeline {
+            self.add_media_to_timeline(media_id);
+        }
+        if let Some((media_id, start)) = media_drop {
+            self.add_media_to_timeline_at(media_id, start);
+        }
+
+        // L'utente ha trascinato/cliccato il playhead in questo frame?
+        // Serve per forzare un seek anche se si sta riproducendo (bug:
+        // "durante il playback lo scrub veniva ignorato") — a differenza
+        // di quando è `drive_playback` stesso a spostare il playhead per
+        // seguire la riproduzione, che non deve innescare un seek.
+        let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
+        if user_scrubbed_playhead {
+            self.sync_selection_to_playhead();
+        }
+
+        // Interagire con la timeline (selezionare una clip o spostare il
+        // playhead) riprende il controllo del viewer dall'anteprima
+        // "grezza" del media pool, se attiva.
+        if self.timeline_state.selected != selected_before_timeline_ui || user_scrubbed_playhead {
+            self.browsing_media = None;
+        }
+
+        if self.browsing_media.is_none() {
+            self.ensure_active_clip_matches_playhead(user_scrubbed_playhead);
+            // `drive_playback` avanza il playhead da sé durante la
+            // riproduzione: senza questo confronto, "selection follows
+            // playhead" seguiva solo lo scrub manuale (già coperto sopra
+            // da `user_scrubbed_playhead`) e restava fermo durante il
+            // play normale (bug: "la selezione non segue durante la
+            // riproduzione"). Il confronto prima/dopo, anziché una sync
+            // incondizionata, lascia intatta un'eventuale selezione
+            // esplicita impostata nello stesso frame da altrove (es.
+            // `split_all_at_playhead`) quando il playhead in realtà non
+            // si muove (caso normale: taglio da fermo).
+            let playhead_before_playback = self.timeline_state.playhead;
+            self.drive_playback();
+            if self.timeline_state.playhead != playhead_before_playback {
+                self.sync_selection_to_playhead();
+            }
+        }
 
         let mut preview_action = None;
         let mut pending_effect = None;
@@ -1638,106 +1728,24 @@ impl eframe::App for VibeVideoApp {
             self.apply_active_clip_gain();
         }
 
-        let selected_before_timeline_ui = self.timeline_state.selected.clone();
-        let playhead_before_timeline_ui = self.timeline_state.playhead;
-        // Se esiste già una timeline, la posizione esatta del rilascio (e
-        // l'anteprima mentre si trascina) è gestita da `show_timeline`
-        // stesso, che ha accesso a fps/scala per convertire pixel->frame.
-        // Se non esiste ancora, non c'è nessuna scala a cui ancorare una
-        // posizione: qui basta un semplice drop-ovunque che la crei al volo
-        // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
-        // media a frame 0.
-        let mut media_drop: Option<(MediaId, FrameIdx)> = None;
-        let mut dropped_on_empty_timeline: Option<MediaId> = None;
-        egui::Panel::bottom("timeline")
-            .default_size(240.0)
-            .resizable(true)
-            .show(ui, |ui| {
-                if let Some(timeline_id) = self.timeline_id {
-                    let labels: HashMap<MediaId, String> = self
-                        .project
-                        .media_pool
-                        .iter()
-                        .map(|(id, item)| (id, file_label(&item.path)))
-                        .collect();
-                    media_drop = timeline_ui::show_timeline(
-                        ui,
-                        &mut self.project,
-                        &mut self.history,
-                        timeline_id,
-                        &|id| labels.get(&id).cloned().unwrap_or_default(),
-                        &mut self.timeline_state,
-                        self.snapping_enabled,
-                    );
-                } else {
-                    let drop_rect = ui.available_rect_before_wrap();
-                    let drop_id = ui.id().with("timeline_drop_zone_empty");
-                    let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
-                    dropped_on_empty_timeline = drop_resp
-                        .dnd_release_payload::<MediaId>()
-                        .map(|arc| *arc);
-                    ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
-                }
-            });
-        if let Some(media_id) = dropped_on_empty_timeline {
-            self.add_media_to_timeline(media_id);
-        }
-        if let Some((media_id, start)) = media_drop {
-            self.add_media_to_timeline_at(media_id, start);
-        }
-
-        // Barra di toggle sotto il player (sopra la timeline: un
-        // `Panel::bottom` mostrato *dopo* quello della timeline reclama
-        // spazio dal bordo inferiore di quel che resta, cioè appena sopra
-        // di essa). Per ora solo la calamita dello snapping; altri toggle
-        // (es. in futuro "ripple" globale on/off) troverebbero posto qui.
-        egui::Panel::bottom("view_toggles")
-            .default_size(28.0)
-            .resizable(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    magnet_toggle(ui, &mut self.snapping_enabled)
-                        .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
-                });
-            });
-
-        // L'utente ha trascinato/cliccato il playhead in questo frame?
-        // Serve per forzare un seek anche se si sta riproducendo (bug:
-        // "durante il playback lo scrub veniva ignorato") — a differenza
-        // di quando è `drive_playback` stesso a spostare il playhead per
-        // seguire la riproduzione, che non deve innescare un seek.
-        let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
-        if user_scrubbed_playhead {
-            self.sync_selection_to_playhead();
-        }
-
-        // Interagire con la timeline (selezionare una clip o spostare il
-        // playhead) riprende il controllo del viewer dall'anteprima
-        // "grezza" del media pool, se attiva.
-        if self.timeline_state.selected != selected_before_timeline_ui || user_scrubbed_playhead {
-            self.browsing_media = None;
-        }
-
-        if self.browsing_media.is_none() {
-            self.ensure_active_clip_matches_playhead(user_scrubbed_playhead);
-            // `drive_playback` avanza il playhead da sé durante la
-            // riproduzione: senza questo confronto, "selection follows
-            // playhead" seguiva solo lo scrub manuale (già coperto sopra
-            // da `user_scrubbed_playhead`) e restava fermo durante il
-            // play normale (bug: "la selezione non segue durante la
-            // riproduzione"). Il confronto prima/dopo, anziché una sync
-            // incondizionata, lascia intatta un'eventuale selezione
-            // esplicita impostata nello stesso frame da altrove (es.
-            // `split_all_at_playhead`) quando il playhead in realtà non
-            // si muove (caso normale: taglio da fermo).
-            let playhead_before_playback = self.timeline_state.playhead;
-            self.drive_playback();
-            if self.timeline_state.playhead != playhead_before_playback {
-                self.sync_selection_to_playhead();
-            }
-        }
-
         egui::CentralPanel::default().show(ui, |ui| {
+            // Barra di toggle subito sotto il player, alla DaVinci Resolve
+            // (la barra con gli strumenti sta sotto il viewer, larga
+            // quanto lui — non tutta la finestra): nidificata *dentro* la
+            // CentralPanel invece che come `Panel::bottom` di primo
+            // livello, così reclama una fetta solo di questa colonna
+            // centrale (che il pannello proprietà, a destra, non copre).
+            // Per ora solo la calamita dello snapping; altri toggle (es.
+            // in futuro "ripple" globale on/off) troverebbero posto qui.
+            egui::Panel::bottom("view_toggles")
+                .default_size(28.0)
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        magnet_toggle(ui, &mut self.snapping_enabled)
+                            .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
+                    });
+                });
             // Le clip SolidColor non hanno un media da decodificare: il
             // colore (eventualmente keyframeato) va valutato al frame
             // *locale alla clip* sul playhead della timeline, l'unico
