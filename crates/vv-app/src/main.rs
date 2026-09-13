@@ -24,6 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 /// Unica track video supportata per ora dalla riproduzione timeline-aware
@@ -38,6 +39,15 @@ const VIDEO_TRACK: usize = 0;
 /// clip da rimuovere con lei senza shiftarle (la sua gemella collegata,
 /// se c'è).
 type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
+
+/// Stato di `VibeVideoApp::gap_playback` — vedi il suo doc per il quadro
+/// generale.
+struct GapPlayback {
+    started_at: Instant,
+    start_frame: FrameIdx,
+    next_clip_id: ClipId,
+    next_clip_start: FrameIdx,
+}
 
 /// Snapshot dei campi della clip selezionata che servono al pannello
 /// proprietà, valutati al `source_frame` corrente. Una struct invece di
@@ -85,6 +95,15 @@ struct VibeVideoApp {
     preview_player: Option<Player>,
     preview_error: Option<String>,
     frame_texture: Option<egui::TextureHandle>,
+    /// Traccia audio già decodificata per path, riusata da `preview_media`
+    /// invece di ridecodificarla da zero ogni volta che il player per quel
+    /// media viene riaperto (es. il playhead attraversa un vuoto: il
+    /// player si chiude e riapre, e senza cache ogni attraversamento
+    /// ridecodificherebbe l'intero file — un hitch percepibile, da
+    /// centinaia di ms a oltre 1s per file lunghi). Non invalidata se il
+    /// file cambia su disco durante la sessione: un limite accettabile per
+    /// una cache di sessione.
+    audio_cache: HashMap<PathBuf, std::sync::Arc<vv_media::AudioBuffer>>,
 
     /// Clip la cui anteprima è attualmente mostrata: guida sia il player
     /// (quale media riprodurre) sia il transform/gain applicati (milestone
@@ -106,6 +125,14 @@ struct VibeVideoApp {
     /// applica a un'anteprima "grezza"). Si esce da questa modalità
     /// interagendo con la timeline (selezione o playhead).
     browsing_media: Option<MediaId>,
+
+    /// Riproduzione in corso attraverso un vuoto sulla track video: nessun
+    /// player da seguire lì (schermo nero, vedi il rendering nel viewer),
+    /// quindi il playhead avanza a un proprio orologio a parete finché non
+    /// raggiunge `next_clip_start`, punto in cui il controllo passa al
+    /// player di quella clip (`GapPlayback::next_clip_id`). `None` quando
+    /// non si sta attraversando un vuoto durante la riproduzione.
+    gap_playback: Option<GapPlayback>,
 
     /// "Selection follows playhead": attiva di default, disattivabile
     /// dalle impostazioni. Quando attiva, spostare il playhead (scrub o
@@ -178,10 +205,12 @@ impl Default for VibeVideoApp {
             preview_player: None,
             preview_error: None,
             frame_texture: None,
+            audio_cache: HashMap::new(),
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
             browsing_media: None,
+            gap_playback: None,
             selection_follows_playhead: true,
             properties_panel_open: true,
             snapping_enabled: true,
@@ -490,8 +519,14 @@ impl VibeVideoApp {
         self.preview_player = None;
         self.preview_error = None;
 
-        match Player::open(&path, duration_secs) {
-            Ok(player) => self.preview_player = Some(player),
+        let cached_audio = self.audio_cache.get(&path).cloned();
+        match Player::open(&path, duration_secs, cached_audio) {
+            Ok((player, audio_buffer)) => {
+                self.preview_player = Some(player);
+                if let Some(buffer) = audio_buffer {
+                    self.audio_cache.insert(path.clone(), buffer);
+                }
+            }
             Err(e) => self.preview_error = Some(e),
         }
         self.preview_path = Some(path);
@@ -669,31 +704,67 @@ impl VibeVideoApp {
 
     /// Fa play/pause sulla clip sotto al playhead, senza bisogno che sia
     /// selezionata (bug: "la riproduzione parte solo se seleziono la
-    /// clip"). Se il player non è ancora agganciato lo aggancia subito.
+    /// clip"). Se il player non è ancora agganciato lo aggancia subito. Se
+    /// il playhead sta attraversando un vuoto (`gap_playback` attivo),
+    /// ferma l'orologio a vuoto (non c'è un player da mettere in pausa) —
+    /// e se invece è *fermo* dentro un vuoto, riprende quell'orologio
+    /// verso la prossima clip sulla track video, se c'è.
     fn toggle_playback(&mut self) {
         self.browsing_media = None;
+        if self.gap_playback.take().is_some() {
+            return;
+        }
         self.ensure_active_clip_matches_playhead(false);
         if let Some(player) = &mut self.preview_player {
             player.toggle_play_pause();
+            return;
+        }
+        if let Some(timeline_id) = self.timeline_id
+            && let Some((next_id, next_start)) =
+                self.next_video_clip_from(timeline_id, self.timeline_state.playhead)
+        {
+            self.begin_gap_playback(self.timeline_state.playhead, next_id, next_start);
         }
     }
 
     /// Guida la riproduzione a ogni frame UI: se il player sta suonando,
     /// il playhead lo segue; se ha raggiunto la fine del *trim* della clip
     /// attiva (non della fine del file, che può essere più lunga), avanza
-    /// automaticamente alla prossima clip sulla track video invece di
-    /// continuare a riprodurre oltre il taglio (bug: "il playhead si
-    /// ferma al primo taglio e il riquadro continua a riprodurre la clip
-    /// per intero").
+    /// oltre — dritto alla prossima clip se comincia esattamente lì, o
+    /// attraverso un vuoto (`gap_playback`: schermo nero, orologio a
+    /// parete) se c'è, invece di saltare la riproduzione in avanti fino ad
+    /// essa (bug: "il vuoto viene saltato invece di essere riprodotto").
+    ///
+    /// Se `gap_playback` è attivo, questa stessa funzione fa anche da
+    /// "player" per il vuoto: avanza il playhead a orologio finché non
+    /// raggiunge la prossima clip, poi le passa il controllo.
     ///
     /// Limite noto: se la prossima clip è un generatore SolidColor la
     /// riproduzione si ferma lì, perché un generatore non ha un player che
     /// faccia da orologio — avanzare il tempo "a vuoto" durante un
-    /// generatore è un'estensione futura.
+    /// generatore è un'estensione futura (diversa da un vuoto vero e
+    /// proprio, già gestito qui).
     fn drive_playback(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
+
+        if let Some(gap) = &self.gap_playback {
+            let fps = self.project.timelines[timeline_id].fps.as_f64().max(1e-9);
+            let elapsed_frames = (gap.started_at.elapsed().as_secs_f64() * fps).round() as FrameIdx;
+            let frame = (gap.start_frame + elapsed_frames).min(gap.next_clip_start);
+            self.timeline_state.playhead = frame;
+            if frame >= gap.next_clip_start {
+                let next_clip_id = gap.next_clip_id;
+                self.gap_playback = None;
+                self.load_video_clip(next_clip_id);
+                if let Some(player) = &mut self.preview_player {
+                    player.play();
+                }
+            }
+            return;
+        }
+
         let Some((track_index, clip_id)) = self.active_clip else {
             return;
         };
@@ -723,24 +794,57 @@ impl VibeVideoApp {
         }
     }
 
-    /// Trova la prima clip sulla track video con inizio >= `from_frame` e
-    /// ci salta, continuando la riproduzione da lì; se non c'è nessuna
-    /// clip successiva, mette in pausa (fine del contenuto).
-    fn advance_playback_past(&mut self, timeline_id: TimelineId, from_frame: FrameIdx) {
-        let next = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+    /// La prima clip sulla track video con inizio >= `from_frame`, se c'è.
+    fn next_video_clip_from(
+        &self,
+        timeline_id: TimelineId,
+        from_frame: FrameIdx,
+    ) -> Option<(ClipId, FrameIdx)> {
+        self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
             .clips
             .iter()
             .filter(|c| c.timeline_start >= from_frame)
             .min_by_key(|c| c.timeline_start)
-            .map(|c| (c.id, c.timeline_start));
+            .map(|c| (c.id, c.timeline_start))
+    }
 
-        match next {
-            Some((next_id, next_start)) => {
+    /// Azzera la clip/player attivi (siamo in un vuoto: schermo nero, vedi
+    /// il rendering nel viewer) e avvia l'orologio a parete di
+    /// `gap_playback` verso `next_clip_id`/`next_clip_start`.
+    fn begin_gap_playback(
+        &mut self,
+        from_frame: FrameIdx,
+        next_clip_id: ClipId,
+        next_clip_start: FrameIdx,
+    ) {
+        self.active_clip = None;
+        self.preview_player = None;
+        self.frame_texture = None;
+        self.timeline_state.playhead = from_frame;
+        self.gap_playback = Some(GapPlayback {
+            started_at: Instant::now(),
+            start_frame: from_frame,
+            next_clip_id,
+            next_clip_start,
+        });
+    }
+
+    /// Continua la riproduzione oltre la fine (nello spazio timeline) della
+    /// clip appena conclusa: se la prossima clip sulla track video comincia
+    /// esattamente lì, ci salta senza soluzione di continuità (nessun
+    /// vuoto); se c'è un vuoto prima, entra in `gap_playback`; se non c'è
+    /// nessuna clip successiva, è la fine del contenuto — si ferma.
+    fn advance_playback_past(&mut self, timeline_id: TimelineId, from_frame: FrameIdx) {
+        match self.next_video_clip_from(timeline_id, from_frame) {
+            Some((next_id, next_start)) if next_start == from_frame => {
                 self.timeline_state.playhead = next_start;
                 self.load_video_clip(next_id);
                 if let Some(player) = &mut self.preview_player {
                     player.play();
                 }
+            }
+            Some((next_id, next_start)) => {
+                self.begin_gap_playback(from_frame, next_id, next_start);
             }
             None => {
                 if let Some(player) = &mut self.preview_player {
@@ -1841,6 +1945,11 @@ impl eframe::App for VibeVideoApp {
         let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
         if user_scrubbed_playhead {
             self.sync_selection_to_playhead();
+            // Uno scrub manuale prevale sempre sull'orologio a vuoto:
+            // altrimenti `drive_playback` lo riscriverebbe sopra al
+            // tentativo dell'utente al frame successivo (stesso principio
+            // di `force_seek` qui sotto, ma per `gap_playback`).
+            self.gap_playback = None;
         }
 
         // Interagire con la timeline (selezionare una clip o spostare il
@@ -2311,34 +2420,55 @@ impl eframe::App for VibeVideoApp {
             // colore (eventualmente keyframeato) va valutato al frame
             // *locale alla clip* sul playhead della timeline, l'unico
             // orologio che ha senso per un generatore (un Player non ha
-            // motivo di esistere per un riempimento uniforme).
-            let solid_color_frame_info = self.active_clip.and_then(|(track_index, clip_id)| {
-                let timeline_id = self.timeline_id?;
+            // motivo di esistere per un riempimento uniforme). Nessuna
+            // clip attiva (il playhead è su un vuoto della track video, o
+            // sta attraversandolo — `gap_playback`) mostra un frame nero
+            // allo stesso modo, invece del placeholder testuale o
+            // dell'ultimo frame rimasto — come un vero NLE. Non quando si
+            // sta sfogliando un media "grezzo" dal media pool
+            // (`browsing_media`): lì `active_clip` è `None` di proposito,
+            // ma `preview_player`/`frame_texture` mostrano davvero
+            // quell'anteprima.
+            let solid_color_frame_info = self.timeline_id.and_then(|timeline_id| {
                 let tl = &self.project.timelines[timeline_id];
-                let clip = tl
-                    .tracks
-                    .get(track_index)?
-                    .clips
-                    .iter()
-                    .find(|c| c.id == clip_id)?;
-                match &clip.source {
-                    vv_core::ClipSource::SolidColor => {
-                        let local_frame =
-                            (self.timeline_state.playhead - clip.timeline_start).max(0);
-                        let rgba = clip
-                            .effects
-                            .color
-                            .as_ref()
-                            .map(|k| k.value_at(local_frame))
-                            .unwrap_or(vv_core::Rgba {
-                                r: 0.0,
-                                g: 0.0,
-                                b: 0.0,
-                                a: 1.0,
-                            });
-                        Some((tl.resolution, rgba))
+                match self.active_clip {
+                    Some((track_index, clip_id)) => {
+                        let clip = tl
+                            .tracks
+                            .get(track_index)?
+                            .clips
+                            .iter()
+                            .find(|c| c.id == clip_id)?;
+                        match &clip.source {
+                            vv_core::ClipSource::SolidColor => {
+                                let local_frame =
+                                    (self.timeline_state.playhead - clip.timeline_start).max(0);
+                                let rgba = clip
+                                    .effects
+                                    .color
+                                    .as_ref()
+                                    .map(|k| k.value_at(local_frame))
+                                    .unwrap_or(vv_core::Rgba {
+                                        r: 0.0,
+                                        g: 0.0,
+                                        b: 0.0,
+                                        a: 1.0,
+                                    });
+                                Some((tl.resolution, rgba))
+                            }
+                            vv_core::ClipSource::Media(_) => None,
+                        }
                     }
-                    vv_core::ClipSource::Media(_) => None,
+                    None if self.browsing_media.is_none() => Some((
+                        tl.resolution,
+                        vv_core::Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    )),
+                    None => None,
                 }
             });
 
@@ -2412,7 +2542,13 @@ impl eframe::App for VibeVideoApp {
             }
         });
 
-        if self.preview_player.as_ref().is_some_and(Player::is_playing) {
+        // Anche durante un vuoto attraversato in riproduzione
+        // (`gap_playback`): lì non c'è un player la cui riproduzione
+        // richieda già repaint da sé, ma il playhead deve comunque
+        // avanzare a orologio finché non raggiunge la prossima clip.
+        if self.preview_player.as_ref().is_some_and(Player::is_playing)
+            || self.gap_playback.is_some()
+        {
             ui.ctx().request_repaint();
         }
 
@@ -3093,6 +3229,176 @@ mod tests {
             app.preview_player.as_ref().is_some_and(Player::is_playing),
             "la riproduzione doveva partire senza alcuna selezione"
         );
+    }
+
+    /// Due clip attaccate (nessun vuoto tra loro): `advance_playback_past`
+    /// deve saltare dritto alla prossima senza passare da `gap_playback`.
+    #[test]
+    fn advance_playback_past_jumps_directly_when_clips_are_back_to_back() {
+        let mut app = VibeVideoApp::default();
+        let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 10, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        app.load_video_clip(clip_a);
+
+        app.advance_playback_past(timeline_id, 10);
+
+        assert!(app.gap_playback.is_none());
+        assert_eq!(app.timeline_state.playhead, 10);
+        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b)));
+    }
+
+    /// Bug segnalato: "quando la playhead passa su un segmento vuoto, non
+    /// deve saltare alla prossima clip ma riprodurre una schermata nera".
+    /// Se c'è un vuoto prima della prossima clip, `advance_playback_past`
+    /// deve entrare in `gap_playback` invece di saltarci dentro subito.
+    #[test]
+    fn advance_playback_past_enters_gap_playback_when_there_is_a_gap_before_the_next_clip() {
+        let mut app = VibeVideoApp::default();
+        let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        app.load_video_clip(clip_a);
+
+        app.advance_playback_past(timeline_id, 10);
+
+        assert!(
+            app.active_clip.is_none(),
+            "schermo nero: nessuna clip attiva nel vuoto"
+        );
+        assert_eq!(app.timeline_state.playhead, 10);
+        let gap = app
+            .gap_playback
+            .as_ref()
+            .expect("doveva entrare in gap_playback");
+        assert_eq!(gap.start_frame, 10);
+        assert_eq!(gap.next_clip_id, clip_b);
+        assert_eq!(gap.next_clip_start, 15);
+    }
+
+    /// Nessuna clip successiva sulla track video: fine del contenuto, non
+    /// deve né saltare né entrare in un `gap_playback` che non porta da
+    /// nessuna parte.
+    #[test]
+    fn advance_playback_past_does_nothing_special_when_there_is_no_next_clip() {
+        let mut app = VibeVideoApp::default();
+        let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        app.load_video_clip(clip_a);
+
+        app.advance_playback_past(timeline_id, 10);
+
+        assert!(app.gap_playback.is_none());
+    }
+
+    /// Mentre `gap_playback` è attivo, `drive_playback` deve avanzare il
+    /// playhead a orologio a parete senza saltare subito alla prossima
+    /// clip: verifica lo stato intermedio (dentro il vuoto, non ancora
+    /// arrivato).
+    #[test]
+    fn drive_playback_advances_the_playhead_through_a_gap_without_jumping() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 100, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        let _ = timeline_id;
+
+        // Timeline a 25fps (vedi `make_timeline_with_clip`): ~200ms fa
+        // equivalgono a circa 5 frame, ben prima dei 100 della prossima
+        // clip.
+        app.gap_playback = Some(GapPlayback {
+            started_at: Instant::now() - std::time::Duration::from_millis(200),
+            start_frame: 0,
+            next_clip_id: clip_b,
+            next_clip_start: 100,
+        });
+
+        app.drive_playback();
+
+        assert!(app.gap_playback.is_some(), "il vuoto non è ancora finito");
+        let playhead = app.timeline_state.playhead;
+        assert!(
+            playhead > 0 && playhead < 100,
+            "playhead={playhead} doveva essere avanzato ma non ancora arrivato"
+        );
+        assert!(
+            app.active_clip.is_none(),
+            "schermo nero finché siamo nel vuoto"
+        );
+    }
+
+    /// Una volta che l'orologio a parete del vuoto ha superato la prossima
+    /// clip, `drive_playback` deve consegnare il controllo a quella clip
+    /// (uscire da `gap_playback`, agganciare la clip, farla partire).
+    #[test]
+    fn drive_playback_hands_off_to_the_next_clip_once_the_gap_elapses() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 5, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        let _ = timeline_id;
+
+        app.gap_playback = Some(GapPlayback {
+            started_at: Instant::now() - std::time::Duration::from_secs(10),
+            start_frame: 0,
+            next_clip_id: clip_b,
+            next_clip_start: 5,
+        });
+
+        app.drive_playback();
+
+        assert!(
+            app.gap_playback.is_none(),
+            "il vuoto doveva essere concluso"
+        );
+        assert_eq!(app.timeline_state.playhead, 5);
+        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b)));
+    }
+
+    /// Bug fix per "toggle_playback deve fermare l'orologio a vuoto se
+    /// attivo, invece di ignorarlo (non c'è un player da mettere in
+    /// pausa)".
+    #[test]
+    fn toggle_playback_stops_gap_playback_clock() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
+
+        app.gap_playback = Some(GapPlayback {
+            started_at: Instant::now(),
+            start_frame: 10,
+            next_clip_id: clip_b,
+            next_clip_start: 15,
+        });
+
+        app.toggle_playback();
+
+        assert!(app.gap_playback.is_none());
+    }
+
+    /// Se il playhead è fermo dentro un vuoto (nessun `gap_playback`
+    /// attivo, nessuna clip agganciata), `toggle_playback` deve far
+    /// ripartire l'orologio a vuoto verso la prossima clip video, non
+    /// restare inerte.
+    #[test]
+    fn toggle_playback_resumes_gap_playback_when_paused_inside_a_gap() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 20, 10);
+        app.timeline_state.playhead = 15;
+
+        assert!(app.gap_playback.is_none());
+        assert!(app.active_clip.is_none());
+
+        app.toggle_playback();
+
+        let gap = app
+            .gap_playback
+            .as_ref()
+            .expect("doveva avviare l'orologio a vuoto verso la prossima clip");
+        assert_eq!(gap.start_frame, 15);
+        assert_eq!(gap.next_clip_id, clip_b);
+        assert_eq!(gap.next_clip_start, 20);
     }
 
     /// Riproduce il bug segnalato: tagliare con T richiedeva di

@@ -25,29 +25,52 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn open(path: &Path, duration_secs: f64) -> Result<Self, String> {
+    /// Se `cached_audio` è `Some`, riusa quel buffer già decodificato
+    /// invece di ridecodificare da zero la traccia audio — evita un hitch
+    /// percepibile (centinaia di ms a oltre 1s per file lunghi) quando si
+    /// riapre un media già visto in questa sessione (es. il player viene
+    /// chiuso quando il playhead attraversa un vuoto e riaperto appena ne
+    /// esce: senza cache, ogni attraversamento ridecodifica l'intero file).
+    /// Tocca al chiamante mantenere la cache per path (vedi
+    /// `VibeVideoApp::audio_cache`); ritorna anche il buffer usato (nuovo
+    /// se decodificato ora, lo stesso passato se riusato) perché il
+    /// chiamante possa aggiornarla.
+    pub fn open(
+        path: &Path,
+        duration_secs: f64,
+        cached_audio: Option<Arc<vv_media::AudioBuffer>>,
+    ) -> Result<(Self, Option<Arc<vv_media::AudioBuffer>>), String> {
         let decode_ahead =
             vv_media::DecodeAhead::spawn(path.to_path_buf(), 300, 60).map_err(|e| e.to_string())?;
         let fps = decode_ahead.fps.as_f64();
 
-        let audio = match vv_media::decode_audio_track(path).map_err(|e| e.to_string())? {
+        let audio_buffer = match cached_audio {
+            Some(buf) => Some(buf),
+            None => vv_media::decode_audio_track(path)
+                .map_err(|e| e.to_string())?
+                .map(Arc::new),
+        };
+        let audio = match &audio_buffer {
             Some(buf) => Some(vv_audio::AudioPlayer::new(
-                buf.samples,
+                buf.samples.clone(),
                 buf.sample_rate,
                 buf.channels,
             )?),
             None => None,
         };
 
-        Ok(Self {
-            decode_ahead,
-            audio,
-            fps,
-            duration_secs,
-            playing: false,
-            wall_clock_started_at: None,
-            wall_clock_base_secs: 0.0,
-        })
+        Ok((
+            Self {
+                decode_ahead,
+                audio,
+                fps,
+                duration_secs,
+                playing: false,
+                wall_clock_started_at: None,
+                wall_clock_base_secs: 0.0,
+            },
+            audio_buffer,
+        ))
     }
 
     pub fn play(&mut self) {
@@ -208,7 +231,8 @@ mod tests {
     #[test]
     fn wall_clock_playback_advances_pauses_and_seeks() {
         let path = make_video_only_clip(3);
-        let mut player = Player::open(&path, 3.0).expect("apertura player fallita");
+        let (mut player, _audio_buffer) =
+            Player::open(&path, 3.0, None).expect("apertura player fallita");
 
         assert_eq!(player.position_secs(), 0.0);
         assert!(!player.is_playing());
@@ -244,7 +268,7 @@ mod tests {
     #[test]
     fn seek_to_frame_round_trips_with_current_source_frame() {
         let path = make_video_only_clip(2);
-        let mut player = Player::open(&path, 2.0).unwrap();
+        let (mut player, _audio_buffer) = Player::open(&path, 2.0, None).unwrap();
 
         player.seek_to_frame(20);
         assert_eq!(player.current_source_frame(), 20);
