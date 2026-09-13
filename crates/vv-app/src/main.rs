@@ -1354,72 +1354,98 @@ impl eframe::App for VibeVideoApp {
             }
         });
 
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button("Apri progetto... (Ctrl+O)")
-                    .clicked()
-                {
-                    self.open_project_dialog();
-                }
-                if ui.button("Salva (Ctrl+S)").clicked() {
-                    self.save_project();
-                }
-                if ui
-                    .button("Salva con nome...")
-                    .on_hover_text("Ctrl+Shift+S")
-                    .clicked()
-                {
-                    self.save_project_as();
-                }
-                if let Some(err) = &self.project_error {
-                    ui.colored_label(egui::Color32::RED, err);
-                }
+        egui::Panel::top("menu_bar").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                let export_disabled = self.timeline_id.is_none() || self.export.is_some();
 
-                ui.separator();
-                if ui.button("Importa media... (Ctrl+I)").clicked() {
-                    self.import_media_dialog();
-                }
-                if ui.button("Nuovo Solid Color").clicked() {
-                    self.add_solid_color_clip();
-                }
+                ui.menu_button("File", |ui| {
+                    if ui.button("Apri progetto... (Ctrl+O)").clicked() {
+                        self.open_project_dialog();
+                        ui.close();
+                    }
+                    if ui.button("Salva (Ctrl+S)").clicked() {
+                        self.save_project();
+                        ui.close();
+                    }
+                    if ui.button("Salva con nome... (Ctrl+Shift+S)").clicked() {
+                        self.save_project_as();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Importa media... (Ctrl+I)").clicked() {
+                        self.import_media_dialog();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(!export_disabled, egui::Button::new("Esporta..."))
+                        .on_hover_text("Esporta l'intera timeline in un file MP4 (H.264 + AAC)")
+                        .clicked()
+                    {
+                        self.start_export();
+                        ui.close();
+                    }
+                });
 
-                ui.separator();
-                if ui.button("Elimina (Del)").clicked() {
-                    self.delete_selected();
-                }
-                if ui
-                    .button("Ripple delete (<)")
-                    .on_hover_text(
-                        "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
+                ui.menu_button("Modifica", |ui| {
+                    if ui.button("Undo (Ctrl+Z)").clicked() {
+                        self.history.undo(&mut self.project);
+                        ui.close();
+                    }
+                    if ui.button("Redo (Ctrl+Shift+Z)").clicked() {
+                        self.history.redo(&mut self.project);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Elimina (Del)").clicked() {
+                        self.delete_selected();
+                        ui.close();
+                    }
+                    if ui
+                        .button("Ripple delete (<)")
+                        .on_hover_text(
+                            "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
+                        )
+                        .clicked()
+                    {
+                        self.ripple_delete_selected();
+                        ui.close();
+                    }
+                    if ui
+                        .button("Dividi (T)")
+                        .on_hover_text("Taglia tutte le clip sotto al playhead, su ogni track")
+                        .clicked()
+                    {
+                        self.split_all_at_playhead();
+                        ui.close();
+                    }
+                });
+
+                ui.menu_button("Clip", |ui| {
+                    if ui.button("Nuovo Solid Color").clicked() {
+                        self.add_solid_color_clip();
+                        ui.close();
+                    }
+                });
+
+                ui.menu_button("Visualizza", |ui| {
+                    // Checkbox: restano aperti al click (l'utente può
+                    // togglarne più di uno senza dover riaprire il menu
+                    // ogni volta), a differenza dei pulsanti-azione sopra.
+                    ui.checkbox(
+                        &mut self.selection_follows_playhead,
+                        "Selection follows playhead",
                     )
-                    .clicked()
-                {
-                    self.ripple_delete_selected();
-                }
-                if ui
-                    .button("Dividi (T)")
-                    .on_hover_text("Taglia tutte le clip sotto al playhead, su ogni track")
-                    .clicked()
-                {
-                    self.split_all_at_playhead();
-                }
-                ui.separator();
-                ui.checkbox(&mut self.selection_follows_playhead, "Selection follows playhead")
                     .on_hover_text(
                         "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
                     );
-                ui.checkbox(&mut self.properties_panel_open, "Pannello proprietà");
+                    ui.checkbox(&mut self.properties_panel_open, "Pannello proprietà");
+                });
+            });
+        });
 
-                ui.separator();
-                if ui.button("Undo (Ctrl+Z)").clicked() {
-                    self.history.undo(&mut self.project);
-                }
-                if ui.button("Redo (Ctrl+Shift+Z)").clicked() {
-                    self.history.redo(&mut self.project);
-                }
-
-                ui.separator();
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            ui.horizontal(|ui| {
                 let playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
                 // ASCII invece dei simboli Unicode ⏸/▶: su alcune
                 // combinazioni piattaforma/driver (es. Asahi Linux) i
@@ -1434,15 +1460,9 @@ impl eframe::App for VibeVideoApp {
                     let pos = player.position_secs();
                     ui.label(format!("{pos:.2}s / {duration:.2}s"));
                 }
-
-                ui.separator();
-                let export_disabled = self.timeline_id.is_none() || self.export.is_some();
-                if ui
-                    .add_enabled(!export_disabled, egui::Button::new("Esporta..."))
-                    .on_hover_text("Esporta l'intera timeline in un file MP4 (H.264 + AAC)")
-                    .clicked()
-                {
-                    self.start_export();
+                if let Some(err) = &self.project_error {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::RED, err);
                 }
             });
         });
