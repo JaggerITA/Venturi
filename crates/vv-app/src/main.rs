@@ -134,6 +134,8 @@ impl VibeVideoApp {
         }
     }
 
+    /// Normal delete: rimuove la clip selezionata, lascia un vuoto al suo
+    /// posto sulla track. Le altre track non si muovono.
     fn delete_selected(&mut self) {
         if let (Some(timeline_id), Some((track_index, clip_id))) =
             (self.timeline_id, self.timeline_state.selected)
@@ -141,6 +143,26 @@ impl VibeVideoApp {
             self.history.do_command(
                 &mut self.project,
                 Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id)),
+            );
+            self.timeline_state.selected = None;
+        }
+    }
+
+    /// Ripple delete: rimuove la clip selezionata e chiude il gap su
+    /// *tutte* le track, mantenendo il sync audio/video (vedi
+    /// ARCHITECTURE.md § Ripple delete — comportamento scelto: sempre
+    /// globale, nessun toggle).
+    fn ripple_delete_selected(&mut self) {
+        if let (Some(timeline_id), Some((track_index, clip_id))) =
+            (self.timeline_id, self.timeline_state.selected)
+        {
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::RippleDeleteAllTracks::new(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                )),
             );
             self.timeline_state.selected = None;
         }
@@ -186,7 +208,11 @@ impl eframe::App for VibeVideoApp {
         }
 
         ui.input(|i| {
-            if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
+            let delete_pressed =
+                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
+            if delete_pressed && i.modifiers.shift {
+                self.ripple_delete_selected();
+            } else if delete_pressed {
                 self.delete_selected();
             }
             if i.key_pressed(egui::Key::S) && !i.modifiers.command {
@@ -214,6 +240,15 @@ impl eframe::App for VibeVideoApp {
                 ui.separator();
                 if ui.button("Elimina (Del)").clicked() {
                     self.delete_selected();
+                }
+                if ui
+                    .button("Ripple delete (Shift+Del)")
+                    .on_hover_text(
+                        "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
+                    )
+                    .clicked()
+                {
+                    self.ripple_delete_selected();
                 }
                 if ui.button("Dividi (S)").clicked() {
                     self.split_selected_at_playhead();
@@ -404,4 +439,87 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_timeline_with_clip(
+        app: &mut VibeVideoApp,
+        track_index: usize,
+        start: FrameIdx,
+        len: FrameIdx,
+    ) -> vv_core::ClipId {
+        if app.timeline_id.is_none() {
+            let id = app.project.timelines.insert(vv_core::Timeline {
+                name: "T".into(),
+                fps: vv_core::Rational::new(25, 1),
+                resolution: (1920, 1080),
+                tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+            });
+            app.timeline_id = Some(id);
+        }
+        let clip_id = app.project.alloc_clip_id();
+        let clip = vv_core::Clip {
+            id: clip_id,
+            source: vv_core::ClipSource::SolidColor,
+            source_in: 0,
+            source_out: len,
+            timeline_start: start,
+            effects: vv_core::EffectStack::default(),
+        };
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::InsertClip {
+                timeline: app.timeline_id.unwrap(),
+                track_index,
+                clip,
+            }),
+        );
+        clip_id
+    }
+
+    #[test]
+    fn ripple_delete_selected_shifts_other_tracks_and_clears_selection() {
+        let mut app = VibeVideoApp::default();
+        let video_a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
+        let audio_a = make_timeline_with_clip(&mut app, 1, 0, 10);
+        let _audio_b = make_timeline_with_clip(&mut app, 1, 10, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = Some((0, video_b));
+        app.ripple_delete_selected();
+
+        assert_eq!(app.timeline_state.selected, None);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[0].clips[0].id, video_a);
+        // La clip audio che partiva allo stesso istante si è spostata a 0
+        // anche se sta su un'altra track: comportamento ripple globale.
+        assert_eq!(tl.tracks[1].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips[0].id, audio_a);
+        assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
+        assert_eq!(tl.tracks[1].clips[1].timeline_start, 0);
+    }
+
+    #[test]
+    fn delete_selected_does_not_shift_other_tracks() {
+        let mut app = VibeVideoApp::default();
+        let video_a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
+        make_timeline_with_clip(&mut app, 1, 0, 10);
+        make_timeline_with_clip(&mut app, 1, 10, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = Some((0, video_b));
+        app.delete_selected();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[0].clips[0].id, video_a);
+        assert_eq!(tl.tracks[1].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
+    }
 }

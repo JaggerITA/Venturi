@@ -182,7 +182,8 @@ vibevideo/
    composita"): quella parte arriva naturalmente con il compositor
    (milestone 5), che deve comunque risolvere "quale clip è attiva a che
    tempo" per il rendering multi-track.
-4. **Ripple delete** globale multi-traccia.
+4. ✅ **Ripple delete** globale multi-traccia (Shift+Del / pulsante
+   dedicato, accanto al normal delete Del/Backspace della milestone 3).
 5. **Trasformazioni**: crop, zoom, gain (valori statici), poi keyframe.
 6. **SolidColor + Text overlay**.
 7. **Speed change** + time-stretch audio.
