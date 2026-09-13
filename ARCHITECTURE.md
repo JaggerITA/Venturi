@@ -169,10 +169,13 @@ vibevideo/
 
 ## Milestone incrementali
 
-1. **Scaffold**: workspace Cargo, finestra egui vuota, apertura di un file
-   video, decode del primo frame, disegno su una texture wgpu nel viewer.
-2. **Playback lineare**: play/pause/seek su una singola clip, frame cache
-   base, audio sincronizzato.
+1. ✅ **Scaffold**: workspace Cargo, finestra egui vuota, apertura di un
+   file video, decode del primo frame, disegno su una texture wgpu nel
+   viewer.
+2. ✅ **Playback lineare**: play/pause/seek su una singola clip, frame
+   cache base (LRU per FrameIdx, decode-ahead su thread dedicato), audio
+   sincronizzato via cpal (l'audio è il clock master; fallback a wall-clock
+   se la clip non ha audio).
 3. **Timeline minima**: multi-traccia, drag delle clip, normal delete
    (lift), split.
 4. **Ripple delete** globale multi-traccia.

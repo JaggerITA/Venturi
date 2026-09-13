@@ -1,14 +1,21 @@
 //! Decode, cache dei frame, proxy e waveform (vedi ARCHITECTURE.md).
-//! Per ora implementato solo il probing dei media (milestone 1); il resto
-//! dei moduli è uno scheletro da riempire nelle milestone successive.
+//! Milestone 2: decode sequenziale/seek (`decode`), frame cache LRU
+//! (`cache`), decode-ahead in background (`playback`) e decodifica della
+//! traccia audio (`audio`). `proxy`/`waveform` restano scheletri per le
+//! milestone successive.
 
+pub mod audio;
 pub mod cache;
 pub mod decode;
+pub mod playback;
 pub mod probe;
 pub mod proxy;
 pub mod waveform;
 
-pub use decode::{FrameRgba, decode_first_frame};
+pub use audio::{AudioBuffer, decode_audio_track};
+pub use cache::FrameCache;
+pub use decode::{Decoder, FrameRgba, decode_first_frame};
+pub use playback::DecodeAhead;
 pub use probe::probe;
 
 #[derive(Debug, thiserror::Error)]
