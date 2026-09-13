@@ -21,7 +21,7 @@ mod timeline_ui;
 
 use player::Player;
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
@@ -133,6 +133,15 @@ struct VibeVideoApp {
     /// è attivo. Il thread lavora su uno snapshot di `Project` clonato al
     /// click di "Esporta", non sul progetto live — vedi `export.rs`.
     export: Option<ExportUiState>,
+
+    /// File del progetto corrente (milestone 10), se già salvato/aperto
+    /// almeno una volta: "Salva" scrive lì direttamente, altrimenti si
+    /// comporta come "Salva con nome...".
+    current_project_path: Option<PathBuf>,
+    /// Ultimo errore di salvataggio/apertura progetto, mostrato in
+    /// toolbar accanto ai pulsanti — separato da `import_error` (quello è
+    /// per l'import media, contesto diverso).
+    project_error: Option<String>,
 }
 
 /// Stato UI di un export in corso: progresso/cancellazione condivisi col
@@ -165,6 +174,8 @@ impl Default for VibeVideoApp {
             properties_panel_open: true,
             snapping_enabled: true,
             export: None,
+            current_project_path: None,
+            project_error: None,
         }
     }
 }
@@ -194,6 +205,75 @@ impl VibeVideoApp {
             .pick_file()
         {
             self.import_media(path);
+        }
+    }
+
+    /// Salva nel file corrente (`current_project_path`), o come "salva con
+    /// nome" se il progetto non è ancora stato salvato/aperto.
+    fn save_project(&mut self) {
+        match self.current_project_path.clone() {
+            Some(path) => self.save_project_to(&path),
+            None => self.save_project_as(),
+        }
+    }
+
+    /// Apre sempre il file dialog di salvataggio, anche se il progetto ha
+    /// già un file corrente (usato dal pulsante "Salva con nome..." e da
+    /// Ctrl+Shift+S).
+    fn save_project_as(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name("progetto.vvproj")
+            .add_filter("progetto vibevideo", &["vvproj"])
+            .save_file()
+        {
+            self.save_project_to(&path);
+        }
+    }
+
+    fn save_project_to(&mut self, path: &Path) {
+        match vv_core::save_project(&self.project, path) {
+            Ok(()) => {
+                self.current_project_path = Some(path.to_path_buf());
+                self.project_error = None;
+            }
+            Err(e) => self.project_error = Some(format!("Salvataggio fallito: {e}")),
+        }
+    }
+
+    fn open_project_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("progetto vibevideo", &["vvproj"])
+            .pick_file()
+        {
+            self.load_project_from(path);
+        }
+    }
+
+    /// Sostituisce il progetto corrente con quello caricato da `path`:
+    /// azzera tutto lo stato UI/di sessione legato al *vecchio* progetto
+    /// (selezione, playhead, history, player/anteprima) — sarebbe
+    /// incoerente riferito al nuovo. `timeline_id` diventa la prima (e di
+    /// norma unica, con l'UI attuale) timeline del progetto caricato.
+    fn load_project_from(&mut self, path: PathBuf) {
+        match vv_core::load_project(&path) {
+            Ok(project) => {
+                self.timeline_id = project.timelines.keys().next();
+                self.project = project;
+                self.history = vv_core::History::default();
+                self.timeline_state = timeline_ui::TimelineState::default();
+                self.import_error = None;
+                self.preview_path = None;
+                self.preview_meta = None;
+                self.preview_player = None;
+                self.preview_error = None;
+                self.frame_texture = None;
+                self.active_clip = None;
+                self.last_synced_playhead = 0;
+                self.browsing_media = None;
+                self.current_project_path = Some(path);
+                self.project_error = None;
+            }
+            Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
         }
     }
 
@@ -1258,10 +1338,45 @@ impl eframe::App for VibeVideoApp {
             if i.modifiers.command && i.key_pressed(egui::Key::I) {
                 self.import_media_dialog();
             }
+            // Ctrl+S: salva (nel file corrente, o "salva con nome" se il
+            // progetto non è ancora stato salvato). Ctrl+Shift+S: sempre
+            // "salva con nome", anche se il progetto ha già un file.
+            if i.modifiers.command && i.key_pressed(egui::Key::S) {
+                if i.modifiers.shift {
+                    self.save_project_as();
+                } else {
+                    self.save_project();
+                }
+            }
+            // Ctrl+O: apri un progetto.
+            if i.modifiers.command && i.key_pressed(egui::Key::O) {
+                self.open_project_dialog();
+            }
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
+                if ui
+                    .button("Apri progetto... (Ctrl+O)")
+                    .clicked()
+                {
+                    self.open_project_dialog();
+                }
+                if ui.button("Salva (Ctrl+S)").clicked() {
+                    self.save_project();
+                }
+                if ui
+                    .button("Salva con nome...")
+                    .on_hover_text("Ctrl+Shift+S")
+                    .clicked()
+                {
+                    self.save_project_as();
+                }
+                if let Some(err) = &self.project_error {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
+
+                ui.separator();
                 if ui.button("Importa media... (Ctrl+I)").clicked() {
                     self.import_media_dialog();
                 }
@@ -2829,5 +2944,65 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    #[test]
+    fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
+        app.timeline_state.playhead = 5;
+
+        let dir = std::env::temp_dir().join("vv-app-persistence-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("progetto.vvproj");
+
+        app.save_project_to(&path);
+        assert!(app.project_error.is_none(), "{:?}", app.project_error);
+        assert_eq!(app.current_project_path, Some(path.clone()));
+
+        // Un progetto "nuovo" in memoria (un'altra clip, un'altra
+        // selezione/playhead): caricare deve sostituire tutto, non
+        // fondere.
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 999);
+        app.timeline_state.playhead = 42;
+
+        app.load_project_from(path.clone());
+        assert!(app.project_error.is_none(), "{:?}", app.project_error);
+        assert_eq!(app.current_project_path, Some(path));
+
+        let loaded_timeline_id = app.timeline_id.expect("timeline attesa dopo il load");
+        assert_eq!(
+            loaded_timeline_id, timeline_id,
+            "stessa TimelineId di prima: SlotMap round-trippa le chiavi"
+        );
+        assert_eq!(
+            app.project.timelines[loaded_timeline_id].tracks[0].clips[0].id,
+            clip_id
+        );
+        // Stato UI del progetto precedente azzerato, non ereditato dal
+        // vecchio `app` né rimasto dal progetto appena sovrascritto.
+        assert!(app.timeline_state.selected.is_empty());
+        assert_eq!(app.timeline_state.playhead, 0);
+    }
+
+    #[test]
+    fn load_project_from_a_bad_path_sets_project_error_without_touching_the_current_project() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.load_project_from(std::env::temp_dir().join("vv-app-persistence-test/nope.vvproj"));
+
+        assert!(app.project_error.is_some());
+        // Il progetto corrente (mai salvato) resta intatto: un load fallito
+        // non deve cancellare del lavoro non salvato.
+        assert_eq!(app.timeline_id, Some(timeline_id));
+        assert_eq!(
+            app.project.timelines[timeline_id].tracks[0].clips[0].id,
+            clip_id
+        );
     }
 }

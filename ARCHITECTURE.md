@@ -444,8 +444,32 @@ vibevideo/
    (`VIDEO_TRACK`); `EffectStack::speed` non applicato (nessun time-remap:
    milestone 7 non ancora fatta, quindi l'export resta a 1x); text overlay
    non applicabile (non implementato in nessuna parte dell'app).
-10. **Persistenza progetto** (RON) + undo/redo completo su tutte le
-    operazioni sopra.
+10. ✅ **Persistenza progetto** (RON): salvataggio/caricamento di un file
+    `.vvproj`. Ogni tipo del modello (`Project`, `Timeline`, `Clip`,
+    `EffectStack`, `Keyframed<T>`, ecc.) derivava già `Serialize`/
+    `Deserialize` fin dalla milestone 1 — non c'era nulla da adattare nel
+    modello dati, solo lettura/scrittura file e (de)serializzazione, in un
+    nuovo modulo `vv-core/src/persistence.rs`
+    (`save_project`/`load_project`, errori `PersistenceError` per
+    I/O + parse RON). `SlotMap` (usata per `media_pool`/`timelines`)
+    round-trippa le chiavi esattamente (stessa versione/indice interni),
+    quindi `MediaId`/`TimelineId` restano validi dopo un caricamento senza
+    bisogno di rimappare nulla lato chiamante — motivo per cui il formato
+    salvato è il `Project` così com'è, senza un wrapper dedicato.
+
+    UI: pulsanti "Apri progetto...", "Salva", "Salva con nome..." in
+    toolbar (Ctrl+O, Ctrl+S, Ctrl+Shift+S). "Salva" scrive nel file
+    corrente se il progetto è già stato salvato/aperto una volta,
+    altrimenti si comporta come "Salva con nome..." (dialog `rfd`, stesso
+    crate già usato per import/export). Aprire un progetto sostituisce
+    tutto lo stato UI/di sessione legato al progetto precedente (history,
+    selezione, playhead, player/anteprima) — sarebbe incoerente riferito
+    al nuovo progetto — e non tocca il progetto corrente se il file scelto
+    non si carica (un load fallito non deve costare del lavoro non
+    salvato). `undo`/`redo` erano già completi su tutte le operazioni
+    esistenti (ogni `Command` di `vv-core` implementa già `apply`/`undo`,
+    verificato dai test già presenti in ogni milestone precedente):
+    nessun lavoro aggiuntivo necessario lì.
 
 ## Setup ambiente richiesto
 

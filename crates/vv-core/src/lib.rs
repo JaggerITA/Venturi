@@ -1,5 +1,6 @@
 pub mod command;
 pub mod model;
+pub mod persistence;
 
 pub use command::{
     Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete,
@@ -7,6 +8,7 @@ pub use command::{
     SetClipColor, SetClipGain, SetClipTransform, SplitClip, UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
+pub use persistence::{PersistenceError, load_project, save_project};
 
 #[cfg(test)]
 mod tests {
