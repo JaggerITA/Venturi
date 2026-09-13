@@ -1,0 +1,4 @@
+/target
+.vibevideo/proxies/
+.vibevideo/waveforms/
+*.vvproj.bak
