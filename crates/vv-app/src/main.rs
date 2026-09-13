@@ -1453,7 +1453,6 @@ impl eframe::App for VibeVideoApp {
             .default_size(240.0)
             .resizable(true)
             .show(ui, |ui| {
-                ui.heading("Timeline");
                 if let Some(timeline_id) = self.timeline_id {
                     let labels: HashMap<MediaId, String> = self
                         .project

@@ -387,6 +387,16 @@ vibevideo/
    riceverne uno nuovo) sulla track video *e* la sua gemella audio
    appena ricollegata — intento più comune dopo un taglio: rivedere o
    eliminare ciò che sta prima del punto appena tagliato.
+
+   **Fix post-milestone, round 7** (rifinitura UI timeline): rimossa la
+   scritta "Timeline" sopra al pannello — non aggiungeva informazione e
+   sottraeva spazio cliccabile; lo spazio che occupava ora fa parte del
+   righello stesso, quindi ci si può cliccare per posizionare la playhead
+   come sul resto del righello. La playhead era rappresentata solo da una
+   linea verticale sottile, senza un punto di riferimento visivo per dove
+   si trova esattamente in alto: aggiunta una "testina" triangolare
+   rivolta in basso nel righello (`egui::Shape::convex_polygon`), come
+   nella maggior parte degli NLE.
 7. **Speed change** + time-stretch audio.
 8. **Proxy workflow** + waveform in timeline.
 9. **Export**: pipeline di encode ffmpeg che applica l'intero stack di

@@ -428,15 +428,29 @@ pub fn show_timeline(
                 });
             }
 
-            // Playhead.
+            // Playhead: linea verticale su tutta l'altezza, più una
+            // "testina" triangolare rivolta in basso nel righello (senza,
+            // la playhead era solo una linea sottile priva di un punto
+            // di riferimento visivo, come in un vero NLE).
             let px = origin.x + state.playhead as f32 * px_per_frame;
+            let playhead_color = egui::Color32::from_rgb(220, 50, 50);
             painter.line_segment(
                 [
                     egui::pos2(px, origin.y),
                     egui::pos2(px, origin.y + content_height),
                 ],
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 50, 50)),
+                egui::Stroke::new(2.0, playhead_color),
             );
+            const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+                    egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+                    egui::pos2(px, origin.y + RULER_HEIGHT),
+                ],
+                playhead_color,
+                egui::Stroke::NONE,
+            ));
         });
 
     if let Some(action) = pending {
