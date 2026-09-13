@@ -561,6 +561,11 @@ impl VibeVideoApp {
         Some((partner_track, partner_id))
     }
 
+    /// Aggiunge il media in coda a ciascuna track (video e, se presente,
+    /// audio separatamente — comportamento storico, usato dai test e da
+    /// eventuali altri chiamanti che non hanno una posizione esplicita).
+    /// Per il drag&drop con posizionamento preciso vedi
+    /// `add_media_to_timeline_at`.
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
@@ -570,8 +575,33 @@ impl VibeVideoApp {
         // pool), viene creata al volo ereditando fps/risoluzione da questo
         // media.
         let timeline_id = self.ensure_timeline_for(&meta);
-
         let video_start = track_end(&self.project, timeline_id, 0);
+        self.insert_media_clip(timeline_id, media_id, &meta, video_start);
+    }
+
+    /// Come `add_media_to_timeline`, ma piazza la clip (e la sua gemella
+    /// audio, se c'è) esattamente a `start`, invece che in coda: usato dal
+    /// drag&drop dal media pool sulla timeline, dove la posizione viene dal
+    /// punto orizzontale in cui l'utente rilascia (vedi
+    /// `timeline_ui::show_timeline`).
+    fn add_media_to_timeline_at(&mut self, media_id: MediaId, start: FrameIdx) {
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
+        let meta = item.meta.clone();
+        let timeline_id = self.ensure_timeline_for(&meta);
+        self.insert_media_clip(timeline_id, media_id, &meta, start);
+    }
+
+    /// Inserisce la clip video (e, se il media ha audio, la sua gemella
+    /// collegata sulla track audio) entrambe a `start`.
+    fn insert_media_clip(
+        &mut self,
+        timeline_id: TimelineId,
+        media_id: MediaId,
+        meta: &vv_core::MediaMeta,
+        start: FrameIdx,
+    ) {
         let video_clip_id = self.project.alloc_clip_id();
         // Se la clip ha anche audio, le due metà vengono collegate di
         // default (vedi doc di `Clip::linked`): l'utente può scollegarle
@@ -583,7 +613,7 @@ impl VibeVideoApp {
             source: vv_core::ClipSource::Media(media_id),
             source_in: 0,
             source_out: meta.duration_frames,
-            timeline_start: video_start,
+            timeline_start: start,
             effects: vv_core::EffectStack::default(),
             linked: audio_clip_id,
         };
@@ -597,13 +627,12 @@ impl VibeVideoApp {
         );
 
         if let Some(audio_clip_id) = audio_clip_id {
-            let audio_start = track_end(&self.project, timeline_id, 1);
             let audio_clip = vv_core::Clip {
                 id: audio_clip_id,
                 source: vv_core::ClipSource::Media(media_id),
                 source_in: 0,
                 source_out: meta.duration_frames,
-                timeline_start: audio_start,
+                timeline_start: start,
                 effects: vv_core::EffectStack::default(),
                 linked: Some(video_clip_id),
             };
@@ -1124,6 +1153,23 @@ impl eframe::App for VibeVideoApp {
                             if resp.double_clicked() {
                                 preview_action = Some(id);
                             }
+                            // "Ghost" che segue il cursore durante il
+                            // trascinamento: senza, non c'era alcun feedback
+                            // visivo che il drag fosse partito (l'elemento
+                            // del media pool resta al suo posto, invariato).
+                            if resp.dragged()
+                                && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+                            {
+                                egui::Area::new(interact_id.with("drag_ghost"))
+                                    .order(egui::Order::Tooltip)
+                                    .fixed_pos(pos + egui::vec2(12.0, 12.0))
+                                    .interactable(false)
+                                    .show(ui.ctx(), |ui| {
+                                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                            ui.label(format!("🎬 {label}"));
+                                        });
+                                    });
+                            }
                         }
                     });
             });
@@ -1471,23 +1517,19 @@ impl eframe::App for VibeVideoApp {
 
         let selected_before_timeline_ui = self.timeline_state.selected.clone();
         let playhead_before_timeline_ui = self.timeline_state.playhead;
-        let mut dropped_media: Option<MediaId> = None;
+        // Se esiste già una timeline, la posizione esatta del rilascio (e
+        // l'anteprima mentre si trascina) è gestita da `show_timeline`
+        // stesso, che ha accesso a fps/scala per convertire pixel->frame.
+        // Se non esiste ancora, non c'è nessuna scala a cui ancorare una
+        // posizione: qui basta un semplice drop-ovunque che la crei al volo
+        // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
+        // media a frame 0.
+        let mut media_drop: Option<(MediaId, FrameIdx)> = None;
+        let mut dropped_on_empty_timeline: Option<MediaId> = None;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
             .resizable(true)
             .show(ui, |ui| {
-                // Drop zone per il trascinamento dal media pool: copre tutto
-                // il pannello timeline, sotto al contenuto, per intercettare
-                // il rilascio ovunque nell'area (non solo sulle track). Se
-                // non esiste ancora una timeline, `add_media_to_timeline` ne
-                // crea una al volo con fps/risoluzione del media droppato.
-                let drop_rect = ui.available_rect_before_wrap();
-                let drop_id = ui.id().with("timeline_drop_zone");
-                let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
-                dropped_media = drop_resp
-                    .dnd_release_payload::<MediaId>()
-                    .map(|arc| *arc);
-
                 if let Some(timeline_id) = self.timeline_id {
                     let labels: HashMap<MediaId, String> = self
                         .project
@@ -1495,7 +1537,7 @@ impl eframe::App for VibeVideoApp {
                         .iter()
                         .map(|(id, item)| (id, file_label(&item.path)))
                         .collect();
-                    timeline_ui::show_timeline(
+                    media_drop = timeline_ui::show_timeline(
                         ui,
                         &mut self.project,
                         &mut self.history,
@@ -1504,11 +1546,20 @@ impl eframe::App for VibeVideoApp {
                         &mut self.timeline_state,
                     );
                 } else {
+                    let drop_rect = ui.available_rect_before_wrap();
+                    let drop_id = ui.id().with("timeline_drop_zone_empty");
+                    let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
+                    dropped_on_empty_timeline = drop_resp
+                        .dnd_release_payload::<MediaId>()
+                        .map(|arc| *arc);
                     ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
                 }
             });
-        if let Some(media_id) = dropped_media {
+        if let Some(media_id) = dropped_on_empty_timeline {
             self.add_media_to_timeline(media_id);
+        }
+        if let Some((media_id, start)) = media_drop {
+            self.add_media_to_timeline_at(media_id, start);
         }
         // L'utente ha trascinato/cliccato il playhead in questo frame?
         // Serve per forzare un seek anche se si sta riproducendo (bug:

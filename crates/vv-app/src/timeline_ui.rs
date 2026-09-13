@@ -128,6 +128,11 @@ enum PendingAction {
     Link(usize, ClipId, usize, ClipId),
 }
 
+/// Ritorna `Some((media, frame))` se in questo frame l'utente ha rilasciato
+/// sulla timeline un elemento trascinato dal media pool: il chiamante (che
+/// ha accesso al media pool e alla history) se ne occupa, questa funzione si
+/// limita a disegnare l'anteprima del punto di atterraggio e a calcolare il
+/// frame dalla posizione orizzontale del rilascio.
 pub fn show_timeline(
     ui: &mut egui::Ui,
     project: &mut Project,
@@ -135,7 +140,8 @@ pub fn show_timeline(
     timeline_id: TimelineId,
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
     state: &mut TimelineState,
-) {
+) -> Option<(vv_core::MediaId, FrameIdx)> {
+    let mut media_drop = None;
     let fps = project.timelines[timeline_id].fps.as_f64();
     let px_per_frame = state.pixels_per_sec / fps.max(1.0) as f32;
 
@@ -242,6 +248,51 @@ pub fn show_timeline(
                 ui.id().with("timeline_marquee"),
                 egui::Sense::click_and_drag(),
             );
+
+            // Drag&drop dal media pool: `dnd_hover_payload`/`dnd_release_payload`
+            // guardano `contains_pointer` invece di `hovered` (che sarebbe
+            // sempre false qui: il widget "attivo" durante un drag è quello
+            // del media pool, non `marquee_resp`), quindi funzionano anche
+            // se il drag è partito da un altro widget — vedi i loro doc in
+            // egui. La posizione del rilascio va letta da `i.pointer`
+            // direttamente per lo stesso motivo (`interact_pointer_pos()` è
+            // legato a chi ha "vinto" l'interazione, non a questo drop).
+            if let Some(media_id) = marquee_resp.dnd_hover_payload::<vv_core::MediaId>()
+                && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+                && let Some(item) = project.media_pool.get(*media_id)
+            {
+                let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                let ghost_height = if item.meta.has_audio {
+                    2.0 * ROW_HEIGHT
+                } else {
+                    ROW_HEIGHT
+                };
+                let ghost_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        origin.x + frame as f32 * px_per_frame,
+                        origin.y + RULER_HEIGHT,
+                    ),
+                    egui::vec2(item.meta.duration_frames as f32 * px_per_frame, ghost_height),
+                );
+                painter.rect_filled(
+                    ghost_rect,
+                    4.0,
+                    egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
+                );
+                painter.rect_stroke(
+                    ghost_rect,
+                    4.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
+                && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+            {
+                let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                media_drop = Some((*media_id, frame));
+            }
+
             if marquee_resp.drag_started() {
                 if let Some(pos) = marquee_resp.interact_pointer_pos()
                     && !press_over_a_clip(pos)
@@ -483,6 +534,8 @@ pub fn show_timeline(
             }
         }
     }
+
+    media_drop
 }
 
 fn clip_label_and_color(
