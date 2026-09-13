@@ -96,6 +96,13 @@ impl Player {
         }
     }
 
+    /// Picco lineare dell'ultimo buffer audio riprodotto, per l'audiometer
+    /// nella UI (vedi `vv_audio::AudioPlayer::peak_linear`). `0.0` se la
+    /// clip non ha audio.
+    pub fn peak_linear(&self) -> f32 {
+        self.audio.as_ref().map_or(0.0, |a| a.peak_linear())
+    }
+
     pub fn seek_secs(&mut self, secs: f64) {
         let secs = secs.clamp(0.0, self.duration_secs.max(0.0));
         if let Some(audio) = &self.audio {

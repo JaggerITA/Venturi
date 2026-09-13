@@ -142,6 +142,17 @@ struct VibeVideoApp {
     /// toolbar accanto ai pulsanti — separato da `import_error` (quello è
     /// per l'import media, contesto diverso).
     project_error: Option<String>,
+
+    /// Audiometer (toggle in Visualizza): una fascia stretta a destra
+    /// della timeline con il livello del player attivo. Attivo di
+    /// default, come nella maggior parte degli NLE.
+    audiometer_enabled: bool,
+    /// Valore mostrato dal meter, con un decadimento applicato qui (non
+    /// nel callback audio): il picco letto da `Player::peak_linear` è
+    /// istantaneo, senza smorzamento scenderebbe a zero non appena il
+    /// buffer corrente non contiene picchi, con un effetto "a scatti"
+    /// invece di una barra che scende dolcemente.
+    audiometer_level: f32,
 }
 
 /// Stato UI di un export in corso: progresso/cancellazione condivisi col
@@ -176,6 +187,8 @@ impl Default for VibeVideoApp {
             export: None,
             current_project_path: None,
             project_error: None,
+            audiometer_enabled: true,
+            audiometer_level: 0.0,
         }
     }
 }
@@ -390,6 +403,59 @@ impl VibeVideoApp {
 
         if should_close && let Some(state) = self.export.take() {
             let _ = state.handle.join();
+        }
+    }
+
+    /// Barra verticale col livello del player attivo, disegnata in tutto
+    /// lo spazio disponibile in `ui` (chi chiama ne ha già ritagliato una
+    /// fascia stretta, vedi il pannello "audiometer" annidato in quello
+    /// "timeline"). Non una misura professionale: solo il picco assoluto
+    /// dell'ultimo buffer audio (`Player::peak_linear`), con un
+    /// decadimento applicato qui frame per frame perché il valore
+    /// istantaneo da solo farebbe scendere la barra a scatti invece che
+    /// dolcemente.
+    fn draw_audiometer(&mut self, ui: &mut egui::Ui) {
+        const DECAY: f32 = 0.85;
+        let raw = self
+            .preview_player
+            .as_ref()
+            .map(Player::peak_linear)
+            .unwrap_or(0.0);
+        self.audiometer_level = raw.max(self.audiometer_level * DECAY);
+        let level = self.audiometer_level.clamp(0.0, 1.0);
+
+        let rect = ui.available_rect_before_wrap();
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(20));
+
+        let margin = 4.0;
+        let bar_rect = rect.shrink(margin);
+        painter.rect_filled(bar_rect, 2.0, egui::Color32::from_gray(10));
+
+        if level > 0.0 {
+            let fill_height = bar_rect.height() * level;
+            let fill_rect = egui::Rect::from_min_max(
+                egui::pos2(bar_rect.left(), bar_rect.bottom() - fill_height),
+                bar_rect.right_bottom(),
+            );
+            // Verde fino al 70%, giallo fino al 90%, rosso oltre (vicino
+            // al clipping) — stessa convenzione di un VU-meter comune.
+            let color = if level > 0.9 {
+                egui::Color32::from_rgb(220, 50, 50)
+            } else if level > 0.7 {
+                egui::Color32::from_rgb(230, 200, 50)
+            } else {
+                egui::Color32::from_rgb(60, 200, 90)
+            };
+            painter.rect_filled(fill_rect, 2.0, color);
+        }
+
+        // Repaint continuo mentre il livello sta ancora decadendo verso lo
+        // zero, altrimenti la barra resterebbe "incollata" all'ultimo
+        // valore finché non arriva un altro input (stesso principio del
+        // repaint durante il playback/export altrove in questo file).
+        if self.audiometer_level > 0.001 {
+            ui.ctx().request_repaint();
         }
     }
 
@@ -1628,6 +1694,10 @@ impl eframe::App for VibeVideoApp {
 
                 ui.menu_button("Visualizza", |ui| {
                     ui.checkbox(&mut self.properties_panel_open, "Pannello proprietà");
+                    ui.checkbox(&mut self.audiometer_enabled, "Audiometer")
+                        .on_hover_text(
+                            "Livello del player attivo, in una fascia stretta a destra della timeline",
+                        );
                 });
             });
         });
@@ -1696,6 +1766,17 @@ impl eframe::App for VibeVideoApp {
             .default_size(240.0)
             .resizable(true)
             .show(ui, |ui| {
+                if self.audiometer_enabled {
+                    // Fascia stretta a destra, ritagliata *prima* di
+                    // mostrare la timeline: le ruba solo questa larghezza
+                    // fissa, non la comprime in proporzione.
+                    egui::Panel::right("audiometer")
+                        .default_size(28.0)
+                        .resizable(false)
+                        .show(ui, |ui| {
+                            self.draw_audiometer(ui);
+                        });
+                }
                 if let Some(timeline_id) = self.timeline_id {
                     let labels: HashMap<MediaId, String> = self
                         .project

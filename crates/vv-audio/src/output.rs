@@ -19,6 +19,13 @@ pub struct AudioPlayer {
     /// Guadagno lineare (non dB) codificato come bit pattern di un f32, per
     /// poterlo leggere/scrivere via atomic dal callback realtime senza lock.
     gain_linear_bits: Arc<AtomicU32>,
+    /// Picco assoluto (post-gain) dell'ultimo buffer scritto dal callback,
+    /// stesso incapsulamento bit-pattern di `gain_linear_bits`: per
+    /// l'audiometer nella UI (vedi `Player::peak_linear` in vv-app), non
+    /// una misura accurata/professionale (nessun RMS, nessuna finestra —
+    /// solo il valore assoluto massimo tra i campioni dell'ultimo
+    /// callback).
+    peak_linear_bits: Arc<AtomicU32>,
     sample_rate: u32,
     total_frames: usize,
 }
@@ -39,6 +46,7 @@ impl AudioPlayer {
         let playing = Arc::new(AtomicBool::new(false));
         let position_frames = Arc::new(AtomicUsize::new(0));
         let gain_linear_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let peak_linear_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let total_frames = samples.len() / channels.max(1) as usize;
         let channels_usize = channels as usize;
 
@@ -47,6 +55,7 @@ impl AudioPlayer {
         let cb_playing = playing.clone();
         let cb_position = position_frames.clone();
         let cb_gain = gain_linear_bits.clone();
+        let cb_peak = peak_linear_bits.clone();
 
         let stream = device
             .build_output_stream(
@@ -54,25 +63,33 @@ impl AudioPlayer {
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if !cb_playing.load(Ordering::Relaxed) {
                         data.fill(0.0);
-                        return;
-                    }
-                    let gain = f32::from_bits(cb_gain.load(Ordering::Relaxed));
-                    let mut pos = cb_position.load(Ordering::Relaxed);
-                    for frame in data.chunks_mut(channels_usize) {
-                        if pos >= total_frames {
-                            frame.fill(0.0);
-                            continue;
+                    } else {
+                        let gain = f32::from_bits(cb_gain.load(Ordering::Relaxed));
+                        let mut pos = cb_position.load(Ordering::Relaxed);
+                        for frame in data.chunks_mut(channels_usize) {
+                            if pos >= total_frames {
+                                frame.fill(0.0);
+                                continue;
+                            }
+                            let start = pos * channels_usize;
+                            for (dst, src) in frame
+                                .iter_mut()
+                                .zip(&cb_samples[start..start + channels_usize])
+                            {
+                                *dst = src * gain;
+                            }
+                            pos += 1;
                         }
-                        let start = pos * channels_usize;
-                        for (dst, src) in frame
-                            .iter_mut()
-                            .zip(&cb_samples[start..start + channels_usize])
-                        {
-                            *dst = src * gain;
-                        }
-                        pos += 1;
+                        cb_position.store(pos, Ordering::Relaxed);
                     }
-                    cb_position.store(pos, Ordering::Relaxed);
+                    // Picco (post-gain) di questo buffer, per l'audiometer:
+                    // calcolato qui in entrambi i rami (silenzio quando in
+                    // pausa/a fine buffer inclusi), non solo quando si
+                    // riproduce davvero, così il meter scende a zero da
+                    // solo alla pausa invece di restare "incollato" all'ultimo
+                    // valore.
+                    let peak = data.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+                    cb_peak.store(peak.to_bits(), Ordering::Relaxed);
                 },
                 move |err| eprintln!("vv-audio: errore stream: {err}"),
                 None,
@@ -86,6 +103,7 @@ impl AudioPlayer {
             playing,
             position_frames,
             gain_linear_bits,
+            peak_linear_bits,
             sample_rate,
             total_frames,
         })
@@ -97,6 +115,14 @@ impl AudioPlayer {
     pub fn set_gain_db(&self, db: f32) {
         self.gain_linear_bits
             .store(db_to_linear(db).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Picco lineare (0.0..=1.0 di norma, può superare 1.0 con un gain
+    /// positivo) dell'ultimo buffer scritto dal callback audio: per un
+    /// audiometer nella UI, non una misura professionale (vedi doc del
+    /// campo `peak_linear_bits`).
+    pub fn peak_linear(&self) -> f32 {
+        f32::from_bits(self.peak_linear_bits.load(Ordering::Relaxed))
     }
 
     pub fn play(&self) {
