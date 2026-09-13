@@ -698,6 +698,23 @@ impl VibeVideoApp {
             return;
         };
         if self.timeline_state.selected.is_empty() {
+            // Nessuna clip selezionata: se invece è selezionato un vuoto
+            // (click su uno spazio vuoto seguito da una clip, vedi
+            // `TimelineState::selected_gap`), il ripple delete lo chiude
+            // shiftando tutte le track — stessa meccanica del ripple
+            // delete su una clip, ma senza nulla da rimuovere.
+            if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
+                self.history.do_command(
+                    &mut self.project,
+                    Box::new(vv_core::RippleDeleteGap::new(
+                        timeline_id,
+                        gap_start,
+                        gap_end - gap_start,
+                    )),
+                );
+                self.timeline_state.clear_selection();
+                self.sync_selection_to_playhead();
+            }
             return;
         }
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();

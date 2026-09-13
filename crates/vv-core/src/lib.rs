@@ -3,8 +3,8 @@ pub mod model;
 
 pub use command::{
     Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete,
-    LinkClips, MoveClip, MoveClips, RemoveKeyframe, RippleDeleteAllTracks, SetClipColor,
-    SetClipGain, SetClipTransform, SplitClip, UnlinkClip, UpsertKeyframe,
+    LinkClips, MoveClip, MoveClips, RemoveKeyframe, RippleDeleteAllTracks, RippleDeleteGap,
+    SetClipColor, SetClipGain, SetClipTransform, SplitClip, UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
 

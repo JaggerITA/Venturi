@@ -45,6 +45,14 @@ pub struct TimelineState {
     /// lo scroll cambia): un drag avviato da un'area vuota della timeline
     /// (non su una clip, non sul righello) lo popola.
     marquee: Option<MarqueeDrag>,
+    /// Vuoto selezionato con un click su uno spazio vuoto *preceduto* da
+    /// una clip successiva sulla stessa track — (track_index, inizio,
+    /// fine), nello spazio frame della timeline. Mutuamente esclusivo con
+    /// `selected` (selezionare l'uno svuota l'altro): serve a dare a un
+    /// vuoto un'identità cliccabile/cancellabile con ripple delete, come in
+    /// DaVinci Resolve. Uno spazio vuoto in coda (nessuna clip dopo) non è
+    /// un "vuoto" selezionabile: non c'è nulla da ravvicinare shiftandolo.
+    pub selected_gap: Option<(usize, FrameIdx, FrameIdx)>,
 }
 
 struct MarqueeDrag {
@@ -78,6 +86,7 @@ impl Default for TimelineState {
             pixels_per_sec: 60.0,
             drag: None,
             marquee: None,
+            selected_gap: None,
         }
     }
 }
@@ -92,6 +101,7 @@ impl TimelineState {
     pub fn set_selection(&mut self, selected: BTreeSet<ClipKey>, anchor: Option<ClipKey>) {
         self.selected = selected;
         self.selection_anchor = anchor;
+        self.selected_gap = None;
     }
 
     /// Imposta la selezione a una singola clip (o a nessuna), aggiornando
@@ -102,10 +112,11 @@ impl TimelineState {
         self.set_selection(clip.into_iter().collect(), clip);
     }
 
-    /// Svuota la selezione.
+    /// Svuota la selezione (clip e vuoto).
     pub fn clear_selection(&mut self) {
         self.selected.clear();
         self.selection_anchor = None;
+        self.selected_gap = None;
     }
 }
 
@@ -315,12 +326,31 @@ pub fn show_timeline(
                     let hits = clips_intersecting_rect(&visuals, px_per_frame, rect);
                     state.selected = hits.iter().copied().collect();
                     state.selection_anchor = hits.first().copied();
+                    state.selected_gap = None;
                 }
             } else if marquee_resp.clicked()
                 && let Some(pos) = marquee_resp.interact_pointer_pos()
                 && !press_over_a_clip(pos)
             {
-                state.clear_selection();
+                // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
+                // da un'altra clip sulla stessa track, non lo spazio in
+                // coda dopo l'ultima), lo si seleziona — comportamento alla
+                // DaVinci Resolve, dà al vuoto un'identità cliccabile e
+                // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
+                let local = to_local(pos);
+                let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
+                let track_index = ((local.y - RULER_HEIGHT) / ROW_HEIGHT)
+                    .floor()
+                    .max(0.0) as usize;
+                let track_index = track_index.min(track_count.saturating_sub(1));
+                match gap_at(&visuals, track_index, frame) {
+                    Some((gap_start, gap_end)) => {
+                        state.selected.clear();
+                        state.selection_anchor = None;
+                        state.selected_gap = Some((track_index, gap_start, gap_end));
+                    }
+                    None => state.clear_selection(),
+                }
             }
             if let Some(m) = &state.marquee {
                 let marquee_rect = egui::Rect::from_two_pos(
@@ -336,6 +366,32 @@ pub fn show_timeline(
                     marquee_rect,
                     0.0,
                     egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            // Vuoto selezionato: stessa cornice bianca usata per una clip
+            // selezionata (vedi `is_selected` più sotto), ma su un
+            // rettangolo vuoto — dà al vuoto un feedback visivo di essere
+            // "selezionato" come richiesto.
+            if let Some((track_index, gap_start, gap_end)) = state.selected_gap {
+                let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
+                let gap_rect = egui::Rect::from_min_size(
+                    egui::pos2(origin.x + gap_start as f32 * px_per_frame, y + 2.0),
+                    egui::vec2(
+                        (gap_end - gap_start) as f32 * px_per_frame,
+                        ROW_HEIGHT - 4.0,
+                    ),
+                );
+                painter.rect_filled(
+                    gap_rect,
+                    4.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
+                );
+                painter.rect_stroke(
+                    gap_rect,
+                    4.0,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -456,6 +512,7 @@ pub fn show_timeline(
                     );
                     state.selected = selected;
                     state.selection_anchor = anchor;
+                    state.selected_gap = None;
                 }
 
                 resp.context_menu(|ui| {
@@ -585,6 +642,35 @@ fn clips_intersecting_rect(
         .filter(|v| clip_local_rect(v, px_per_frame).intersects(rect))
         .map(|v| (v.track_index, v.clip.id))
         .collect()
+}
+
+/// Il vuoto sulla track `track_index` che copre `frame` (spazio frame della
+/// timeline), se `frame` cade in uno spazio vuoto seguito da un'altra clip
+/// sulla stessa track. Un vuoto in coda (nessuna clip dopo `frame` su quella
+/// track) non conta: non c'è nulla da riavvicinare shiftandolo, quindi non
+/// ha senso selezionarlo — vedi doc di `TimelineState::selected_gap`.
+fn gap_at(visuals: &[ClipVisual], track_index: usize, frame: FrameIdx) -> Option<(FrameIdx, FrameIdx)> {
+    let mut track_clips: Vec<&Clip> = visuals
+        .iter()
+        .filter(|v| v.track_index == track_index)
+        .map(|v| &v.clip)
+        .collect();
+    track_clips.sort_by_key(|c| c.timeline_start);
+
+    if track_clips
+        .iter()
+        .any(|c| frame >= c.timeline_start && frame < c.timeline_end())
+    {
+        return None; // `frame` è dentro a una clip, non in un vuoto.
+    }
+    let next = track_clips.iter().find(|c| c.timeline_start > frame)?;
+    let gap_start = track_clips
+        .iter()
+        .filter(|c| c.timeline_end() <= frame)
+        .map(|c| c.timeline_end())
+        .max()
+        .unwrap_or(0);
+    Some((gap_start, next.timeline_start))
 }
 
 /// I due comportamenti richiesti per il click con modificatori: `Toggle`

@@ -236,6 +236,61 @@ impl Command for RippleDeleteAllTracks {
     }
 }
 
+/// Chiude uno spazio vuoto (nessuna clip da rimuovere) su tutte le track,
+/// shiftando indietro di `gap_len` ogni clip che inizia a `gap_start` o
+/// dopo — stessa identica meccanica di shift di `RippleDeleteAllTracks`
+/// (mantiene il sync A/V globale), ma senza rimuovere alcuna clip: usato
+/// per il ripple delete su un vuoto selezionato (comportamento "seleziona
+/// il vuoto, ripple delete" di DaVinci Resolve).
+#[derive(Debug)]
+pub struct RippleDeleteGap {
+    pub timeline: TimelineId,
+    pub gap_start: FrameIdx,
+    pub gap_len: FrameIdx,
+    shifted: Vec<(usize, ClipId, FrameIdx)>,
+}
+
+impl RippleDeleteGap {
+    pub fn new(timeline: TimelineId, gap_start: FrameIdx, gap_len: FrameIdx) -> Self {
+        Self {
+            timeline,
+            gap_start,
+            gap_len,
+            shifted: Vec::new(),
+        }
+    }
+}
+
+impl Command for RippleDeleteGap {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        let mut shifted = Vec::new();
+        for (track_index, track) in tl.tracks.iter_mut().enumerate() {
+            for c in &mut track.clips {
+                if c.timeline_start >= self.gap_start {
+                    shifted.push((track_index, c.id, c.timeline_start));
+                    c.timeline_start -= self.gap_len;
+                }
+            }
+            resort(track);
+        }
+        self.shifted = shifted;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        for (track_index, clip_id, original_start) in &self.shifted {
+            let track = &mut tl.tracks[*track_index];
+            if let Some(c) = track.clips.iter_mut().find(|c| c.id == *clip_id) {
+                c.timeline_start = *original_start;
+            }
+        }
+        for track in &mut tl.tracks {
+            resort(track);
+        }
+    }
+}
+
 /// Sposta una clip a una nuova posizione, eventualmente su un'altra track
 /// (drag nella timeline). Non fa collision-avoidance da sé: il chiamante
 /// (la UI) deve clampare `new_start` prima di emettere il comando, per
