@@ -173,6 +173,17 @@ impl VibeVideoApp {
         }
     }
 
+    // Apre il file dialog e importa il file scelto (usato dal pulsante
+    // toolbar e dalla shortcut Ctrl+I).
+    fn import_media_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("video", &["mp4", "mov", "mkv", "avi"])
+            .pick_file()
+        {
+            self.import_media(path);
+        }
+    }
+
     fn preview_media(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
@@ -961,16 +972,16 @@ impl eframe::App for VibeVideoApp {
             if i.key_pressed(egui::Key::Space) {
                 self.toggle_playback();
             }
+            // Ctrl+I (Cmd+I su macOS): import media, come il pulsante toolbar.
+            if i.modifiers.command && i.key_pressed(egui::Key::I) {
+                self.import_media_dialog();
+            }
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Importa media...").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("video", &["mp4", "mov", "mkv", "avi"])
-                        .pick_file()
-                {
-                    self.import_media(path);
+                if ui.button("Importa media... (Ctrl+I)").clicked() {
+                    self.import_media_dialog();
                 }
                 if ui.button("Nuovo Solid Color").clicked() {
                     self.add_solid_color_clip();
