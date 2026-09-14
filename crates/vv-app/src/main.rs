@@ -304,10 +304,18 @@ impl VibeVideoApp {
             Ok(meta) => {
                 self.import_error = None;
                 self.ensure_timeline_for(&meta);
+                // Fingerprint economico (path+dimensione+mtime, non i
+                // byte del file: vedi doc di `content_fingerprint`),
+                // chiave dei proxy e di qualunque altra cache derivata
+                // dal contenuto — `0` solo se il file è già sparito tra
+                // l'import e qui (raro, non impedisce comunque
+                // l'import: un `content_hash` sbagliato al più fa
+                // rigenerare un proxy che poteva essere riusato).
+                let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
                 let media_id = self.project.media_pool.insert(vv_core::MediaItem {
                     path: path.clone(),
                     meta,
-                    content_hash: 0, // placeholder: hashing reale arriva con la cache (milestone 8)
+                    content_hash,
                 });
                 self.preview_media(media_id);
             }

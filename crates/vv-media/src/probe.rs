@@ -57,6 +57,43 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     })
 }
 
+/// Fingerprint economico di un file (path canonico + dimensione + data
+/// di modifica, FNV-1a), usato come `MediaItem::content_hash` — chiave
+/// dei proxy (`proxy.rs`) e di qualunque altra cache derivata dal
+/// contenuto. Non un vero hash dei byte: leggere l'intero file
+/// rallenterebbe ogni import su sorgenti da GB, e qui basta un
+/// fingerprint "stesso file della volta scorsa", non una garanzia
+/// crittografica — un file sovrascritto con la stessa dimensione e la
+/// stessa mtime per coincidenza (raro: capita solo con strumenti di
+/// copia che preservano i metadata alla lettera) userebbe una cache
+/// stantia, un compromesso accettato esplicitamente per restare
+/// istantaneo anche su file grandi. Stabile tra un riavvio dell'app e
+/// l'altro (a differenza di un hash randomizzato per-processo come
+/// `DefaultHasher`), non implementato su hardware/versioni rustc
+/// diverse.
+pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
+    let metadata = std::fs::metadata(path)?;
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mtime_secs = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV-1a prime
+        }
+    };
+    feed(canonical.to_string_lossy().as_bytes());
+    feed(&metadata.len().to_le_bytes());
+    feed(&mtime_secs.to_le_bytes());
+    Ok(hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +139,51 @@ mod tests {
         assert_eq!(meta.sample_rate, 48000);
         // ~2s a 25fps: tollera qualche frame di arrotondamento sul container.
         assert!((meta.duration_frames - 50).abs() <= 2);
+    }
+
+    #[test]
+    fn content_fingerprint_is_stable_for_the_same_unchanged_file() {
+        let dir = std::env::temp_dir().join("vv-media-fingerprint-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stable.bin");
+        std::fs::write(&path, "contenuto di prova").unwrap();
+
+        let a = content_fingerprint(&path).unwrap();
+        let b = content_fingerprint(&path).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn content_fingerprint_differs_for_different_sized_files() {
+        let dir = std::env::temp_dir().join("vv-media-fingerprint-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path_a = dir.join("a.bin");
+        let path_b = dir.join("b.bin");
+        std::fs::write(&path_a, "contenuto corto").unwrap();
+        std::fs::write(&path_b, "contenuto molto più lungo di quello corto").unwrap();
+
+        assert_ne!(
+            content_fingerprint(&path_a).unwrap(),
+            content_fingerprint(&path_b).unwrap()
+        );
+    }
+
+    #[test]
+    fn content_fingerprint_changes_when_the_file_is_rewritten_with_different_content() {
+        let dir = std::env::temp_dir().join("vv-media-fingerprint-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rewritten.bin");
+
+        std::fs::write(&path, "prima versione").unwrap();
+        let before = content_fingerprint(&path).unwrap();
+
+        // Dimensione diversa garantisce che il fingerprint cambi anche
+        // se il filesystem ha una risoluzione della mtime troppo bassa
+        // per registrare la scrittura come "più tardi" della precedente
+        // entro la durata del test.
+        std::fs::write(&path, "seconda versione, più lunga della prima").unwrap();
+        let after = content_fingerprint(&path).unwrap();
+
+        assert_ne!(before, after);
     }
 }

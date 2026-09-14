@@ -18,7 +18,7 @@ pub use cache::{FrameCache, SharedFrameCache, WantedRange};
 pub use decode::{ColorMatrix, Decoder, FrameYuv420, decode_first_frame};
 pub use encode::Encoder;
 pub use playback::{DecodeAhead, frame_cache_capacity};
-pub use probe::probe;
+pub use probe::{content_fingerprint, probe};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
