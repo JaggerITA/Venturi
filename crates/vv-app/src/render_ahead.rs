@@ -478,11 +478,29 @@ fn walk_and_fill(
     // segmenti dello stesso media in questa finestra evita di scartare
     // mai qualcosa che un altro segmento della stessa finestra ancora usa.
     let mut min_source_start_by_media: HashMap<MediaId, FrameIdx> = HashMap::new();
+    // Quanti segmenti di questo stesso media cadono in questa finestra:
+    // la `FrameCache` è UNA sola per media (condivisa, con un'unica
+    // capacità LRU), ma `capped_source_end` sotto veniva calcolato dando
+    // a *ogni* segmento l'intera `capacity` come se fosse il solo a
+    // usarla — se due segmenti dello stesso media (tipicamente un
+    // taglio con nel mezzo una parte scartata: sorgenti lontani tra
+    // loro) chiedono insieme più frame di quanti la cache può
+    // contenerne, il secondo elaborato sfratta per limite di capacità
+    // (LRU ordinaria, non `evict_before`) quello che il primo aveva
+    // appena decodificato nello stesso identico ciclo — bug segnalato
+    // dall'utente: il buffer si comporta come se fosse per-clip invece
+    // che per-media/timeline, perché ogni segmento finiva per bufferizzare
+    // "per conto proprio" a spese degli altri. Dividere la capacità tra i
+    // segmenti dello stesso media in questa finestra (stesso principio
+    // già usato per dividere il budget totale tra i media *distinti*,
+    // vedi `per_media_budget`) evita che uno sfratti per intero l'altro.
+    let mut segments_per_media: HashMap<MediaId, usize> = HashMap::new();
     for s in &segments {
         min_source_start_by_media
             .entry(s.media_id)
             .and_modify(|v| *v = (*v).min(s.source_start))
             .or_insert(s.source_start);
+        *segments_per_media.entry(s.media_id).or_insert(0) += 1;
     }
 
     for segment in segments {
@@ -543,9 +561,20 @@ fn walk_and_fill(
         // tenere invece la coda della finestra, la parte meno urgente.
         // Meglio bufferizzare di meno ma partendo dalla testina, che è
         // anche quello che l'indicatore "buffered" deve mostrare.
+        //
+        // Il limite usato è `capacity` diviso per il numero di segmenti
+        // di questo stesso media in questa finestra (vedi
+        // `segments_per_media` sopra), non `capacity` intera: la
+        // `FrameCache` è una sola, condivisa da tutti — dare a ognuno
+        // l'intera capacità come se fosse l'unico a scriverci fa sì che
+        // l'ultimo segmento elaborato sfratti per limite di capacità
+        // (LRU ordinaria) quello che un segmento precedente aveva appena
+        // decodificato nello stesso ciclo.
+        let per_segment_capacity =
+            (capacity / segments_per_media[&segment.media_id]).max(1) as FrameIdx;
         let capped_source_end = segment
             .source_end
-            .min(segment.source_start + capacity as FrameIdx - 1);
+            .min(segment.source_start + per_segment_capacity - 1);
 
         // Diventa `true` dopo il primo frame realmente decodificato in
         // questo giro: prima di allora `od.next_frame` può essere solo
@@ -1164,6 +1193,79 @@ mod tests {
         );
     }
 
+    /// Regressione per il bug segnalato dall'utente ("il caching non deve
+    /// essere per clip ma per timeline"): il test precedente usa un
+    /// budget enorme (100MB) che non mette mai sotto pressione la
+    /// capacità reale della cache, quindi non lo scopre. Con un budget
+    /// stretto, due segmenti dello stesso media in questa finestra (un
+    /// taglio con in mezzo una parte scartata: sorgenti lontani tra
+    /// loro) chiedevano *insieme* più frame di quanti la `FrameCache`
+    /// condivisa potesse contenerne — il secondo segmento elaborato
+    /// (`[200,254]`) sfrattava per limite di capacità (LRU ordinaria,
+    /// non `evict_before`) tutto ciò che il primo (`[40,59]`) aveva
+    /// appena decodificato nello stesso identico ciclo, anche se
+    /// `evict_before` da solo l'avrebbe protetto. Visto dall'utente:
+    /// ogni clip sembra bufferizzare "per conto suo", a spese delle
+    /// altre — da cui "il caching sembra per-clip, non per-timeline".
+    #[test]
+    fn walk_and_fill_does_not_let_one_segment_of_a_media_evict_another_via_capacity_when_the_budget_is_tight()
+     {
+        let path = make_test_clip_with_short_gop(
+            "vv-app-render-ahead-test",
+            "same_media_cut_tight_budget.mp4",
+            20,
+            25,
+        );
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        // Stesso taglio del test precedente: [0,60) poi [200,300).
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![
+                media_clip_trimmed(1, media_a, 0, 0, 60),
+                media_clip_trimmed(2, media_a, 60, 200, 100),
+            ],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Capacità ~50 frame: meno di quanto i due segmenti insieme
+        // chiederebbero (~20 + ~55), ma più di quanto ciascuno chiede da
+        // solo — costringe la condivisione della stessa cache a contare
+        // davvero.
+        let budget = 50 * 320 * 240 * 4;
+
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 40, budget, false);
+
+        let ranges = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
+            "il tratto della prima clip [40,59] non deve sparire per colpa del secondo segmento nello stesso ciclo: ranges={ranges:?}"
+        );
+        assert!(
+            ranges.iter().any(|&(s, _)| s <= 200),
+            "la seconda clip deve comunque ricevere una fetta della capacità condivisa: ranges={ranges:?}"
+        );
+    }
+
     /// Regressione per il bug segnalato dall'utente: con la testina
     /// ferma subito prima di un taglio (basta tagliare una clip e
     /// posizionare la testina appena prima del punto di taglio: la
@@ -1682,4 +1784,5 @@ mod tests {
             );
         }
     }
+
 }
