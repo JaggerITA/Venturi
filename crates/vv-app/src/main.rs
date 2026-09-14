@@ -21,6 +21,7 @@ mod player;
 mod render_ahead;
 mod timeline_ui;
 
+use eframe::wgpu;
 use frame_provider::FrameProvider;
 use player::Player;
 use std::collections::{BTreeSet, HashMap};
@@ -90,6 +91,14 @@ enum PendingEffectChange {
     RemoveColorKeyframe(usize, ClipId, FrameIdx),
 }
 
+/// Quale rappresentazione di texture del viewer è quella corrente — vedi
+/// doc di `VibeVideoApp::last_viewer_frame_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerFrameKind {
+    SolidColor,
+    Video,
+}
+
 struct VibeVideoApp {
     project: vv_core::Project,
     history: vv_core::History,
@@ -101,7 +110,40 @@ struct VibeVideoApp {
     preview_meta: Option<vv_core::MediaMeta>,
     preview_player: Option<Player>,
     preview_error: Option<String>,
+    /// Texture per il frame di colore solido (clip SolidColor, o vuoto):
+    /// gestita da egui (`ctx.load_texture`/`TextureHandle::set`) — non fa
+    /// parte del round-trip GPU eliminato dal path video sotto, è
+    /// un'immagine sintetica generata su CPU, niente da guadagnare a
+    /// tenerla sulla GPU (REFACTOR_PIPELINE.md B2).
     frame_texture: Option<egui::TextureHandle>,
+    /// Id stabile della texture video registrata in `egui-wgpu`
+    /// (REFACTOR_PIPELINE.md B2): creato una volta al primo frame video
+    /// (`register_native_texture`), poi solo aggiornato in-place
+    /// (`update_egui_texture_from_wgpu_texture`) — mai una nuova
+    /// registrazione a ogni frame, che perderebbe il riferimento alla
+    /// precedente (bind group + texture GPU, mai liberata) invece di
+    /// riusarlo. `None` se l'app non ha un device wgpu condiviso con
+    /// egui (`egui_render_state`, es. nei test) — in quel caso il video
+    /// non può essere mostrato zero-copy.
+    video_texture_id: Option<egui::TextureId>,
+    video_display_size: Option<egui::Vec2>,
+    /// Quale delle due rappresentazioni sopra (`frame_texture` per il
+    /// colore solido, `video_texture_id`+`video_display_size` per il
+    /// video) è quella da mostrare adesso — nessuna delle due viene
+    /// azzerata quando non si aggiorna in un dato frame (per continuare a
+    /// mostrare l'ultimo frame valido invece di un flash a vuoto, vedi
+    /// `preview_media`), quindi il viewer deve sapere quale delle due è
+    /// la più recente.
+    last_viewer_frame_kind: Option<ViewerFrameKind>,
+    /// Device/queue/renderer condivisi con `egui-wgpu`, se l'app è stata
+    /// avviata da `main()` con un contesto eframe reale (sempre, tranne
+    /// nei test che costruiscono `VibeVideoApp` con `Default` senza una
+    /// finestra) — necessari per registrare/aggiornare
+    /// `video_texture_id` (REFACTOR_PIPELINE.md B2). Anche
+    /// `self.compositor` viene costruito condividendo questo stesso
+    /// device quando presente (vedi `main()`), altrimenti resta il
+    /// device headless indipendente di prima.
+    egui_render_state: Option<eframe::egui_wgpu::RenderState>,
     /// Decode-ahead video per l'anteprima "grezza" di un media dal media
     /// pool (`browsing_media`), non legata a nessuna clip/posizione di
     /// timeline a cui `render_ahead` potrebbe agganciarsi. Il video delle
@@ -238,6 +280,10 @@ impl Default for VibeVideoApp {
             preview_player: None,
             preview_error: None,
             frame_texture: None,
+            video_texture_id: None,
+            video_display_size: None,
+            last_viewer_frame_kind: None,
+            egui_render_state: None,
             browsing_decode_ahead: None,
             audio_cache: HashMap::new(),
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
@@ -347,6 +393,7 @@ impl VibeVideoApp {
                 self.preview_player = None;
                 self.preview_error = None;
                 self.frame_texture = None;
+                self.last_viewer_frame_kind = None;
                 self.browsing_decode_ahead = None;
                 self.active_clip = None;
                 self.last_synced_playhead = 0;
@@ -2977,6 +3024,9 @@ impl eframe::App for VibeVideoApp {
             });
 
             if let Some(((w, h), rgba)) = solid_color_frame_info {
+                // Immagine sintetica generata su CPU (nessun frame
+                // decodificato da comporre): niente da guadagnare a
+                // tenerla sulla GPU, resta sul path gestito da egui.
                 let data = vv_render::solid_color_frame(rgba, w, h);
                 let image =
                     egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &data);
@@ -2990,53 +3040,98 @@ impl eframe::App for VibeVideoApp {
                         ));
                     }
                 }
+                self.last_viewer_frame_kind = Some(ViewerFrameKind::SolidColor);
             } else if let Some((frame, source_frame)) = self.current_video_frame() {
-                let transform = self
-                    .active_clip_effects()
-                    .map(|e| e.transform.value_at(source_frame))
-                    .unwrap_or_default();
-                let composited = self.compositor.render_frame(
-                    &frame.data,
-                    frame.width,
-                    frame.height,
-                    &transform,
-                    frame.width,
-                    frame.height,
-                );
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    &composited,
-                );
-                match &mut self.frame_texture {
-                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.frame_texture = Some(ui.ctx().load_texture(
-                            "current-frame",
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+                // Zero-copy (REFACTOR_PIPELINE.md B2): la texture di
+                // output resta sulla GPU, registrata/aggiornata
+                // direttamente nel renderer di egui-wgpu — nessun
+                // readback CPU né re-upload via `egui::ColorImage` come
+                // nel path sopra. Richiede il device condiviso con
+                // egui-wgpu (`egui_render_state`, sempre presente
+                // nell'app reale — vedi `main()`; `None` solo nei test
+                // che costruiscono `VibeVideoApp` con `Default` senza una
+                // finestra, dove semplicemente non c'è nulla da mostrare
+                // per questo frame).
+                if let Some(render_state) = self.egui_render_state.clone() {
+                    let transform = self
+                        .active_clip_effects()
+                        .map(|e| e.transform.value_at(source_frame))
+                        .unwrap_or_default();
+                    let texture = self.compositor.render_frame_to_texture(
+                        &frame.data,
+                        frame.width,
+                        frame.height,
+                        &transform,
+                        frame.width,
+                        frame.height,
+                    );
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let mut renderer = render_state.renderer.write();
+                    match self.video_texture_id {
+                        Some(id) => renderer.update_egui_texture_from_wgpu_texture(
+                            &render_state.device,
+                            &view,
+                            wgpu::FilterMode::Linear,
+                            id,
+                        ),
+                        None => {
+                            self.video_texture_id =
+                                Some(renderer.register_native_texture(
+                                    &render_state.device,
+                                    &view,
+                                    wgpu::FilterMode::Linear,
+                                ));
+                        }
                     }
+                    drop(renderer);
+                    self.video_display_size =
+                        Some(egui::vec2(frame.width as f32, frame.height as f32));
+                    self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
                 }
             }
 
-            if let Some(texture) = &self.frame_texture {
-                let available = ui.available_size();
-                let tex_size = texture.size_vec2();
-                let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
-                let display_size = tex_size * scale.max(0.0);
-                ui.centered_and_justified(|ui| {
-                    ui.add(egui::Image::from_texture(texture).fit_to_exact_size(display_size));
-                });
-            } else if let Some(err) = &self.preview_error {
-                ui.colored_label(egui::Color32::RED, format!("Errore player: {err}"));
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(if self.preview_player.is_some() {
-                        "Decodifica in corso..."
+            match self.last_viewer_frame_kind {
+                Some(ViewerFrameKind::SolidColor) => {
+                    if let Some(texture) = &self.frame_texture {
+                        let available = ui.available_size();
+                        let tex_size = texture.size_vec2();
+                        let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
+                        let display_size = tex_size * scale.max(0.0);
+                        ui.centered_and_justified(|ui| {
+                            ui.add(
+                                egui::Image::from_texture(texture).fit_to_exact_size(display_size),
+                            );
+                        });
+                    }
+                }
+                Some(ViewerFrameKind::Video) => {
+                    if let (Some(id), Some(tex_size)) =
+                        (self.video_texture_id, self.video_display_size)
+                    {
+                        let available = ui.available_size();
+                        let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
+                        let display_size = tex_size * scale.max(0.0);
+                        ui.centered_and_justified(|ui| {
+                            ui.add(
+                                egui::Image::new(egui::load::SizedTexture::new(id, tex_size))
+                                    .fit_to_exact_size(display_size),
+                            );
+                        });
+                    }
+                }
+                None => {
+                    if let Some(err) = &self.preview_error {
+                        ui.colored_label(egui::Color32::RED, format!("Errore player: {err}"));
                     } else {
-                        "Importa un media, aggiungilo alla timeline e premi Spazio."
-                    });
-                });
+                        ui.centered_and_justified(|ui| {
+                            ui.label(if self.preview_player.is_some() {
+                                "Decodifica in corso..."
+                            } else {
+                                "Importa un media, aggiungilo alla timeline e premi Spazio."
+                            });
+                        });
+                    }
+                }
             }
         });
 
@@ -3084,8 +3179,23 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "vibevideo",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
             let mut app = VibeVideoApp::default();
+            // Condivide il device/queue wgpu di egui-wgpu invece del
+            // device headless indipendente di `Default`: necessario per
+            // il path zero-copy del viewer (REFACTOR_PIPELINE.md B2) —
+            // una texture creata su un device diverso da quello del
+            // renderer egui non può essergli registrata. `NativeOptions`
+            // sopra richiede sempre `Renderer::Wgpu`, quindi in pratica
+            // questo è sempre `Some`; il fallback al device headless
+            // resta solo per non fare panic se eframe cambiasse renderer.
+            if let Some(render_state) = cc.wgpu_render_state.clone() {
+                app.compositor = vv_render::Compositor::new(
+                    std::sync::Arc::new(render_state.device.clone()),
+                    std::sync::Arc::new(render_state.queue.clone()),
+                );
+                app.egui_render_state = Some(render_state);
+            }
             if let Some(path) = startup_path {
                 app.import_media(path);
             }
