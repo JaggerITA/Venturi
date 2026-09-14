@@ -368,14 +368,25 @@ fn position_decoder(
         // la nuova posizione, resta fermo sull'ultimo frame in cache).
         //
         // Il confronto/aggiornamento usa `cycle_min_start` (il minimo tra
-        // tutti i segmenti di questo media nella finestra corrente), non
+        // tutti i segmenti di questo media nella finestra corrente,
+        // costante per tutte le chiamate di questo stesso ciclo — vedi
+        // `min_source_start_by_media` in `walk_and_fill`), non
         // `segment_start` del segmento specifico: vedi il doc di
         // `OpenDecoder::requested_start` per il perché — con
         // `segment_start` un taglio nello stesso media faceva scattare un
-        // seek reale ad ogni ciclo pur restando fermi.
+        // seek reale ad ogni ciclo pur restando fermi. La riassegnazione
+        // dev'essere una sovrascrittura semplice, non un `.min()` con il
+        // valore precedente: `requested_start` deve seguire il ciclo più
+        // recente, altrimenti resta bloccato al valore minimo mai visto
+        // e uno scrub all'indietro verso una posizione più avanti di
+        // quel minimo storico (il caso comune: quasi ogni scrub indietro
+        // dopo un po' di playback) smette di essere rilevato come tale —
+        // bug: la testina si muove indietro ma il buffer non si
+        // ricalcola mai per la nuova posizione, il player resta fermo
+        // sull'ultimo frame già in cache.
         let needs_seek = segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
             || cycle_min_start < o.requested_start;
-        o.requested_start = o.requested_start.min(cycle_min_start);
+        o.requested_start = cycle_min_start;
         if !needs_seek {
             return Positioned::Reused;
         }
@@ -1356,6 +1367,96 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Regressione per il bug segnalato dall'utente subito dopo il fix
+    /// precedente (requested_start = min(requested_start, cycle_min_start)
+    /// invece di una semplice sovrascrittura): con quel codice
+    /// `requested_start` non torna mai più su dopo essere sceso, quindi
+    /// resta bloccato al valore minimo mai visto dall'apertura del
+    /// decoder in poi. Dopo un po' di playback in avanti (che alza
+    /// `cycle_min_start` ad ogni ciclo, ma `requested_start` restava
+    /// fermo al primo valore basso) uno scrub all'indietro verso una
+    /// posizione più avanti di quel minimo storico — cioè quasi
+    /// *qualunque* scrub indietro dopo un po' di riproduzione — smetteva
+    /// di essere riconosciuto come backward: nessun seek, il decoder
+    /// resta dov'era, il fronte del buffer non arriva mai alla nuova
+    /// testina anche se la sua posizione era già stata sfrattata da
+    /// `evict_before` nei cicli precedenti — "sposto la testina
+    /// indietro e non vedo nessun fotogramma, il buffer non si
+    /// ricalcola mai".
+    #[test]
+    fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum() {
+        let path = make_test_clip_with_short_gop(
+            "vv-app-render-ahead-test",
+            "backward_above_historical_min.mp4",
+            20,
+            25,
+        );
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 500)],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Budget stretto: la finestra intera non ci sta in cache, quindi
+        // avanzando `evict_before` scarta davvero i frame dietro la
+        // testina invece di lasciarli semplicemente ancora presenti per
+        // caso.
+        let budget = 43_000_000;
+
+        // Playback in avanti su più cicli: la testina parte da 0 e sale,
+        // esattamente lo scenario in cui `requested_start` restava
+        // bloccato al primo valore (0) con il bug del `.min()`.
+        for from in [0, 50, 100, 150, 200] {
+            walk_and_fill(&project, timeline_id, &caches, &mut open, from, budget);
+        }
+
+        // A questo punto i frame intorno a 0 sono sicuramente sfrattati
+        // (evict_before ha scartato tutto ciò che è dietro alla testina
+        // ad ogni ciclo, l'ultimo dei quali è 200).
+        let ranges_before = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        assert!(
+            !ranges_before.iter().any(|&(s, e)| s <= 80 && e >= 80),
+            "80 non deve essere già in cache per coincidenza, altrimenti il test non prova nulla: {ranges_before:?}"
+        );
+
+        // Scrub indietro a 80: più indietro della testina attuale (200),
+        // ma più avanti del minimo storico (0) — esattamente il caso che
+        // il bug del `.min()` non rilevava come "tornato indietro".
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 80, budget);
+
+        let ranges_after = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        assert!(
+            ranges_after.iter().any(|&(s, e)| s <= 80 && e >= 80),
+            "lo scrub indietro a 80 deve far ricalcolare il buffer per la nuova posizione: {ranges_after:?}"
+        );
     }
 
     /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
