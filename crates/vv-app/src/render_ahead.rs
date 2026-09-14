@@ -173,11 +173,25 @@ impl Drop for RenderAhead {
 struct OpenDecoder {
     decoder: Decoder,
     next_frame: FrameIdx,
-    /// `segment_start` dell'ultima chiamata a `position_decoder` per
-    /// questo media: confrontarlo con quello della chiamata corrente
-    /// permette di distinguere "la testina è avanzata" (normale, il
-    /// decoder resta dov'è) da "la testina è tornata indietro" (serve
-    /// un seek reale, qualunque sia l'ampiezza — vedi `position_decoder`).
+    /// Il più piccolo `source_start` richiesto per questo media
+    /// nell'ultimo ciclo in cui è comparso — non il `segment_start` del
+    /// singolo ultimo segmento processato: un taglio produce più
+    /// segmenti per lo stesso media nella stessa finestra (la clip prima
+    /// e quella dopo il taglio), processati in sequenza nello stesso
+    /// ciclo, e l'ultimo di questi ha quasi sempre un `source_start` più
+    /// alto del primo. Confrontare/aggiornare con il *minimo* del ciclo
+    /// (vedi `min_source_start_by_media` in `walk_and_fill`) invece che
+    /// con il segmento più recente permette di distinguere "la testina è
+    /// avanzata" (normale, il decoder resta dov'è) da "la testina è
+    /// tornata indietro" (serve un seek reale, qualunque sia l'ampiezza —
+    /// vedi `position_decoder`) senza falsi positivi quando si
+    /// riattraversa lo stesso media più volte nella stessa finestra: con
+    /// il solo ultimo segmento, il ciclo successivo rielaborando il
+    /// *primo* segmento (source_start più basso) lo leggeva sempre come
+    /// "tornato indietro" rispetto a quel valore residuo, scatenando un
+    /// seek reale ad ogni singolo ciclo di poll pur restando fermi —
+    /// bug segnalato: dopo un taglio, con la testina ferma appena prima,
+    /// il buffer veniva ricalcolato e invalidato in loop.
     requested_start: FrameIdx,
 }
 
@@ -218,6 +232,21 @@ fn worker_loop(
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
         walk_and_fill(&project, timeline_id, &caches, &mut open, from, budget);
     }
+}
+
+/// Cosa ha fatto `position_decoder` per soddisfare la richiesta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Positioned {
+    /// Decoder già aperto e già posizionato bene: nessun seek, il fronte
+    /// del buffer avanza in sequenza senza alcun costo aggiuntivo.
+    Reused,
+    /// Decoder già aperto, riposizionato con un seek sul decoder
+    /// esistente (`seek_to_time`, non una riapertura).
+    Seeked,
+    /// Nessun decoder aperto per questo media: aperto da zero.
+    Opened,
+    /// Apertura del media fallita: il chiamante salta il segmento.
+    Failed,
 }
 
 /// Un tratto contiguo di timeline coperto da una singola clip Media, in
@@ -313,14 +342,17 @@ fn collect_media_segments(
 /// (osservato: riproduzione a scatti, un frame ogni pochi secondi).
 /// `Decoder::open` va usato solo per la primissima apertura di un media
 /// (nessun decoder ancora in `open`) o per uno diverso da quello aperto.
-/// Ritorna `false` se l'apertura del media fallisce (il chiamante salta
-/// quel segmento).
+/// Ritorna `Positioned::Failed` se l'apertura del media fallisce (il
+/// chiamante salta quel segmento); altrimenti riporta cosa è stato fatto
+/// per arrivarci — usato dai test per verificare che un seek reale
+/// scatti solo quando davvero serve, non ad ogni ciclo.
 fn position_decoder(
     open: &mut HashMap<MediaId, OpenDecoder>,
     media_id: MediaId,
     path: &Path,
     segment_start: FrameIdx,
-) -> bool {
+    cycle_min_start: FrameIdx,
+) -> Positioned {
     if let Some(o) = open.get_mut(&media_id) {
         // Due motivi per un seek reale: `segment_start` è troppo avanti
         // per continuare a decodificare in sequenza fino a lì (costa
@@ -334,11 +366,18 @@ fn position_decoder(
         // cache decodificando solo in avanti (bug segnalato: dopo un
         // piccolo scrub all'indietro il buffer non si rigenera mai per
         // la nuova posizione, resta fermo sull'ultimo frame in cache).
+        //
+        // Il confronto/aggiornamento usa `cycle_min_start` (il minimo tra
+        // tutti i segmenti di questo media nella finestra corrente), non
+        // `segment_start` del segmento specifico: vedi il doc di
+        // `OpenDecoder::requested_start` per il perché — con
+        // `segment_start` un taglio nello stesso media faceva scattare un
+        // seek reale ad ogni ciclo pur restando fermi.
         let needs_seek = segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
-            || segment_start < o.requested_start;
-        o.requested_start = segment_start;
+            || cycle_min_start < o.requested_start;
+        o.requested_start = o.requested_start.min(cycle_min_start);
         if !needs_seek {
-            return true;
+            return Positioned::Reused;
         }
         // Stesso media già aperto, serve solo tornare/saltare a un altro
         // punto: un `seek_to_time` sul decoder esistente riusa il file
@@ -364,13 +403,13 @@ fn position_decoder(
         // segment_start), che aggiorna subito questo campo nel loop di
         // decodifica sotto.
         o.next_frame = 0;
-        return true;
+        return Positioned::Seeked;
     }
     // Nessun decoder aperto per questo media: qui l'apertura reale è
     // inevitabile (prima volta, o media diverso da quello aperto finora).
     let debug_start = debug_enabled().then(std::time::Instant::now);
     let Ok(mut decoder) = Decoder::open(path) else {
-        return false;
+        return Positioned::Failed;
     };
     let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
     let _ = decoder.seek_to_time(secs);
@@ -386,10 +425,10 @@ fn position_decoder(
         OpenDecoder {
             decoder,
             next_frame: 0,
-            requested_start: segment_start,
+            requested_start: cycle_min_start,
         },
     );
-    true
+    Positioned::Opened
 }
 
 /// Cammina `LOOKAHEAD_SECS` avanti da `from_frame` e riempie la
@@ -457,7 +496,10 @@ fn walk_and_fill(
         else {
             continue;
         };
-        if !position_decoder(open, segment.media_id, &path, segment.source_start) {
+        let cycle_min_start = min_source_start_by_media[&segment.media_id];
+        if position_decoder(open, segment.media_id, &path, segment.source_start, cycle_min_start)
+            == Positioned::Failed
+        {
             continue;
         }
         let (width, height) = {
@@ -857,9 +899,16 @@ mod tests {
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        assert!(position_decoder(&mut open, media_a, &path, 0));
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 0, 0),
+            Positioned::Opened
+        );
 
-        assert!(position_decoder(&mut open, media_a, &bogus_path, 1000));
+        assert_eq!(
+            position_decoder(&mut open, media_a, &bogus_path, 1000, 1000),
+            Positioned::Seeked,
+            "il path bogus non deve impedire il riuso del decoder già aperto"
+        );
         assert_eq!(open.get(&media_a).unwrap().next_frame, 0);
     }
 
@@ -876,7 +925,10 @@ mod tests {
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        assert!(position_decoder(&mut open, media_a, &path, 0));
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 0, 0),
+            Positioned::Opened
+        );
 
         // Decodifica qualche frame in avanti "a mano", come farebbe
         // walk_and_fill, per simulare un decoder già bufferizzato oltre
@@ -894,7 +946,10 @@ mod tests {
         // Un ciclo successivo con il target ancora dietro alla posizione
         // del decoder — lo stato normale durante il playback in avanti —
         // non deve riaprire/riazzerare il decoder.
-        assert!(position_decoder(&mut open, media_a, &path, 0));
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 0, 0),
+            Positioned::Reused
+        );
         assert_eq!(
             open.get(&media_a).unwrap().next_frame,
             advanced_next_frame,
@@ -1019,6 +1074,58 @@ mod tests {
         assert!(
             ranges.iter().any(|&(s, e)| s <= 200 && e >= 200),
             "la seconda clip deve comunque essere bufferizzata, non solo attraversata: ranges={ranges:?}"
+        );
+    }
+
+    /// Regressione per il bug segnalato dall'utente: con la testina
+    /// ferma subito prima di un taglio (basta tagliare una clip e
+    /// posizionare la testina appena prima del punto di taglio: la
+    /// finestra di lookahead include comunque un pezzo di entrambe le
+    /// metà, due segmenti dello stesso media), ogni ciclo di poll
+    /// rielabora gli stessi due segmenti nello stesso ordine. Prima del
+    /// fix, `requested_start` veniva sovrascritto incondizionatamente
+    /// con il `segment_start` dell'*ultimo* segmento processato (quello
+    /// dopo il taglio, source_start più alto): al ciclo successivo,
+    /// rielaborando il *primo* segmento (source_start più basso), il
+    /// confronto lo leggeva sempre come "tornato indietro" rispetto a
+    /// quel valore residuo — scatenando un seek reale a ogni singolo
+    /// ciclo pur restando fermi, "il buffer viene calcolato e
+    /// invalidato in loop" segnalato dall'utente (visivamente: la
+    /// striscia "buffered" non avanza mai, sembra girare a vuoto).
+    #[test]
+    fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments()
+     {
+        let path = make_test_clip("vv-app-render-ahead-test", "same_media_two_segments.mp4", 3);
+        let (media_a, _) = two_media_ids();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+
+        // Ciclo 1: due segmenti dello stesso media nella stessa finestra
+        // (come ai due lati di un taglio), source_start 10 e poi 50 — il
+        // minimo del ciclo (quello che `walk_and_fill` calcolerebbe in
+        // `min_source_start_by_media`) è 10 per entrambi.
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 10, 10),
+            Positioned::Opened
+        );
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 50, 10),
+            Positioned::Reused,
+            "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
+        );
+
+        // Ciclo 2, testina ferma (stesso from_frame di prima): stessi
+        // due segmenti, stesso minimo di ciclo. Rielaborare il *primo*
+        // segmento (10) non deve sembrare "tornato indietro" solo
+        // perché l'ultima chiamata vista nel ciclo precedente era per
+        // il segmento successivo (50).
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 10, 10),
+            Positioned::Reused,
+            "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
+        );
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path, 50, 10),
+            Positioned::Reused
         );
     }
 
