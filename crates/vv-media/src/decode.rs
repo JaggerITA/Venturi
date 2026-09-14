@@ -434,8 +434,7 @@ mod tests {
 
         // Il pattern testsrc non è mai uniforme: se troviamo più di un
         // valore distinto nel piano Y, lo stride/formato sono corretti.
-        let distinct: std::collections::HashSet<u8> =
-            frame.y.iter().step_by(37).copied().collect();
+        let distinct: std::collections::HashSet<u8> = frame.y.iter().step_by(37).copied().collect();
         assert!(
             distinct.len() > 5,
             "i pixel decodificati sembrano degeneri: {distinct:?}"
@@ -450,7 +449,10 @@ mod tests {
         let path = make_test_clip("colorspace.mp4", 1);
         let frame = decode_first_frame(&path).expect("decode fallito");
         assert_eq!(frame.matrix, ColorMatrix::Bt601);
-        assert!(!frame.full_range, "il range di default per video deve essere limited (MPEG), non full");
+        assert!(
+            !frame.full_range,
+            "il range di default per video deve essere limited (MPEG), non full"
+        );
     }
 
     #[test]

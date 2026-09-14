@@ -180,7 +180,12 @@ impl SharedFrameCache {
     }
 
     pub fn get(&self, media_id: MediaId, idx: FrameIdx) -> Option<Arc<FrameYuv420>> {
-        self.inner.lock().unwrap().entries.get(&(media_id, idx)).cloned()
+        self.inner
+            .lock()
+            .unwrap()
+            .entries
+            .get(&(media_id, idx))
+            .cloned()
     }
 
     pub fn contains(&self, media_id: MediaId, idx: FrameIdx) -> bool {
@@ -258,7 +263,9 @@ impl SharedFrameCache {
             let mut scored: Vec<((MediaId, FrameIdx), FrameIdx)> = inner
                 .entries
                 .keys()
-                .map(|&(media_id, idx)| ((media_id, idx), distance(media_id, idx, playhead, window)))
+                .map(|&(media_id, idx)| {
+                    ((media_id, idx), distance(media_id, idx, playhead, window))
+                })
                 .collect();
             // Più lontano prima: si sfratta dalla coda.
             scored.sort_unstable_by_key(|&(_, dist)| std::cmp::Reverse(dist));
@@ -301,7 +308,12 @@ impl SharedFrameCache {
 /// `FrameIdx::MAX` se nessuno lo contiene (non dovrebbe succedere per un
 /// frame sopravvissuto al Tier A nello stesso pass, ma resta un
 /// fallback sicuro anziché un panic).
-fn distance(media_id: MediaId, idx: FrameIdx, playhead: FrameIdx, window: &[WantedRange]) -> FrameIdx {
+fn distance(
+    media_id: MediaId,
+    idx: FrameIdx,
+    playhead: FrameIdx,
+    window: &[WantedRange],
+) -> FrameIdx {
     window
         .iter()
         .filter(|w| w.media_id == media_id && w.contains(idx))

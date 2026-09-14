@@ -2,7 +2,8 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipId, FrameIdx, Interpolation, Keyframed, Project, Rgba, TimelineId, Transform,
+    Clip, ClipId, FrameIdx, Interpolation, Keyframed, Project, Rgba, TimelineId, Track, TrackKind,
+    Transform,
 };
 
 pub trait Command: std::fmt::Debug {
@@ -80,6 +81,96 @@ impl History {
     /// render-ahead di una nuova disposizione delle clip.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+}
+
+/// Aggiunge una track vuota in coda a `tracks` (REFACTOR_PIPELINE.md B4).
+/// Sempre in coda, mai in una posizione "intelligente" in base al tipo:
+/// l'ordine dei `tracks` conta solo per il compositing video
+/// (bottom->top, vedi `Timeline::active_video_clip_at`), e lì contano solo
+/// le posizioni *relative* tra track Video — un'eventuale track Audio
+/// interposta non cambia quale track Video è la più in alto. Appendere e
+/// basta evita qualunque caso speciale su "dove va inserita".
+#[derive(Debug)]
+pub struct AddTrack {
+    pub timeline: TimelineId,
+    pub kind: TrackKind,
+    /// Indice assegnato da `apply` (l'ultimo di `tracks` in quel momento),
+    /// noto solo a posteriori.
+    index: Option<usize>,
+}
+
+impl AddTrack {
+    pub fn new(timeline: TimelineId, kind: TrackKind) -> Self {
+        Self {
+            timeline,
+            kind,
+            index: None,
+        }
+    }
+
+    /// L'indice della track appena creata, noto solo dopo `apply`.
+    pub fn track_index(&self) -> Option<usize> {
+        self.index
+    }
+}
+
+impl Command for AddTrack {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        tl.tracks.push(Track::new(self.kind));
+        self.index = Some(tl.tracks.len() - 1);
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(index) = self.index else {
+            return;
+        };
+        let tl = &mut project.timelines[self.timeline];
+        if index < tl.tracks.len() {
+            tl.tracks.remove(index);
+        }
+    }
+}
+
+/// Rimuove una track (con tutte le sue clip). Non fa da sé la verifica "non
+/// è l'ultima del suo tipo": quella è una regola della UI (mantenere sempre
+/// almeno una track Video e una Audio), non un invariante del modello dati
+/// — un progetto caricato da un file esterno potrebbe legittimamente non
+/// averne.
+#[derive(Debug)]
+pub struct RemoveTrack {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    removed: Option<Track>,
+}
+
+impl RemoveTrack {
+    pub fn new(timeline: TimelineId, track_index: usize) -> Self {
+        Self {
+            timeline,
+            track_index,
+            removed: None,
+        }
+    }
+}
+
+impl Command for RemoveTrack {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        if self.track_index >= tl.tracks.len() {
+            return;
+        }
+        self.removed = Some(tl.tracks.remove(self.track_index));
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(track) = self.removed.clone() else {
+            return;
+        };
+        let tl = &mut project.timelines[self.timeline];
+        let index = self.track_index.min(tl.tracks.len());
+        tl.tracks.insert(index, track);
     }
 }
 

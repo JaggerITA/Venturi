@@ -28,16 +28,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
-
-const VIDEO_TRACK: usize = 0;
 
 /// Quanti secondi di timeline tenere bufferizzati avanti dal playhead,
 /// attraversando quante clip servono per coprirli.
@@ -237,8 +235,7 @@ impl OpenDecoder {
     /// media — con un fallback conservativo finché non c'è ancora
     /// un'osservazione reale.
     fn seek_threshold_frames(&self) -> FrameIdx {
-        self.estimated_gop
-            .unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
+        self.estimated_gop.unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
     }
 
     /// Da chiamare con l'indice del primo frame decodificato dopo un
@@ -369,10 +366,14 @@ struct MediaSegment {
 }
 
 /// Divide `[from_frame, end_frame)` di timeline in segmenti, uno per ogni
-/// clip Media attraversata sulla track video: cammina quante clip
-/// servono nella stessa passata, saltando vuoti (nessuna clip, quindi
-/// nessun segmento) e clip SolidColor (nessun decode necessario) senza
-/// bisogno di casi speciali. Funzione pura, testabile senza ffmpeg.
+/// clip Media attraversata sulla track video *attiva* (la più in alto tra
+/// quelle video che coprono ciascun punto, `Timeline::active_video_clip_at`
+/// — REFACTOR_PIPELINE.md B4: con più track video, quella "in cima" può
+/// cambiare da un tratto all'altro, il loop lo scopre da sé rivalutando
+/// ogni volta che avanza, nessun caso speciale in più): cammina quante clip
+/// servono nella stessa passata, saltando vuoti (nessuna clip attiva,
+/// quindi nessun segmento) e clip SolidColor (nessun decode necessario)
+/// senza bisogno di casi speciali. Funzione pura, testabile senza ffmpeg.
 fn collect_media_segments(
     timeline: &Timeline,
     from_frame: FrameIdx,
@@ -381,8 +382,8 @@ fn collect_media_segments(
     let mut segments = Vec::new();
     let mut frame = from_frame;
     while frame < end_frame {
-        let next_frame = match timeline.active_clip_at(VIDEO_TRACK, frame) {
-            Some(clip) => {
+        let next_frame = match timeline.active_video_clip_at(frame) {
+            Some((_, clip)) => {
                 let segment_end_timeline = clip.timeline_end().min(end_frame);
                 if let ClipSource::Media(media_id) = &clip.source {
                     let media_id = *media_id;
@@ -390,7 +391,8 @@ fn collect_media_segments(
                     // (`vv_core::Clip::source_frame_at`, vedi doc lì per il
                     // perché — REFACTOR_PIPELINE.md B1).
                     let source_start = clip.source_frame_at(frame);
-                    let source_end = (clip.source_frame_at(segment_end_timeline) - 1).max(source_start);
+                    let source_end =
+                        (clip.source_frame_at(segment_end_timeline) - 1).max(source_start);
                     segments.push(MediaSegment {
                         media_id,
                         source_start,
@@ -401,15 +403,7 @@ fn collect_media_segments(
                 segment_end_timeline
             }
             None => timeline
-                .tracks
-                .get(VIDEO_TRACK)
-                .and_then(|t| {
-                    t.clips
-                        .iter()
-                        .filter(|c| c.timeline_start >= frame)
-                        .map(|c| c.timeline_start)
-                        .min()
-                })
+                .next_video_clip_start_from(frame)
                 .map(|s| s.min(end_frame))
                 .unwrap_or(end_frame),
         };
@@ -1516,7 +1510,7 @@ mod tests {
     /// stesso media, non quella soglia).
     #[test]
     fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments()
-     {
+    {
         let path = make_test_clip("vv-app-render-ahead-test", "same_media_two_segments.mp4", 3);
         let (media_a, _) = two_media_ids();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
@@ -2076,5 +2070,4 @@ mod tests {
             );
         }
     }
-
 }

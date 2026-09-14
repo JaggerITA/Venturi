@@ -145,6 +145,20 @@ restano come descritti sopra, ancora scheletri.
 6. Blend over (alpha standard) accumulando track per track nel framebuffer
    di output, poi presentato nella texture del viewer egui (`egui-wgpu`).
 
+**Stato attuale** (REFACTOR_PIPELINE.md B4): il passo 1 ("risolvi la clip
+attiva" per track) e il passo 6 ("blend over track per track") sono oggi lo
+stesso passo, risolto *prima* del compositor, non dentro: senza
+un'opacità per-clip ancora modellata in `EffectStack`, un vero accumulo
+alpha multi-layer su layer tutti opachi produce esattamente lo stesso
+risultato di "mostra solo la track più in alto che ha una clip in quel
+punto" (`vv_core::Timeline::active_video_clip_at`) — quindi il compositor
+(`vv-render`) riceve ancora un solo frame video in ingresso per chiamata
+(più eventuali overlay testo/generatori sullo stesso frame), e la scelta
+di *quale* clip tra le track è fatta a monte. Il giorno in cui arriva
+un'opacità/blend-mode per-clip, quella scelta smette di bastare e serve
+un vero accumulo multi-texture nel compositor: a quel punto i passi 1 e 6
+si separano per davvero.
+
 ## Pipeline audio
 
 - Decode (ffmpeg) → resample al sample rate di progetto (`rubato` o
@@ -473,11 +487,13 @@ vibevideo/
    `AtomicBool`) col thread.
 
    **Limiti v1**, coerenti con lo stato attuale del progetto: tutta la
-   timeline, nessuna selezione in/out; una sola track video (0) e una sola
-   track audio (1), come tutto quel che la UI può costruire oggi
-   (`VIDEO_TRACK`); `EffectStack::speed` non applicato (nessun time-remap:
-   milestone 7 non ancora fatta, quindi l'export resta a 1x); text overlay
-   non applicabile (non implementato in nessuna parte dell'app).
+   timeline, nessuna selezione in/out; N track video (compositate
+   bottom->top, la più in alto vince dove ha una clip — niente opacità
+   per-clip ancora, quindi "vince" invece di un vero accumulo alpha) e N
+   track audio (sommate, REFACTOR_PIPELINE.md B4); `EffectStack::speed`
+   non applicato (nessun time-remap: milestone 7 non ancora fatta, quindi
+   l'export resta a 1x); text overlay non applicabile (non implementato in
+   nessuna parte dell'app).
 10. ✅ **Persistenza progetto** (RON): salvataggio/caricamento di un file
     `.vvproj`. Ogni tipo del modello (`Project`, `Timeline`, `Clip`,
     `EffectStack`, `Keyframed<T>`, ecc.) derivava già `Serialize`/

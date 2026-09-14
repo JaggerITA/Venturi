@@ -359,6 +359,71 @@ impl Timeline {
             .max()
             .unwrap_or(0)
     }
+
+    /// Le track di tipo `kind`, con il loro indice in `tracks` — l'indice
+    /// è quello che il resto dell'API (`active_clip_at`, i comandi) si
+    /// aspetta, non una posizione "solo tra le track di questo tipo".
+    pub fn tracks_of_kind(
+        &self,
+        kind: TrackKind,
+    ) -> impl DoubleEndedIterator<Item = (usize, &Track)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(move |(_, t)| t.kind == kind)
+    }
+
+    /// Indice della prima (bottom-most) track di tipo `kind`, o `None` se
+    /// non ce n'è nessuna — dove atterra di default una clip nuova (media
+    /// trascinato dal pool, SolidColor), finché l'utente non aggiunge altre
+    /// track a mano (REFACTOR_PIPELINE.md B4).
+    pub fn first_track_index(&self, kind: TrackKind) -> Option<usize> {
+        self.tracks_of_kind(kind).map(|(i, _)| i).next()
+    }
+
+    /// La clip Video attiva al frame `frame`, sulla track video più in alto
+    /// (indice più alto: l'ordine di `tracks` è bottom->top) tra quelle che
+    /// ne hanno una in quel punto. Con una sola track video (caso comune)
+    /// coincide con `active_clip_at` su quella track; con più track video
+    /// generalizza "quale si vede": senza un'opacità per-clip (non ancora
+    /// modellata in `EffectStack`), un vero accumulo alpha su più layer
+    /// opachi collassa esattamente in "il più in alto che c'è in quel
+    /// punto" — REFACTOR_PIPELINE.md B4, vedi anche
+    /// `vv_render::Compositor` (ancora un solo frame in ingresso: qui è
+    /// dove si sceglie *quale*, non nel compositor).
+    pub fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, &Clip)> {
+        self.tracks_of_kind(TrackKind::Video)
+            .rev()
+            .find_map(|(i, t)| {
+                t.clips
+                    .iter()
+                    .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+                    .map(|c| (i, c))
+            })
+    }
+
+    /// Il `timeline_start` più vicino, a `frame` o dopo, tra tutte le clip
+    /// di tutte le track Video — "quando ricompare qualcosa da mostrare"
+    /// dopo un vuoto, a prescindere da su quale track video sia.
+    pub fn next_video_clip_start_from(&self, frame: FrameIdx) -> Option<FrameIdx> {
+        self.tracks_of_kind(TrackKind::Video)
+            .flat_map(|(_, t)| t.clips.iter())
+            .filter(|c| c.timeline_start >= frame)
+            .map(|c| c.timeline_start)
+            .min()
+    }
+
+    /// La clip con questo id, su una qualunque track, insieme all'indice
+    /// della sua track — permette di ritrovare una clip nota per id senza
+    /// dover tenere traccia (letteralmente) di quale track la contiene, che
+    /// con più track video può cambiare da un frame all'altro
+    /// (`active_video_clip_at`).
+    pub fn find_clip(&self, clip_id: ClipId) -> Option<(usize, &Clip)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .find_map(|(i, t)| t.clips.iter().find(|c| c.id == clip_id).map(|c| (i, c)))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -539,6 +604,136 @@ mod timeline_tests {
             tl.active_clip_at(0, 25).is_none(),
             "oltre la fine dell'ultima clip"
         );
+    }
+
+    #[test]
+    fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
+        // Due track video: la prima (indice 0, "bottom") copre [0, 30), la
+        // seconda (indice 1, "top") solo [10, 20) — un layer più corto
+        // sovrapposto a uno più lungo, il caso base del blend-over
+        // (REFACTOR_PIPELINE.md B4).
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(0, 30, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(10, 10, 2)],
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(
+            tl.active_video_clip_at(5).map(|(t, c)| (t, c.id)),
+            Some((0, ClipId(1))),
+            "solo la track bottom ha qualcosa qui"
+        );
+        assert_eq!(
+            tl.active_video_clip_at(15).map(|(t, c)| (t, c.id)),
+            Some((1, ClipId(2))),
+            "la track top copre questo punto: vince lei"
+        );
+        assert_eq!(
+            tl.active_video_clip_at(25).map(|(t, c)| (t, c.id)),
+            Some((0, ClipId(1))),
+            "tornata scoperta la track top, si rivede la bottom sotto"
+        );
+        assert!(tl.active_video_clip_at(35).is_none());
+    }
+
+    #[test]
+    fn active_video_clip_at_ignores_audio_tracks() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(0, 10, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Audio,
+                    clips: vec![clip_at(0, 10, 2)],
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(
+            tl.active_video_clip_at(5).map(|(_, c)| c.id),
+            Some(ClipId(1))
+        );
+    }
+
+    #[test]
+    fn next_video_clip_start_from_finds_the_closest_across_video_tracks() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(50, 10, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(20, 10, 2)],
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(tl.next_video_clip_start_from(0), Some(20));
+        assert_eq!(tl.next_video_clip_start_from(25), Some(50));
+        assert_eq!(tl.next_video_clip_start_from(61), None);
+    }
+
+    #[test]
+    fn find_clip_locates_a_clip_by_id_on_any_track() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(0, 10, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Audio,
+                    clips: vec![clip_at(0, 10, 2)],
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(tl.find_clip(ClipId(1)).map(|(t, _)| t), Some(0));
+        assert_eq!(tl.find_clip(ClipId(2)).map(|(t, _)| t), Some(1));
+        assert!(tl.find_clip(ClipId(99)).is_none());
+    }
+
+    #[test]
+    fn first_track_index_finds_the_bottom_most_track_of_a_kind() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track::new(TrackKind::Video),
+                Track::new(TrackKind::Audio),
+                Track::new(TrackKind::Video),
+            ],
+        };
+        assert_eq!(tl.first_track_index(TrackKind::Video), Some(0));
+        assert_eq!(tl.first_track_index(TrackKind::Audio), Some(1));
     }
 
     #[test]

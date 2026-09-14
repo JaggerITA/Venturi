@@ -3,10 +3,10 @@ pub mod model;
 pub mod persistence;
 
 pub use command::{
-    Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue, LiftDelete,
-    LinkClips, MoveClip, MoveClips, RemoveKeyframe, RippleDeleteAllTracks, RippleDeleteGap,
-    SetClipColor, SetClipGain, SetClipTransform, SplitClip, TrimClip, TrimEdge, UnlinkClip,
-    UpsertKeyframe,
+    AddTrack, Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue,
+    LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveTrack, RippleDeleteAllTracks,
+    RippleDeleteGap, SetClipColor, SetClipGain, SetClipTransform, SplitClip, TrimClip, TrimEdge,
+    UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
 pub use persistence::{PersistenceError, load_project, save_project};
@@ -36,6 +36,51 @@ mod tests {
             effects: EffectStack::default(),
             linked: None,
         }
+    }
+
+    #[test]
+    fn add_track_appends_and_undo_removes_it() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        history.do_command(
+            &mut project,
+            Box::new(command::AddTrack::new(timeline, TrackKind::Video)),
+        );
+        assert_eq!(project.timelines[timeline].tracks.len(), 3);
+        assert_eq!(project.timelines[timeline].tracks[2].kind, TrackKind::Video);
+
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline].tracks.len(), 2);
+    }
+
+    #[test]
+    fn remove_track_deletes_its_clips_too_and_undo_restores_everything() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 10);
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::RemoveTrack::new(timeline, 0)),
+        );
+        assert_eq!(project.timelines[timeline].tracks.len(), 1);
+        assert_eq!(project.timelines[timeline].tracks[0].kind, TrackKind::Audio);
+
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline].tracks.len(), 2);
+        assert_eq!(project.timelines[timeline].tracks[0].kind, TrackKind::Video);
+        assert_eq!(project.timelines[timeline].tracks[0].clips[0].id, a_id);
     }
 
     #[test]

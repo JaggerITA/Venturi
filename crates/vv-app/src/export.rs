@@ -8,21 +8,23 @@
 //! non sul `Project` live della UI.
 //!
 //! Limiti v1, coerenti con lo stato attuale del progetto (ARCHITECTURE.md):
-//! tutta la timeline, nessuna selezione in/out; una sola track video (0) e
-//! una sola track audio (1), come tutto quel che la UI può costruire oggi
-//! (`VIDEO_TRACK` in `main.rs`); `EffectStack::speed` non applicato (nessun
+//! tutta la timeline, nessuna selezione in/out; N track video (compositate
+//! bottom->top, la più in alto vince dove ha una clip — nessuna opacità
+//! per-clip ancora, quindi "vince" invece di un vero accumulo alpha, vedi
+//! `Timeline::active_video_clip_at`) e N track audio (sommate,
+//! REFACTOR_PIPELINE.md B4); `EffectStack::speed` non applicato (nessun
 //! time-remap: milestone 7 non ancora fatta).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vv_core::{Clip, ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId};
+use vv_core::{
+    Clip, ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId, TrackKind,
+};
 
 use crate::frame_provider::{FrameProvider, as_render_yuv_frame, media_source_frame};
 
-const VIDEO_TRACK: usize = 0;
-const AUDIO_TRACK: usize = 1;
 /// Sample rate/canali a cui viene mixata la traccia audio prima
 /// dell'encode, indipendentemente da quelli nativi dei singoli media
 /// (vedi `resample_and_remix`).
@@ -158,9 +160,8 @@ pub fn export_timeline(
     }
 
     let has_audio_track = timeline
-        .tracks
-        .get(AUDIO_TRACK)
-        .is_some_and(|t| !t.clips.is_empty());
+        .tracks_of_kind(TrackKind::Audio)
+        .any(|(_, t)| !t.clips.is_empty());
 
     let mut encoder = vv_media::Encoder::new(
         output_path,
@@ -217,7 +218,7 @@ fn render_video_frame(
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
-    let Some(clip) = timeline.active_clip_at(VIDEO_TRACK, frame) else {
+    let Some((_, clip)) = timeline.active_video_clip_at(frame) else {
         provider.active = None;
         return Ok(black_frame(resolution));
     };
@@ -265,10 +266,15 @@ fn render_video_frame(
     }
 }
 
-/// Decodifica/gaina/mixa la track audio (1) in un unico buffer PCM f32
+/// Decodifica/gaina/mixa *tutte* le track audio in un unico buffer PCM f32
 /// interleaved a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`, lungo
 /// `total_frames` (nello spazio frame della timeline) — silenzio nei buchi
-/// e dove non c'è traccia audio.
+/// e dove non c'è alcuna traccia audio (REFACTOR_PIPELINE.md B4: N track
+/// audio invece di una sola fissa, sommate nello stesso buffer — a
+/// differenza del video, per l'audio "sovrapposto" ha senso sommare per
+/// davvero, non serve un mixer in tempo reale per farlo bene: l'export non
+/// ha vincoli di latenza, il vero mixer continuo di B5 serve solo per
+/// l'anteprima dal vivo).
 fn mix_audio_track(
     project: &Project,
     timeline: &Timeline,
@@ -279,63 +285,64 @@ fn mix_audio_track(
         (total_frames as f64 / fps * PROJECT_SAMPLE_RATE as f64).round() as usize;
     let mut mixed = vec![0.0_f32; total_out_frames * PROJECT_CHANNELS];
 
-    let Some(track) = timeline.tracks.get(AUDIO_TRACK) else {
-        return Ok(mixed);
-    };
+    for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
+        for clip in &track.clips {
+            let ClipSource::Media(media_id) = &clip.source else {
+                continue; // SolidColor non ha audio.
+            };
+            let Some(item) = project.media_pool.get(*media_id) else {
+                continue;
+            };
+            let Some(audio) =
+                vv_media::decode_audio_track(&item.path).map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            if audio.samples.is_empty() {
+                continue;
+            }
 
-    for clip in &track.clips {
-        let ClipSource::Media(media_id) = &clip.source else {
-            continue; // SolidColor non ha audio.
-        };
-        let Some(item) = project.media_pool.get(*media_id) else {
-            continue;
-        };
-        let Some(audio) = vv_media::decode_audio_track(&item.path).map_err(|e| e.to_string())?
-        else {
-            continue;
-        };
-        if audio.samples.is_empty() {
-            continue;
-        }
+            let src_channels = audio.channels as usize;
+            let src_rate = audio.sample_rate as f64;
+            let clip_fps = item.meta.fps.as_f64().max(1e-9);
 
-        let src_channels = audio.channels as usize;
-        let src_rate = audio.sample_rate as f64;
-        let clip_fps = item.meta.fps.as_f64().max(1e-9);
+            // [source_in, source_out) del clip, tradotto da frame sorgente
+            // (fps nativo del media) a campioni nel buffer decodificato.
+            let start = ((clip.source_in as f64 / clip_fps * src_rate).round() as usize
+                * src_channels)
+                .min(audio.samples.len());
+            let end = ((clip.source_out as f64 / clip_fps * src_rate).round() as usize
+                * src_channels)
+                .min(audio.samples.len());
+            if start >= end {
+                continue;
+            }
+            let mut slice = audio.samples[start..end].to_vec();
 
-        // [source_in, source_out) del clip, tradotto da frame sorgente
-        // (fps nativo del media) a campioni nel buffer decodificato.
-        let start = ((clip.source_in as f64 / clip_fps * src_rate).round() as usize * src_channels)
-            .min(audio.samples.len());
-        let end = ((clip.source_out as f64 / clip_fps * src_rate).round() as usize * src_channels)
-            .min(audio.samples.len());
-        if start >= end {
-            continue;
-        }
-        let mut slice = audio.samples[start..end].to_vec();
+            apply_gain(
+                &mut slice,
+                src_channels,
+                audio.sample_rate,
+                clip_fps,
+                clip.source_in,
+                &clip.effects.gain_db,
+            );
 
-        apply_gain(
-            &mut slice,
-            src_channels,
-            audio.sample_rate,
-            clip_fps,
-            clip.source_in,
-            &clip.effects.gain_db,
-        );
+            let resampled = resample_and_remix(
+                &slice,
+                src_channels,
+                audio.sample_rate,
+                PROJECT_CHANNELS,
+                PROJECT_SAMPLE_RATE,
+            );
 
-        let resampled = resample_and_remix(
-            &slice,
-            src_channels,
-            audio.sample_rate,
-            PROJECT_CHANNELS,
-            PROJECT_SAMPLE_RATE,
-        );
-
-        let dst_start_frame =
-            (clip.timeline_start as f64 / fps * PROJECT_SAMPLE_RATE as f64).round() as usize;
-        let dst_start = dst_start_frame * PROJECT_CHANNELS;
-        for (i, &s) in resampled.iter().enumerate() {
-            if let Some(m) = mixed.get_mut(dst_start + i) {
-                *m += s;
+            let dst_start_frame =
+                (clip.timeline_start as f64 / fps * PROJECT_SAMPLE_RATE as f64).round() as usize;
+            let dst_start = dst_start_frame * PROJECT_CHANNELS;
+            for (i, &s) in resampled.iter().enumerate() {
+                if let Some(m) = mixed.get_mut(dst_start + i) {
+                    *m += s;
+                }
             }
         }
     }
@@ -521,6 +528,15 @@ mod tests {
         }
     }
 
+    fn blue() -> Rgba {
+        Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }
+    }
+
     #[test]
     fn render_video_frame_returns_black_in_a_gap() {
         let project = Project::default();
@@ -607,6 +623,52 @@ mod tests {
         let err = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2))
             .expect_err("un media assente dal pool deve fallire, non produrre un frame nero");
         assert!(err.contains("media non trovato"), "err={err}");
+    }
+
+    /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): dove la
+    /// track più in alto (seconda nel vettore) non ha una clip, si vede
+    /// quella sotto; dove ce l'ha, vince lei — stesso comportamento del
+    /// viewer live in `main.rs`, generalizzato via
+    /// `Timeline::active_video_clip_at`.
+    #[test]
+    fn render_video_frame_prefers_the_topmost_video_track() {
+        let project = Project::default();
+        let tl = timeline_with(vec![
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![solid_color_clip(1, 0, 30, red())],
+                muted: false,
+            },
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![solid_color_clip(2, 10, 10, blue())],
+                muted: false,
+            },
+        ]);
+        let compositor = vv_render::Compositor::new_headless();
+        let mut provider = StreamingFrameProvider::default();
+
+        let below =
+            render_video_frame(&project, &tl, &compositor, &mut provider, 5, (2, 2)).unwrap();
+        assert!(
+            below
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| px == &[255, 0, 0, 255]),
+            "sotto la track top: si vede quella bottom"
+        );
+
+        let above =
+            render_video_frame(&project, &tl, &compositor, &mut provider, 15, (2, 2)).unwrap();
+        assert!(
+            above
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| px == &[0, 0, 255, 255]),
+            "la track top ha una clip qui: vince lei"
+        );
     }
 
     #[test]

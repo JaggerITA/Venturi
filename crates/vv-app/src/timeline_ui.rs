@@ -23,6 +23,9 @@ const ROW_HEIGHT: f32 = 40.0;
 const RULER_HEIGHT: f32 = 20.0;
 const MIN_TIMELINE_SECS: f64 = 20.0;
 const TRAILING_MARGIN_SECS: f64 = 5.0;
+/// Colonna fissa a sinistra della timeline (etichetta track + rimuovi),
+/// non coinvolta nello scroll orizzontale — vedi `draw_track_headers`.
+const TRACK_HEADER_WIDTH: f32 = 100.0;
 
 /// (indice track, id clip): coppia usata ovunque per identificare univocamente
 /// una clip nella timeline (l'id da solo non basta, la stessa clip non può
@@ -227,6 +230,71 @@ enum PendingAction {
     Trim(Vec<(ClipId, usize, TrimEdge, FrameIdx)>),
     Unlink(usize, ClipId),
     Link(usize, ClipId, usize, ClipId),
+    /// Aggiunge una track vuota del tipo dato (REFACTOR_PIPELINE.md B4).
+    AddTrack(TrackKind),
+    /// Rimuove la track a questo indice (e le sue clip).
+    RemoveTrack(usize),
+}
+
+/// Disegna l'etichetta (Video/Audio) e il pulsante di rimozione di ogni
+/// track, in una colonna fissa a sinistra che non scorre con il contenuto
+/// orizzontale, più due pulsanti per aggiungerne una nuova in fondo
+/// (REFACTOR_PIPELINE.md B4) — l'unico modo per l'utente di ottenere più
+/// di una track video/audio, dato che il modello dati e il resto di questa
+/// UI (drag, selezione, comandi) sono già generici sul numero di track.
+/// La rimozione dell'ultima track di un tipo è disabilitata: mantenere
+/// sempre almeno una track Video e una Audio evita di dover gestire un
+/// progetto senza una destinazione di default per nuove clip altrove
+/// (`VibeVideoApp::insert_media_clip`/`add_solid_color_clip`).
+fn draw_track_headers(
+    ui: &mut egui::Ui,
+    track_kinds: &[TrackKind],
+    content_height: f32,
+    pending: &mut Option<PendingAction>,
+) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(TRACK_HEADER_WIDTH, content_height.max(RULER_HEIGHT)),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.add_space(RULER_HEIGHT);
+            for (track_index, kind) in track_kinds.iter().enumerate() {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let label = match kind {
+                            TrackKind::Video => "Video",
+                            TrackKind::Audio => "Audio",
+                        };
+                        ui.label(label);
+                        let is_last_of_kind =
+                            track_kinds.iter().filter(|k| *k == kind).count() <= 1;
+                        let remove =
+                            ui.add_enabled(!is_last_of_kind, egui::Button::new("×").small());
+                        if remove
+                            .on_hover_text(if is_last_of_kind {
+                                "Non si può rimuovere l'ultima track di questo tipo"
+                            } else {
+                                "Rimuovi track"
+                            })
+                            .clicked()
+                        {
+                            *pending = Some(PendingAction::RemoveTrack(track_index));
+                        }
+                    },
+                );
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.small_button("+ Video").clicked() {
+                    *pending = Some(PendingAction::AddTrack(TrackKind::Video));
+                }
+                if ui.small_button("+ Audio").clicked() {
+                    *pending = Some(PendingAction::AddTrack(TrackKind::Audio));
+                }
+            });
+        },
+    );
 }
 
 /// Ritorna `Some((media, frame))` se in questo frame l'utente ha rilasciato
@@ -272,7 +340,7 @@ pub fn show_timeline(
     let px_per_frame = state.pixels_per_sec / fps.max(1.0) as f32;
 
     // --- pass 1: raccogli i dati da disegnare (borrow immutabile) ---
-    let (track_count, visuals, max_end_frames) = {
+    let (track_count, track_kinds, visuals, max_end_frames) = {
         let tl = &project.timelines[timeline_id];
         let mut visuals = Vec::new();
         let mut max_end: FrameIdx = 0;
@@ -288,7 +356,8 @@ pub fn show_timeline(
                 });
             }
         }
-        (tl.tracks.len(), visuals, max_end)
+        let track_kinds: Vec<TrackKind> = tl.tracks.iter().map(|t| t.kind).collect();
+        (tl.tracks.len(), track_kinds, visuals, max_end)
     };
 
     let total_secs = (max_end_frames as f64 / fps + TRAILING_MARGIN_SECS).max(MIN_TIMELINE_SECS);
@@ -297,576 +366,585 @@ pub fn show_timeline(
 
     let mut pending: Option<PendingAction> = None;
 
-    egui::ScrollArea::horizontal()
-        .id_salt("timeline_scroll")
-        // `auto_shrink` di default è true su entrambi gli assi: una
-        // ScrollArea si restringe al contenuto anziché riempire lo spazio
-        // assegnato. Quando il contenuto (poche track corte) è più basso
-        // dell'altezza a cui l'utente ha trascinato il pannello, questo fa
-        // sì che il pannello *stesso* si richiuda al contenuto ogni frame
-        // successivo al drag — è la causa reale del bug "il resize della
-        // timeline torna indietro al rilascio del mouse": durante il drag
-        // l'interazione forza la dimensione, ma al frame successivo lo
-        // shrink-to-content la sovrascrive di nuovo. `false` su entrambi
-        // gli assi fa riempire sempre lo spazio assegnato dal Panel.
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let (rect, _resp) = ui.allocate_exact_size(
-                egui::vec2(content_width, content_height),
-                egui::Sense::hover(),
-            );
-            let painter = ui.painter_at(rect);
-            let origin = rect.min;
-            let to_local = |pos: egui::Pos2| egui::pos2(pos.x - origin.x, pos.y - origin.y);
-            let press_over_a_clip = |pos: egui::Pos2| {
-                let local = to_local(pos);
-                visuals
-                    .iter()
-                    .any(|v| clip_local_rect(v, px_per_frame).contains(local))
-            };
+    ui.horizontal_top(|ui| {
+        draw_track_headers(ui, &track_kinds, content_height, &mut pending);
 
-            // Ruler: click/drag per spostare il playhead.
-            let ruler_rect =
-                egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
-            painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(45));
-            let ruler_resp = ui.interact(
-                ruler_rect,
-                ui.id().with("timeline_ruler"),
-                egui::Sense::click_and_drag(),
-            );
-            if let Some(pos) = ruler_resp.interact_pointer_pos() {
-                let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                state.playhead = frame;
-            }
-            if ruler_resp.clicked() {
-                state.clear_selection();
-            }
-
-            // Striscia "buffered": una sottile fascia sul bordo inferiore
-            // del righello, colorata dove il player ha già frame in cache
-            // (vedi doc del parametro `buffered_ranges`). Sotto alla linea
-            // della playhead (disegnata più avanti) così resta visibile
-            // anche quando la playhead ci passa sopra.
-            const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
-            let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
-            for &(start, end) in buffered_ranges {
-                let x0 = origin.x + start as f32 * px_per_frame;
-                let x1 = origin.x + (end + 1) as f32 * px_per_frame;
-                let strip_rect = egui::Rect::from_min_max(
-                    egui::pos2(x0, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
-                    egui::pos2(x1, origin.y + RULER_HEIGHT),
+        egui::ScrollArea::horizontal()
+            .id_salt("timeline_scroll")
+            // `auto_shrink` di default è true su entrambi gli assi: una
+            // ScrollArea si restringe al contenuto anziché riempire lo spazio
+            // assegnato. Quando il contenuto (poche track corte) è più basso
+            // dell'altezza a cui l'utente ha trascinato il pannello, questo fa
+            // sì che il pannello *stesso* si richiuda al contenuto ogni frame
+            // successivo al drag — è la causa reale del bug "il resize della
+            // timeline torna indietro al rilascio del mouse": durante il drag
+            // l'interazione forza la dimensione, ma al frame successivo lo
+            // shrink-to-content la sovrascrive di nuovo. `false` su entrambi
+            // gli assi fa riempire sempre lo spazio assegnato dal Panel.
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let (rect, _resp) = ui.allocate_exact_size(
+                    egui::vec2(content_width, content_height),
+                    egui::Sense::hover(),
                 );
-                painter.rect_filled(strip_rect, 0.0, buffered_color);
-            }
-
-            // Sfondo delle track (alternato per leggibilità), e sopra,
-            // un'unica regione interagibile per tutta l'area sotto al
-            // righello: cattura click/drag partiti da uno spazio vuoto
-            // (marquee-select o "svuota selezione"). Le clip, interagite
-            // più avanti nel loop, sono "sopra" a questa nell'hit-test di
-            // egui (un rettangolo grande sotto + rettangoli piccoli sopra
-            // è un pattern che risolve correttamente da solo), e in più il
-            // controllo `press_over_a_clip` la rende no-op se il punto di
-            // partenza è comunque dentro una clip: doppia sicurezza contro
-            // un click che "ruba" l'interazione a una clip.
-            for track_index in 0..track_count {
-                let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
-                let track_rect = egui::Rect::from_min_size(
-                    egui::pos2(origin.x, y),
-                    egui::vec2(content_width, ROW_HEIGHT),
-                );
-                let bg = if track_index % 2 == 0 {
-                    egui::Color32::from_gray(32)
-                } else {
-                    egui::Color32::from_gray(27)
+                let painter = ui.painter_at(rect);
+                let origin = rect.min;
+                let to_local = |pos: egui::Pos2| egui::pos2(pos.x - origin.x, pos.y - origin.y);
+                let press_over_a_clip = |pos: egui::Pos2| {
+                    let local = to_local(pos);
+                    visuals
+                        .iter()
+                        .any(|v| clip_local_rect(v, px_per_frame).contains(local))
                 };
-                painter.rect_filled(track_rect, 0.0, bg);
-            }
-            let track_area_rect = egui::Rect::from_min_size(
-                egui::pos2(origin.x, origin.y + RULER_HEIGHT),
-                egui::vec2(content_width, content_height - RULER_HEIGHT),
-            );
-            let marquee_resp = ui.interact(
-                track_area_rect,
-                ui.id().with("timeline_marquee"),
-                egui::Sense::click_and_drag(),
-            );
 
-            // Drag&drop dal media pool: `dnd_hover_payload`/`dnd_release_payload`
-            // guardano `contains_pointer` invece di `hovered` (che sarebbe
-            // sempre false qui: il widget "attivo" durante un drag è quello
-            // del media pool, non `marquee_resp`), quindi funzionano anche
-            // se il drag è partito da un altro widget — vedi i loro doc in
-            // egui. La posizione del rilascio va letta da `i.pointer`
-            // direttamente per lo stesso motivo (`interact_pointer_pos()` è
-            // legato a chi ha "vinto" l'interazione, non a questo drop).
-            if let Some(media_id) = marquee_resp.dnd_hover_payload::<vv_core::MediaId>()
-                && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-                && let Some(item) = project.media_pool.get(*media_id)
-            {
-                let raw_frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                let frame = snap_frame(
-                    raw_frame,
-                    item.meta.duration_frames,
-                    &visuals,
-                    &[],
-                    px_per_frame,
-                    snapping_enabled,
-                )
-                .max(0);
-                let ghost_height = if item.meta.has_audio {
-                    2.0 * ROW_HEIGHT
-                } else {
-                    ROW_HEIGHT
-                };
-                let ghost_rect = egui::Rect::from_min_size(
-                    egui::pos2(
-                        origin.x + frame as f32 * px_per_frame,
-                        origin.y + RULER_HEIGHT,
-                    ),
-                    egui::vec2(
-                        item.meta.duration_frames as f32 * px_per_frame,
-                        ghost_height,
-                    ),
+                // Ruler: click/drag per spostare il playhead.
+                let ruler_rect =
+                    egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
+                painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(45));
+                let ruler_resp = ui.interact(
+                    ruler_rect,
+                    ui.id().with("timeline_ruler"),
+                    egui::Sense::click_and_drag(),
                 );
-                painter.rect_filled(
-                    ghost_rect,
-                    4.0,
-                    egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
-                );
-                painter.rect_stroke(
-                    ghost_rect,
-                    4.0,
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            if let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
-                && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
-            {
-                let raw_frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                let len = project
-                    .media_pool
-                    .get(*media_id)
-                    .map(|item| item.meta.duration_frames)
-                    .unwrap_or(0);
-                let frame = snap_frame(
-                    raw_frame,
-                    len,
-                    &visuals,
-                    &[],
-                    px_per_frame,
-                    snapping_enabled,
-                )
-                .max(0);
-                media_drop = Some((*media_id, frame));
-            }
+                if let Some(pos) = ruler_resp.interact_pointer_pos() {
+                    let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    state.playhead = frame;
+                }
+                if ruler_resp.clicked() {
+                    state.clear_selection();
+                }
 
-            if marquee_resp.drag_started() {
-                if let Some(pos) = marquee_resp.interact_pointer_pos()
+                // Striscia "buffered": una sottile fascia sul bordo inferiore
+                // del righello, colorata dove il player ha già frame in cache
+                // (vedi doc del parametro `buffered_ranges`). Sotto alla linea
+                // della playhead (disegnata più avanti) così resta visibile
+                // anche quando la playhead ci passa sopra.
+                const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
+                let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
+                for &(start, end) in buffered_ranges {
+                    let x0 = origin.x + start as f32 * px_per_frame;
+                    let x1 = origin.x + (end + 1) as f32 * px_per_frame;
+                    let strip_rect = egui::Rect::from_min_max(
+                        egui::pos2(x0, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
+                        egui::pos2(x1, origin.y + RULER_HEIGHT),
+                    );
+                    painter.rect_filled(strip_rect, 0.0, buffered_color);
+                }
+
+                // Sfondo delle track (alternato per leggibilità), e sopra,
+                // un'unica regione interagibile per tutta l'area sotto al
+                // righello: cattura click/drag partiti da uno spazio vuoto
+                // (marquee-select o "svuota selezione"). Le clip, interagite
+                // più avanti nel loop, sono "sopra" a questa nell'hit-test di
+                // egui (un rettangolo grande sotto + rettangoli piccoli sopra
+                // è un pattern che risolve correttamente da solo), e in più il
+                // controllo `press_over_a_clip` la rende no-op se il punto di
+                // partenza è comunque dentro una clip: doppia sicurezza contro
+                // un click che "ruba" l'interazione a una clip.
+                for track_index in 0..track_count {
+                    let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
+                    let track_rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.x, y),
+                        egui::vec2(content_width, ROW_HEIGHT),
+                    );
+                    let bg = if track_index % 2 == 0 {
+                        egui::Color32::from_gray(32)
+                    } else {
+                        egui::Color32::from_gray(27)
+                    };
+                    painter.rect_filled(track_rect, 0.0, bg);
+                }
+                let track_area_rect = egui::Rect::from_min_size(
+                    egui::pos2(origin.x, origin.y + RULER_HEIGHT),
+                    egui::vec2(content_width, content_height - RULER_HEIGHT),
+                );
+                let marquee_resp = ui.interact(
+                    track_area_rect,
+                    ui.id().with("timeline_marquee"),
+                    egui::Sense::click_and_drag(),
+                );
+
+                // Drag&drop dal media pool: `dnd_hover_payload`/`dnd_release_payload`
+                // guardano `contains_pointer` invece di `hovered` (che sarebbe
+                // sempre false qui: il widget "attivo" durante un drag è quello
+                // del media pool, non `marquee_resp`), quindi funzionano anche
+                // se il drag è partito da un altro widget — vedi i loro doc in
+                // egui. La posizione del rilascio va letta da `i.pointer`
+                // direttamente per lo stesso motivo (`interact_pointer_pos()` è
+                // legato a chi ha "vinto" l'interazione, non a questo drop).
+                if let Some(media_id) = marquee_resp.dnd_hover_payload::<vv_core::MediaId>()
+                    && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+                    && let Some(item) = project.media_pool.get(*media_id)
+                {
+                    let raw_frame =
+                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    let frame = snap_frame(
+                        raw_frame,
+                        item.meta.duration_frames,
+                        &visuals,
+                        &[],
+                        px_per_frame,
+                        snapping_enabled,
+                    )
+                    .max(0);
+                    let ghost_height = if item.meta.has_audio {
+                        2.0 * ROW_HEIGHT
+                    } else {
+                        ROW_HEIGHT
+                    };
+                    let ghost_rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            origin.x + frame as f32 * px_per_frame,
+                            origin.y + RULER_HEIGHT,
+                        ),
+                        egui::vec2(
+                            item.meta.duration_frames as f32 * px_per_frame,
+                            ghost_height,
+                        ),
+                    );
+                    painter.rect_filled(
+                        ghost_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
+                    );
+                    painter.rect_stroke(
+                        ghost_rect,
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
+                    && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                {
+                    let raw_frame =
+                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    let len = project
+                        .media_pool
+                        .get(*media_id)
+                        .map(|item| item.meta.duration_frames)
+                        .unwrap_or(0);
+                    let frame = snap_frame(
+                        raw_frame,
+                        len,
+                        &visuals,
+                        &[],
+                        px_per_frame,
+                        snapping_enabled,
+                    )
+                    .max(0);
+                    media_drop = Some((*media_id, frame));
+                }
+
+                if marquee_resp.drag_started() {
+                    if let Some(pos) = marquee_resp.interact_pointer_pos()
+                        && !press_over_a_clip(pos)
+                    {
+                        let local = to_local(pos);
+                        state.marquee = Some(MarqueeDrag {
+                            start: local,
+                            current: local,
+                        });
+                    }
+                } else if marquee_resp.dragged() {
+                    if let (Some(m), Some(pos)) =
+                        (&mut state.marquee, marquee_resp.interact_pointer_pos())
+                    {
+                        m.current = to_local(pos);
+                    }
+                } else if marquee_resp.drag_stopped() {
+                    if let Some(m) = state.marquee.take() {
+                        let rect = egui::Rect::from_two_pos(m.start, m.current);
+                        let hits = clips_intersecting_rect(&visuals, px_per_frame, rect);
+                        state.selected = hits.iter().copied().collect();
+                        state.selection_anchor = hits.first().copied();
+                        state.selected_gap = None;
+                    }
+                } else if marquee_resp.clicked()
+                    && let Some(pos) = marquee_resp.interact_pointer_pos()
                     && !press_over_a_clip(pos)
                 {
+                    // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
+                    // da un'altra clip sulla stessa track, non lo spazio in
+                    // coda dopo l'ultima), lo si seleziona — comportamento alla
+                    // DaVinci Resolve, dà al vuoto un'identità cliccabile e
+                    // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
                     let local = to_local(pos);
-                    state.marquee = Some(MarqueeDrag {
-                        start: local,
-                        current: local,
+                    let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
+                    let track_index =
+                        ((local.y - RULER_HEIGHT) / ROW_HEIGHT).floor().max(0.0) as usize;
+                    let track_index = track_index.min(track_count.saturating_sub(1));
+                    match gap_at(&visuals, track_index, frame) {
+                        Some((gap_start, gap_end)) => {
+                            state.selected.clear();
+                            state.selection_anchor = None;
+                            state.selected_gap = Some((track_index, gap_start, gap_end));
+                        }
+                        None => state.clear_selection(),
+                    }
+                }
+                if let Some(m) = &state.marquee {
+                    let marquee_rect = egui::Rect::from_two_pos(
+                        origin + m.start.to_vec2(),
+                        origin + m.current.to_vec2(),
+                    );
+                    painter.rect_filled(
+                        marquee_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                    );
+                    painter.rect_stroke(
+                        marquee_rect,
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+
+                // Vuoto selezionato: stessa cornice bianca usata per una clip
+                // selezionata (vedi `is_selected` più sotto), ma su un
+                // rettangolo vuoto — dà al vuoto un feedback visivo di essere
+                // "selezionato" come richiesto.
+                if let Some((track_index, gap_start, gap_end)) = state.selected_gap {
+                    let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
+                    let gap_rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.x + gap_start as f32 * px_per_frame, y + 2.0),
+                        egui::vec2(
+                            (gap_end - gap_start) as f32 * px_per_frame,
+                            ROW_HEIGHT - 4.0,
+                        ),
+                    );
+                    painter.rect_filled(
+                        gap_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
+                    );
+                    painter.rect_stroke(
+                        gap_rect,
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+
+                // Posizione (clampata, e agganciata alla calamita se attiva)
+                // della clip primaria in trascinamento, calcolata una sola
+                // volta e riusata sia per lei sia per l'eventuale gemella
+                // collegata — e per l'anteprima in tempo reale durante il drag
+                // (non solo al rilascio), così l'utente vede scattare la clip
+                // mentre trascina.
+                let dragged_primary_new_start = state.drag.as_ref().map(|d| {
+                    let raw = d.original_start as f32 + d.accum_px / px_per_frame;
+                    let candidate = (raw.round() as FrameIdx).clamp(d.min_start, d.max_start);
+                    let len = visuals
+                        .iter()
+                        .find(|v| v.clip.id == d.clip_id)
+                        .map(|v| v.clip.timeline_len())
+                        .unwrap_or(0);
+                    let mut exclude = vec![d.clip_id];
+                    if let Some((partner_id, _, _)) = d.linked {
+                        exclude.push(partner_id);
+                    }
+                    snap_frame(
+                        candidate,
+                        len,
+                        &visuals,
+                        &exclude,
+                        px_per_frame,
+                        snapping_enabled,
+                    )
+                    .clamp(d.min_start, d.max_start)
+                });
+
+                // Stessa idea di `dragged_primary_new_start` ma per il trim di
+                // un bordo: qui cambia anche la *lunghezza* visualizzata, non
+                // solo la posizione, quindi non basta un nuovo `timeline_start`
+                // da solo (vedi il calcolo di `display_start`/`display_len`
+                // più sotto). Nessuno snap ai vicini per il trim (v1): solo il
+                // clamp già calcolato in `combined_trim_range`.
+                let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
+                    let raw = t.original_value as f32 + t.accum_px / px_per_frame;
+                    (raw.round() as FrameIdx).clamp(t.min_value, t.max_value)
+                });
+
+                // Le gemelle collegate di tutte le clip selezionate vanno
+                // evidenziate insieme a loro (le clip audio+video sono
+                // collegate di default): calcolato una volta sola, non per
+                // ogni clip.
+                let linked_ids = selected_linked_clip_ids(&visuals, &state.selected);
+
+                // Clip.
+                for visual in &visuals {
+                    let is_trimming_this = state.trim.as_ref().is_some_and(|t| {
+                        t.clip_id == visual.clip.id
+                            || t.linked == Some((visual.clip.id, visual.track_index))
+                    });
+                    let (display_start, display_len) = if is_trimming_this
+                        && let (Some(t), Some(new_value)) = (&state.trim, trimmed_primary_new_value)
+                    {
+                        match t.edge {
+                            TrimEdge::Start => {
+                                (new_value, (visual.clip.timeline_end() - new_value).max(1))
+                            }
+                            TrimEdge::End => (
+                                visual.clip.timeline_start,
+                                (new_value - visual.clip.timeline_start).max(1),
+                            ),
+                        }
+                    } else {
+                        let start = match (&state.drag, dragged_primary_new_start) {
+                            (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
+                            (Some(d), Some(new_start)) => match d.linked {
+                                Some((partner_id, partner_track, offset))
+                                    if partner_id == visual.clip.id
+                                        && partner_track == visual.track_index =>
+                                {
+                                    new_start + offset
+                                }
+                                _ => visual.clip.timeline_start,
+                            },
+                            _ => visual.clip.timeline_start,
+                        };
+                        (start, visual.clip.timeline_len())
+                    };
+
+                    let x = origin.x + display_start as f32 * px_per_frame;
+                    let y = origin.y + RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
+                    let w = (display_len as f32 * px_per_frame).max(2.0);
+                    let clip_rect = egui::Rect::from_min_size(
+                        egui::pos2(x, y + 2.0),
+                        egui::vec2(w, ROW_HEIGHT - 4.0),
+                    );
+
+                    let id = ui.id().with("clip").with(visual.clip.id.0);
+                    let resp = ui.interact(clip_rect, id, egui::Sense::click_and_drag());
+
+                    let is_selected = state
+                        .selected
+                        .contains(&(visual.track_index, visual.clip.id))
+                        || linked_ids.contains(&visual.clip.id);
+                    let stroke = if is_selected {
+                        egui::Stroke::new(2.0, egui::Color32::WHITE)
+                    } else {
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(15))
+                    };
+                    painter.rect_filled(clip_rect, 4.0, visual.color);
+                    painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
+                    painter.text(
+                        clip_rect.left_top() + egui::vec2(4.0, 2.0),
+                        egui::Align2::LEFT_TOP,
+                        &visual.label,
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::BLACK,
+                    );
+                    if visual.clip.linked.is_some() {
+                        // Due anelli disegnati a mano invece del glifo Unicode
+                        // "🔗": su alcune combinazioni piattaforma/driver (es.
+                        // Asahi Linux) i font bundled di egui non lo
+                        // renderizzano — appare come un quadratino vuoto.
+                        let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
+                        let ring_stroke = egui::Stroke::new(1.3, egui::Color32::BLACK);
+                        painter.circle_stroke(center + egui::vec2(-2.5, 0.0), 3.5, ring_stroke);
+                        painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
+                    }
+
+                    // Zona di trascinamento riservata al trim, ai due bordi
+                    // della clip: ridotta per le clip molto strette, altrimenti
+                    // l'intera clip sarebbe "solo bordi" e non si potrebbe più
+                    // spostare (Move) col drag normale dal centro.
+                    let handle_px = TRIM_HANDLE_PX.min(clip_rect.width() / 3.0);
+                    let edge_at = |pos: egui::Pos2| -> Option<TrimEdge> {
+                        let local_x = pos.x - clip_rect.left();
+                        if local_x < handle_px {
+                            Some(TrimEdge::Start)
+                        } else if clip_rect.width() - local_x < handle_px {
+                            Some(TrimEdge::End)
+                        } else {
+                            None
+                        }
+                    };
+                    if resp.hovered()
+                        && state.drag.is_none()
+                        && state.trim.is_none()
+                        && let Some(pos) = resp.hover_pos()
+                        && edge_at(pos).is_some()
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+
+                    if resp.drag_started() {
+                        // `press_origin` (il punto dove il tasto è stato
+                        // premuto) invece di `interact_pointer_pos()` (dove si
+                        // trova *ora*): egui richiede un piccolo movimento
+                        // prima di dichiarare ufficialmente iniziato un drag su
+                        // un widget che sente anche il click, quindi per il
+                        // primo movimento verso l'*interno* della clip (bordo
+                        // sinistro trascinato a destra, o viceversa per quello
+                        // destro — il trim che "restringe") la posizione
+                        // corrente a quel punto è già uscita dalla zona
+                        // maniglia, mentre muoversi verso l'*esterno* (il trim
+                        // che "allarga") no: da qui l'asimmetria se si usa
+                        // `interact_pointer_pos()`.
+                        let press_pos = ui.input(|i| i.pointer.press_origin());
+                        match press_pos.and_then(edge_at) {
+                            Some(edge) => {
+                                let (min_value, max_value, linked) = combined_trim_range(
+                                    &visuals,
+                                    project,
+                                    visual.track_index,
+                                    visual.clip.id,
+                                    edge,
+                                );
+                                let original_value = match edge {
+                                    TrimEdge::Start => visual.clip.timeline_start,
+                                    TrimEdge::End => visual.clip.timeline_end(),
+                                };
+                                state.trim = Some(TrimState {
+                                    clip_id: visual.clip.id,
+                                    track_index: visual.track_index,
+                                    edge,
+                                    original_value,
+                                    accum_px: 0.0,
+                                    min_value,
+                                    max_value: max_value.max(min_value),
+                                    linked,
+                                });
+                            }
+                            None => {
+                                let (min_start, max_start, linked) = combined_drag_range(
+                                    &visuals,
+                                    visual.track_index,
+                                    visual.clip.id,
+                                    visual.clip.linked,
+                                );
+
+                                state.drag = Some(DragState {
+                                    clip_id: visual.clip.id,
+                                    track_index: visual.track_index,
+                                    original_start: visual.clip.timeline_start,
+                                    accum_px: 0.0,
+                                    min_start,
+                                    max_start: max_start.max(min_start),
+                                    linked,
+                                });
+                            }
+                        }
+                    } else if resp.dragged() {
+                        if let Some(t) = &mut state.trim
+                            && t.clip_id == visual.clip.id
+                        {
+                            t.accum_px += resp.drag_delta().x;
+                        } else if let Some(d) = &mut state.drag
+                            && d.clip_id == visual.clip.id
+                        {
+                            d.accum_px += resp.drag_delta().x;
+                        }
+                    } else if resp.drag_stopped() {
+                        if let Some(t) = state.trim.take()
+                            && t.clip_id == visual.clip.id
+                        {
+                            // Stesso valore (già clampato) mostrato
+                            // nell'anteprima durante il trim: quel che si
+                            // vedeva è quel che si ottiene.
+                            let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
+                            let delta = new_value - t.original_value;
+                            let new_source_value = match t.edge {
+                                TrimEdge::Start => visual.clip.source_in + delta,
+                                TrimEdge::End => visual.clip.source_out + delta,
+                            };
+                            let mut trims =
+                                vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
+                            if let Some((partner_id, partner_track)) = t.linked
+                                && let Some(partner) =
+                                    visuals.iter().find(|v| v.clip.id == partner_id)
+                            {
+                                let partner_new_source_value = match t.edge {
+                                    TrimEdge::Start => partner.clip.source_in + delta,
+                                    TrimEdge::End => partner.clip.source_out + delta,
+                                };
+                                trims.push((
+                                    partner_id,
+                                    partner_track,
+                                    t.edge,
+                                    partner_new_source_value,
+                                ));
+                            }
+                            pending = Some(PendingAction::Trim(trims));
+                        } else if let Some(d) = state.drag.take()
+                            && d.clip_id == visual.clip.id
+                        {
+                            // Stessa posizione (già clampata e agganciata alla
+                            // calamita) mostrata nell'anteprima durante il drag,
+                            // calcolata da `state.drag` prima del `take()` qui
+                            // sopra: quel che si vedeva è quel che si ottiene.
+                            let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
+                            let mut moves = vec![(d.clip_id, d.track_index, new_start)];
+                            if let Some((partner_id, partner_track, offset)) = d.linked {
+                                moves.push((partner_id, partner_track, new_start + offset));
+                            }
+                            pending = Some(PendingAction::Move(moves));
+                        }
+                    } else if resp.clicked() {
+                        let modifiers = click_modifiers(ui.input(|i| i.modifiers));
+                        let (selected, anchor) = apply_click_selection(
+                            &state.selected,
+                            state.selection_anchor,
+                            (visual.track_index, visual.clip.id),
+                            modifiers,
+                            &visuals,
+                            px_per_frame,
+                        );
+                        state.selected = selected;
+                        state.selection_anchor = anchor;
+                        state.selected_gap = None;
+                    }
+
+                    resp.context_menu(|ui| {
+                        if visual.clip.linked.is_some() {
+                            if ui.button("Scollega audio/video").clicked() {
+                                pending =
+                                    Some(PendingAction::Unlink(visual.track_index, visual.clip.id));
+                                ui.close();
+                            }
+                        } else if state.selected.len() == 2 {
+                            if ui.button("Collega").clicked() {
+                                let mut two = state.selected.iter().copied();
+                                let a = two.next().expect("len() == 2");
+                                let b = two.next().expect("len() == 2");
+                                pending = Some(PendingAction::Link(a.0, a.1, b.0, b.1));
+                                ui.close();
+                            }
+                        } else {
+                            ui.label("Seleziona esattamente 2 clip per collegarle");
+                        }
                     });
                 }
-            } else if marquee_resp.dragged() {
-                if let (Some(m), Some(pos)) =
-                    (&mut state.marquee, marquee_resp.interact_pointer_pos())
-                {
-                    m.current = to_local(pos);
-                }
-            } else if marquee_resp.drag_stopped() {
-                if let Some(m) = state.marquee.take() {
-                    let rect = egui::Rect::from_two_pos(m.start, m.current);
-                    let hits = clips_intersecting_rect(&visuals, px_per_frame, rect);
-                    state.selected = hits.iter().copied().collect();
-                    state.selection_anchor = hits.first().copied();
-                    state.selected_gap = None;
-                }
-            } else if marquee_resp.clicked()
-                && let Some(pos) = marquee_resp.interact_pointer_pos()
-                && !press_over_a_clip(pos)
-            {
-                // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
-                // da un'altra clip sulla stessa track, non lo spazio in
-                // coda dopo l'ultima), lo si seleziona — comportamento alla
-                // DaVinci Resolve, dà al vuoto un'identità cliccabile e
-                // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
-                let local = to_local(pos);
-                let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
-                let track_index = ((local.y - RULER_HEIGHT) / ROW_HEIGHT).floor().max(0.0) as usize;
-                let track_index = track_index.min(track_count.saturating_sub(1));
-                match gap_at(&visuals, track_index, frame) {
-                    Some((gap_start, gap_end)) => {
-                        state.selected.clear();
-                        state.selection_anchor = None;
-                        state.selected_gap = Some((track_index, gap_start, gap_end));
-                    }
-                    None => state.clear_selection(),
-                }
-            }
-            if let Some(m) = &state.marquee {
-                let marquee_rect = egui::Rect::from_two_pos(
-                    origin + m.start.to_vec2(),
-                    origin + m.current.to_vec2(),
-                );
-                painter.rect_filled(
-                    marquee_rect,
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
-                );
-                painter.rect_stroke(
-                    marquee_rect,
-                    0.0,
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
-                    egui::StrokeKind::Inside,
-                );
-            }
 
-            // Vuoto selezionato: stessa cornice bianca usata per una clip
-            // selezionata (vedi `is_selected` più sotto), ma su un
-            // rettangolo vuoto — dà al vuoto un feedback visivo di essere
-            // "selezionato" come richiesto.
-            if let Some((track_index, gap_start, gap_end)) = state.selected_gap {
-                let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
-                let gap_rect = egui::Rect::from_min_size(
-                    egui::pos2(origin.x + gap_start as f32 * px_per_frame, y + 2.0),
-                    egui::vec2(
-                        (gap_end - gap_start) as f32 * px_per_frame,
-                        ROW_HEIGHT - 4.0,
-                    ),
+                // Playhead: linea verticale su tutta l'altezza, più una
+                // "testina" triangolare rivolta in basso nel righello (senza,
+                // la playhead era solo una linea sottile priva di un punto
+                // di riferimento visivo, come in un vero NLE).
+                let px = origin.x + state.playhead as f32 * px_per_frame;
+                let playhead_color = egui::Color32::from_rgb(220, 50, 50);
+                painter.line_segment(
+                    [
+                        egui::pos2(px, origin.y),
+                        egui::pos2(px, origin.y + content_height),
+                    ],
+                    egui::Stroke::new(2.0, playhead_color),
                 );
-                painter.rect_filled(
-                    gap_rect,
-                    4.0,
-                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                );
-                painter.rect_stroke(
-                    gap_rect,
-                    4.0,
-                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                    egui::StrokeKind::Inside,
-                );
-            }
-
-            // Posizione (clampata, e agganciata alla calamita se attiva)
-            // della clip primaria in trascinamento, calcolata una sola
-            // volta e riusata sia per lei sia per l'eventuale gemella
-            // collegata — e per l'anteprima in tempo reale durante il drag
-            // (non solo al rilascio), così l'utente vede scattare la clip
-            // mentre trascina.
-            let dragged_primary_new_start = state.drag.as_ref().map(|d| {
-                let raw = d.original_start as f32 + d.accum_px / px_per_frame;
-                let candidate = (raw.round() as FrameIdx).clamp(d.min_start, d.max_start);
-                let len = visuals
-                    .iter()
-                    .find(|v| v.clip.id == d.clip_id)
-                    .map(|v| v.clip.timeline_len())
-                    .unwrap_or(0);
-                let mut exclude = vec![d.clip_id];
-                if let Some((partner_id, _, _)) = d.linked {
-                    exclude.push(partner_id);
-                }
-                snap_frame(
-                    candidate,
-                    len,
-                    &visuals,
-                    &exclude,
-                    px_per_frame,
-                    snapping_enabled,
-                )
-                .clamp(d.min_start, d.max_start)
+                const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+                        egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+                        egui::pos2(px, origin.y + RULER_HEIGHT),
+                    ],
+                    playhead_color,
+                    egui::Stroke::NONE,
+                ));
             });
-
-            // Stessa idea di `dragged_primary_new_start` ma per il trim di
-            // un bordo: qui cambia anche la *lunghezza* visualizzata, non
-            // solo la posizione, quindi non basta un nuovo `timeline_start`
-            // da solo (vedi il calcolo di `display_start`/`display_len`
-            // più sotto). Nessuno snap ai vicini per il trim (v1): solo il
-            // clamp già calcolato in `combined_trim_range`.
-            let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
-                let raw = t.original_value as f32 + t.accum_px / px_per_frame;
-                (raw.round() as FrameIdx).clamp(t.min_value, t.max_value)
-            });
-
-            // Le gemelle collegate di tutte le clip selezionate vanno
-            // evidenziate insieme a loro (le clip audio+video sono
-            // collegate di default): calcolato una volta sola, non per
-            // ogni clip.
-            let linked_ids = selected_linked_clip_ids(&visuals, &state.selected);
-
-            // Clip.
-            for visual in &visuals {
-                let is_trimming_this = state.trim.as_ref().is_some_and(|t| {
-                    t.clip_id == visual.clip.id
-                        || t.linked == Some((visual.clip.id, visual.track_index))
-                });
-                let (display_start, display_len) = if is_trimming_this
-                    && let (Some(t), Some(new_value)) = (&state.trim, trimmed_primary_new_value)
-                {
-                    match t.edge {
-                        TrimEdge::Start => {
-                            (new_value, (visual.clip.timeline_end() - new_value).max(1))
-                        }
-                        TrimEdge::End => (
-                            visual.clip.timeline_start,
-                            (new_value - visual.clip.timeline_start).max(1),
-                        ),
-                    }
-                } else {
-                    let start = match (&state.drag, dragged_primary_new_start) {
-                        (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
-                        (Some(d), Some(new_start)) => match d.linked {
-                            Some((partner_id, partner_track, offset))
-                                if partner_id == visual.clip.id
-                                    && partner_track == visual.track_index =>
-                            {
-                                new_start + offset
-                            }
-                            _ => visual.clip.timeline_start,
-                        },
-                        _ => visual.clip.timeline_start,
-                    };
-                    (start, visual.clip.timeline_len())
-                };
-
-                let x = origin.x + display_start as f32 * px_per_frame;
-                let y = origin.y + RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
-                let w = (display_len as f32 * px_per_frame).max(2.0);
-                let clip_rect = egui::Rect::from_min_size(
-                    egui::pos2(x, y + 2.0),
-                    egui::vec2(w, ROW_HEIGHT - 4.0),
-                );
-
-                let id = ui.id().with("clip").with(visual.clip.id.0);
-                let resp = ui.interact(clip_rect, id, egui::Sense::click_and_drag());
-
-                let is_selected = state
-                    .selected
-                    .contains(&(visual.track_index, visual.clip.id))
-                    || linked_ids.contains(&visual.clip.id);
-                let stroke = if is_selected {
-                    egui::Stroke::new(2.0, egui::Color32::WHITE)
-                } else {
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(15))
-                };
-                painter.rect_filled(clip_rect, 4.0, visual.color);
-                painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
-                painter.text(
-                    clip_rect.left_top() + egui::vec2(4.0, 2.0),
-                    egui::Align2::LEFT_TOP,
-                    &visual.label,
-                    egui::FontId::proportional(12.0),
-                    egui::Color32::BLACK,
-                );
-                if visual.clip.linked.is_some() {
-                    // Due anelli disegnati a mano invece del glifo Unicode
-                    // "🔗": su alcune combinazioni piattaforma/driver (es.
-                    // Asahi Linux) i font bundled di egui non lo
-                    // renderizzano — appare come un quadratino vuoto.
-                    let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
-                    let ring_stroke = egui::Stroke::new(1.3, egui::Color32::BLACK);
-                    painter.circle_stroke(center + egui::vec2(-2.5, 0.0), 3.5, ring_stroke);
-                    painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
-                }
-
-                // Zona di trascinamento riservata al trim, ai due bordi
-                // della clip: ridotta per le clip molto strette, altrimenti
-                // l'intera clip sarebbe "solo bordi" e non si potrebbe più
-                // spostare (Move) col drag normale dal centro.
-                let handle_px = TRIM_HANDLE_PX.min(clip_rect.width() / 3.0);
-                let edge_at = |pos: egui::Pos2| -> Option<TrimEdge> {
-                    let local_x = pos.x - clip_rect.left();
-                    if local_x < handle_px {
-                        Some(TrimEdge::Start)
-                    } else if clip_rect.width() - local_x < handle_px {
-                        Some(TrimEdge::End)
-                    } else {
-                        None
-                    }
-                };
-                if resp.hovered()
-                    && state.drag.is_none()
-                    && state.trim.is_none()
-                    && let Some(pos) = resp.hover_pos()
-                    && edge_at(pos).is_some()
-                {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                }
-
-                if resp.drag_started() {
-                    // `press_origin` (il punto dove il tasto è stato
-                    // premuto) invece di `interact_pointer_pos()` (dove si
-                    // trova *ora*): egui richiede un piccolo movimento
-                    // prima di dichiarare ufficialmente iniziato un drag su
-                    // un widget che sente anche il click, quindi per il
-                    // primo movimento verso l'*interno* della clip (bordo
-                    // sinistro trascinato a destra, o viceversa per quello
-                    // destro — il trim che "restringe") la posizione
-                    // corrente a quel punto è già uscita dalla zona
-                    // maniglia, mentre muoversi verso l'*esterno* (il trim
-                    // che "allarga") no: da qui l'asimmetria se si usa
-                    // `interact_pointer_pos()`.
-                    let press_pos = ui.input(|i| i.pointer.press_origin());
-                    match press_pos.and_then(edge_at) {
-                        Some(edge) => {
-                            let (min_value, max_value, linked) = combined_trim_range(
-                                &visuals,
-                                project,
-                                visual.track_index,
-                                visual.clip.id,
-                                edge,
-                            );
-                            let original_value = match edge {
-                                TrimEdge::Start => visual.clip.timeline_start,
-                                TrimEdge::End => visual.clip.timeline_end(),
-                            };
-                            state.trim = Some(TrimState {
-                                clip_id: visual.clip.id,
-                                track_index: visual.track_index,
-                                edge,
-                                original_value,
-                                accum_px: 0.0,
-                                min_value,
-                                max_value: max_value.max(min_value),
-                                linked,
-                            });
-                        }
-                        None => {
-                            let (min_start, max_start, linked) = combined_drag_range(
-                                &visuals,
-                                visual.track_index,
-                                visual.clip.id,
-                                visual.clip.linked,
-                            );
-
-                            state.drag = Some(DragState {
-                                clip_id: visual.clip.id,
-                                track_index: visual.track_index,
-                                original_start: visual.clip.timeline_start,
-                                accum_px: 0.0,
-                                min_start,
-                                max_start: max_start.max(min_start),
-                                linked,
-                            });
-                        }
-                    }
-                } else if resp.dragged() {
-                    if let Some(t) = &mut state.trim
-                        && t.clip_id == visual.clip.id
-                    {
-                        t.accum_px += resp.drag_delta().x;
-                    } else if let Some(d) = &mut state.drag
-                        && d.clip_id == visual.clip.id
-                    {
-                        d.accum_px += resp.drag_delta().x;
-                    }
-                } else if resp.drag_stopped() {
-                    if let Some(t) = state.trim.take()
-                        && t.clip_id == visual.clip.id
-                    {
-                        // Stesso valore (già clampato) mostrato
-                        // nell'anteprima durante il trim: quel che si
-                        // vedeva è quel che si ottiene.
-                        let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
-                        let delta = new_value - t.original_value;
-                        let new_source_value = match t.edge {
-                            TrimEdge::Start => visual.clip.source_in + delta,
-                            TrimEdge::End => visual.clip.source_out + delta,
-                        };
-                        let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
-                        if let Some((partner_id, partner_track)) = t.linked
-                            && let Some(partner) = visuals.iter().find(|v| v.clip.id == partner_id)
-                        {
-                            let partner_new_source_value = match t.edge {
-                                TrimEdge::Start => partner.clip.source_in + delta,
-                                TrimEdge::End => partner.clip.source_out + delta,
-                            };
-                            trims.push((
-                                partner_id,
-                                partner_track,
-                                t.edge,
-                                partner_new_source_value,
-                            ));
-                        }
-                        pending = Some(PendingAction::Trim(trims));
-                    } else if let Some(d) = state.drag.take()
-                        && d.clip_id == visual.clip.id
-                    {
-                        // Stessa posizione (già clampata e agganciata alla
-                        // calamita) mostrata nell'anteprima durante il drag,
-                        // calcolata da `state.drag` prima del `take()` qui
-                        // sopra: quel che si vedeva è quel che si ottiene.
-                        let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
-                        let mut moves = vec![(d.clip_id, d.track_index, new_start)];
-                        if let Some((partner_id, partner_track, offset)) = d.linked {
-                            moves.push((partner_id, partner_track, new_start + offset));
-                        }
-                        pending = Some(PendingAction::Move(moves));
-                    }
-                } else if resp.clicked() {
-                    let modifiers = click_modifiers(ui.input(|i| i.modifiers));
-                    let (selected, anchor) = apply_click_selection(
-                        &state.selected,
-                        state.selection_anchor,
-                        (visual.track_index, visual.clip.id),
-                        modifiers,
-                        &visuals,
-                        px_per_frame,
-                    );
-                    state.selected = selected;
-                    state.selection_anchor = anchor;
-                    state.selected_gap = None;
-                }
-
-                resp.context_menu(|ui| {
-                    if visual.clip.linked.is_some() {
-                        if ui.button("Scollega audio/video").clicked() {
-                            pending =
-                                Some(PendingAction::Unlink(visual.track_index, visual.clip.id));
-                            ui.close();
-                        }
-                    } else if state.selected.len() == 2 {
-                        if ui.button("Collega").clicked() {
-                            let mut two = state.selected.iter().copied();
-                            let a = two.next().expect("len() == 2");
-                            let b = two.next().expect("len() == 2");
-                            pending = Some(PendingAction::Link(a.0, a.1, b.0, b.1));
-                            ui.close();
-                        }
-                    } else {
-                        ui.label("Seleziona esattamente 2 clip per collegarle");
-                    }
-                });
-            }
-
-            // Playhead: linea verticale su tutta l'altezza, più una
-            // "testina" triangolare rivolta in basso nel righello (senza,
-            // la playhead era solo una linea sottile priva di un punto
-            // di riferimento visivo, come in un vero NLE).
-            let px = origin.x + state.playhead as f32 * px_per_frame;
-            let playhead_color = egui::Color32::from_rgb(220, 50, 50);
-            painter.line_segment(
-                [
-                    egui::pos2(px, origin.y),
-                    egui::pos2(px, origin.y + content_height),
-                ],
-                egui::Stroke::new(2.0, playhead_color),
-            );
-            const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-                    egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-                    egui::pos2(px, origin.y + RULER_HEIGHT),
-                ],
-                playhead_color,
-                egui::Stroke::NONE,
-            ));
-        });
+    });
 
     if let Some(action) = pending {
         match action {
@@ -910,6 +988,20 @@ pub fn show_timeline(
                         (track_b, clip_b),
                     )),
                 );
+            }
+            PendingAction::AddTrack(kind) => {
+                history.do_command(project, Box::new(vv_core::AddTrack::new(timeline_id, kind)));
+            }
+            PendingAction::RemoveTrack(track_index) => {
+                history.do_command(
+                    project,
+                    Box::new(vv_core::RemoveTrack::new(timeline_id, track_index)),
+                );
+                // Gli indici di track memorizzati nella selezione (e nel
+                // vuoto eventualmente selezionato) possono essere shiftati
+                // o non esistere più: più semplice e sicuro azzerare che
+                // provare a rimapparli uno per uno.
+                state.clear_selection();
             }
         }
     }
@@ -1821,6 +1913,46 @@ mod tests {
         output.textures_delta.clear();
 
         assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2);
+    }
+
+    /// Esegue `show_timeline` con più di una track video (REFACTOR_PIPELINE.md
+    /// B4): la colonna di header (etichette + pulsanti aggiungi/rimuovi
+    /// track, `draw_track_headers`) deve reggere N track qualunque, non
+    /// solo la coppia fissa video/audio di prima.
+    #[test]
+    fn show_timeline_renders_without_panicking_with_more_than_two_tracks() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                vv_core::Track::new(TrackKind::Video),
+                vv_core::Track::new(TrackKind::Video),
+                vv_core::Track::new(TrackKind::Audio),
+            ],
+        });
+        let mut history = History::default();
+        let mut state = TimelineState::default();
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                show_timeline(
+                    ui,
+                    &mut project,
+                    &mut history,
+                    timeline_id,
+                    &|_id| "media".to_string(),
+                    &mut state,
+                    true,
+                    &[],
+                );
+            });
+        });
+        output.textures_delta.clear();
+
+        assert_eq!(project.timelines[timeline_id].tracks.len(), 3);
     }
 
     /// Bug: il pannello timeline (`Panel::bottom` con dentro

@@ -1,19 +1,17 @@
 //! Finestra egui: media pool (sinistra), viewer (centro), timeline
 //! multi-traccia (basso), toolbar con play/pause/seek per l'anteprima.
 //!
-//! Il viewer mostra l'anteprima del media della clip selezionata in
-//! timeline, con crop/zoom/gain (milestone 5, valori statici) applicati
-//! tramite il compositor GPU di `vv-render`. Non è ancora il compositing
-//! multi-track completo della timeline (che richiede risolvere "quale clip
-//! è attiva su quale track a che tempo" per ogni frame, milestone
-//! successiva) — qui si vede sempre e solo la clip selezionata, non il
-//! risultato finale con tutte le track sovrapposte.
-//!
-//! La texture del frame corrente viene riusata in-place a ogni frame
-//! (`TextureHandle::set`) invece di riallocarla 25-60 volte al secondo. Il
-//! compositor fa oggi un round-trip CPU->GPU->CPU per restare compatibile
-//! con questo path: passare la texture GPU direttamente a egui (zero-copy)
-//! è un'ottimizzazione futura, vedi doc di `vv_render::Compositor`.
+//! Il viewer mostra, per ogni frame, la clip Media attiva sulla track
+//! video più in alto tra quelle che ne hanno una in quel punto
+//! (`vv_core::Timeline::active_video_clip_at` — con più track video
+//! sovrapposte, N tracce reali, non solo la track 0 fissa,
+//! REFACTOR_PIPELINE.md B4), con crop/zoom/gain (milestone 5, valori
+//! statici) applicati tramite il compositor GPU di `vv-render`, texture
+//! GPU passata direttamente a egui-wgpu senza round-trip CPU
+//! (REFACTOR_PIPELINE.md B2). Non è ancora un vero accumulo alpha
+//! multi-layer: senza un'opacità per-clip ancora modellata, "compositing
+//! bottom->top" collassa in "la track più in alto che copre quel punto
+//! vince" — vedi doc di `active_video_clip_at`.
 
 mod export;
 mod frame_provider;
@@ -30,12 +28,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
-
-/// Unica track video supportata per ora dalla riproduzione timeline-aware
-/// (l'app crea sempre "video in track 0, audio in track 1", vedi
-/// `add_media_to_timeline`): il compositing multi-track vero e proprio
-/// resta per una milestone successiva.
-const VIDEO_TRACK: usize = 0;
 
 /// Default di `VibeVideoApp::cache_budget_bytes`: ~151 frame (~6s) di
 /// margine a 1080p, ~38 (~1,5s) a 4K, ~340 (~13,6s) a 720p — vedi doc del
@@ -656,31 +648,30 @@ impl VibeVideoApp {
             vv_media::DecodeAhead::spawn(item.path.clone(), self.cache_budget_bytes, 60).ok();
     }
 
-    /// La clip su `track_index` che copre `frame` (nello spazio della
-    /// timeline), se c'è.
-    fn clip_at(&self, track_index: usize, frame: FrameIdx) -> Option<ClipId> {
+    /// La clip Video attiva (track più in alto tra quelle che ne hanno una
+    /// in quel punto, `Timeline::active_video_clip_at`) al frame `frame`,
+    /// con la sua track — quella che il player/il viewer devono seguire.
+    fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, ClipId)> {
         let timeline_id = self.timeline_id?;
         self.project.timelines[timeline_id]
-            .active_clip_at(track_index, frame)
-            .map(|c| c.id)
+            .active_video_clip_at(frame)
+            .map(|(t, c)| (t, c.id))
     }
 
     /// Se "selection follows playhead" è attivo, allinea la selezione alla
-    /// clip sulla track video sotto al playhead corrente (selezione vuota
-    /// se il playhead è su un vuoto): collassa sempre a una singola clip,
-    /// anche se prima della sync la selezione era multipla. No-op se la
+    /// clip video attiva sotto al playhead corrente (selezione vuota se il
+    /// playhead è su un vuoto): collassa sempre a una singola clip, anche
+    /// se prima della sync la selezione era multipla. No-op se la
     /// funzionalità è disattivata dalle impostazioni.
     fn sync_selection_to_playhead(&mut self) {
         if !self.selection_follows_playhead {
             return;
         }
-        let clip = self
-            .clip_at(VIDEO_TRACK, self.timeline_state.playhead)
-            .map(|id| (VIDEO_TRACK, id));
+        let clip = self.active_video_clip_at(self.timeline_state.playhead);
         self.timeline_state.set_single_selection(clip);
     }
 
-    /// Carica `clip_id` (sulla track video) nel player, posizionandosi al
+    /// Carica `clip_id` (su una track video) nel player, posizionandosi al
     /// frame locale corrispondente al playhead corrente — sia per lo
     /// scrub in una clip diversa sia per il primo aggancio all'avvio della
     /// riproduzione. Le clip SolidColor non hanno un player: il colore si
@@ -694,29 +685,23 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let Some(clip) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)
-            .cloned()
+        let Some((track_index, clip)) = self.project.timelines[timeline_id]
+            .find_clip(clip_id)
+            .map(|(t, c)| (t, c.clone()))
         else {
             return;
         };
 
-        let previous_media = self.active_clip.and_then(|(track_index, id)| {
+        let previous_media = self.active_clip.and_then(|(_, id)| {
             self.project.timelines[timeline_id]
-                .tracks
-                .get(track_index)?
-                .clips
-                .iter()
-                .find(|c| c.id == id)
-                .and_then(|c| match c.source {
+                .find_clip(id)
+                .and_then(|(_, c)| match c.source {
                     vv_core::ClipSource::Media(m) => Some(m),
                     vv_core::ClipSource::SolidColor => None,
                 })
         });
 
-        self.active_clip = Some((VIDEO_TRACK, clip_id));
+        self.active_clip = Some((track_index, clip_id));
 
         match clip.source {
             vv_core::ClipSource::Media(media_id) => {
@@ -764,23 +749,20 @@ impl VibeVideoApp {
         if self.browsing_media.is_some() || self.timeline_id.is_none() {
             return;
         }
-        let desired = self.clip_at(VIDEO_TRACK, self.timeline_state.playhead);
-        let current = self
-            .active_clip
-            .filter(|(t, _)| *t == VIDEO_TRACK)
-            .map(|(_, id)| id);
+        let desired = self.active_video_clip_at(self.timeline_state.playhead);
+        let current = self.active_clip;
 
         if desired != current {
             match desired {
                 // `load_active_clip_audio` fa già un seek verso il
                 // playhead corrente: non serve altro qui.
-                Some(clip_id) => self.load_active_clip_audio(clip_id),
+                Some((_, clip_id)) => self.load_active_clip_audio(clip_id),
                 None => {
                     self.active_clip = None;
                     self.preview_player = None;
                 }
             }
-        } else if let Some(clip_id) = desired
+        } else if let Some((_, clip_id)) = desired
             && self.timeline_state.playhead != self.last_synced_playhead
         {
             let is_playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
@@ -800,11 +782,7 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let Some(clip) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)
-        else {
+        let Some((_, clip)) = self.project.timelines[timeline_id].find_clip(clip_id) else {
             return;
         };
         let local = (self.timeline_state.playhead - clip.timeline_start)
@@ -834,10 +812,9 @@ impl VibeVideoApp {
             return;
         }
         if let Some(timeline_id) = self.timeline_id
-            && self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-                .clips
-                .iter()
-                .any(|c| c.timeline_start >= self.timeline_state.playhead)
+            && self.project.timelines[timeline_id]
+                .next_video_clip_start_from(self.timeline_state.playhead)
+                .is_some()
         {
             self.gap_wall_clock = Some(GapWallClock {
                 started_at: Instant::now(),
@@ -873,18 +850,14 @@ impl VibeVideoApp {
             // un tetto, l'orologio a parete potrebbe scavalcare una clip
             // molto corta (o un frame UI arrivato in ritardo) senza mai
             // "trovarla" sotto di sé.
-            if let Some(next_start) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-                .clips
-                .iter()
-                .filter(|c| c.timeline_start >= gap.start_frame)
-                .map(|c| c.timeline_start)
-                .min()
+            if let Some(next_start) =
+                self.project.timelines[timeline_id].next_video_clip_start_from(gap.start_frame)
             {
                 frame = frame.min(next_start);
             }
             self.timeline_state.playhead = frame;
             if self.project.timelines[timeline_id]
-                .active_clip_at(VIDEO_TRACK, frame)
+                .active_video_clip_at(frame)
                 .is_some()
             {
                 self.gap_wall_clock = None;
@@ -896,17 +869,12 @@ impl VibeVideoApp {
             return;
         }
 
-        let Some((track_index, clip_id)) = self.active_clip else {
+        let Some((_, clip_id)) = self.active_clip else {
             return;
         };
-        if track_index != VIDEO_TRACK {
-            return;
-        }
-        let Some(clip) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)
-            .cloned()
+        let Some((_, clip)) = self.project.timelines[timeline_id]
+            .find_clip(clip_id)
+            .map(|(t, c)| (t, c.clone()))
         else {
             return;
         };
@@ -926,11 +894,14 @@ impl VibeVideoApp {
     }
 
     /// Intervalli (in frame di *timeline*) attualmente bufferizzati per
-    /// ogni clip Media sulla track video, per l'indicatore visivo
+    /// ogni clip Media di ogni track video, per l'indicatore visivo
     /// "buffered" sulla timeline (richiesta: "visualizzare durante la
     /// riproduzione come viene fatto il buffer"). Interroga direttamente
     /// `render_ahead`, che bufferizza a livello di timeline (non più un
-    /// caso a parte per la clip attiva/il preload della successiva).
+    /// caso a parte per la clip attiva/il preload della successiva): una
+    /// clip su una track video occlusa da un'altra in quel punto
+    /// (`active_video_clip_at`) risulterà correttamente "non
+    /// bufferizzata", perché non è lei a essere mostrata né decodificata.
     fn buffered_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
@@ -938,16 +909,15 @@ impl VibeVideoApp {
         let Some(render_ahead) = &self.render_ahead else {
             return Vec::new();
         };
-        let Some(track) = self.project.timelines[timeline_id].tracks.get(VIDEO_TRACK) else {
-            return Vec::new();
-        };
         let mut ranges = Vec::new();
-        for clip in &track.clips {
-            if let vv_core::ClipSource::Media(media_id) = &clip.source {
-                ranges.extend(map_source_ranges_to_timeline(
-                    clip,
-                    &render_ahead.cached_ranges_for(*media_id),
-                ));
+        for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Video) {
+            for clip in &track.clips {
+                if let vv_core::ClipSource::Media(media_id) = &clip.source {
+                    ranges.extend(map_source_ranges_to_timeline(
+                        clip,
+                        &render_ahead.cached_ranges_for(*media_id),
+                    ));
+                }
             }
         }
         ranges
@@ -962,17 +932,16 @@ impl VibeVideoApp {
     fn advance_playback_past(&mut self, timeline_id: TimelineId, from_frame: FrameIdx) {
         self.timeline_state.playhead = from_frame;
         if self.project.timelines[timeline_id]
-            .active_clip_at(VIDEO_TRACK, from_frame)
+            .active_video_clip_at(from_frame)
             .is_some()
         {
             self.ensure_active_clip_matches_playhead(true);
             if let Some(player) = &mut self.preview_player {
                 player.play();
             }
-        } else if self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-            .clips
-            .iter()
-            .any(|c| c.timeline_start >= from_frame)
+        } else if self.project.timelines[timeline_id]
+            .next_video_clip_start_from(from_frame)
+            .is_some()
         {
             // Vuoto: schermo nero (vedi il rendering nel viewer, che si
             // basa su `active_clip`), nessun player audio da seguire.
@@ -1057,13 +1026,18 @@ impl VibeVideoApp {
     }
 
     /// Crea una clip generatore SolidColor da 5s e la accoda in fondo alla
-    /// track video 0. Il colore iniziale è grigio medio, modificabile
+    /// prima track video. Il colore iniziale è grigio medio, modificabile
     /// subito dal pannello proprietà una volta selezionata.
     fn add_solid_color_clip(&mut self) {
         let timeline_id = self.ensure_timeline();
         let fps = self.project.timelines[timeline_id].fps.as_f64();
         let default_len = (fps * 5.0).round() as FrameIdx;
-        let video_start = track_end(&self.project, timeline_id, 0);
+        let Some(video_track) =
+            self.project.timelines[timeline_id].first_track_index(TrackKind::Video)
+        else {
+            return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
+        };
+        let video_start = track_end(&self.project, timeline_id, video_track);
 
         let effects = vv_core::EffectStack {
             color: Some(vv_core::Keyframed::constant(vv_core::Rgba {
@@ -1088,7 +1062,7 @@ impl VibeVideoApp {
             &mut self.project,
             Box::new(vv_core::InsertClip {
                 timeline: timeline_id,
-                track_index: 0,
+                track_index: video_track,
                 clip,
             }),
         );
@@ -1193,7 +1167,10 @@ impl VibeVideoApp {
         // pool), viene creata al volo ereditando fps/risoluzione da questo
         // media.
         let timeline_id = self.ensure_timeline_for(&meta);
-        let video_start = track_end(&self.project, timeline_id, 0);
+        let video_track = self.project.timelines[timeline_id]
+            .first_track_index(TrackKind::Video)
+            .unwrap_or(0);
+        let video_start = track_end(&self.project, timeline_id, video_track);
         self.insert_media_clip(timeline_id, media_id, &meta, video_start);
     }
 
@@ -1212,7 +1189,12 @@ impl VibeVideoApp {
     }
 
     /// Inserisce la clip video (e, se il media ha audio, la sua gemella
-    /// collegata sulla track audio) entrambe a `start`.
+    /// collegata sulla track audio) entrambe a `start`. Atterrano sempre
+    /// sulla prima (bottom-most) track video/audio, la stessa "di
+    /// default" finché l'utente non ne aggiunge altre a mano
+    /// (REFACTOR_PIPELINE.md B4) — un drop mirato su una track specifica
+    /// resta un'estensione futura, oggi non necessaria: le clip si possono
+    /// comunque trascinare su un'altra track dopo l'inserimento.
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
@@ -1220,11 +1202,20 @@ impl VibeVideoApp {
         meta: &vv_core::MediaMeta,
         start: FrameIdx,
     ) {
+        let Some(video_track) =
+            self.project.timelines[timeline_id].first_track_index(TrackKind::Video)
+        else {
+            return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
+        };
         let video_clip_id = self.project.alloc_clip_id();
         // Se la clip ha anche audio, le due metà vengono collegate di
         // default (vedi doc di `Clip::linked`): l'utente può scollegarle
         // dal menu contestuale sulla clip, in timeline_ui.
-        let audio_clip_id = meta.has_audio.then(|| self.project.alloc_clip_id());
+        let audio_track = meta
+            .has_audio
+            .then(|| self.project.timelines[timeline_id].first_track_index(TrackKind::Audio))
+            .flatten();
+        let audio_clip_id = audio_track.map(|_| self.project.alloc_clip_id());
 
         let video_clip = vv_core::Clip {
             id: video_clip_id,
@@ -1239,12 +1230,12 @@ impl VibeVideoApp {
             &mut self.project,
             Box::new(vv_core::InsertClip {
                 timeline: timeline_id,
-                track_index: 0,
+                track_index: video_track,
                 clip: video_clip,
             }),
         );
 
-        if let Some(audio_clip_id) = audio_clip_id {
+        if let (Some(audio_track), Some(audio_clip_id)) = (audio_track, audio_clip_id) {
             let audio_clip = vv_core::Clip {
                 id: audio_clip_id,
                 source: vv_core::ClipSource::Media(media_id),
@@ -1258,7 +1249,7 @@ impl VibeVideoApp {
                 &mut self.project,
                 Box::new(vv_core::InsertClip {
                     timeline: timeline_id,
-                    track_index: 1,
+                    track_index: audio_track,
                     clip: audio_clip,
                 }),
             );
@@ -1847,18 +1838,24 @@ impl VibeVideoApp {
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
         // "Selection follows playhead": seleziona la metà SINISTRA appena
-        // tagliata sulla track video (il suo id è invariato, la metà che
-        // ha ottenuto un nuovo id è la destra — vedi sopra) *e* la sua
-        // gemella audio collegata, esplicitamente, non tramite il
-        // generico "clip sotto al playhead" (che per costruzione
-        // sarebbe la metà destra, dato che il playhead è esattamente al
-        // suo inizio: `clip_at` usa `start <= playhead < end`). L'intento
-        // più comune dopo un taglio è rivedere/eliminare ciò che sta
-        // *prima* del punto appena tagliato, non dopo.
+        // tagliata sulla track video attiva (il suo id è invariato, la
+        // metà che ha ottenuto un nuovo id è la destra — vedi sopra) *e*
+        // la sua gemella audio collegata, esplicitamente, non tramite il
+        // generico "clip sotto al playhead" (che per costruzione sarebbe
+        // la metà destra, dato che il playhead è esattamente al suo
+        // inizio: `clip_at` usa `start <= playhead < end`). L'intento più
+        // comune dopo un taglio è rivedere/eliminare ciò che sta *prima*
+        // del punto appena tagliato, non dopo. Con più track video, "la
+        // track video" del taglio è quella più in alto tra quelle tagliate
+        // — la stessa che il viewer mostrava un istante prima del taglio.
         if self.selection_follows_playhead
             && let Some((video_track, video_clip_id, _)) = targets
                 .iter()
-                .find(|(track_index, _, _)| *track_index == VIDEO_TRACK)
+                .filter(|(track_index, _, _)| {
+                    self.project.timelines[timeline_id].tracks[*track_index].kind
+                        == TrackKind::Video
+                })
+                .max_by_key(|(track_index, _, _)| *track_index)
         {
             let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
             if let Some(partner) = self.linked_partner(timeline_id, *video_track, *video_clip_id) {
@@ -3073,12 +3070,11 @@ impl eframe::App for VibeVideoApp {
                             id,
                         ),
                         None => {
-                            self.video_texture_id =
-                                Some(renderer.register_native_texture(
-                                    &render_state.device,
-                                    &view,
-                                    wgpu::FilterMode::Linear,
-                                ));
+                            self.video_texture_id = Some(renderer.register_native_texture(
+                                &render_state.device,
+                                &view,
+                                wgpu::FilterMode::Linear,
+                            ));
                         }
                     }
                     drop(renderer);
@@ -3240,6 +3236,29 @@ mod tests {
             }),
         );
         clip_id
+    }
+
+    /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): la seconda
+    /// (aggiunta con `AddTrack`, quindi in coda a `tracks` — più in alto
+    /// di quella di default) ha una clip più corta al centro di quella
+    /// della prima. `active_video_clip_at` deve vedere quella in cima dove
+    /// c'è, e tornare a quella sotto appena finisce — la stessa
+    /// generalizzazione che il player/il viewer usano per seguire il
+    /// playhead.
+    #[test]
+    fn active_video_clip_at_prefers_the_topmost_video_track() {
+        let mut app = VibeVideoApp::default();
+        let bottom = make_timeline_with_clip(&mut app, 0, 0, 30);
+        let timeline_id = app.timeline_id.unwrap();
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+        );
+        let top = make_timeline_with_clip(&mut app, 2, 10, 10);
+
+        assert_eq!(app.active_video_clip_at(5), Some((0, bottom)));
+        assert_eq!(app.active_video_clip_at(15), Some((2, top)));
+        assert_eq!(app.active_video_clip_at(25), Some((0, bottom)));
     }
 
     #[test]
@@ -3844,8 +3863,8 @@ mod tests {
     #[test]
     fn advance_playback_past_jumps_directly_when_clips_are_back_to_back() {
         let mut app = VibeVideoApp::default();
-        let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 10, 10);
+        let clip_a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let clip_b = make_timeline_with_clip(&mut app, 0, 10, 10);
         let timeline_id = app.timeline_id.unwrap();
         app.load_active_clip_audio(clip_a);
 
@@ -3853,7 +3872,7 @@ mod tests {
 
         assert!(app.gap_wall_clock.is_none());
         assert_eq!(app.timeline_state.playhead, 10);
-        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b)));
+        assert_eq!(app.active_clip, Some((0, clip_b)));
     }
 
     /// Bug segnalato: "quando la playhead passa su un segmento vuoto, non
@@ -3863,8 +3882,8 @@ mod tests {
     #[test]
     fn advance_playback_past_starts_the_gap_wall_clock_when_there_is_a_gap_before_the_next_clip() {
         let mut app = VibeVideoApp::default();
-        let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
+        let clip_a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        make_timeline_with_clip(&mut app, 0, 15, 10);
         let timeline_id = app.timeline_id.unwrap();
         app.load_active_clip_audio(clip_a);
 
@@ -3888,7 +3907,7 @@ mod tests {
     #[test]
     fn advance_playback_past_does_nothing_special_when_there_is_no_next_clip() {
         let mut app = VibeVideoApp::default();
-        let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        let clip_a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
         app.load_active_clip_audio(clip_a);
 
@@ -3904,7 +3923,7 @@ mod tests {
     #[test]
     fn drive_playback_advances_the_playhead_through_a_gap_without_jumping() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 100, 10);
+        make_timeline_with_clip(&mut app, 0, 100, 10);
         let _ = app.timeline_id.unwrap();
 
         // Timeline a 25fps (vedi `make_timeline_with_clip`): ~200ms fa
@@ -3935,7 +3954,7 @@ mod tests {
     #[test]
     fn drive_playback_hands_off_to_the_next_clip_once_the_gap_elapses() {
         let mut app = VibeVideoApp::default();
-        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 5, 10);
+        let clip_b = make_timeline_with_clip(&mut app, 0, 5, 10);
         let _ = app.timeline_id.unwrap();
 
         app.gap_wall_clock = Some(GapWallClock {
@@ -3950,7 +3969,7 @@ mod tests {
             "il vuoto doveva essere concluso"
         );
         assert_eq!(app.timeline_state.playhead, 5);
-        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b)));
+        assert_eq!(app.active_clip, Some((0, clip_b)));
     }
 
     /// Bug fix per "toggle_playback deve fermare l'orologio a vuoto se
@@ -3959,8 +3978,8 @@ mod tests {
     #[test]
     fn toggle_playback_stops_gap_wall_clock() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        make_timeline_with_clip(&mut app, 0, 15, 10);
 
         app.gap_wall_clock = Some(GapWallClock {
             started_at: Instant::now(),
@@ -3978,8 +3997,8 @@ mod tests {
     #[test]
     fn toggle_playback_resumes_the_gap_wall_clock_when_paused_inside_a_gap() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 20, 10);
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        make_timeline_with_clip(&mut app, 0, 20, 10);
         app.timeline_state.playhead = 15;
 
         assert!(app.gap_wall_clock.is_none());
@@ -4000,7 +4019,7 @@ mod tests {
     #[test]
     fn toggle_playback_does_not_start_the_gap_wall_clock_with_nothing_ahead() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        make_timeline_with_clip(&mut app, 0, 0, 10);
         app.timeline_state.playhead = 15; // dopo l'unica clip, niente oltre
 
         app.toggle_playback();
@@ -4581,7 +4600,7 @@ mod tests {
         let media_id = app.project.media_pool.iter().next().unwrap().0;
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
-        let clip = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].clone();
+        let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
 
         // Manda a `render_ahead` la clip appena inserita (nell'app vera
         // succede a ogni frame UI via `sync_render_ahead`).
@@ -4651,7 +4670,7 @@ mod tests {
         app.add_media_to_timeline_at(media_a, 0); // [0,50)
         app.add_media_to_timeline_at(media_b, 50); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
-        let clip_b = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[1].clone();
+        let clip_b = app.project.timelines[timeline_id].tracks[0].clips[1].clone();
 
         // Playhead vicino alla fine della prima clip: la finestra di
         // lookahead di `render_ahead` (3s) attraversa abbondantemente il
@@ -4716,8 +4735,8 @@ mod tests {
         app.add_media_to_timeline_at(media_a, 0); // [0,50)
         app.add_media_to_timeline_at(media_b, 50); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
-        let clip_b_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[1].id;
-        let clip_a_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].id;
+        let clip_b_id = app.project.timelines[timeline_id].tracks[0].clips[1].id;
+        let clip_a_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
         app.load_active_clip_audio(clip_a_id);
         let player = app.preview_player.as_mut().expect("player atteso");
@@ -4725,7 +4744,7 @@ mod tests {
 
         app.advance_playback_past(timeline_id, 50);
 
-        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b_id)));
+        assert_eq!(app.active_clip, Some((0, clip_b_id)));
         assert!(
             app.preview_player.as_ref().is_some_and(Player::is_playing),
             "doveva restare in riproduzione sulla nuova clip"

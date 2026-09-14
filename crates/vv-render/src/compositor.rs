@@ -587,7 +587,11 @@ mod tests {
     /// (REFACTOR_PIPELINE.md §5, accuratezza del frame non negoziabile).
     fn yuv_to_rgb_reference(y: u8, u: u8, v: u8, matrix: ColorMatrix, full_range: bool) -> [u8; 3] {
         let (y_n, u_n, v_n) = if full_range {
-            (y as f64 / 255.0, u as f64 / 255.0 - 0.5, v as f64 / 255.0 - 0.5)
+            (
+                y as f64 / 255.0,
+                u as f64 / 255.0 - 0.5,
+                v as f64 / 255.0 - 0.5,
+            )
         } else {
             (
                 (y as f64 - 16.0) / 219.0,
@@ -772,8 +776,7 @@ mod tests {
         };
 
         let via_readback = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
-        let texture =
-            compositor.render_frame_to_texture(&input.as_yuv_frame(), &transform, 16, 16);
+        let texture = compositor.render_frame_to_texture(&input.as_yuv_frame(), &transform, 16, 16);
         let via_texture = read_back(&compositor, &texture, 16, 16);
 
         assert_eq!(
