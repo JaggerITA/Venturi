@@ -319,12 +319,15 @@ pub fn show_timeline(
     buffered_ranges: &[(FrameIdx, FrameIdx)],
     // Intervalli (in frame di timeline) delle clip attualmente servite
     // dal proxy invece che dal sorgente (REFACTOR_PIPELINE.md proxy) —
-    // striscia separata, colore diverso, appena sopra quella
-    // "buffered": indica *da dove* arriverebbe il frame quando viene
-    // bufferizzato, non se è già pronto ora (le due cose sono
-    // indipendenti: una clip proxy-backed può avere solo una parte già
-    // in cache, o viceversa una clip non proxy-backed può comunque
-    // essere già bufferizzata dal sorgente pieno).
+    // disegnati come una striscia sulla clip stessa, non sul righello:
+    // il proxy è una proprietà *per clip* (o meglio: per intera clip, si
+    // veda `VibeVideoApp::proxy_timeline_ranges`), non di un punto della
+    // timeline come invece lo è "buffered" — indica *da dove*
+    // arriverebbe il frame quando viene bufferizzato, non se è già
+    // pronto ora (le due cose sono indipendenti: una clip proxy-backed
+    // può avere solo una parte già in cache, o viceversa una clip non
+    // proxy-backed può comunque essere già bufferizzata dal sorgente
+    // pieno).
     proxy_ranges: &[(FrameIdx, FrameIdx)],
 ) -> Option<(vv_core::MediaId, FrameIdx)> {
     let mut media_drop = None;
@@ -438,26 +441,6 @@ pub fn show_timeline(
                         egui::pos2(x1, origin.y + RULER_HEIGHT),
                     );
                     painter.rect_filled(strip_rect, 0.0, buffered_color);
-                }
-
-                // Striscia "proxy": stessa fascia, appena sopra quella
-                // "buffered" (vedi doc del parametro `proxy_ranges`),
-                // colore diverso (ambra invece di blu) per restare
-                // distinguibile a colpo d'occhio anche dove le due si
-                // toccano.
-                const PROXY_STRIP_HEIGHT: f32 = 4.0;
-                let proxy_color = egui::Color32::from_rgba_unmultiplied(255, 175, 60, 160);
-                for &(start, end) in proxy_ranges {
-                    let x0 = origin.x + start as f32 * px_per_frame;
-                    let x1 = origin.x + (end + 1) as f32 * px_per_frame;
-                    let strip_rect = egui::Rect::from_min_max(
-                        egui::pos2(
-                            x0,
-                            origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT - PROXY_STRIP_HEIGHT,
-                        ),
-                        egui::pos2(x1, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
-                    );
-                    painter.rect_filled(strip_rect, 0.0, proxy_color);
                 }
 
                 // Sfondo delle track (alternato per leggibilità), e sopra,
@@ -759,8 +742,29 @@ pub fn show_timeline(
                     };
                     painter.rect_filled(clip_rect, 4.0, visual.color);
                     painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
+
+                    // Striscia "proxy": sulla clip stessa (non sul righello
+                    // della timeline, dove viveva prima) — il proxy è una
+                    // proprietà *per clip*, non di un punto della timeline,
+                    // quindi la sua indicazione appartiene alla clip.
+                    // Etichetta spostata più in basso per non finirci sotto.
+                    let is_proxy_backed = proxy_ranges.iter().any(|&(s, e)| {
+                        s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
+                    });
+                    let label_offset_y = if is_proxy_backed {
+                        const PROXY_STRIP_HEIGHT: f32 = 4.0;
+                        let proxy_color = egui::Color32::from_rgba_unmultiplied(255, 175, 60, 220);
+                        let strip_rect = egui::Rect::from_min_size(
+                            clip_rect.left_top() + egui::vec2(1.0, 1.0),
+                            egui::vec2(clip_rect.width() - 2.0, PROXY_STRIP_HEIGHT),
+                        );
+                        painter.rect_filled(strip_rect, 2.0, proxy_color);
+                        2.0 + PROXY_STRIP_HEIGHT
+                    } else {
+                        2.0
+                    };
                     painter.text(
-                        clip_rect.left_top() + egui::vec2(4.0, 2.0),
+                        clip_rect.left_top() + egui::vec2(4.0, label_offset_y),
                         egui::Align2::LEFT_TOP,
                         &visual.label,
                         egui::FontId::proportional(12.0),

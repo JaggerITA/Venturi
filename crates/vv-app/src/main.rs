@@ -2380,21 +2380,6 @@ impl eframe::App for VibeVideoApp {
                         self.add_solid_color_clip();
                         ui.close();
                     }
-                    ui.separator();
-                    if ui
-                        .checkbox(&mut self.proxy_enabled, "Usa proxy")
-                        .on_hover_text(
-                            "Anteprima/editing da una copia a bassa risoluzione generata in \
-                             background invece che dal sorgente: scrub molto più fluido su \
-                             sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
-                             sorgenti originali. Disattiva per lavori che richiedono la \
-                             qualità piena.",
-                        )
-                        .changed()
-                        && let Some(render_ahead) = &self.render_ahead
-                    {
-                        render_ahead.set_proxy_enabled(self.proxy_enabled);
-                    }
                 });
 
                 ui.menu_button("Timeline", |ui| {
@@ -2417,6 +2402,50 @@ impl eframe::App for VibeVideoApp {
                         ui.close();
                     }
                     ui.label("Ctrl+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
+                    ui.separator();
+                    ui.menu_button("Proxy", |ui| {
+                        if ui
+                            .checkbox(&mut self.proxy_enabled, "Usa proxy")
+                            .on_hover_text(
+                                "Anteprima/editing da una copia a bassa risoluzione generata in \
+                                 background invece che dal sorgente: scrub molto più fluido su \
+                                 sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
+                                 sorgenti originali. Disattiva per lavori che richiedono la \
+                                 qualità piena.",
+                            )
+                            .changed()
+                            && let Some(render_ahead) = &self.render_ahead
+                        {
+                            render_ahead.set_proxy_enabled(self.proxy_enabled);
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Cache video:");
+                            // Espresso in MB nella UI, ma `cache_budget_bytes`
+                            // resta in byte internamente (vedi doc del campo):
+                            // effetto solo sui player aperti *dopo* la
+                            // modifica, non su uno già in corso.
+                            let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut budget_mb)
+                                        .range(100..=8000)
+                                        .suffix(" MB"),
+                                )
+                                .on_hover_text(
+                                    "Quanta RAM pre-decodificare per il player aperto: di più = \
+                                     scrub/playback più fluidi, di meno = meno rischio di esaurire \
+                                     la memoria (soprattutto con sorgenti 4K+). Effetto dal \
+                                     prossimo cambio clip.",
+                                )
+                                .changed()
+                            {
+                                self.cache_budget_bytes = budget_mb as usize * 1_000_000;
+                                if let Some(render_ahead) = &self.render_ahead {
+                                    render_ahead.set_cache_budget_bytes(self.cache_budget_bytes);
+                                }
+                            }
+                        });
+                    });
                 });
 
                 ui.menu_button("Visualizza", |ui| {
@@ -2425,34 +2454,6 @@ impl eframe::App for VibeVideoApp {
                         .on_hover_text(
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
                         );
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Cache video:");
-                        // Espresso in MB nella UI, ma `cache_budget_bytes`
-                        // resta in byte internamente (vedi doc del campo):
-                        // effetto solo sui player aperti *dopo* la
-                        // modifica, non su uno già in corso.
-                        let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut budget_mb)
-                                    .range(100..=8000)
-                                    .suffix(" MB"),
-                            )
-                            .on_hover_text(
-                                "Quanta RAM pre-decodificare per il player aperto: di più = \
-                                 scrub/playback più fluidi, di meno = meno rischio di esaurire \
-                                 la memoria (soprattutto con sorgenti 4K+). Effetto dal \
-                                 prossimo cambio clip.",
-                            )
-                            .changed()
-                        {
-                            self.cache_budget_bytes = budget_mb as usize * 1_000_000;
-                            if let Some(render_ahead) = &self.render_ahead {
-                                render_ahead.set_cache_budget_bytes(self.cache_budget_bytes);
-                            }
-                        }
-                    });
                 });
             });
         });
