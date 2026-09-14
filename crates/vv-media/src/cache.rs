@@ -61,6 +61,28 @@ impl FrameCache {
             .resize(NonZeroUsize::new(capacity.max(1)).unwrap());
     }
 
+    /// Rimuove ogni frame con indice `< idx`: non più raggiungibile
+    /// tornando indietro dalla testina corrente, quindi non più utile a
+    /// bufferizzare in avanti. Senza questo, lo sfratto della LRU standard
+    /// avviene solo quando si *inserisce* un nuovo frame oltre la
+    /// capacità — proporzionale a quanti frame nuovi arrivano, non a
+    /// quanto la testina si è mossa. Se la testina avanza a piccoli
+    /// passi (mai abbastanza per un seek reale, vedi
+    /// `SEEK_THRESHOLD_FRAMES` in `render_ahead`) e il decoder resta
+    /// comodamente avanti, il "fronte" del buffer può restare bloccato
+    /// molto indietro rispetto alla testina per un tempo indefinito,
+    /// mentre la coda si allunga di pochi frame ad ogni ciclo — lo
+    /// scarto fisso tra testina e inizio del buffer segnalato
+    /// dall'utente. Con questo, ad ogni ciclo il fronte è sempre la
+    /// testina corrente (o il primo frame disponibile dopo di essa).
+    pub fn evict_before(&self, idx: FrameIdx) {
+        let mut cache = self.inner.lock().unwrap();
+        let stale: Vec<FrameIdx> = cache.iter().map(|(&k, _)| k).filter(|&k| k < idx).collect();
+        for k in stale {
+            cache.pop(&k);
+        }
+    }
+
     /// Intervalli contigui (inclusivi) di frame attualmente in cache,
     /// ordinati per inizio crescente — per un indicatore visivo "buffered"
     /// nella UI (mostrare quali porzioni sono già decodificate durante la

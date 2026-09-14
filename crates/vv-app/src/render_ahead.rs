@@ -446,6 +446,16 @@ fn walk_and_fill(
         // aggressivamente del previsto proprio i frame vicini alla
         // testina (vedi doc di `FrameCache::resize`).
         cache.resize(capacity);
+        // Scarta tutto ciò che è rimasto indietro rispetto alla testina
+        // corrente: senza questo, lo sfratto della LRU standard avviene
+        // solo quando arrivano nuovi frame in coda, non quando la
+        // testina avanza — se avanza a piccoli passi (mai abbastanza
+        // per un seek reale) il fronte del buffer può restare bloccato
+        // molto indietro per un tempo indefinito mentre la coda cresce
+        // di poco ad ogni ciclo, cioè esattamente lo scarto fisso tra
+        // testina e inizio del buffer segnalato dall'utente (vedi doc
+        // di `FrameCache::evict_before`).
+        cache.evict_before(segment.source_start);
 
         // Non decodificare oltre quanto la cache di questo media può
         // effettivamente contenere: farlo comunque significa sfrattare
@@ -965,6 +975,70 @@ mod tests {
                 "timeout indietro: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Regressione per il bug segnalato dall'utente e confermato dal log
+    /// diagnostico reale: quando la testina avanza a piccoli passi (mai
+    /// abbastanza da superare `SEEK_THRESHOLD_FRAMES` e forzare un seek
+    /// reale) il decoder resta comodamente avanti e continua da dove si
+    /// trovava — corretto e voluto (vedi `position_decoder`) — ma la
+    /// cache veniva sfrattata dalla sola LRU standard, che rimuove i più
+    /// vecchi solo quando *arrivano* nuovi frame, non quando la *testina
+    /// si sposta*: il fronte del buffer restava quindi bloccato molto
+    /// indietro rispetto alla testina per un tempo indefinito, mentre la
+    /// coda si allungava di pochi frame ad ogni ciclo — esattamente lo
+    /// scarto fisso "il buffer inizia sempre qualche frame dopo la
+    /// testina" segnalato dall'utente (confermato con un budget stretto
+    /// che costringe a superare la capacità ad ogni ciclo).
+    #[test]
+    fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_reseek() {
+        let path = make_test_clip("vv-app-render-ahead-test", "front_tracks_target.mp4", 20);
+
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 500)],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Budget stretto: ogni avanzamento di 10 frame aggiunge più
+        // frame di quanti la cache possa contenere senza sfrattarne,
+        // costringendo lo sfratto ad agire ad ogni ciclo.
+        let budget = 43_000_000;
+
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 10, budget);
+
+        let mut target = 300;
+        walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget);
+        for _ in 0..15 {
+            target += 10;
+            walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget);
+            let ranges = caches
+                .lock()
+                .unwrap()
+                .get(&media_a)
+                .unwrap()
+                .cached_ranges();
+            assert!(
+                ranges.iter().any(|&(s, _)| s == target),
+                "il buffer deve iniziare esattamente alla testina (target={target}): {ranges:?}"
+            );
         }
     }
 }
