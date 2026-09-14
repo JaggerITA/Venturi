@@ -2452,6 +2452,24 @@ impl eframe::App for VibeVideoApp {
                         .map(|(id, item)| (id, file_label(&item.path)))
                         .collect();
                     let buffered_ranges = self.buffered_timeline_ranges();
+                    // Il worker di `render_ahead` bufferizza su un thread
+                    // proprio, a un ritmo suo indipendente dai repaint
+                    // della UI (vedi doc del modulo `render_ahead`) — ma
+                    // egui/eframe non ridisegna da solo se non c'è un
+                    // input o una `request_repaint` esplicita: senza
+                    // questo, la barra "buffered" avanzava solo quando
+                    // *qualcos'altro* forzava comunque un repaint (es.
+                    // muovere il mouse, che genera eventi di input) anche
+                    // se il buffer stava davvero avanzando in background
+                    // (bug segnalato dall'utente). `is_caught_up` viene
+                    // dal worker stesso (vedi doc lì): stessa identica
+                    // logica del repaint continuo durante l'export
+                    // (`!done`, più sopra in questo file), si ferma da
+                    // sé un ciclo dopo che il worker si è davvero
+                    // stabilizzato.
+                    if self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up()) {
+                        ui.ctx().request_repaint();
+                    }
                     media_drop = timeline_ui::show_timeline(
                         ui,
                         &mut self.project,

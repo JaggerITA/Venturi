@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -88,6 +88,11 @@ pub struct RenderAhead {
     caches: Arc<SharedFrameCache>,
     target: Arc<AtomicI64>,
     cache_budget_bytes: Arc<AtomicUsize>,
+    /// `true` quando l'ultimo ciclo del worker ha trovato l'intera
+    /// finestra di lookahead già in cache — vedi `WalkOutcome::caught_up`
+    /// e `is_caught_up`. Parte da `false`: prima che il worker abbia
+    /// completato almeno un ciclo non si sa ancora se c'è lavoro da fare.
+    caught_up: Arc<AtomicBool>,
     tx: mpsc::Sender<Command>,
     handle: Option<JoinHandle<()>>,
 }
@@ -97,17 +102,20 @@ impl RenderAhead {
         let caches = Arc::new(SharedFrameCache::new());
         let target = Arc::new(AtomicI64::new(0));
         let budget = Arc::new(AtomicUsize::new(cache_budget_bytes));
+        let caught_up = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
 
         let thread_caches = caches.clone();
         let thread_target = target.clone();
         let thread_budget = budget.clone();
+        let thread_caught_up = caught_up.clone();
         let handle = std::thread::spawn(move || {
             worker_loop(
                 rx,
                 thread_caches,
                 thread_target,
                 thread_budget,
+                thread_caught_up,
                 project,
                 timeline_id,
             );
@@ -117,6 +125,7 @@ impl RenderAhead {
             caches,
             target,
             cache_budget_bytes: budget,
+            caught_up,
             tx,
             handle: Some(handle),
         }
@@ -126,9 +135,21 @@ impl RenderAhead {
     /// economica da fare a ogni frame UI durante lo scrub/playback, sia
     /// per un avanzamento continuo sia per un salto — il worker rivaluta
     /// da zero la finestra a ogni ciclo, quindi non serve distinguere i
-    /// due casi (a differenza di `DecodeAhead::set_target`/`seek`).
+    /// due casi (a differenza di `DecodeAhead::set_target`/`seek`). Se il
+    /// target è realmente cambiato (non la chiamata ridondante che
+    /// `sync_render_ahead` fa comunque a ogni frame UI), segna subito
+    /// "non ancora bufferizzato": il worker lo confermerà/correggerà al
+    /// suo prossimo ciclo (al più `POLL_INTERVAL` dopo), ma senza questo
+    /// aggiornamento *immediato* la UI potrebbe leggere `is_caught_up()`
+    /// ancora `true` (stantio, da prima del cambio) nell'unico repaint
+    /// che segue subito l'interazione e smettere di richiederne altri —
+    /// lo stesso bug di fondo che questo intero meccanismo esiste per
+    /// risolvere, spostato di un frame invece che eliminato.
     pub fn set_target(&self, frame: FrameIdx) {
-        self.target.store(frame, Ordering::Relaxed);
+        let previous = self.target.swap(frame, Ordering::Relaxed);
+        if previous != frame {
+            self.caught_up.store(false, Ordering::Relaxed);
+        }
     }
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
@@ -138,8 +159,14 @@ impl RenderAhead {
     /// Da chiamare dopo ogni comando che cambia la disposizione delle
     /// clip (ogni `history.do_command`): il worker lavora su una propria
     /// copia del progetto, non condivisa con la UI (`Project` è già
-    /// `Clone`, stesso principio dello snapshot per l'export).
+    /// `Clone`, stesso principio dello snapshot per l'export). Segna
+    /// subito "non ancora bufferizzato" — stesso motivo di `set_target`,
+    /// qui incondizionato perché ogni chiamata rappresenta per
+    /// costruzione un cambio reale (il chiamante la fa solo a
+    /// generazione della history diversa dall'ultima notificata, vedi
+    /// `sync_render_ahead`).
     pub fn update_project(&self, project: &Project, timeline_id: TimelineId) {
+        self.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::UpdateProject(
             Box::new(project.clone()),
             timeline_id,
@@ -150,6 +177,16 @@ impl RenderAhead {
     /// cache.
     pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameYuv420>> {
         self.caches.get(media_id, source_frame)
+    }
+
+    /// `false` finché il worker ha ancora lavoro da fare per soddisfare
+    /// la finestra di lookahead corrente (budget saturo, o semplicemente
+    /// non ha ancora finito di decodificarla) — la UI lo usa per sapere
+    /// se vale la pena richiedere un altro repaint pur di mostrare
+    /// l'indicatore "buffered" avanzare, invece di aspettare che qualcos'
+    /// altro lo faccia comunque (vedi il repaint in `VibeVideoApp::ui`).
+    pub fn is_caught_up(&self) -> bool {
+        self.caught_up.load(Ordering::Relaxed)
     }
 
     /// Intervalli (in frame *sorgente*) attualmente in cache per un
@@ -267,6 +304,7 @@ fn worker_loop(
     caches: Arc<SharedFrameCache>,
     target: Arc<AtomicI64>,
     cache_budget_bytes: Arc<AtomicUsize>,
+    caught_up: Arc<AtomicBool>,
     mut project: Project,
     mut timeline_id: TimelineId,
 ) {
@@ -325,7 +363,7 @@ fn worker_loop(
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
-        retry_immediately = walk_and_fill(
+        let outcome = walk_and_fill(
             &project,
             timeline_id,
             &caches,
@@ -335,6 +373,8 @@ fn worker_loop(
             went_backward,
             &target,
         );
+        retry_immediately = outcome.interrupted;
+        caught_up.store(outcome.caught_up, Ordering::Relaxed);
     }
 }
 
@@ -549,13 +589,38 @@ fn position_decoder(
 /// (confrontando `from_frame` globale, non per-media/per-segmento —
 /// vedi `position_decoder`) prima di iterare sui segmenti.
 ///
-/// Ritorna `true` se il fill è stato interrotto in anticipo perché la
-/// testina *live* (`target`) si è spostata abbastanza, mentre si
-/// decodificava, da rendere obsoleto il lavoro rimasto in questo ciclo —
-/// in quel caso il chiamante (`worker_loop`) non aspetta il prossimo
-/// `POLL_INTERVAL`, rilegge subito il target fresco e ricomincia: un
-/// prefetch lontano non deve mai far aspettare la testina che si sposta
-/// nel frattempo (REFACTOR_PIPELINE.md §3.1).
+/// Esito di un ciclo di `walk_and_fill`, letto da `worker_loop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalkOutcome {
+    /// La testina *live* (`target`) si è spostata abbastanza, mentre si
+    /// decodificava, da rendere obsoleto il lavoro rimasto in questo
+    /// ciclo — in quel caso il chiamante non aspetta il prossimo
+    /// `POLL_INTERVAL`, rilegge subito il target fresco e ricomincia: un
+    /// prefetch lontano non deve mai far aspettare la testina che si
+    /// sposta nel frattempo (REFACTOR_PIPELINE.md §3.1).
+    interrupted: bool,
+    /// La finestra di lookahead richiesta in questo ciclo è ora
+    /// interamente in cache (o non c'era nulla da bufferizzare):
+    /// `false` se il budget globale ha fermato il fill a metà, o se
+    /// `interrupted` ha troncato il giro — in entrambi i casi c'è ancora
+    /// lavoro potenzialmente utile da fare al prossimo ciclo. Esposto
+    /// alla UI via `RenderAhead::is_caught_up`: senza questo segnale, la
+    /// UI non ha modo di sapere quando può smettere di richiedere
+    /// repaint continui in attesa di vedere avanzare l'indicatore
+    /// "buffered" (bug osservato: restava fermo finché non arrivava un
+    /// repaint per qualche altro motivo, es. muovere il mouse — il
+    /// worker bufferizza comunque, a un ritmo suo indipendente dalla UI,
+    /// ma senza repaint quel progresso non veniva mai ridisegnato).
+    caught_up: bool,
+}
+
+impl WalkOutcome {
+    const SETTLED: Self = Self {
+        interrupted: false,
+        caught_up: true,
+    };
+}
+
 fn walk_and_fill(
     project: &Project,
     timeline_id: TimelineId,
@@ -565,9 +630,9 @@ fn walk_and_fill(
     cache_budget_bytes: usize,
     went_backward: bool,
     target: &AtomicI64,
-) -> bool {
+) -> WalkOutcome {
     let Some(timeline) = project.timelines.get(timeline_id) else {
-        return false;
+        return WalkOutcome::SETTLED;
     };
     let fps = timeline.fps.as_f64().max(1e-9);
     let lookahead_frames = ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1);
@@ -575,7 +640,7 @@ fn walk_and_fill(
 
     let segments = collect_media_segments(timeline, from_frame, end_frame);
     if segments.is_empty() {
-        return false;
+        return WalkOutcome::SETTLED;
     }
     let distinct_media: HashSet<MediaId> = segments.iter().map(|s| s.media_id).collect();
     open.retain(|id, _| distinct_media.contains(id));
@@ -597,7 +662,7 @@ fn walk_and_fill(
     // insieme retain/evict_before/sfratto-per-capacità di prima.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
 
-    'segments: for segment in &segments {
+    for segment in &segments {
         let Some(path) = project
             .media_pool
             .get(segment.media_id)
@@ -658,7 +723,10 @@ fn walk_and_fill(
             // guadagnare continuando, esce dall'intero giro sui segmenti,
             // non solo da questo.
             if caches.bytes_used() >= cache_budget_bytes {
-                break 'segments;
+                return WalkOutcome {
+                    interrupted: false,
+                    caught_up: false,
+                };
             }
             let mut threshold_frames = od.seek_threshold_frames();
             match od.decoder.next_frame() {
@@ -701,7 +769,10 @@ fn walk_and_fill(
             // che rende la finestra corrente stale.
             let live = target.load(Ordering::Relaxed);
             if (live - from_frame).abs() > threshold_frames {
-                return true;
+                return WalkOutcome {
+                    interrupted: true,
+                    caught_up: false,
+                };
             }
         }
 
@@ -717,7 +788,7 @@ fn walk_and_fill(
             );
         }
     }
-    false
+    WalkOutcome::SETTLED
 }
 
 #[cfg(test)]
@@ -1211,6 +1282,55 @@ mod tests {
         );
     }
 
+    /// `WalkOutcome::caught_up` è la base di `RenderAhead::is_caught_up`,
+    /// che la UI usa per decidere se vale la pena richiedere un altro
+    /// repaint (vedi doc lì): con un budget ampio a sufficienza per
+    /// l'intera finestra di lookahead, un ciclo deve bastare a coprirla
+    /// tutta e segnalarlo.
+    #[test]
+    fn walk_and_fill_reports_caught_up_when_the_whole_window_fits_the_budget() {
+        let path = make_test_clip("vv-app-render-ahead-test", "caught_up.mp4", 3);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 75,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 75)],
+            muted: false,
+        }]));
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let generous_budget = 320 * 240 * 4 * 200; // ben oltre i 75 frame della finestra
+        let outcome = walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            0,
+            generous_budget,
+            false,
+            &AtomicI64::new(0),
+        );
+
+        assert!(
+            outcome.caught_up,
+            "budget e finestra coprono tutta la clip: non dovrebbe restare altro da fare"
+        );
+        assert!(!outcome.interrupted);
+    }
+
     /// Regressione: se il budget non basta a coprire tutta la finestra
     /// di lookahead, il buffer deve comunque partire dalla testina (i
     /// frame più vicini, i più utili da mostrare subito) e non da una
@@ -1310,7 +1430,7 @@ mod tests {
         // altrove mentre questo ciclo stava per partire.
         let drifted_target = AtomicI64::new(DEFAULT_SEEK_THRESHOLD_FRAMES + 200);
 
-        let interrupted = walk_and_fill(
+        let outcome = walk_and_fill(
             &project,
             timeline_id,
             &caches,
@@ -1321,8 +1441,12 @@ mod tests {
             &drifted_target,
         );
         assert!(
-            interrupted,
+            outcome.interrupted,
             "deve segnalare l'interruzione al chiamante (worker_loop) per farlo ripartire subito"
+        );
+        assert!(
+            !outcome.caught_up,
+            "interrotto: non ha potuto verificare se la finestra fosse coperta"
         );
 
         let ranges = caches.cached_ranges(media_a);
@@ -1453,13 +1577,14 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Capacità ~50 frame: meno di quanto i due segmenti insieme
-        // chiederebbero (~20 + ~55), ma più di quanto ciascuno chiede da
-        // solo — costringe la condivisione della stessa cache a contare
-        // davvero.
-        let budget = 50 * 320 * 240 * 4;
+        // Capacità ~60 frame YUV420 (width*height*3/2 byte/frame, non
+        // più i 4 byte/pixel RGBA da prima di REFACTOR_PIPELINE.md B3):
+        // meno di quanto i due segmenti insieme chiederebbero (~20 + ~55),
+        // ma più di quanto ciascuno chiede da solo — costringe la
+        // condivisione della stessa cache a contare davvero.
+        let budget = 60 * 320 * 240 * 3 / 2;
 
-        walk_and_fill(
+        let outcome = walk_and_fill(
             &project,
             timeline_id,
             &caches,
@@ -1478,6 +1603,10 @@ mod tests {
         assert!(
             ranges.iter().any(|&(s, _)| s <= 200),
             "la seconda clip deve comunque ricevere una fetta della capacità condivisa: ranges={ranges:?}"
+        );
+        assert!(
+            !outcome.caught_up,
+            "budget saturo prima di finire la finestra: non è \"caught up\", c'è ancora lavoro per il prossimo ciclo"
         );
     }
 
