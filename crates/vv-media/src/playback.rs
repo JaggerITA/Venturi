@@ -52,13 +52,43 @@ pub struct DecodeAhead {
     pub fps: vv_core::Rational,
 }
 
+/// Frame minimi tenuti in cache indipendentemente dal budget di memoria:
+/// evita che una risoluzione fuori scala (es. 8K) riduca la cache a
+/// pochissimi frame, sotto la soglia utile per un margine di sicurezza
+/// contro rallentamenti di decodifica transitori.
+const MIN_CACHE_FRAMES: usize = 24;
+
+/// Quanti frame RGBA8 (`width*height*4` byte l'uno, non compressi) entrano
+/// in `budget_bytes`, con un minimo di `MIN_CACHE_FRAMES`. Funzione pura
+/// (nessuna apertura di file/thread) per poterla testare senza dipendere
+/// da ffmpeg.
+fn frame_cache_capacity(budget_bytes: usize, width: u32, height: u32) -> usize {
+    let bytes_per_frame = (width as usize * height as usize * 4).max(1);
+    (budget_bytes / bytes_per_frame).max(MIN_CACHE_FRAMES)
+}
+
 impl DecodeAhead {
     /// Apre il decoder subito nel thread chiamante (per propagare un
     /// eventuale errore di apertura in modo sincrono), poi sposta il
     /// decode continuo su un thread dedicato.
+    ///
+    /// La capacità della cache (in frame) è derivata da `cache_budget_bytes`
+    /// (un budget di *memoria*, non un conteggio di frame) e dalla
+    /// risoluzione reale del media, scoperta solo qui dopo l'apertura:
+    /// frame RGBA8 non compressi pesano `width*height*4` byte l'uno, quindi
+    /// un conteggio fisso di frame ha un costo in RAM molto diverso a
+    /// seconda della sorgente (un 1080p e un 4K differiscono di ~4x). Un
+    /// budget fisso invece garantisce un tetto di memoria prevedibile per
+    /// player aperto qualunque sia la risoluzione, *e* dà automaticamente
+    /// più margine di riproduzione fluida (più frame pre-decodificati)
+    /// alle sorgenti più leggere invece di limitarle tutte allo stesso
+    /// conteggio pensato per il caso peggiore (bug segnalato: cache
+    /// tarata bassa per stare sotto OOM su 4K aveva introdotto stutter
+    /// anche su sorgenti comuni 1080p/720p, che invece potevano permettersi
+    /// molto più margine).
     pub fn spawn(
         path: PathBuf,
-        cache_capacity: usize,
+        cache_budget_bytes: usize,
         ahead_frames: i64,
     ) -> Result<Self, crate::MediaError> {
         let decoder = Decoder::open(&path)?;
@@ -66,6 +96,15 @@ impl DecodeAhead {
         let height = decoder.height();
         let fps = decoder.fps();
         let decoder = SendDecoder(decoder);
+
+        let cache_capacity = frame_cache_capacity(cache_budget_bytes, width, height);
+        // Il decode-ahead non deve mai puntare a correre più avanti di
+        // quanto la cache possa effettivamente trattenere, altrimenti
+        // decodificherebbe frame che vengono sfrattati (LRU) prima di
+        // essere mai consumati — lavoro sprecato. Margine di un terzo
+        // sotto la capacità per lasciare spazio anche a un po' di
+        // rilettura all'indietro.
+        let ahead_frames = ahead_frames.min((cache_capacity as i64 * 2) / 3).max(1);
 
         let cache = Arc::new(FrameCache::new(cache_capacity));
         let target = Arc::new(AtomicI64::new(0));
@@ -175,6 +214,41 @@ mod tests {
     use std::process::Command as OsCommand;
     use std::time::Instant;
 
+    /// Bug segnalato: un tetto di frame fisso (indipendente dalla
+    /// risoluzione) o penalizza inutilmente le sorgenti leggere (1080p) per
+    /// stare sotto OOM sulle pesanti (4K), o va OOM su quelle pesanti se
+    /// tarato per quelle leggere. Un budget di memoria elimina il
+    /// compromesso: la stessa quantità di RAM, distribuita su più o meno
+    /// frame a seconda del peso di ciascuno.
+    #[test]
+    fn frame_cache_capacity_scales_inversely_with_resolution() {
+        let cap_1080p = frame_cache_capacity(1_200_000_000, 1920, 1080);
+        let cap_4k = frame_cache_capacity(1_200_000_000, 3840, 2160);
+
+        // 4K ha 4 volte i pixel di 1080p: a parità di budget, circa un
+        // quarto dei frame.
+        assert!(cap_1080p > cap_4k * 3);
+        assert!((cap_1080p as f64 / cap_4k as f64 - 4.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn frame_cache_capacity_never_drops_below_the_floor_on_extreme_resolutions() {
+        // Budget volutamente assurdo per una risoluzione enorme: non deve
+        // mai scendere sotto `MIN_CACHE_FRAMES`, né panicare per una
+        // divisione che azzera la capacità.
+        let cap = frame_cache_capacity(1024, 7680, 4320);
+        assert_eq!(cap, MIN_CACHE_FRAMES);
+    }
+
+    #[test]
+    fn frame_cache_capacity_respects_a_generous_budget() {
+        // Budget ampio su una risoluzione piccola: la capacità deve
+        // riflettere il budget (molti frame), non restare bloccata al
+        // minimo.
+        let cap = frame_cache_capacity(100_000_000, 320, 240);
+        assert!(cap > MIN_CACHE_FRAMES * 10, "cap={cap}");
+    }
+
     fn make_test_clip(name: &str, duration_secs: u32) -> PathBuf {
         let dir = std::env::temp_dir().join("vv-media-playback-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -215,7 +289,10 @@ mod tests {
     #[test]
     fn decode_ahead_fills_cache_from_target() {
         let path = make_test_clip("ahead.mp4", 1);
-        let player = DecodeAhead::spawn(path, 100, 50).unwrap();
+        // Budget generoso per la fixture 320x240 (~40MB => >100 frame di
+        // capacità): vedi doc di `DecodeAhead::spawn`, il secondo
+        // parametro è un budget di memoria, non più un conteggio di frame.
+        let player = DecodeAhead::spawn(path, 40_000_000, 50).unwrap();
         player.set_target(0);
 
         assert!(
@@ -231,7 +308,7 @@ mod tests {
     #[test]
     fn decode_ahead_seek_jumps_the_worker() {
         let path = make_test_clip("ahead_seek.mp4", 3);
-        let player = DecodeAhead::spawn(path, 200, 50).unwrap();
+        let player = DecodeAhead::spawn(path, 65_000_000, 50).unwrap();
 
         player.seek(50, 2.0);
 

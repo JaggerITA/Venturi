@@ -40,22 +40,21 @@ impl Player {
         duration_secs: f64,
         cached_audio: Option<Arc<vv_media::AudioBuffer>>,
     ) -> Result<(Self, Option<Arc<vv_media::AudioBuffer>>), String> {
-        // Capacità della cache dei frame decodificati: erano 300, non
-        // compressi (RGBA8, `width*height*4` byte l'uno — vedi
-        // `vv_media::FrameRgba`) e uno per ogni player aperto, mai più di
-        // uno alla volta ma sostituito per intero a ogni cambio di media
-        // (bug segnalato: "uso di memoria alto in generale, OOM dopo 3/4
-        // incollaggi" — a 1080p sono ~2,4GB per player, a 4K oltre 9GB, e
-        // ogni sostituzione con un media diverso dealloca i vecchi e ne
-        // alloca altrettanti di nuovi). 90 (con `ahead_frames` invariato a
-        // 60, quindi ancora ~2s di run-ahead per una riproduzione fluida,
-        // più ~30 frame di margine per lo scrub all'indietro) portano lo
-        // stesso caso a ~712MB/~2,85GB: un taglio di oltre 3x mantenendo
-        // margine sufficiente. Un downscale/proxy per sorgenti in alta
-        // risoluzione (milestone 8, ancora da fare) risolverebbe la cosa
-        // alla radice, ma è un lavoro più ampio.
-        let decode_ahead =
-            vv_media::DecodeAhead::spawn(path.to_path_buf(), 90, 60).map_err(|e| e.to_string())?;
+        // Budget di memoria per la cache dei frame decodificati (in byte,
+        // non un conteggio fisso di frame — vedi doc di `DecodeAhead::spawn`
+        // in vv-media): un conteggio fisso (erano 300 frame, poi 90) ha un
+        // costo in RAM molto diverso a seconda della risoluzione — 300
+        // frame erano ~2,4GB a 1080p, oltre 9GB a 4K (bug segnalato: "uso
+        // di memoria alto in generale, OOM dopo 3/4 incollaggi") — e
+        // tararlo basso per stare sotto quel tetto anche a 4K penalizzava
+        // le sorgenti più comuni 1080p/720p, che potevano permettersi molto
+        // più margine (bug segnalato: "anche il normale playback ha degli
+        // stutter"). 1,2GB dà ~151 frame (~6s) a 1080p, ~38 (~1,5s) a 4K,
+        // ~340 (~13,6s) a 720p — un tetto di memoria prevedibile per player
+        // aperto (uno solo alla volta) che si adatta da sé alla sorgente.
+        const CACHE_BUDGET_BYTES: usize = 1_200_000_000;
+        let decode_ahead = vv_media::DecodeAhead::spawn(path.to_path_buf(), CACHE_BUDGET_BYTES, 60)
+            .map_err(|e| e.to_string())?;
         let fps = decode_ahead.fps.as_f64();
 
         let audio_buffer = match cached_audio {
