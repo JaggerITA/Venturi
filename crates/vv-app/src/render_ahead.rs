@@ -173,6 +173,12 @@ impl Drop for RenderAhead {
 struct OpenDecoder {
     decoder: Decoder,
     next_frame: FrameIdx,
+    /// `segment_start` dell'ultima chiamata a `position_decoder` per
+    /// questo media: confrontarlo con quello della chiamata corrente
+    /// permette di distinguere "la testina è avanzata" (normale, il
+    /// decoder resta dov'è) da "la testina è tornata indietro" (serve
+    /// un seek reale, qualunque sia l'ampiezza — vedi `position_decoder`).
+    requested_start: FrameIdx,
 }
 
 fn worker_loop(
@@ -297,12 +303,17 @@ fn collect_media_segments(
 /// (e quindi una nuova decodifica completa della finestra) ogni ciclo di
 /// poll, sia quando il decoder era leggermente avanti sia appena il giro
 /// precedente si era concluso esattamente al termine del segmento. Un
-/// seek reale serve solo quando decodificare in avanti non potrebbe
-/// comunque raggiungere `segment_start`: è troppo indietro rispetto ad
-/// esso (conviene un seek a decodificare in sequenza fino a lì) — un
-/// vero scrub all'indietro è gestito a parte in `worker_loop`, che
-/// svuota `open` quando il target salta indietro. Quando serve un seek
-/// per lo stesso media già aperto, va fatto sul decoder *esistente*
+/// seek reale serve quando decodificare in avanti non potrebbe comunque
+/// raggiungere `segment_start`: è troppo indietro rispetto ad esso
+/// (conviene un seek a decodificare in sequenza fino a lì), oppure la
+/// testina è tornata indietro rispetto all'ultima richiesta per questo
+/// media (`OpenDecoder::requested_start`) — qualunque sia l'ampiezza,
+/// non solo sopra `SEEK_THRESHOLD_FRAMES`: `walk_and_fill` scarta ad
+/// ogni ciclo tutto ciò che è dietro alla testina corrente
+/// (`FrameCache::evict_before`), quindi anche un piccolo passo indietro
+/// cade in territorio già scartato, irraggiungibile decodificando solo
+/// in avanti. Quando serve un seek per lo stesso media già aperto, va
+/// fatto sul decoder *esistente*
 /// (`seek_to_time`), non riaprendo il file da `Decoder::open`: per un
 /// file grande/non ottimizzato per lo streaming, riaprire vuol dire
 /// riparsare l'intero container/indice ogni volta, un costo che può
@@ -320,11 +331,22 @@ fn position_decoder(
     path: &Path,
     segment_start: FrameIdx,
 ) -> bool {
-    let needs_seek = match open.get(&media_id) {
-        Some(o) => segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES,
-        None => false,
-    };
     if let Some(o) = open.get_mut(&media_id) {
+        // Due motivi per un seek reale: `segment_start` è troppo avanti
+        // per continuare a decodificare in sequenza fino a lì (costa
+        // meno un seek), oppure la testina è tornata *indietro* rispetto
+        // all'ultima richiesta per questo media — qualunque sia
+        // l'ampiezza, non solo sopra una soglia: `walk_and_fill` scarta
+        // (`FrameCache::evict_before`) ad ogni ciclo tutto ciò che è
+        // dietro alla testina corrente per tenere il fronte del buffer
+        // sempre lì, quindi un frame anche di poco più indietro rispetto
+        // all'ultima richiesta è già stato scartato e non tornerà mai in
+        // cache decodificando solo in avanti (bug segnalato: dopo un
+        // piccolo scrub all'indietro il buffer non si rigenera mai per
+        // la nuova posizione, resta fermo sull'ultimo frame in cache).
+        let needs_seek = segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
+            || segment_start < o.requested_start;
+        o.requested_start = segment_start;
         if !needs_seek {
             return true;
         }
@@ -374,6 +396,7 @@ fn position_decoder(
         OpenDecoder {
             decoder,
             next_frame: 0,
+            requested_start: segment_start,
         },
     );
     true
@@ -973,6 +996,84 @@ mod tests {
             assert!(
                 start.elapsed() < Duration::from_secs(5),
                 "timeout indietro: ranges={ranges:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Regressione per il bug segnalato dall'utente: uno scrub
+    /// all'indietro *piccolo* (qui 30 frame, ben sotto
+    /// `SEEK_THRESHOLD_FRAMES`=120) deve rigenerare il buffer per la
+    /// nuova posizione tanto quanto uno grande. Prima del fix, restava
+    /// bloccato sul frame in cache più vicino perché `position_decoder`
+    /// considerava "abbastanza avanti" qualunque target ancora dietro
+    /// a `next_frame` più di una soglia — ma `walk_and_fill` scarta ad
+    /// ogni ciclo tutto ciò che è dietro alla testina corrente
+    /// (`evict_before`), quindi anche un piccolo passo indietro cade in
+    /// territorio già scartato e irraggiungibile decodificando solo in
+    /// avanti.
+    #[test]
+    fn render_ahead_catches_up_after_a_small_backward_seek_within_the_old_threshold() {
+        let path = make_test_clip("vv-app-render-ahead-test", "small_backward_seek.mp4", 4);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 100)],
+            muted: false,
+        }]));
+
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        render_ahead.set_target(80);
+
+        // Attendi non solo che il buffer copra 80, ma che i cicli di
+        // poll successivi abbiano anche già scartato (`evict_before`)
+        // ciò che è rimasto dietro a 80 (compreso 50) — altrimenti il
+        // test passerebbe per caso, perché il primo riempimento (che
+        // decodifica dal keyframe più vicino, qui l'inizio del file)
+        // include già 50 prima ancora che venga scartato.
+        let covers = |ranges: &[(FrameIdx, FrameIdx)], f: FrameIdx| {
+            ranges.iter().any(|&(s, e)| s <= f && f <= e)
+        };
+        let start = std::time::Instant::now();
+        loop {
+            let ranges = render_ahead.cached_ranges_for(media_a);
+            if covers(&ranges, 80) && !covers(&ranges, 50) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timeout in avanti: ranges={ranges:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Scrub indietro di soli 30 frame (sotto la vecchia soglia di
+        // 120): deve comunque rigenerare il buffer per la nuova
+        // posizione, non restare bloccato sul frame più vicino già in
+        // cache.
+        render_ahead.set_target(50);
+        let start = std::time::Instant::now();
+        loop {
+            let ranges = render_ahead.cached_ranges_for(media_a);
+            if ranges.iter().any(|&(s, _)| s == 50) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timeout su scrub piccolo indietro: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
