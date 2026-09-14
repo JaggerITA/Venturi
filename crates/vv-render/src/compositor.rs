@@ -1,5 +1,7 @@
 //! Pipeline di compositing per-frame (vedi ARCHITECTURE.md § Compositing
-//! GPU): crop + zoom via shader wgpu, invece di manipolare i pixel su CPU.
+//! GPU): input in YUV420 planare ([`YuvFrame`], REFACTOR_PIPELINE.md B3
+//! — la conversione a RGB avviene qui, nello shader, non più su CPU in
+//! vv-media), crop + zoom via shader wgpu.
 //!
 //! Due modi di ottenere il risultato, che condividono lo stesso pass
 //! (`render_to_texture`, privato):
@@ -25,19 +27,75 @@ use vv_core::Transform;
 use wgpu::util::DeviceExt;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Formato dei tre piani di input (Y/U/V): un solo canale 8 bit, letto
+/// come `.r` nello shader.
+const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
+/// Matrice di conversione YUV→RGB (REFACTOR_PIPELINE.md B3) — stessi tre
+/// casi di `vv_media::ColorMatrix`, ridefinita qui invece di dipendere
+/// da vv-media: vv-render non sa cos'è un media decodificato, prende
+/// solo piani di byte grezzi (stessa convenzione già in uso per il
+/// resto di questo modulo — vedi `YuvFrame`, non un
+/// `vv_media::FrameYuv420`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMatrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+impl ColorMatrix {
+    /// Selettore passato allo shader (`transform.wgsl`, funzione
+    /// `kr_kb`): deve restare sincronizzato con quella funzione.
+    fn shader_id(self) -> f32 {
+        match self {
+            Self::Bt601 => 0.0,
+            Self::Bt709 => 1.0,
+            Self::Bt2020 => 2.0,
+        }
+    }
+}
+
+/// Un frame video decodificato in YUV420 planare 8 bit, con i metadati
+/// colore necessari a convertirlo in RGB correttamente — l'input di
+/// [`Compositor::render_frame`]/[`Compositor::render_frame_to_texture`].
+/// I piani devono essere densi (nessun padding di riga, vedi
+/// `vv_media::FrameYuv420` per come vengono prodotti dal decoder).
+pub struct YuvFrame<'a> {
+    pub y: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    /// Dimensioni dei piani U/V (sottocampionati 4:2:0, tipicamente
+    /// `(width+1)/2` x `(height+1)/2` ma non ricalcolate qui: il
+    /// chiamante passa le dimensioni reali allocate dal decoder).
+    pub chroma_width: u32,
+    pub chroma_height: u32,
+    pub matrix: ColorMatrix,
+    /// `true` = range JPEG/full (0-255), `false` = range MPEG/limited.
+    pub full_range: bool,
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct TransformUniform {
     crop: [f32; 4],
     zoom_pos: [f32; 4],
+    color: [f32; 4],
 }
 
-impl From<&Transform> for TransformUniform {
-    fn from(t: &Transform) -> Self {
+impl TransformUniform {
+    fn new(t: &Transform, matrix: ColorMatrix, full_range: bool) -> Self {
         Self {
             crop: t.crop,
             zoom_pos: [t.zoom, t.position[0], t.position[1], 0.0],
+            color: [
+                matrix.shader_id(),
+                if full_range { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         }
     }
 }
@@ -57,27 +115,33 @@ impl Compositor {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/transform.wgsl").into()),
         });
 
+        // Tre texture di input (Y/U/V, binding 0-2) invece di una sola
+        // RGBA: la conversione YUV→RGB avviene nello shader
+        // (REFACTOR_PIPELINE.md B3), qui arrivano solo i piani grezzi.
+        let plane_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vv-render transform bind group layout"),
             entries: &[
+                plane_entry(0), // Y
+                plane_entry(1), // U
+                plane_entry(2), // V
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -161,22 +225,19 @@ impl Compositor {
         Self::new(Arc::new(device), Arc::new(queue))
     }
 
-    /// Applica `transform` a un frame RGBA8 e restituisce il risultato
+    /// Applica `transform` a un frame YUV420 e restituisce il risultato
     /// come RGBA8 denso (`output_w * output_h * 4` byte), ridimensionato a
     /// `output_w x output_h`. Fa un readback GPU→CPU: per il path
     /// zero-copy verso l'anteprima egui vedi
     /// [`Compositor::render_frame_to_texture`].
     pub fn render_frame(
         &self,
-        input_rgba: &[u8],
-        input_w: u32,
-        input_h: u32,
+        frame: &YuvFrame,
         transform: &Transform,
         output_w: u32,
         output_h: u32,
     ) -> Vec<u8> {
-        let output_texture =
-            self.render_to_texture(input_rgba, input_w, input_h, transform, output_w, output_h);
+        let output_texture = self.render_to_texture(frame, transform, output_w, output_h);
 
         // wgpu richiede che ogni riga del buffer di destinazione sia
         // allineata a COPY_BYTES_PER_ROW_ALIGNMENT: il buffer può quindi
@@ -252,52 +313,65 @@ impl Compositor {
     /// sulla stessa coda, quindi la GPU la esegue comunque in ordine.
     pub fn render_frame_to_texture(
         &self,
-        input_rgba: &[u8],
-        input_w: u32,
-        input_h: u32,
+        frame: &YuvFrame,
         transform: &Transform,
         output_w: u32,
         output_h: u32,
     ) -> wgpu::Texture {
-        self.render_to_texture(input_rgba, input_w, input_h, transform, output_w, output_h)
+        self.render_to_texture(frame, transform, output_w, output_h)
     }
 
     /// Il pass condiviso da `render_frame` e `render_frame_to_texture`:
-    /// upload del frame in ingresso, crop/zoom via shader, draw nella
-    /// texture di output — tutto ciò che precede la scelta "leggi
-    /// indietro su CPU o lascia sulla GPU", che sta ai due metodi
-    /// pubblici sopra.
+    /// upload dei tre piani in ingresso, crop/zoom + conversione YUV→RGB
+    /// via shader, draw nella texture di output — tutto ciò che precede
+    /// la scelta "leggi indietro su CPU o lascia sulla GPU", che sta ai
+    /// due metodi pubblici sopra.
     fn render_to_texture(
         &self,
-        input_rgba: &[u8],
-        input_w: u32,
-        input_h: u32,
+        frame: &YuvFrame,
         transform: &Transform,
         output_w: u32,
         output_h: u32,
     ) -> wgpu::Texture {
-        let input_texture = self.device.create_texture_with_data(
-            &self.queue,
-            &wgpu::TextureDescriptor {
-                label: Some("vv-render input frame"),
-                size: wgpu::Extent3d {
-                    width: input_w,
-                    height: input_h,
-                    depth_or_array_layers: 1,
+        let plane_texture = |label: &str, data: &[u8], w: u32, h: u32| {
+            self.device.create_texture_with_data(
+                &self.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: PLANE_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
                 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: OUTPUT_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            input_rgba,
+                wgpu::util::TextureDataOrder::LayerMajor,
+                data,
+            )
+        };
+        let y_texture = plane_texture("vv-render Y plane", frame.y, frame.width, frame.height);
+        let u_texture = plane_texture(
+            "vv-render U plane",
+            frame.u,
+            frame.chroma_width,
+            frame.chroma_height,
         );
-        let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let v_texture = plane_texture(
+            "vv-render V plane",
+            frame.v,
+            frame.chroma_width,
+            frame.chroma_height,
+        );
+        let y_view = y_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let uniform = TransformUniform::from(transform);
+        let uniform = TransformUniform::new(transform, frame.matrix, frame.full_range);
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -312,14 +386,22 @@ impl Compositor {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&input_view),
+                    resource: wgpu::BindingResource::TextureView(&y_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::TextureView(&u_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&v_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
@@ -385,34 +467,95 @@ impl Compositor {
 mod tests {
     use super::*;
 
-    fn solid_frame(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
-        let mut data = Vec::with_capacity((w * h * 4) as usize);
-        for _ in 0..(w * h) {
-            data.extend_from_slice(&rgba);
-        }
-        data
+    /// Frame YUV420 posseduto dal test (i piani di `YuvFrame` sono
+    /// riferimenti in prestito): dimensioni croma calcolate come
+    /// `vv_media::FrameYuv420` le calcolerebbe, arrotondate per eccesso.
+    struct OwnedYuvFrame {
+        width: u32,
+        height: u32,
+        y: Vec<u8>,
+        u: Vec<u8>,
+        v: Vec<u8>,
+        chroma_width: u32,
+        chroma_height: u32,
+        matrix: ColorMatrix,
+        full_range: bool,
     }
 
-    /// Frame 4x4 con quattro quadranti di colore diverso: utile per
-    /// verificare *dove* il crop va a pescare, non solo che il colore medio
-    /// torni giusto.
-    fn quadrant_frame() -> (u32, u32, Vec<u8>) {
-        let w = 4;
-        let h = 4;
-        let mut data = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let color = match (x < w / 2, y < h / 2) {
-                    (true, true) => [255, 0, 0, 255],     // alto-sinistra: rosso
-                    (false, true) => [0, 255, 0, 255],    // alto-destra: verde
-                    (true, false) => [0, 0, 255, 255],    // basso-sinistra: blu
-                    (false, false) => [255, 255, 0, 255], // basso-destra: giallo
-                };
-                let idx = ((y * w + x) * 4) as usize;
-                data[idx..idx + 4].copy_from_slice(&color);
+    impl OwnedYuvFrame {
+        fn as_yuv_frame(&self) -> YuvFrame<'_> {
+            YuvFrame {
+                y: &self.y,
+                width: self.width,
+                height: self.height,
+                u: &self.u,
+                v: &self.v,
+                chroma_width: self.chroma_width,
+                chroma_height: self.chroma_height,
+                matrix: self.matrix,
+                full_range: self.full_range,
             }
         }
-        (w, h, data)
+    }
+
+    /// Frame uniforme: stesso Y/U/V su ogni pixel.
+    fn solid_frame(
+        w: u32,
+        h: u32,
+        y: u8,
+        u: u8,
+        v: u8,
+        matrix: ColorMatrix,
+        full_range: bool,
+    ) -> OwnedYuvFrame {
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        OwnedYuvFrame {
+            width: w,
+            height: h,
+            y: vec![y; (w * h) as usize],
+            u: vec![u; (cw * ch) as usize],
+            v: vec![v; (cw * ch) as usize],
+            chroma_width: cw,
+            chroma_height: ch,
+            matrix,
+            full_range,
+        }
+    }
+
+    /// Frame 4x4 con quattro quadranti a Y diverso, croma neutra
+    /// (U=V=128) e range full: con croma neutra R=G=B=Y esattamente
+    /// (vedi `yuv_to_rgb_reference`), utile per verificare *dove* il
+    /// crop va a pescare guardando solo il canale rosso, senza che la
+    /// conversione colore aggiunga un'altra variabile al test.
+    fn quadrant_frame() -> OwnedYuvFrame {
+        let w: u32 = 4;
+        let h: u32 = 4;
+        let mut y_plane = vec![0u8; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let level = match (x < w / 2, y < h / 2) {
+                    (true, true) => 40u8,    // alto-sinistra
+                    (false, true) => 100u8,  // alto-destra
+                    (true, false) => 160u8,  // basso-sinistra
+                    (false, false) => 220u8, // basso-destra
+                };
+                y_plane[(y * w + x) as usize] = level;
+            }
+        }
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        OwnedYuvFrame {
+            width: w,
+            height: h,
+            y: y_plane,
+            u: vec![128; (cw * ch) as usize],
+            v: vec![128; (cw * ch) as usize],
+            chroma_width: cw,
+            chroma_height: ch,
+            matrix: ColorMatrix::Bt601,
+            full_range: true,
+        }
     }
 
     fn center_pixel(rgba: &[u8], width: u32, height: u32) -> [u8; 4] {
@@ -422,59 +565,137 @@ mod tests {
         rgba[idx..idx + 4].try_into().unwrap()
     }
 
+    /// Anche per una croma "neutra" (128), 128/255 non è esattamente
+    /// 0.5: un residuo di pochi livelli negli 8 bit è quantizzazione
+    /// attesa della matrice YUV→RGB (lo stesso residuo compare
+    /// nell'implementazione di riferimento in f64, non solo nello
+    /// shader f32), non un errore — da qui una tolleranza piccola invece
+    /// di un'uguaglianza esatta.
+    fn assert_close_rgba(got: [u8; 4], expected: [u8; 4]) {
+        for i in 0..4 {
+            assert!(
+                (got[i] as i16 - expected[i] as i16).abs() <= 2,
+                "got={got:?} expected={expected:?}"
+            );
+        }
+    }
+
+    /// Implementazione di riferimento (CPU, f64) della stessa formula
+    /// usata nello shader (`transform.wgsl`, `yuv_to_rgb`): serve a
+    /// verificare che il calcolo sulla GPU (f32) sia effettivamente
+    /// quella formula, non una approssimazione silenziosamente diversa
+    /// (REFACTOR_PIPELINE.md §5, accuratezza del frame non negoziabile).
+    fn yuv_to_rgb_reference(y: u8, u: u8, v: u8, matrix: ColorMatrix, full_range: bool) -> [u8; 3] {
+        let (y_n, u_n, v_n) = if full_range {
+            (y as f64 / 255.0, u as f64 / 255.0 - 0.5, v as f64 / 255.0 - 0.5)
+        } else {
+            (
+                (y as f64 - 16.0) / 219.0,
+                (u as f64 - 128.0) / 224.0,
+                (v as f64 - 128.0) / 224.0,
+            )
+        };
+        let (kr, kb) = match matrix {
+            ColorMatrix::Bt601 => (0.299, 0.114),
+            ColorMatrix::Bt709 => (0.2126, 0.0722),
+            ColorMatrix::Bt2020 => (0.2627, 0.0593),
+        };
+        let kg = 1.0 - kr - kb;
+        let r = y_n + 2.0 * (1.0 - kr) * v_n;
+        let b = y_n + 2.0 * (1.0 - kb) * u_n;
+        let g = y_n - (2.0 * kr * (1.0 - kr) / kg) * v_n - (2.0 * kb * (1.0 - kb) / kg) * u_n;
+        [r, g, b].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
+    }
+
     #[test]
     fn identity_transform_passes_through_solid_color() {
         let compositor = Compositor::new_headless();
-        let input = solid_frame(8, 8, [10, 20, 30, 255]);
-        let out = compositor.render_frame(&input, 8, 8, &Transform::default(), 8, 8);
+        let input = solid_frame(8, 8, 128, 128, 128, ColorMatrix::Bt601, true);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 8, 8);
 
         assert_eq!(out.len(), 8 * 8 * 4);
+        // Croma neutra (128) e range full: Y=128 mappa a R=G=B=128 a
+        // meno di un residuo di quantizzazione (vedi assert_close_rgba).
         for px in out.as_chunks::<4>().0 {
-            assert_eq!(px, &[10, 20, 30, 255]);
+            assert_close_rgba(*px, [128, 128, 128, 255]);
+        }
+    }
+
+    /// Verifica la formula di conversione stessa (non solo che "un
+    /// colore passa"): per ogni matrice/range, l'output della GPU deve
+    /// combaciare con la stessa formula calcolata su CPU, a meno di un
+    /// piccolo scarto di arrotondamento f32-vs-f64.
+    #[test]
+    fn yuv_to_rgb_matches_the_reference_formula_across_matrices_and_ranges() {
+        let compositor = Compositor::new_headless();
+        let cases = [
+            (ColorMatrix::Bt601, false),
+            (ColorMatrix::Bt601, true),
+            (ColorMatrix::Bt709, false),
+            (ColorMatrix::Bt709, true),
+            (ColorMatrix::Bt2020, false),
+            (ColorMatrix::Bt2020, true),
+        ];
+        // Y/U/V non degeneri (non tutti a metà scala): esercita davvero
+        // la matrice invece di ridursi a un grigio neutro.
+        let (y, u, v) = (100u8, 90u8, 180u8);
+
+        for (matrix, full_range) in cases {
+            let input = solid_frame(2, 2, y, u, v, matrix, full_range);
+            let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 2, 2);
+            let expected = yuv_to_rgb_reference(y, u, v, matrix, full_range);
+            let got = &out[0..3];
+            for i in 0..3 {
+                assert!(
+                    (got[i] as i16 - expected[i] as i16).abs() <= 2,
+                    "matrix={matrix:?} full_range={full_range}: got={got:?} expected={expected:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn crop_to_top_left_quadrant_shows_only_that_color() {
         let compositor = Compositor::new_headless();
-        let (w, h, input) = quadrant_frame();
+        let input = quadrant_frame();
 
         let transform = Transform {
-            crop: [0.0, 0.0, 0.5, 0.5], // solo il quadrante alto-sinistra (rosso)
+            crop: [0.0, 0.0, 0.5, 0.5], // solo il quadrante alto-sinistra
             zoom: 1.0,
             position: [0.0, 0.0],
         };
-        let out = compositor.render_frame(&input, w, h, &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
 
         // Solo il pixel centrale, non tutta l'immagine: ai bordi del crop il
         // filtro bilineare sfuma legittimamente coi texel vicini (specie
         // all'angolo dove convergono tutti e 4 i quadranti) — non è un bug
         // della matematica di crop, è come ci si aspetta si comporti un
         // sampler lineare. Il centro del crop invece cade tra due texel
-        // dello stesso colore, quindi deve restare puro.
-        assert_eq!(center_pixel(&out, 16, 16), [255, 0, 0, 255]);
+        // dello stesso colore, quindi deve restare puro. Croma neutra: R
+        // deve combaciare esattamente con la Y di quel quadrante (40).
+        assert_close_rgba(center_pixel(&out, 16, 16), [40, 40, 40, 255]);
     }
 
     #[test]
     fn crop_to_bottom_right_quadrant_shows_only_that_color() {
         let compositor = Compositor::new_headless();
-        let (w, h, input) = quadrant_frame();
+        let input = quadrant_frame();
 
         let transform = Transform {
-            crop: [0.5, 0.5, 1.0, 1.0], // quadrante basso-destra (giallo)
+            crop: [0.5, 0.5, 1.0, 1.0], // quadrante basso-destra
             zoom: 1.0,
             position: [0.0, 0.0],
         };
-        let out = compositor.render_frame(&input, w, h, &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
 
-        assert_eq!(center_pixel(&out, 16, 16), [255, 255, 0, 255]);
+        assert_close_rgba(center_pixel(&out, 16, 16), [220, 220, 220, 255]);
     }
 
     #[test]
     fn output_size_can_differ_from_input_size() {
         let compositor = Compositor::new_headless();
-        let input = solid_frame(4, 4, [1, 2, 3, 255]);
-        let out = compositor.render_frame(&input, 4, 4, &Transform::default(), 37, 21);
+        let input = solid_frame(4, 4, 1, 2, 3, ColorMatrix::Bt601, true);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 37, 21);
         assert_eq!(out.len(), 37 * 21 * 4);
     }
 
@@ -543,15 +764,16 @@ mod tests {
     #[test]
     fn render_frame_to_texture_produces_the_same_pixels_as_render_frame() {
         let compositor = Compositor::new_headless();
-        let (w, h, input) = quadrant_frame();
+        let input = quadrant_frame();
         let transform = Transform {
             crop: [0.0, 0.0, 0.5, 0.5],
             zoom: 1.0,
             position: [0.0, 0.0],
         };
 
-        let via_readback = compositor.render_frame(&input, w, h, &transform, 16, 16);
-        let texture = compositor.render_frame_to_texture(&input, w, h, &transform, 16, 16);
+        let via_readback = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let texture =
+            compositor.render_frame_to_texture(&input.as_yuv_frame(), &transform, 16, 16);
         let via_texture = read_back(&compositor, &texture, 16, 16);
 
         assert_eq!(

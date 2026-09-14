@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use vv_core::{Clip, ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId};
 
-use crate::frame_provider::{FrameProvider, media_source_frame};
+use crate::frame_provider::{FrameProvider, as_render_yuv_frame, media_source_frame};
 
 const VIDEO_TRACK: usize = 0;
 const AUDIO_TRACK: usize = 1;
@@ -80,7 +80,7 @@ impl ActiveClipDecoder {
     /// Decodifica in avanti fino a raggiungere (o superare) `target`,
     /// scartando i frame intermedi. `None` a fine stream (capita se
     /// `source_out` va oltre la fine reale del file).
-    fn advance_to(&mut self, target: FrameIdx) -> Result<Option<vv_media::FrameRgba>, String> {
+    fn advance_to(&mut self, target: FrameIdx) -> Result<Option<vv_media::FrameYuv420>, String> {
         loop {
             match self.decoder.next_frame().map_err(|e| e.to_string())? {
                 Some((idx, frame)) if idx >= target => return Ok(Some(frame)),
@@ -109,7 +109,7 @@ impl FrameProvider for StreamingFrameProvider {
         project: &Project,
         clip: &Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<vv_media::FrameRgba>>, String> {
+    ) -> Result<Option<Arc<vv_media::FrameYuv420>>, String> {
         let Some((media_id, source_frame)) = media_source_frame(clip, timeline_frame) else {
             self.active = None;
             return Ok(None);
@@ -231,9 +231,7 @@ fn render_video_frame(
             let transform = clip.effects.transform.value_at(clip.source_frame_at(frame));
             Ok(match provider.frame_for(project, clip, frame)? {
                 Some(f) => compositor.render_frame(
-                    &f.data,
-                    f.width,
-                    f.height,
+                    &as_render_yuv_frame(&f),
                     &transform,
                     resolution.0,
                     resolution.1,

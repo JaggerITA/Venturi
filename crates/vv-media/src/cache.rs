@@ -4,15 +4,23 @@
 //! usata da `render_ahead::RenderAhead` per il buffer a livello di
 //! timeline — vedi REFACTOR_PIPELINE.md §2).
 
-use crate::decode::FrameRgba;
+use crate::decode::FrameYuv420;
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use vv_core::{FrameIdx, MediaId};
 
+/// Byte totali occupati da un frame YUV420 (somma dei tre piani densi):
+/// helper condiviso da `FrameCache` (implicito, via `lru`, che conta solo
+/// il *numero* di elementi, vedi `capacity`/`resize`) e da
+/// `SharedFrameCache` (che invece conta byte reali, vedi `bytes_used`).
+fn frame_bytes(frame: &FrameYuv420) -> usize {
+    frame.y.len() + frame.u.len() + frame.v.len()
+}
+
 pub struct FrameCache {
-    inner: Mutex<LruCache<FrameIdx, Arc<FrameRgba>>>,
+    inner: Mutex<LruCache<FrameIdx, Arc<FrameYuv420>>>,
 }
 
 impl FrameCache {
@@ -22,11 +30,11 @@ impl FrameCache {
         }
     }
 
-    pub fn get(&self, idx: FrameIdx) -> Option<Arc<FrameRgba>> {
+    pub fn get(&self, idx: FrameIdx) -> Option<Arc<FrameYuv420>> {
         self.inner.lock().unwrap().get(&idx).cloned()
     }
 
-    pub fn insert(&self, idx: FrameIdx, frame: Arc<FrameRgba>) {
+    pub fn insert(&self, idx: FrameIdx, frame: Arc<FrameYuv420>) {
         self.inner.lock().unwrap().put(idx, frame);
     }
 
@@ -135,7 +143,7 @@ impl WantedRange {
 }
 
 struct SharedInner {
-    entries: HashMap<(MediaId, FrameIdx), Arc<FrameRgba>>,
+    entries: HashMap<(MediaId, FrameIdx), Arc<FrameYuv420>>,
     bytes_used: usize,
 }
 
@@ -171,7 +179,7 @@ impl SharedFrameCache {
         }
     }
 
-    pub fn get(&self, media_id: MediaId, idx: FrameIdx) -> Option<Arc<FrameRgba>> {
+    pub fn get(&self, media_id: MediaId, idx: FrameIdx) -> Option<Arc<FrameYuv420>> {
         self.inner.lock().unwrap().entries.get(&(media_id, idx)).cloned()
     }
 
@@ -184,10 +192,11 @@ impl SharedFrameCache {
     }
 
     /// Byte totali attualmente occupati da frame decodificati, sommati
-    /// sulla dimensione *reale* di ciascun frame (`data.len()`, non una
-    /// stima uniforme): media di risoluzioni diverse pesano quanto
-    /// pesano davvero. Il chiamante (il loop di fill in `render_ahead`)
-    /// lo confronta con il budget per sapere quando fermarsi.
+    /// sulla dimensione *reale* di ciascun frame (i tre piani YUV420,
+    /// non una stima uniforme): media di risoluzioni diverse pesano
+    /// quanto pesano davvero. Il chiamante (il loop di fill in
+    /// `render_ahead`) lo confronta con il budget per sapere quando
+    /// fermarsi.
     pub fn bytes_used(&self) -> usize {
         self.inner.lock().unwrap().bytes_used
     }
@@ -197,11 +206,11 @@ impl SharedFrameCache {
     /// il budget: inserendo sempre in ordine di priorità (più vicino alla
     /// testina prima, vedi doc di `reconcile`) questo basta, senza
     /// bisogno di sfrattare durante il fill.
-    pub fn insert(&self, media_id: MediaId, idx: FrameIdx, frame: Arc<FrameRgba>) {
+    pub fn insert(&self, media_id: MediaId, idx: FrameIdx, frame: Arc<FrameYuv420>) {
         let mut inner = self.inner.lock().unwrap();
-        let bytes = frame.data.len();
+        let bytes = frame_bytes(&frame);
         if let Some(old) = inner.entries.insert((media_id, idx), frame) {
-            inner.bytes_used -= old.data.len();
+            inner.bytes_used -= frame_bytes(&old);
         }
         inner.bytes_used += bytes;
     }
@@ -239,7 +248,7 @@ impl SharedFrameCache {
                 .iter()
                 .any(|w| w.media_id == media_id && w.contains(idx));
             if !keep {
-                *bytes_used -= frame.data.len();
+                *bytes_used -= frame_bytes(frame);
             }
             keep
         });
@@ -258,7 +267,7 @@ impl SharedFrameCache {
                     break;
                 }
                 if let Some(frame) = inner.entries.remove(&key) {
-                    inner.bytes_used -= frame.data.len();
+                    inner.bytes_used -= frame_bytes(&frame);
                 }
             }
         }
@@ -305,11 +314,17 @@ fn distance(media_id: MediaId, idx: FrameIdx, playhead: FrameIdx, window: &[Want
 mod tests {
     use super::*;
 
-    fn dummy_frame() -> Arc<FrameRgba> {
-        Arc::new(FrameRgba {
+    fn dummy_frame() -> Arc<FrameYuv420> {
+        Arc::new(FrameYuv420 {
             width: 1,
             height: 1,
-            data: vec![0, 0, 0, 0],
+            y: vec![0],
+            u: vec![0],
+            v: vec![0],
+            u_width: 1,
+            u_height: 1,
+            matrix: crate::decode::ColorMatrix::Bt601,
+            full_range: false,
         })
     }
 
@@ -358,11 +373,20 @@ mod tests {
         (a, b)
     }
 
-    fn frame_of_size(bytes: usize) -> Arc<FrameRgba> {
-        Arc::new(FrameRgba {
+    /// Frame con `bytes` byte totali, tutti nel piano Y (i test che lo
+    /// usano verificano solo la contabilità byte/eviction, non pixel
+    /// reali — dove finiscono i byte tra i tre piani non conta).
+    fn frame_of_size(bytes: usize) -> Arc<FrameYuv420> {
+        Arc::new(FrameYuv420 {
             width: 1,
             height: 1,
-            data: vec![0; bytes],
+            y: vec![0; bytes],
+            u: vec![],
+            v: vec![],
+            u_width: 0,
+            u_height: 0,
+            matrix: crate::decode::ColorMatrix::Bt601,
+            full_range: false,
         })
     }
 

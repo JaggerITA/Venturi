@@ -1,26 +1,92 @@
 //! Decodifica sequenziale/seek per singola clip.
 //!
 //! `Decoder` apre lo stream video di un media e permette di decodificare
-//! frame in sequenza (`next_frame`) o dopo un seek (`seek_to_time`). Per
-//! ora la conversione YUV->RGB è su CPU via `sws_scale`: è la via più
-//! rapida per avere un player funzionante. Il path ad alte prestazioni per
-//! il playback continuo (milestone 5+) terrà i frame in YUV e farà la
-//! conversione in shader nel compositor (vedi ARCHITECTURE.md § Compositing
-//! GPU) — qui il costo CPU per frame resta finché il viewer passa dalla
-//! texture egui standard.
+//! frame in sequenza (`next_frame`) o dopo un seek (`seek_to_time`).
+//! `sws_scale` normalizza *qualunque* formato pixel/profondità/sottocampionamento
+//! in ingresso (YUV420P, NV12, YUV422, 10-bit, ecc. — la stessa robustezza
+//! che aveva quando il target era RGBA) a YUV420P planare 8-bit: la
+//! conversione YUV→RGB *finale* resta sulla GPU, nello shader del
+//! compositor (REFACTOR_PIPELINE.md B3) — qui si esce con tre piani
+//! densi (Y/U/V) invece di un RGBA già espanso, ~2.5× meno byte per
+//! frame in cache a parità di risoluzione.
+//!
+//! La matrice di conversione (BT.601/709/2020) e il range (limited/full)
+//! vanno letti dal frame *decodificato originale* (prima dello scaling:
+//! `sws_scale` per un target YUV420P riformatta i piani ma non
+//! reinterpreta la semantica colore, quindi i metadati del sorgente
+//! restano validi per l'output) — un file che non li segnala esplicitamente
+//! (comune) ricade su un'euristica standard basata sulla risoluzione
+//! (vedi `guess_matrix`), la stessa convenzione usata da ffmpeg/dai
+//! player più comuni.
 
 use ffmpeg::format::Pixel;
 use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
+use ffmpeg::util::color;
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
 use vv_core::FrameIdx;
 
-pub struct FrameRgba {
+/// Matrice di conversione YUV→RGB da applicare nello shader del
+/// compositor (REFACTOR_PIPELINE.md B3) — i coefficienti Kr/Kb vivono
+/// lì, qui è solo la selezione. BT2020 è usata *solo* se segnalata
+/// esplicitamente dal sorgente, mai indovinata dall'euristica per
+/// risoluzione (troppo rara/specifica per un fallback sicuro).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMatrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+/// Frame decodificato in YUV420P planare 8-bit: tre piani densi
+/// (stride == larghezza del piano, niente padding — vedi
+/// `yuv420_from_decoded`), con i metadati colore necessari per
+/// convertirlo in RGB correttamente (REFACTOR_PIPELINE.md B3).
+pub struct FrameYuv420 {
     pub width: u32,
     pub height: u32,
-    /// RGBA8 non-premoltiplicato, stride == width*4 (righe già compattate).
-    pub data: Vec<u8>,
+    pub y: Vec<u8>,
+    /// Piani U/V sottocampionati 4:2:0: dimensioni `plane_width(1)` x
+    /// `plane_height(1)` del frame scalato (ffmpeg arrotonda per
+    /// eccesso su dimensioni dispari, non un semplice `width/2`).
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub u_width: u32,
+    pub u_height: u32,
+    pub matrix: ColorMatrix,
+    /// `true` = range JPEG/full (0-255), `false` = range MPEG/limited
+    /// (16-235 luma, 16-240 croma) — quest'ultimo è la norma per
+    /// contenuti video, l'euristica per `Range::Unspecified` assume
+    /// limited (vedi `finish_frame`).
+    pub full_range: bool,
+}
+
+/// Spazio colore da usare quando il sorgente non lo segnala
+/// esplicitamente (`color::Space::Unspecified`, comune: molti encoder
+/// non lo scrivono) — soglia per risoluzione, la stessa convenzione
+/// usata da ffmpeg e dalla maggior parte dei player: SD (sotto 720
+/// righe) è quasi sempre BT.601, HD e oltre BT.709. BT.2020 non è mai
+/// indovinata qui, solo se il sorgente la segnala esplicitamente.
+fn guess_matrix(space: color::Space, height: u32) -> ColorMatrix {
+    match space {
+        color::Space::BT709 => ColorMatrix::Bt709,
+        color::Space::BT2020NCL | color::Space::BT2020CL => ColorMatrix::Bt2020,
+        // SMPTE170M/BT470BG sono la stessa matrice "BT.601" (Kr/Kb
+        // identici, solo lo standard di origine NTSC/PAL cambia nome).
+        // Qualunque altra matrice segnalata esplicitamente (rara: YCGCO,
+        // SMPTE240M, ICTCP...) non ha un equivalente qui — ricade
+        // sull'euristica per risoluzione invece di un calcolo palesemente
+        // sbagliato con un'altra matrice arbitraria.
+        color::Space::SMPTE170M | color::Space::BT470BG => ColorMatrix::Bt601,
+        _ => {
+            if height >= 720 {
+                ColorMatrix::Bt709
+            } else {
+                ColorMatrix::Bt601
+            }
+        }
+    }
 }
 
 /// Decoder aperto su un singolo stream video di un media. Non `Sync`: ogni
@@ -77,7 +143,7 @@ impl Decoder {
             decoder.format(),
             decoder.width(),
             decoder.height(),
-            Pixel::RGBA,
+            Pixel::YUV420P,
             decoder.width(),
             decoder.height(),
             Flags::BILINEAR,
@@ -119,7 +185,7 @@ impl Decoder {
 
     /// Decodifica il prossimo frame video disponibile in ordine di
     /// presentazione. `Ok(None)` a fine stream.
-    pub fn next_frame(&mut self) -> Result<Option<(FrameIdx, FrameRgba)>, crate::MediaError> {
+    pub fn next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Video::empty();
 
         // Stream già esaurito in una chiamata precedente: non si può
@@ -163,45 +229,71 @@ impl Decoder {
     fn finish_frame(
         &mut self,
         decoded: &ffmpeg::frame::Video,
-    ) -> Result<(FrameIdx, FrameRgba), crate::MediaError> {
+    ) -> Result<(FrameIdx, FrameYuv420), crate::MediaError> {
         let pts = decoded.pts().unwrap_or(0);
         let secs =
             pts as f64 * self.time_base.numerator() as f64 / self.time_base.denominator() as f64;
         let idx = (secs * self.fps.as_f64()).round() as FrameIdx;
-        let rgba = rgba_from_decoded(&mut self.scaler, decoded)?;
-        Ok((idx, rgba))
+        // Letti dal frame *originale* (prima dello scaling): sws_scale
+        // per un target YUV420P riformatta i piani ma non ne reinterpreta
+        // la semantica colore, i metadati del sorgente restano validi
+        // (vedi doc di modulo).
+        let matrix = guess_matrix(decoded.color_space(), decoded.height());
+        let full_range = decoded.color_range() == color::Range::JPEG;
+        let frame = yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range)?;
+        Ok((idx, frame))
     }
 }
 
-fn rgba_from_decoded(
+fn yuv420_from_decoded(
     scaler: &mut Scaler,
     decoded: &ffmpeg::frame::Video,
-) -> Result<FrameRgba, crate::MediaError> {
-    let mut rgba = ffmpeg::frame::Video::empty();
-    scaler.run(decoded, &mut rgba)?;
+    matrix: ColorMatrix,
+    full_range: bool,
+) -> Result<FrameYuv420, crate::MediaError> {
+    let mut scaled = ffmpeg::frame::Video::empty();
+    scaler.run(decoded, &mut scaled)?;
 
-    let width = rgba.width();
-    let height = rgba.height();
-    let stride = rgba.stride(0);
-    let plane = rgba.data(0);
-    let row_bytes = (width * 4) as usize;
+    // sws_scale può restituire righe con padding (stride > row_bytes)
+    // su ciascun piano: ricompattiamo per avere buffer densi da caricare
+    // come texture, un piano alla volta (`plane_width`/`plane_height`
+    // riflettono le dimensioni reali allocate da ffmpeg per quel piano,
+    // niente calcoli a mano su arrotondamenti di sottocampionamento).
+    let pack_plane = |index: usize| -> Vec<u8> {
+        let w = scaled.plane_width(index) as usize;
+        let h = scaled.plane_height(index) as usize;
+        let stride = scaled.stride(index);
+        let plane = scaled.data(index);
+        let mut out = Vec::with_capacity(w * h);
+        for row in 0..h {
+            let start = row * stride;
+            out.extend_from_slice(&plane[start..start + w]);
+        }
+        out
+    };
 
-    // sws_scale può restituire righe con padding (stride > row_bytes):
-    // ricompattiamo per avere un buffer denso da caricare come texture.
-    let mut data = Vec::with_capacity(row_bytes * height as usize);
-    for y in 0..height as usize {
-        let start = y * stride;
-        data.extend_from_slice(&plane[start..start + row_bytes]);
-    }
+    let width = scaled.width();
+    let height = scaled.height();
+    let u_width = scaled.plane_width(1);
+    let u_height = scaled.plane_height(1);
+    let y = pack_plane(0);
+    let u = pack_plane(1);
+    let v = pack_plane(2);
 
-    Ok(FrameRgba {
+    Ok(FrameYuv420 {
         width,
         height,
-        data,
+        y,
+        u,
+        v,
+        u_width,
+        u_height,
+        matrix,
+        full_range,
     })
 }
 
-pub fn decode_first_frame(path: &Path) -> Result<FrameRgba, crate::MediaError> {
+pub fn decode_first_frame(path: &Path) -> Result<FrameYuv420, crate::MediaError> {
     let mut decoder = Decoder::open(path)?;
     decoder
         .next_frame()?
@@ -213,6 +305,45 @@ pub fn decode_first_frame(path: &Path) -> Result<FrameRgba, crate::MediaError> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn guess_matrix_uses_the_signaled_space_when_present() {
+        assert_eq!(guess_matrix(color::Space::BT709, 240), ColorMatrix::Bt709);
+        assert_eq!(
+            guess_matrix(color::Space::BT2020NCL, 240),
+            ColorMatrix::Bt2020
+        );
+        assert_eq!(
+            guess_matrix(color::Space::SMPTE170M, 1080),
+            ColorMatrix::Bt601,
+            "una matrice SD segnalata esplicitamente vince sull'euristica per risoluzione"
+        );
+    }
+
+    #[test]
+    fn guess_matrix_falls_back_to_a_resolution_heuristic_when_unspecified() {
+        assert_eq!(
+            guess_matrix(color::Space::Unspecified, 240),
+            ColorMatrix::Bt601,
+            "SD non segnalato: BT.601"
+        );
+        assert_eq!(
+            guess_matrix(color::Space::Unspecified, 1080),
+            ColorMatrix::Bt709,
+            "HD non segnalato: BT.709"
+        );
+    }
+
+    #[test]
+    fn guess_matrix_never_guesses_bt2020_from_the_heuristic() {
+        // BT.2020 è troppo specifica per essere indovinata: anche a
+        // risoluzioni UHD, senza segnalazione esplicita si resta su
+        // BT.709, mai BT.2020.
+        assert_eq!(
+            guess_matrix(color::Space::Unspecified, 2160),
+            ColorMatrix::Bt709
+        );
+    }
 
     fn make_test_clip(name: &str, duration_secs: u32) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("vv-media-decode-test");
@@ -293,25 +424,33 @@ mod tests {
         let frame = decode_first_frame(&path).expect("decode fallito");
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 240);
-        assert_eq!(frame.data.len(), 320 * 240 * 4);
+        assert_eq!(frame.y.len(), 320 * 240, "piano Y denso, 1 byte/pixel");
+        // 4:2:0: piani croma a metà risoluzione (arrotondata per eccesso,
+        // qui esatta perché 320x240 è già pari).
+        assert_eq!(frame.u_width, 160);
+        assert_eq!(frame.u_height, 120);
+        assert_eq!(frame.u.len(), 160 * 120);
+        assert_eq!(frame.v.len(), 160 * 120);
 
         // Il pattern testsrc non è mai uniforme: se troviamo più di un
-        // valore distinto tra i byte RGB, lo stride/formato sono corretti.
-        let distinct: std::collections::HashSet<u8> = frame
-            .data
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .step_by(37) // campiona, non serve leggere ogni pixel
-            .map(|px| px[0])
-            .collect();
+        // valore distinto nel piano Y, lo stride/formato sono corretti.
+        let distinct: std::collections::HashSet<u8> =
+            frame.y.iter().step_by(37).copied().collect();
         assert!(
             distinct.len() > 5,
             "i pixel decodificati sembrano degeneri: {distinct:?}"
         );
+    }
 
-        // Alpha sempre opaco per un frame video.
-        assert!(frame.data.as_chunks::<4>().0.iter().all(|px| px[3] == 255));
+    #[test]
+    fn decode_first_frame_defaults_to_mpeg_limited_range_and_a_resolution_based_matrix() {
+        // make_test_clip non segnala esplicitamente matrice/range (comune
+        // per contenuti generati/consumer): 320x240 è sotto la soglia
+        // 720p, deve ricadere su BT.601 + limited range.
+        let path = make_test_clip("colorspace.mp4", 1);
+        let frame = decode_first_frame(&path).expect("decode fallito");
+        assert_eq!(frame.matrix, ColorMatrix::Bt601);
+        assert!(!frame.full_range, "il range di default per video deve essere limited (MPEG), non full");
     }
 
     #[test]

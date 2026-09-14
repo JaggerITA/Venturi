@@ -35,7 +35,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
-use vv_media::{Decoder, FrameRgba, SharedFrameCache, WantedRange};
+use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
 const VIDEO_TRACK: usize = 0;
 
@@ -150,7 +150,7 @@ impl RenderAhead {
 
     /// Il frame decodificato per `(media_id, source_frame)`, se già in
     /// cache.
-    pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameRgba>> {
+    pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameYuv420>> {
         self.caches.get(media_id, source_frame)
     }
 
@@ -182,7 +182,7 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
         _project: &Project,
         clip: &vv_core::Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<FrameRgba>>, String> {
+    ) -> Result<Option<Arc<FrameYuv420>>, String> {
         let Some((media_id, source_frame)) =
             crate::frame_provider::media_source_frame(clip, timeline_frame)
         else {

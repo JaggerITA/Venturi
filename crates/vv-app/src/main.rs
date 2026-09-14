@@ -1123,7 +1123,7 @@ impl VibeVideoApp {
     /// `browsing_decode_ahead` durante un'anteprima "grezza" dal media
     /// pool, o `render_ahead` (il buffer a livello di timeline) per la
     /// clip Media attiva sulla timeline.
-    fn current_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameRgba>, FrameIdx)> {
+    fn current_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameYuv420>, FrameIdx)> {
         if self.browsing_media.is_some() {
             let player = self.preview_player.as_ref()?;
             let decode_ahead = self.browsing_decode_ahead.as_ref()?;
@@ -3058,9 +3058,7 @@ impl eframe::App for VibeVideoApp {
                         .map(|e| e.transform.value_at(source_frame))
                         .unwrap_or_default();
                     let texture = self.compositor.render_frame_to_texture(
-                        &frame.data,
-                        frame.width,
-                        frame.height,
+                        &frame_provider::as_render_yuv_frame(&frame),
                         &transform,
                         frame.width,
                         frame.height,

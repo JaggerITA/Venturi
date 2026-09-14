@@ -13,12 +13,14 @@
 
 use std::sync::Arc;
 use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project};
-use vv_media::FrameRgba;
+use vv_media::FrameYuv420;
 
-/// Procura il frame RGBA per una clip Media a una data posizione di
-/// timeline. `&mut self` perché l'implementazione per l'export tiene
-/// stato (il decoder aperto per la clip attiva) — quella per l'anteprima
-/// non ne ha bisogno, ma il trait resta uniforme per le due strategie.
+/// Procura il frame YUV420 decodificato (REFACTOR_PIPELINE.md B3: non
+/// più RGBA, la conversione a RGB avviene nello shader del compositor)
+/// per una clip Media a una data posizione di timeline. `&mut self`
+/// perché l'implementazione per l'export tiene stato (il decoder aperto
+/// per la clip attiva) — quella per l'anteprima non ne ha bisogno, ma
+/// il trait resta uniforme per le due strategie.
 pub trait FrameProvider {
     /// `Err` solo per un fallimento reale (media non trovato, errore di
     /// decodifica) — mai per "non disponibile ora", che è `Ok(None)`:
@@ -35,7 +37,7 @@ pub trait FrameProvider {
         project: &Project,
         clip: &Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<FrameRgba>>, String>;
+    ) -> Result<Option<Arc<FrameYuv420>>, String>;
 }
 
 /// `(media_id, frame_sorgente)` per `clip` alla posizione di timeline
@@ -49,4 +51,29 @@ pub fn media_source_frame(clip: &Clip, timeline_frame: FrameIdx) -> Option<(Medi
         return None;
     };
     Some((*media_id, clip.source_frame_at(timeline_frame)))
+}
+
+/// `vv_render::YuvFrame` in prestito da un `vv_media::FrameYuv420` — il
+/// compositor (vv-render) non dipende da vv-media (stessa convenzione
+/// già in uso per il resto della sua API, prende piani di byte grezzi,
+/// non un tipo di vv-media), quindi entrambi i chiamanti di
+/// `FrameProvider` (anteprima in `main.rs`, export in `export.rs`)
+/// passano di qui prima di chiamare `Compositor::render_frame`/
+/// `render_frame_to_texture`.
+pub fn as_render_yuv_frame(frame: &FrameYuv420) -> vv_render::YuvFrame<'_> {
+    vv_render::YuvFrame {
+        y: &frame.y,
+        width: frame.width,
+        height: frame.height,
+        u: &frame.u,
+        v: &frame.v,
+        chroma_width: frame.u_width,
+        chroma_height: frame.u_height,
+        matrix: match frame.matrix {
+            vv_media::ColorMatrix::Bt601 => vv_render::ColorMatrix::Bt601,
+            vv_media::ColorMatrix::Bt709 => vv_render::ColorMatrix::Bt709,
+            vv_media::ColorMatrix::Bt2020 => vv_render::ColorMatrix::Bt2020,
+        },
+        full_range: frame.full_range,
+    }
 }
