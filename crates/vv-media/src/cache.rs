@@ -220,6 +220,19 @@ impl SharedFrameCache {
         inner.bytes_used += bytes;
     }
 
+    /// Svuota l'intera cache: da chiamare quando ciò che è già in cache
+    /// non è più affidabile a prescindere da finestra/budget — es. il
+    /// toggle "usa proxy" cambia (i frame già cachati sotto le stesse
+    /// chiavi `(media_id, idx)` potrebbero venire da una risoluzione
+    /// diversa da quella che si vuole adesso, e `reconcile` da solo non
+    /// lo scoprirebbe mai: la sua unica nozione di "scartare" è
+    /// finestra/budget, non provenienza).
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.clear();
+        inner.bytes_used = 0;
+    }
+
     /// Un solo pass di riconciliazione, chiamato una volta a ogni ciclo
     /// di poll (prima del fill) dopo aver aggiornato playhead e i
     /// segmenti della finestra corrente. Sostituisce con un'unica
@@ -420,6 +433,20 @@ mod tests {
 
         assert_eq!(cache.cached_ranges(media_a), vec![(50, 50)]);
         assert_eq!(cache.bytes_used(), 4);
+    }
+
+    #[test]
+    fn shared_cache_clear_empties_every_media_and_resets_bytes_used() {
+        let (media_a, media_b) = two_media_ids();
+        let cache = SharedFrameCache::new();
+        cache.insert(media_a, 1, frame_of_size(4));
+        cache.insert(media_b, 1, frame_of_size(4));
+
+        cache.clear();
+
+        assert!(cache.cached_ranges(media_a).is_empty());
+        assert!(cache.cached_ranges(media_b).is_empty());
+        assert_eq!(cache.bytes_used(), 0);
     }
 
     #[test]

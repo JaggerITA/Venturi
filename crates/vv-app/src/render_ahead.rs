@@ -82,6 +82,14 @@ const MAX_SEEK_THRESHOLD_FRAMES: FrameIdx = 300;
 
 enum Command {
     UpdateProject(Box<Project>, TimelineId),
+    /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy): passa dal
+    /// canale comandi, non da un atomico come `target`/`cache_budget_bytes`,
+    /// perché il worker deve reagire alla *transizione* — svuotare la
+    /// cache condivisa (vedi `SharedFrameCache::clear`, i frame già
+    /// cachati sotto le stesse chiavi potrebbero venire dalla
+    /// risoluzione sbagliata) e i decoder aperti — non solo leggere un
+    /// valore aggiornato al prossimo ciclo.
+    SetProxyEnabled(bool),
     Stop,
 }
 
@@ -93,6 +101,16 @@ enum Command {
 fn debug_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("VV_DEBUG_RENDER_AHEAD").is_ok())
+}
+
+/// Handle `Arc` condivisi tra `RenderAhead` (thread UI) e il worker
+/// (thread dedicato) — raggruppati per non far crescere il numero di
+/// argomenti di `worker_loop` a ogni nuovo stato condiviso.
+struct SharedState {
+    caches: Arc<SharedFrameCache>,
+    target: Arc<AtomicI64>,
+    cache_budget_bytes: Arc<AtomicUsize>,
+    caught_up: Arc<AtomicBool>,
 }
 
 /// Vedi il doc del modulo. Uno per `VibeVideoApp` (non uno per clip: la
@@ -111,27 +129,26 @@ pub struct RenderAhead {
 }
 
 impl RenderAhead {
-    pub fn spawn(project: Project, timeline_id: TimelineId, cache_budget_bytes: usize) -> Self {
+    pub fn spawn(
+        project: Project,
+        timeline_id: TimelineId,
+        cache_budget_bytes: usize,
+        proxy_enabled: bool,
+    ) -> Self {
         let caches = Arc::new(SharedFrameCache::new());
         let target = Arc::new(AtomicI64::new(0));
         let budget = Arc::new(AtomicUsize::new(cache_budget_bytes));
         let caught_up = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
 
-        let thread_caches = caches.clone();
-        let thread_target = target.clone();
-        let thread_budget = budget.clone();
-        let thread_caught_up = caught_up.clone();
+        let thread_shared = SharedState {
+            caches: caches.clone(),
+            target: target.clone(),
+            cache_budget_bytes: budget.clone(),
+            caught_up: caught_up.clone(),
+        };
         let handle = std::thread::spawn(move || {
-            worker_loop(
-                rx,
-                thread_caches,
-                thread_target,
-                thread_budget,
-                thread_caught_up,
-                project,
-                timeline_id,
-            );
+            worker_loop(rx, thread_shared, project, timeline_id, proxy_enabled);
         });
 
         Self {
@@ -184,6 +201,14 @@ impl RenderAhead {
             Box::new(project.clone()),
             timeline_id,
         ));
+    }
+
+    /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy): il worker
+    /// svuota la cache condivisa e riapre da zero ogni decoder sul path
+    /// giusto per il nuovo stato — vedi doc di `Command::SetProxyEnabled`.
+    pub fn set_proxy_enabled(&self, enabled: bool) {
+        self.caught_up.store(false, Ordering::Relaxed);
+        let _ = self.tx.send(Command::SetProxyEnabled(enabled));
     }
 
     /// Il frame decodificato per `(media_id, source_frame)`, se già in
@@ -249,6 +274,14 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
 /// essere riaperti ogni volta che il segmento "torna" al primo.
 struct OpenDecoder {
     decoder: Decoder,
+    /// Il path da cui questo decoder è stato aperto — confrontato a ogni
+    /// ciclo (`position_decoder`) contro quello appena risolto per lo
+    /// stesso media: se diverso (un proxy è appena diventato disponibile
+    /// in background, o il toggle "usa proxy" è cambiato — REFACTOR_PIPELINE.md
+    /// proxy), il decoder aperto sul path vecchio non ha alcun senso da
+    /// riusare/seekare, va riaperto da zero sul nuovo indipendentemente
+    /// da `needs_seek`.
+    resolved_path: std::path::PathBuf,
     next_frame: FrameIdx,
     /// `true` subito dopo un seek reale o la primissima apertura: il
     /// prossimo frame decodificato è per costruzione un keyframe (un
@@ -269,9 +302,10 @@ struct OpenDecoder {
 }
 
 impl OpenDecoder {
-    fn fresh(decoder: Decoder) -> Self {
+    fn fresh(decoder: Decoder, resolved_path: std::path::PathBuf) -> Self {
         Self {
             decoder,
+            resolved_path,
             next_frame: 0,
             just_repositioned: true,
             last_keyframe_landed: None,
@@ -314,13 +348,17 @@ impl OpenDecoder {
 
 fn worker_loop(
     rx: mpsc::Receiver<Command>,
-    caches: Arc<SharedFrameCache>,
-    target: Arc<AtomicI64>,
-    cache_budget_bytes: Arc<AtomicUsize>,
-    caught_up: Arc<AtomicBool>,
+    shared: SharedState,
     mut project: Project,
     mut timeline_id: TimelineId,
+    mut proxy_enabled: bool,
 ) {
+    let SharedState {
+        caches,
+        target,
+        cache_budget_bytes,
+        caught_up,
+    } = shared;
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Decoder aperti per la finestra *dietro* la testina, separati da
     // `open`: vedi doc di `walk_and_fill` sul perché condividere lo
@@ -349,6 +387,12 @@ fn worker_loop(
                     open.clear();
                     open_behind.clear();
                 }
+                Ok(Command::SetProxyEnabled(v)) => {
+                    proxy_enabled = v;
+                    caches.clear();
+                    open.clear();
+                    open_behind.clear();
+                }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -358,6 +402,12 @@ fn worker_loop(
                 Ok(Command::UpdateProject(p, id)) => {
                     project = *p;
                     timeline_id = id;
+                    open.clear();
+                    open_behind.clear();
+                }
+                Ok(Command::SetProxyEnabled(v)) => {
+                    proxy_enabled = v;
+                    caches.clear();
                     open.clear();
                     open_behind.clear();
                 }
@@ -373,6 +423,12 @@ fn worker_loop(
                 Command::UpdateProject(p, id) => {
                     project = *p;
                     timeline_id = id;
+                    open.clear();
+                    open_behind.clear();
+                }
+                Command::SetProxyEnabled(v) => {
+                    proxy_enabled = v;
+                    caches.clear();
                     open.clear();
                     open_behind.clear();
                 }
@@ -392,6 +448,7 @@ fn worker_loop(
             from,
             budget,
             went_backward,
+            proxy_enabled,
             &target,
         );
         retry_immediately = outcome.interrupted;
@@ -590,6 +647,13 @@ fn position_decoder(
     segment_start: FrameIdx,
     went_backward: bool,
 ) -> Positioned {
+    // Un proxy appena diventato disponibile (o il toggle "usa proxy"
+    // cambiato) fa risolvere un path diverso per lo stesso media: il
+    // decoder aperto sul path vecchio va scartato, non riposizionato —
+    // vedi doc di `OpenDecoder::resolved_path`.
+    if open.get(&media_id).is_some_and(|o| o.resolved_path != path) {
+        open.remove(&media_id);
+    }
     if let Some(o) = open.get_mut(&media_id) {
         let needs_seek = segment_start > o.next_frame + o.seek_threshold_frames()
             || (went_backward && segment_start < o.next_frame);
@@ -640,7 +704,7 @@ fn position_decoder(
             t.elapsed()
         );
     }
-    open.insert(media_id, OpenDecoder::fresh(decoder));
+    open.insert(media_id, OpenDecoder::fresh(decoder, path.to_path_buf()));
     Positioned::Opened
 }
 
@@ -700,6 +764,7 @@ fn walk_and_fill(
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
     went_backward: bool,
+    proxy_enabled: bool,
     target: &AtomicI64,
 ) -> WalkOutcome {
     let Some(timeline) = project.timelines.get(timeline_id) else {
@@ -747,6 +812,7 @@ fn walk_and_fill(
         went_backward,
         cache_budget_bytes,
         from_frame,
+        proxy_enabled,
         target,
     };
     // In avanti prima, sempre: il frame che serve ORA per non fermare la
@@ -783,6 +849,10 @@ struct FillContext<'a> {
     went_backward: bool,
     cache_budget_bytes: usize,
     from_frame: FrameIdx,
+    /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy) come letto
+    /// dall'ultimo `Command::SetProxyEnabled` — vedi `fill_segments`
+    /// dove decide se risolvere il path sorgente o quello del proxy.
+    proxy_enabled: bool,
     target: &'a AtomicI64,
 }
 
@@ -800,13 +870,20 @@ fn fill_segments(
     open: &mut HashMap<MediaId, OpenDecoder>,
 ) -> ControlFlow<WalkOutcome> {
     for segment in segments {
-        let Some(path) = ctx
-            .project
-            .media_pool
-            .get(segment.media_id)
-            .map(|m| m.path.clone())
-        else {
+        let Some(item) = ctx.project.media_pool.get(segment.media_id) else {
             continue;
+        };
+        // Proxy solo se il toggle è attivo *e* quello per questo media
+        // è già pronto (REFACTOR_PIPELINE.md proxy) — il caso "toggle
+        // attivo ma proxy non ancora generato in background" ricade sul
+        // sorgente originale senza bisogno di un caso a parte: appena
+        // `generate_proxy` finisce (thread separato, vedi `main.rs`),
+        // il prossimo ciclo lo trova su disco e ci passa da sé (il
+        // confronto path in `position_decoder` se ne accorge).
+        let path = if ctx.proxy_enabled && vv_media::proxy::proxy_exists(item.content_hash) {
+            vv_media::proxy::proxy_path_for(item.content_hash)
+        } else {
+            item.path.clone()
         };
         if position_decoder(
             open,
@@ -1260,7 +1337,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
         // Target vicino alla fine della prima clip: la finestra di
         // lookahead (3s = 75 frame a 25fps) attraversa abbondantemente il
         // taglio a 50.
@@ -1324,7 +1401,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
         render_ahead.set_target(40);
 
         // Aspetta che il buffer arrivi almeno fino al taglio.
@@ -1365,7 +1442,7 @@ mod tests {
     fn open_decoder_seek_threshold_uses_the_default_fallback_before_any_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_fresh.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let od = OpenDecoder::fresh(decoder);
+        let od = OpenDecoder::fresh(decoder, path.clone());
         assert_eq!(od.seek_threshold_frames(), DEFAULT_SEEK_THRESHOLD_FRAMES);
     }
 
@@ -1375,7 +1452,7 @@ mod tests {
     fn open_decoder_records_the_observed_gap_between_two_consecutive_landings() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_observed.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let mut od = OpenDecoder::fresh(decoder);
+        let mut od = OpenDecoder::fresh(decoder, path.clone());
 
         od.record_keyframe_landing(25);
         od.record_keyframe_landing(50);
@@ -1391,7 +1468,7 @@ mod tests {
     fn open_decoder_gop_estimate_never_grows_from_a_wider_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_min.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let mut od = OpenDecoder::fresh(decoder);
+        let mut od = OpenDecoder::fresh(decoder, path.clone());
 
         od.record_keyframe_landing(0);
         od.record_keyframe_landing(25); // distanza 25: stima = 25
@@ -1416,7 +1493,7 @@ mod tests {
     fn open_decoder_gop_estimate_is_capped_even_on_the_first_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_cap.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let mut od = OpenDecoder::fresh(decoder);
+        let mut od = OpenDecoder::fresh(decoder, path.clone());
 
         od.record_keyframe_landing(0);
         od.record_keyframe_landing(10_000);
@@ -1431,28 +1508,63 @@ mod tests {
     /// volta (anche secondi), e se quel costo eccede la tolleranza il
     /// target avanza oltre durante l'apertura stessa, scatenandone
     /// un'altra al giro successivo: un loop che non recupera mai
-    /// (osservato: un frame ogni pochi secondi). Verificato passando un
-    /// path inesistente al secondo giro: se il decoder venisse
-    /// riaperto invece di riusato, questa chiamata fallirebbe.
+    /// (osservato: un frame ogni pochi secondi). Verificato dal valore
+    /// di ritorno: `Seeked` (riuso) invece di `Opened` (riapertura) alla
+    /// seconda chiamata sullo stesso path.
+    ///
+    /// Nota: qui il path è lo stesso a entrambe le chiamate di
+    /// proposito — un path *diverso* per lo stesso media_id forza ora
+    /// una riapertura anche a parità di posizione (vedi
+    /// `position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek`,
+    /// il proxy che diventa disponibile a metà sessione ha bisogno
+    /// esattamente di questo).
     #[test]
     fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening_the_file() {
         let path = make_test_clip("vv-app-render-ahead-test", "reuse.mp4", 3);
-        let bogus_path = std::path::PathBuf::from("/nonexistent/reuse.mp4");
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
             position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Opened
         );
 
         assert_eq!(
-            position_decoder(&mut open, media_a, &bogus_path, 1000, false),
+            position_decoder(&mut open, media_a, &path, 1000, false),
             Positioned::Seeked,
-            "il path bogus non deve impedire il riuso del decoder già aperto"
+            "un seek reale su un media già aperto deve riusare il decoder, non riaprirlo"
         );
-        assert_eq!(open.get(&media_a).unwrap().next_frame, 0);
+    }
+
+    /// REFACTOR_PIPELINE.md proxy: un proxy che diventa disponibile in
+    /// background (o il toggle "usa proxy" che cambia) fa risolvere un
+    /// path diverso per lo stesso media_id — il decoder aperto sul path
+    /// vecchio non ha alcun senso da riusare/seekare (punta a un file
+    /// diverso), va riaperto da zero anche se la posizione richiesta
+    /// sarebbe altrimenti "abbastanza vicina" da non giustificare un
+    /// seek.
+    #[test]
+    fn position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek() {
+        let path_a = make_test_clip("vv-app-render-ahead-test", "swap_a.mp4", 2);
+        let path_b = make_test_clip("vv-app-render-ahead-test", "swap_b.mp4", 2);
+        let (media_a, _) = two_media_ids();
+
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path_a, 0, false),
+            Positioned::Opened
+        );
+
+        // Stessa posizione richiesta (0): senza il controllo sul path
+        // risolto, `needs_seek` sarebbe `false` (0 non è "troppo avanti"
+        // rispetto a un decoder appena aperto) e la chiamata
+        // restituirebbe `Reused` — riusando un decoder che punta al file
+        // sbagliato.
+        assert_eq!(
+            position_decoder(&mut open, media_a, &path_b, 0, false),
+            Positioned::Opened,
+            "il path è cambiato: deve riaprire sul nuovo, non riusare il decoder del vecchio"
+        );
     }
 
     /// Regressione per il bug segnalato: durante il playback normale il
@@ -1468,7 +1580,6 @@ mod tests {
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
             position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Opened
@@ -1542,6 +1653,7 @@ mod tests {
             0,
             generous_budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(0),
         );
 
@@ -1599,6 +1711,7 @@ mod tests {
             60,
             generous_budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(60),
         );
 
@@ -1657,6 +1770,7 @@ mod tests {
             0,
             tiny_budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(0),
         );
 
@@ -1724,6 +1838,7 @@ mod tests {
             0,
             100_000_000,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &drifted_target,
         );
         assert!(
@@ -1802,6 +1917,7 @@ mod tests {
             40,
             budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(40),
         );
 
@@ -1882,6 +1998,7 @@ mod tests {
             40,
             budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(40),
         );
 
@@ -1933,7 +2050,6 @@ mod tests {
         let path = make_test_clip("vv-app-render-ahead-test", "same_media_two_segments.mp4", 3);
         let (media_a, _) = two_media_ids();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
 
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
         // (come ai due lati di un taglio), source_start 10 e poi 25.
@@ -2037,6 +2153,7 @@ mod tests {
             0,
             total_budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(0),
         );
         let frames_b_shared = frames_cached(&caches.cached_ranges(media_b));
@@ -2054,6 +2171,7 @@ mod tests {
             200,
             total_budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(200),
         );
         let ranges = caches.cached_ranges(media_b);
@@ -2099,7 +2217,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
         render_ahead.set_target(80);
 
         let start = std::time::Instant::now();
@@ -2173,7 +2291,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
         render_ahead.set_target(100);
 
         // Attendi non solo che il buffer copra 100, ma che i cicli di
@@ -2286,6 +2404,7 @@ mod tests {
                 from,
                 budget,
                 went_backward,
+                false, // proxy_enabled: irrilevante per questo test
                 &AtomicI64::new(from),
             );
         }
@@ -2310,6 +2429,7 @@ mod tests {
             80,
             budget,
             true,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(80),
         );
 
@@ -2388,6 +2508,7 @@ mod tests {
             300,
             budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(300),
         );
         let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
@@ -2408,6 +2529,7 @@ mod tests {
             270,
             budget,
             true,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(270),
         );
 
@@ -2490,6 +2612,7 @@ mod tests {
             10,
             budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(10),
         );
 
@@ -2503,6 +2626,7 @@ mod tests {
             target,
             budget,
             false,
+            false, // proxy_enabled: irrilevante per questo test
             &AtomicI64::new(target),
         );
         for _ in 0..15 {
@@ -2516,6 +2640,7 @@ mod tests {
                 target,
                 budget,
                 false,
+                false, // proxy_enabled: irrilevante per questo test
                 &AtomicI64::new(target),
             );
             let ranges = caches.cached_ranges(media_a);

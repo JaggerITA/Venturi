@@ -16,6 +16,7 @@
 mod export;
 mod frame_provider;
 mod player;
+mod proxy_worker;
 mod render_ahead;
 mod timeline_ui;
 
@@ -159,6 +160,28 @@ struct VibeVideoApp {
     /// dall'hardware/uso dell'utente, non da una scelta valida per tutti.
     cache_budget_bytes: usize,
 
+    /// Toggle "usa proxy" (menu "Visualizza", REFACTOR_PIPELINE.md
+    /// proxy): quando attivo, l'anteprima/editing decodifica dal proxy
+    /// tutto-intra a bassa risoluzione invece che dal sorgente, se già
+    /// generato — elimina il costo "cammina dal keyframe più vicino" che
+    /// rende lo scrub veloce impossibile su sorgenti long-GOP (misurato:
+    /// 0 frame esatti disponibili durante uno scrub veloce a 1080p,
+    /// senza proxy). L'export ignora sempre questo toggle: usa solo i
+    /// sorgenti originali, mai il proxy. Attivo di default; da
+    /// disattivare per lavori che richiedono la qualità piena (color
+    /// grading — non ancora implementato — o verificare dettagli fini).
+    /// Non persiste tra un riavvio e l'altro, come ogni altra
+    /// impostazione in vibevideo oggi.
+    proxy_enabled: bool,
+    /// Genera in background il proxy di ogni media importato (vedi
+    /// `vv_media::proxy`): sempre attivo indipendentemente da
+    /// `proxy_enabled`, così un proxy è già pronto appena l'utente
+    /// riattiva il toggle, invece di aspettare la prima volta che serve
+    /// davvero. `None` finché non è mai stato importato nulla (spawnato
+    /// alla prima `import_media`, non subito: niente thread in più per
+    /// una sessione che non importa mai media).
+    proxy_worker: Option<proxy_worker::ProxyWorker>,
+
     /// Clip la cui anteprima è attualmente mostrata: guida sia il player
     /// (quale media riprodurre) sia il transform/gain applicati (milestone
     /// 5). `None` se non c'è ancora una clip selezionata.
@@ -279,6 +302,8 @@ impl Default for VibeVideoApp {
             browsing_decode_ahead: None,
             audio_cache: HashMap::new(),
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
+            proxy_enabled: true,
+            proxy_worker: None,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
@@ -317,6 +342,14 @@ impl VibeVideoApp {
                     meta,
                     content_hash,
                 });
+                // Sempre accodato, a prescindere da `proxy_enabled`: il
+                // toggle controlla solo se l'anteprima *usa* il proxy
+                // già pronto, non se viene generato — così è già lì
+                // quando/se l'utente lo riattiva, invece di aspettare la
+                // prima volta che serve davvero.
+                self.proxy_worker
+                    .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
+                    .enqueue(path.clone(), content_hash);
                 self.preview_media(media_id);
             }
             Err(e) => self.import_error = Some(e.to_string()),
@@ -1008,6 +1041,7 @@ impl VibeVideoApp {
                 self.project.clone(),
                 timeline_id,
                 self.cache_budget_bytes,
+                self.proxy_enabled,
             ));
             self.render_ahead_generation = self.history.generation();
         }
@@ -2346,6 +2380,20 @@ impl eframe::App for VibeVideoApp {
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
                         );
                     ui.separator();
+                    if ui
+                        .checkbox(&mut self.proxy_enabled, "Usa proxy")
+                        .on_hover_text(
+                            "Anteprima/editing da una copia a bassa risoluzione generata in \
+                             background invece che dal sorgente: scrub molto più fluido su \
+                             sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
+                             sorgenti originali. Disattiva per lavori che richiedono la \
+                             qualità piena.",
+                        )
+                        .changed()
+                        && let Some(render_ahead) = &self.render_ahead
+                    {
+                        render_ahead.set_proxy_enabled(self.proxy_enabled);
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Cache video:");
                         // Espresso in MB nella UI, ma `cache_budget_bytes`
