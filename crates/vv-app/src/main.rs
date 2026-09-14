@@ -1948,6 +1948,16 @@ impl eframe::App for VibeVideoApp {
             player.set_gain_db(gain);
         }
 
+        // Eventi Copy/Paste raccolti qui dentro (vedi sotto) ma gestiti
+        // *fuori* dalla chiusura di `ui.input`: `Context::input` tiene il
+        // lock in scrittura del contesto per tutta la sua durata, e
+        // `handle_clipboard_events` deve poter chiamare `ctx.copy_text`
+        // (che lo richiede anche lui) — farlo da dentro la chiusura
+        // rientrava sullo stesso lock non rientrante e faceva deadlockare
+        // l'intera UI al primo Ctrl+C (bug segnalato: "si blocca tutto
+        // appena premo Ctrl+C su una clip", panic "Failed to acquire
+        // RwLock write... Deadlock?").
+        let mut clipboard_events: Vec<egui::Event> = Vec::new();
         ui.input(|i| {
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 self.delete_selected();
@@ -2000,10 +2010,14 @@ impl eframe::App for VibeVideoApp {
             // semantici `Copy`/`Paste`, non come normali pressioni di
             // tasto — con `key_pressed` la scorciatoia risultava
             // silenziosamente inattiva (il pulsante in menu, che chiama
-            // gli stessi metodi, funzionava comunque). Vedi il doc di
-            // `handle_clipboard_events` per il bug più subdolo trovato
-            // dopo.
-            self.handle_clipboard_events(ui, &i.events);
+            // gli stessi metodi, funzionava comunque). Gestiti fuori da
+            // qui (vedi sopra), solo raccolti: `handle_clipboard_events`
+            // per il bug più subdolo trovato dopo.
+            for event in &i.events {
+                if matches!(event, egui::Event::Copy | egui::Event::Paste(_)) {
+                    clipboard_events.push(event.clone());
+                }
+            }
             // Ctrl+"+"/Ctrl+"-" (anche Ctrl+"=", stesso tasto di "+" non
             // shiftato sulla maggior parte delle tastiere): zoom della
             // timeline.
@@ -2016,6 +2030,7 @@ impl eframe::App for VibeVideoApp {
                 self.timeline_state.zoom_out();
             }
         });
+        self.handle_clipboard_events(ui, &clipboard_events);
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
