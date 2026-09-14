@@ -317,6 +317,15 @@ pub fn show_timeline(
     // player video comuni (es. la barra grigia sotto la barra di
     // avanzamento di YouTube).
     buffered_ranges: &[(FrameIdx, FrameIdx)],
+    // Intervalli (in frame di timeline) delle clip attualmente servite
+    // dal proxy invece che dal sorgente (REFACTOR_PIPELINE.md proxy) —
+    // striscia separata, colore diverso, appena sopra quella
+    // "buffered": indica *da dove* arriverebbe il frame quando viene
+    // bufferizzato, non se è già pronto ora (le due cose sono
+    // indipendenti: una clip proxy-backed può avere solo una parte già
+    // in cache, o viceversa una clip non proxy-backed può comunque
+    // essere già bufferizzata dal sorgente pieno).
+    proxy_ranges: &[(FrameIdx, FrameIdx)],
 ) -> Option<(vv_core::MediaId, FrameIdx)> {
     let mut media_drop = None;
 
@@ -429,6 +438,26 @@ pub fn show_timeline(
                         egui::pos2(x1, origin.y + RULER_HEIGHT),
                     );
                     painter.rect_filled(strip_rect, 0.0, buffered_color);
+                }
+
+                // Striscia "proxy": stessa fascia, appena sopra quella
+                // "buffered" (vedi doc del parametro `proxy_ranges`),
+                // colore diverso (ambra invece di blu) per restare
+                // distinguibile a colpo d'occhio anche dove le due si
+                // toccano.
+                const PROXY_STRIP_HEIGHT: f32 = 4.0;
+                let proxy_color = egui::Color32::from_rgba_unmultiplied(255, 175, 60, 160);
+                for &(start, end) in proxy_ranges {
+                    let x0 = origin.x + start as f32 * px_per_frame;
+                    let x1 = origin.x + (end + 1) as f32 * px_per_frame;
+                    let strip_rect = egui::Rect::from_min_max(
+                        egui::pos2(
+                            x0,
+                            origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT - PROXY_STRIP_HEIGHT,
+                        ),
+                        egui::pos2(x1, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
+                    );
+                    painter.rect_filled(strip_rect, 0.0, proxy_color);
                 }
 
                 // Sfondo delle track (alternato per leggibilità), e sopra,
@@ -1905,6 +1934,7 @@ mod tests {
                     &mut state,
                     true,
                     &[],
+                    &[],
                 );
             });
         });
@@ -1946,6 +1976,7 @@ mod tests {
                     &|_id| "media".to_string(),
                     &mut state,
                     true,
+                    &[],
                     &[],
                 );
             });
@@ -2015,6 +2046,7 @@ mod tests {
                             &|_id| "media".to_string(),
                             &mut state,
                             true,
+                            &[],
                             &[],
                         );
                     });

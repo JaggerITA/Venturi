@@ -964,6 +964,37 @@ impl VibeVideoApp {
         ranges
     }
 
+    /// Intervalli (in frame di *timeline*) delle clip Media attualmente
+    /// servite dal proxy invece che dal sorgente — indicatore visivo
+    /// separato da quello "buffered" (colore diverso in
+    /// `timeline_ui::show_timeline`): dice *da dove* arriverebbe il
+    /// frame quando viene bufferizzato, non se è già pronto ora. Copre
+    /// l'intera estensione di ogni clip proxy-backed, non solo la parte
+    /// già decodificata: a differenza della cache, "proxy o sorgente"
+    /// è deciso dal toggle + dalla disponibilità del file su disco, non
+    /// da cosa è già stato effettivamente decodificato finora (vedi
+    /// `render_ahead::fill_segments`, la stessa condizione).
+    fn proxy_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
+        let Some(timeline_id) = self.timeline_id else {
+            return Vec::new();
+        };
+        if !self.proxy_enabled {
+            return Vec::new();
+        }
+        let mut ranges = Vec::new();
+        for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Video) {
+            for clip in &track.clips {
+                if let vv_core::ClipSource::Media(media_id) = &clip.source
+                    && let Some(item) = self.project.media_pool.get(*media_id)
+                    && vv_media::proxy::proxy_exists(item.content_hash)
+                {
+                    ranges.push((clip.timeline_start, clip.timeline_end() - 1));
+                }
+            }
+        }
+        ranges
+    }
+
     /// Continua la riproduzione oltre la fine (nello spazio timeline) della
     /// clip appena conclusa: se sotto c'è già una clip (adiacente, nessun
     /// vuoto), vi si aggancia subito; altrimenti avvia `gap_wall_clock`
@@ -2349,6 +2380,21 @@ impl eframe::App for VibeVideoApp {
                         self.add_solid_color_clip();
                         ui.close();
                     }
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut self.proxy_enabled, "Usa proxy")
+                        .on_hover_text(
+                            "Anteprima/editing da una copia a bassa risoluzione generata in \
+                             background invece che dal sorgente: scrub molto più fluido su \
+                             sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
+                             sorgenti originali. Disattiva per lavori che richiedono la \
+                             qualità piena.",
+                        )
+                        .changed()
+                        && let Some(render_ahead) = &self.render_ahead
+                    {
+                        render_ahead.set_proxy_enabled(self.proxy_enabled);
+                    }
                 });
 
                 ui.menu_button("Timeline", |ui| {
@@ -2380,20 +2426,6 @@ impl eframe::App for VibeVideoApp {
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
                         );
                     ui.separator();
-                    if ui
-                        .checkbox(&mut self.proxy_enabled, "Usa proxy")
-                        .on_hover_text(
-                            "Anteprima/editing da una copia a bassa risoluzione generata in \
-                             background invece che dal sorgente: scrub molto più fluido su \
-                             sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
-                             sorgenti originali. Disattiva per lavori che richiedono la \
-                             qualità piena.",
-                        )
-                        .changed()
-                        && let Some(render_ahead) = &self.render_ahead
-                    {
-                        render_ahead.set_proxy_enabled(self.proxy_enabled);
-                    }
                     ui.horizontal(|ui| {
                         ui.label("Cache video:");
                         // Espresso in MB nella UI, ma `cache_budget_bytes`
@@ -2508,6 +2540,7 @@ impl eframe::App for VibeVideoApp {
                         .map(|(id, item)| (id, file_label(&item.path)))
                         .collect();
                     let buffered_ranges = self.buffered_timeline_ranges();
+                    let proxy_ranges = self.proxy_timeline_ranges();
                     // Il worker di `render_ahead` bufferizza su un thread
                     // proprio, a un ritmo suo indipendente dai repaint
                     // della UI (vedi doc del modulo `render_ahead`) — ma
@@ -2535,6 +2568,7 @@ impl eframe::App for VibeVideoApp {
                         &mut self.timeline_state,
                         self.snapping_enabled,
                         &buffered_ranges,
+                        &proxy_ranges,
                     );
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();
@@ -4700,6 +4734,79 @@ mod tests {
                 clip.timeline_end()
             );
         }
+    }
+
+    /// `proxy_timeline_ranges` copre l'intera clip appena il proxy è
+    /// pronto su disco (non solo la parte già bufferizzata, a
+    /// differenza di `buffered_timeline_ranges` — vedi doc del metodo),
+    /// è vuoto finché non lo è, ed è vuoto a prescindere se il toggle è
+    /// disattivato.
+    #[test]
+    fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
+        let dir = std::env::temp_dir().join("vv-app-proxy-ranges-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        // Fingerprint calcolato prima dell'import vero e proprio, solo per
+        // ripulire un eventuale proxy rimasto da un run precedente di
+        // questo stesso test con lo stesso content_hash (path+dimensione+
+        // mtime coincidenti) — altrimenti l'asserzione "vuoto subito dopo
+        // l'import" sotto sarebbe fragile, non per una vera race ma per
+        // stato residuo su disco.
+        let content_hash = vv_media::content_fingerprint(&path).unwrap();
+        let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash));
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path); // accoda anche la generazione del proxy
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+        let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
+
+        assert!(
+            app.proxy_timeline_ranges().is_empty(),
+            "il proxy non può già essere pronto subito dopo l'import"
+        );
+
+        let start = std::time::Instant::now();
+        loop {
+            if vv_media::proxy::proxy_exists(content_hash) {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "timeout: proxy mai generato"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            app.proxy_timeline_ranges(),
+            vec![(clip.timeline_start, clip.timeline_end() - 1)],
+            "con il proxy pronto e il toggle attivo, deve coprire l'intera clip"
+        );
+
+        app.proxy_enabled = false;
+        assert!(
+            app.proxy_timeline_ranges().is_empty(),
+            "col toggle disattivato non deve segnalare nulla, anche col proxy pronto"
+        );
     }
 
     /// Test end-to-end del bug segnalato ("il buffer si ferma sempre al
