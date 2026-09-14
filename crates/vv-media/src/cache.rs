@@ -35,6 +35,32 @@ impl FrameCache {
         self.inner.lock().unwrap().contains(&idx)
     }
 
+    /// Capacità attuale (numero massimo di frame), non necessariamente
+    /// quella passata a `new`: vedi `resize`.
+    pub fn capacity(&self) -> usize {
+        self.inner.lock().unwrap().cap().get()
+    }
+
+    /// Cambia la capacità a caldo, sfrattando gli elementi meno usati di
+    /// recente se si restringe. Serve perché il budget di memoria per
+    /// media è ricalcolato ad ogni ciclo (dipende da quanti media
+    /// distinti sono nella finestra corrente, vedi `render_ahead`): senza
+    /// questo, una cache creata quando il budget per-media era più
+    /// piccolo (es. due media distinti nella finestra) restava bloccata
+    /// a quella capacità anche dopo che il budget per-media era tornato
+    /// più ampio (es. di nuovo un solo media) — chi decide quanto
+    /// bufferizzare in avanti calcolava sulla capacità *nuova* (più
+    /// ampia) mentre la cache reale ne aveva ancora una più piccola,
+    /// risultando in uno sfratto dei frame più vicini alla testina più
+    /// aggressivo del previsto (bug segnalato: il buffer inizia sempre
+    /// qualche frame dopo la testina).
+    pub fn resize(&self, capacity: usize) {
+        self.inner
+            .lock()
+            .unwrap()
+            .resize(NonZeroUsize::new(capacity.max(1)).unwrap());
+    }
+
     /// Intervalli contigui (inclusivi) di frame attualmente in cache,
     /// ordinati per inizio crescente — per un indicatore visivo "buffered"
     /// nella UI (mostrare quali porzioni sono già decodificate durante la

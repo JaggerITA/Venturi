@@ -437,6 +437,15 @@ fn walk_and_fill(
             .entry(segment.media_id)
             .or_insert_with(|| Arc::new(FrameCache::new(capacity)))
             .clone();
+        // `capacity` è ricalcolata ogni ciclo (dipende da quanti media
+        // distinti sono nella finestra corrente) e può differire da
+        // quella con cui questa cache è stata creata la prima volta —
+        // tenerla sincronizzata evita che il limite usato sotto per
+        // `capped_source_end` (calcolato su `capacity`) diverga dalla
+        // capacità *reale* della cache, che altrimenti sfratterebbe più
+        // aggressivamente del previsto proprio i frame vicini alla
+        // testina (vedi doc di `FrameCache::resize`).
+        cache.resize(capacity);
 
         // Non decodificare oltre quanto la cache di questo media può
         // effettivamente contenere: farlo comunque significa sfrattare
@@ -805,6 +814,96 @@ mod tests {
         assert!(
             ranges[0].1 < 74,
             "con un budget così piccolo non deve riuscire a coprire tutta la finestra: {ranges:?}"
+        );
+    }
+
+    /// Regressione per il bug segnalato dall'utente e confermato dal log
+    /// diagnostico reale: la cache di un media viene creata con la
+    /// capacità del momento (`or_insert_with`, eseguito solo se assente)
+    /// — se in quel momento c'erano *due* media distinti nella finestra
+    /// (budget diviso a metà), la cache resta bloccata a quella capacità
+    /// piccola anche dopo che il secondo media è uscito dalla finestra e
+    /// il budget per il primo è tornato intero: chi calcola fin dove
+    /// decodificare usa la capacità *nuova* (più ampia), ma la cache
+    /// reale ne ha ancora una più piccola, quindi sfratta più
+    /// aggressivamente del previsto proprio i frame vicini alla testina.
+    #[test]
+    fn walk_and_fill_grows_the_cache_back_up_once_fewer_distinct_media_remain_in_the_window() {
+        let path_a = make_test_clip("vv-app-render-ahead-test", "resize_a.mp4", 2);
+        let path_b = make_test_clip("vv-app-render-ahead-test", "resize_b.mp4", 15);
+
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path: path_a,
+            meta: MediaMeta {
+                duration_frames: 40,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let media_b = project.media_pool.insert(MediaItem {
+            path: path_b,
+            meta: MediaMeta {
+                duration_frames: 375,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![
+                media_clip(1, media_a, 0, 40),   // [0,40)
+                media_clip(2, media_b, 40, 400), // [40,440)
+            ],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Con 30 frame di capacità piena (320x240), un budget doppio
+        // basta per 30 frame quando diviso tra due media distinti.
+        let total_budget = 30 * 320 * 240 * 4 * 2;
+
+        // Primo ciclo: la finestra di lookahead (3s = 75 frame) attraversa
+        // il taglio a 40, quindi media_a e media_b sono entrambi nella
+        // finestra e si dividono il budget.
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 0, total_budget);
+        let cap_b_small = caches.lock().unwrap().get(&media_b).unwrap().capacity();
+        assert!(
+            cap_b_small < 40,
+            "la capacità iniziale doveva essere piccola (budget diviso in due): {cap_b_small}"
+        );
+
+        // Secondo ciclo: il target è ben oltre il taglio, solo media_b è
+        // nella finestra, quindi il suo budget torna intero (raddoppia).
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 200, total_budget);
+        let cap_b_large = caches.lock().unwrap().get(&media_b).unwrap().capacity();
+        assert!(
+            cap_b_large >= cap_b_small * 2 - 2,
+            "la cache doveva essere ridimensionata verso l'alto: {cap_b_small} -> {cap_b_large}"
+        );
+
+        // source_start per il secondo ciclo: clip b ha source_in=0,
+        // timeline_start=40, quindi 200-40=160.
+        let ranges = caches
+            .lock()
+            .unwrap()
+            .get(&media_b)
+            .unwrap()
+            .cached_ranges();
+        assert!(
+            ranges.iter().any(|&(s, _)| s <= 160),
+            "con la capacità più ampia il buffer deve poter partire dalla nuova testina, non da una coda arbitraria più avanti: {ranges:?}"
         );
     }
 
