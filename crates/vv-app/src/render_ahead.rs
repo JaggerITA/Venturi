@@ -190,12 +190,6 @@ fn worker_loop(
     mut timeline_id: TimelineId,
 ) {
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    // Ultimo target visto: serve a distinguere un avanzamento normale
-    // (i decoder continuano da dove sono, si veda `position_decoder`) da
-    // un salto indietro (scrub), dopo il quale i decoder aperti sono
-    // ormai troppo avanti e decodificare in avanti non potrà mai
-    // raggiungere la nuova posizione — vanno riaperti da zero.
-    let mut last_from_frame: Option<FrameIdx> = None;
     loop {
         match rx.recv_timeout(POLL_INTERVAL) {
             Ok(Command::Stop) => return,
@@ -221,10 +215,6 @@ fn worker_loop(
         }
 
         let from = target.load(Ordering::Relaxed);
-        if last_from_frame.is_some_and(|last| from + SEEK_THRESHOLD_FRAMES < last) {
-            open.clear();
-        }
-        last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
         walk_and_fill(&project, timeline_id, &caches, &mut open, from, budget);
     }
