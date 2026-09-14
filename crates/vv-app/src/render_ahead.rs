@@ -283,39 +283,67 @@ fn collect_media_segments(
 /// posizione) rifare lo stesso seek produce esattamente lo stesso
 /// risultato all'infinito. Essere avanti rispetto all'inizio del
 /// segmento è lo stato **sano e atteso** di un buffer che lavora bene —
-/// trattarlo come motivo di riapertura è il bug che causava un seek
-/// reale (e quindi una nuova decodifica completa della finestra) ogni
-/// ciclo di poll, sia quando il decoder era leggermente avanti sia
-/// appena il giro precedente si era concluso esattamente al termine del
-/// segmento. Un seek reale serve solo quando decodificare in avanti non
-/// potrebbe comunque raggiungere `segment_start`: è troppo indietro
-/// rispetto ad esso (conviene un seek a decodificare in sequenza fino a
-/// lì) — un vero scrub all'indietro è gestito a parte in `worker_loop`,
-/// che svuota `open` quando il target salta indietro, così il ramo
-/// "nessun decoder aperto" qui sotto si occupa del resto. Ritorna
-/// `false` se l'apertura del media fallisce (il chiamante salta quel
-/// segmento).
+/// trattarlo come motivo di un seek è il bug che causava un seek reale
+/// (e quindi una nuova decodifica completa della finestra) ogni ciclo di
+/// poll, sia quando il decoder era leggermente avanti sia appena il giro
+/// precedente si era concluso esattamente al termine del segmento. Un
+/// seek reale serve solo quando decodificare in avanti non potrebbe
+/// comunque raggiungere `segment_start`: è troppo indietro rispetto ad
+/// esso (conviene un seek a decodificare in sequenza fino a lì) — un
+/// vero scrub all'indietro è gestito a parte in `worker_loop`, che
+/// svuota `open` quando il target salta indietro. Quando serve un seek
+/// per lo stesso media già aperto, va fatto sul decoder *esistente*
+/// (`seek_to_time`), non riaprendo il file da `Decoder::open`: per un
+/// file grande/non ottimizzato per lo streaming, riaprire vuol dire
+/// riparsare l'intero container/indice ogni volta, un costo che può
+/// arrivare a secondi — se supera la tolleranza (`SEEK_THRESHOLD_FRAMES`)
+/// il target avanza oltre durante l'apertura stessa, scatenandone
+/// un'altra al giro successivo, in un loop che non recupera mai
+/// (osservato: riproduzione a scatti, un frame ogni pochi secondi).
+/// `Decoder::open` va usato solo per la primissima apertura di un media
+/// (nessun decoder ancora in `open`) o per uno diverso da quello aperto.
+/// Ritorna `false` se l'apertura del media fallisce (il chiamante salta
+/// quel segmento).
 fn position_decoder(
     open: &mut HashMap<MediaId, OpenDecoder>,
     media_id: MediaId,
     path: &Path,
     segment_start: FrameIdx,
 ) -> bool {
-    let needs_new_decoder = match open.get(&media_id) {
+    let needs_seek = match open.get(&media_id) {
         Some(o) => segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES,
-        None => true,
+        None => false,
     };
-    if !needs_new_decoder {
+    if let Some(o) = open.get_mut(&media_id) {
+        if !needs_seek {
+            return true;
+        }
+        // Stesso media già aperto, serve solo tornare/saltare a un altro
+        // punto: un `seek_to_time` sul decoder esistente riusa il file
+        // già aperto e il container/indice già parsato — aprire di
+        // nuovo da `Decoder::open` per un semplice seek è il bug che
+        // rendeva ogni riposizionamento costoso quanto la primissima
+        // apertura del file (per un file grande, anche secondi): se
+        // quel costo supera la tolleranza (`SEEK_THRESHOLD_FRAMES`), il
+        // target avanza oltre *durante* l'apertura stessa, scatenando
+        // un'altra apertura completa al giro successivo — un loop che
+        // non recupera mai (osservato: "1 frame ogni pochi secondi").
+        let secs = segment_start as f64 / o.decoder.fps().as_f64().max(1e-9);
+        let _ = o.decoder.seek_to_time(secs);
+        // Placeholder: il prossimo `next_frame()` restituisce l'idx
+        // *reale* del keyframe da cui riparte (può essere <
+        // segment_start), che aggiorna subito questo campo nel loop di
+        // decodifica sotto.
+        o.next_frame = 0;
         return true;
     }
+    // Nessun decoder aperto per questo media: qui l'apertura reale è
+    // inevitabile (prima volta, o media diverso da quello aperto finora).
     let Ok(mut decoder) = Decoder::open(path) else {
         return false;
     };
     let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
     let _ = decoder.seek_to_time(secs);
-    // Placeholder: il prossimo `next_frame()` restituisce l'idx *reale*
-    // del keyframe da cui riparte (può essere < segment_start), che
-    // aggiorna subito questo campo nel loop di decodifica sotto.
     open.insert(
         media_id,
         OpenDecoder {
@@ -627,6 +655,29 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Regressione: un seek reale per un media già aperto deve riusare
+    /// il decoder esistente (`seek_to_time`), non buttarlo via per
+    /// riaprire il file da zero — per un file grande/non ottimizzato per
+    /// lo streaming, riaprire vuol dire riparsare l'intero indice ogni
+    /// volta (anche secondi), e se quel costo eccede la tolleranza il
+    /// target avanza oltre durante l'apertura stessa, scatenandone
+    /// un'altra al giro successivo: un loop che non recupera mai
+    /// (osservato: un frame ogni pochi secondi). Verificato passando un
+    /// path inesistente al secondo giro: se il decoder venisse
+    /// riaperto invece di riusato, questa chiamata fallirebbe.
+    #[test]
+    fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening_the_file() {
+        let path = make_test_clip("vv-app-render-ahead-test", "reuse.mp4", 3);
+        let bogus_path = std::path::PathBuf::from("/nonexistent/reuse.mp4");
+        let (media_a, _) = two_media_ids();
+
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        assert!(position_decoder(&mut open, media_a, &path, 0));
+
+        assert!(position_decoder(&mut open, media_a, &bogus_path, 1000));
+        assert_eq!(open.get(&media_a).unwrap().next_frame, 0);
     }
 
     /// Regressione per il bug segnalato: durante il playback normale il
