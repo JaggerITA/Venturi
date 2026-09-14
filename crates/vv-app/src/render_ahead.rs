@@ -49,11 +49,25 @@ const LOOKAHEAD_SECS: f64 = 3.0;
 /// subito, quindi un intervallo breve non ha un costo significativo.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Oltre quanti frame di distanza in avanti conviene un seek reale
-/// invece di continuare a decodificare in sequenza scartando gli
-/// intermedi (un seek flush comunque il decoder, quindi per piccoli
-/// spostamenti decodificare in sequenza resta più efficiente).
-const SEEK_THRESHOLD_FRAMES: FrameIdx = 120;
+/// Soglia di fallback per "oltre quanti frame di distanza in avanti
+/// conviene un seek reale invece di continuare a decodificare in
+/// sequenza", finché non c'è ancora nessuna osservazione reale del GOP
+/// per quel media (vedi `OpenDecoder::seek_threshold_frames` — un numero
+/// fisso uguale per un 4K long-GOP e un 1080p intra-friendly può sbagliare
+/// di un ordine di grandezza in entrambe le direzioni, REFACTOR_PIPELINE.md
+/// §1 A3). Basso e conservativo di proposito: sbagliare per eccesso (un
+/// seek in più del necessario) costa poco, un seek riusa sempre il
+/// decoder già aperto (`seek_to_time`), mai una riapertura.
+const DEFAULT_SEEK_THRESHOLD_FRAMES: FrameIdx = 30;
+
+/// Limite superiore per la stima del GOP osservato (vedi
+/// `OpenDecoder::record_keyframe_landing`): due atterraggi da seek
+/// consecutivi possono capitare per caso a più GOP di distanza (es. due
+/// seek lontani, senza che nel mezzo sia mai capitato un atterraggio più
+/// ravvicinato) — la stima è comunque un minimo che si stringe nel tempo,
+/// questo limite serve solo a non lasciarla esplodere prima che arrivi
+/// un'osservazione più stretta.
+const MAX_SEEK_THRESHOLD_FRAMES: FrameIdx = 300;
 
 enum Command {
     UpdateProject(Box<Project>, TimelineId),
@@ -168,6 +182,67 @@ impl Drop for RenderAhead {
 struct OpenDecoder {
     decoder: Decoder,
     next_frame: FrameIdx,
+    /// `true` subito dopo un seek reale o la primissima apertura: il
+    /// prossimo frame decodificato è per costruzione un keyframe (un
+    /// seek/apertura atterra sempre lì, mai su un frame intermedio) —
+    /// usato per imparare il GOP reale del media (vedi
+    /// `record_keyframe_landing`), non solo per correggere il
+    /// placeholder di `next_frame`. Azzerato non appena quel frame viene
+    /// consumato, così non si scambia un frame qualunque nel mezzo del
+    /// decode sequenziale per un keyframe.
+    just_repositioned: bool,
+    /// Ultimo atterraggio da seek osservato, e la stima del GOP derivata
+    /// dalla distanza tra atterraggi consecutivi (vedi
+    /// `record_keyframe_landing`). `None` finché non c'è ancora almeno
+    /// un'osservazione — `seek_threshold_frames` usa un fallback in quel
+    /// caso.
+    last_keyframe_landed: Option<FrameIdx>,
+    estimated_gop: Option<FrameIdx>,
+}
+
+impl OpenDecoder {
+    fn fresh(decoder: Decoder) -> Self {
+        Self {
+            decoder,
+            next_frame: 0,
+            just_repositioned: true,
+            last_keyframe_landed: None,
+            estimated_gop: None,
+        }
+    }
+
+    /// Soglia oltre cui conviene un seek reale invece di continuare a
+    /// decodificare in sequenza (REFACTOR_PIPELINE.md §3.3): circa un GOP
+    /// del media *osservato*, non un numero fisso uguale per tutti i
+    /// media — con un fallback conservativo finché non c'è ancora
+    /// un'osservazione reale.
+    fn seek_threshold_frames(&self) -> FrameIdx {
+        self.estimated_gop
+            .unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
+    }
+
+    /// Da chiamare con l'indice del primo frame decodificato dopo un
+    /// seek/apertura reale (`just_repositioned`, azzerato dal
+    /// chiamante subito dopo): aggiorna la stima del GOP dalla distanza
+    /// rispetto all'ultimo atterraggio osservato. La stima è un
+    /// *minimo* (mai più ampia di quella attuale, tranne alla prima
+    /// osservazione) — un singolo salto accidentale di più GOP alla
+    /// volta sovrastimerebbe, il minimo resta un limite superiore sicuro
+    /// alla vera dimensione del GOP e si stringe man mano che arrivano
+    /// atterraggi più ravvicinati; `MAX_SEEK_THRESHOLD_FRAMES` evita che
+    /// nel frattempo resti sproporzionata.
+    fn record_keyframe_landing(&mut self, idx: FrameIdx) {
+        if let Some(prev) = self.last_keyframe_landed
+            && idx > prev
+        {
+            let observed = (idx - prev).min(MAX_SEEK_THRESHOLD_FRAMES);
+            self.estimated_gop = Some(match self.estimated_gop {
+                Some(g) => g.min(observed),
+                None => observed,
+            });
+        }
+        self.last_keyframe_landed = Some(idx);
+    }
 }
 
 fn worker_loop(
@@ -373,7 +448,7 @@ fn collect_media_segments(
 /// `Decoder::open`: per un file grande/non ottimizzato per lo
 /// streaming, riaprire vuol dire riparsare l'intero container/indice
 /// ogni volta, un costo che può arrivare a secondi — se supera la
-/// tolleranza (`SEEK_THRESHOLD_FRAMES`) il target avanza oltre durante
+/// tolleranza (`OpenDecoder::seek_threshold_frames`) il target avanza oltre durante
 /// l'apertura stessa, scatenandone un'altra al giro successivo, in un
 /// loop che non recupera mai (osservato: riproduzione a scatti, un
 /// frame ogni pochi secondi). `Decoder::open` va usato solo per la
@@ -391,7 +466,7 @@ fn position_decoder(
     went_backward: bool,
 ) -> Positioned {
     if let Some(o) = open.get_mut(&media_id) {
-        let needs_seek = segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
+        let needs_seek = segment_start > o.next_frame + o.seek_threshold_frames()
             || (went_backward && segment_start < o.next_frame);
         if !needs_seek {
             return Positioned::Reused;
@@ -402,7 +477,7 @@ fn position_decoder(
         // nuovo da `Decoder::open` per un semplice seek è il bug che
         // rendeva ogni riposizionamento costoso quanto la primissima
         // apertura del file (per un file grande, anche secondi): se
-        // quel costo supera la tolleranza (`SEEK_THRESHOLD_FRAMES`), il
+        // quel costo supera la soglia (`seek_threshold_frames`), il
         // target avanza oltre *durante* l'apertura stessa, scatenando
         // un'altra apertura completa al giro successivo — un loop che
         // non recupera mai (osservato: "1 frame ogni pochi secondi").
@@ -418,8 +493,11 @@ fn position_decoder(
         // Placeholder: il prossimo `next_frame()` restituisce l'idx
         // *reale* del keyframe da cui riparte (può essere <
         // segment_start), che aggiorna subito questo campo nel loop di
-        // decodifica sotto.
+        // decodifica sotto — che userà anche `just_repositioned` per
+        // imparare il GOP reale da questo atterraggio (vedi
+        // `OpenDecoder::record_keyframe_landing`).
         o.next_frame = 0;
+        o.just_repositioned = true;
         return Positioned::Seeked;
     }
     // Nessun decoder aperto per questo media: qui l'apertura reale è
@@ -437,7 +515,7 @@ fn position_decoder(
             t.elapsed()
         );
     }
-    open.insert(media_id, OpenDecoder { decoder, next_frame: 0 });
+    open.insert(media_id, OpenDecoder::fresh(decoder));
     Positioned::Opened
 }
 
@@ -567,8 +645,20 @@ fn walk_and_fill(
             if caches.bytes_used() >= cache_budget_bytes {
                 break 'segments;
             }
+            let mut threshold_frames = od.seek_threshold_frames();
             match od.decoder.next_frame() {
                 Ok(Some((idx, frame))) => {
+                    // Primo frame dopo un seek/apertura reale: è per
+                    // costruzione un keyframe, registra l'atterraggio per
+                    // affinare la stima del GOP di questo media (vedi
+                    // `OpenDecoder::record_keyframe_landing`) prima che il
+                    // resto del loop possa scambiarlo per un frame
+                    // qualunque nel mezzo del decode sequenziale.
+                    if od.just_repositioned {
+                        od.record_keyframe_landing(idx);
+                        od.just_repositioned = false;
+                        threshold_frames = od.seek_threshold_frames();
+                    }
                     // `insert` sovrascrive innocuamente se `idx` è già
                     // presente (decoder ripartito da un keyframe
                     // precedente al punto richiesto): evita solo un ramo
@@ -589,12 +679,13 @@ fn walk_and_fill(
             // segmento che non serve più — il chiamante (`worker_loop`)
             // ricomincia immediatamente con il target fresco, senza
             // aspettare fino al prossimo `POLL_INTERVAL`. Soglia condivisa
-            // con `position_decoder` (`SEEK_THRESHOLD_FRAMES`): sotto
-            // quella distanza il lavoro in corso è ancora utile (drift
-            // normale di riproduzione), sopra è uno scrub/salto che rende
-            // la finestra corrente stale.
+            // con `position_decoder` (`OpenDecoder::seek_threshold_frames`,
+            // adattiva sul GOP osservato — REFACTOR_PIPELINE.md §3.3):
+            // sotto quella distanza il lavoro in corso è ancora utile
+            // (drift normale di riproduzione), sopra è uno scrub/salto
+            // che rende la finestra corrente stale.
             let live = target.load(Ordering::Relaxed);
-            if (live - from_frame).abs() > SEEK_THRESHOLD_FRAMES {
+            if (live - from_frame).abs() > threshold_frames {
                 return true;
             }
         }
@@ -965,6 +1056,71 @@ mod tests {
         }
     }
 
+    /// REFACTOR_PIPELINE.md §3.3: una `OpenDecoder` appena aperta non ha
+    /// ancora osservazioni, quindi usa il fallback di default.
+    #[test]
+    fn open_decoder_seek_threshold_uses_the_default_fallback_before_any_observation() {
+        let path = make_test_clip("vv-app-render-ahead-test", "gop_fresh.mp4", 2);
+        let decoder = Decoder::open(&path).unwrap();
+        let od = OpenDecoder::fresh(decoder);
+        assert_eq!(od.seek_threshold_frames(), DEFAULT_SEEK_THRESHOLD_FRAMES);
+    }
+
+    /// Due atterraggi consecutivi da seek aggiornano la stima del GOP
+    /// alla distanza osservata tra loro.
+    #[test]
+    fn open_decoder_records_the_observed_gap_between_two_consecutive_landings() {
+        let path = make_test_clip("vv-app-render-ahead-test", "gop_observed.mp4", 2);
+        let decoder = Decoder::open(&path).unwrap();
+        let mut od = OpenDecoder::fresh(decoder);
+
+        od.record_keyframe_landing(25);
+        od.record_keyframe_landing(50);
+
+        assert_eq!(od.seek_threshold_frames(), 25);
+    }
+
+    /// La stima è un *minimo*: un salto accidentale di più GOP alla
+    /// volta (qui una distanza di 200 dopo una di 25) non deve far
+    /// salire la soglia — solo un'osservazione più *stretta* la
+    /// stringe ulteriormente, mai il contrario.
+    #[test]
+    fn open_decoder_gop_estimate_never_grows_from_a_wider_observation() {
+        let path = make_test_clip("vv-app-render-ahead-test", "gop_min.mp4", 2);
+        let decoder = Decoder::open(&path).unwrap();
+        let mut od = OpenDecoder::fresh(decoder);
+
+        od.record_keyframe_landing(0);
+        od.record_keyframe_landing(25); // distanza 25: stima = 25
+        assert_eq!(od.seek_threshold_frames(), 25);
+
+        od.record_keyframe_landing(225); // distanza 200: non deve salire a 200
+        assert_eq!(
+            od.seek_threshold_frames(),
+            25,
+            "un salto più largo di uno già osservato non deve far crescere la stima"
+        );
+
+        od.record_keyframe_landing(235); // distanza 10: deve stringersi
+        assert_eq!(od.seek_threshold_frames(), 10);
+    }
+
+    /// Senza il tetto (`MAX_SEEK_THRESHOLD_FRAMES`), la *prima*
+    /// osservazione da sola potrebbe far esplodere la soglia se due
+    /// seek capitano per caso a molti GOP di distanza prima che ne
+    /// arrivi una più stretta.
+    #[test]
+    fn open_decoder_gop_estimate_is_capped_even_on_the_first_observation() {
+        let path = make_test_clip("vv-app-render-ahead-test", "gop_cap.mp4", 2);
+        let decoder = Decoder::open(&path).unwrap();
+        let mut od = OpenDecoder::fresh(decoder);
+
+        od.record_keyframe_landing(0);
+        od.record_keyframe_landing(10_000);
+
+        assert_eq!(od.seek_threshold_frames(), MAX_SEEK_THRESHOLD_FRAMES);
+    }
+
     /// Regressione: un seek reale per un media già aperto deve riusare
     /// il decoder esistente (`seek_to_time`), non buttarlo via per
     /// riaprire il file da zero — per un file grande/non ottimizzato per
@@ -1098,7 +1254,8 @@ mod tests {
     }
 
     /// REFACTOR_PIPELINE.md §3.1 (reattività): se il target *live* si è
-    /// già spostato oltre `SEEK_THRESHOLD_FRAMES` rispetto a `from_frame`
+    /// già spostato oltre la soglia di fallback (nessuna osservazione
+    /// del GOP ancora fatta per questo media) rispetto a `from_frame`
     /// prima ancora di iniziare, il fill deve accorgersene alla prima
     /// occasione (dopo il primo frame decodificato) e interrompersi
     /// restituendo `true`, invece di continuare a decodificare per tutta
@@ -1136,7 +1293,7 @@ mod tests {
         // Il target live è già oltre soglia rispetto a from_frame=0 prima
         // ancora che il fill inizi: simula la testina che è saltata
         // altrove mentre questo ciclo stava per partire.
-        let drifted_target = AtomicI64::new(SEEK_THRESHOLD_FRAMES + 200);
+        let drifted_target = AtomicI64::new(DEFAULT_SEEK_THRESHOLD_FRAMES + 200);
 
         let interrupted = walk_and_fill(
             &project,
@@ -1326,6 +1483,16 @@ mod tests {
     /// il caso multi-segmento non può proprio più presentarsi: verificato
     /// qui passando esplicitamente `false` (testina ferma) a entrambi i
     /// segmenti in entrambi i cicli.
+    ///
+    /// Gap tra i due segmenti (10 e 25, non 10 e 50 come in una versione
+    /// precedente di questo test) scelto apposta sotto
+    /// `DEFAULT_SEEK_THRESHOLD_FRAMES`: qui `position_decoder` viene
+    /// chiamato direttamente, senza mai decodificare un frame reale, quindi
+    /// nessuna osservazione del GOP avviene mai e la soglia resta al
+    /// fallback per tutto il test — un gap più ampio farebbe scattare
+    /// legittimamente il ramo "troppo avanti", mascherando la cosa che
+    /// questo test vuole isolare (la contaminazione tra segmenti dello
+    /// stesso media, non quella soglia).
     #[test]
     fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments()
      {
@@ -1334,13 +1501,13 @@ mod tests {
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
 
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
-        // (come ai due lati di un taglio), source_start 10 e poi 50.
+        // (come ai due lati di un taglio), source_start 10 e poi 25.
         assert_eq!(
             position_decoder(&mut open, media_a, &path, 10, false),
             Positioned::Opened
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 50, false),
+            position_decoder(&mut open, media_a, &path, 25, false),
             Positioned::Reused,
             "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
         );
@@ -1348,14 +1515,14 @@ mod tests {
         // Ciclo 2, testina ferma (`went_backward=false` per entrambi):
         // stessi due segmenti. Rielaborare il *primo* segmento (10) non
         // deve sembrare "tornato indietro" solo perché l'ultima chiamata
-        // vista nel ciclo precedente era per il segmento successivo (50).
+        // vista nel ciclo precedente era per il segmento successivo (25).
         assert_eq!(
             position_decoder(&mut open, media_a, &path, 10, false),
             Positioned::Reused,
             "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 50, false),
+            position_decoder(&mut open, media_a, &path, 25, false),
             Positioned::Reused
         );
     }
@@ -1528,9 +1695,11 @@ mod tests {
     }
 
     /// Regressione per il bug segnalato dall'utente: uno scrub
-    /// all'indietro *piccolo* (qui 30 frame, ben sotto
-    /// `SEEK_THRESHOLD_FRAMES`=120) deve rigenerare il buffer per la
-    /// nuova posizione tanto quanto uno grande. Prima del fix, restava
+    /// all'indietro *piccolo* (qui 30 frame, sotto qualunque soglia di
+    /// seek plausibile) deve rigenerare il buffer per la nuova posizione
+    /// tanto quanto uno grande — irrilevante comunque, perché uno scrub
+    /// indietro scatta sempre via `went_backward`, non via soglia. Prima
+    /// del fix, restava
     /// bloccato sul frame in cache più vicino perché `position_decoder`
     /// considerava "abbastanza avanti" qualunque target ancora dietro
     /// a `next_frame` più di una soglia — ma `walk_and_fill` scarta ad
@@ -1803,7 +1972,7 @@ mod tests {
 
     /// Regressione per il bug segnalato dall'utente e confermato dal log
     /// diagnostico reale: quando la testina avanza a piccoli passi (mai
-    /// abbastanza da superare `SEEK_THRESHOLD_FRAMES` e forzare un seek
+    /// abbastanza da superare la soglia di seek e forzare un seek
     /// reale) il decoder resta comodamente avanti e continua da dove si
     /// trovava — corretto e voluto (vedi `position_decoder`) — ma la
     /// cache veniva sfrattata dalla sola LRU standard, che rimuove i più
