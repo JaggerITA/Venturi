@@ -16,10 +16,12 @@
 //! è un'ottimizzazione futura, vedi doc di `vv_render::Compositor`.
 
 mod export;
+mod frame_provider;
 mod player;
 mod render_ahead;
 mod timeline_ui;
 
+use frame_provider::FrameProvider;
 use player::Player;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -1074,7 +1076,7 @@ impl VibeVideoApp {
     /// `browsing_decode_ahead` durante un'anteprima "grezza" dal media
     /// pool, o `render_ahead` (il buffer a livello di timeline) per la
     /// clip Media attiva sulla timeline.
-    fn current_video_frame(&self) -> Option<(std::sync::Arc<vv_media::FrameRgba>, FrameIdx)> {
+    fn current_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameRgba>, FrameIdx)> {
         if self.browsing_media.is_some() {
             let player = self.preview_player.as_ref()?;
             let decode_ahead = self.browsing_decode_ahead.as_ref()?;
@@ -1089,20 +1091,20 @@ impl VibeVideoApp {
                 .get(track_index)?
                 .clips
                 .iter()
-                .find(|c| c.id == clip_id)?;
-            let vv_core::ClipSource::Media(media_id) = &clip.source else {
-                return None;
-            };
-            // Mappatura clip→frame-sorgente condivisa con render_ahead ed
-            // export (`vv_core::Clip::source_frame_at`, vedi doc lì —
-            // REFACTOR_PIPELINE.md B1). Il clamp preserva il comportamento
-            // precedente per il breve istante in cui `active_clip` può
-            // restare un frame indietro rispetto al playhead appena
-            // aggiornato.
-            let source_frame = clip.source_frame_at(self.timeline_state.playhead.max(clip.timeline_start));
+                .find(|c| c.id == clip_id)?
+                .clone();
+            // Stessa interfaccia dell'export per procurare il frame
+            // (`FrameProvider`, REFACTOR_PIPELINE.md B1) — qui backed
+            // dalla cache di `render_ahead`, non bloccante. Il clamp
+            // preserva il comportamento precedente per il breve istante
+            // in cui `active_clip` può restare un frame indietro
+            // rispetto al playhead appena aggiornato.
+            let timeline_frame = self.timeline_state.playhead.max(clip.timeline_start);
+            let source_frame = clip.source_frame_at(timeline_frame);
             self.render_ahead
-                .as_ref()?
-                .get_frame(*media_id, source_frame)
+                .as_mut()?
+                .frame_for(&self.project, &clip, timeline_frame)
+                .ok()?
                 .map(|f| (f, source_frame))
         }
     }

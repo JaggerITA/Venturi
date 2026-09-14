@@ -14,10 +14,12 @@
 //! time-remap: milestone 7 non ancora fatta).
 
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use vv_core::{ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId};
+use vv_core::{Clip, ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId};
+
+use crate::frame_provider::{FrameProvider, media_source_frame};
 
 const VIDEO_TRACK: usize = 0;
 const AUDIO_TRACK: usize = 1;
@@ -89,6 +91,48 @@ impl ActiveClipDecoder {
     }
 }
 
+/// Implementazione di `FrameProvider` per l'export: streaming sincrono,
+/// un `ActiveClipDecoder` tenuto aperto per la clip Media attiva
+/// (riaperto solo al cambio di clip — mai un decoder nuovo per ogni
+/// frame). A differenza della cache dell'anteprima, un errore di
+/// decodifica qui è un vero `Err`, non un `Ok(None)`: l'export non deve
+/// mai trasformare in silenzio un file che non si apre in un frame nero
+/// (REFACTOR_PIPELINE.md B1, doc di `FrameProvider`).
+#[derive(Default)]
+struct StreamingFrameProvider {
+    active: Option<ActiveClipDecoder>,
+}
+
+impl FrameProvider for StreamingFrameProvider {
+    fn frame_for(
+        &mut self,
+        project: &Project,
+        clip: &Clip,
+        timeline_frame: FrameIdx,
+    ) -> Result<Option<Arc<vv_media::FrameRgba>>, String> {
+        let Some((media_id, source_frame)) = media_source_frame(clip, timeline_frame) else {
+            self.active = None;
+            return Ok(None);
+        };
+        let path = project
+            .media_pool
+            .get(media_id)
+            .ok_or_else(|| "media non trovato nel pool".to_string())?
+            .path
+            .clone();
+
+        if self.active.as_ref().is_none_or(|a| a.clip_id != clip.id) {
+            self.active = Some(ActiveClipDecoder::open_for(clip.id, &path, source_frame)?);
+        }
+        let frame = self
+            .active
+            .as_mut()
+            .expect("appena assegnato sopra se assente")
+            .advance_to(source_frame)?;
+        Ok(frame.map(Arc::new))
+    }
+}
+
 /// Cammina l'intera timeline (frame `0..total_frames`) e produce
 /// `output_path`. Bloccante: il chiamante (`main.rs`) lo gira su un thread
 /// dedicato. `project` è uno snapshot clonato al momento del click, non
@@ -132,7 +176,7 @@ pub fn export_timeline(
     // `Compositor::new_headless()` in `main.rs`).
     let compositor = vv_render::Compositor::new_headless();
 
-    let mut active: Option<ActiveClipDecoder> = None;
+    let mut provider = StreamingFrameProvider::default();
     for frame in 0..total_frames {
         if cancel.load(Ordering::Relaxed) {
             return Err("annullato".to_string());
@@ -142,7 +186,7 @@ pub fn export_timeline(
             project,
             timeline,
             &compositor,
-            &mut active,
+            &mut provider,
             frame,
             timeline.resolution,
         )?;
@@ -169,39 +213,23 @@ fn render_video_frame(
     project: &Project,
     timeline: &Timeline,
     compositor: &vv_render::Compositor,
-    active: &mut Option<ActiveClipDecoder>,
+    provider: &mut StreamingFrameProvider,
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
     let Some(clip) = timeline.active_clip_at(VIDEO_TRACK, frame) else {
-        *active = None;
+        provider.active = None;
         return Ok(black_frame(resolution));
     };
 
-    // Mappatura clip→frame-sorgente condivisa con l'anteprima
-    // (`vv_core::Clip::source_frame_at`, vedi doc lì per il perché —
-    // REFACTOR_PIPELINE.md B1).
-    let source_frame = clip.source_frame_at(frame);
-
     match &clip.source {
-        ClipSource::Media(media_id) => {
-            let path = project
-                .media_pool
-                .get(*media_id)
-                .ok_or_else(|| "media non trovato nel pool".to_string())?
-                .path
-                .clone();
-
-            if active.as_ref().is_none_or(|a| a.clip_id != clip.id) {
-                *active = Some(ActiveClipDecoder::open_for(clip.id, &path, source_frame)?);
-            }
-            let source_frame_rgba = active
-                .as_mut()
-                .expect("appena assegnato sopra se assente")
-                .advance_to(source_frame)?;
-
-            let transform = clip.effects.transform.value_at(source_frame);
-            Ok(match source_frame_rgba {
+        ClipSource::Media(_) => {
+            // Mappatura clip→frame-sorgente condivisa con l'anteprima
+            // via `FrameProvider` (REFACTOR_PIPELINE.md B1) — solo il
+            // transform la ricalcola qui perché serve indipendentemente
+            // da `provider` avere restituito un frame o `None`.
+            let transform = clip.effects.transform.value_at(clip.source_frame_at(frame));
+            Ok(match provider.frame_for(project, clip, frame)? {
                 Some(f) => compositor.render_frame(
                     &f.data,
                     f.width,
@@ -217,7 +245,7 @@ fn render_video_frame(
             })
         }
         ClipSource::SolidColor => {
-            *active = None;
+            provider.active = None;
             let local = frame - clip.timeline_start;
             let color = clip
                 .effects
@@ -504,7 +532,7 @@ mod tests {
             muted: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();
-        let mut active = None;
+        let mut active = StreamingFrameProvider::default();
         let frame = render_video_frame(&project, &tl, &compositor, &mut active, 0, (2, 2)).unwrap();
         assert!(
             frame
@@ -524,7 +552,7 @@ mod tests {
             muted: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();
-        let mut active = None;
+        let mut active = StreamingFrameProvider::default();
         let frame =
             render_video_frame(&project, &tl, &compositor, &mut active, 12, (2, 2)).unwrap();
         assert!(
@@ -534,6 +562,53 @@ mod tests {
                 .iter()
                 .all(|px| px == &[255, 0, 0, 255])
         );
+    }
+
+    /// `FrameProvider::frame_for` (REFACTOR_PIPELINE.md B1, doc lì): un
+    /// vero fallimento durante l'export deve restituire `Err`, mai
+    /// scivolare in silenzio verso un `Ok` con un frame nero — quello è
+    /// riservato al caso "oltre la fine reale del file", non a "il
+    /// media referenziato dalla clip non esiste nel pool".
+    #[test]
+    fn render_video_frame_fails_loudly_when_the_clip_references_a_missing_media() {
+        let missing_media_id = {
+            // Un MediaId "orfano": mai inserito nel progetto usato dal
+            // test, quindi `media_pool.get` restituirà `None` — esattamente
+            // il caso "media non trovato nel pool" da verificare.
+            let mut other_project = Project::default();
+            other_project.media_pool.insert(vv_core::MediaItem {
+                path: "dummy.mp4".into(),
+                meta: vv_core::MediaMeta {
+                    duration_frames: 0,
+                    fps: vv_core::Rational::new(25, 1),
+                    width: 0,
+                    height: 0,
+                    has_audio: false,
+                    sample_rate: 0,
+                    channels: 0,
+                },
+                content_hash: 0,
+            })
+        };
+        let project = Project::default();
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![Clip {
+                id: ClipId(1),
+                source: ClipSource::Media(missing_media_id),
+                source_in: 0,
+                source_out: 10,
+                timeline_start: 0,
+                effects: EffectStack::default(),
+                linked: None,
+            }],
+            muted: false,
+        }]);
+        let compositor = vv_render::Compositor::new_headless();
+        let mut provider = StreamingFrameProvider::default();
+        let err = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2))
+            .expect_err("un media assente dal pool deve fallire, non produrre un frame nero");
+        assert!(err.contains("media non trovato"), "err={err}");
     }
 
     #[test]

@@ -172,6 +172,26 @@ impl Drop for RenderAhead {
     }
 }
 
+/// L'anteprima procura il frame dalla `SharedFrameCache` già riempita
+/// in background dal worker — non bloccante, mai un errore reale (un
+/// media che non decodifica viene semplicemente saltato dal worker, non
+/// propagato qui: vedi `position_decoder`), quindi sempre `Ok`.
+impl crate::frame_provider::FrameProvider for RenderAhead {
+    fn frame_for(
+        &mut self,
+        _project: &Project,
+        clip: &vv_core::Clip,
+        timeline_frame: FrameIdx,
+    ) -> Result<Option<Arc<FrameRgba>>, String> {
+        let Some((media_id, source_frame)) =
+            crate::frame_provider::media_source_frame(clip, timeline_frame)
+        else {
+            return Ok(None);
+        };
+        Ok(self.get_frame(media_id, source_frame))
+    }
+}
+
 /// Decoder tenuto aperto per un media, con la posizione (frame sorgente)
 /// che produrrà al prossimo `next_frame()`: permette di decidere se
 /// conviene continuare a decodificare in sequenza o fare un seek reale
