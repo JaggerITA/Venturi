@@ -1093,8 +1093,13 @@ impl VibeVideoApp {
             let vv_core::ClipSource::Media(media_id) = &clip.source else {
                 return None;
             };
-            let local = (self.timeline_state.playhead - clip.timeline_start).max(0);
-            let source_frame = clip.source_in + local;
+            // Mappatura clip→frame-sorgente condivisa con render_ahead ed
+            // export (`vv_core::Clip::source_frame_at`, vedi doc lì —
+            // REFACTOR_PIPELINE.md B1). Il clamp preserva il comportamento
+            // precedente per il breve istante in cui `active_clip` può
+            // restare un frame indietro rispetto al playhead appena
+            // aggiornato.
+            let source_frame = clip.source_frame_at(self.timeline_state.playhead.max(clip.timeline_start));
             self.render_ahead
                 .as_ref()?
                 .get_frame(*media_id, source_frame)

@@ -366,10 +366,11 @@ fn collect_media_segments(
                 let segment_end_timeline = clip.timeline_end().min(end_frame);
                 if let ClipSource::Media(media_id) = &clip.source {
                     let media_id = *media_id;
-                    let source_start = clip.source_in + (frame - clip.timeline_start);
-                    let source_end =
-                        (clip.source_in + (segment_end_timeline - clip.timeline_start) - 1)
-                            .max(source_start);
+                    // Mappatura clip→frame-sorgente condivisa con l'export
+                    // (`vv_core::Clip::source_frame_at`, vedi doc lì per il
+                    // perché — REFACTOR_PIPELINE.md B1).
+                    let source_start = clip.source_frame_at(frame);
+                    let source_end = (clip.source_frame_at(segment_end_timeline) - 1).max(source_start);
                     segments.push(MediaSegment {
                         media_id,
                         source_start,

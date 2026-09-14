@@ -178,8 +178,10 @@ fn render_video_frame(
         return Ok(black_frame(resolution));
     };
 
-    let local = frame - clip.timeline_start;
-    let source_frame = clip.source_in + local;
+    // Mappatura clip→frame-sorgente condivisa con l'anteprima
+    // (`vv_core::Clip::source_frame_at`, vedi doc lì per il perché —
+    // REFACTOR_PIPELINE.md B1).
+    let source_frame = clip.source_frame_at(frame);
 
     match &clip.source {
         ClipSource::Media(media_id) => {
@@ -216,6 +218,7 @@ fn render_video_frame(
         }
         ClipSource::SolidColor => {
             *active = None;
+            let local = frame - clip.timeline_start;
             let color = clip
                 .effects
                 .color

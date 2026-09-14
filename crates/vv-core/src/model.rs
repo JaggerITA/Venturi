@@ -282,6 +282,22 @@ impl Clip {
     pub fn timeline_end(&self) -> FrameIdx {
         self.timeline_start + self.timeline_len()
     }
+
+    /// Mappa una posizione di *timeline* (deve cadere dentro l'intervallo
+    /// di questa clip, `timeline_start..timeline_end()` — il chiamante lo
+    /// garantisce risolvendo `Timeline::active_clip_at` prima di
+    /// chiamare) al frame *sorgente* corrispondente (fps nativo del
+    /// media). Unica funzione per questa mappatura: prima era scritta
+    /// separatamente nel walker di prefetch dell'anteprima
+    /// (`vv-app::render_ahead::collect_media_segments`) e nel loop di
+    /// export (`vv-app::export::render_video_frame`), identiche solo
+    /// perché coincidono quando `effects.speed == 1` — al primo
+    /// time-remap reale (milestone 7, `EffectStack::speed` non ancora
+    /// applicato qui) sarebbero divergenti senza un posto unico da
+    /// cambiare. Quel cambio va qui, non ai due chiamanti.
+    pub fn source_frame_at(&self, timeline_frame: FrameIdx) -> FrameIdx {
+        self.source_in + (timeline_frame - self.timeline_start)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -523,6 +539,21 @@ mod timeline_tests {
             tl.active_clip_at(0, 25).is_none(),
             "oltre la fine dell'ultima clip"
         );
+    }
+
+    #[test]
+    fn source_frame_at_maps_a_trimmed_clip_correctly() {
+        let clip = Clip {
+            id: ClipId(1),
+            source: ClipSource::SolidColor,
+            source_in: 200,
+            source_out: 300,
+            timeline_start: 60,
+            effects: EffectStack::default(),
+            linked: None,
+        };
+        assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");
+        assert_eq!(clip.source_frame_at(75), 215);
     }
 
     #[test]
