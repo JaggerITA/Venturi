@@ -5027,18 +5027,27 @@ mod tests {
             .expect("doveva precaricare anche se stesso media (non contiguo)");
         assert_eq!(preload.clip_id, clip_b_id);
 
+        // Attende non solo "qualcosa in cache" ma specificamente un
+        // frame a partire da source_in=60: l'unico keyframe del file di
+        // test è a frame 0 (nessun `-g` esplicito nella fixture), quindi
+        // il decode-ahead deve decodificare in sequenza 0..60 prima di
+        // arrivarci — un "cache non vuota" generico passerebbe troppo
+        // presto, su frame precedenti a 60 che
+        // `map_source_ranges_to_timeline` scarta comunque (fuori dal
+        // trim di clip_b).
         let start = std::time::Instant::now();
         loop {
-            if app
-                .next_preload
-                .as_ref()
-                .is_some_and(|p| !p.player.cached_source_ranges().is_empty())
-            {
+            if app.next_preload.as_ref().is_some_and(|p| {
+                p.player
+                    .cached_source_ranges()
+                    .iter()
+                    .any(|&(_, end)| end >= 60)
+            }) {
                 break;
             }
             assert!(
                 start.elapsed() < std::time::Duration::from_secs(2),
-                "timeout: il preload non ha mai bufferizzato nulla"
+                "timeout: il preload non ha mai raggiunto source_in=60"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

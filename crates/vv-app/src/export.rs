@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use vv_core::{Clip, ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId};
+use vv_core::{ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId};
 
 const VIDEO_TRACK: usize = 0;
 const AUDIO_TRACK: usize = 1;
@@ -38,33 +38,6 @@ pub struct ExportProgress {
     pub total_frames: FrameIdx,
     pub done: bool,
     pub error: Option<String>,
-}
-
-/// La clip attiva su `track_index` al frame `frame` della timeline, se
-/// c'è. Stessa forma di `VibeVideoApp::clip_at` in `main.rs`, ma su
-/// `&Timeline` direttamente invece che su `&self` (l'export lavora su uno
-/// snapshot di `Project`, non sull'app) — tenuta separata invece di
-/// riusare quella esistente per restare additivi.
-fn active_clip_at(timeline: &Timeline, track_index: usize, frame: FrameIdx) -> Option<&Clip> {
-    timeline
-        .tracks
-        .get(track_index)?
-        .clips
-        .iter()
-        .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
-}
-
-/// Ultimo frame (esclusivo) coperto da una qualunque clip della timeline,
-/// su qualunque track: definisce la lunghezza dell'export (frame
-/// `0..total_frames`).
-fn timeline_total_frames(timeline: &Timeline) -> FrameIdx {
-    timeline
-        .tracks
-        .iter()
-        .flat_map(|t| t.clips.iter())
-        .map(Clip::timeline_end)
-        .max()
-        .unwrap_or(0)
 }
 
 fn black_frame(resolution: (u32, u32)) -> Vec<u8> {
@@ -133,7 +106,7 @@ pub fn export_timeline(
         .get(timeline_id)
         .ok_or_else(|| "timeline non trovata".to_string())?;
 
-    let total_frames = timeline_total_frames(timeline);
+    let total_frames = timeline.total_frames();
     progress.lock().unwrap().total_frames = total_frames;
     if total_frames <= 0 {
         progress.lock().unwrap().done = true;
@@ -200,7 +173,7 @@ fn render_video_frame(
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
-    let Some(clip) = active_clip_at(timeline, VIDEO_TRACK, frame) else {
+    let Some(clip) = timeline.active_clip_at(VIDEO_TRACK, frame) else {
         *active = None;
         return Ok(black_frame(resolution));
     };
@@ -442,7 +415,7 @@ fn resample_and_remix(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vv_core::{EffectStack, Track, TrackKind};
+    use vv_core::{Clip, EffectStack, Track, TrackKind};
 
     fn solid_color_clip(id: u64, start: FrameIdx, len: FrameIdx, color: Rgba) -> Clip {
         Clip {
@@ -482,7 +455,7 @@ mod tests {
                 muted: false,
             },
         ]);
-        assert_eq!(timeline_total_frames(&tl), 25);
+        assert_eq!(tl.total_frames(), 25);
     }
 
     #[test]
@@ -492,7 +465,7 @@ mod tests {
             clips: vec![],
             muted: false,
         }]);
-        assert_eq!(timeline_total_frames(&tl), 0);
+        assert_eq!(tl.total_frames(), 0);
     }
 
     #[test]
@@ -505,9 +478,9 @@ mod tests {
             ],
             muted: false,
         }]);
-        assert_eq!(active_clip_at(&tl, 0, 5).map(|c| c.id), Some(ClipId(1)));
-        assert!(active_clip_at(&tl, 0, 15).is_none(), "buco tra le due clip");
-        assert_eq!(active_clip_at(&tl, 0, 25).map(|c| c.id), Some(ClipId(2)));
+        assert_eq!(tl.active_clip_at(0, 5).map(|c| c.id), Some(ClipId(1)));
+        assert!(tl.active_clip_at(0, 15).is_none(), "buco tra le due clip");
+        assert_eq!(tl.active_clip_at(0, 25).map(|c| c.id), Some(ClipId(2)));
     }
 
     fn red() -> Rgba {
@@ -644,7 +617,7 @@ mod tests {
                 muted: false,
             },
         ]);
-        assert!(active_clip_at(&tl, 1, 5).is_none(), "track audio vuota");
+        assert!(tl.active_clip_at(1, 5).is_none(), "track audio vuota");
     }
 
     /// End-to-end: costruisce una timeline vera (via `VibeVideoApp`, non

@@ -317,6 +317,34 @@ pub struct Timeline {
     pub tracks: Vec<Track>,
 }
 
+impl Timeline {
+    /// La clip attiva su `track_index` al frame `frame`, se c'è. Prima
+    /// vivevano tre copie quasi identiche di questa stessa ricerca lineare
+    /// (`VibeVideoApp::clip_at` in vv-app/main.rs, `active_clip_at` in
+    /// vv-app/export.rs, e concettualmente dentro la logica di preload
+    /// per-clip in main.rs): estratta qui una volta sola perché sia
+    /// export sia il render-ahead a livello di timeline la usano allo
+    /// stesso modo.
+    pub fn active_clip_at(&self, track_index: usize, frame: FrameIdx) -> Option<&Clip> {
+        self.tracks
+            .get(track_index)?
+            .clips
+            .iter()
+            .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+    }
+
+    /// Ultimo frame (esclusivo) coperto da una qualunque clip della
+    /// timeline, su qualunque track.
+    pub fn total_frames(&self) -> FrameIdx {
+        self.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(Clip::timeline_end)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Project {
     pub media_pool: SlotMap<MediaId, MediaItem>,
@@ -457,5 +485,91 @@ mod keyframe_tests {
         };
         let mid = Rgba::lerp(&a, &b, 0.5);
         assert_eq!((mid.r, mid.g, mid.b, mid.a), (0.5, 0.25, 0.1, 0.5));
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    fn clip_at(timeline_start: FrameIdx, len: FrameIdx, id: u64) -> Clip {
+        Clip {
+            id: ClipId(id),
+            source: ClipSource::SolidColor,
+            source_in: 0,
+            source_out: len,
+            timeline_start,
+            effects: EffectStack::default(),
+            linked: None,
+        }
+    }
+
+    #[test]
+    fn active_clip_at_finds_the_covering_clip_and_none_in_a_gap() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                clips: vec![clip_at(0, 10, 1), clip_at(20, 5, 2)],
+                muted: false,
+            }],
+        };
+        assert_eq!(tl.active_clip_at(0, 5).map(|c| c.id), Some(ClipId(1)));
+        assert!(tl.active_clip_at(0, 15).is_none(), "buco tra le due clip");
+        assert_eq!(tl.active_clip_at(0, 20).map(|c| c.id), Some(ClipId(2)));
+        assert!(
+            tl.active_clip_at(0, 25).is_none(),
+            "oltre la fine dell'ultima clip"
+        );
+    }
+
+    #[test]
+    fn active_clip_at_ignores_other_tracks_and_out_of_range_indices() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                clips: vec![clip_at(0, 10, 1)],
+                muted: false,
+            }],
+        };
+        assert!(tl.active_clip_at(1, 5).is_none(), "track inesistente");
+    }
+
+    #[test]
+    fn total_frames_is_the_furthest_clip_end_across_tracks() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(0, 10, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Audio,
+                    clips: vec![clip_at(15, 10, 2)], // finisce a 25, più avanti della video
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(tl.total_frames(), 25);
+    }
+
+    #[test]
+    fn total_frames_is_zero_for_an_empty_timeline() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video)],
+        };
+        assert_eq!(tl.total_frames(), 0);
     }
 }
