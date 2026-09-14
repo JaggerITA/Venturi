@@ -191,16 +191,12 @@ impl Player {
         (self.position_secs() * self.fps).round() as FrameIdx
     }
 
-    /// Frame corrente da mostrare nel viewer. Aggiorna anche il target del
-    /// decode-ahead alla posizione corrente. Se il frame esatto non è
-    /// ancora pronto (scrub o cambio clip appena avvenuto: vedi doc di
-    /// `FrameCache::get_or_nearest`), ritorna il più vicino disponibile
-    /// invece di lasciare il viewer fermo sull'ultimo frame mostrato — che
-    /// dopo un cambio clip può appartenere a tutt'altro contesto.
+    /// Frame corrente da mostrare nel viewer, se già decodificato. Aggiorna
+    /// anche il target del decode-ahead alla posizione corrente.
     pub fn current_frame(&self) -> Option<Arc<FrameRgba>> {
         let idx = self.current_source_frame();
         self.decode_ahead.set_target(idx);
-        self.decode_ahead.cache().get_or_nearest(idx)
+        self.decode_ahead.cache().get(idx)
     }
 
     /// Da chiamare a ogni frame UI: mette in pausa automaticamente a fine
