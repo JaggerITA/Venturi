@@ -631,13 +631,21 @@ impl VibeVideoApp {
 
         // Se la clip precedente era sullo *stesso media*, non riaprire il
         // player: `Player::open` rifà un decode completo della traccia
-        // audio e apre un nuovo decoder video, che sul taglio tra due
-        // pezzi della stessa sorgente (es. dopo un T) si vedeva come
-        // "il video sparisce e ricompare dopo qualche centinaio di ms".
-        // Basta un seek sul player già aperto — anzi, se il player è già
-        // esattamente al frame giusto (il caso comune: taglio netto, la
-        // riproduzione arriva già al punto di attacco), nemmeno quello:
-        // un seek è comunque un flush del decoder, evitabile del tutto.
+        // audio e apre un nuovo decoder video. Basta un seek sul player
+        // già aperto — anzi, se il player è già esattamente al frame
+        // giusto (il caso di un T-split: le due metà sono contigue nello
+        // stesso file, `source_out` dell'una == `source_in` dell'altra),
+        // nemmeno quello: un seek è comunque un flush del decoder,
+        // evitabile del tutto in quel caso. Ma "stesso media" da solo NON
+        // basta a garantire che il riuso sia gratis: due clip che
+        // referenziano *punti diversi e non contigui* dello stesso file
+        // (es. due trim separati dello stesso sorgente incollati altrove
+        // sulla timeline) richiedono comunque un seek reale — bug
+        // segnalato: proprio in quel caso il riuso "gratis" veniva scelto
+        // a prescindere, ignorando un eventuale preload già scaldato in
+        // anticipo per quella clip (l'indicatore "buffered" mostrava
+        // progresso, ma al taglio il costo del seek si pagava comunque,
+        // perché il player riusato non era quello preparato in anticipo).
         let previous_media = self.active_clip.and_then(|(track_index, id)| {
             self.project.timelines[timeline_id]
                 .tracks
@@ -655,20 +663,37 @@ impl VibeVideoApp {
 
         match clip.source {
             vv_core::ClipSource::Media(media_id) => {
-                let can_reuse =
-                    self.preview_player.is_some() && can_reuse_player_for(previous_media, media_id);
-                if !can_reuse {
-                    // Se `maintain_next_clip_preload` aveva già scaldato in
-                    // anticipo il player per *questa* clip (media diverso
-                    // dalla precedente, altrimenti si sarebbe riusato sopra),
-                    // lo consuma invece di aprirne uno a freddo proprio ora
-                    // — bug segnalato: "il buffer si ferma a fine clip e
-                    // ricomincia solo quando la testina la raggiunge",
-                    // anche sui tagli netti (senza vuoto in mezzo), dove
-                    // prima non c'era alcun preload.
+                let same_media = can_reuse_player_for(previous_media, media_id);
+                // Continuazione davvero gratis: il player esistente è già
+                // posizionato esattamente dove serve, nessun seek in vista
+                // (vedi sopra). Confrontato sulla posizione *reale* del
+                // player, non solo dedotto dai dati della clip: resta
+                // corretto anche per uno scrub diretto a metà clip, non
+                // solo per il taglio netto a inizio clip.
+                let already_at_target = same_media
+                    && self
+                        .preview_player
+                        .as_ref()
+                        .is_some_and(|p| p.current_source_frame() == clip.source_in);
+
+                if !already_at_target {
+                    // Preferisce un preload già scaldato in anticipo per
+                    // *questa* clip (vedi `maintain_next_clip_preload`), a
+                    // prescindere dal fatto che sia lo stesso media o no:
+                    // se non è una continuazione gratis, riusare il player
+                    // esistente con un seek costa comunque quanto aprirne
+                    // uno nuovo. Solo se non c'è alcun preload pronto si
+                    // ricade sul riuso-con-seek (se stesso media, evita
+                    // almeno la riapertura completa) o sull'apertura a
+                    // freddo (se media diverso).
                     match self.next_preload.take() {
                         Some(preload) if preload.clip_id == clip_id => {
                             self.preview_player = Some(preload.player);
+                        }
+                        _ if same_media && self.preview_player.is_some() => {
+                            // Riusa il player già aperto così com'è: il
+                            // seek verso il target, più sotto, lo porterà
+                            // al punto giusto.
                         }
                         _ => self.preview_media(media_id),
                     }
@@ -986,7 +1011,20 @@ impl VibeVideoApp {
                             let remaining =
                                 (clip.source_out - player.current_source_frame()) as f64 / fps;
                             self.next_video_clip_from(timeline_id, clip.timeline_end())
-                                .map(|(next_id, _)| (next_id, remaining))
+                                .and_then(|(next_id, _)| {
+                                    let next_clip = self.project.timelines[timeline_id].tracks
+                                        [VIDEO_TRACK]
+                                        .clips
+                                        .iter()
+                                        .find(|c| c.id == next_id)?;
+                                    // Continuazione gratis nello stesso
+                                    // file (es. dopo un T-split):
+                                    // `load_video_clip` la riprende senza
+                                    // alcun seek, un preload qui sarebbe
+                                    // solo un player extra sprecato.
+                                    (!is_seamless_continuation(&clip, next_clip))
+                                        .then_some((next_id, remaining))
+                                })
                         }
                         _ => None,
                     }
@@ -1911,6 +1949,22 @@ impl VibeVideoApp {
 /// Funzione pura per poterla testare senza passare da un `Player` vero.
 fn can_reuse_player_for(previous_media: Option<MediaId>, next_media: MediaId) -> bool {
     previous_media == Some(next_media)
+}
+
+/// `true` se `b` continua `a` senza soluzione di continuità nello stesso
+/// file sorgente (stesso media, `b.source_in == a.source_out`) — il caso
+/// tipico di un T-split. Solo in questo caso il riuso del player già
+/// aperto è davvero gratis (nessun seek): due clip che condividono il
+/// media ma referenziano punti diversi e non contigui del file (es. due
+/// trim separati incollati altrove sulla timeline) richiedono comunque un
+/// seek reale, quindi non contano come "seamless" qui — vedi uso in
+/// `maintain_next_clip_preload`/`load_video_clip`. Funzione pura per
+/// poterla testare senza un vero `Player`.
+fn is_seamless_continuation(a: &vv_core::Clip, b: &vv_core::Clip) -> bool {
+    matches!(
+        (&a.source, &b.source),
+        (vv_core::ClipSource::Media(m1), vv_core::ClipSource::Media(m2)) if m1 == m2
+    ) && b.source_in == a.source_out
 }
 
 /// Mappa intervalli di frame *sorgente* (spazio nativo del media, quello
@@ -4127,6 +4181,65 @@ mod tests {
         );
     }
 
+    /// Bug segnalato: due clip dello *stesso* media ma con punti di
+    /// attacco non contigui (es. due trim separati incollati altrove)
+    /// venivano trattate come una continuazione gratis (riuso col solo
+    /// seek), ignorando un eventuale preload già scaldato in anticipo —
+    /// il seek costava comunque quanto aprire un player nuovo. Solo la
+    /// vera contiguità (`source_out` dell'una == `source_in` dell'altra,
+    /// tipica di un T-split) è davvero gratis.
+    #[test]
+    fn is_seamless_continuation_only_for_the_same_media_and_contiguous_source_ranges() {
+        let base = vv_core::Clip {
+            id: ClipId(0),
+            source: vv_core::ClipSource::Media(MediaId::default()),
+            source_in: 0,
+            source_out: 50,
+            timeline_start: 0,
+            effects: vv_core::EffectStack::default(),
+            linked: None,
+        };
+
+        // Stesso media, contiguo: source_in di b == source_out di a.
+        let contiguous = vv_core::Clip {
+            source_in: 50,
+            timeline_start: 50,
+            ..base.clone()
+        };
+        assert!(is_seamless_continuation(&base, &contiguous));
+
+        // Stesso media, MA non contiguo: due trim separati dello stesso
+        // file.
+        let non_contiguous = vv_core::Clip {
+            source_in: 60,
+            timeline_start: 50,
+            ..base.clone()
+        };
+        assert!(!is_seamless_continuation(&base, &non_contiguous));
+
+        // Media diverso, anche se numericamente "contiguo".
+        let other_media = vv_core::Clip {
+            source: vv_core::ClipSource::Media(
+                vv_core::Project::default()
+                    .media_pool
+                    .insert(dummy_media_item()),
+            ),
+            source_in: 50,
+            timeline_start: 50,
+            ..base.clone()
+        };
+        assert!(!is_seamless_continuation(&base, &other_media));
+
+        // SolidColor non conta mai come continuazione.
+        let solid = vv_core::Clip {
+            source: vv_core::ClipSource::SolidColor,
+            source_in: 50,
+            timeline_start: 50,
+            ..base.clone()
+        };
+        assert!(!is_seamless_continuation(&base, &solid));
+    }
+
     fn dummy_media_item() -> vv_core::MediaItem {
         vv_core::MediaItem {
             path: "dummy.mp4".into(),
@@ -4820,6 +4933,132 @@ mod tests {
             app.next_preload.is_none(),
             "il preload consumato deve svuotarsi"
         );
+        assert!(
+            !app.buffered_timeline_ranges().is_empty(),
+            "il buffer doveva essere già presente subito dopo il taglio, non ripartire da zero"
+        );
+    }
+
+    /// Bug segnalato: "l'indicatore sembra bufferizzare fino alla clip
+    /// successiva, ma poi entra comunque tardi di 1s come se non ci
+    /// fosse alcun buffer". Causa: due clip dello *stesso* media ma con
+    /// punti di attacco non contigui (es. due trim separati dello stesso
+    /// file incollati altrove, come nel caso segnalato) venivano
+    /// riconosciute come "stesso media" e quindi riusate col solo seek,
+    /// ignorando il preload — che pure era stato avviato e mostrava
+    /// progresso nell'indicatore, ma restava inutilizzato. Verifica che
+    /// in questo caso specifico (stesso media, non contiguo) il preload
+    /// venga comunque usato.
+    #[test]
+    fn load_video_clip_uses_a_matching_preload_for_the_same_media_when_not_contiguous() {
+        let dir = std::env::temp_dir().join("vv-app-same-media-noncontiguous-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=3",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        let meta = app.project.media_pool.get(media_id).unwrap().meta.clone();
+        let timeline_id = app.ensure_timeline_for(&meta);
+
+        // Clip A: source [0,50) a timeline [0,50). Clip B: source [60,75)
+        // — stesso media, ma NON contiguo (60 != 50) — a timeline [50,65).
+        let clip_a_id = app.project.alloc_clip_id();
+        let clip_a = vv_core::Clip {
+            id: clip_a_id,
+            source: vv_core::ClipSource::Media(media_id),
+            source_in: 0,
+            source_out: 50,
+            timeline_start: 0,
+            effects: vv_core::EffectStack::default(),
+            linked: None,
+        };
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: VIDEO_TRACK,
+                clip: clip_a,
+            }),
+        );
+        let clip_b_id = app.project.alloc_clip_id();
+        let clip_b = vv_core::Clip {
+            id: clip_b_id,
+            source: vv_core::ClipSource::Media(media_id),
+            source_in: 60,
+            source_out: 75,
+            timeline_start: 50,
+            effects: vv_core::EffectStack::default(),
+            linked: None,
+        };
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: VIDEO_TRACK,
+                clip: clip_b,
+            }),
+        );
+
+        app.load_video_clip(clip_a_id);
+        let player = app.preview_player.as_mut().expect("player atteso");
+        player.seek_to_frame(48);
+        player.play();
+        app.maintain_next_clip_preload();
+        let preload = app
+            .next_preload
+            .as_ref()
+            .expect("doveva precaricare anche se stesso media (non contiguo)");
+        assert_eq!(preload.clip_id, clip_b_id);
+
+        let start = std::time::Instant::now();
+        loop {
+            if app
+                .next_preload
+                .as_ref()
+                .is_some_and(|p| !p.player.cached_source_ranges().is_empty())
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(2),
+                "timeout: il preload non ha mai bufferizzato nulla"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        app.advance_playback_past(timeline_id, 50);
+
+        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b_id)));
+        assert!(
+            app.next_preload.is_none(),
+            "il preload consumato deve svuotarsi"
+        );
+        assert_eq!(
+            app.preview_player.as_ref().unwrap().current_source_frame(),
+            60
+        );
+        // Il segnale che distingue davvero "ha usato il preload" da "ha
+        // riusato il vecchio player con un seek" (il bug): un seek fresco
+        // flusha il decoder e parte da una cache vuota, che il
+        // decode-ahead impiega un momento a ripopolare — qui invece deve
+        // già avere qualcosa, ereditato dal preload.
         assert!(
             !app.buffered_timeline_ranges().is_empty(),
             "il buffer doveva essere già presente subito dopo il taglio, non ripartire da zero"
