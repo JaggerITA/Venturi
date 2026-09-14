@@ -1146,6 +1146,45 @@ impl VibeVideoApp {
         self.sync_selection_to_playhead();
     }
 
+    /// Gestisce gli eventi Copy/Paste della tastiera per la clipboard della
+    /// timeline. Funzione isolata (non inline in `ui()`) apposta per poter
+    /// scrivere un test: `ui()` prende un `eframe::Frame` che non ha un
+    /// costruttore pubblico fuori da `eframe`, quindi non è testabile
+    /// direttamente, mentre questa può girare dentro un `egui::Context`
+    /// "nudo" in `run_ui` (stesso trucco già usato per `show_timeline` in
+    /// `timeline_ui.rs`).
+    ///
+    /// Bug segnalato: Ctrl+V da tastiera "funzionava solo dal menu".
+    /// Causa: `egui-winit` genera `Event::Paste` SOLO se la clipboard di
+    /// *sistema* contiene già del testo non vuoto (vedi `is_paste_command`
+    /// in egui-winit — se la legge vuota, non emette proprio l'evento). La
+    /// nostra clipboard vera (`timeline_state.clipboard`) è interna
+    /// all'app e non scrive nulla in quella di sistema, quindi Ctrl+V
+    /// restava silenziosamente muto ogni volta che la clipboard di sistema
+    /// era vuota (sessione appena avviata, mai copiato altro) — un caso
+    /// facile da non notare se per caso conteneva già del testo di
+    /// qualcos'altro. Il pulsante di menu funzionava comunque perché
+    /// chiama `paste_clipboard_at_playhead` direttamente, scavalcando
+    /// questo passaggio. Fix: dopo una copia riuscita, scrivere anche un
+    /// placeholder nella clipboard di sistema (`ctx.copy_text`), così ce
+    /// n'è sempre uno non vuoto quando c'è davvero qualcosa da incollare —
+    /// il contenuto della stringa non conta, `Event::Paste` viene gestito
+    /// a prescindere dal suo payload.
+    fn handle_clipboard_events(&mut self, ui: &egui::Ui, events: &[egui::Event]) {
+        for event in events {
+            match event {
+                egui::Event::Copy => {
+                    self.copy_selected_clips();
+                    if !self.timeline_state.clipboard.is_empty() {
+                        ui.ctx().copy_text("vibevideo:clip".to_owned());
+                    }
+                }
+                egui::Event::Paste(_) => self.paste_clipboard_at_playhead(),
+                _ => {}
+            }
+        }
+    }
+
     /// Copia le clip selezionate (+ la gemella collegata di ciascuna, se
     /// non già anch'essa selezionata esplicitamente — stesso principio di
     /// `delete_selected`) in `timeline_state.clipboard`, pronte per
@@ -1961,14 +2000,10 @@ impl eframe::App for VibeVideoApp {
             // semantici `Copy`/`Paste`, non come normali pressioni di
             // tasto — con `key_pressed` la scorciatoia risultava
             // silenziosamente inattiva (il pulsante in menu, che chiama
-            // gli stessi metodi, funzionava comunque).
-            for event in &i.events {
-                match event {
-                    egui::Event::Copy => self.copy_selected_clips(),
-                    egui::Event::Paste(_) => self.paste_clipboard_at_playhead(),
-                    _ => {}
-                }
-            }
+            // gli stessi metodi, funzionava comunque). Vedi il doc di
+            // `handle_clipboard_events` per il bug più subdolo trovato
+            // dopo.
+            self.handle_clipboard_events(ui, &i.events);
             // Ctrl+"+"/Ctrl+"-" (anche Ctrl+"=", stesso tasto di "+" non
             // shiftato sulla maggior parte delle tastiere): zoom della
             // timeline.
@@ -2032,7 +2067,12 @@ impl eframe::App for VibeVideoApp {
                         )
                         .clicked()
                     {
-                        self.copy_selected_clips();
+                        // Passa anche da qui (non solo `copy_selected_clips`
+                        // diretto) per scrivere lo stesso placeholder nella
+                        // clipboard di sistema — vedi doc di
+                        // `handle_clipboard_events`: serve perché Ctrl+V da
+                        // tastiera dipende da quella, non dalla nostra.
+                        self.handle_clipboard_events(ui, &[egui::Event::Copy]);
                         ui.close();
                     }
                     if ui
@@ -3940,6 +3980,82 @@ mod tests {
         app.paste_clipboard_at_playhead();
 
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
+    }
+
+    /// Bug segnalato: "il copia-incolla funziona solo dal menu, non da
+    /// tastiera". Causa: `egui-winit` genera `Event::Paste` solo se la
+    /// clipboard di *sistema* non è vuota (vedi doc di
+    /// `handle_clipboard_events`) — questo test verifica che un
+    /// `Event::Copy` scriva sempre qualcosa di non vuoto lì, così un
+    /// successivo Ctrl+V da tastiera possa davvero generare l'evento.
+    /// Gira dentro un `egui::Context` "nudo" (`run_ui`), non il vero
+    /// `eframe::Frame` di `ui()` (non costruibile fuori da `eframe`):
+    /// stesso trucco già usato per `show_timeline` in `timeline_ui.rs`.
+    #[test]
+    fn handle_clipboard_events_primes_the_system_clipboard_after_a_copy() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_clipboard_events(ui, &[egui::Event::Copy]);
+        });
+        output.textures_delta.clear();
+
+        assert_eq!(app.timeline_state.clipboard.len(), 1);
+        let copied_something_non_empty = output
+            .platform_output
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, egui::OutputCommand::CopyText(text) if !text.is_empty()));
+        assert!(
+            copied_something_non_empty,
+            "doveva scrivere qualcosa di non vuoto nella clipboard di sistema"
+        );
+    }
+
+    /// Senza nulla di selezionato, `copy_selected_clips` è un no-op: non
+    /// deve nemmeno toccare la clipboard di sistema (altrimenti Ctrl+C a
+    /// vuoto cancellerebbe silenziosamente quel che l'utente avesse
+    /// eventualmente copiato altrove per incollarlo in un'altra app).
+    #[test]
+    fn handle_clipboard_events_does_not_touch_system_clipboard_when_nothing_is_selected() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_clipboard_events(ui, &[egui::Event::Copy]);
+        });
+        output.textures_delta.clear();
+
+        assert!(app.timeline_state.clipboard.is_empty());
+        assert!(
+            output.platform_output.commands.is_empty(),
+            "senza nulla da copiare non deve toccare la clipboard di sistema"
+        );
+    }
+
+    /// `Event::Paste` va gestito a prescindere dal suo payload testuale
+    /// (la clipboard vera è `timeline_state.clipboard`, non il testo di
+    /// sistema): incolla comunque quel che avevamo già copiato.
+    #[test]
+    fn handle_clipboard_events_pastes_regardless_of_the_paste_events_payload() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
+        app.copy_selected_clips();
+        app.timeline_state.playhead = 100;
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_clipboard_events(ui, &[egui::Event::Paste("qualsiasi cosa".to_owned())]);
+        });
+        output.textures_delta.clear();
+
+        let timeline_id = app.timeline_id.unwrap();
+        assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 2);
     }
 
     /// Bug segnalato: incollare una clip sopra un'altra la copriva solo
