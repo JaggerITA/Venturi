@@ -55,6 +55,16 @@ enum Command {
     Stop,
 }
 
+/// Log diagnostico opzionale su stderr, attivo solo con la variabile
+/// d'ambiente `VV_DEBUG_RENDER_AHEAD=1`: per capire da rapporti utente
+/// cosa succede davvero su una macchina/file che non riesco a
+/// riprodurre qui (apertura/seek di un decoder, stato della finestra ad
+/// ogni ciclo di poll) senza appesantire l'uso normale.
+fn debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("VV_DEBUG_RENDER_AHEAD").is_ok())
+}
+
 /// Vedi il doc del modulo. Uno per `VibeVideoApp` (non uno per clip: la
 /// differenza chiave rispetto al sistema precedente).
 pub struct RenderAhead {
@@ -329,7 +339,14 @@ fn position_decoder(
         // un'altra apertura completa al giro successivo — un loop che
         // non recupera mai (osservato: "1 frame ogni pochi secondi").
         let secs = segment_start as f64 / o.decoder.fps().as_f64().max(1e-9);
+        let debug_start = debug_enabled().then(std::time::Instant::now);
         let _ = o.decoder.seek_to_time(secs);
+        if let Some(t) = debug_start {
+            eprintln!(
+                "[render_ahead] seek (decoder riusato) media={media_id:?} target={segment_start} elapsed={:?}",
+                t.elapsed()
+            );
+        }
         // Placeholder: il prossimo `next_frame()` restituisce l'idx
         // *reale* del keyframe da cui riparte (può essere <
         // segment_start), che aggiorna subito questo campo nel loop di
@@ -339,11 +356,19 @@ fn position_decoder(
     }
     // Nessun decoder aperto per questo media: qui l'apertura reale è
     // inevitabile (prima volta, o media diverso da quello aperto finora).
+    let debug_start = debug_enabled().then(std::time::Instant::now);
     let Ok(mut decoder) = Decoder::open(path) else {
         return false;
     };
     let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
     let _ = decoder.seek_to_time(secs);
+    if let Some(t) = debug_start {
+        eprintln!(
+            "[render_ahead] OPEN (nuovo decoder) media={media_id:?} path={} target={segment_start} elapsed={:?}",
+            path.display(),
+            t.elapsed()
+        );
+    }
     open.insert(
         media_id,
         OpenDecoder {
@@ -444,6 +469,17 @@ fn walk_and_fill(
                 }
                 _ => break,
             }
+        }
+
+        if debug_enabled() {
+            let final_next_frame = open.get(&segment.media_id).unwrap().next_frame;
+            eprintln!(
+                "[render_ahead] media={:?} target_frame={from_frame} segment=[{},{}] capped_end={capped_source_end} next_frame_after={final_next_frame} cached_ranges={:?}",
+                segment.media_id,
+                segment.source_start,
+                segment.source_end,
+                cache.cached_ranges()
+            );
         }
     }
 }
