@@ -17,6 +17,7 @@
 
 mod export;
 mod player;
+mod render_ahead;
 mod timeline_ui;
 
 use player::Player;
@@ -46,37 +47,11 @@ const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 /// se c'è).
 type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
 
-/// Stato di `VibeVideoApp::gap_playback` — vedi il suo doc per il quadro
-/// generale.
-struct GapPlayback {
+/// Stato di `VibeVideoApp::gap_wall_clock` — vedi il suo doc per il
+/// quadro generale.
+struct GapWallClock {
     started_at: Instant,
     start_frame: FrameIdx,
-    next_clip_id: ClipId,
-    next_clip_start: FrameIdx,
-    /// Player della prossima clip già aperto e posizionato al suo
-    /// `source_in`, ma non ancora in play: dà al decode-ahead tutto il
-    /// tempo residuo del vuoto per popolare la cache dei frame, invece di
-    /// partire da zero solo al cambio di controllo (bug: "il primo
-    /// secondo di video resta nero, l'audio invece parte subito"). `None`
-    /// per un generatore SolidColor o se l'apertura è fallita — in quel
-    /// caso il cambio di controllo ricade su `load_video_clip`.
-    preloaded_player: Option<Player>,
-}
-
-/// Quanti secondi prima della fine della clip attiva (nello spazio della
-/// clip stessa) iniziare a precaricare la prossima clip video sulla track
-/// — vedi `VibeVideoApp::maintain_next_clip_preload`. Dà al decode-ahead
-/// del nuovo player tempo di scaldarsi *prima* del taglio invece che a
-/// partire da lì, sia sui tagli netti sia sui vuoti (bug segnalato:
-/// l'indicatore "buffered" mostrava il buffer fermarsi a fine clip e
-/// ripartire da zero solo quando la testina raggiungeva la successiva).
-const NEXT_CLIP_PRELOAD_LOOKAHEAD_SECS: f64 = 3.0;
-
-/// Stato di `VibeVideoApp::next_preload` — vedi il suo doc per il quadro
-/// generale.
-struct NextPreload {
-    clip_id: ClipId,
-    player: Player,
 }
 
 /// Snapshot dei campi della clip selezionata che servono al pannello
@@ -125,6 +100,11 @@ struct VibeVideoApp {
     preview_player: Option<Player>,
     preview_error: Option<String>,
     frame_texture: Option<egui::TextureHandle>,
+    /// Decode-ahead video per l'anteprima "grezza" di un media dal media
+    /// pool (`browsing_media`), non legata a nessuna clip/posizione di
+    /// timeline a cui `render_ahead` potrebbe agganciarsi. Il video delle
+    /// clip *sulla* timeline viene invece da `render_ahead`, sempre.
+    browsing_decode_ahead: Option<vv_media::DecodeAhead>,
     /// Traccia audio già decodificata per path, riusata da `preview_media`
     /// invece di ridecodificarla da zero ogni volta che il player per quel
     /// media viene riaperto (es. il playhead attraversa un vuoto: il
@@ -164,23 +144,26 @@ struct VibeVideoApp {
     /// interagendo con la timeline (selezione o playhead).
     browsing_media: Option<MediaId>,
 
-    /// Riproduzione in corso attraverso un vuoto sulla track video: nessun
-    /// player da seguire lì (schermo nero, vedi il rendering nel viewer),
-    /// quindi il playhead avanza a un proprio orologio a parete finché non
-    /// raggiunge `next_clip_start`, punto in cui il controllo passa al
-    /// player di quella clip (`GapPlayback::next_clip_id`). `None` quando
-    /// non si sta attraversando un vuoto durante la riproduzione.
-    gap_playback: Option<GapPlayback>,
+    /// Buffer video a livello di timeline: bufferizza N secondi avanti
+    /// dal playhead attraversando quante clip servono (vedi doc del
+    /// modulo `render_ahead`), invece di un preload per singola clip.
+    /// `None` finché non esiste ancora una timeline (stesso principio di
+    /// `timeline_id`), spawnato la prima volta in `ensure_timeline`.
+    render_ahead: Option<render_ahead::RenderAhead>,
+    /// `history.generation()` all'ultima notifica a `render_ahead` di una
+    /// nuova disposizione delle clip: un confronto di interi a ogni frame
+    /// UI basta a sapere se serve rimandargli una copia del progetto,
+    /// senza dover clonare/diffare `Project` a ogni frame per scoprirlo.
+    render_ahead_generation: u64,
 
-    /// Player della prossima clip video sulla track, aperto in anticipo
-    /// mentre quella attiva si avvicina alla fine (vedi
-    /// `maintain_next_clip_preload`/`NEXT_CLIP_PRELOAD_LOOKAHEAD_SECS`) —
-    /// sia che tra le due ci sia un vuoto sia che siano adiacenti. Consumato
-    /// da `load_video_clip` (taglio netto) o `begin_gap_playback` (vuoto)
-    /// quando il momento arriva, invece di aprire un player a freddo
-    /// esattamente lì. `None` se non c'è nulla da precaricare al momento
-    /// (fine contenuto, non in riproduzione, o già consumato/scartato).
-    next_preload: Option<NextPreload>,
+    /// Orologio a parete che avanza il playhead durante un vuoto in
+    /// riproduzione (nessuna clip video sotto, quindi nessun player audio
+    /// da seguire): sostituisce il precedente `GapPlayback`, ora senza
+    /// alcun preload video — il buffer a livello di timeline
+    /// (`render_ahead`) copre già la prossima clip da solo, vuoto o non
+    /// vuoto che sia. `None` quando non si sta attraversando un vuoto in
+    /// riproduzione.
+    gap_wall_clock: Option<GapWallClock>,
 
     /// "Selection follows playhead": attiva di default, disattivabile
     /// dalle impostazioni. Quando attiva, spostare il playhead (scrub o
@@ -253,14 +236,16 @@ impl Default for VibeVideoApp {
             preview_player: None,
             preview_error: None,
             frame_texture: None,
+            browsing_decode_ahead: None,
             audio_cache: HashMap::new(),
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
             browsing_media: None,
-            gap_playback: None,
-            next_preload: None,
+            render_ahead: None,
+            render_ahead_generation: 0,
+            gap_wall_clock: None,
             selection_follows_playhead: true,
             properties_panel_open: true,
             snapping_enabled: true,
@@ -360,11 +345,25 @@ impl VibeVideoApp {
                 self.preview_player = None;
                 self.preview_error = None;
                 self.frame_texture = None;
+                self.browsing_decode_ahead = None;
                 self.active_clip = None;
                 self.last_synced_playhead = 0;
                 self.browsing_media = None;
+                self.gap_wall_clock = None;
                 self.current_project_path = Some(path);
                 self.project_error = None;
+                // Il progetto è stato sostituito senza passare da
+                // `history.do_command` (che è stata appena azzerata):
+                // `sync_render_ahead` non se ne accorgerebbe da sola
+                // confrontando la generazione, quindi lo si notifica
+                // esplicitamente qui.
+                if let Some(timeline_id) = self.timeline_id {
+                    self.spawn_render_ahead_if_needed(timeline_id);
+                    if let Some(render_ahead) = &self.render_ahead {
+                        render_ahead.update_project(&self.project, timeline_id);
+                    }
+                }
+                self.render_ahead_generation = self.history.generation();
             }
             Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
         }
@@ -554,23 +553,25 @@ impl VibeVideoApp {
         }
     }
 
-    fn preview_media(&mut self, media_id: MediaId) {
+    /// Apre il player *audio* per `media_id` (riusando `audio_cache` se
+    /// possibile), sostituendo quello precedente. Non tocca il video: il
+    /// chiamante decide se serve anche un decode-ahead video a parte
+    /// (`preview_media`, per l'anteprima "grezza" dal media pool) o no
+    /// (le clip attive sulla timeline, il cui video viene da
+    /// `render_ahead`).
+    fn open_audio_player(&mut self, media_id: MediaId) -> bool {
         let Some(item) = self.project.media_pool.get(media_id) else {
-            return;
+            return false;
         };
         let path = item.path.clone();
         let meta = item.meta.clone();
         let duration_secs = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
 
-        // `frame_texture` non viene azzerata qui apposta: il viewer
-        // continua a mostrare l'ultimo frame finché il nuovo player non ne
-        // decodifica uno (sovrascrive la texture in-place), invece di un
-        // flash a vuoto durante il cambio media.
         self.preview_player = None;
         self.preview_error = None;
 
         let cached_audio = self.audio_cache.get(&path).cloned();
-        match Player::open(&path, duration_secs, cached_audio, self.cache_budget_bytes) {
+        match Player::open(&path, duration_secs, meta.fps, cached_audio) {
             Ok((player, audio_buffer)) => {
                 self.preview_player = Some(player);
                 if let Some(buffer) = audio_buffer {
@@ -581,6 +582,29 @@ impl VibeVideoApp {
         }
         self.preview_path = Some(path);
         self.preview_meta = Some(meta);
+        true
+    }
+
+    /// Anteprima "grezza" di un media dal media pool (non necessariamente
+    /// sulla timeline): apre sia l'audio (`open_audio_player`) sia un
+    /// decode-ahead video dedicato (`browsing_decode_ahead`) — a
+    /// differenza delle clip attive sulla timeline, il cui video viene dal
+    /// buffer condiviso `render_ahead`, qui non c'è alcuna clip/posizione
+    /// di timeline a cui agganciarsi, quindi serve un decode-ahead a sé.
+    fn preview_media(&mut self, media_id: MediaId) {
+        // `frame_texture` non viene azzerata qui apposta: il viewer
+        // continua a mostrare l'ultimo frame finché il nuovo decode-ahead
+        // non ne produce uno (sovrascrive la texture in-place), invece di
+        // un flash a vuoto durante il cambio media.
+        self.browsing_decode_ahead = None;
+        if !self.open_audio_player(media_id) {
+            return;
+        }
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
+        self.browsing_decode_ahead =
+            vv_media::DecodeAhead::spawn(item.path.clone(), self.cache_budget_bytes, 60).ok();
     }
 
     /// La clip su `track_index` che copre `frame` (nello spazio della
@@ -588,11 +612,7 @@ impl VibeVideoApp {
     fn clip_at(&self, track_index: usize, frame: FrameIdx) -> Option<ClipId> {
         let timeline_id = self.timeline_id?;
         self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)?
-            .clips
-            .iter()
-            .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+            .active_clip_at(track_index, frame)
             .map(|c| c.id)
     }
 
@@ -615,8 +635,13 @@ impl VibeVideoApp {
     /// frame locale corrispondente al playhead corrente — sia per lo
     /// scrub in una clip diversa sia per il primo aggancio all'avvio della
     /// riproduzione. Le clip SolidColor non hanno un player: il colore si
-    /// legge direttamente nel pannello centrale dal playhead.
-    fn load_video_clip(&mut self, clip_id: ClipId) {
+    /// legge direttamente nel pannello centrale dal playhead. Solo audio:
+    /// il video della clip attiva viene da `render_ahead`, interrogato
+    /// direttamente dal viewer (vedi `current_video_frame`) — niente più
+    /// da fare qui per il video, quindi niente più bisogno di preload
+    /// speciali: un seek sul player audio, quando serve, è sempre
+    /// economico (l'intera traccia è già decodificata in RAM).
+    fn load_active_clip_audio(&mut self, clip_id: ClipId) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
@@ -629,23 +654,6 @@ impl VibeVideoApp {
             return;
         };
 
-        // Se la clip precedente era sullo *stesso media*, non riaprire il
-        // player: `Player::open` rifà un decode completo della traccia
-        // audio e apre un nuovo decoder video. Basta un seek sul player
-        // già aperto — anzi, se il player è già esattamente al frame
-        // giusto (il caso di un T-split: le due metà sono contigue nello
-        // stesso file, `source_out` dell'una == `source_in` dell'altra),
-        // nemmeno quello: un seek è comunque un flush del decoder,
-        // evitabile del tutto in quel caso. Ma "stesso media" da solo NON
-        // basta a garantire che il riuso sia gratis: due clip che
-        // referenziano *punti diversi e non contigui* dello stesso file
-        // (es. due trim separati dello stesso sorgente incollati altrove
-        // sulla timeline) richiedono comunque un seek reale — bug
-        // segnalato: proprio in quel caso il riuso "gratis" veniva scelto
-        // a prescindere, ignorando un eventuale preload già scaldato in
-        // anticipo per quella clip (l'indicatore "buffered" mostrava
-        // progresso, ma al taglio il costo del seek si pagava comunque,
-        // perché il player riusato non era quello preparato in anticipo).
         let previous_media = self.active_clip.and_then(|(track_index, id)| {
             self.project.timelines[timeline_id]
                 .tracks
@@ -663,40 +671,10 @@ impl VibeVideoApp {
 
         match clip.source {
             vv_core::ClipSource::Media(media_id) => {
-                let same_media = can_reuse_player_for(previous_media, media_id);
-                // Continuazione davvero gratis: il player esistente è già
-                // posizionato esattamente dove serve, nessun seek in vista
-                // (vedi sopra). Confrontato sulla posizione *reale* del
-                // player, non solo dedotto dai dati della clip: resta
-                // corretto anche per uno scrub diretto a metà clip, non
-                // solo per il taglio netto a inizio clip.
-                let already_at_target = same_media
-                    && self
-                        .preview_player
-                        .as_ref()
-                        .is_some_and(|p| p.current_source_frame() == clip.source_in);
-
-                if !already_at_target {
-                    // Preferisce un preload già scaldato in anticipo per
-                    // *questa* clip (vedi `maintain_next_clip_preload`), a
-                    // prescindere dal fatto che sia lo stesso media o no:
-                    // se non è una continuazione gratis, riusare il player
-                    // esistente con un seek costa comunque quanto aprirne
-                    // uno nuovo. Solo se non c'è alcun preload pronto si
-                    // ricade sul riuso-con-seek (se stesso media, evita
-                    // almeno la riapertura completa) o sull'apertura a
-                    // freddo (se media diverso).
-                    match self.next_preload.take() {
-                        Some(preload) if preload.clip_id == clip_id => {
-                            self.preview_player = Some(preload.player);
-                        }
-                        _ if same_media && self.preview_player.is_some() => {
-                            // Riusa il player già aperto così com'è: il
-                            // seek verso il target, più sotto, lo porterà
-                            // al punto giusto.
-                        }
-                        _ => self.preview_media(media_id),
-                    }
+                let can_reuse =
+                    self.preview_player.is_some() && can_reuse_player_for(previous_media, media_id);
+                if !can_reuse {
+                    self.open_audio_player(media_id);
                 }
                 if let Some(player) = &self.preview_player {
                     player.set_gain_db(clip.effects.gain_db.default);
@@ -712,7 +690,6 @@ impl VibeVideoApp {
             }
             vv_core::ClipSource::SolidColor => {
                 self.preview_player = None;
-                self.frame_texture = None;
                 self.preview_error = None;
             }
         }
@@ -746,13 +723,12 @@ impl VibeVideoApp {
 
         if desired != current {
             match desired {
-                // `load_video_clip` fa già un seek verso il playhead
-                // corrente: non serve altro qui.
-                Some(clip_id) => self.load_video_clip(clip_id),
+                // `load_active_clip_audio` fa già un seek verso il
+                // playhead corrente: non serve altro qui.
+                Some(clip_id) => self.load_active_clip_audio(clip_id),
                 None => {
                     self.active_clip = None;
                     self.preview_player = None;
-                    self.frame_texture = None;
                 }
             }
         } else if let Some(clip_id) = desired
@@ -792,14 +768,15 @@ impl VibeVideoApp {
 
     /// Fa play/pause sulla clip sotto al playhead, senza bisogno che sia
     /// selezionata (bug: "la riproduzione parte solo se seleziono la
-    /// clip"). Se il player non è ancora agganciato lo aggancia subito. Se
-    /// il playhead sta attraversando un vuoto (`gap_playback` attivo),
-    /// ferma l'orologio a vuoto (non c'è un player da mettere in pausa) —
-    /// e se invece è *fermo* dentro un vuoto, riprende quell'orologio
-    /// verso la prossima clip sulla track video, se c'è.
+    /// clip"). Se il player audio non è ancora agganciato lo aggancia
+    /// subito. Se il playhead sta attraversando un vuoto
+    /// (`gap_wall_clock` attivo), lo ferma (non c'è un player da mettere
+    /// in pausa) — e se invece è *fermo* dentro un vuoto, lo fa ripartire,
+    /// se c'è ancora qualcosa più avanti sulla track video.
     fn toggle_playback(&mut self) {
         self.browsing_media = None;
-        if self.gap_playback.take().is_some() {
+        self.browsing_decode_ahead = None;
+        if self.gap_wall_clock.take().is_some() {
             return;
         }
         self.ensure_active_clip_matches_playhead(false);
@@ -808,58 +785,63 @@ impl VibeVideoApp {
             return;
         }
         if let Some(timeline_id) = self.timeline_id
-            && let Some((next_id, next_start)) =
-                self.next_video_clip_from(timeline_id, self.timeline_state.playhead)
+            && self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+                .clips
+                .iter()
+                .any(|c| c.timeline_start >= self.timeline_state.playhead)
         {
-            self.begin_gap_playback(self.timeline_state.playhead, next_id, next_start);
+            self.gap_wall_clock = Some(GapWallClock {
+                started_at: Instant::now(),
+                start_frame: self.timeline_state.playhead,
+            });
         }
     }
 
-    /// Guida la riproduzione a ogni frame UI: se il player sta suonando,
-    /// il playhead lo segue; se ha raggiunto la fine del *trim* della clip
-    /// attiva (non della fine del file, che può essere più lunga), avanza
-    /// oltre — dritto alla prossima clip se comincia esattamente lì, o
-    /// attraverso un vuoto (`gap_playback`: schermo nero, orologio a
-    /// parete) se c'è, invece di saltare la riproduzione in avanti fino ad
-    /// essa (bug: "il vuoto viene saltato invece di essere riprodotto").
+    /// Guida la riproduzione a ogni frame UI: se il player audio sta
+    /// suonando, il playhead lo segue; se ha raggiunto la fine del *trim*
+    /// della clip attiva (non della fine del file, che può essere più
+    /// lunga), avanza oltre (`advance_playback_past`). Se non c'è nessun
+    /// player da seguire (vuoto sulla track video), `gap_wall_clock` fa da
+    /// orologio finché non trova di nuovo una clip — il video, in
+    /// entrambi i casi, non passa più da qui: lo mostra direttamente il
+    /// viewer interrogando `render_ahead` in base al playhead corrente
+    /// (vedi `current_video_frame`), quindi non serve più alcun caso
+    /// speciale per vuoti/tagli/stesso media qui dentro.
     ///
-    /// Se `gap_playback` è attivo, questa stessa funzione fa anche da
-    /// "player" per il vuoto: avanza il playhead a orologio finché non
-    /// raggiunge la prossima clip, poi le passa il controllo.
-    ///
-    /// Limite noto: se la prossima clip è un generatore SolidColor la
-    /// riproduzione si ferma lì, perché un generatore non ha un player che
-    /// faccia da orologio — avanzare il tempo "a vuoto" durante un
-    /// generatore è un'estensione futura (diversa da un vuoto vero e
-    /// proprio, già gestito qui).
+    /// Limite noto (invariato): se la prossima clip è un generatore
+    /// SolidColor la riproduzione si ferma lì, perché un generatore non ha
+    /// un player che faccia da orologio.
     fn drive_playback(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
 
-        if let Some(gap) = &self.gap_playback {
+        if let Some(gap) = &self.gap_wall_clock {
             let fps = self.project.timelines[timeline_id].fps.as_f64().max(1e-9);
             let elapsed_frames = (gap.started_at.elapsed().as_secs_f64() * fps).round() as FrameIdx;
-            let frame = (gap.start_frame + elapsed_frames).min(gap.next_clip_start);
+            let mut frame = gap.start_frame + elapsed_frames;
+            // Non superare mai l'inizio della prossima clip video: senza
+            // un tetto, l'orologio a parete potrebbe scavalcare una clip
+            // molto corta (o un frame UI arrivato in ritardo) senza mai
+            // "trovarla" sotto di sé.
+            if let Some(next_start) = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+                .clips
+                .iter()
+                .filter(|c| c.timeline_start >= gap.start_frame)
+                .map(|c| c.timeline_start)
+                .min()
+            {
+                frame = frame.min(next_start);
+            }
             self.timeline_state.playhead = frame;
-            if frame >= gap.next_clip_start {
-                let next_clip_id = gap.next_clip_id;
-                let preloaded_player = self.gap_playback.take().and_then(|g| g.preloaded_player);
-                match preloaded_player {
-                    // Già aperto e posizionato durante il vuoto (vedi
-                    // `begin_gap_playback`): il decode-ahead ha già avuto
-                    // tempo di popolare la cache, niente hitch.
-                    Some(mut player) => {
-                        player.play();
-                        self.active_clip = Some((VIDEO_TRACK, next_clip_id));
-                        self.preview_player = Some(player);
-                    }
-                    None => {
-                        self.load_video_clip(next_clip_id);
-                        if let Some(player) = &mut self.preview_player {
-                            player.play();
-                        }
-                    }
+            if self.project.timelines[timeline_id]
+                .active_clip_at(VIDEO_TRACK, frame)
+                .is_some()
+            {
+                self.gap_wall_clock = None;
+                self.ensure_active_clip_matches_playhead(true);
+                if let Some(player) = &mut self.preview_player {
+                    player.play();
                 }
             }
             return;
@@ -894,247 +876,65 @@ impl VibeVideoApp {
         }
     }
 
-    /// La prima clip sulla track video con inizio >= `from_frame`, se c'è.
-    fn next_video_clip_from(
-        &self,
-        timeline_id: TimelineId,
-        from_frame: FrameIdx,
-    ) -> Option<(ClipId, FrameIdx)> {
-        self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-            .clips
-            .iter()
-            .filter(|c| c.timeline_start >= from_frame)
-            .min_by_key(|c| c.timeline_start)
-            .map(|c| (c.id, c.timeline_start))
-    }
-
-    /// Azzera la clip/player attivi (siamo in un vuoto: schermo nero, vedi
-    /// il rendering nel viewer) e avvia l'orologio a parete di
-    /// `gap_playback` verso `next_clip_id`/`next_clip_start`. Riusa il
-    /// player già precaricato in anticipo da `maintain_next_clip_preload`
-    /// se punta già alla clip giusta (il caso comune: aveva l'intero
-    /// residuo della clip precedente per scaldarsi, non solo la durata del
-    /// vuoto), altrimenti lo apre solo ora (clip troppo corta perché il
-    /// preload anticipato abbia fatto in tempo) — vedi doc di
-    /// `GapPlayback::preloaded_player`.
-    fn begin_gap_playback(
-        &mut self,
-        from_frame: FrameIdx,
-        next_clip_id: ClipId,
-        next_clip_start: FrameIdx,
-    ) {
-        self.active_clip = None;
-        self.preview_player = None;
-        self.frame_texture = None;
-        self.timeline_state.playhead = from_frame;
-        let preloaded_player = match self.next_preload.take() {
-            Some(preload) if preload.clip_id == next_clip_id => Some(preload.player),
-            _ => self.preload_player_for_clip(next_clip_id),
-        };
-        self.gap_playback = Some(GapPlayback {
-            started_at: Instant::now(),
-            start_frame: from_frame,
-            next_clip_id,
-            next_clip_start,
-            preloaded_player,
-        });
-    }
-
-    /// Apre in anticipo (senza avviare la riproduzione) il player della
-    /// clip video `clip_id`, posizionato già al suo `source_in`: dà al
-    /// decode-ahead tutto il tempo residuo del vuoto per popolare la
-    /// cache dei frame prima del cambio di controllo a fine
-    /// `gap_playback`, invece di partire da zero solo in quel momento
-    /// (bug: audio già in RAM che parte subito, ma un secondo circa di
-    /// schermo nero finché il decoder video si scalda). `None` per un
-    /// generatore SolidColor (nessun player) o se l'apertura fallisce —
-    /// in quel caso il cambio di controllo ricade su `load_video_clip`.
-    fn preload_player_for_clip(&mut self, clip_id: ClipId) -> Option<Player> {
-        let timeline_id = self.timeline_id?;
-        let clip = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)?
-            .clone();
-        let vv_core::ClipSource::Media(media_id) = clip.source else {
-            return None;
-        };
-        let item = self.project.media_pool.get(media_id)?;
-        let path = item.path.clone();
-        let meta = item.meta.clone();
-        let duration_secs = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
-        let cached_audio = self.audio_cache.get(&path).cloned();
-        let (mut player, audio_buffer) =
-            Player::open(&path, duration_secs, cached_audio, self.cache_budget_bytes).ok()?;
-        if let Some(buffer) = audio_buffer {
-            self.audio_cache.insert(path, buffer);
-        }
-        player.set_gain_db(clip.effects.gain_db.default);
-        player.seek_to_frame(clip.source_in);
-        Some(player)
-    }
-
-    /// Da chiamare a ogni frame UI: mentre la clip video attiva (o, durante
-    /// un vuoto, `gap_playback`) si avvicina alla fine entro
-    /// `NEXT_CLIP_PRELOAD_LOOKAHEAD_SECS`, avvia in anticipo il player
-    /// della prossima clip video sulla track — sia che tra le due ci sia
-    /// un vuoto sia che siano adiacenti (bug segnalato: l'indicatore
-    /// "buffered" mostrava il buffer fermarsi a fine clip e ripartire da
-    /// zero solo quando la testina raggiungeva la successiva; prima
-    /// l'unico preload esisteva già ma solo per il caso "vuoto", avviato
-    /// solo all'inizio del vuoto stesso). Scarta un preload obsoleto
-    /// (l'utente ha scrubbato altrove, o la prossima clip è cambiata) e
-    /// non fa nulla se non c'è riproduzione in corso o non c'è una
-    /// prossima clip da precaricare.
-    fn maintain_next_clip_preload(&mut self) {
-        let Some(timeline_id) = self.timeline_id else {
-            self.next_preload = None;
-            return;
-        };
-        let fps = self.project.timelines[timeline_id].fps.as_f64().max(1e-9);
-
-        let next: Option<(ClipId, f64)> = if let Some(gap) = &self.gap_playback {
-            let remaining = (gap.next_clip_start - self.timeline_state.playhead) as f64 / fps;
-            Some((gap.next_clip_id, remaining))
-        } else {
-            match self.active_clip {
-                Some((VIDEO_TRACK, clip_id))
-                    if self.preview_player.as_ref().is_some_and(Player::is_playing) =>
-                {
-                    let clip = self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
-                        .clips
-                        .iter()
-                        .find(|c| c.id == clip_id)
-                        .cloned();
-                    match (clip, &self.preview_player) {
-                        (Some(clip), Some(player)) => {
-                            let remaining =
-                                (clip.source_out - player.current_source_frame()) as f64 / fps;
-                            self.next_video_clip_from(timeline_id, clip.timeline_end())
-                                .and_then(|(next_id, _)| {
-                                    let next_clip = self.project.timelines[timeline_id].tracks
-                                        [VIDEO_TRACK]
-                                        .clips
-                                        .iter()
-                                        .find(|c| c.id == next_id)?;
-                                    // Continuazione gratis nello stesso
-                                    // file (es. dopo un T-split):
-                                    // `load_video_clip` la riprende senza
-                                    // alcun seek, un preload qui sarebbe
-                                    // solo un player extra sprecato.
-                                    (!is_seamless_continuation(&clip, next_clip))
-                                        .then_some((next_id, remaining))
-                                })
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-        };
-
-        let Some((next_id, remaining_secs)) = next else {
-            self.next_preload = None;
-            return;
-        };
-        if remaining_secs > NEXT_CLIP_PRELOAD_LOOKAHEAD_SECS {
-            self.next_preload = None;
-            return;
-        }
-        if self
-            .next_preload
-            .as_ref()
-            .is_some_and(|p| p.clip_id == next_id)
-        {
-            return;
-        }
-        if let Some(player) = self.preload_player_for_clip(next_id) {
-            self.next_preload = Some(NextPreload {
-                clip_id: next_id,
-                player,
-            });
-        }
-    }
-
-    /// Intervalli (in frame di *timeline*) attualmente bufferizzati nei
-    /// player aperti in questo momento, per l'indicatore visivo "buffered"
-    /// sulla timeline (richiesta: "visualizzare durante la riproduzione
-    /// come viene fatto il buffer"). Include la clip attiva
-    /// (`preview_player`) e, se in corso, il preload della prossima clip
-    /// — durante un vuoto (`gap_playback.preloaded_player`) o su un taglio
-    /// netto in avvicinamento (`next_preload`, vedi
-    /// `maintain_next_clip_preload`): sono gli unici player che possono
-    /// esistere in un dato momento in questa app.
+    /// Intervalli (in frame di *timeline*) attualmente bufferizzati per
+    /// ogni clip Media sulla track video, per l'indicatore visivo
+    /// "buffered" sulla timeline (richiesta: "visualizzare durante la
+    /// riproduzione come viene fatto il buffer"). Interroga direttamente
+    /// `render_ahead`, che bufferizza a livello di timeline (non più un
+    /// caso a parte per la clip attiva/il preload della successiva).
     fn buffered_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
         };
-        let tl = &self.project.timelines[timeline_id];
+        let Some(render_ahead) = &self.render_ahead else {
+            return Vec::new();
+        };
+        let Some(track) = self.project.timelines[timeline_id].tracks.get(VIDEO_TRACK) else {
+            return Vec::new();
+        };
         let mut ranges = Vec::new();
-
-        if let Some((track_index, clip_id)) = self.active_clip
-            && let Some(player) = &self.preview_player
-            && let Some(clip) = tl
-                .tracks
-                .get(track_index)
-                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
-        {
-            ranges.extend(map_source_ranges_to_timeline(
-                clip,
-                &player.cached_source_ranges(),
-            ));
+        for clip in &track.clips {
+            if let vv_core::ClipSource::Media(media_id) = &clip.source {
+                ranges.extend(map_source_ranges_to_timeline(
+                    clip,
+                    &render_ahead.cached_ranges_for(*media_id),
+                ));
+            }
         }
-
-        if let Some(gap) = &self.gap_playback
-            && let Some(player) = &gap.preloaded_player
-            && let Some(clip) = tl.tracks[VIDEO_TRACK]
-                .clips
-                .iter()
-                .find(|c| c.id == gap.next_clip_id)
-        {
-            ranges.extend(map_source_ranges_to_timeline(
-                clip,
-                &player.cached_source_ranges(),
-            ));
-        }
-
-        if let Some(preload) = &self.next_preload
-            && let Some(clip) = tl.tracks[VIDEO_TRACK]
-                .clips
-                .iter()
-                .find(|c| c.id == preload.clip_id)
-        {
-            ranges.extend(map_source_ranges_to_timeline(
-                clip,
-                &preload.player.cached_source_ranges(),
-            ));
-        }
-
         ranges
     }
 
     /// Continua la riproduzione oltre la fine (nello spazio timeline) della
-    /// clip appena conclusa: se la prossima clip sulla track video comincia
-    /// esattamente lì, ci salta senza soluzione di continuità (nessun
-    /// vuoto); se c'è un vuoto prima, entra in `gap_playback`; se non c'è
-    /// nessuna clip successiva, è la fine del contenuto — si ferma.
+    /// clip appena conclusa: se sotto c'è già una clip (adiacente, nessun
+    /// vuoto), vi si aggancia subito; altrimenti avvia `gap_wall_clock`
+    /// finché non ne trova una (o finisce il contenuto, nel qual caso si
+    /// ferma) — il video ce l'ha già pronto `render_ahead`, che bufferizza
+    /// a prescindere da dove sia il playhead.
     fn advance_playback_past(&mut self, timeline_id: TimelineId, from_frame: FrameIdx) {
-        match self.next_video_clip_from(timeline_id, from_frame) {
-            Some((next_id, next_start)) if next_start == from_frame => {
-                self.timeline_state.playhead = next_start;
-                self.load_video_clip(next_id);
-                if let Some(player) = &mut self.preview_player {
-                    player.play();
-                }
+        self.timeline_state.playhead = from_frame;
+        if self.project.timelines[timeline_id]
+            .active_clip_at(VIDEO_TRACK, from_frame)
+            .is_some()
+        {
+            self.ensure_active_clip_matches_playhead(true);
+            if let Some(player) = &mut self.preview_player {
+                player.play();
             }
-            Some((next_id, next_start)) => {
-                self.begin_gap_playback(from_frame, next_id, next_start);
-            }
-            None => {
-                if let Some(player) = &mut self.preview_player {
-                    player.pause();
-                }
-            }
+        } else if self.project.timelines[timeline_id].tracks[VIDEO_TRACK]
+            .clips
+            .iter()
+            .any(|c| c.timeline_start >= from_frame)
+        {
+            // Vuoto: schermo nero (vedi il rendering nel viewer, che si
+            // basa su `active_clip`), nessun player audio da seguire.
+            self.active_clip = None;
+            self.preview_player = None;
+            self.gap_wall_clock = Some(GapWallClock {
+                started_at: Instant::now(),
+                start_frame: from_frame,
+            });
+        } else if let Some(player) = &mut self.preview_player {
+            player.pause();
         }
     }
 
@@ -1149,6 +949,7 @@ impl VibeVideoApp {
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         });
         self.timeline_id = Some(id);
+        self.spawn_render_ahead_if_needed(id);
         id
     }
 
@@ -1168,7 +969,42 @@ impl VibeVideoApp {
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         });
         self.timeline_id = Some(id);
+        self.spawn_render_ahead_if_needed(id);
         id
+    }
+
+    /// Spawna `render_ahead` la prima volta che esiste una timeline (una
+    /// per sessione: non viene più ricreato dopo, solo aggiornato via
+    /// `sync_render_ahead`/`RenderAhead::update_project`).
+    fn spawn_render_ahead_if_needed(&mut self, timeline_id: TimelineId) {
+        if self.render_ahead.is_none() {
+            self.render_ahead = Some(render_ahead::RenderAhead::spawn(
+                self.project.clone(),
+                timeline_id,
+                self.cache_budget_bytes,
+            ));
+            self.render_ahead_generation = self.history.generation();
+        }
+    }
+
+    /// Da chiamare a ogni frame UI: se il progetto è cambiato dall'ultima
+    /// volta (confronto economico su `History::generation`, vedi doc del
+    /// campo `render_ahead_generation`), manda a `render_ahead` una nuova
+    /// copia — non un clone/diff a ogni frame incondizionatamente, solo
+    /// quando serve davvero.
+    fn sync_render_ahead(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let Some(render_ahead) = &self.render_ahead else {
+            return;
+        };
+        let generation = self.history.generation();
+        if generation != self.render_ahead_generation {
+            render_ahead.update_project(&self.project, timeline_id);
+            self.render_ahead_generation = generation;
+        }
+        render_ahead.set_target(self.timeline_state.playhead);
     }
 
     /// Crea una clip generatore SolidColor da 5s e la accoda in fondo alla
@@ -1228,6 +1064,42 @@ impl VibeVideoApp {
             .iter()
             .find(|c| c.id == clip_id)
             .map(|c| &c.effects)
+    }
+
+    /// Il frame video grezzo (RGBA, non ancora composito) da mostrare nel
+    /// viewer in questo momento, con la posizione (frame *sorgente*, per
+    /// valutare il transform keyframeato) a cui corrisponde — `None` se
+    /// non c'è ancora nulla di pronto. Due sorgenti possibili, mai
+    /// entrambe insieme (`browsing_media` le distingue):
+    /// `browsing_decode_ahead` durante un'anteprima "grezza" dal media
+    /// pool, o `render_ahead` (il buffer a livello di timeline) per la
+    /// clip Media attiva sulla timeline.
+    fn current_video_frame(&self) -> Option<(std::sync::Arc<vv_media::FrameRgba>, FrameIdx)> {
+        if self.browsing_media.is_some() {
+            let player = self.preview_player.as_ref()?;
+            let decode_ahead = self.browsing_decode_ahead.as_ref()?;
+            let idx = player.current_source_frame();
+            decode_ahead.set_target(idx);
+            decode_ahead.cache().get(idx).map(|f| (f, idx))
+        } else {
+            let (track_index, clip_id) = self.active_clip?;
+            let timeline_id = self.timeline_id?;
+            let clip = self.project.timelines[timeline_id]
+                .tracks
+                .get(track_index)?
+                .clips
+                .iter()
+                .find(|c| c.id == clip_id)?;
+            let vv_core::ClipSource::Media(media_id) = &clip.source else {
+                return None;
+            };
+            let local = (self.timeline_state.playhead - clip.timeline_start).max(0);
+            let source_frame = clip.source_in + local;
+            self.render_ahead
+                .as_ref()?
+                .get_frame(*media_id, source_frame)
+                .map(|f| (f, source_frame))
+        }
     }
 
     /// La gemella collegata (`Clip::linked`) di una clip, con la sua
@@ -1951,22 +1823,6 @@ fn can_reuse_player_for(previous_media: Option<MediaId>, next_media: MediaId) ->
     previous_media == Some(next_media)
 }
 
-/// `true` se `b` continua `a` senza soluzione di continuità nello stesso
-/// file sorgente (stesso media, `b.source_in == a.source_out`) — il caso
-/// tipico di un T-split. Solo in questo caso il riuso del player già
-/// aperto è davvero gratis (nessun seek): due clip che condividono il
-/// media ma referenziano punti diversi e non contigui del file (es. due
-/// trim separati incollati altrove sulla timeline) richiedono comunque un
-/// seek reale, quindi non contano come "seamless" qui — vedi uso in
-/// `maintain_next_clip_preload`/`load_video_clip`. Funzione pura per
-/// poterla testare senza un vero `Player`.
-fn is_seamless_continuation(a: &vv_core::Clip, b: &vv_core::Clip) -> bool {
-    matches!(
-        (&a.source, &b.source),
-        (vv_core::ClipSource::Media(m1), vv_core::ClipSource::Media(m2)) if m1 == m2
-    ) && b.source_in == a.source_out
-}
-
 /// Mappa intervalli di frame *sorgente* (spazio nativo del media, quello
 /// di `Player::cached_source_ranges`) in intervalli di frame di
 /// *timeline*, per una clip: clampa al suo intervallo di trim
@@ -2453,6 +2309,9 @@ impl eframe::App for VibeVideoApp {
                             .changed()
                         {
                             self.cache_budget_bytes = budget_mb as usize * 1_000_000;
+                            if let Some(render_ahead) = &self.render_ahead {
+                                render_ahead.set_cache_budget_bytes(self.cache_budget_bytes);
+                            }
                         }
                     });
                 });
@@ -2580,8 +2439,8 @@ impl eframe::App for VibeVideoApp {
             // Uno scrub manuale prevale sempre sull'orologio a vuoto:
             // altrimenti `drive_playback` lo riscriverebbe sopra al
             // tentativo dell'utente al frame successivo (stesso principio
-            // di `force_seek` qui sotto, ma per `gap_playback`).
-            self.gap_playback = None;
+            // di `force_seek` qui sotto, ma per `gap_wall_clock`).
+            self.gap_wall_clock = None;
         }
 
         // Interagire con la timeline (selezionare una clip o spostare il
@@ -2589,6 +2448,7 @@ impl eframe::App for VibeVideoApp {
         // "grezza" del media pool, se attiva.
         if self.timeline_state.selected != selected_before_timeline_ui || user_scrubbed_playhead {
             self.browsing_media = None;
+            self.browsing_decode_ahead = None;
         }
 
         if self.browsing_media.is_none() {
@@ -2608,8 +2468,12 @@ impl eframe::App for VibeVideoApp {
             if self.timeline_state.playhead != playhead_before_playback {
                 self.sync_selection_to_playhead();
             }
-            self.maintain_next_clip_preload();
         }
+        // Fuori dall'`if` sopra: il buffer a livello di timeline deve
+        // restare caldo anche mentre si sta sfogliando un'anteprima
+        // "grezza" dal media pool (`browsing_media`), non solo durante la
+        // riproduzione sulla timeline.
+        self.sync_render_ahead();
 
         let mut preview_action = None;
         let mut pending_effect = None;
@@ -3119,13 +2983,7 @@ impl eframe::App for VibeVideoApp {
                         ));
                     }
                 }
-            } else if let Some(frame) = self.preview_player.as_ref().and_then(|p| p.current_frame())
-            {
-                let source_frame = self
-                    .preview_player
-                    .as_ref()
-                    .map(|p| p.current_source_frame())
-                    .unwrap_or(0);
+            } else if let Some((frame, source_frame)) = self.current_video_frame() {
                 let transform = self
                     .active_clip_effects()
                     .map(|e| e.transform.value_at(source_frame))
@@ -3176,11 +3034,11 @@ impl eframe::App for VibeVideoApp {
         });
 
         // Anche durante un vuoto attraversato in riproduzione
-        // (`gap_playback`): lì non c'è un player la cui riproduzione
+        // (`gap_wall_clock`): lì non c'è un player la cui riproduzione
         // richieda già repaint da sé, ma il playhead deve comunque
         // avanzare a orologio finché non raggiunge la prossima clip.
         if self.preview_player.as_ref().is_some_and(Player::is_playing)
-            || self.gap_playback.is_some()
+            || self.gap_wall_clock.is_some()
         {
             ui.ctx().request_repaint();
         }
@@ -3436,7 +3294,7 @@ mod tests {
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
         app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
-        app.load_video_clip(clip_id);
+        app.load_active_clip_audio(clip_id);
 
         assert_eq!(app.active_clip, Some((0, clip_id)));
         assert!(app.preview_player.is_some(), "doveva aprirsi un player");
@@ -3571,7 +3429,7 @@ mod tests {
         let timeline_id = app.timeline_id.unwrap();
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
-        app.load_video_clip(clip_id);
+        app.load_active_clip_audio(clip_id);
 
         assert_eq!(app.active_clip, Some((0, clip_id)));
         assert!(app.preview_player.is_none());
@@ -3653,7 +3511,7 @@ mod tests {
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
         app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
-        app.load_video_clip(clip_id);
+        app.load_active_clip_audio(clip_id);
         // Il player appena aperto non ha ancora un frame in cache: il primo
         // sync forza comunque il seek verso il playhead (0 qui, no-op).
         app.ensure_active_clip_matches_playhead(false);
@@ -3865,18 +3723,20 @@ mod tests {
     }
 
     /// Due clip attaccate (nessun vuoto tra loro): `advance_playback_past`
-    /// deve saltare dritto alla prossima senza passare da `gap_playback`.
+    /// deve agganciarsi subito alla prossima, senza passare da
+    /// `gap_wall_clock` (il video, per entrambe, viene comunque da
+    /// `render_ahead`, invariato a prescindere da questo).
     #[test]
     fn advance_playback_past_jumps_directly_when_clips_are_back_to_back() {
         let mut app = VibeVideoApp::default();
         let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
         let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 10, 10);
         let timeline_id = app.timeline_id.unwrap();
-        app.load_video_clip(clip_a);
+        app.load_active_clip_audio(clip_a);
 
         app.advance_playback_past(timeline_id, 10);
 
-        assert!(app.gap_playback.is_none());
+        assert!(app.gap_wall_clock.is_none());
         assert_eq!(app.timeline_state.playhead, 10);
         assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b)));
     }
@@ -3884,14 +3744,14 @@ mod tests {
     /// Bug segnalato: "quando la playhead passa su un segmento vuoto, non
     /// deve saltare alla prossima clip ma riprodurre una schermata nera".
     /// Se c'è un vuoto prima della prossima clip, `advance_playback_past`
-    /// deve entrare in `gap_playback` invece di saltarci dentro subito.
+    /// deve avviare `gap_wall_clock` invece di saltarci dentro subito.
     #[test]
-    fn advance_playback_past_enters_gap_playback_when_there_is_a_gap_before_the_next_clip() {
+    fn advance_playback_past_starts_the_gap_wall_clock_when_there_is_a_gap_before_the_next_clip() {
         let mut app = VibeVideoApp::default();
         let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
         let timeline_id = app.timeline_id.unwrap();
-        app.load_video_clip(clip_a);
+        app.load_active_clip_audio(clip_a);
 
         app.advance_playback_past(timeline_id, 10);
 
@@ -3901,55 +3761,48 @@ mod tests {
         );
         assert_eq!(app.timeline_state.playhead, 10);
         let gap = app
-            .gap_playback
+            .gap_wall_clock
             .as_ref()
-            .expect("doveva entrare in gap_playback");
+            .expect("doveva avviare l'orologio a vuoto");
         assert_eq!(gap.start_frame, 10);
-        assert_eq!(gap.next_clip_id, clip_b);
-        assert_eq!(gap.next_clip_start, 15);
     }
 
     /// Nessuna clip successiva sulla track video: fine del contenuto, non
-    /// deve né saltare né entrare in un `gap_playback` che non porta da
+    /// deve né saltare né avviare un `gap_wall_clock` che non porta da
     /// nessuna parte.
     #[test]
     fn advance_playback_past_does_nothing_special_when_there_is_no_next_clip() {
         let mut app = VibeVideoApp::default();
         let clip_a = make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
-        app.load_video_clip(clip_a);
+        app.load_active_clip_audio(clip_a);
 
         app.advance_playback_past(timeline_id, 10);
 
-        assert!(app.gap_playback.is_none());
+        assert!(app.gap_wall_clock.is_none());
     }
 
-    /// Mentre `gap_playback` è attivo, `drive_playback` deve avanzare il
+    /// Mentre `gap_wall_clock` è attivo, `drive_playback` deve avanzare il
     /// playhead a orologio a parete senza saltare subito alla prossima
     /// clip: verifica lo stato intermedio (dentro il vuoto, non ancora
     /// arrivato).
     #[test]
     fn drive_playback_advances_the_playhead_through_a_gap_without_jumping() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 100, 10);
-        let timeline_id = app.timeline_id.unwrap();
-        let _ = timeline_id;
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 100, 10);
+        let _ = app.timeline_id.unwrap();
 
         // Timeline a 25fps (vedi `make_timeline_with_clip`): ~200ms fa
         // equivalgono a circa 5 frame, ben prima dei 100 della prossima
         // clip.
-        app.gap_playback = Some(GapPlayback {
+        app.gap_wall_clock = Some(GapWallClock {
             started_at: Instant::now() - std::time::Duration::from_millis(200),
             start_frame: 0,
-            next_clip_id: clip_b,
-            next_clip_start: 100,
-            preloaded_player: None,
         });
 
         app.drive_playback();
 
-        assert!(app.gap_playback.is_some(), "il vuoto non è ancora finito");
+        assert!(app.gap_wall_clock.is_some(), "il vuoto non è ancora finito");
         let playhead = app.timeline_state.playhead;
         assert!(
             playhead > 0 && playhead < 100,
@@ -3961,29 +3814,24 @@ mod tests {
         );
     }
 
-    /// Una volta che l'orologio a parete del vuoto ha superato la prossima
-    /// clip, `drive_playback` deve consegnare il controllo a quella clip
-    /// (uscire da `gap_playback`, agganciare la clip, farla partire).
+    /// Una volta che l'orologio a parete del vuoto ha raggiunto/superato
+    /// la prossima clip, `drive_playback` deve consegnarle il controllo
+    /// (uscire da `gap_wall_clock`, agganciare la clip, farla partire).
     #[test]
     fn drive_playback_hands_off_to_the_next_clip_once_the_gap_elapses() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
         let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 5, 10);
-        let timeline_id = app.timeline_id.unwrap();
-        let _ = timeline_id;
+        let _ = app.timeline_id.unwrap();
 
-        app.gap_playback = Some(GapPlayback {
+        app.gap_wall_clock = Some(GapWallClock {
             started_at: Instant::now() - std::time::Duration::from_secs(10),
             start_frame: 0,
-            next_clip_id: clip_b,
-            next_clip_start: 5,
-            preloaded_player: None,
         });
 
         app.drive_playback();
 
         assert!(
-            app.gap_playback.is_none(),
+            app.gap_wall_clock.is_none(),
             "il vuoto doveva essere concluso"
         );
         assert_eq!(app.timeline_state.playhead, 5);
@@ -3994,47 +3842,55 @@ mod tests {
     /// attivo, invece di ignorarlo (non c'è un player da mettere in
     /// pausa)".
     #[test]
-    fn toggle_playback_stops_gap_playback_clock() {
+    fn toggle_playback_stops_gap_wall_clock() {
         let mut app = VibeVideoApp::default();
         make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 15, 10);
 
-        app.gap_playback = Some(GapPlayback {
+        app.gap_wall_clock = Some(GapWallClock {
             started_at: Instant::now(),
             start_frame: 10,
-            next_clip_id: clip_b,
-            next_clip_start: 15,
-            preloaded_player: None,
         });
 
         app.toggle_playback();
 
-        assert!(app.gap_playback.is_none());
+        assert!(app.gap_wall_clock.is_none());
     }
 
-    /// Se il playhead è fermo dentro un vuoto (nessun `gap_playback`
-    /// attivo, nessuna clip agganciata), `toggle_playback` deve far
-    /// ripartire l'orologio a vuoto verso la prossima clip video, non
-    /// restare inerte.
+    /// Se il playhead è fermo dentro un vuoto (nessun `gap_wall_clock`
+    /// attivo, nessuna clip agganciata), `toggle_playback` deve farlo
+    /// ripartire, non restare inerte.
     #[test]
-    fn toggle_playback_resumes_gap_playback_when_paused_inside_a_gap() {
+    fn toggle_playback_resumes_the_gap_wall_clock_when_paused_inside_a_gap() {
         let mut app = VibeVideoApp::default();
         make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
-        let clip_b = make_timeline_with_clip(&mut app, VIDEO_TRACK, 20, 10);
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 20, 10);
         app.timeline_state.playhead = 15;
 
-        assert!(app.gap_playback.is_none());
+        assert!(app.gap_wall_clock.is_none());
         assert!(app.active_clip.is_none());
 
         app.toggle_playback();
 
         let gap = app
-            .gap_playback
+            .gap_wall_clock
             .as_ref()
-            .expect("doveva avviare l'orologio a vuoto verso la prossima clip");
+            .expect("doveva far ripartire l'orologio a vuoto");
         assert_eq!(gap.start_frame, 15);
-        assert_eq!(gap.next_clip_id, clip_b);
-        assert_eq!(gap.next_clip_start, 20);
+    }
+
+    /// Nessuna clip più avanti sulla track video: `toggle_playback` non
+    /// deve avviare un orologio a vuoto che non porterebbe da nessuna
+    /// parte.
+    #[test]
+    fn toggle_playback_does_not_start_the_gap_wall_clock_with_nothing_ahead() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, VIDEO_TRACK, 0, 10);
+        app.timeline_state.playhead = 15; // dopo l'unica clip, niente oltre
+
+        app.toggle_playback();
+
+        assert!(app.gap_wall_clock.is_none());
     }
 
     /// Riproduce il bug segnalato: tagliare con T richiedeva di
@@ -4179,65 +4035,6 @@ mod tests {
             map_source_ranges_to_timeline(&clip, &[(0, 99), (110, 115), (500, 600)]),
             vec![(30, 35)]
         );
-    }
-
-    /// Bug segnalato: due clip dello *stesso* media ma con punti di
-    /// attacco non contigui (es. due trim separati incollati altrove)
-    /// venivano trattate come una continuazione gratis (riuso col solo
-    /// seek), ignorando un eventuale preload già scaldato in anticipo —
-    /// il seek costava comunque quanto aprire un player nuovo. Solo la
-    /// vera contiguità (`source_out` dell'una == `source_in` dell'altra,
-    /// tipica di un T-split) è davvero gratis.
-    #[test]
-    fn is_seamless_continuation_only_for_the_same_media_and_contiguous_source_ranges() {
-        let base = vv_core::Clip {
-            id: ClipId(0),
-            source: vv_core::ClipSource::Media(MediaId::default()),
-            source_in: 0,
-            source_out: 50,
-            timeline_start: 0,
-            effects: vv_core::EffectStack::default(),
-            linked: None,
-        };
-
-        // Stesso media, contiguo: source_in di b == source_out di a.
-        let contiguous = vv_core::Clip {
-            source_in: 50,
-            timeline_start: 50,
-            ..base.clone()
-        };
-        assert!(is_seamless_continuation(&base, &contiguous));
-
-        // Stesso media, MA non contiguo: due trim separati dello stesso
-        // file.
-        let non_contiguous = vv_core::Clip {
-            source_in: 60,
-            timeline_start: 50,
-            ..base.clone()
-        };
-        assert!(!is_seamless_continuation(&base, &non_contiguous));
-
-        // Media diverso, anche se numericamente "contiguo".
-        let other_media = vv_core::Clip {
-            source: vv_core::ClipSource::Media(
-                vv_core::Project::default()
-                    .media_pool
-                    .insert(dummy_media_item()),
-            ),
-            source_in: 50,
-            timeline_start: 50,
-            ..base.clone()
-        };
-        assert!(!is_seamless_continuation(&base, &other_media));
-
-        // SolidColor non conta mai come continuazione.
-        let solid = vv_core::Clip {
-            source: vv_core::ClipSource::SolidColor,
-            source_in: 50,
-            timeline_start: 50,
-            ..base.clone()
-        };
-        assert!(!is_seamless_continuation(&base, &solid));
     }
 
     fn dummy_media_item() -> vv_core::MediaItem {
@@ -4636,57 +4433,14 @@ mod tests {
         assert_eq!(audio_halves[1].linked, Some(video_halves[1].id));
     }
 
-    /// Bug segnalato: dopo un vuoto, l'audio della clip successiva parte
-    /// subito ma il video resta nero per circa un secondo. Verifica il
-    /// pezzo base: `preload_player_for_clip` apre davvero un player per
-    /// una clip Media, non per un generatore SolidColor (nessun player
-    /// possibile).
-    #[test]
-    fn preload_player_for_clip_opens_a_player_only_for_media_clips() {
-        let dir = std::env::temp_dir().join("vv-app-preload-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=320x240:rate=25:duration=1",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
-
-        let mut app = VibeVideoApp::default();
-        app.import_media(path);
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
-        app.add_media_to_timeline(media_id);
-        let timeline_id = app.timeline_id.unwrap();
-        let media_clip_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].id;
-
-        assert!(
-            app.preload_player_for_clip(media_clip_id).is_some(),
-            "doveva aprire un player per la clip video"
-        );
-
-        let solid_id = make_timeline_with_clip(&mut app, VIDEO_TRACK, 1000, 10);
-        assert!(app.preload_player_for_clip(solid_id).is_none());
-    }
-
     /// Richiesta: "inserisci un indicatore visivo delle porzioni di
     /// timeline presenti in memoria". Verifica l'integrazione end-to-end
     /// (non solo la funzione pura `map_source_ranges_to_timeline`, già
-    /// coperta a parte): la clip attiva su un player vero, con del
-    /// decode-ahead reale in corso su un thread separato, produce
-    /// intervalli bufferizzati entro i propri limiti di timeline.
+    /// coperta a parte): con `render_ahead` reale in corso su un thread
+    /// separato, la clip sotto al playhead produce intervalli bufferizzati
+    /// entro i propri limiti di timeline.
     #[test]
-    fn buffered_timeline_ranges_reports_the_active_clips_decoded_frames() {
+    fn buffered_timeline_ranges_reports_the_clip_under_the_playheads_decoded_frames() {
         let dir = std::env::temp_dir().join("vv-app-buffered-ranges-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
@@ -4714,11 +4468,10 @@ mod tests {
         let timeline_id = app.timeline_id.unwrap();
         let clip = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].clone();
 
-        app.load_video_clip(clip.id);
-        assert!(app.preview_player.is_some());
+        // Manda a `render_ahead` la clip appena inserita (nell'app vera
+        // succede a ogni frame UI via `sync_render_ahead`).
+        app.sync_render_ahead();
 
-        // Il decode-ahead popola la cache su un thread separato: attende
-        // che ci sia almeno qualcosa, con un timeout generoso.
         let start = std::time::Instant::now();
         loop {
             if !app.buffered_timeline_ranges().is_empty() {
@@ -4741,17 +4494,15 @@ mod tests {
         }
     }
 
-    /// Bug segnalato: l'indicatore "buffered" mostrava il buffer fermarsi
-    /// esattamente a fine clip e ripartire da zero solo quando la testina
-    /// raggiungeva la clip successiva — anche su un taglio netto, senza
-    /// alcun vuoto in mezzo (il preload esisteva già, ma solo per il caso
-    /// "vuoto", avviato solo all'inizio del vuoto stesso). Verifica che
-    /// avvicinandosi alla fine della clip attiva (entro
-    /// `NEXT_CLIP_PRELOAD_LOOKAHEAD_SECS`) parta il preload della
-    /// prossima, prima ancora di raggiungerla.
+    /// Test end-to-end del bug segnalato ("il buffer si ferma sempre al
+    /// bordo della clip successiva"): a differenza del vecchio sistema
+    /// per-clip, `render_ahead` deve bufferizzare *oltre* la fine della
+    /// clip attiva, dentro la clip successiva, PRIMA che il playhead la
+    /// raggiunga — un taglio netto tra due media diversi, nessun caso
+    /// speciale necessario.
     #[test]
-    fn maintain_next_clip_preload_starts_warming_up_the_next_clip_within_the_lookahead_window() {
-        let dir = std::env::temp_dir().join("vv-app-preload-lookahead-test");
+    fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it() {
+        let dir = std::env::temp_dir().join("vv-app-buffered-ranges-cut-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path_a = dir.join("clip_a.mp4");
         let path_b = dir.join("clip_b.mp4");
@@ -4785,85 +4536,38 @@ mod tests {
         app.add_media_to_timeline_at(media_a, 0); // [0,50)
         app.add_media_to_timeline_at(media_b, 50); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
-        let clip_a_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].id;
-        let clip_b_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[1].id;
+        let clip_b = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[1].clone();
 
-        app.load_video_clip(clip_a_id);
-        let player = app.preview_player.as_mut().expect("player atteso");
-        player.seek_to_frame(48); // 2 frame residui = 0.08s, entro i 3s di lookahead
-        player.play();
+        // Playhead vicino alla fine della prima clip: la finestra di
+        // lookahead di `render_ahead` (3s) attraversa abbondantemente il
+        // taglio a 50.
+        app.timeline_state.playhead = 45;
+        app.sync_render_ahead();
 
-        app.maintain_next_clip_preload();
-
-        let preload = app
-            .next_preload
-            .as_ref()
-            .expect("doveva iniziare a precaricare la prossima clip");
-        assert_eq!(preload.clip_id, clip_b_id);
-    }
-
-    /// Lontano dalla fine della clip attiva, non deve ancora precaricare
-    /// nulla (eviterebbe di tenere sempre due player aperti per l'intera
-    /// durata della riproduzione, vanificando il contenimento della
-    /// memoria discusso in precedenza).
-    #[test]
-    fn maintain_next_clip_preload_does_nothing_far_from_the_end_of_the_clip() {
-        let dir = std::env::temp_dir().join("vv-app-preload-lookahead-far-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path_a = dir.join("clip_a.mp4");
-        let path_b = dir.join("clip_b.mp4");
-        for (path, duration) in [(&path_a, 5), (&path_b, 1)] {
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    &format!("testsrc=size=320x240:rate=25:duration={duration}"),
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    path.to_str().unwrap(),
-                ])
-                .status()
-                .expect("ffmpeg CLI non trovato");
-            assert!(status.success());
+        let start = std::time::Instant::now();
+        loop {
+            let covers_next_clip = app
+                .buffered_timeline_ranges()
+                .iter()
+                .any(|&(s, e)| s < clip_b.timeline_end() && e >= clip_b.timeline_start);
+            if covers_next_clip {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "timeout: la clip successiva non è mai stata bufferizzata in anticipo"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-
-        let mut app = VibeVideoApp::default();
-        app.import_media(path_a);
-        app.import_media(path_b);
-        let mut media_ids = app.project.media_pool.iter().map(|(id, _)| id);
-        let media_a = media_ids.next().unwrap();
-        let media_b = media_ids.next().unwrap();
-        drop(media_ids);
-
-        app.add_media_to_timeline_at(media_a, 0); // [0,125)
-        app.add_media_to_timeline_at(media_b, 125);
-
-        let clip_a_id =
-            app.project.timelines[app.timeline_id.unwrap()].tracks[VIDEO_TRACK].clips[0].id;
-        app.load_video_clip(clip_a_id);
-        let player = app.preview_player.as_mut().expect("player atteso");
-        player.seek_to_frame(0); // 5s residui, ben oltre i 3s di lookahead
-        player.play();
-
-        app.maintain_next_clip_preload();
-
-        assert!(app.next_preload.is_none());
     }
 
-    /// Test end-to-end del bug segnalato: su un taglio netto tra due clip
-    /// di media diversi, il preload avviato in anticipo da
-    /// `maintain_next_clip_preload` deve essere quello effettivamente
-    /// usato al momento del cambio (`advance_playback_past`), non un
-    /// player aperto a freddo lì — verificato indirettamente controllando
-    /// che l'indicatore "buffered" non sia vuoto *subito dopo* il cambio,
-    /// senza alcuna attesa.
+    /// Su un taglio netto tra due clip di media diversi,
+    /// `advance_playback_past` deve agganciare la clip successiva (audio
+    /// incluso) — senza alcun preload da consumare, dato che il video non
+    /// passa più da qui (lo mostra `render_ahead` a prescindere).
     #[test]
-    fn advance_playback_past_uses_a_proactively_preloaded_player_at_a_straight_cut() {
-        let dir = std::env::temp_dir().join("vv-app-preload-handoff-cut-test");
+    fn advance_playback_past_switches_active_clip_and_audio_at_a_straight_cut() {
+        let dir = std::env::temp_dir().join("vv-app-straight-cut-audio-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path_a = dir.join("clip_a.mp4");
         let path_b = dir.join("clip_b.mp4");
@@ -4898,234 +4602,22 @@ mod tests {
         app.add_media_to_timeline_at(media_b, 50); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
         let clip_b_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[1].id;
-
         let clip_a_id = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].id;
-        app.load_video_clip(clip_a_id);
-        let player = app.preview_player.as_mut().expect("player atteso");
-        player.seek_to_frame(48);
-        player.play();
-        app.maintain_next_clip_preload();
-        assert!(app.next_preload.is_some(), "il preload doveva partire");
 
-        // Attende che il preload abbia già qualcosa in cache, altrimenti il
-        // test non distinguerebbe "preload usato ma ancora vuoto" da
-        // "preload non usato affatto".
-        let start = std::time::Instant::now();
-        loop {
-            if app
-                .next_preload
-                .as_ref()
-                .is_some_and(|p| !p.player.cached_source_ranges().is_empty())
-            {
-                break;
-            }
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(2),
-                "timeout: il preload non ha mai bufferizzato nulla"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        app.load_active_clip_audio(clip_a_id);
+        let player = app.preview_player.as_mut().expect("player atteso");
+        player.play();
 
         app.advance_playback_past(timeline_id, 50);
 
         assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b_id)));
         assert!(
-            app.next_preload.is_none(),
-            "il preload consumato deve svuotarsi"
-        );
-        assert!(
-            !app.buffered_timeline_ranges().is_empty(),
-            "il buffer doveva essere già presente subito dopo il taglio, non ripartire da zero"
-        );
-    }
-
-    /// Bug segnalato: "l'indicatore sembra bufferizzare fino alla clip
-    /// successiva, ma poi entra comunque tardi di 1s come se non ci
-    /// fosse alcun buffer". Causa: due clip dello *stesso* media ma con
-    /// punti di attacco non contigui (es. due trim separati dello stesso
-    /// file incollati altrove, come nel caso segnalato) venivano
-    /// riconosciute come "stesso media" e quindi riusate col solo seek,
-    /// ignorando il preload — che pure era stato avviato e mostrava
-    /// progresso nell'indicatore, ma restava inutilizzato. Verifica che
-    /// in questo caso specifico (stesso media, non contiguo) il preload
-    /// venga comunque usato.
-    #[test]
-    fn load_video_clip_uses_a_matching_preload_for_the_same_media_when_not_contiguous() {
-        let dir = std::env::temp_dir().join("vv-app-same-media-noncontiguous-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=320x240:rate=25:duration=3",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
-
-        let mut app = VibeVideoApp::default();
-        app.import_media(path);
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
-        let meta = app.project.media_pool.get(media_id).unwrap().meta.clone();
-        let timeline_id = app.ensure_timeline_for(&meta);
-
-        // Clip A: source [0,50) a timeline [0,50). Clip B: source [60,75)
-        // — stesso media, ma NON contiguo (60 != 50) — a timeline [50,65).
-        let clip_a_id = app.project.alloc_clip_id();
-        let clip_a = vv_core::Clip {
-            id: clip_a_id,
-            source: vv_core::ClipSource::Media(media_id),
-            source_in: 0,
-            source_out: 50,
-            timeline_start: 0,
-            effects: vv_core::EffectStack::default(),
-            linked: None,
-        };
-        app.history.do_command(
-            &mut app.project,
-            Box::new(vv_core::InsertClip {
-                timeline: timeline_id,
-                track_index: VIDEO_TRACK,
-                clip: clip_a,
-            }),
-        );
-        let clip_b_id = app.project.alloc_clip_id();
-        let clip_b = vv_core::Clip {
-            id: clip_b_id,
-            source: vv_core::ClipSource::Media(media_id),
-            source_in: 60,
-            source_out: 75,
-            timeline_start: 50,
-            effects: vv_core::EffectStack::default(),
-            linked: None,
-        };
-        app.history.do_command(
-            &mut app.project,
-            Box::new(vv_core::InsertClip {
-                timeline: timeline_id,
-                track_index: VIDEO_TRACK,
-                clip: clip_b,
-            }),
-        );
-
-        app.load_video_clip(clip_a_id);
-        let player = app.preview_player.as_mut().expect("player atteso");
-        player.seek_to_frame(48);
-        player.play();
-        app.maintain_next_clip_preload();
-        let preload = app
-            .next_preload
-            .as_ref()
-            .expect("doveva precaricare anche se stesso media (non contiguo)");
-        assert_eq!(preload.clip_id, clip_b_id);
-
-        // Attende non solo "qualcosa in cache" ma specificamente un
-        // frame a partire da source_in=60: l'unico keyframe del file di
-        // test è a frame 0 (nessun `-g` esplicito nella fixture), quindi
-        // il decode-ahead deve decodificare in sequenza 0..60 prima di
-        // arrivarci — un "cache non vuota" generico passerebbe troppo
-        // presto, su frame precedenti a 60 che
-        // `map_source_ranges_to_timeline` scarta comunque (fuori dal
-        // trim di clip_b).
-        let start = std::time::Instant::now();
-        loop {
-            if app.next_preload.as_ref().is_some_and(|p| {
-                p.player
-                    .cached_source_ranges()
-                    .iter()
-                    .any(|&(_, end)| end >= 60)
-            }) {
-                break;
-            }
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(2),
-                "timeout: il preload non ha mai raggiunto source_in=60"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        app.advance_playback_past(timeline_id, 50);
-
-        assert_eq!(app.active_clip, Some((VIDEO_TRACK, clip_b_id)));
-        assert!(
-            app.next_preload.is_none(),
-            "il preload consumato deve svuotarsi"
+            app.preview_player.as_ref().is_some_and(Player::is_playing),
+            "doveva restare in riproduzione sulla nuova clip"
         );
         assert_eq!(
             app.preview_player.as_ref().unwrap().current_source_frame(),
-            60
-        );
-        // Il segnale che distingue davvero "ha usato il preload" da "ha
-        // riusato il vecchio player con un seek" (il bug): un seek fresco
-        // flusha il decoder e parte da una cache vuota, che il
-        // decode-ahead impiega un momento a ripopolare — qui invece deve
-        // già avere qualcosa, ereditato dal preload.
-        assert!(
-            !app.buffered_timeline_ranges().is_empty(),
-            "il buffer doveva essere già presente subito dopo il taglio, non ripartire da zero"
-        );
-    }
-
-    /// Se `gap_playback` ha già un player precaricato (vedi
-    /// `begin_gap_playback`), il cambio di controllo a fine vuoto lo usa
-    /// direttamente invece di riaprirne uno da zero — verifica che parta
-    /// a suonare e che `active_clip`/`preview_player` risultino coerenti.
-    #[test]
-    fn drive_playback_hands_off_using_the_preloaded_player_when_available() {
-        let dir = std::env::temp_dir().join("vv-app-preload-handoff-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=size=320x240:rate=25:duration=1",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
-
-        let mut app = VibeVideoApp::default();
-        app.import_media(path);
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
-        app.add_media_to_timeline(media_id);
-        let timeline_id = app.timeline_id.unwrap();
-        let _ = timeline_id;
-        let media_clip_id =
-            app.project.timelines[app.timeline_id.unwrap()].tracks[VIDEO_TRACK].clips[0].id;
-
-        let preloaded = app.preload_player_for_clip(media_clip_id);
-        assert!(preloaded.is_some());
-        app.gap_playback = Some(GapPlayback {
-            started_at: Instant::now() - std::time::Duration::from_secs(10),
-            start_frame: 0,
-            next_clip_id: media_clip_id,
-            next_clip_start: 0,
-            preloaded_player: preloaded,
-        });
-
-        app.drive_playback();
-
-        assert!(app.gap_playback.is_none());
-        assert_eq!(app.active_clip, Some((VIDEO_TRACK, media_clip_id)));
-        assert!(
-            app.preview_player.as_ref().is_some_and(Player::is_playing),
-            "il player precaricato doveva partire a suonare"
+            0
         );
     }
 

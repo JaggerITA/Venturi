@@ -43,6 +43,7 @@ impl Command for CompositeCommand {
 pub struct History {
     undo_stack: Vec<Box<dyn Command>>,
     redo_stack: Vec<Box<dyn Command>>,
+    generation: u64,
 }
 
 impl History {
@@ -50,12 +51,14 @@ impl History {
         cmd.apply(project);
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
+        self.generation += 1;
     }
 
     pub fn undo(&mut self, project: &mut Project) {
         if let Some(cmd) = self.undo_stack.pop() {
             cmd.undo(project);
             self.redo_stack.push(cmd);
+            self.generation += 1;
         }
     }
 
@@ -63,7 +66,20 @@ impl History {
         if let Some(mut cmd) = self.redo_stack.pop() {
             cmd.apply(project);
             self.undo_stack.push(cmd);
+            self.generation += 1;
         }
+    }
+
+    /// Incrementato a ogni modifica effettiva del progetto
+    /// (`do_command`/`undo`/`redo` che hanno davvero fatto qualcosa, non
+    /// una `redo`/`undo` a vuoto su uno stack esaurito): permette di
+    /// rilevare "il progetto è cambiato da quando l'ho controllato
+    /// l'ultima volta" con un semplice confronto di interi, invece di
+    /// dover clonare/diffare l'intero `Project` a ogni frame UI — usato
+    /// da `VibeVideoApp` per sapere quando notificare il worker di
+    /// render-ahead di una nuova disposizione delle clip.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 

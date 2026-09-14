@@ -62,7 +62,7 @@ const MIN_CACHE_FRAMES: usize = 24;
 /// in `budget_bytes`, con un minimo di `MIN_CACHE_FRAMES`. Funzione pura
 /// (nessuna apertura di file/thread) per poterla testare senza dipendere
 /// da ffmpeg.
-fn frame_cache_capacity(budget_bytes: usize, width: u32, height: u32) -> usize {
+pub fn frame_cache_capacity(budget_bytes: usize, width: u32, height: u32) -> usize {
     let bytes_per_frame = (width as usize * height as usize * 4).max(1);
     (budget_bytes / bytes_per_frame).max(MIN_CACHE_FRAMES)
 }

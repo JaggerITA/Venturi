@@ -17,7 +17,7 @@ pub use audio::{AudioBuffer, decode_audio_track};
 pub use cache::FrameCache;
 pub use decode::{Decoder, FrameRgba, decode_first_frame};
 pub use encode::Encoder;
-pub use playback::DecodeAhead;
+pub use playback::{DecodeAhead, frame_cache_capacity};
 pub use probe::probe;
 
 #[derive(Debug, thiserror::Error)]

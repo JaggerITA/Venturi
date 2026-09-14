@@ -1,21 +1,36 @@
-//! Player lineare per una singola clip: combina il decode-ahead video
-//! (`vv_media::DecodeAhead`) e l'output audio (`vv_audio::AudioPlayer`),
-//! che è il clock di sincronizzazione quando presente (vedi
-//! ARCHITECTURE.md § Pipeline audio). Senza audio si usa un clock a parete
-//! (`Instant`) come fallback.
+//! Player *audio* per una singola clip: apre/segue l'`AudioPlayer` (vedi
+//! ARCHITECTURE.md § Pipeline audio), la cui posizione è il clock di
+//! sincronizzazione durante il playback. Senza audio (media muto) usa un
+//! clock a parete (`Instant`) come fallback.
 //!
-//! Vive in vv-app perché orchestra due crate diverse (vv-media + vv-audio)
-//! per uso esclusivo della UI: non è (ancora) logica riutilizzabile al di
-//! fuori dell'app, quindi non giustifica una crate propria (milestone 2).
+//! Il VIDEO non passa più da qui: vive nel buffer a livello di timeline
+//! (`render_ahead::RenderAhead`), che bufferizza N secondi avanti dal
+//! playhead attraversando quante clip servono, invece di un decode-ahead
+//! per singolo player. `Player` resta solo audio perché l'audio ha un
+//! modello più semplice — nessun preload speciale necessario, riaprire un
+//! `AudioPlayer` è economico grazie a `VibeVideoApp::audio_cache` (che
+//! evita di ridecodificare l'intera traccia ogni volta, la causa
+//! originale di un hitch percepibile risolta in una fix precedente) — a
+//! differenza del video, dove il costo di un seek/riapertura dipende dal
+//! GOP del sorgente e può arrivare a ~1s.
+//!
+//! L'anteprima "grezza" di un media dal media pool (non necessariamente
+//! sulla timeline, vedi `VibeVideoApp::browsing_media`) ha bisogno anche
+//! lei di un decode-ahead video, ma non passa da qui: usa un
+//! `vv_media::DecodeAhead` a sé (`VibeVideoApp::browsing_decode_ahead`),
+//! visto che non è legata a nessuna clip/posizione di timeline a cui
+//! `render_ahead` potrebbe agganciarsi.
+//!
+//! Vive in vv-app perché orchestra vv-audio per uso esclusivo della UI:
+//! non è (ancora) logica riutilizzabile al di fuori dell'app, quindi non
+//! giustifica una crate propria (milestone 2).
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use vv_core::FrameIdx;
-use vv_media::FrameRgba;
 
 pub struct Player {
-    decode_ahead: vv_media::DecodeAhead,
     audio: Option<vv_audio::AudioPlayer>,
     fps: f64,
     duration_secs: f64,
@@ -25,34 +40,23 @@ pub struct Player {
 }
 
 impl Player {
+    /// `fps` è quello nativo del media (da `MediaMeta`, non più letto da
+    /// un decoder video visto che qui non se ne apre più uno): serve a
+    /// tradurre tra posizione in secondi e frame sorgente
+    /// (`current_source_frame`/`seek_to_frame`).
+    ///
     /// Se `cached_audio` è `Some`, riusa quel buffer già decodificato
-    /// invece di ridecodificare da zero la traccia audio — evita un hitch
-    /// percepibile (centinaia di ms a oltre 1s per file lunghi) quando si
-    /// riapre un media già visto in questa sessione (es. il player viene
-    /// chiuso quando il playhead attraversa un vuoto e riaperto appena ne
-    /// esce: senza cache, ogni attraversamento ridecodifica l'intero file).
-    /// Tocca al chiamante mantenere la cache per path (vedi
+    /// invece di ridecodificare da zero la traccia audio. Tocca al
+    /// chiamante mantenere la cache per path (vedi
     /// `VibeVideoApp::audio_cache`); ritorna anche il buffer usato (nuovo
     /// se decodificato ora, lo stesso passato se riusato) perché il
     /// chiamante possa aggiornarla.
-    ///
-    /// `cache_budget_bytes`: budget di memoria per la cache dei frame
-    /// decodificati (in byte, non un conteggio fisso di frame — vedi doc
-    /// di `DecodeAhead::spawn` in vv-media): un conteggio fisso ha un
-    /// costo in RAM molto diverso a seconda della risoluzione, quindi
-    /// configurabile dall'utente (vedi `VibeVideoApp::cache_budget_bytes`,
-    /// impostazione in "Visualizza") invece di una costante fissa nel
-    /// codice.
     pub fn open(
         path: &Path,
         duration_secs: f64,
+        fps: vv_core::Rational,
         cached_audio: Option<Arc<vv_media::AudioBuffer>>,
-        cache_budget_bytes: usize,
     ) -> Result<(Self, Option<Arc<vv_media::AudioBuffer>>), String> {
-        let decode_ahead = vv_media::DecodeAhead::spawn(path.to_path_buf(), cache_budget_bytes, 60)
-            .map_err(|e| e.to_string())?;
-        let fps = decode_ahead.fps.as_f64();
-
         let audio_buffer = match cached_audio {
             Some(buf) => Some(buf),
             None => vv_media::decode_audio_track(path)
@@ -70,9 +74,8 @@ impl Player {
 
         Ok((
             Self {
-                decode_ahead,
                 audio,
-                fps,
+                fps: fps.as_f64(),
                 duration_secs,
                 playing: false,
                 wall_clock_started_at: None,
@@ -147,8 +150,6 @@ impl Player {
         if self.playing {
             self.wall_clock_started_at = Some(Instant::now());
         }
-        let frame_idx = (secs * self.fps).round() as FrameIdx;
-        self.decode_ahead.seek(frame_idx, secs);
     }
 
     pub fn position_secs(&self) -> f64 {
@@ -184,24 +185,6 @@ impl Player {
     /// player non ancora trim-aware).
     pub fn current_source_frame(&self) -> FrameIdx {
         (self.position_secs() * self.fps).round() as FrameIdx
-    }
-
-    /// Frame corrente da mostrare nel viewer, se già decodificato. Aggiorna
-    /// anche il target del decode-ahead alla posizione corrente.
-    pub fn current_frame(&self) -> Option<Arc<FrameRgba>> {
-        let idx = self.current_source_frame();
-        self.decode_ahead.set_target(idx);
-        self.decode_ahead.cache().get(idx)
-    }
-
-    /// Intervalli (in frame *sorgente*, spazio nativo del media — non
-    /// ancora tradotti in frame di timeline) attualmente in cache nel
-    /// decode-ahead: per l'indicatore visivo "buffered" sulla timeline
-    /// (richiesta: "visualizzare durante la riproduzione come viene fatto
-    /// il buffer"). Il chiamante traduce in spazio timeline conoscendo la
-    /// clip attiva (vedi `VibeVideoApp::buffered_timeline_ranges`).
-    pub fn cached_source_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
-        self.decode_ahead.cache().cached_ranges()
     }
 
     /// Da chiamare a ogni frame UI: mette in pausa automaticamente a fine
@@ -247,11 +230,13 @@ mod tests {
         path
     }
 
+    const TEST_FPS: vv_core::Rational = vv_core::Rational::new(25, 1);
+
     #[test]
     fn wall_clock_playback_advances_pauses_and_seeks() {
         let path = make_video_only_clip(3);
         let (mut player, _audio_buffer) =
-            Player::open(&path, 3.0, None, 20_000_000).expect("apertura player fallita");
+            Player::open(&path, 3.0, TEST_FPS, None).expect("apertura player fallita");
 
         assert_eq!(player.position_secs(), 0.0);
         assert!(!player.is_playing());
@@ -287,7 +272,7 @@ mod tests {
     #[test]
     fn seek_to_frame_round_trips_with_current_source_frame() {
         let path = make_video_only_clip(2);
-        let (mut player, _audio_buffer) = Player::open(&path, 2.0, None, 20_000_000).unwrap();
+        let (mut player, _audio_buffer) = Player::open(&path, 2.0, TEST_FPS, None).unwrap();
 
         player.seek_to_frame(20);
         assert_eq!(player.current_source_frame(), 20);

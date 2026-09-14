@@ -107,6 +107,28 @@ decodificati.
   aformat,astats` o lettura diretta dei sample), cachato su disco insieme ai
   metadata del media.
 
+**Stato implementativo (buffer video a livello di timeline):** costruito
+in `vv-app/src/render_ahead.rs` (`RenderAhead`), sostituisce un precedente
+sistema di preload "per clip" che richiedeva un caso speciale per ogni
+scenario (vuoti, tagli netti, stesso media non contiguo) — proposta
+dell'utente dopo aver notato con l'indicatore "buffered" che il vecchio
+sistema si fermava sempre al bordo della clip successiva. Un solo thread
+(non ancora un pool multi-worker come descritto sopra) cammina in avanti
+dal playhead per `LOOKAHEAD_SECS` (3s) attraversando quante clip servono
+sulla track video, e mantiene una `FrameCache` per ogni `MediaId`
+coinvolto nella finestra (`HashMap<MediaId, FrameCache>`, non
+`LruCache<(MediaId, SourceFrameIdx), _>` come qui sopra — stesso effetto,
+una cache logicamente per-media, ma implementata come mappa di cache
+indipendenti anziché un'unica cache a chiave composita). Il budget di
+memoria (configurabile in UI, "Visualizza") è diviso tra i media
+*distinti* effettivamente nella finestra, non fisso a testa. Il video di
+una clip attiva/prossima viene sempre letto da qui, mai da un decoder
+aperto ad hoc per quella clip — elimina la necessità di preload speciali:
+un solo cammino uniforme copre vuoti, tagli netti e riferimenti ripetuti
+allo stesso media. **Non ancora fatto**: pool multi-worker (un thread
+singolo si è mostrato sufficiente finora), proxy, waveform — questi tre
+restano come descritti sopra, ancora scheletri.
+
 ## Compositing GPU (wgpu, per ogni frame di output)
 
 1. Per ogni track (bottom→top) al tempo corrente: risolvi la clip attiva,
@@ -149,10 +171,22 @@ svuotato/il redo-stack pulito a ogni nuovo comando. Esempi: `InsertClip`,
   presenta il framebuffer wgpu.
 - **Decode pool**: worker dedicati (≈ metà dei core disponibili),
   ricevono richieste `(ClipId, FrameIdx)` da uno scheduler guidato dal
-  playhead, scrivono nella cache condivisa.
+  playhead, scrivono nella cache condivisa. **Stato attuale**: un solo
+  thread di render-ahead (`RenderAhead`, non un pool), che cammina la
+  timeline invece di ricevere richieste per singola clip — vedi §
+  "Pipeline di decode + cache" sopra. Passare a un vero pool resta
+  un'estensione futura, se un thread singolo non tenesse il passo su
+  contenuti più pesanti.
 - **Audio thread**: callback `cpal`, consuma un ring buffer lock-free
-  riempito da un thread di mixing dedicato.
-- **Background pool**: generazione proxy + waveform, priorità bassa.
+  riempito da un thread di mixing dedicato. **Stato attuale**: non ancora
+  così — l'audio passa da `vv-app/src/player.rs::Player`, un
+  `AudioPlayer` per clip attiva (aperto/scambiato al taglio, non un
+  output continuo con mixing dedicato); `vv-audio::mixer` resta uno
+  scheletro. L'audio-clock-continuity attuale si appoggia su
+  `VibeVideoApp::audio_cache` (traccia audio già decodificata riusata tra
+  un'apertura e l'altra) per restare economico anche senza un vero mixer.
+- **Background pool**: generazione proxy + waveform, priorità bassa. Non
+  ancora costruito (proxy/waveform restano scheletri, vedi sopra).
 
 ## Struttura del workspace Cargo
 
