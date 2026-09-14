@@ -491,9 +491,29 @@ fn walk_and_fill(
             .source_end
             .min(segment.source_start + capacity as FrameIdx - 1);
 
+        // Diventa `true` dopo il primo frame realmente decodificato in
+        // questo giro: prima di allora `od.next_frame` può essere solo
+        // il placeholder `0` impostato da `position_decoder` dopo un
+        // (ri)apertura/seek, non ancora corretto al vero indice del
+        // keyframe da cui il decoder riparte — controllare la cache
+        // prima di quel momento potrebbe far fermare il ciclo per un
+        // falso positivo (0 per coincidenza già in cache) senza aver mai
+        // scoperto la vera posizione del decoder.
+        let mut resumed = false;
         loop {
             let od = open.get_mut(&segment.media_id).unwrap();
             if od.next_frame > capped_source_end {
+                break;
+            }
+            // Ci siamo ricongiunti con una porzione già bufferizzata (non
+            // sfrattata perché avanti alla testina, vedi
+            // `FrameCache::evict_before`): il resto della finestra fino a
+            // `capped_source_end` dovrebbe già esserci, quindi continuare
+            // a decodificare sarebbe lavoro sprecato — ottimizzazione
+            // richiesta esplicitamente: un piccolo scrub all'indietro
+            // deve ridecodificare solo il nuovo tratto scoperto prima del
+            // punto di riconnessione, non l'intera finestra.
+            if resumed && cache.contains(od.next_frame) {
                 break;
             }
             match od.decoder.next_frame() {
@@ -508,6 +528,7 @@ fn walk_and_fill(
                     // quella reale).
                     cache.insert(idx, Arc::new(frame));
                     od.next_frame = idx + 1;
+                    resumed = true;
                 }
                 _ => break,
             }
@@ -1077,6 +1098,77 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
+    /// all'indietro, la porzione già bufferizzata *avanti* alla nuova
+    /// testina (non toccata da `evict_before`, che scarta solo ciò che
+    /// è dietro) non deve essere ridecodificata — solo il tratto
+    /// scoperto tra il nuovo target e il punto di riconnessione con la
+    /// cache esistente. Verificato osservando `OpenDecoder::next_frame`
+    /// dopo il seek: deve fermarsi al punto di riconnessione (270, dove
+    /// il buffer precedente non è mai stato toccato), non continuare
+    /// fino al nuovo `capped_source_end` (che sarebbe molto più avanti).
+    #[test]
+    fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek() {
+        let path = make_test_clip("vv-app-render-ahead-test", "reconnect.mp4", 20);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 500)],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let budget = 43_000_000; // capacità ~139 frame
+
+        // Bufferizza attorno a 300: con keyint=250 (default libx264) il
+        // decoder riparte dal keyframe 250 e riempie fino al limite di
+        // capacità.
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 300, budget);
+        let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
+        assert!(
+            filled_up_to > 350,
+            "il primo riempimento deve aver bufferizzato ben oltre 300 (fino all'orizzonte di lookahead): {filled_up_to}"
+        );
+
+        // Scrub indietro di soli 30 frame: sotto la vecchia soglia di
+        // 120, ma comunque un vero spostamento all'indietro (deve
+        // riaprire/riseekare, vedi `requested_start`).
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 270, budget);
+
+        let next_frame_after = open.get(&media_a).unwrap().next_frame;
+        assert_eq!(
+            next_frame_after, 270,
+            "deve fermarsi appena si ricongiunge con il buffer esistente (270), non ridecodificare fino al nuovo capped_source_end: next_frame={next_frame_after}"
+        );
+
+        // La coda già bufferizzata (fino a `filled_up_to`) deve essere
+        // ancora intatta e raggiungibile dal nuovo range contiguo.
+        let ranges = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 270 && e >= filled_up_to),
+            "la coda già bufferizzata non deve sparire: ranges={ranges:?} filled_up_to={filled_up_to}"
+        );
     }
 
     /// Regressione per il bug segnalato dall'utente e confermato dal log
