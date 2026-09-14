@@ -174,6 +174,12 @@ fn worker_loop(
     mut timeline_id: TimelineId,
 ) {
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    // Ultimo target visto: serve a distinguere un avanzamento normale
+    // (i decoder continuano da dove sono, si veda `position_decoder`) da
+    // un salto indietro (scrub), dopo il quale i decoder aperti sono
+    // ormai troppo avanti e decodificare in avanti non potrà mai
+    // raggiungere la nuova posizione — vanno riaperti da zero.
+    let mut last_from_frame: Option<FrameIdx> = None;
     loop {
         match rx.recv_timeout(POLL_INTERVAL) {
             Ok(Command::Stop) => return,
@@ -199,6 +205,10 @@ fn worker_loop(
         }
 
         let from = target.load(Ordering::Relaxed);
+        if last_from_frame.is_some_and(|last| from + SEEK_THRESHOLD_FRAMES < last) {
+            open.clear();
+        }
+        last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
         walk_and_fill(&project, timeline_id, &caches, &mut open, from, budget);
     }
@@ -264,31 +274,35 @@ fn collect_media_segments(
 }
 
 /// Assicura che `open[media_id]` sia un decoder posizionato in modo da
-/// poter coprire `[segment_start, segment_end]` decodificando in avanti
-/// in modo efficiente. Un decoder già aperto per questo media viene
-/// riusato — anche se è *oltre* `segment_start` — a patto che possa
-/// ancora produrre qualcosa di utile per il segmento (cioè non sia già
-/// passato oltre `segment_end`): essere avanti rispetto all'inizio del
-/// segmento è lo stato **sano e atteso** di un buffer che lavora bene,
-/// non un motivo per riaprire — farlo comunque è il bug che causava un
-/// seek reale ogni ciclo di poll (~ogni 50ms), buttando via il lavoro
-/// appena fatto. Un seek reale serve solo quando decodificare in avanti
-/// non potrebbe comunque raggiungere il segmento: il decoder è già
-/// passato oltre la sua fine (serve tornare indietro), oppure è troppo
-/// indietro rispetto al suo inizio (conviene un seek a decodificare in
-/// sequenza fino a lì). Ritorna `false` se l'apertura del media fallisce
-/// (il chiamante salta quel segmento).
+/// poter coprire `segment_start` decodificando in avanti in modo
+/// efficiente. Un decoder già aperto per questo media viene riusato —
+/// anche se è *oltre* `segment_start`, incluso il caso in cui abbia già
+/// superato `segment_end` — perché non c'è nulla che un riapertura
+/// potrebbe migliorare in quel caso: se la cache copre già il segmento va
+/// tutto bene così, se non lo copre (limite di capacità, non di
+/// posizione) rifare lo stesso seek produce esattamente lo stesso
+/// risultato all'infinito. Essere avanti rispetto all'inizio del
+/// segmento è lo stato **sano e atteso** di un buffer che lavora bene —
+/// trattarlo come motivo di riapertura è il bug che causava un seek
+/// reale (e quindi una nuova decodifica completa della finestra) ogni
+/// ciclo di poll, sia quando il decoder era leggermente avanti sia
+/// appena il giro precedente si era concluso esattamente al termine del
+/// segmento. Un seek reale serve solo quando decodificare in avanti non
+/// potrebbe comunque raggiungere `segment_start`: è troppo indietro
+/// rispetto ad esso (conviene un seek a decodificare in sequenza fino a
+/// lì) — un vero scrub all'indietro è gestito a parte in `worker_loop`,
+/// che svuota `open` quando il target salta indietro, così il ramo
+/// "nessun decoder aperto" qui sotto si occupa del resto. Ritorna
+/// `false` se l'apertura del media fallisce (il chiamante salta quel
+/// segmento).
 fn position_decoder(
     open: &mut HashMap<MediaId, OpenDecoder>,
     media_id: MediaId,
     path: &Path,
     segment_start: FrameIdx,
-    segment_end: FrameIdx,
 ) -> bool {
     let needs_new_decoder = match open.get(&media_id) {
-        Some(o) => {
-            o.next_frame > segment_end || segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
-        }
+        Some(o) => segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES,
         None => true,
     };
     if !needs_new_decoder {
@@ -356,13 +370,7 @@ fn walk_and_fill(
         else {
             continue;
         };
-        if !position_decoder(
-            open,
-            segment.media_id,
-            &path,
-            segment.source_start,
-            segment.source_end,
-        ) {
+        if !position_decoder(open, segment.media_id, &path, segment.source_start) {
             continue;
         }
         let (width, height) = {
@@ -377,9 +385,20 @@ fn walk_and_fill(
             .or_insert_with(|| Arc::new(FrameCache::new(capacity)))
             .clone();
 
+        // Non decodificare oltre quanto la cache di questo media può
+        // effettivamente contenere: farlo comunque significa sfrattare
+        // (LRU) prima i frame più vicini all'inizio del segmento — quelli
+        // più vicini alla testina, i più utili da mostrare subito — per
+        // tenere invece la coda della finestra, la parte meno urgente.
+        // Meglio bufferizzare di meno ma partendo dalla testina, che è
+        // anche quello che l'indicatore "buffered" deve mostrare.
+        let capped_source_end = segment
+            .source_end
+            .min(segment.source_start + capacity as FrameIdx - 1);
+
         loop {
             let od = open.get_mut(&segment.media_id).unwrap();
-            if od.next_frame > segment.source_end {
+            if od.next_frame > capped_source_end {
                 break;
             }
             match od.decoder.next_frame() {
@@ -623,7 +642,7 @@ mod tests {
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        assert!(position_decoder(&mut open, media_a, &path, 0, 1000));
+        assert!(position_decoder(&mut open, media_a, &path, 0));
 
         // Decodifica qualche frame in avanti "a mano", come farebbe
         // walk_and_fill, per simulare un decoder già bufferizzato oltre
@@ -641,17 +660,125 @@ mod tests {
         // Un ciclo successivo con il target ancora dietro alla posizione
         // del decoder — lo stato normale durante il playback in avanti —
         // non deve riaprire/riazzerare il decoder.
-        assert!(position_decoder(
-            &mut open,
-            media_a,
-            &path,
-            0,
-            advanced_next_frame + 1000,
-        ));
+        assert!(position_decoder(&mut open, media_a, &path, 0));
         assert_eq!(
             open.get(&media_a).unwrap().next_frame,
             advanced_next_frame,
             "non deve aver riaperto il decoder mentre è ancora utilmente avanti"
         );
+    }
+
+    /// Regressione: se il budget non basta a coprire tutta la finestra
+    /// di lookahead, il buffer deve comunque partire dalla testina (i
+    /// frame più vicini, i più utili da mostrare subito) e non da una
+    /// coda arbitraria della finestra — altrimenti l'indicatore mostra
+    /// un intervallo che "cade dopo" la testina senza mai coprirla.
+    #[test]
+    fn walk_and_fill_prioritizes_frames_near_the_playhead_when_the_budget_is_too_small_for_the_full_window()
+     {
+        let path = make_test_clip("vv-app-render-ahead-test", "small_budget.mp4", 3);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 75,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 75)],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Budget minuscolo: la finestra di lookahead (3s = 75 frame a
+        // 25fps) non ci sta tutta nella cache.
+        let tiny_budget = 320 * 240 * 4 * 5;
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 0, tiny_budget);
+
+        let ranges = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        assert!(!ranges.is_empty());
+        assert_eq!(
+            ranges[0].0, 0,
+            "il buffer deve partire dalla testina, non da una coda arbitraria: {ranges:?}"
+        );
+        assert!(
+            ranges[0].1 < 74,
+            "con un budget così piccolo non deve riuscire a coprire tutta la finestra: {ranges:?}"
+        );
+    }
+
+    /// Regressione: dopo uno scrub molto indietro rispetto a dove il
+    /// worker aveva già bufferizzato in avanti, il buffer deve
+    /// raggiungere anche la nuova posizione — il decoder può solo
+    /// decodificare in avanti, quindi senza un riapertura esplicita
+    /// resterebbe bloccato oltre il nuovo target per sempre.
+    #[test]
+    fn render_ahead_catches_up_after_a_large_backward_seek() {
+        let path = make_test_clip("vv-app-render-ahead-test", "backward_seek.mp4", 4);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 100)],
+            muted: false,
+        }]));
+
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        render_ahead.set_target(80);
+
+        let start = std::time::Instant::now();
+        loop {
+            if !render_ahead.cached_ranges_for(media_a).is_empty() {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timeout in avanti"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Scrub indietro oltre la soglia di seek: il decoder che ha
+        // bufferizzato attorno a 80 non può proseguire in avanti per
+        // raggiungere 0.
+        render_ahead.set_target(0);
+        let start = std::time::Instant::now();
+        loop {
+            let ranges = render_ahead.cached_ranges_for(media_a);
+            if ranges.iter().any(|&(s, _)| s == 0) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timeout indietro: ranges={ranges:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
