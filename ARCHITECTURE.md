@@ -99,10 +99,19 @@ decodificati.
   stessa cache. Frame *raw* post color-space-detect, pre-effetti; pool di
   worker thread per il decode-ahead durante playback/scrub, budget di
   default ~1.5 GB RAM per 1080p (~500 frame NV12/YUV420).
-- Proxy: generazione in background (ffmpeg, H.264 all-intra a 960px di
-  larghezza) per ogni media importato, salvati in `.vibevideo/proxies/`
-  accanto al progetto, chiave = `content_hash`. Toggle "usa proxy" in UI
-  come in Resolve; l'export usa sempre i sorgenti originali.
+- Proxy: ✅ generazione in background (`vv-media::proxy`, thread dedicato
+  `vv-app::proxy_worker`) per ogni media importato — H.264 tutto-intra
+  (un keyframe per frame: elimina il costo "cammina dal keyframe più
+  vicino" che rende lo scrub impossibile su sorgenti long-GOP, non
+  un'approssimazione del frame mostrato) a 960px di larghezza, salvati
+  in `$XDG_CACHE_HOME/vibevideo/proxies/` (cache **globale**, non
+  accanto al progetto: la chiave è già `content_hash`, indipendente dal
+  progetto e riusabile prima ancora che sia mai stato salvato o tra
+  progetti diversi che condividono lo stesso sorgente). Toggle "usa
+  proxy" nel menu Visualizza (default attivo); l'export ignora sempre
+  il toggle, legge solo `MediaItem::path`. `content_hash` è un
+  fingerprint veloce (path canonico + dimensione + mtime, non i byte
+  del file), non più il placeholder `0`.
 - Waveform: pre-pass di peak extraction all'import (ffmpeg `-af
   aformat,astats` o lettura diretta dei sample), cachato su disco insieme ai
   metadata del media.
@@ -126,8 +135,9 @@ una clip attiva/prossima viene sempre letto da qui, mai da un decoder
 aperto ad hoc per quella clip — elimina la necessità di preload speciali:
 un solo cammino uniforme copre vuoti, tagli netti e riferimenti ripetuti
 allo stesso media. **Non ancora fatto**: pool multi-worker (un thread
-singolo si è mostrato sufficiente finora), proxy, waveform — questi tre
-restano come descritti sopra, ancora scheletri.
+singolo si è mostrato sufficiente finora), waveform — restano come
+descritti sopra, ancora scheletri. Il proxy invece è implementato, vedi
+sopra.
 
 ## Compositing GPU (wgpu, per ogni frame di output)
 
@@ -199,8 +209,9 @@ svuotato/il redo-stack pulito a ogni nuovo comando. Esempi: `InsertClip`,
   scheletro. L'audio-clock-continuity attuale si appoggia su
   `VibeVideoApp::audio_cache` (traccia audio già decodificata riusata tra
   un'apertura e l'altra) per restare economico anche senza un vero mixer.
-- **Background pool**: generazione proxy + waveform, priorità bassa. Non
-  ancora costruito (proxy/waveform restano scheletri, vedi sopra).
+- **Background pool**: la generazione proxy ha il suo thread dedicato
+  (`vv-app::proxy_worker`, coda seriale — vedi sopra); waveform resta
+  uno scheletro, priorità bassa, non ancora costruito.
 
 ## Struttura del workspace Cargo
 
