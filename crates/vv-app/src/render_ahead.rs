@@ -173,26 +173,6 @@ impl Drop for RenderAhead {
 struct OpenDecoder {
     decoder: Decoder,
     next_frame: FrameIdx,
-    /// Il più piccolo `source_start` richiesto per questo media
-    /// nell'ultimo ciclo in cui è comparso — non il `segment_start` del
-    /// singolo ultimo segmento processato: un taglio produce più
-    /// segmenti per lo stesso media nella stessa finestra (la clip prima
-    /// e quella dopo il taglio), processati in sequenza nello stesso
-    /// ciclo, e l'ultimo di questi ha quasi sempre un `source_start` più
-    /// alto del primo. Confrontare/aggiornare con il *minimo* del ciclo
-    /// (vedi `min_source_start_by_media` in `walk_and_fill`) invece che
-    /// con il segmento più recente permette di distinguere "la testina è
-    /// avanzata" (normale, il decoder resta dov'è) da "la testina è
-    /// tornata indietro" (serve un seek reale, qualunque sia l'ampiezza —
-    /// vedi `position_decoder`) senza falsi positivi quando si
-    /// riattraversa lo stesso media più volte nella stessa finestra: con
-    /// il solo ultimo segmento, il ciclo successivo rielaborando il
-    /// *primo* segmento (source_start più basso) lo leggeva sempre come
-    /// "tornato indietro" rispetto a quel valore residuo, scatenando un
-    /// seek reale ad ogni singolo ciclo di poll pur restando fermi —
-    /// bug segnalato: dopo un taglio, con la testina ferma appena prima,
-    /// il buffer veniva ricalcolato e invalidato in loop.
-    requested_start: FrameIdx,
 }
 
 fn worker_loop(
@@ -204,6 +184,14 @@ fn worker_loop(
     mut timeline_id: TimelineId,
 ) {
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    // Ultimo `from` visto, confrontato una sola volta per ciclo (non per
+    // media/segmento, vedi doc di `walk_and_fill`) per sapere se la
+    // testina è tornata indietro dall'ultimo ciclo — qualunque sia
+    // l'ampiezza. Aggiornato per semplice assegnazione a ogni ciclo, mai
+    // un min/max con lo storico: deve riflettere solo il ciclo
+    // *precedente*, altrimenti (bug osservato in precedenza) può restare
+    // bloccato su un valore vecchio e smettere di rilevare scrub reali.
+    let mut last_from_frame: Option<FrameIdx> = None;
     loop {
         match rx.recv_timeout(POLL_INTERVAL) {
             Ok(Command::Stop) => return,
@@ -229,8 +217,18 @@ fn worker_loop(
         }
 
         let from = target.load(Ordering::Relaxed);
+        let went_backward = last_from_frame.is_some_and(|last| from < last);
+        last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
-        walk_and_fill(&project, timeline_id, &caches, &mut open, from, budget);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            from,
+            budget,
+            went_backward,
+        );
     }
 }
 
@@ -321,72 +319,61 @@ fn collect_media_segments(
 /// trattarlo come motivo di un seek è il bug che causava un seek reale
 /// (e quindi una nuova decodifica completa della finestra) ogni ciclo di
 /// poll, sia quando il decoder era leggermente avanti sia appena il giro
-/// precedente si era concluso esattamente al termine del segmento. Un
-/// seek reale serve quando decodificare in avanti non potrebbe comunque
-/// raggiungere `segment_start`: è troppo indietro rispetto ad esso
-/// (conviene un seek a decodificare in sequenza fino a lì), oppure la
-/// testina è tornata indietro rispetto all'ultima richiesta per questo
-/// media (`OpenDecoder::requested_start`) — qualunque sia l'ampiezza,
-/// non solo sopra `SEEK_THRESHOLD_FRAMES`: `walk_and_fill` scarta ad
-/// ogni ciclo tutto ciò che è dietro alla testina corrente
-/// (`FrameCache::evict_before`), quindi anche un piccolo passo indietro
-/// cade in territorio già scartato, irraggiungibile decodificando solo
-/// in avanti. Quando serve un seek per lo stesso media già aperto, va
-/// fatto sul decoder *esistente*
-/// (`seek_to_time`), non riaprendo il file da `Decoder::open`: per un
-/// file grande/non ottimizzato per lo streaming, riaprire vuol dire
-/// riparsare l'intero container/indice ogni volta, un costo che può
-/// arrivare a secondi — se supera la tolleranza (`SEEK_THRESHOLD_FRAMES`)
-/// il target avanza oltre durante l'apertura stessa, scatenandone
-/// un'altra al giro successivo, in un loop che non recupera mai
-/// (osservato: riproduzione a scatti, un frame ogni pochi secondi).
-/// `Decoder::open` va usato solo per la primissima apertura di un media
-/// (nessun decoder ancora in `open`) o per uno diverso da quello aperto.
-/// Ritorna `Positioned::Failed` se l'apertura del media fallisce (il
-/// chiamante salta quel segmento); altrimenti riporta cosa è stato fatto
-/// per arrivarci — usato dai test per verificare che un seek reale
-/// scatti solo quando davvero serve, non ad ogni ciclo.
+/// precedente si era concluso esattamente al termine del segmento.
+///
+/// Un seek reale serve in due casi, indipendenti tra loro:
+/// - `segment_start` è troppo avanti per continuare a decodificare in
+///   sequenza fino a lì (costa meno un seek);
+/// - la testina di *timeline* è tornata indietro dal ciclo di poll
+///   precedente (`went_backward`, deciso *una sola volta per ciclo* dal
+///   chiamante — vedi `worker_loop`/`walk_and_fill` — confrontando il
+///   target globale, non per-media/per-segmento) **e** questo decoder è
+///   fisicamente già oltre `segment_start`: essere avanti è sano quando
+///   la testina è ferma o avanza (il decoder ha bufferizzato bene), ma
+///   se la testina è appena tornata indietro non può significare altro
+///   che "questo decoder ha superato la nuova posizione e non potrà mai
+///   tornarci decodificando solo in avanti" (`walk_and_fill` scarta ad
+///   ogni ciclo tutto ciò che è dietro alla testina via
+///   `FrameCache::evict_before`, quindi anche un passo indietro di un
+///   solo frame cade subito in territorio già scartato).
+///
+/// `went_backward` è deciso una volta per l'intero ciclo (non da uno
+/// stato per-media come in una versione precedente di questo codice):
+/// un taglio produce più segmenti per lo stesso media nella stessa
+/// finestra (la clip prima e quella dopo), e derivare "sono tornato
+/// indietro?" da uno stato per-media aggiornato mentre si itera sui
+/// segmenti si è dimostrato fragile due volte (vedi git log) — sporcato
+/// dall'ordine di elaborazione dei segmenti nello stesso ciclo, poi
+/// reso "sticky" da un tentativo di correzione. Con un'unica decisione
+/// globale per ciclo, il caso multi-segmento non può più contaminarla:
+/// non viene mai letta né scritta prima di sapere se la testina si è
+/// davvero mossa.
+///
+/// Quando serve un seek per lo stesso media già aperto, va fatto sul
+/// decoder *esistente* (`seek_to_time`), non riaprendo il file da
+/// `Decoder::open`: per un file grande/non ottimizzato per lo
+/// streaming, riaprire vuol dire riparsare l'intero container/indice
+/// ogni volta, un costo che può arrivare a secondi — se supera la
+/// tolleranza (`SEEK_THRESHOLD_FRAMES`) il target avanza oltre durante
+/// l'apertura stessa, scatenandone un'altra al giro successivo, in un
+/// loop che non recupera mai (osservato: riproduzione a scatti, un
+/// frame ogni pochi secondi). `Decoder::open` va usato solo per la
+/// primissima apertura di un media (nessun decoder ancora in `open`) o
+/// per uno diverso da quello aperto. Ritorna `Positioned::Failed` se
+/// l'apertura del media fallisce (il chiamante salta quel segmento);
+/// altrimenti riporta cosa è stato fatto per arrivarci — usato dai test
+/// per verificare che un seek reale scatti solo quando davvero serve,
+/// non ad ogni ciclo.
 fn position_decoder(
     open: &mut HashMap<MediaId, OpenDecoder>,
     media_id: MediaId,
     path: &Path,
     segment_start: FrameIdx,
-    cycle_min_start: FrameIdx,
+    went_backward: bool,
 ) -> Positioned {
     if let Some(o) = open.get_mut(&media_id) {
-        // Due motivi per un seek reale: `segment_start` è troppo avanti
-        // per continuare a decodificare in sequenza fino a lì (costa
-        // meno un seek), oppure la testina è tornata *indietro* rispetto
-        // all'ultima richiesta per questo media — qualunque sia
-        // l'ampiezza, non solo sopra una soglia: `walk_and_fill` scarta
-        // (`FrameCache::evict_before`) ad ogni ciclo tutto ciò che è
-        // dietro alla testina corrente per tenere il fronte del buffer
-        // sempre lì, quindi un frame anche di poco più indietro rispetto
-        // all'ultima richiesta è già stato scartato e non tornerà mai in
-        // cache decodificando solo in avanti (bug segnalato: dopo un
-        // piccolo scrub all'indietro il buffer non si rigenera mai per
-        // la nuova posizione, resta fermo sull'ultimo frame in cache).
-        //
-        // Il confronto/aggiornamento usa `cycle_min_start` (il minimo tra
-        // tutti i segmenti di questo media nella finestra corrente,
-        // costante per tutte le chiamate di questo stesso ciclo — vedi
-        // `min_source_start_by_media` in `walk_and_fill`), non
-        // `segment_start` del segmento specifico: vedi il doc di
-        // `OpenDecoder::requested_start` per il perché — con
-        // `segment_start` un taglio nello stesso media faceva scattare un
-        // seek reale ad ogni ciclo pur restando fermi. La riassegnazione
-        // dev'essere una sovrascrittura semplice, non un `.min()` con il
-        // valore precedente: `requested_start` deve seguire il ciclo più
-        // recente, altrimenti resta bloccato al valore minimo mai visto
-        // e uno scrub all'indietro verso una posizione più avanti di
-        // quel minimo storico (il caso comune: quasi ogni scrub indietro
-        // dopo un po' di playback) smette di essere rilevato come tale —
-        // bug: la testina si muove indietro ma il buffer non si
-        // ricalcola mai per la nuova posizione, il player resta fermo
-        // sull'ultimo frame già in cache.
         let needs_seek = segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
-            || cycle_min_start < o.requested_start;
-        o.requested_start = cycle_min_start;
+            || (went_backward && segment_start < o.next_frame);
         if !needs_seek {
             return Positioned::Reused;
         }
@@ -431,14 +418,7 @@ fn position_decoder(
             t.elapsed()
         );
     }
-    open.insert(
-        media_id,
-        OpenDecoder {
-            decoder,
-            next_frame: 0,
-            requested_start: cycle_min_start,
-        },
-    );
+    open.insert(media_id, OpenDecoder { decoder, next_frame: 0 });
     Positioned::Opened
 }
 
@@ -450,6 +430,11 @@ fn position_decoder(
 /// passaggio a secco (`collect_media_segments`) prima di decodificare
 /// davvero. I media usciti dalla finestra vengono sfrattati dalla cache
 /// condivisa, altrimenti crescerebbe senza limite scorrendo la timeline.
+///
+/// `went_backward`: se la testina di timeline è tornata indietro dal
+/// ciclo di poll precedente, decisa una sola volta dal chiamante
+/// (confrontando `from_frame` globale, non per-media/per-segmento —
+/// vedi `position_decoder`) prima di iterare sui segmenti.
 fn walk_and_fill(
     project: &Project,
     timeline_id: TimelineId,
@@ -457,6 +442,7 @@ fn walk_and_fill(
     open: &mut HashMap<MediaId, OpenDecoder>,
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
+    went_backward: bool,
 ) {
     let Some(timeline) = project.timelines.get(timeline_id) else {
         return;
@@ -507,9 +493,13 @@ fn walk_and_fill(
         else {
             continue;
         };
-        let cycle_min_start = min_source_start_by_media[&segment.media_id];
-        if position_decoder(open, segment.media_id, &path, segment.source_start, cycle_min_start)
-            == Positioned::Failed
+        if position_decoder(
+            open,
+            segment.media_id,
+            &path,
+            segment.source_start,
+            went_backward,
+        ) == Positioned::Failed
         {
             continue;
         }
@@ -893,6 +883,84 @@ mod tests {
         }
     }
 
+    /// Riproduzione end-to-end (thread worker reale, non `walk_and_fill`
+    /// diretto) dello scenario originale segnalato dall'utente: taglia
+    /// una clip, posiziona la testina *ferma* appena prima del punto di
+    /// taglio (finestra di lookahead che include un pezzo di entrambe le
+    /// metà, due segmenti dello stesso media). Con la testina davvero
+    /// ferma per diversi cicli di poll reali (non solo due chiamate
+    /// dirette a `walk_and_fill` come nel test unitario equivalente), il
+    /// buffer deve convergere e restare stabile — non ricalcolarsi né
+    /// restringersi a ripetizione.
+    #[test]
+    fn render_ahead_does_not_loop_when_the_playhead_sits_still_just_before_a_cut() {
+        let path = make_test_clip_with_short_gop(
+            "vv-app-render-ahead-test",
+            "stationary_before_cut.mp4",
+            20,
+            25,
+        );
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        // Taglio a timeline_start=50 tra due pezzi *contigui* dello
+        // stesso file (un plain split, non un trim con buco in mezzo):
+        // source [0,50) e poi [50,150).
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![
+                media_clip_trimmed(1, media_a, 0, 0, 50),
+                media_clip_trimmed(2, media_a, 50, 50, 100),
+            ],
+            muted: false,
+        }]));
+
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
+        render_ahead.set_target(40);
+
+        // Aspetta che il buffer arrivi almeno fino al taglio.
+        let start = std::time::Instant::now();
+        loop {
+            let ranges = render_ahead.cached_ranges_for(media_a);
+            if ranges.iter().any(|&(s, e)| s <= 40 && e >= 50) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "timeout: il buffer non ha mai raggiunto il taglio: ranges={ranges:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Testina ferma per una manciata di cicli di poll reali (50ms
+        // l'uno): se ci fosse un loop calcola/invalida, qui l'intervallo
+        // bufferizzato attorno alla testina sparirebbe e riapparirebbe
+        // a ripetizione invece di restare semplicemente stabile (o
+        // crescere in avanti, mai restringersi da dietro la testina).
+        let mut samples = Vec::new();
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(50));
+            samples.push(render_ahead.cached_ranges_for(media_a));
+        }
+        for (i, ranges) in samples.iter().enumerate() {
+            assert!(
+                ranges.iter().any(|&(s, e)| s <= 40 && e >= 50),
+                "campione {i}: il buffer attorno alla testina è sparito con la testina ferma: {ranges:?}"
+            );
+        }
+    }
+
     /// Regressione: un seek reale per un media già aperto deve riusare
     /// il decoder esistente (`seek_to_time`), non buttarlo via per
     /// riaprire il file da zero — per un file grande/non ottimizzato per
@@ -911,12 +979,12 @@ mod tests {
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, 0),
+            position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Opened
         );
 
         assert_eq!(
-            position_decoder(&mut open, media_a, &bogus_path, 1000, 1000),
+            position_decoder(&mut open, media_a, &bogus_path, 1000, false),
             Positioned::Seeked,
             "il path bogus non deve impedire il riuso del decoder già aperto"
         );
@@ -937,7 +1005,7 @@ mod tests {
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, 0),
+            position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Opened
         );
 
@@ -958,7 +1026,7 @@ mod tests {
         // del decoder — lo stato normale durante il playback in avanti —
         // non deve riaprire/riazzerare il decoder.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, 0),
+            position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Reused
         );
         assert_eq!(
@@ -1002,7 +1070,15 @@ mod tests {
         // Budget minuscolo: la finestra di lookahead (3s = 75 frame a
         // 25fps) non ci sta tutta nella cache.
         let tiny_budget = 320 * 240 * 4 * 5;
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 0, tiny_budget);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            0,
+            tiny_budget,
+            false,
+        );
 
         let ranges = caches
             .lock()
@@ -1070,7 +1146,7 @@ mod tests {
         // La finestra di lookahead (3s = 75 frame a 25fps) da 40
         // attraversa il taglio a 60, includendo un pezzo di entrambe le
         // clip nello stesso ciclo.
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 40, budget);
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 40, budget, false);
 
         let ranges = caches
             .lock()
@@ -1093,16 +1169,18 @@ mod tests {
     /// posizionare la testina appena prima del punto di taglio: la
     /// finestra di lookahead include comunque un pezzo di entrambe le
     /// metà, due segmenti dello stesso media), ogni ciclo di poll
-    /// rielabora gli stessi due segmenti nello stesso ordine. Prima del
-    /// fix, `requested_start` veniva sovrascritto incondizionatamente
-    /// con il `segment_start` dell'*ultimo* segmento processato (quello
-    /// dopo il taglio, source_start più alto): al ciclo successivo,
-    /// rielaborando il *primo* segmento (source_start più basso), il
-    /// confronto lo leggeva sempre come "tornato indietro" rispetto a
-    /// quel valore residuo — scatenando un seek reale a ogni singolo
-    /// ciclo pur restando fermi, "il buffer viene calcolato e
-    /// invalidato in loop" segnalato dall'utente (visivamente: la
-    /// striscia "buffered" non avanza mai, sembra girare a vuoto).
+    /// rielabora gli stessi due segmenti nello stesso ordine. In una
+    /// versione precedente di questo codice, `requested_start` (stato
+    /// *per media*, aggiornato dentro il loop sui segmenti) veniva
+    /// sovrascritto con il `segment_start` dell'*ultimo* segmento
+    /// processato: al ciclo successivo, rielaborando il *primo* segmento
+    /// (source_start più basso), il confronto lo leggeva sempre come
+    /// "tornato indietro" — scatenando un seek reale a ogni singolo
+    /// ciclo pur restando fermi. Con `went_backward` deciso una volta
+    /// sola per ciclo (non per segmento, vedi doc di `position_decoder`)
+    /// il caso multi-segmento non può proprio più presentarsi: verificato
+    /// qui passando esplicitamente `false` (testina ferma) a entrambi i
+    /// segmenti in entrambi i cicli.
     #[test]
     fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments()
      {
@@ -1111,31 +1189,28 @@ mod tests {
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
 
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
-        // (come ai due lati di un taglio), source_start 10 e poi 50 — il
-        // minimo del ciclo (quello che `walk_and_fill` calcolerebbe in
-        // `min_source_start_by_media`) è 10 per entrambi.
+        // (come ai due lati di un taglio), source_start 10 e poi 50.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 10, 10),
+            position_decoder(&mut open, media_a, &path, 10, false),
             Positioned::Opened
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 50, 10),
+            position_decoder(&mut open, media_a, &path, 50, false),
             Positioned::Reused,
             "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
         );
 
-        // Ciclo 2, testina ferma (stesso from_frame di prima): stessi
-        // due segmenti, stesso minimo di ciclo. Rielaborare il *primo*
-        // segmento (10) non deve sembrare "tornato indietro" solo
-        // perché l'ultima chiamata vista nel ciclo precedente era per
-        // il segmento successivo (50).
+        // Ciclo 2, testina ferma (`went_backward=false` per entrambi):
+        // stessi due segmenti. Rielaborare il *primo* segmento (10) non
+        // deve sembrare "tornato indietro" solo perché l'ultima chiamata
+        // vista nel ciclo precedente era per il segmento successivo (50).
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 10, 10),
+            position_decoder(&mut open, media_a, &path, 10, false),
             Positioned::Reused,
             "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 50, 10),
+            position_decoder(&mut open, media_a, &path, 50, false),
             Positioned::Reused
         );
     }
@@ -1200,7 +1275,7 @@ mod tests {
         // Primo ciclo: la finestra di lookahead (3s = 75 frame) attraversa
         // il taglio a 40, quindi media_a e media_b sono entrambi nella
         // finestra e si dividono il budget.
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 0, total_budget);
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 0, total_budget, false);
         let cap_b_small = caches.lock().unwrap().get(&media_b).unwrap().capacity();
         assert!(
             cap_b_small < 40,
@@ -1209,7 +1284,15 @@ mod tests {
 
         // Secondo ciclo: il target è ben oltre il taglio, solo media_b è
         // nella finestra, quindi il suo budget torna intero (raddoppia).
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 200, total_budget);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            200,
+            total_budget,
+            false,
+        );
         let cap_b_large = caches.lock().unwrap().get(&media_b).unwrap().capacity();
         assert!(
             cap_b_large >= cap_b_small * 2 - 2,
@@ -1369,22 +1452,17 @@ mod tests {
         }
     }
 
-    /// Regressione per il bug segnalato dall'utente subito dopo il fix
-    /// precedente (requested_start = min(requested_start, cycle_min_start)
-    /// invece di una semplice sovrascrittura): con quel codice
-    /// `requested_start` non torna mai più su dopo essere sceso, quindi
-    /// resta bloccato al valore minimo mai visto dall'apertura del
-    /// decoder in poi. Dopo un po' di playback in avanti (che alza
-    /// `cycle_min_start` ad ogni ciclo, ma `requested_start` restava
-    /// fermo al primo valore basso) uno scrub all'indietro verso una
-    /// posizione più avanti di quel minimo storico — cioè quasi
-    /// *qualunque* scrub indietro dopo un po' di riproduzione — smetteva
-    /// di essere riconosciuto come backward: nessun seek, il decoder
-    /// resta dov'era, il fronte del buffer non arriva mai alla nuova
-    /// testina anche se la sua posizione era già stata sfrattata da
-    /// `evict_before` nei cicli precedenti — "sposto la testina
-    /// indietro e non vedo nessun fotogramma, il buffer non si
-    /// ricalcola mai".
+    /// Regressione generale: dopo un po' di playback in avanti su più
+    /// cicli, uno scrub all'indietro verso una posizione più recente del
+    /// primissimo target mai visto deve comunque far ricalcolare il
+    /// buffer per la nuova posizione. Ha già scoperto due bug diversi in
+    /// due iterazioni di questo codice: prima un `requested_start`
+    /// per-media che restava "sticky" dopo un fix mal fatto (un `.min()`
+    /// invece di una sovrascrittura), poi — nella versione attuale —
+    /// verifica che il `went_backward` calcolato una volta per ciclo
+    /// (qui simulato esplicitamente dal test, come farebbe
+    /// `worker_loop`) funzioni correttamente su una sequenza realistica
+    /// di cicli, non solo su un singolo salto indietro isolato.
     #[test]
     fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum() {
         let path = make_test_clip_with_short_gop(
@@ -1421,11 +1499,23 @@ mod tests {
         // caso.
         let budget = 43_000_000;
 
-        // Playback in avanti su più cicli: la testina parte da 0 e sale,
-        // esattamente lo scenario in cui `requested_start` restava
-        // bloccato al primo valore (0) con il bug del `.min()`.
+        // Playback in avanti su più cicli: `went_backward` è sempre
+        // `false` (ogni target è >= al precedente), esattamente come lo
+        // calcolerebbe `worker_loop` confrontando `from` col ciclo
+        // prima.
+        let mut prev = None;
         for from in [0, 50, 100, 150, 200] {
-            walk_and_fill(&project, timeline_id, &caches, &mut open, from, budget);
+            let went_backward = prev.is_some_and(|p| from < p);
+            prev = Some(from);
+            walk_and_fill(
+                &project,
+                timeline_id,
+                &caches,
+                &mut open,
+                from,
+                budget,
+                went_backward,
+            );
         }
 
         // A questo punto i frame intorno a 0 sono sicuramente sfrattati
@@ -1443,9 +1533,8 @@ mod tests {
         );
 
         // Scrub indietro a 80: più indietro della testina attuale (200),
-        // ma più avanti del minimo storico (0) — esattamente il caso che
-        // il bug del `.min()` non rilevava come "tornato indietro".
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 80, budget);
+        // ma più avanti del target più vecchio mai visto (0).
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 80, budget, true);
 
         let ranges_after = caches
             .lock()
@@ -1498,7 +1587,7 @@ mod tests {
         // Bufferizza attorno a 300: con keyint=250 (default libx264) il
         // decoder riparte dal keyframe 250 e riempie fino al limite di
         // capacità.
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 300, budget);
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 300, budget, false);
         let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
         assert!(
             filled_up_to > 350,
@@ -1507,8 +1596,8 @@ mod tests {
 
         // Scrub indietro di soli 30 frame: sotto la vecchia soglia di
         // 120, ma comunque un vero spostamento all'indietro (deve
-        // riaprire/riseekare, vedi `requested_start`).
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 270, budget);
+        // riaprire/riseekare, `went_backward=true`).
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 270, budget, true);
 
         let next_frame_after = open.get(&media_a).unwrap().next_frame;
         assert_eq!(
@@ -1574,13 +1663,13 @@ mod tests {
         // costringendo lo sfratto ad agire ad ogni ciclo.
         let budget = 43_000_000;
 
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 10, budget);
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 10, budget, false);
 
         let mut target = 300;
-        walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget);
+        walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget, false);
         for _ in 0..15 {
             target += 10;
-            walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget);
+            walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget, false);
             let ranges = caches
                 .lock()
                 .unwrap()
