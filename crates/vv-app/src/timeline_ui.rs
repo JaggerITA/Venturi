@@ -242,6 +242,13 @@ pub fn show_timeline(
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
     state: &mut TimelineState,
     snapping_enabled: bool,
+    // Intervalli (in frame di timeline) già decodificati/in cache nel
+    // player aperto in questo momento — disegnati come una sottile
+    // striscia "buffered" nel righello (richiesta: "visualizzare durante
+    // la riproduzione come viene fatto il buffer"), stesso principio dei
+    // player video comuni (es. la barra grigia sotto la barra di
+    // avanzamento di YouTube).
+    buffered_ranges: &[(FrameIdx, FrameIdx)],
 ) -> Option<(vv_core::MediaId, FrameIdx)> {
     let mut media_drop = None;
 
@@ -333,6 +340,23 @@ pub fn show_timeline(
             }
             if ruler_resp.clicked() {
                 state.clear_selection();
+            }
+
+            // Striscia "buffered": una sottile fascia sul bordo inferiore
+            // del righello, colorata dove il player ha già frame in cache
+            // (vedi doc del parametro `buffered_ranges`). Sotto alla linea
+            // della playhead (disegnata più avanti) così resta visibile
+            // anche quando la playhead ci passa sopra.
+            const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
+            let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
+            for &(start, end) in buffered_ranges {
+                let x0 = origin.x + start as f32 * px_per_frame;
+                let x1 = origin.x + (end + 1) as f32 * px_per_frame;
+                let strip_rect = egui::Rect::from_min_max(
+                    egui::pos2(x0, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
+                    egui::pos2(x1, origin.y + RULER_HEIGHT),
+                );
+                painter.rect_filled(strip_rect, 0.0, buffered_color);
             }
 
             // Sfondo delle track (alternato per leggibilità), e sopra,
@@ -1788,6 +1812,7 @@ mod tests {
                     &|_id| "media".to_string(),
                     &mut state,
                     true,
+                    &[],
                 );
             });
         });
@@ -1858,6 +1883,7 @@ mod tests {
                             &|_id| "media".to_string(),
                             &mut state,
                             true,
+                            &[],
                         );
                     });
                 last_height = panel_resp.response.rect.height();

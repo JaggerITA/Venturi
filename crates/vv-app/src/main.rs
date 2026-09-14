@@ -33,6 +33,12 @@ use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 /// resta per una milestone successiva.
 const VIDEO_TRACK: usize = 0;
 
+/// Default di `VibeVideoApp::cache_budget_bytes`: ~151 frame (~6s) di
+/// margine a 1080p, ~38 (~1,5s) a 4K, ~340 (~13,6s) a 720p — vedi doc del
+/// campo per il perché è un budget di memoria e non un conteggio fisso di
+/// frame.
+const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
+
 /// Un'"unità" da rimuovere con un solo `RippleDeleteAllTracks` in
 /// `ripple_delete_selected`: la clip primaria (track, id), il suo
 /// `timeline_start` (per ordinare le unità da destra a sinistra) e le
@@ -112,6 +118,14 @@ struct VibeVideoApp {
     /// file cambia su disco durante la sessione: un limite accettabile per
     /// una cache di sessione.
     audio_cache: HashMap<PathBuf, std::sync::Arc<vv_media::AudioBuffer>>,
+
+    /// Budget di memoria (byte) per la cache dei frame decodificati di
+    /// *ogni* player aperto (vedi doc di `Player::open`/`DecodeAhead::spawn`):
+    /// configurabile dall'utente nel menu "Visualizza" invece di una
+    /// costante fissa nel codice, perché quanta RAM vale la pena dedicare
+    /// a un margine di riproduzione fluida contro OOM dipende
+    /// dall'hardware/uso dell'utente, non da una scelta valida per tutti.
+    cache_budget_bytes: usize,
 
     /// Clip la cui anteprima è attualmente mostrata: guida sia il player
     /// (quale media riprodurre) sia il transform/gain applicati (milestone
@@ -214,6 +228,7 @@ impl Default for VibeVideoApp {
             preview_error: None,
             frame_texture: None,
             audio_cache: HashMap::new(),
+            cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
@@ -528,7 +543,7 @@ impl VibeVideoApp {
         self.preview_error = None;
 
         let cached_audio = self.audio_cache.get(&path).cloned();
-        match Player::open(&path, duration_secs, cached_audio) {
+        match Player::open(&path, duration_secs, cached_audio, self.cache_budget_bytes) {
             Ok((player, audio_buffer)) => {
                 self.preview_player = Some(player);
                 if let Some(buffer) = audio_buffer {
@@ -877,13 +892,58 @@ impl VibeVideoApp {
         let meta = item.meta.clone();
         let duration_secs = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
         let cached_audio = self.audio_cache.get(&path).cloned();
-        let (mut player, audio_buffer) = Player::open(&path, duration_secs, cached_audio).ok()?;
+        let (mut player, audio_buffer) =
+            Player::open(&path, duration_secs, cached_audio, self.cache_budget_bytes).ok()?;
         if let Some(buffer) = audio_buffer {
             self.audio_cache.insert(path, buffer);
         }
         player.set_gain_db(clip.effects.gain_db.default);
         player.seek_to_frame(clip.source_in);
         Some(player)
+    }
+
+    /// Intervalli (in frame di *timeline*) attualmente bufferizzati nei
+    /// player aperti in questo momento, per l'indicatore visivo "buffered"
+    /// sulla timeline (richiesta: "visualizzare durante la riproduzione
+    /// come viene fatto il buffer"). Include sia la clip attiva
+    /// (`preview_player`) sia, durante un vuoto, la clip già precaricata
+    /// in anticipo (`gap_playback.preloaded_player` — vedi
+    /// `begin_gap_playback`): sono gli unici due player che possono
+    /// esistere in un dato momento in questa app.
+    fn buffered_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
+        let Some(timeline_id) = self.timeline_id else {
+            return Vec::new();
+        };
+        let tl = &self.project.timelines[timeline_id];
+        let mut ranges = Vec::new();
+
+        if let Some((track_index, clip_id)) = self.active_clip
+            && let Some(player) = &self.preview_player
+            && let Some(clip) = tl
+                .tracks
+                .get(track_index)
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+        {
+            ranges.extend(map_source_ranges_to_timeline(
+                clip,
+                &player.cached_source_ranges(),
+            ));
+        }
+
+        if let Some(gap) = &self.gap_playback
+            && let Some(player) = &gap.preloaded_player
+            && let Some(clip) = tl.tracks[VIDEO_TRACK]
+                .clips
+                .iter()
+                .find(|c| c.id == gap.next_clip_id)
+        {
+            ranges.extend(map_source_ranges_to_timeline(
+                clip,
+                &player.cached_source_ranges(),
+            ));
+        }
+
+        ranges
     }
 
     /// Continua la riproduzione oltre la fine (nello spazio timeline) della
@@ -1724,6 +1784,32 @@ fn can_reuse_player_for(previous_media: Option<MediaId>, next_media: MediaId) ->
     previous_media == Some(next_media)
 }
 
+/// Mappa intervalli di frame *sorgente* (spazio nativo del media, quello
+/// di `Player::cached_source_ranges`) in intervalli di frame di
+/// *timeline*, per una clip: clampa al suo intervallo di trim
+/// (`source_in..source_out`) e trasla per il suo `timeline_start`. Un
+/// intervallo sorgente che cade fuori dal trim (o lo attraversa solo in
+/// parte) viene scartato o accorciato di conseguenza. Funzione pura per
+/// poterla testare senza un vero `Player`.
+fn map_source_ranges_to_timeline(
+    clip: &vv_core::Clip,
+    source_ranges: &[(FrameIdx, FrameIdx)],
+) -> Vec<(FrameIdx, FrameIdx)> {
+    source_ranges
+        .iter()
+        .filter_map(|&(s_start, s_end)| {
+            let start = s_start.max(clip.source_in);
+            let end = s_end.min(clip.source_out - 1);
+            (start <= end).then(|| {
+                (
+                    clip.timeline_start + (start - clip.source_in),
+                    clip.timeline_start + (end - clip.source_in),
+                )
+            })
+        })
+        .collect()
+}
+
 fn track_end(project: &vv_core::Project, timeline_id: TimelineId, track_index: usize) -> FrameIdx {
     project.timelines[timeline_id]
         .tracks
@@ -2161,6 +2247,31 @@ impl eframe::App for VibeVideoApp {
                         .on_hover_text(
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
                         );
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Cache video:");
+                        // Espresso in MB nella UI, ma `cache_budget_bytes`
+                        // resta in byte internamente (vedi doc del campo):
+                        // effetto solo sui player aperti *dopo* la
+                        // modifica, non su uno già in corso.
+                        let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut budget_mb)
+                                    .range(100..=8000)
+                                    .suffix(" MB"),
+                            )
+                            .on_hover_text(
+                                "Quanta RAM pre-decodificare per il player aperto: di più = \
+                                 scrub/playback più fluidi, di meno = meno rischio di esaurire \
+                                 la memoria (soprattutto con sorgenti 4K+). Effetto dal \
+                                 prossimo cambio clip.",
+                            )
+                            .changed()
+                        {
+                            self.cache_budget_bytes = budget_mb as usize * 1_000_000;
+                        }
+                    });
                 });
             });
         });
@@ -2247,6 +2358,7 @@ impl eframe::App for VibeVideoApp {
                         .iter()
                         .map(|(id, item)| (id, file_label(&item.path)))
                         .collect();
+                    let buffered_ranges = self.buffered_timeline_ranges();
                     media_drop = timeline_ui::show_timeline(
                         ui,
                         &mut self.project,
@@ -2255,6 +2367,7 @@ impl eframe::App for VibeVideoApp {
                         &|id| labels.get(&id).cloned().unwrap_or_default(),
                         &mut self.timeline_state,
                         self.snapping_enabled,
+                        &buffered_ranges,
                     );
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();
@@ -3848,6 +3961,42 @@ mod tests {
         assert!(!can_reuse_player_for(None, MediaId::default()));
     }
 
+    #[test]
+    fn map_source_ranges_to_timeline_translates_and_clamps_to_the_trim() {
+        // Clip: source_in=100, source_out=150 (trim di 50 frame), piazzata
+        // a timeline_start=20.
+        let clip = vv_core::Clip {
+            id: ClipId(0),
+            source: vv_core::ClipSource::SolidColor,
+            source_in: 100,
+            source_out: 150,
+            timeline_start: 20,
+            effects: vv_core::EffectStack::default(),
+            linked: None,
+        };
+
+        // Dentro al trim: tradotto 1:1 con l'offset timeline_start-source_in.
+        assert_eq!(
+            map_source_ranges_to_timeline(&clip, &[(110, 120)]),
+            vec![(30, 40)]
+        );
+
+        // Sporge da entrambi i lati: accorciato al trim.
+        assert_eq!(
+            map_source_ranges_to_timeline(&clip, &[(50, 200)]),
+            vec![(20, 69)]
+        );
+
+        // Completamente fuori dal trim: scartato.
+        assert!(map_source_ranges_to_timeline(&clip, &[(0, 99)]).is_empty());
+
+        // Più intervalli: ognuno tradotto/filtrato indipendentemente.
+        assert_eq!(
+            map_source_ranges_to_timeline(&clip, &[(0, 99), (110, 115), (500, 600)]),
+            vec![(30, 35)]
+        );
+    }
+
     fn dummy_media_item() -> vv_core::MediaItem {
         vv_core::MediaItem {
             path: "dummy.mp4".into(),
@@ -4285,6 +4434,68 @@ mod tests {
 
         let solid_id = make_timeline_with_clip(&mut app, VIDEO_TRACK, 1000, 10);
         assert!(app.preload_player_for_clip(solid_id).is_none());
+    }
+
+    /// Richiesta: "inserisci un indicatore visivo delle porzioni di
+    /// timeline presenti in memoria". Verifica l'integrazione end-to-end
+    /// (non solo la funzione pura `map_source_ranges_to_timeline`, già
+    /// coperta a parte): la clip attiva su un player vero, con del
+    /// decode-ahead reale in corso su un thread separato, produce
+    /// intervalli bufferizzati entro i propri limiti di timeline.
+    #[test]
+    fn buffered_timeline_ranges_reports_the_active_clips_decoded_frames() {
+        let dir = std::env::temp_dir().join("vv-app-buffered-ranges-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+        let clip = app.project.timelines[timeline_id].tracks[VIDEO_TRACK].clips[0].clone();
+
+        app.load_video_clip(clip.id);
+        assert!(app.preview_player.is_some());
+
+        // Il decode-ahead popola la cache su un thread separato: attende
+        // che ci sia almeno qualcosa, con un timeout generoso.
+        let start = std::time::Instant::now();
+        loop {
+            if !app.buffered_timeline_ranges().is_empty() {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(2),
+                "timeout: nessun frame bufferizzato entro 2s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        for (s, e) in app.buffered_timeline_ranges() {
+            assert!(
+                s >= clip.timeline_start && e < clip.timeline_end(),
+                "range {s}..{e} fuori dai limiti della clip ({}..{})",
+                clip.timeline_start,
+                clip.timeline_end()
+            );
+        }
     }
 
     /// Se `gap_playback` ha già un player precaricato (vedi

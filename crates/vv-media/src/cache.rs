@@ -34,4 +34,62 @@ impl FrameCache {
     pub fn contains(&self, idx: FrameIdx) -> bool {
         self.inner.lock().unwrap().contains(&idx)
     }
+
+    /// Intervalli contigui (inclusivi) di frame attualmente in cache,
+    /// ordinati per inizio crescente — per un indicatore visivo "buffered"
+    /// nella UI (mostrare quali porzioni sono già decodificate durante la
+    /// riproduzione). `lru::LruCache::iter` non è ordinato per chiave,
+    /// quindi le chiavi vanno raccolte e ordinate prima di unire quelle
+    /// adiacenti.
+    pub fn cached_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
+        let cache = self.inner.lock().unwrap();
+        let mut indices: Vec<FrameIdx> = cache.iter().map(|(&k, _)| k).collect();
+        indices.sort_unstable();
+
+        let mut ranges: Vec<(FrameIdx, FrameIdx)> = Vec::new();
+        for idx in indices {
+            match ranges.last_mut() {
+                Some((_, end)) if idx == *end + 1 => *end = idx,
+                _ => ranges.push((idx, idx)),
+            }
+        }
+        ranges
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_frame() -> Arc<FrameRgba> {
+        Arc::new(FrameRgba {
+            width: 1,
+            height: 1,
+            data: vec![0, 0, 0, 0],
+        })
+    }
+
+    #[test]
+    fn cached_ranges_is_empty_for_an_empty_cache() {
+        let cache = FrameCache::new(4);
+        assert!(cache.cached_ranges().is_empty());
+    }
+
+    #[test]
+    fn cached_ranges_merges_contiguous_indices_into_one_range() {
+        let cache = FrameCache::new(8);
+        for idx in [5, 6, 7, 8] {
+            cache.insert(idx, dummy_frame());
+        }
+        assert_eq!(cache.cached_ranges(), vec![(5, 8)]);
+    }
+
+    #[test]
+    fn cached_ranges_keeps_gaps_as_separate_ranges_in_order() {
+        let cache = FrameCache::new(8);
+        for idx in [20, 1, 2, 10, 11, 12] {
+            cache.insert(idx, dummy_frame());
+        }
+        assert_eq!(cache.cached_ranges(), vec![(1, 2), (10, 12), (20, 20)]);
+    }
 }

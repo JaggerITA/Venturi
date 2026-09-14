@@ -35,25 +35,21 @@ impl Player {
     /// `VibeVideoApp::audio_cache`); ritorna anche il buffer usato (nuovo
     /// se decodificato ora, lo stesso passato se riusato) perché il
     /// chiamante possa aggiornarla.
+    ///
+    /// `cache_budget_bytes`: budget di memoria per la cache dei frame
+    /// decodificati (in byte, non un conteggio fisso di frame — vedi doc
+    /// di `DecodeAhead::spawn` in vv-media): un conteggio fisso ha un
+    /// costo in RAM molto diverso a seconda della risoluzione, quindi
+    /// configurabile dall'utente (vedi `VibeVideoApp::cache_budget_bytes`,
+    /// impostazione in "Visualizza") invece di una costante fissa nel
+    /// codice.
     pub fn open(
         path: &Path,
         duration_secs: f64,
         cached_audio: Option<Arc<vv_media::AudioBuffer>>,
+        cache_budget_bytes: usize,
     ) -> Result<(Self, Option<Arc<vv_media::AudioBuffer>>), String> {
-        // Budget di memoria per la cache dei frame decodificati (in byte,
-        // non un conteggio fisso di frame — vedi doc di `DecodeAhead::spawn`
-        // in vv-media): un conteggio fisso (erano 300 frame, poi 90) ha un
-        // costo in RAM molto diverso a seconda della risoluzione — 300
-        // frame erano ~2,4GB a 1080p, oltre 9GB a 4K (bug segnalato: "uso
-        // di memoria alto in generale, OOM dopo 3/4 incollaggi") — e
-        // tararlo basso per stare sotto quel tetto anche a 4K penalizzava
-        // le sorgenti più comuni 1080p/720p, che potevano permettersi molto
-        // più margine (bug segnalato: "anche il normale playback ha degli
-        // stutter"). 1,2GB dà ~151 frame (~6s) a 1080p, ~38 (~1,5s) a 4K,
-        // ~340 (~13,6s) a 720p — un tetto di memoria prevedibile per player
-        // aperto (uno solo alla volta) che si adatta da sé alla sorgente.
-        const CACHE_BUDGET_BYTES: usize = 1_200_000_000;
-        let decode_ahead = vv_media::DecodeAhead::spawn(path.to_path_buf(), CACHE_BUDGET_BYTES, 60)
+        let decode_ahead = vv_media::DecodeAhead::spawn(path.to_path_buf(), cache_budget_bytes, 60)
             .map_err(|e| e.to_string())?;
         let fps = decode_ahead.fps.as_f64();
 
@@ -198,6 +194,16 @@ impl Player {
         self.decode_ahead.cache().get(idx)
     }
 
+    /// Intervalli (in frame *sorgente*, spazio nativo del media — non
+    /// ancora tradotti in frame di timeline) attualmente in cache nel
+    /// decode-ahead: per l'indicatore visivo "buffered" sulla timeline
+    /// (richiesta: "visualizzare durante la riproduzione come viene fatto
+    /// il buffer"). Il chiamante traduce in spazio timeline conoscendo la
+    /// clip attiva (vedi `VibeVideoApp::buffered_timeline_ranges`).
+    pub fn cached_source_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
+        self.decode_ahead.cache().cached_ranges()
+    }
+
     /// Da chiamare a ogni frame UI: mette in pausa automaticamente a fine
     /// clip (altrimenti il wall clock continuerebbe a correre oltre la
     /// durata).
@@ -245,7 +251,7 @@ mod tests {
     fn wall_clock_playback_advances_pauses_and_seeks() {
         let path = make_video_only_clip(3);
         let (mut player, _audio_buffer) =
-            Player::open(&path, 3.0, None).expect("apertura player fallita");
+            Player::open(&path, 3.0, None, 20_000_000).expect("apertura player fallita");
 
         assert_eq!(player.position_secs(), 0.0);
         assert!(!player.is_playing());
@@ -281,7 +287,7 @@ mod tests {
     #[test]
     fn seek_to_frame_round_trips_with_current_source_frame() {
         let path = make_video_only_clip(2);
-        let (mut player, _audio_buffer) = Player::open(&path, 2.0, None).unwrap();
+        let (mut player, _audio_buffer) = Player::open(&path, 2.0, None, 20_000_000).unwrap();
 
         player.seek_to_frame(20);
         assert_eq!(player.current_source_frame(), 20);
