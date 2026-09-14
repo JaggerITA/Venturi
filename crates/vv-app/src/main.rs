@@ -181,6 +181,18 @@ struct VibeVideoApp {
     /// alla prima `import_media`, non subito: niente thread in più per
     /// una sessione che non importa mai media).
     proxy_worker: Option<proxy_worker::ProxyWorker>,
+    /// Toggle "cache read-ahead" (menu Timeline > Proxy, dove vive anche
+    /// il toggle proxy — l'utente vuole provare se coi proxy attivi
+    /// serva ancora): quando `false`, `render_ahead` bufferizza solo il
+    /// frame esatto sotto la testina, niente avanti né dietro (vedi doc
+    /// di `render_ahead::RenderAhead::set_read_ahead_enabled`). Attivo
+    /// di default: senza, lo scrub/playback tornerebbe a dipendere
+    /// interamente dalla latenza di un seek+decode sincrono a ogni
+    /// singolo frame, esattamente ciò che il read-ahead esiste per
+    /// evitare — utile *disattivarlo* solo per misurare se, con un
+    /// proxy tutto-intra attivo (seek economico quanto un decode
+    /// singolo), quella latenza resta comunque trascurabile.
+    read_ahead_enabled: bool,
 
     /// Clip la cui anteprima è attualmente mostrata: guida sia il player
     /// (quale media riprodurre) sia il transform/gain applicati (milestone
@@ -304,6 +316,7 @@ impl Default for VibeVideoApp {
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             proxy_enabled: true,
             proxy_worker: None,
+            read_ahead_enabled: true,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
@@ -1073,6 +1086,7 @@ impl VibeVideoApp {
                 timeline_id,
                 self.cache_budget_bytes,
                 self.proxy_enabled,
+                self.read_ahead_enabled,
             ));
             self.render_ahead_generation = self.history.generation();
         }
@@ -2417,6 +2431,19 @@ impl eframe::App for VibeVideoApp {
                             && let Some(render_ahead) = &self.render_ahead
                         {
                             render_ahead.set_proxy_enabled(self.proxy_enabled);
+                        }
+                        if ui
+                            .checkbox(&mut self.read_ahead_enabled, "Cache read-ahead")
+                            .on_hover_text(
+                                "Bufferizza in anticipo qualche secondo avanti/dietro la testina, \
+                                 invece del solo frame esatto sotto di essa. Disattivalo per \
+                                 verificare se serve ancora con i proxy attivi (un seek su un \
+                                 proxy tutto-intra è già economico quanto un decode singolo).",
+                            )
+                            .changed()
+                            && let Some(render_ahead) = &self.render_ahead
+                        {
+                            render_ahead.set_read_ahead_enabled(self.read_ahead_enabled);
                         }
                         ui.horizontal(|ui| {
                             ui.label("Cache video:");

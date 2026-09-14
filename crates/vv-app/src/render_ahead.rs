@@ -111,6 +111,7 @@ struct SharedState {
     target: Arc<AtomicI64>,
     cache_budget_bytes: Arc<AtomicUsize>,
     caught_up: Arc<AtomicBool>,
+    read_ahead_enabled: Arc<AtomicBool>,
 }
 
 /// Vedi il doc del modulo. Uno per `VibeVideoApp` (non uno per clip: la
@@ -124,6 +125,16 @@ pub struct RenderAhead {
     /// e `is_caught_up`. Parte da `false`: prima che il worker abbia
     /// completato almeno un ciclo non si sa ancora se c'è lavoro da fare.
     caught_up: Arc<AtomicBool>,
+    /// Toggle "cache read-ahead" (attivo di default): quando `false`, la
+    /// finestra da bufferizzare si riduce al solo frame sotto la testina
+    /// (niente avanti, niente dietro) — vedi doc di
+    /// `set_read_ahead_enabled`. Un semplice atomico come `target`, non
+    /// un `Command`: a differenza del toggle proxy non serve reagire
+    /// alla transizione con un effetto collaterale sincrono (svuotare
+    /// la cache) — una finestra che si restringe lascia comunque
+    /// scartare il resto al prossimo `reconcile`, uno che si allarga lo
+    /// riempie di nuovo da sé.
+    read_ahead_enabled: Arc<AtomicBool>,
     tx: mpsc::Sender<Command>,
     handle: Option<JoinHandle<()>>,
 }
@@ -134,11 +145,13 @@ impl RenderAhead {
         timeline_id: TimelineId,
         cache_budget_bytes: usize,
         proxy_enabled: bool,
+        read_ahead_enabled: bool,
     ) -> Self {
         let caches = Arc::new(SharedFrameCache::new());
         let target = Arc::new(AtomicI64::new(0));
         let budget = Arc::new(AtomicUsize::new(cache_budget_bytes));
         let caught_up = Arc::new(AtomicBool::new(false));
+        let read_ahead = Arc::new(AtomicBool::new(read_ahead_enabled));
         let (tx, rx) = mpsc::channel();
 
         let thread_shared = SharedState {
@@ -146,6 +159,7 @@ impl RenderAhead {
             target: target.clone(),
             cache_budget_bytes: budget.clone(),
             caught_up: caught_up.clone(),
+            read_ahead_enabled: read_ahead.clone(),
         };
         let handle = std::thread::spawn(move || {
             worker_loop(rx, thread_shared, project, timeline_id, proxy_enabled);
@@ -156,6 +170,7 @@ impl RenderAhead {
             target,
             cache_budget_bytes: budget,
             caught_up,
+            read_ahead_enabled: read_ahead,
             tx,
             handle: Some(handle),
         }
@@ -184,6 +199,19 @@ impl RenderAhead {
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
         self.cache_budget_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Toggle "cache read-ahead": `false` riduce la finestra bufferizzata
+    /// al solo frame sotto la testina (niente avanti, niente dietro),
+    /// per verificare se serve ancora davvero con i proxy attivi (un
+    /// seek su un proxy tutto-intra costa quanto decodificare un frame
+    /// singolo, quindi in teoria il read-ahead diventa superfluo — non
+    /// per forza vero nella pratica, da qui il toggle per provarlo).
+    /// Segna subito "non ancora bufferizzato": la finestra sta per
+    /// cambiare dimensione, l'utente deve vedere la UI reagire.
+    pub fn set_read_ahead_enabled(&self, enabled: bool) {
+        self.read_ahead_enabled.store(enabled, Ordering::Relaxed);
+        self.caught_up.store(false, Ordering::Relaxed);
     }
 
     /// Da chiamare dopo ogni comando che cambia la disposizione delle
@@ -358,6 +386,7 @@ fn worker_loop(
         target,
         cache_budget_bytes,
         caught_up,
+        read_ahead_enabled,
     } = shared;
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Decoder aperti per la finestra *dietro* la testina, separati da
@@ -439,6 +468,7 @@ fn worker_loop(
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
+        let read_ahead = read_ahead_enabled.load(Ordering::Relaxed);
         let outcome = walk_and_fill(
             &project,
             timeline_id,
@@ -449,6 +479,7 @@ fn worker_loop(
             budget,
             went_backward,
             proxy_enabled,
+            read_ahead,
             &target,
         );
         retry_immediately = outcome.interrupted;
@@ -765,15 +796,31 @@ fn walk_and_fill(
     cache_budget_bytes: usize,
     went_backward: bool,
     proxy_enabled: bool,
+    read_ahead_enabled: bool,
     target: &AtomicI64,
 ) -> WalkOutcome {
     let Some(timeline) = project.timelines.get(timeline_id) else {
         return WalkOutcome::SETTLED;
     };
     let fps = timeline.fps.as_f64().max(1e-9);
-    let lookahead_frames = ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1);
+    // Col read-ahead disattivo, la finestra si riduce al solo frame
+    // sotto la testina — niente avanti, niente dietro (vedi doc di
+    // `RenderAhead::set_read_ahead_enabled`). `end_frame = from_frame +
+    // 1` copre esattamente `[from_frame, from_frame]`, `start_frame =
+    // from_frame` rende `collect_media_segments_behind` un giro a vuoto
+    // (nessun frame dietro voluto) — nessun caso speciale in più nel
+    // resto della funzione, sono ancora `collect_media_segments`/
+    // `collect_media_segments_behind` a decidere cosa c'è da fare, solo
+    // con una finestra diversa in ingresso.
+    let (lookahead_frames, behind_frames) = if read_ahead_enabled {
+        (
+            ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1),
+            (BEHIND_SECS * fps).round() as FrameIdx,
+        )
+    } else {
+        (1, 0)
+    };
     let end_frame = from_frame + lookahead_frames;
-    let behind_frames = (BEHIND_SECS * fps).round() as FrameIdx;
     let start_frame = (from_frame - behind_frames).max(0);
 
     let forward_segments = collect_media_segments(timeline, from_frame, end_frame);
@@ -1337,7 +1384,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
         // Target vicino alla fine della prima clip: la finestra di
         // lookahead (3s = 75 frame a 25fps) attraversa abbondantemente il
         // taglio a 50.
@@ -1401,7 +1448,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
         render_ahead.set_target(40);
 
         // Aspetta che il buffer arrivi almeno fino al taglio.
@@ -1654,6 +1701,7 @@ mod tests {
             generous_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(0),
         );
 
@@ -1712,6 +1760,7 @@ mod tests {
             generous_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(60),
         );
 
@@ -1723,6 +1772,72 @@ mod tests {
         assert!(
             ranges.iter().any(|&(s, e)| s <= 60 && e >= 99),
             "la finestra in avanti deve comunque essere coperta normalmente: {ranges:?}"
+        );
+    }
+
+    /// Toggle "cache read-ahead" disattivo: la finestra si riduce al
+    /// solo frame sotto la testina, niente avanti né dietro — anche con
+    /// budget generoso e una zona mai vista prima (che con read-ahead
+    /// attivo farebbe scattare sia la finestra in avanti sia quella di
+    /// retention, vedi il test sopra).
+    #[test]
+    fn walk_and_fill_buffers_only_the_exact_frame_when_read_ahead_is_disabled() {
+        let path = make_test_clip("vv-app-render-ahead-test", "no_read_ahead.mp4", 4);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 100)],
+            muted: false,
+        }]));
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let generous_budget = 320 * 240 * 3 / 2 * 200;
+
+        let outcome = walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            &mut open_behind,
+            60,
+            generous_budget,
+            false,
+            false, // proxy_enabled: irrilevante per questo test
+            false, // read_ahead_enabled: quello sotto esame
+            &AtomicI64::new(60),
+        );
+
+        // [0,60], non [(60,60)]: con keyint di default (250) e una clip
+        // di soli 100 frame, l'unico keyframe è a 0 — raggiungere il
+        // frame 60 richiede comunque di decodificare in sequenza da lì
+        // (nessun modo di saltare i frame intermedi), e quei frame
+        // restano in cache perché genuinamente già decodificati. Quel
+        // che conta per il toggle è che la finestra *non vada oltre* 60
+        // (col read-ahead attivo arriverebbe fino a 99, la fine della
+        // clip — vedi il test sopra).
+        assert_eq!(
+            caches.cached_ranges(media_a),
+            vec![(0, 60)],
+            "col read-ahead disattivo la finestra non deve estendersi oltre la testina"
+        );
+        assert!(
+            outcome.caught_up,
+            "una finestra di un solo frame, già coperta, deve risultare caught_up"
         );
     }
 
@@ -1771,6 +1886,7 @@ mod tests {
             tiny_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(0),
         );
 
@@ -1839,6 +1955,7 @@ mod tests {
             100_000_000,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &drifted_target,
         );
         assert!(
@@ -1918,6 +2035,7 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(40),
         );
 
@@ -1999,6 +2117,7 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(40),
         );
 
@@ -2154,6 +2273,7 @@ mod tests {
             total_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(0),
         );
         let frames_b_shared = frames_cached(&caches.cached_ranges(media_b));
@@ -2172,6 +2292,7 @@ mod tests {
             total_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(200),
         );
         let ranges = caches.cached_ranges(media_b);
@@ -2217,7 +2338,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
         render_ahead.set_target(80);
 
         let start = std::time::Instant::now();
@@ -2291,7 +2412,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
         render_ahead.set_target(100);
 
         // Attendi non solo che il buffer copra 100, ma che i cicli di
@@ -2405,6 +2526,7 @@ mod tests {
                 budget,
                 went_backward,
                 false, // proxy_enabled: irrilevante per questo test
+                true,  // read_ahead_enabled: irrilevante per questo test
                 &AtomicI64::new(from),
             );
         }
@@ -2430,6 +2552,7 @@ mod tests {
             budget,
             true,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(80),
         );
 
@@ -2509,6 +2632,7 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(300),
         );
         let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
@@ -2530,6 +2654,7 @@ mod tests {
             budget,
             true,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(270),
         );
 
@@ -2613,6 +2738,7 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(10),
         );
 
@@ -2627,6 +2753,7 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
+            true,  // read_ahead_enabled: irrilevante per questo test
             &AtomicI64::new(target),
         );
         for _ in 0..15 {
@@ -2641,6 +2768,7 @@ mod tests {
                 budget,
                 false,
                 false, // proxy_enabled: irrilevante per questo test
+                true,  // read_ahead_enabled: irrilevante per questo test
                 &AtomicI64::new(target),
             );
             let ranges = caches.cached_ranges(media_a);
