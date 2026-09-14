@@ -54,9 +54,24 @@ impl Decoder {
         let rate = video_stream.rate();
         let fps = vv_core::Rational::new(rate.numerator(), rate.denominator());
 
-        let decoder = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?
-            .decoder()
-            .video()?;
+        let mut decoder_ctx =
+            ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?.decoder();
+        // Multi-threading a livello di frame (auto-detect del numero di
+        // thread in base ai core disponibili, `count: 0`): senza questo
+        // libavcodec decodifica a un solo thread per default. Il costo di
+        // un seek è "decodifica in sequenza dall'ultimo keyframe fino al
+        // target" (il GOP può arrivare a centinaia di frame): con più
+        // frame indipendenti decodificati in parallelo quell'attraversamento
+        // è più volte più veloce, a correttezza invariata — nessun frame
+        // saltato o approssimato, solo più thread al lavoro sugli stessi
+        // identici frame (bug segnalato: "lo scrubbing non è reattivo... il
+        // cambio clip resta in freeze per ~1s").
+        decoder_ctx.set_threading(ffmpeg::threading::Config {
+            kind: ffmpeg::threading::Type::Frame,
+            count: 0,
+            ..Default::default()
+        });
+        let decoder = decoder_ctx.video()?;
 
         let scaler = Scaler::get(
             decoder.format(),
@@ -223,6 +238,52 @@ mod tests {
             .expect("ffmpeg CLI non trovato");
         assert!(status.success());
         path
+    }
+
+    #[test]
+    #[ignore = "misurazione manuale, non una asserzione di correttezza"]
+    fn bench_decode_forward_through_a_large_gop() {
+        let dir = std::env::temp_dir().join("vv-media-decode-bench");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("large_gop.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=1920x1080:rate=25:duration=12",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-g",
+                "250",
+                "-keyint_min",
+                "250",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut decoder = Decoder::open(&path).expect("apertura fallita");
+        decoder.seek_to_time(0.0).expect("seek fallito");
+        let start = std::time::Instant::now();
+        let mut count = 0;
+        while count < 249 {
+            match decoder.next_frame().expect("decode fallito") {
+                Some(_) => count += 1,
+                None => break,
+            }
+        }
+        eprintln!(
+            "decodificati {count} frame (1920x1080) in {:?} ({:.1} fps)",
+            start.elapsed(),
+            count as f64 / start.elapsed().as_secs_f64()
+        );
     }
 
     #[test]
