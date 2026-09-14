@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -192,16 +192,34 @@ fn worker_loop(
     // *precedente*, altrimenti (bug osservato in precedenza) può restare
     // bloccato su un valore vecchio e smettere di rilevare scrub reali.
     let mut last_from_frame: Option<FrameIdx> = None;
+    // `true` quando l'ultimo `walk_and_fill` è stato interrotto perché la
+    // testina si è spostata abbastanza da rendere il lavoro in corso
+    // obsoleto (vedi `walk_and_fill`): in quel caso non ha senso aspettare
+    // fino al prossimo `POLL_INTERVAL`, il target fresco va riletto subito.
+    let mut retry_immediately = false;
     loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Command::Stop) => return,
-            Ok(Command::UpdateProject(p, id)) => {
-                project = *p;
-                timeline_id = id;
-                open.clear();
+        if retry_immediately {
+            match rx.try_recv() {
+                Ok(Command::Stop) => return,
+                Ok(Command::UpdateProject(p, id)) => {
+                    project = *p;
+                    timeline_id = id;
+                    open.clear();
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return,
             }
-            Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => {}
+        } else {
+            match rx.recv_timeout(POLL_INTERVAL) {
+                Ok(Command::Stop) => return,
+                Ok(Command::UpdateProject(p, id)) => {
+                    project = *p;
+                    timeline_id = id;
+                    open.clear();
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
         }
         // Drena eventuali altri comandi già in coda (non bloccante): solo
         // l'ultimo conta, i precedenti sono superati.
@@ -220,7 +238,7 @@ fn worker_loop(
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
-        walk_and_fill(
+        retry_immediately = walk_and_fill(
             &project,
             timeline_id,
             &caches,
@@ -228,6 +246,7 @@ fn worker_loop(
             from,
             budget,
             went_backward,
+            &target,
         );
     }
 }
@@ -435,6 +454,14 @@ fn position_decoder(
 /// ciclo di poll precedente, decisa una sola volta dal chiamante
 /// (confrontando `from_frame` globale, non per-media/per-segmento —
 /// vedi `position_decoder`) prima di iterare sui segmenti.
+///
+/// Ritorna `true` se il fill è stato interrotto in anticipo perché la
+/// testina *live* (`target`) si è spostata abbastanza, mentre si
+/// decodificava, da rendere obsoleto il lavoro rimasto in questo ciclo —
+/// in quel caso il chiamante (`worker_loop`) non aspetta il prossimo
+/// `POLL_INTERVAL`, rilegge subito il target fresco e ricomincia: un
+/// prefetch lontano non deve mai far aspettare la testina che si sposta
+/// nel frattempo (REFACTOR_PIPELINE.md §3.1).
 fn walk_and_fill(
     project: &Project,
     timeline_id: TimelineId,
@@ -443,9 +470,10 @@ fn walk_and_fill(
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
     went_backward: bool,
-) {
+    target: &AtomicI64,
+) -> bool {
     let Some(timeline) = project.timelines.get(timeline_id) else {
-        return;
+        return false;
     };
     let fps = timeline.fps.as_f64().max(1e-9);
     let lookahead_frames = ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1);
@@ -453,7 +481,7 @@ fn walk_and_fill(
 
     let segments = collect_media_segments(timeline, from_frame, end_frame);
     if segments.is_empty() {
-        return;
+        return false;
     }
     let distinct_media: HashSet<MediaId> = segments.iter().map(|s| s.media_id).collect();
     let per_media_budget = cache_budget_bytes / distinct_media.len().max(1);
@@ -624,6 +652,21 @@ fn walk_and_fill(
                 }
                 _ => break,
             }
+            // Rilettura economica (atomica) del target *live*, non solo
+            // quello letto a inizio ciclo: se nel frattempo la testina si
+            // è spostata abbastanza da rendere questo prefetch obsoleto,
+            // interrompe subito invece di finire di decodificare un
+            // segmento che non serve più — il chiamante (`worker_loop`)
+            // ricomincia immediatamente con il target fresco, senza
+            // aspettare fino al prossimo `POLL_INTERVAL`. Soglia condivisa
+            // con `position_decoder` (`SEEK_THRESHOLD_FRAMES`): sotto
+            // quella distanza il lavoro in corso è ancora utile (drift
+            // normale di riproduzione), sopra è uno scrub/salto che rende
+            // la finestra corrente stale.
+            let live = target.load(Ordering::Relaxed);
+            if (live - from_frame).abs() > SEEK_THRESHOLD_FRAMES {
+                return true;
+            }
         }
 
         if debug_enabled() {
@@ -637,6 +680,7 @@ fn walk_and_fill(
             );
         }
     }
+    false
 }
 
 #[cfg(test)]
@@ -1107,6 +1151,7 @@ mod tests {
             0,
             tiny_budget,
             false,
+            &AtomicI64::new(0),
         );
 
         let ranges = caches
@@ -1123,6 +1168,75 @@ mod tests {
         assert!(
             ranges[0].1 < 74,
             "con un budget così piccolo non deve riuscire a coprire tutta la finestra: {ranges:?}"
+        );
+    }
+
+    /// REFACTOR_PIPELINE.md §3.1 (reattività): se il target *live* si è
+    /// già spostato oltre `SEEK_THRESHOLD_FRAMES` rispetto a `from_frame`
+    /// prima ancora di iniziare, il fill deve accorgersene alla prima
+    /// occasione (dopo il primo frame decodificato) e interrompersi
+    /// restituendo `true`, invece di continuare a decodificare per tutta
+    /// la finestra un prefetch ormai obsoleto.
+    #[test]
+    fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_drifted() {
+        let path = make_test_clip_with_short_gop(
+            "vv-app-render-ahead-test",
+            "reactivity_drift.mp4",
+            20,
+            25,
+        );
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 500)],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Il target live è già oltre soglia rispetto a from_frame=0 prima
+        // ancora che il fill inizi: simula la testina che è saltata
+        // altrove mentre questo ciclo stava per partire.
+        let drifted_target = AtomicI64::new(SEEK_THRESHOLD_FRAMES + 200);
+
+        let interrupted = walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            0,
+            100_000_000,
+            false,
+            &drifted_target,
+        );
+        assert!(
+            interrupted,
+            "deve segnalare l'interruzione al chiamante (worker_loop) per farlo ripartire subito"
+        );
+
+        let ranges = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        let decoded_frames: FrameIdx = ranges.iter().map(|&(s, e)| e - s + 1).sum();
+        assert!(
+            decoded_frames < 10,
+            "deve fermarsi dopo pochissimi frame, non decodificare l'intera finestra ormai obsoleta: ranges={ranges:?}"
         );
     }
 
@@ -1175,7 +1289,16 @@ mod tests {
         // La finestra di lookahead (3s = 75 frame a 25fps) da 40
         // attraversa il taglio a 60, includendo un pezzo di entrambe le
         // clip nello stesso ciclo.
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 40, budget, false);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            40,
+            budget,
+            false,
+            &AtomicI64::new(40),
+        );
 
         let ranges = caches
             .lock()
@@ -1248,7 +1371,16 @@ mod tests {
         // davvero.
         let budget = 50 * 320 * 240 * 4;
 
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 40, budget, false);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            40,
+            budget,
+            false,
+            &AtomicI64::new(40),
+        );
 
         let ranges = caches
             .lock()
@@ -1377,7 +1509,16 @@ mod tests {
         // Primo ciclo: la finestra di lookahead (3s = 75 frame) attraversa
         // il taglio a 40, quindi media_a e media_b sono entrambi nella
         // finestra e si dividono il budget.
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 0, total_budget, false);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            0,
+            total_budget,
+            false,
+            &AtomicI64::new(0),
+        );
         let cap_b_small = caches.lock().unwrap().get(&media_b).unwrap().capacity();
         assert!(
             cap_b_small < 40,
@@ -1394,6 +1535,7 @@ mod tests {
             200,
             total_budget,
             false,
+            &AtomicI64::new(200),
         );
         let cap_b_large = caches.lock().unwrap().get(&media_b).unwrap().capacity();
         assert!(
@@ -1617,6 +1759,7 @@ mod tests {
                 from,
                 budget,
                 went_backward,
+                &AtomicI64::new(from),
             );
         }
 
@@ -1636,7 +1779,16 @@ mod tests {
 
         // Scrub indietro a 80: più indietro della testina attuale (200),
         // ma più avanti del target più vecchio mai visto (0).
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 80, budget, true);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            80,
+            budget,
+            true,
+            &AtomicI64::new(80),
+        );
 
         let ranges_after = caches
             .lock()
@@ -1689,7 +1841,16 @@ mod tests {
         // Bufferizza attorno a 300: con keyint=250 (default libx264) il
         // decoder riparte dal keyframe 250 e riempie fino al limite di
         // capacità.
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 300, budget, false);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            300,
+            budget,
+            false,
+            &AtomicI64::new(300),
+        );
         let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
         assert!(
             filled_up_to > 350,
@@ -1699,7 +1860,16 @@ mod tests {
         // Scrub indietro di soli 30 frame: sotto la vecchia soglia di
         // 120, ma comunque un vero spostamento all'indietro (deve
         // riaprire/riseekare, `went_backward=true`).
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 270, budget, true);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            270,
+            budget,
+            true,
+            &AtomicI64::new(270),
+        );
 
         let next_frame_after = open.get(&media_a).unwrap().next_frame;
         assert_eq!(
@@ -1765,13 +1935,40 @@ mod tests {
         // costringendo lo sfratto ad agire ad ogni ciclo.
         let budget = 43_000_000;
 
-        walk_and_fill(&project, timeline_id, &caches, &mut open, 10, budget, false);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            10,
+            budget,
+            false,
+            &AtomicI64::new(10),
+        );
 
         let mut target = 300;
-        walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget, false);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            target,
+            budget,
+            false,
+            &AtomicI64::new(target),
+        );
         for _ in 0..15 {
             target += 10;
-            walk_and_fill(&project, timeline_id, &caches, &mut open, target, budget, false);
+            walk_and_fill(
+                &project,
+                timeline_id,
+                &caches,
+                &mut open,
+                target,
+                budget,
+                false,
+                &AtomicI64::new(target),
+            );
             let ranges = caches
                 .lock()
                 .unwrap()
