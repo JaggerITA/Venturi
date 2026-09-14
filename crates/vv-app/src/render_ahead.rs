@@ -156,9 +156,11 @@ impl Drop for RenderAhead {
 /// Decoder tenuto aperto per un media, con la posizione (frame sorgente)
 /// che produrrà al prossimo `next_frame()`: permette di decidere se
 /// conviene continuare a decodificare in sequenza o fare un seek reale
-/// (vedi `ensure_positioned`).
+/// (vedi `position_decoder`). Uno per media (non uno slot condiviso): se
+/// la finestra di lookahead attraversa un taglio tra due media diversi,
+/// entrambi restano posizionati da un ciclo di poll all'altro invece di
+/// essere riaperti ogni volta che il segmento "torna" al primo.
 struct OpenDecoder {
-    media_id: MediaId,
     decoder: Decoder,
     next_frame: FrameIdx,
 }
@@ -171,14 +173,14 @@ fn worker_loop(
     mut project: Project,
     mut timeline_id: TimelineId,
 ) {
-    let mut open: Option<OpenDecoder> = None;
+    let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     loop {
         match rx.recv_timeout(POLL_INTERVAL) {
             Ok(Command::Stop) => return,
             Ok(Command::UpdateProject(p, id)) => {
                 project = *p;
                 timeline_id = id;
-                open = None;
+                open.clear();
             }
             Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
@@ -191,7 +193,7 @@ fn worker_loop(
                 Command::UpdateProject(p, id) => {
                     project = *p;
                     timeline_id = id;
-                    open = None;
+                    open.clear();
                 }
             }
         }
@@ -261,25 +263,33 @@ fn collect_media_segments(
     segments
 }
 
-/// Assicura che `open` sia un decoder per `media_id` posizionato in modo
-/// da poter raggiungere `target` decodificando in avanti in modo
-/// efficiente: lo (ri)apre con un seek reale solo se serve un media
-/// diverso, o se `target` è molto lontano dalla posizione attuale
-/// (indietro, o troppo in avanti) — altrimenti lo lascia continuare da
-/// dove si trovava, decodifica in sequenza più efficiente di un seek per
-/// piccoli spostamenti. Ritorna `false` se l'apertura del media fallisce
+/// Assicura che `open[media_id]` sia un decoder posizionato in modo da
+/// poter coprire `[segment_start, segment_end]` decodificando in avanti
+/// in modo efficiente. Un decoder già aperto per questo media viene
+/// riusato — anche se è *oltre* `segment_start` — a patto che possa
+/// ancora produrre qualcosa di utile per il segmento (cioè non sia già
+/// passato oltre `segment_end`): essere avanti rispetto all'inizio del
+/// segmento è lo stato **sano e atteso** di un buffer che lavora bene,
+/// non un motivo per riaprire — farlo comunque è il bug che causava un
+/// seek reale ogni ciclo di poll (~ogni 50ms), buttando via il lavoro
+/// appena fatto. Un seek reale serve solo quando decodificare in avanti
+/// non potrebbe comunque raggiungere il segmento: il decoder è già
+/// passato oltre la sua fine (serve tornare indietro), oppure è troppo
+/// indietro rispetto al suo inizio (conviene un seek a decodificare in
+/// sequenza fino a lì). Ritorna `false` se l'apertura del media fallisce
 /// (il chiamante salta quel segmento).
-fn ensure_positioned(
-    open: &mut Option<OpenDecoder>,
+fn position_decoder(
+    open: &mut HashMap<MediaId, OpenDecoder>,
     media_id: MediaId,
     path: &Path,
-    target: FrameIdx,
+    segment_start: FrameIdx,
+    segment_end: FrameIdx,
 ) -> bool {
-    let needs_new_decoder = match open {
-        Some(o) if o.media_id == media_id => {
-            target < o.next_frame || target > o.next_frame + SEEK_THRESHOLD_FRAMES
+    let needs_new_decoder = match open.get(&media_id) {
+        Some(o) => {
+            o.next_frame > segment_end || segment_start > o.next_frame + SEEK_THRESHOLD_FRAMES
         }
-        _ => true,
+        None => true,
     };
     if !needs_new_decoder {
         return true;
@@ -287,16 +297,18 @@ fn ensure_positioned(
     let Ok(mut decoder) = Decoder::open(path) else {
         return false;
     };
-    let secs = target as f64 / decoder.fps().as_f64().max(1e-9);
+    let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
     let _ = decoder.seek_to_time(secs);
     // Placeholder: il prossimo `next_frame()` restituisce l'idx *reale*
-    // del keyframe da cui riparte (può essere < target), che aggiorna
-    // subito questo campo nel loop di decodifica sotto.
-    *open = Some(OpenDecoder {
+    // del keyframe da cui riparte (può essere < segment_start), che
+    // aggiorna subito questo campo nel loop di decodifica sotto.
+    open.insert(
         media_id,
-        decoder,
-        next_frame: 0,
-    });
+        OpenDecoder {
+            decoder,
+            next_frame: 0,
+        },
+    );
     true
 }
 
@@ -312,7 +324,7 @@ fn walk_and_fill(
     project: &Project,
     timeline_id: TimelineId,
     caches: &Mutex<HashMap<MediaId, Arc<FrameCache>>>,
-    open: &mut Option<OpenDecoder>,
+    open: &mut HashMap<MediaId, OpenDecoder>,
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
 ) {
@@ -334,6 +346,7 @@ fn walk_and_fill(
         .lock()
         .unwrap()
         .retain(|id, _| distinct_media.contains(id));
+    open.retain(|id, _| distinct_media.contains(id));
 
     for segment in segments {
         let Some(path) = project
@@ -343,11 +356,17 @@ fn walk_and_fill(
         else {
             continue;
         };
-        if !ensure_positioned(open, segment.media_id, &path, segment.source_start) {
+        if !position_decoder(
+            open,
+            segment.media_id,
+            &path,
+            segment.source_start,
+            segment.source_end,
+        ) {
             continue;
         }
         let (width, height) = {
-            let d = &open.as_ref().unwrap().decoder;
+            let d = &open.get(&segment.media_id).unwrap().decoder;
             (d.width(), d.height())
         };
         let capacity = vv_media::frame_cache_capacity(per_media_budget, width, height);
@@ -359,18 +378,22 @@ fn walk_and_fill(
             .clone();
 
         loop {
-            let next = open.as_ref().unwrap().next_frame;
-            if next > segment.source_end {
+            let od = open.get_mut(&segment.media_id).unwrap();
+            if od.next_frame > segment.source_end {
                 break;
             }
-            if cache.contains(next) {
-                open.as_mut().unwrap().next_frame = next + 1;
-                continue;
-            }
-            match open.as_mut().unwrap().decoder.next_frame() {
+            match od.decoder.next_frame() {
                 Ok(Some((idx, frame))) => {
+                    // `cache.insert` è un LRU `put`: anche quando `idx`
+                    // è già presente (decoder ripartito da un keyframe
+                    // precedente al punto richiesto) sovrascrivere è
+                    // innocuo, evita solo di introdurre un ramo che
+                    // avanzi `next_frame` senza consumare davvero un
+                    // frame dal decoder (in passato causa di un
+                    // disallineamento tra la posizione tracciata e
+                    // quella reale).
                     cache.insert(idx, Arc::new(frame));
-                    open.as_mut().unwrap().next_frame = idx + 1;
+                    od.next_frame = idx + 1;
                 }
                 _ => break,
             }
@@ -585,5 +608,50 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Regressione per il bug segnalato: durante il playback normale il
+    /// decoder è quasi sempre *avanti* rispetto al target (è lo stato
+    /// sano di un buffer che lavora bene). Prima del fix,
+    /// `position_decoder` interpretava questo come "troppo indietro" e
+    /// riapriva il file con un seek reale a ogni ciclo di poll,
+    /// invalidando il lavoro appena fatto — da cui l'indicatore che
+    /// "gira in tondo" senza mai avanzare stabilmente.
+    #[test]
+    fn position_decoder_does_not_reseek_when_already_usefully_ahead_of_the_segment_start() {
+        let path = make_test_clip("vv-app-render-ahead-test", "steady.mp4", 3);
+        let (media_a, _) = two_media_ids();
+
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        assert!(position_decoder(&mut open, media_a, &path, 0, 1000));
+
+        // Decodifica qualche frame in avanti "a mano", come farebbe
+        // walk_and_fill, per simulare un decoder già bufferizzato oltre
+        // il target attuale.
+        for _ in 0..20 {
+            let od = open.get_mut(&media_a).unwrap();
+            match od.decoder.next_frame() {
+                Ok(Some((idx, _))) => od.next_frame = idx + 1,
+                _ => break,
+            }
+        }
+        let advanced_next_frame = open.get(&media_a).unwrap().next_frame;
+        assert!(advanced_next_frame > 0, "il decoder deve aver avanzato");
+
+        // Un ciclo successivo con il target ancora dietro alla posizione
+        // del decoder — lo stato normale durante il playback in avanti —
+        // non deve riaprire/riazzerare il decoder.
+        assert!(position_decoder(
+            &mut open,
+            media_a,
+            &path,
+            0,
+            advanced_next_frame + 1000,
+        ));
+        assert_eq!(
+            open.get(&media_a).unwrap().next_frame,
+            advanced_next_frame,
+            "non deve aver riaperto il decoder mentre è ancora utilmente avanti"
+        );
     }
 }
