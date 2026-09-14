@@ -1,9 +1,14 @@
 //! Buffer video a livello di *timeline*, non di singola clip: un thread
 //! dedicato cammina in avanti dal playhead per `LOOKAHEAD_SECS`,
 //! attraversando quante clip servono (tagli netti, vuoti, stesso media o
-//! diverso — nessun caso speciale), e mantiene una `FrameCache` per ogni
-//! media coinvolto nella finestra. Sostituisce il precedente sistema di
-//! preload "per clip" (`GapPlayback`/`NextPreload`/
+//! diverso — nessun caso speciale), e riempie una `SharedFrameCache`
+//! *unica*, condivisa da tutti i media della finestra, a budget globale
+//! in byte con sfratto per priorità-distanza-dalla-testina (vedi
+//! `vv_media::cache` e REFACTOR_PIPELINE.md §2 — sostituisce una
+//! generazione precedente di questo modulo che usava N cache
+//! indipendenti con budget diviso, la cui divisione arbitraria era
+//! radice di più di un bug). Sostituisce a sua volta il sistema di
+//! preload "per clip" ancora precedente (`GapPlayback`/`NextPreload`/
 //! `is_seamless_continuation`), che richiedeva un caso a parte per ogni
 //! nuovo scenario incontrato (proposta dell'utente, che ha notato con
 //! l'indicatore "buffered" che il buffer si fermava sempre al bordo
@@ -25,12 +30,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
-use vv_media::{Decoder, FrameCache, FrameRgba};
+use vv_media::{Decoder, FrameRgba, SharedFrameCache, WantedRange};
 
 const VIDEO_TRACK: usize = 0;
 
@@ -68,7 +73,7 @@ fn debug_enabled() -> bool {
 /// Vedi il doc del modulo. Uno per `VibeVideoApp` (non uno per clip: la
 /// differenza chiave rispetto al sistema precedente).
 pub struct RenderAhead {
-    caches: Arc<Mutex<HashMap<MediaId, Arc<FrameCache>>>>,
+    caches: Arc<SharedFrameCache>,
     target: Arc<AtomicI64>,
     cache_budget_bytes: Arc<AtomicUsize>,
     tx: mpsc::Sender<Command>,
@@ -77,8 +82,7 @@ pub struct RenderAhead {
 
 impl RenderAhead {
     pub fn spawn(project: Project, timeline_id: TimelineId, cache_budget_bytes: usize) -> Self {
-        let caches: Arc<Mutex<HashMap<MediaId, Arc<FrameCache>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let caches = Arc::new(SharedFrameCache::new());
         let target = Arc::new(AtomicI64::new(0));
         let budget = Arc::new(AtomicUsize::new(cache_budget_bytes));
         let (tx, rx) = mpsc::channel();
@@ -133,11 +137,7 @@ impl RenderAhead {
     /// Il frame decodificato per `(media_id, source_frame)`, se già in
     /// cache.
     pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameRgba>> {
-        self.caches
-            .lock()
-            .unwrap()
-            .get(&media_id)?
-            .get(source_frame)
+        self.caches.get(media_id, source_frame)
     }
 
     /// Intervalli (in frame *sorgente*) attualmente in cache per un
@@ -145,12 +145,7 @@ impl RenderAhead {
     /// chiamante li traduce in spazio timeline per la clip in questione,
     /// vedi `map_source_ranges_to_timeline` in main.rs).
     pub fn cached_ranges_for(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
-        self.caches
-            .lock()
-            .unwrap()
-            .get(&media_id)
-            .map(|c| c.cached_ranges())
-            .unwrap_or_default()
+        self.caches.cached_ranges(media_id)
     }
 }
 
@@ -177,7 +172,7 @@ struct OpenDecoder {
 
 fn worker_loop(
     rx: mpsc::Receiver<Command>,
-    caches: Arc<Mutex<HashMap<MediaId, Arc<FrameCache>>>>,
+    caches: Arc<SharedFrameCache>,
     target: Arc<AtomicI64>,
     cache_budget_bytes: Arc<AtomicUsize>,
     mut project: Project,
@@ -267,11 +262,15 @@ enum Positioned {
 }
 
 /// Un tratto contiguo di timeline coperto da una singola clip Media, in
-/// spazio frame *sorgente*.
+/// spazio frame *sorgente*, con la posizione timeline corrispondente
+/// (`timeline_start`, dove cade `source_start`) — necessaria per
+/// costruire i `WantedRange` passati a `SharedFrameCache::reconcile`,
+/// che ne ha bisogno per calcolare la distanza dalla testina.
 struct MediaSegment {
     media_id: MediaId,
     source_start: FrameIdx,
     source_end: FrameIdx,
+    timeline_start: FrameIdx,
 }
 
 /// Divide `[from_frame, end_frame)` di timeline in segmenti, uno per ogni
@@ -300,6 +299,7 @@ fn collect_media_segments(
                         media_id,
                         source_start,
                         source_end,
+                        timeline_start: frame,
                     });
                 }
                 segment_end_timeline
@@ -352,9 +352,9 @@ fn collect_media_segments(
 ///   se la testina è appena tornata indietro non può significare altro
 ///   che "questo decoder ha superato la nuova posizione e non potrà mai
 ///   tornarci decodificando solo in avanti" (`walk_and_fill` scarta ad
-///   ogni ciclo tutto ciò che è dietro alla testina via
-///   `FrameCache::evict_before`, quindi anche un passo indietro di un
-///   solo frame cade subito in territorio già scartato).
+///   ogni ciclo, via `SharedFrameCache::reconcile`, tutto ciò che è
+///   fuori dalla finestra corrente — anche un passo indietro di un solo
+///   frame cade subito fuori finestra e viene scartato).
 ///
 /// `went_backward` è deciso una volta per l'intero ciclo (non da uno
 /// stato per-media come in una versione precedente di questo codice):
@@ -442,13 +442,14 @@ fn position_decoder(
 }
 
 /// Cammina `LOOKAHEAD_SECS` avanti da `from_frame` e riempie la
-/// `FrameCache` di ogni media coinvolto. Il budget di memoria è diviso
-/// tra i media *distinti* effettivamente nella finestra (non uno fisso a
-/// testa: pochi media nella finestra hanno più margine a testa, tanti ne
-/// hanno meno, il totale resta sotto controllo) — enumerati con un primo
-/// passaggio a secco (`collect_media_segments`) prima di decodificare
-/// davvero. I media usciti dalla finestra vengono sfrattati dalla cache
-/// condivisa, altrimenti crescerebbe senza limite scorrendo la timeline.
+/// `SharedFrameCache` (REFACTOR_PIPELINE.md §2) in ordine di priorità:
+/// i segmenti restituiti da `collect_media_segments` sono già ordinati
+/// dal più vicino alla testina al più lontano (si cammina la timeline in
+/// avanti da `from_frame`), quindi elaborarli in quest'ordine — fermandosi
+/// non appena il budget globale è saturo — significa che il frame che
+/// serve ORA (sotto la testina, qualunque sia il suo media) è sempre il
+/// primo a essere bufferizzato, senza bisogno di un vero scheduler
+/// multi-thread (REFACTOR_PIPELINE.md §3.4, non ancora fatto).
 ///
 /// `went_backward`: se la testina di timeline è tornata indietro dal
 /// ciclo di poll precedente, decisa una sola volta dal chiamante
@@ -465,7 +466,7 @@ fn position_decoder(
 fn walk_and_fill(
     project: &Project,
     timeline_id: TimelineId,
-    caches: &Mutex<HashMap<MediaId, Arc<FrameCache>>>,
+    caches: &SharedFrameCache,
     open: &mut HashMap<MediaId, OpenDecoder>,
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
@@ -484,54 +485,26 @@ fn walk_and_fill(
         return false;
     }
     let distinct_media: HashSet<MediaId> = segments.iter().map(|s| s.media_id).collect();
-    let per_media_budget = cache_budget_bytes / distinct_media.len().max(1);
-
-    caches
-        .lock()
-        .unwrap()
-        .retain(|id, _| distinct_media.contains(id));
     open.retain(|id, _| distinct_media.contains(id));
 
-    // Un taglio tra due clip che condividono lo stesso media (comune:
-    // un unico file tagliato in più pezzi sulla timeline) produce più
-    // segmenti per lo stesso `media_id` nella stessa finestra, ognuno
-    // con il proprio `source_start`. Scartare "tutto ciò che è dietro"
-    // usando il `source_start` del *singolo* segmento in elaborazione
-    // (come si faceva prima) è sbagliato quando un segmento successivo
-    // ha un `source_start` più alto di quanto il segmento precedente
-    // abbia appena decodificato: il suo `evict_before` cancellerebbe il
-    // lavoro appena fatto nello stesso identico ciclo — che è
-    // esattamente "il buffer si ricalcola da capo invalidando i frame
-    // successivi" segnalato dall'utente. Usare il minimo tra tutti i
-    // segmenti dello stesso media in questa finestra evita di scartare
-    // mai qualcosa che un altro segmento della stessa finestra ancora usa.
-    let mut min_source_start_by_media: HashMap<MediaId, FrameIdx> = HashMap::new();
-    // Quanti segmenti di questo stesso media cadono in questa finestra:
-    // la `FrameCache` è UNA sola per media (condivisa, con un'unica
-    // capacità LRU), ma `capped_source_end` sotto veniva calcolato dando
-    // a *ogni* segmento l'intera `capacity` come se fosse il solo a
-    // usarla — se due segmenti dello stesso media (tipicamente un
-    // taglio con nel mezzo una parte scartata: sorgenti lontani tra
-    // loro) chiedono insieme più frame di quanti la cache può
-    // contenerne, il secondo elaborato sfratta per limite di capacità
-    // (LRU ordinaria, non `evict_before`) quello che il primo aveva
-    // appena decodificato nello stesso identico ciclo — bug segnalato
-    // dall'utente: il buffer si comporta come se fosse per-clip invece
-    // che per-media/timeline, perché ogni segmento finiva per bufferizzare
-    // "per conto proprio" a spese degli altri. Dividere la capacità tra i
-    // segmenti dello stesso media in questa finestra (stesso principio
-    // già usato per dividere il budget totale tra i media *distinti*,
-    // vedi `per_media_budget`) evita che uno sfratti per intero l'altro.
-    let mut segments_per_media: HashMap<MediaId, usize> = HashMap::new();
-    for s in &segments {
-        min_source_start_by_media
-            .entry(s.media_id)
-            .and_modify(|v| *v = (*v).min(s.source_start))
-            .or_insert(s.source_start);
-        *segments_per_media.entry(s.media_id).or_insert(0) += 1;
-    }
+    let window: Vec<WantedRange> = segments
+        .iter()
+        .map(|s| WantedRange {
+            media_id: s.media_id,
+            source_start: s.source_start,
+            source_end: s.source_end,
+            timeline_start: s.timeline_start,
+        })
+        .collect();
+    // Un solo pass di riconciliazione (vedi doc di `SharedFrameCache::
+    // reconcile`): scarta ciò che è uscito dalla finestra (qualunque sia
+    // il motivo — media non più presente, dietro la testina, oltre
+    // l'orizzonte) e, se il budget globale non basta per tutto ciò che è
+    // rimasto, sfratta il contenuto più lontano dalla testina. Sostituisce
+    // insieme retain/evict_before/sfratto-per-capacità di prima.
+    caches.reconcile(from_frame, &window, cache_budget_bytes);
 
-    for segment in segments {
+    'segments: for segment in &segments {
         let Some(path) = project
             .media_pool
             .get(segment.media_id)
@@ -549,60 +522,6 @@ fn walk_and_fill(
         {
             continue;
         }
-        let (width, height) = {
-            let d = &open.get(&segment.media_id).unwrap().decoder;
-            (d.width(), d.height())
-        };
-        let capacity = vv_media::frame_cache_capacity(per_media_budget, width, height);
-        let cache = caches
-            .lock()
-            .unwrap()
-            .entry(segment.media_id)
-            .or_insert_with(|| Arc::new(FrameCache::new(capacity)))
-            .clone();
-        // `capacity` è ricalcolata ogni ciclo (dipende da quanti media
-        // distinti sono nella finestra corrente) e può differire da
-        // quella con cui questa cache è stata creata la prima volta —
-        // tenerla sincronizzata evita che il limite usato sotto per
-        // `capped_source_end` (calcolato su `capacity`) diverga dalla
-        // capacità *reale* della cache, che altrimenti sfratterebbe più
-        // aggressivamente del previsto proprio i frame vicini alla
-        // testina (vedi doc di `FrameCache::resize`).
-        cache.resize(capacity);
-        // Scarta tutto ciò che è rimasto indietro rispetto alla testina
-        // corrente: senza questo, lo sfratto della LRU standard avviene
-        // solo quando arrivano nuovi frame in coda, non quando la
-        // testina avanza — se avanza a piccoli passi (mai abbastanza
-        // per un seek reale) il fronte del buffer può restare bloccato
-        // molto indietro per un tempo indefinito mentre la coda cresce
-        // di poco ad ogni ciclo, cioè esattamente lo scarto fisso tra
-        // testina e inizio del buffer segnalato dall'utente (vedi doc
-        // di `FrameCache::evict_before`). Il limite è il minimo tra
-        // tutti i segmenti di questo media nella finestra corrente (vedi
-        // sopra), non quello del singolo segmento in elaborazione.
-        cache.evict_before(min_source_start_by_media[&segment.media_id]);
-
-        // Non decodificare oltre quanto la cache di questo media può
-        // effettivamente contenere: farlo comunque significa sfrattare
-        // (LRU) prima i frame più vicini all'inizio del segmento — quelli
-        // più vicini alla testina, i più utili da mostrare subito — per
-        // tenere invece la coda della finestra, la parte meno urgente.
-        // Meglio bufferizzare di meno ma partendo dalla testina, che è
-        // anche quello che l'indicatore "buffered" deve mostrare.
-        //
-        // Il limite usato è `capacity` diviso per il numero di segmenti
-        // di questo stesso media in questa finestra (vedi
-        // `segments_per_media` sopra), non `capacity` intera: la
-        // `FrameCache` è una sola, condivisa da tutti — dare a ognuno
-        // l'intera capacità come se fosse l'unico a scriverci fa sì che
-        // l'ultimo segmento elaborato sfratti per limite di capacità
-        // (LRU ordinaria) quello che un segmento precedente aveva appena
-        // decodificato nello stesso ciclo.
-        let per_segment_capacity =
-            (capacity / segments_per_media[&segment.media_id]).max(1) as FrameIdx;
-        let capped_source_end = segment
-            .source_end
-            .min(segment.source_start + per_segment_capacity - 1);
 
         // Diventa `true` dopo il primo frame realmente decodificato in
         // questo giro: prima di allora `od.next_frame` può essere solo
@@ -615,38 +534,49 @@ fn walk_and_fill(
         let mut resumed = false;
         loop {
             let od = open.get_mut(&segment.media_id).unwrap();
-            if od.next_frame > capped_source_end {
+            if od.next_frame > segment.source_end {
                 break;
             }
             // Ci siamo ricongiunti con una porzione già bufferizzata (non
-            // sfrattata perché avanti alla testina, vedi
-            // `FrameCache::evict_before`) che arriva *fino alla fine di
-            // questo segmento*: da qui in avanti dovrebbe già esserci
+            // sfrattata perché dentro alla finestra corrente, vedi
+            // `SharedFrameCache::reconcile`) che arriva *fino alla fine
+            // di questo segmento*: da qui in avanti dovrebbe già esserci
             // tutto, quindi continuare a decodificare sarebbe lavoro
-            // sprecato — ottimizzazione richiesta esplicitamente: un
-            // piccolo scrub all'indietro deve ridecodificare solo il
-            // nuovo tratto scoperto prima del punto di riconnessione,
-            // non l'intera finestra. Controllare *anche* `capped_source_end`
-            // (non solo il prossimo frame) evita un falso positivo
-            // quando si sta solo attraversando un'isola di cache lasciata
-            // da un *altro* segmento dello stesso media in questa stessa
-            // finestra (un taglio tra due pezzi non contigui dello stesso
-            // file): fermarsi lì lascerebbe scoperta la vera destinazione
-            // di questo segmento, più avanti.
-            if resumed && cache.contains(od.next_frame) && cache.contains(capped_source_end) {
+            // sprecato — un piccolo scrub all'indietro deve ridecodificare
+            // solo il nuovo tratto scoperto prima del punto di
+            // riconnessione, non l'intera finestra. Controllare *anche*
+            // `segment.source_end` (non solo il prossimo frame) evita un
+            // falso positivo quando si sta solo attraversando un'isola di
+            // cache lasciata da un *altro* segmento dello stesso media in
+            // questa stessa finestra (un taglio tra due pezzi non
+            // contigui dello stesso file): fermarsi lì lascerebbe
+            // scoperta la vera destinazione di questo segmento, più
+            // avanti.
+            if resumed
+                && caches.contains(segment.media_id, od.next_frame)
+                && caches.contains(segment.media_id, segment.source_end)
+            {
                 break;
+            }
+            // Budget globale saturo: i segmenti restanti (questo incluso,
+            // da qui in poi) sono per costruzione più lontani dalla
+            // testina di tutto ciò che è già in cache (fill in ordine di
+            // priorità, vedi doc della funzione) — non c'è nulla da
+            // guadagnare continuando, esce dall'intero giro sui segmenti,
+            // non solo da questo.
+            if caches.bytes_used() >= cache_budget_bytes {
+                break 'segments;
             }
             match od.decoder.next_frame() {
                 Ok(Some((idx, frame))) => {
-                    // `cache.insert` è un LRU `put`: anche quando `idx`
-                    // è già presente (decoder ripartito da un keyframe
-                    // precedente al punto richiesto) sovrascrivere è
-                    // innocuo, evita solo di introdurre un ramo che
-                    // avanzi `next_frame` senza consumare davvero un
+                    // `insert` sovrascrive innocuamente se `idx` è già
+                    // presente (decoder ripartito da un keyframe
+                    // precedente al punto richiesto): evita solo un ramo
+                    // che avanzi `next_frame` senza consumare davvero un
                     // frame dal decoder (in passato causa di un
-                    // disallineamento tra la posizione tracciata e
-                    // quella reale).
-                    cache.insert(idx, Arc::new(frame));
+                    // disallineamento tra la posizione tracciata e quella
+                    // reale).
+                    caches.insert(segment.media_id, idx, Arc::new(frame));
                     od.next_frame = idx + 1;
                     resumed = true;
                 }
@@ -672,11 +602,12 @@ fn walk_and_fill(
         if debug_enabled() {
             let final_next_frame = open.get(&segment.media_id).unwrap().next_frame;
             eprintln!(
-                "[render_ahead] media={:?} target_frame={from_frame} segment=[{},{}] capped_end={capped_source_end} next_frame_after={final_next_frame} cached_ranges={:?}",
+                "[render_ahead] media={:?} target_frame={from_frame} segment=[{},{}] next_frame_after={final_next_frame} bytes_used={} cached_ranges={:?}",
                 segment.media_id,
                 segment.source_start,
                 segment.source_end,
-                cache.cached_ranges()
+                caches.bytes_used(),
+                caches.cached_ranges(segment.media_id)
             );
         }
     }
@@ -1138,7 +1069,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget minuscolo: la finestra di lookahead (3s = 75 frame a
         // 25fps) non ci sta tutta nella cache.
@@ -1154,12 +1085,7 @@ mod tests {
             &AtomicI64::new(0),
         );
 
-        let ranges = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        let ranges = caches.cached_ranges(media_a);
         assert!(!ranges.is_empty());
         assert_eq!(
             ranges[0].0, 0,
@@ -1205,7 +1131,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Il target live è già oltre soglia rispetto a from_frame=0 prima
         // ancora che il fill inizi: simula la testina che è saltata
@@ -1227,12 +1153,7 @@ mod tests {
             "deve segnalare l'interruzione al chiamante (worker_loop) per farlo ripartire subito"
         );
 
-        let ranges = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        let ranges = caches.cached_ranges(media_a);
         let decoded_frames: FrameIdx = ranges.iter().map(|&(s, e)| e - s + 1).sum();
         assert!(
             decoded_frames < 10,
@@ -1282,7 +1203,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let budget = 100_000_000;
 
@@ -1300,12 +1221,7 @@ mod tests {
             &AtomicI64::new(40),
         );
 
-        let ranges = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
             "il tratto della prima clip [40,59] non deve essere sfrattato dall'elaborazione della seconda: ranges={ranges:?}"
@@ -1363,7 +1279,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Capacità ~50 frame: meno di quanto i due segmenti insieme
         // chiederebbero (~20 + ~55), ma più di quanto ciascuno chiede da
@@ -1382,12 +1298,7 @@ mod tests {
             &AtomicI64::new(40),
         );
 
-        let ranges = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
             "il tratto della prima clip [40,59] non deve sparire per colpa del secondo segmento nello stesso ciclo: ranges={ranges:?}"
@@ -1449,18 +1360,18 @@ mod tests {
         );
     }
 
-    /// Regressione per il bug segnalato dall'utente e confermato dal log
-    /// diagnostico reale: la cache di un media viene creata con la
-    /// capacità del momento (`or_insert_with`, eseguito solo se assente)
-    /// — se in quel momento c'erano *due* media distinti nella finestra
-    /// (budget diviso a metà), la cache resta bloccata a quella capacità
-    /// piccola anche dopo che il secondo media è uscito dalla finestra e
-    /// il budget per il primo è tornato intero: chi calcola fin dove
-    /// decodificare usa la capacità *nuova* (più ampia), ma la cache
-    /// reale ne ha ancora una più piccola, quindi sfratta più
-    /// aggressivamente del previsto proprio i frame vicini alla testina.
+    /// Regressione (ex-A2, REFACTOR_PIPELINE.md): con la vecchia
+    /// architettura (una `FrameCache` per media, capacità fissata al
+    /// momento della creazione) questo test verificava che la capacità
+    /// di `media_b` si allargasse quando `media_a` usciva dalla finestra
+    /// — un problema che con la `SharedFrameCache` a budget globale (§2)
+    /// non può più presentarsi *per costruzione*: non esiste più una
+    /// capacità per-media da tenere sincronizzata, il budget è uno solo
+    /// e sempre quello reale. Verifica quindi l'equivalente diretto: con
+    /// meno media a contendersi il budget, `media_b` arriva a
+    /// bufferizzare *più* frame (non più capacità, ma copertura reale).
     #[test]
-    fn walk_and_fill_grows_the_cache_back_up_once_fewer_distinct_media_remain_in_the_window() {
+    fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_budget() {
         let path_a = make_test_clip("vv-app-render-ahead-test", "resize_a.mp4", 2);
         let path_b = make_test_clip("vv-app-render-ahead-test", "resize_b.mp4", 15);
 
@@ -1500,15 +1411,20 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Con 30 frame di capacità piena (320x240), un budget doppio
-        // basta per 30 frame quando diviso tra due media distinti.
-        let total_budget = 30 * 320 * 240 * 4 * 2;
+        // Budget che a 320x240 (307_200 B/frame) basta per ~60 frame
+        // totali: con due media a contendersi la finestra ce ne stanno
+        // pochi a testa, con uno solo molti di più.
+        let total_budget = 60 * 320 * 240 * 4;
+
+        let frames_cached = |ranges: &[(FrameIdx, FrameIdx)]| -> FrameIdx {
+            ranges.iter().map(|&(s, e)| e - s + 1).sum()
+        };
 
         // Primo ciclo: la finestra di lookahead (3s = 75 frame) attraversa
         // il taglio a 40, quindi media_a e media_b sono entrambi nella
-        // finestra e si dividono il budget.
+        // finestra e condividono lo stesso budget globale.
         walk_and_fill(
             &project,
             timeline_id,
@@ -1519,14 +1435,12 @@ mod tests {
             false,
             &AtomicI64::new(0),
         );
-        let cap_b_small = caches.lock().unwrap().get(&media_b).unwrap().capacity();
-        assert!(
-            cap_b_small < 40,
-            "la capacità iniziale doveva essere piccola (budget diviso in due): {cap_b_small}"
-        );
+        let frames_b_shared = frames_cached(&caches.cached_ranges(media_b));
 
         // Secondo ciclo: il target è ben oltre il taglio, solo media_b è
-        // nella finestra, quindi il suo budget torna intero (raddoppia).
+        // nella finestra — reconcile scarta media_a (Tier A), quindi
+        // media_b ha l'intero budget globale per sé, senza bisogno di
+        // nessuna capacità da "ridimensionare verso l'alto" a parte.
         walk_and_fill(
             &project,
             timeline_id,
@@ -1537,23 +1451,18 @@ mod tests {
             false,
             &AtomicI64::new(200),
         );
-        let cap_b_large = caches.lock().unwrap().get(&media_b).unwrap().capacity();
+        let ranges = caches.cached_ranges(media_b);
+        let frames_b_alone = frames_cached(&ranges);
         assert!(
-            cap_b_large >= cap_b_small * 2 - 2,
-            "la cache doveva essere ridimensionata verso l'alto: {cap_b_small} -> {cap_b_large}"
+            frames_b_alone > frames_b_shared,
+            "con un solo media nella finestra deve arrivare a bufferizzarne di più, non restare fermo alla quota di quando la condivideva: {frames_b_shared} -> {frames_b_alone}"
         );
 
         // source_start per il secondo ciclo: clip b ha source_in=0,
         // timeline_start=40, quindi 200-40=160.
-        let ranges = caches
-            .lock()
-            .unwrap()
-            .get(&media_b)
-            .unwrap()
-            .cached_ranges();
         assert!(
             ranges.iter().any(|&(s, _)| s <= 160),
-            "con la capacità più ampia il buffer deve poter partire dalla nuova testina, non da una coda arbitraria più avanti: {ranges:?}"
+            "con più budget disponibile il buffer deve poter partire dalla nuova testina, non da una coda arbitraria più avanti: {ranges:?}"
         );
     }
 
@@ -1735,7 +1644,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget stretto: la finestra intera non ci sta in cache, quindi
         // avanzando `evict_before` scarta davvero i frame dietro la
@@ -1766,12 +1675,7 @@ mod tests {
         // A questo punto i frame intorno a 0 sono sicuramente sfrattati
         // (evict_before ha scartato tutto ciò che è dietro alla testina
         // ad ogni ciclo, l'ultimo dei quali è 200).
-        let ranges_before = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        let ranges_before = caches.cached_ranges(media_a);
         assert!(
             !ranges_before.iter().any(|&(s, e)| s <= 80 && e >= 80),
             "80 non deve essere già in cache per coincidenza, altrimenti il test non prova nulla: {ranges_before:?}"
@@ -1790,12 +1694,7 @@ mod tests {
             &AtomicI64::new(80),
         );
 
-        let ranges_after = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        let ranges_after = caches.cached_ranges(media_a);
         assert!(
             ranges_after.iter().any(|&(s, e)| s <= 80 && e >= 80),
             "lo scrub indietro a 80 deve far ricalcolare il buffer per la nuova posizione: {ranges_after:?}"
@@ -1803,14 +1702,25 @@ mod tests {
     }
 
     /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
-    /// all'indietro, la porzione già bufferizzata *avanti* alla nuova
-    /// testina (non toccata da `evict_before`, che scarta solo ciò che
-    /// è dietro) non deve essere ridecodificata — solo il tratto
-    /// scoperto tra il nuovo target e il punto di riconnessione con la
-    /// cache esistente. Verificato osservando `OpenDecoder::next_frame`
-    /// dopo il seek: deve fermarsi al punto di riconnessione (270, dove
-    /// il buffer precedente non è mai stato toccato), non continuare
-    /// fino al nuovo `capped_source_end` (che sarebbe molto più avanti).
+    /// all'indietro, la porzione già bufferizzata che ricade ancora
+    /// nella *nuova* finestra non deve essere ridecodificata — solo il
+    /// tratto scoperto tra il nuovo target e il punto di riconnessione
+    /// con la cache esistente. Verificato osservando
+    /// `OpenDecoder::next_frame` dopo il seek: deve fermarsi al punto di
+    /// riconnessione (270), non continuare a ridecodificare quel che è
+    /// già lì.
+    ///
+    /// Nota (REFACTOR_PIPELINE.md §2, Tier A): con la `SharedFrameCache`
+    /// a budget globale, `reconcile` scarta anche ciò che è *oltre*
+    /// l'orizzonte della nuova finestra (qui: oltre 344, dato che la
+    /// nuova testina è 270) — a differenza della vecchia `evict_before`,
+    /// che scartava solo ciò che era dietro e lasciava intatto tutto ciò
+    /// che era avanti, qualunque fosse l'orizzonte. È voluto: il budget
+    /// della finestra è sempre esattamente quello della finestra
+    /// corrente, non un accumulo indefinito di code storiche. Quindi qui
+    /// si verifica solo che [270,344] (l'intersezione tra vecchia coda e
+    /// nuova finestra) sia raggiungibile senza ridecodificarla — non che
+    /// tutta la vecchia coda fino a 374 sopravviva.
     #[test]
     fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek() {
         let path = make_test_clip("vv-app-render-ahead-test", "reconnect.mp4", 20);
@@ -1834,7 +1744,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let budget = 43_000_000; // capacità ~139 frame
 
@@ -1877,17 +1787,17 @@ mod tests {
             "deve fermarsi appena si ricongiunge con il buffer esistente (270), non ridecodificare fino al nuovo capped_source_end: next_frame={next_frame_after}"
         );
 
-        // La coda già bufferizzata (fino a `filled_up_to`) deve essere
-        // ancora intatta e raggiungibile dal nuovo range contiguo.
-        let ranges = caches
-            .lock()
-            .unwrap()
-            .get(&media_a)
-            .unwrap()
-            .cached_ranges();
+        // L'intersezione tra la vecchia coda e la nuova finestra
+        // ([270,344]) deve essere raggiungibile come un range contiguo,
+        // senza buchi dovuti a una ridecodifica sprecata. Il fatto che
+        // `filled_up_to` (374) sia più avanti dell'orizzonte della nuova
+        // finestra è atteso: quella parte è stata scartata dal Tier A di
+        // `reconcile` perché non più nella finestra corrente (vedi nota
+        // sopra), non perché la riconnessione abbia fallito.
+        let ranges = caches.cached_ranges(media_a);
         assert!(
-            ranges.iter().any(|&(s, e)| s <= 270 && e >= filled_up_to),
-            "la coda già bufferizzata non deve sparire: ranges={ranges:?} filled_up_to={filled_up_to}"
+            ranges.iter().any(|&(s, e)| s <= 270 && e >= 344),
+            "l'intersezione [270,344] tra vecchia coda e nuova finestra deve restare un range contiguo: ranges={ranges:?} filled_up_to={filled_up_to}"
         );
     }
 
@@ -1928,7 +1838,7 @@ mod tests {
             muted: false,
         }]));
 
-        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget stretto: ogni avanzamento di 10 frame aggiunge più
         // frame di quanti la cache possa contenere senza sfrattarne,
@@ -1969,12 +1879,7 @@ mod tests {
                 false,
                 &AtomicI64::new(target),
             );
-            let ranges = caches
-                .lock()
-                .unwrap()
-                .get(&media_a)
-                .unwrap()
-                .cached_ranges();
+            let ranges = caches.cached_ranges(media_a);
             assert!(
                 ranges.iter().any(|&(s, _)| s == target),
                 "il buffer deve iniziare esattamente alla testina (target={target}): {ranges:?}"
