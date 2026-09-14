@@ -27,6 +27,7 @@
 //! ora) parte di questo worker.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -40,6 +41,18 @@ use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 /// Quanti secondi di timeline tenere bufferizzati avanti dal playhead,
 /// attraversando quante clip servono per coprirli.
 const LOOKAHEAD_SECS: f64 = 3.0;
+
+/// Quanti secondi di timeline tenere bufferizzati anche *dietro* la
+/// testina, oltre alla finestra in avanti sopra — deliberatamente molto
+/// più piccola: la priorità resta sempre in avanti (vedi l'ordine di
+/// fill in `walk_and_fill`, dietro riempito solo con quel che resta del
+/// budget). Serve solo a rendere economico uno scrub avanti-indietro
+/// ravvicinato (es. confrontare due punti vicini, o un piccolo
+/// tentennamento della mano) senza forzare una ridecodifica completa a
+/// ogni piccolo passo indietro — non è un buffer di "rewind" per uno
+/// scrub lontano, quello resta correttamente costoso quanto un seek in
+/// avanti verso una zona mai visitata.
+const BEHIND_SECS: f64 = 2.0;
 
 /// Intervallo di poll del thread: ogni ciclo rivaluta il target corrente
 /// e completa quel che manca fino all'orizzonte di lookahead — una volta
@@ -309,6 +322,10 @@ fn worker_loop(
     mut timeline_id: TimelineId,
 ) {
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    // Decoder aperti per la finestra *dietro* la testina, separati da
+    // `open`: vedi doc di `walk_and_fill` sul perché condividere lo
+    // stesso decoder tra le due direzioni non funzionerebbe.
+    let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Ultimo `from` visto, confrontato una sola volta per ciclo (non per
     // media/segmento, vedi doc di `walk_and_fill`) per sapere se la
     // testina è tornata indietro dall'ultimo ciclo — qualunque sia
@@ -330,6 +347,7 @@ fn worker_loop(
                     project = *p;
                     timeline_id = id;
                     open.clear();
+                    open_behind.clear();
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return,
@@ -341,6 +359,7 @@ fn worker_loop(
                     project = *p;
                     timeline_id = id;
                     open.clear();
+                    open_behind.clear();
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -355,6 +374,7 @@ fn worker_loop(
                     project = *p;
                     timeline_id = id;
                     open.clear();
+                    open_behind.clear();
                 }
             }
         }
@@ -368,6 +388,7 @@ fn worker_loop(
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             from,
             budget,
             went_backward,
@@ -448,6 +469,55 @@ fn collect_media_segments(
                 .unwrap_or(end_frame),
         };
         if next_frame <= frame {
+            break; // sicurezza: non dovrebbe succedere, evita un loop infinito
+        }
+        frame = next_frame;
+    }
+    segments
+}
+
+/// Simmetrico a `collect_media_segments`, ma all'indietro: divide
+/// `[start_frame, from_frame)` in segmenti camminando la timeline verso
+/// sinistra invece che verso destra — stessa identica logica (nessun
+/// caso speciale per direzione: clip attiva -> segmento fino al suo
+/// inizio, vuoto -> salta al bordo della clip precedente), solo con
+/// `Timeline::previous_video_clip_end_before` al posto di
+/// `next_video_clip_start_from`. La decodifica vera e propria di questi
+/// segmenti resta comunque in avanti nello spazio *sorgente* (ffmpeg
+/// decodifica solo in avanti): "all'indietro" qui si riferisce solo a
+/// *dove* cade il segmento nello spazio timeline, non a come viene
+/// prodotto — vedi il loop di fill in `walk_and_fill`, identico per i
+/// segmenti in avanti e quelli dietro.
+fn collect_media_segments_behind(
+    timeline: &Timeline,
+    from_frame: FrameIdx,
+    start_frame: FrameIdx,
+) -> Vec<MediaSegment> {
+    let mut segments = Vec::new();
+    let mut frame = from_frame;
+    while frame > start_frame {
+        let next_frame = match timeline.active_video_clip_at(frame - 1) {
+            Some((_, clip)) => {
+                let segment_start_timeline = clip.timeline_start.max(start_frame);
+                if let ClipSource::Media(media_id) = &clip.source {
+                    let media_id = *media_id;
+                    let source_start = clip.source_frame_at(segment_start_timeline);
+                    let source_end = (clip.source_frame_at(frame) - 1).max(source_start);
+                    segments.push(MediaSegment {
+                        media_id,
+                        source_start,
+                        source_end,
+                        timeline_start: segment_start_timeline,
+                    });
+                }
+                segment_start_timeline
+            }
+            None => timeline
+                .previous_video_clip_end_before(frame)
+                .map(|e| e.max(start_frame))
+                .unwrap_or(start_frame),
+        };
+        if next_frame >= frame {
             break; // sicurezza: non dovrebbe succedere, evita un loop infinito
         }
         frame = next_frame;
@@ -626,6 +696,7 @@ fn walk_and_fill(
     timeline_id: TimelineId,
     caches: &SharedFrameCache,
     open: &mut HashMap<MediaId, OpenDecoder>,
+    open_behind: &mut HashMap<MediaId, OpenDecoder>,
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
     went_backward: bool,
@@ -637,16 +708,22 @@ fn walk_and_fill(
     let fps = timeline.fps.as_f64().max(1e-9);
     let lookahead_frames = ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1);
     let end_frame = from_frame + lookahead_frames;
+    let behind_frames = (BEHIND_SECS * fps).round() as FrameIdx;
+    let start_frame = (from_frame - behind_frames).max(0);
 
-    let segments = collect_media_segments(timeline, from_frame, end_frame);
-    if segments.is_empty() {
+    let forward_segments = collect_media_segments(timeline, from_frame, end_frame);
+    let behind_segments = collect_media_segments_behind(timeline, from_frame, start_frame);
+    if forward_segments.is_empty() && behind_segments.is_empty() {
         return WalkOutcome::SETTLED;
     }
-    let distinct_media: HashSet<MediaId> = segments.iter().map(|s| s.media_id).collect();
-    open.retain(|id, _| distinct_media.contains(id));
+    let forward_media: HashSet<MediaId> = forward_segments.iter().map(|s| s.media_id).collect();
+    let behind_media: HashSet<MediaId> = behind_segments.iter().map(|s| s.media_id).collect();
+    open.retain(|id, _| forward_media.contains(id));
+    open_behind.retain(|id, _| behind_media.contains(id));
 
-    let window: Vec<WantedRange> = segments
+    let window: Vec<WantedRange> = forward_segments
         .iter()
+        .chain(behind_segments.iter())
         .map(|s| WantedRange {
             media_id: s.media_id,
             source_start: s.source_start,
@@ -655,15 +732,76 @@ fn walk_and_fill(
         })
         .collect();
     // Un solo pass di riconciliazione (vedi doc di `SharedFrameCache::
-    // reconcile`): scarta ciò che è uscito dalla finestra (qualunque sia
-    // il motivo — media non più presente, dietro la testina, oltre
-    // l'orizzonte) e, se il budget globale non basta per tutto ciò che è
-    // rimasto, sfratta il contenuto più lontano dalla testina. Sostituisce
-    // insieme retain/evict_before/sfratto-per-capacità di prima.
+    // reconcile`): scarta ciò che è uscito da *entrambe* le finestre
+    // (qualunque sia il motivo — media non più presente, oltre l'una o
+    // l'altra estremità) e, se il budget globale condiviso non basta per
+    // tutto ciò che è rimasto, sfratta il contenuto più lontano dalla
+    // testina (che sia in avanti o dietro, la distanza è simmetrica).
+    // Sostituisce insieme retain/evict_before/sfratto-per-capacità di
+    // prima.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
 
-    for segment in &segments {
-        let Some(path) = project
+    let ctx = FillContext {
+        project,
+        caches,
+        went_backward,
+        cache_budget_bytes,
+        from_frame,
+        target,
+    };
+    // In avanti prima, sempre: il frame che serve ORA per non fermare la
+    // riproduzione ha sempre priorità sul buffer dietro la testina, che è
+    // solo una comodità per uno scrub avanti-indietro ravvicinato (vedi
+    // doc di `BEHIND_SECS`) — se il budget si esaurisce già qui, dietro
+    // non riceve nulla in questo ciclo, correttamente.
+    if let ControlFlow::Break(outcome) = fill_segments(&forward_segments, &ctx, open) {
+        return outcome;
+    }
+    // Decoder *separato* da quello della finestra in avanti (vedi
+    // `open_behind`, mappa a parte passata dal chiamante): usare lo
+    // stesso decoder per entrambe le direzioni lo lascerebbe posizionato
+    // in avanti dopo il fill sopra, facendo scattare
+    // `od.next_frame > segment.source_end` qui sotto per *qualunque*
+    // segmento dietro la testina dello stesso media — saltandolo sempre
+    // in silenzio, anche la primissima volta che quella zona va davvero
+    // decodificata (non è mai stato un problema di posizionamento, è che
+    // le due finestre vogliono il decoder in due punti diversi nello
+    // stesso momento).
+    if let ControlFlow::Break(outcome) = fill_segments(&behind_segments, &ctx, open_behind) {
+        return outcome;
+    }
+    WalkOutcome::SETTLED
+}
+
+/// Parametri di `fill_segments` che non cambiano tra la chiamata per la
+/// finestra in avanti e quella per la finestra dietro la testina —
+/// raggruppati per non far crescere il numero di argomenti della
+/// funzione a ogni nuovo parametro condiviso.
+struct FillContext<'a> {
+    project: &'a Project,
+    caches: &'a SharedFrameCache,
+    went_backward: bool,
+    cache_budget_bytes: usize,
+    from_frame: FrameIdx,
+    target: &'a AtomicI64,
+}
+
+/// Nucleo del fill condiviso da finestra in avanti e finestra dietro la
+/// testina (vedi doc di `walk_and_fill`): decodifica quanto serve per
+/// coprire `segments`, usando/aggiornando i decoder aperti in `open`,
+/// fermandosi se il budget globale è saturo o se la testina *live* si è
+/// spostata troppo per rendere utile continuare. `ControlFlow::Continue`
+/// se ha processato tutti i segmenti senza interruzioni; `Break` porta
+/// già l'esito finale che `walk_and_fill` deve restituire al suo
+/// chiamante.
+fn fill_segments(
+    segments: &[MediaSegment],
+    ctx: &FillContext,
+    open: &mut HashMap<MediaId, OpenDecoder>,
+) -> ControlFlow<WalkOutcome> {
+    for segment in segments {
+        let Some(path) = ctx
+            .project
             .media_pool
             .get(segment.media_id)
             .map(|m| m.path.clone())
@@ -675,7 +813,7 @@ fn walk_and_fill(
             segment.media_id,
             &path,
             segment.source_start,
-            went_backward,
+            ctx.went_backward,
         ) == Positioned::Failed
         {
             continue;
@@ -711,8 +849,8 @@ fn walk_and_fill(
             // scoperta la vera destinazione di questo segmento, più
             // avanti.
             if resumed
-                && caches.contains(segment.media_id, od.next_frame)
-                && caches.contains(segment.media_id, segment.source_end)
+                && ctx.caches.contains(segment.media_id, od.next_frame)
+                && ctx.caches.contains(segment.media_id, segment.source_end)
             {
                 break;
             }
@@ -722,11 +860,11 @@ fn walk_and_fill(
             // priorità, vedi doc della funzione) — non c'è nulla da
             // guadagnare continuando, esce dall'intero giro sui segmenti,
             // non solo da questo.
-            if caches.bytes_used() >= cache_budget_bytes {
-                return WalkOutcome {
+            if ctx.caches.bytes_used() >= ctx.cache_budget_bytes {
+                return ControlFlow::Break(WalkOutcome {
                     interrupted: false,
                     caught_up: false,
-                };
+                });
             }
             let mut threshold_frames = od.seek_threshold_frames();
             match od.decoder.next_frame() {
@@ -749,7 +887,7 @@ fn walk_and_fill(
                     // frame dal decoder (in passato causa di un
                     // disallineamento tra la posizione tracciata e quella
                     // reale).
-                    caches.insert(segment.media_id, idx, Arc::new(frame));
+                    ctx.caches.insert(segment.media_id, idx, Arc::new(frame));
                     od.next_frame = idx + 1;
                     resumed = true;
                 }
@@ -767,28 +905,29 @@ fn walk_and_fill(
             // sotto quella distanza il lavoro in corso è ancora utile
             // (drift normale di riproduzione), sopra è uno scrub/salto
             // che rende la finestra corrente stale.
-            let live = target.load(Ordering::Relaxed);
-            if (live - from_frame).abs() > threshold_frames {
-                return WalkOutcome {
+            let live = ctx.target.load(Ordering::Relaxed);
+            if (live - ctx.from_frame).abs() > threshold_frames {
+                return ControlFlow::Break(WalkOutcome {
                     interrupted: true,
                     caught_up: false,
-                };
+                });
             }
         }
 
         if debug_enabled() {
             let final_next_frame = open.get(&segment.media_id).unwrap().next_frame;
+            let from_frame = ctx.from_frame;
             eprintln!(
                 "[render_ahead] media={:?} target_frame={from_frame} segment=[{},{}] next_frame_after={final_next_frame} bytes_used={} cached_ranges={:?}",
                 segment.media_id,
                 segment.source_start,
                 segment.source_end,
-                caches.bytes_used(),
-                caches.cached_ranges(segment.media_id)
+                ctx.caches.bytes_used(),
+                ctx.caches.cached_ranges(segment.media_id)
             );
         }
     }
-    WalkOutcome::SETTLED
+    ControlFlow::Continue(())
 }
 
 #[cfg(test)]
@@ -995,6 +1134,84 @@ mod tests {
     fn collect_media_segments_is_empty_for_a_timeline_with_no_clips() {
         let tl = timeline_with(vec![Track::new(TrackKind::Video)]);
         assert!(collect_media_segments(&tl, 0, 100).is_empty());
+    }
+
+    #[test]
+    fn collect_media_segments_behind_walks_across_a_straight_cut_between_two_media() {
+        let (media_a, media_b) = two_media_ids();
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![
+                media_clip(1, media_a, 0, 50),
+                media_clip(2, media_b, 50, 50),
+            ],
+            muted: false,
+        }]);
+
+        // Finestra dietro [40,60): attraversa il taglio a 50 andando
+        // all'indietro, simmetrico al test forward sopra.
+        let segments = collect_media_segments_behind(&tl, 60, 40);
+        assert_eq!(
+            segments.len(),
+            2,
+            "deve attraversare il taglio all'indietro in un colpo solo"
+        );
+        // Ordine di scoperta: dal più vicino alla testina (60) al più
+        // lontano — prima il pezzo di media_b [50,60), poi quello di
+        // media_a [40,50).
+        assert_eq!(segments[0].source_start, 0);
+        assert_eq!(segments[0].source_end, 9);
+        assert_eq!(segments[1].source_start, 40);
+        assert_eq!(segments[1].source_end, 49);
+    }
+
+    #[test]
+    fn collect_media_segments_behind_skips_gaps_and_solid_color_without_decoding() {
+        let (media_a, _) = two_media_ids();
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![
+                media_clip(1, media_a, 0, 10),
+                // vuoto 10..20
+                solid_clip(2, 20, 10),
+                media_clip(3, media_a, 30, 10),
+            ],
+            muted: false,
+        }]);
+
+        let segments = collect_media_segments_behind(&tl, 40, 0);
+        assert_eq!(
+            segments.len(),
+            2,
+            "solo le due clip Media generano segmenti, il vuoto e la SolidColor vengono saltati"
+        );
+        assert_eq!((segments[0].source_start, segments[0].source_end), (0, 9));
+        assert_eq!((segments[1].source_start, segments[1].source_end), (0, 9));
+    }
+
+    #[test]
+    fn collect_media_segments_behind_is_empty_for_a_timeline_with_no_clips() {
+        let tl = timeline_with(vec![Track::new(TrackKind::Video)]);
+        assert!(collect_media_segments_behind(&tl, 100, 0).is_empty());
+    }
+
+    #[test]
+    fn collect_media_segments_behind_stops_at_the_start_frame_bound() {
+        // Un'unica clip lunga [0,200): la finestra dietro deve fermarsi
+        // esattamente a `start_frame`, non proseguire fino all'inizio
+        // della clip.
+        let (media_a, _) = two_media_ids();
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 200)],
+            muted: false,
+        }]);
+
+        let segments = collect_media_segments_behind(&tl, 150, 100);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].timeline_start, 100);
+        assert_eq!(segments[0].source_start, 100);
+        assert_eq!(segments[0].source_end, 149);
     }
 
     /// Test end-to-end: il worker attraversa un taglio netto tra due
@@ -1224,6 +1441,7 @@ mod tests {
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
             position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Opened
@@ -1250,6 +1468,7 @@ mod tests {
         let (media_a, _) = two_media_ids();
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
             position_decoder(&mut open, media_a, &path, 0, false),
             Positioned::Opened
@@ -1312,12 +1531,14 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let generous_budget = 320 * 240 * 4 * 200; // ben oltre i 75 frame della finestra
         let outcome = walk_and_fill(
             &project,
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             0,
             generous_budget,
             false,
@@ -1329,6 +1550,67 @@ mod tests {
             "budget e finestra coprono tutta la clip: non dovrebbe restare altro da fare"
         );
         assert!(!outcome.interrupted);
+    }
+
+    /// La finestra di retention dietro la testina (`BEHIND_SECS`) non è
+    /// solo "non scartare quel che c'è già": su una zona *mai visitata
+    /// prima* deve venire davvero decodificata, non solo trattenuta se
+    /// già presente — altrimenti uno scrub in una zona nuova poco dopo
+    /// l'inizio della clip non avrebbe nulla da retention dietro di sé.
+    #[test]
+    fn walk_and_fill_decodes_the_behind_window_on_a_fresh_area() {
+        let path = make_test_clip("vv-app-render-ahead-test", "fresh_behind.mp4", 4);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 100)],
+            muted: false,
+        }]));
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Budget generoso: niente sfratto per capacità a confondere il
+        // risultato, qui interessa solo "viene decodificato" o no.
+        let generous_budget = 320 * 240 * 3 / 2 * 200;
+
+        // Prima volta che questa zona viene vista: playhead a 60, mai
+        // stato altrove prima (`went_backward` irrilevante al primo
+        // ciclo).
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            &mut open_behind,
+            60,
+            generous_budget,
+            false,
+            &AtomicI64::new(60),
+        );
+
+        let ranges = caches.cached_ranges(media_a);
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
+            "il tratto dietro la testina [40,59] (dentro BEHIND_SECS) deve essere stato decodificato, non solo trattenuto se già presente: {ranges:?}"
+        );
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 60 && e >= 99),
+            "la finestra in avanti deve comunque essere coperta normalmente: {ranges:?}"
+        );
     }
 
     /// Regressione: se il budget non basta a coprire tutta la finestra
@@ -1362,6 +1644,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget minuscolo: la finestra di lookahead (3s = 75 frame a
         // 25fps) non ci sta tutta nella cache.
         let tiny_budget = 320 * 240 * 4 * 5;
@@ -1370,6 +1653,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             0,
             tiny_budget,
             false,
@@ -1425,6 +1709,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Il target live è già oltre soglia rispetto a from_frame=0 prima
         // ancora che il fill inizi: simula la testina che è saltata
         // altrove mentre questo ciclo stava per partire.
@@ -1435,6 +1720,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             0,
             100_000_000,
             false,
@@ -1501,6 +1787,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let budget = 100_000_000;
 
         // La finestra di lookahead (3s = 75 frame a 25fps) da 40
@@ -1511,6 +1798,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             40,
             budget,
             false,
@@ -1577,6 +1865,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Capacità ~60 frame YUV420 (width*height*3/2 byte/frame, non
         // più i 4 byte/pixel RGBA da prima di REFACTOR_PIPELINE.md B3):
         // meno di quanto i due segmenti insieme chiederebbero (~20 + ~55),
@@ -1589,6 +1878,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             40,
             budget,
             false,
@@ -1643,6 +1933,7 @@ mod tests {
         let path = make_test_clip("vv-app-render-ahead-test", "same_media_two_segments.mp4", 3);
         let (media_a, _) = two_media_ids();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
 
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
         // (come ai due lati di un taglio), source_start 10 e poi 25.
@@ -1724,6 +2015,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget che a 320x240 (307_200 B/frame) basta per ~60 frame
         // totali: con due media a contendersi la finestra ce ne stanno
         // pochi a testa, con uno solo molti di più.
@@ -1741,6 +2033,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             0,
             total_budget,
             false,
@@ -1757,6 +2050,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             200,
             total_budget,
             false,
@@ -1839,26 +2133,31 @@ mod tests {
     }
 
     /// Regressione per il bug segnalato dall'utente: uno scrub
-    /// all'indietro *piccolo* (qui 30 frame, sotto qualunque soglia di
-    /// seek plausibile) deve rigenerare il buffer per la nuova posizione
-    /// tanto quanto uno grande — irrilevante comunque, perché uno scrub
-    /// indietro scatta sempre via `went_backward`, non via soglia. Prima
-    /// del fix, restava
-    /// bloccato sul frame in cache più vicino perché `position_decoder`
-    /// considerava "abbastanza avanti" qualunque target ancora dietro
-    /// a `next_frame` più di una soglia — ma `walk_and_fill` scarta ad
-    /// ogni ciclo tutto ciò che è dietro alla testina corrente
-    /// (`evict_before`), quindi anche un piccolo passo indietro cade in
-    /// territorio già scartato e irraggiungibile decodificando solo in
-    /// avanti.
+    /// all'indietro deve rigenerare il buffer per la nuova posizione,
+    /// non restare bloccato sul frame in cache più vicino. Lo scrub qui
+    /// (70 frame) è scelto apposta *oltre* la finestra di retention
+    /// dietro la testina (`BEHIND_SECS`, 2s = 50 frame a 25fps): un
+    /// vero scrub oltre quella finestra deve ancora comportarsi come
+    /// prima di quella finestra — rigenerare da zero — perché qui non
+    /// c'è nulla da riusare. Uno scrub *dentro* la finestra invece non
+    /// deve rigenerare nulla per costruzione (vedi
+    /// `walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek`,
+    /// che verifica esattamente quello). Prima del fix originale di
+    /// questa regressione, restava bloccato sul frame in cache più
+    /// vicino perché `position_decoder` considerava "abbastanza avanti"
+    /// qualunque target ancora dietro a `next_frame` più di una soglia —
+    /// ma `walk_and_fill` scarta ad ogni ciclo tutto ciò che è fuori
+    /// dalla finestra corrente, quindi anche un piccolo passo indietro
+    /// oltre la finestra di retention cade in territorio già scartato e
+    /// irraggiungibile decodificando solo in avanti.
     #[test]
-    fn render_ahead_catches_up_after_a_small_backward_seek_within_the_old_threshold() {
-        let path = make_test_clip("vv-app-render-ahead-test", "small_backward_seek.mp4", 4);
+    fn render_ahead_catches_up_after_a_backward_seek_beyond_the_retention_window() {
+        let path = make_test_clip("vv-app-render-ahead-test", "small_backward_seek.mp4", 6);
         let mut project = Project::default();
         let media_a = project.media_pool.insert(MediaItem {
             path,
             meta: MediaMeta {
-                duration_frames: 100,
+                duration_frames: 150,
                 fps: Rational::new(25, 1),
                 width: 320,
                 height: 240,
@@ -1870,26 +2169,28 @@ mod tests {
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
-            clips: vec![media_clip(1, media_a, 0, 100)],
+            clips: vec![media_clip(1, media_a, 0, 150)],
             muted: false,
         }]));
 
         let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000);
-        render_ahead.set_target(80);
+        render_ahead.set_target(100);
 
-        // Attendi non solo che il buffer copra 80, ma che i cicli di
-        // poll successivi abbiano anche già scartato (`evict_before`)
-        // ciò che è rimasto dietro a 80 (compreso 50) — altrimenti il
-        // test passerebbe per caso, perché il primo riempimento (che
-        // decodifica dal keyframe più vicino, qui l'inizio del file)
-        // include già 50 prima ancora che venga scartato.
+        // Attendi non solo che il buffer copra 100, ma che i cicli di
+        // poll successivi abbiano anche già scartato ciò che è rimasto
+        // fuori dalla finestra (avanti+dietro) di 100 — compreso 30, che
+        // è 70 frame dietro, oltre i 50 della finestra di retention.
+        // Altrimenti il test passerebbe per caso, perché il primo
+        // riempimento (che decodifica dal keyframe più vicino, qui
+        // l'inizio del file) include già 30 prima ancora che venga
+        // scartato.
         let covers = |ranges: &[(FrameIdx, FrameIdx)], f: FrameIdx| {
             ranges.iter().any(|&(s, e)| s <= f && f <= e)
         };
         let start = std::time::Instant::now();
         loop {
             let ranges = render_ahead.cached_ranges_for(media_a);
-            if covers(&ranges, 80) && !covers(&ranges, 50) {
+            if covers(&ranges, 100) && !covers(&ranges, 30) {
                 break;
             }
             assert!(
@@ -1899,20 +2200,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // Scrub indietro di soli 30 frame (sotto la vecchia soglia di
-        // 120): deve comunque rigenerare il buffer per la nuova
+        // Scrub indietro di 70 frame (oltre la finestra di retention di
+        // 50): deve comunque rigenerare il buffer per la nuova
         // posizione, non restare bloccato sul frame più vicino già in
-        // cache.
-        render_ahead.set_target(50);
+        // cache. Copertura di 30 (non "un range che parte esattamente
+        // lì"): il seek atterra sul keyframe più vicino a 30, che può
+        // essere anche prima di 30 stesso.
+        render_ahead.set_target(30);
         let start = std::time::Instant::now();
         loop {
             let ranges = render_ahead.cached_ranges_for(media_a);
-            if ranges.iter().any(|&(s, _)| s == 50) {
+            if covers(&ranges, 30) {
                 break;
             }
             assert!(
                 start.elapsed() < Duration::from_secs(5),
-                "timeout su scrub piccolo indietro: ranges={ranges:?}"
+                "timeout su scrub indietro: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -1959,6 +2262,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget stretto: la finestra intera non ci sta in cache, quindi
         // avanzando `evict_before` scarta davvero i frame dietro la
         // testina invece di lasciarli semplicemente ancora presenti per
@@ -1978,6 +2282,7 @@ mod tests {
                 timeline_id,
                 &caches,
                 &mut open,
+                &mut open_behind,
                 from,
                 budget,
                 went_backward,
@@ -2001,6 +2306,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             80,
             budget,
             true,
@@ -2016,12 +2322,19 @@ mod tests {
 
     /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
     /// all'indietro, la porzione già bufferizzata che ricade ancora
-    /// nella *nuova* finestra non deve essere ridecodificata — solo il
-    /// tratto scoperto tra il nuovo target e il punto di riconnessione
-    /// con la cache esistente. Verificato osservando
-    /// `OpenDecoder::next_frame` dopo il seek: deve fermarsi al punto di
-    /// riconnessione (270), non continuare a ridecodificare quel che è
-    /// già lì.
+    /// nella *nuova* finestra (avanti + dietro, vedi `BEHIND_SECS`) non
+    /// deve essere ridecodificata — solo il singolo frame inevitabile
+    /// (il keyframe su cui il seek atterra: senza deciderlo *ancora*
+    /// dopo il seek, vedi doc di `position_decoder`). Con la finestra di
+    /// retention dietro la testina, lo scrub di 30 frame qui sotto
+    /// ricade interamente *dentro* quella finestra (50 frame): il
+    /// tratto [250,269] non viene nemmeno scartato da `reconcile`, la
+    /// riconnessione scatta appena il decoder atterra sul keyframe 250 e
+    /// decodifica quel singolo frame — non deve proseguire fino a 270
+    /// come nella versione senza retention. Verificato osservando
+    /// `OpenDecoder::next_frame` dopo il seek: deve fermarsi a 251
+    /// (keyframe 250 decodificato + 1), non continuare a ridecodificare
+    /// quel che è già lì.
     ///
     /// Nota (REFACTOR_PIPELINE.md §2, Tier A): con la `SharedFrameCache`
     /// a budget globale, `reconcile` scarta anche ciò che è *oltre*
@@ -2031,9 +2344,10 @@ mod tests {
     /// che era avanti, qualunque fosse l'orizzonte. È voluto: il budget
     /// della finestra è sempre esattamente quello della finestra
     /// corrente, non un accumulo indefinito di code storiche. Quindi qui
-    /// si verifica solo che [270,344] (l'intersezione tra vecchia coda e
-    /// nuova finestra) sia raggiungibile senza ridecodificarla — non che
-    /// tutta la vecchia coda fino a 374 sopravviva.
+    /// si verifica solo che [250,344] (l'intersezione tra vecchia coda e
+    /// nuova finestra allargata dalla retention) sia raggiungibile senza
+    /// ridecodificarla — non che tutta la vecchia coda fino a 374
+    /// sopravviva.
     #[test]
     fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek() {
         let path = make_test_clip("vv-app-render-ahead-test", "reconnect.mp4", 20);
@@ -2059,6 +2373,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let budget = 43_000_000; // capacità ~139 frame
 
         // Bufferizza attorno a 300: con keyint=250 (default libx264) il
@@ -2069,6 +2384,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             300,
             budget,
             false,
@@ -2088,6 +2404,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             270,
             budget,
             true,
@@ -2096,21 +2413,22 @@ mod tests {
 
         let next_frame_after = open.get(&media_a).unwrap().next_frame;
         assert_eq!(
-            next_frame_after, 270,
-            "deve fermarsi appena si ricongiunge con il buffer esistente (270), non ridecodificare fino al nuovo capped_source_end: next_frame={next_frame_after}"
+            next_frame_after, 251,
+            "deve fermarsi appena si ricongiunge con il buffer esistente (251, subito dopo il keyframe 250 su cui il seek atterra), non ridecodificare oltre: next_frame={next_frame_after}"
         );
 
         // L'intersezione tra la vecchia coda e la nuova finestra
-        // ([270,344]) deve essere raggiungibile come un range contiguo,
-        // senza buchi dovuti a una ridecodifica sprecata. Il fatto che
-        // `filled_up_to` (374) sia più avanti dell'orizzonte della nuova
-        // finestra è atteso: quella parte è stata scartata dal Tier A di
-        // `reconcile` perché non più nella finestra corrente (vedi nota
-        // sopra), non perché la riconnessione abbia fallito.
+        // allargata dalla retention ([250,344]) deve essere raggiungibile
+        // come un range contiguo, senza buchi dovuti a una ridecodifica
+        // sprecata. Il fatto che `filled_up_to` (374) sia più avanti
+        // dell'orizzonte della nuova finestra è atteso: quella parte è
+        // stata scartata dal Tier A di `reconcile` perché non più nella
+        // finestra corrente (vedi nota sopra), non perché la
+        // riconnessione abbia fallito.
         let ranges = caches.cached_ranges(media_a);
         assert!(
-            ranges.iter().any(|&(s, e)| s <= 270 && e >= 344),
-            "l'intersezione [270,344] tra vecchia coda e nuova finestra deve restare un range contiguo: ranges={ranges:?} filled_up_to={filled_up_to}"
+            ranges.iter().any(|&(s, e)| s <= 250 && e >= 344),
+            "l'intersezione [250,344] tra vecchia coda e nuova finestra deve restare un range contiguo: ranges={ranges:?} filled_up_to={filled_up_to}"
         );
     }
 
@@ -2126,7 +2444,11 @@ mod tests {
     /// coda si allungava di pochi frame ad ogni ciclo — esattamente lo
     /// scarto fisso "il buffer inizia sempre qualche frame dopo la
     /// testina" segnalato dall'utente (confermato con un budget stretto
-    /// che costringe a superare la capacità ad ogni ciclo).
+    /// che costringe a superare la capacità ad ogni ciclo). Con la
+    /// finestra di retention dietro la testina, il buffer copre anche un
+    /// tratto *prima* di ciascun target: la verifica giusta ora è che la
+    /// testina sia coperta (non più in un vuoto), non che un range parta
+    /// esattamente lì.
     #[test]
     fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_reseek() {
         let path = make_test_clip("vv-app-render-ahead-test", "front_tracks_target.mp4", 20);
@@ -2153,6 +2475,7 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         // Budget stretto: ogni avanzamento di 10 frame aggiunge più
         // frame di quanti la cache possa contenere senza sfrattarne,
         // costringendo lo sfratto ad agire ad ogni ciclo.
@@ -2163,6 +2486,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             10,
             budget,
             false,
@@ -2175,6 +2499,7 @@ mod tests {
             timeline_id,
             &caches,
             &mut open,
+            &mut open_behind,
             target,
             budget,
             false,
@@ -2187,6 +2512,7 @@ mod tests {
                 timeline_id,
                 &caches,
                 &mut open,
+                &mut open_behind,
                 target,
                 budget,
                 false,
@@ -2194,8 +2520,8 @@ mod tests {
             );
             let ranges = caches.cached_ranges(media_a);
             assert!(
-                ranges.iter().any(|&(s, _)| s == target),
-                "il buffer deve iniziare esattamente alla testina (target={target}): {ranges:?}"
+                ranges.iter().any(|&(s, e)| s <= target && target <= e),
+                "il buffer deve coprire la testina (target={target}): {ranges:?}"
             );
         }
     }

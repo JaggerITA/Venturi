@@ -413,6 +413,20 @@ impl Timeline {
             .min()
     }
 
+    /// Il `timeline_end()` più vicino, a `frame` o prima, tra tutte le
+    /// clip di tutte le track Video — simmetrico a
+    /// `next_video_clip_start_from`, usato per camminare *all'indietro*
+    /// (buffer dietro la testina, REFACTOR_PIPELINE.md, vedi
+    /// `render_ahead::collect_media_segments_behind`): "dov'è la fine
+    /// della clip più vicina saltando all'indietro un vuoto".
+    pub fn previous_video_clip_end_before(&self, frame: FrameIdx) -> Option<FrameIdx> {
+        self.tracks_of_kind(TrackKind::Video)
+            .flat_map(|(_, t)| t.clips.iter())
+            .map(Clip::timeline_end)
+            .filter(|&end| end <= frame)
+            .max()
+    }
+
     /// La clip con questo id, su una qualunque track, insieme all'indice
     /// della sua track — permette di ritrovare una clip nota per id senza
     /// dover tenere traccia (letteralmente) di quale track la contiene, che
@@ -694,6 +708,32 @@ mod timeline_tests {
         assert_eq!(tl.next_video_clip_start_from(0), Some(20));
         assert_eq!(tl.next_video_clip_start_from(25), Some(50));
         assert_eq!(tl.next_video_clip_start_from(61), None);
+    }
+
+    #[test]
+    fn previous_video_clip_end_before_finds_the_closest_across_video_tracks() {
+        // clip_at(20,10,2) -> [20,30), clip_at(50,10,1) -> [50,60).
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(50, 10, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(20, 10, 2)],
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(tl.previous_video_clip_end_before(100), Some(60));
+        assert_eq!(tl.previous_video_clip_end_before(60), Some(60));
+        assert_eq!(tl.previous_video_clip_end_before(59), Some(30));
+        assert_eq!(tl.previous_video_clip_end_before(19), None);
     }
 
     #[test]
