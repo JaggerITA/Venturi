@@ -438,6 +438,27 @@ fn walk_and_fill(
         .retain(|id, _| distinct_media.contains(id));
     open.retain(|id, _| distinct_media.contains(id));
 
+    // Un taglio tra due clip che condividono lo stesso media (comune:
+    // un unico file tagliato in più pezzi sulla timeline) produce più
+    // segmenti per lo stesso `media_id` nella stessa finestra, ognuno
+    // con il proprio `source_start`. Scartare "tutto ciò che è dietro"
+    // usando il `source_start` del *singolo* segmento in elaborazione
+    // (come si faceva prima) è sbagliato quando un segmento successivo
+    // ha un `source_start` più alto di quanto il segmento precedente
+    // abbia appena decodificato: il suo `evict_before` cancellerebbe il
+    // lavoro appena fatto nello stesso identico ciclo — che è
+    // esattamente "il buffer si ricalcola da capo invalidando i frame
+    // successivi" segnalato dall'utente. Usare il minimo tra tutti i
+    // segmenti dello stesso media in questa finestra evita di scartare
+    // mai qualcosa che un altro segmento della stessa finestra ancora usa.
+    let mut min_source_start_by_media: HashMap<MediaId, FrameIdx> = HashMap::new();
+    for s in &segments {
+        min_source_start_by_media
+            .entry(s.media_id)
+            .and_modify(|v| *v = (*v).min(s.source_start))
+            .or_insert(s.source_start);
+    }
+
     for segment in segments {
         let Some(path) = project
             .media_pool
@@ -477,8 +498,10 @@ fn walk_and_fill(
         // molto indietro per un tempo indefinito mentre la coda cresce
         // di poco ad ogni ciclo, cioè esattamente lo scarto fisso tra
         // testina e inizio del buffer segnalato dall'utente (vedi doc
-        // di `FrameCache::evict_before`).
-        cache.evict_before(segment.source_start);
+        // di `FrameCache::evict_before`). Il limite è il minimo tra
+        // tutti i segmenti di questo media nella finestra corrente (vedi
+        // sopra), non quello del singolo segmento in elaborazione.
+        cache.evict_before(min_source_start_by_media[&segment.media_id]);
 
         // Non decodificare oltre quanto la cache di questo media può
         // effettivamente contenere: farlo comunque significa sfrattare
@@ -507,13 +530,20 @@ fn walk_and_fill(
             }
             // Ci siamo ricongiunti con una porzione già bufferizzata (non
             // sfrattata perché avanti alla testina, vedi
-            // `FrameCache::evict_before`): il resto della finestra fino a
-            // `capped_source_end` dovrebbe già esserci, quindi continuare
-            // a decodificare sarebbe lavoro sprecato — ottimizzazione
-            // richiesta esplicitamente: un piccolo scrub all'indietro
-            // deve ridecodificare solo il nuovo tratto scoperto prima del
-            // punto di riconnessione, non l'intera finestra.
-            if resumed && cache.contains(od.next_frame) {
+            // `FrameCache::evict_before`) che arriva *fino alla fine di
+            // questo segmento*: da qui in avanti dovrebbe già esserci
+            // tutto, quindi continuare a decodificare sarebbe lavoro
+            // sprecato — ottimizzazione richiesta esplicitamente: un
+            // piccolo scrub all'indietro deve ridecodificare solo il
+            // nuovo tratto scoperto prima del punto di riconnessione,
+            // non l'intera finestra. Controllare *anche* `capped_source_end`
+            // (non solo il prossimo frame) evita un falso positivo
+            // quando si sta solo attraversando un'isola di cache lasciata
+            // da un *altro* segmento dello stesso media in questa stessa
+            // finestra (un taglio tra due pezzi non contigui dello stesso
+            // file): fermarsi lì lascerebbe scoperta la vera destinazione
+            // di questo segmento, più avanti.
+            if resumed && cache.contains(od.next_frame) && cache.contains(capped_source_end) {
                 break;
             }
             match od.decoder.next_frame() {
@@ -576,6 +606,48 @@ mod tests {
         path
     }
 
+    /// Come `make_test_clip`, ma con un GOP corto ed esplicito: senza
+    /// questo, il keyframe più vicino a un target lontano dall'inizio
+    /// resta comunque quello iniziale (keyint di default 250, più lungo
+    /// della durata dei clip di test), quindi un seek più avanti nel
+    /// file dovrebbe comunque riattraversare in sequenza tutto ciò che
+    /// lo precede — mascherando un'eventuale sfratto scorretto di una
+    /// porzione già bufferizzata, perché verrebbe rigenerata comunque
+    /// nel passaggio. Con un GOP corto il seek può saltare direttamente
+    /// vicino al target senza toccare le porzioni precedenti già in
+    /// cache, rendendo visibile un eventuale sfratto indebito.
+    fn make_test_clip_with_short_gop(
+        dir_name: &str,
+        file_name: &str,
+        duration_secs: u32,
+        gop: u32,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file_name);
+        let status = OsCommand::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=size=320x240:rate=25:duration={duration_secs}"),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                &gop.to_string(),
+                "-keyint_min",
+                &gop.to_string(),
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        path
+    }
+
     /// Due `MediaId` distinti (slotmap key, non generabili a mano):
     /// bastano per i test puri di `collect_media_segments`, che non
     /// hanno bisogno di un `MediaItem` reale dietro.
@@ -609,6 +681,28 @@ mod tests {
             source_in: 0,
             source_out: len,
             timeline_start: start,
+            effects: EffectStack::default(),
+            linked: None,
+        }
+    }
+
+    /// Come `media_clip`, ma con un `source_in` esplicito — serve a
+    /// simulare due clip sulla timeline che sono *tagli* dello stesso
+    /// file lungo (source range sequenziali, non entrambe da 0), il
+    /// caso comune che espone il bug del `evict_before` per-segmento.
+    fn media_clip_trimmed(
+        id: u64,
+        media_id: MediaId,
+        timeline_start: FrameIdx,
+        source_in: FrameIdx,
+        len: FrameIdx,
+    ) -> Clip {
+        Clip {
+            id: ClipId(id),
+            source: ClipSource::Media(media_id),
+            source_in,
+            source_out: source_in + len,
+            timeline_start,
             effects: EffectStack::default(),
             linked: None,
         }
@@ -868,6 +962,73 @@ mod tests {
         assert!(
             ranges[0].1 < 74,
             "con un budget così piccolo non deve riuscire a coprire tutta la finestra: {ranges:?}"
+        );
+    }
+
+    /// Regressione per il bug segnalato dall'utente: due clip sulla
+    /// timeline che condividono lo stesso media (un unico file tagliato
+    /// in più pezzi, comunissimo) generano due `MediaSegment` per lo
+    /// stesso `media_id` nella stessa finestra, con `source_start`
+    /// diversi. Chiamare `evict_before` con il `source_start` del
+    /// *singolo* segmento in elaborazione (come si faceva prima)
+    /// scartava, elaborando il secondo segmento, tutto ciò che il primo
+    /// aveva appena decodificato — "il buffer si ricalcola da capo
+    /// invalidando i frame successivi" segnalato dall'utente,
+    /// riproducibile ad ogni taglio tra due pezzi dello stesso file.
+    #[test]
+    fn walk_and_fill_does_not_invalidate_one_segment_while_processing_another_segment_of_the_same_media()
+     {
+        let path =
+            make_test_clip_with_short_gop("vv-app-render-ahead-test", "same_media_cut.mp4", 20, 25);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        // Taglio a timeline_start=60 tra due pezzi dello stesso file:
+        // il primo usa il sorgente [0,60), il secondo riparte da un
+        // punto molto più avanti nel sorgente [200,300) — esattamente
+        // come tagliare via una parte centrale dello stesso file.
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![
+                media_clip_trimmed(1, media_a, 0, 0, 60),
+                media_clip_trimmed(2, media_a, 60, 200, 100),
+            ],
+            muted: false,
+        }]));
+
+        let caches: Mutex<HashMap<MediaId, Arc<FrameCache>>> = Mutex::new(HashMap::new());
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let budget = 100_000_000;
+
+        // La finestra di lookahead (3s = 75 frame a 25fps) da 40
+        // attraversa il taglio a 60, includendo un pezzo di entrambe le
+        // clip nello stesso ciclo.
+        walk_and_fill(&project, timeline_id, &caches, &mut open, 40, budget);
+
+        let ranges = caches
+            .lock()
+            .unwrap()
+            .get(&media_a)
+            .unwrap()
+            .cached_ranges();
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
+            "il tratto della prima clip [40,59] non deve essere sfrattato dall'elaborazione della seconda: ranges={ranges:?}"
+        );
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 200 && e >= 200),
+            "la seconda clip deve comunque essere bufferizzata, non solo attraversata: ranges={ranges:?}"
         );
     }
 
