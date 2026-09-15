@@ -902,6 +902,7 @@ fn range_fully_cached(
 /// per verificare che un seek reale scatti solo quando davvero serve,
 /// non ad ogni ciclo.
 fn position_decoder(
+    caches: &SharedFrameCache,
     open: &mut HashMap<MediaId, OpenDecoder>,
     media_id: MediaId,
     path: &Path,
@@ -918,7 +919,24 @@ fn position_decoder(
     }
     if let Some(o) = open.get_mut(&media_id) {
         let needs_seek = segment_start > o.next_frame + o.seek_threshold_frames()
-            || (went_backward && segment_start < o.next_frame);
+            || (went_backward && segment_start < o.next_frame)
+            // `next_frame` è solo quel che il decoder *crede* di aver
+            // già prodotto — non garantisce che sia ancora davvero in
+            // cache: uno sfratto tra un ciclo e l'altro (`reconcile`,
+            // Tier B, o un budget stretto durante un fill precedente)
+            // può aver rimosso proprio la coda che il decoder pensa di
+            // avere già dietro di sé, senza che nulla nel decoder stesso
+            // se ne accorga. Qui si riverifica *sempre* (anche quando
+            // `next_frame` sembrerebbe già a posto) che `[segment_start,
+            // next_frame)` sia davvero coperto da un unico intervallo
+            // contiguo in cache — bug reale, confermato dall'utente: un
+            // "Reused" silenzioso su un buco lasciato da uno sfratto
+            // faceva restare quel buco scoperto per sempre, il primo
+            // controllo del ciclo (`next_frame > source_end`) bastava a
+            // convincere il resto della funzione che non c'era altro da
+            // fare.
+            || (o.next_frame > segment_start
+                && !range_fully_cached(caches, media_id, segment_start, o.next_frame - 1));
         if !needs_seek {
             return Positioned::Reused;
         }
@@ -1080,6 +1098,18 @@ fn walk_and_fill(
     // Sostituisce insieme retain/evict_before/sfratto-per-capacità di
     // prima.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
+    if debug_enabled() {
+        for id in forward_media
+            .iter()
+            .chain(behind_media.iter())
+            .collect::<HashSet<_>>()
+        {
+            eprintln!(
+                "[render_ahead] DOPO-RECONCILE media={id:?} cached_ranges={:?}",
+                caches.cached_ranges(*id)
+            );
+        }
+    }
 
     let ctx = FillContext {
         project,
@@ -1226,6 +1256,7 @@ fn fill_segments(
             item.path.clone()
         };
         if position_decoder(
+            ctx.caches,
             open,
             segment.media_id,
             &path,
@@ -1258,31 +1289,32 @@ fn fill_segments(
             // tutto, quindi continuare a decodificare sarebbe lavoro
             // sprecato — un piccolo scrub all'indietro deve ridecodificare
             // solo il nuovo tratto scoperto prima del punto di
-            // riconnessione, non l'intera finestra. Controllare *anche*
-            // `segment.source_end` (non solo il prossimo frame) evita un
-            // falso positivo quando si sta solo attraversando un'isola di
-            // cache lasciata da un *altro* segmento dello stesso media in
-            // questa stessa finestra (un taglio tra due pezzi non
-            // contigui dello stesso file): fermarsi lì lascerebbe
-            // scoperta la vera destinazione di questo segmento, più
-            // avanti.
+            // riconnessione, non l'intera finestra. Serve un *unico*
+            // intervallo contiguo che copra `[next_frame, source_end]`
+            // (`range_fully_cached`), non due `contains` indipendenti:
+            // due punti entrambi presenti ma su isole di cache separate
+            // (es. un buco lasciato da un fill precedente saturo di
+            // budget) soddisfacevano comunque `contains(next_frame) &&
+            // contains(source_end)` senza che ci fosse continuità tra i
+            // due — un riaggancio "falso positivo" che lasciava scoperto
+            // per sempre proprio il buco in mezzo, mai più raggiunto
+            // dopo (bug reale, confermato dall'utente: un blocco restava
+            // "da processare" a ogni ciclo, stabile, mai completato).
             if resumed
-                && ctx.caches.contains(segment.media_id, od.next_frame)
-                && ctx.caches.contains(segment.media_id, segment.source_end)
+                && range_fully_cached(
+                    ctx.caches,
+                    segment.media_id,
+                    od.next_frame,
+                    segment.source_end,
+                )
             {
+                if debug_enabled() {
+                    eprintln!(
+                        "[render_ahead] RIAGGANCIO media={:?} segment=[{},{}] next_frame={}",
+                        segment.media_id, segment.source_start, segment.source_end, od.next_frame
+                    );
+                }
                 break;
-            }
-            // Budget globale saturo: i segmenti restanti (questo incluso,
-            // da qui in poi) sono per costruzione più lontani dalla
-            // testina di tutto ciò che è già in cache (fill in ordine di
-            // priorità, vedi doc della funzione) — non c'è nulla da
-            // guadagnare continuando, esce dall'intero giro sui segmenti,
-            // non solo da questo.
-            if ctx.caches.bytes_used() >= ctx.cache_budget_bytes {
-                return ControlFlow::Break(WalkOutcome {
-                    interrupted: false,
-                    caught_up: false,
-                });
             }
             let mut threshold_frames = od.seek_threshold_frames();
             match od.decoder.next_frame() {
@@ -1298,18 +1330,75 @@ fn fill_segments(
                         od.just_repositioned = false;
                         threshold_frames = od.seek_threshold_frames();
                     }
-                    // `insert` sovrascrive innocuamente se `idx` è già
-                    // presente (decoder ripartito da un keyframe
-                    // precedente al punto richiesto): evita solo un ramo
-                    // che avanzi `next_frame` senza consumare davvero un
-                    // frame dal decoder (in passato causa di un
-                    // disallineamento tra la posizione tracciata e quella
-                    // reale).
-                    ctx.caches.insert(segment.media_id, idx, Arc::new(frame));
+                    // Frame di puro transito verso il keyframe più
+                    // vicino, prima ancora di `segment.source_start`
+                    // (un GOP lungo può costringere il decoder a
+                    // riattraversarne parecchi per raggiungere un
+                    // segmento lontano dal proprio keyframe): niente
+                    // budget speso per loro, e niente controllo di
+                    // saturazione qui sotto. Il prossimo `reconcile` li
+                    // scarterebbe comunque (fuori da qualunque finestra
+                    // voluta) — spendere budget per loro poteva far
+                    // saturare la cache *prima* di raggiungere il
+                    // tratto realmente richiesto, lasciando per sempre
+                    // scoperto un buco appena oltre (bug reale,
+                    // confermato dall'utente: un segmento restava "da
+                    // processare" a ogni ciclo, la cache bloccata esatta
+                    // al budget senza mai crescere oltre).
+                    if idx >= segment.source_start {
+                        if ctx.caches.bytes_used() >= ctx.cache_budget_bytes {
+                            if debug_enabled() {
+                                eprintln!(
+                                    "[render_ahead] BUDGET-SATURO media={:?} segment=[{},{}] next_frame={} bytes_used={} budget={}",
+                                    segment.media_id,
+                                    segment.source_start,
+                                    segment.source_end,
+                                    od.next_frame,
+                                    ctx.caches.bytes_used(),
+                                    ctx.cache_budget_bytes
+                                );
+                            }
+                            return ControlFlow::Break(WalkOutcome {
+                                interrupted: false,
+                                caught_up: false,
+                            });
+                        }
+                        // `insert` sovrascrive innocuamente se `idx` è
+                        // già presente (decoder ripartito da un keyframe
+                        // precedente al punto richiesto): evita solo un
+                        // ramo che avanzi `next_frame` senza consumare
+                        // davvero un frame dal decoder (in passato causa
+                        // di un disallineamento tra la posizione
+                        // tracciata e quella reale).
+                        ctx.caches.insert(segment.media_id, idx, Arc::new(frame));
+                    }
                     od.next_frame = idx + 1;
                     resumed = true;
                 }
-                _ => break,
+                Ok(None) => {
+                    if debug_enabled() {
+                        eprintln!(
+                            "[render_ahead] DECODE-FINE(EOF) media={:?} segment=[{},{}] next_frame={}",
+                            segment.media_id,
+                            segment.source_start,
+                            segment.source_end,
+                            od.next_frame
+                        );
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if debug_enabled() {
+                        eprintln!(
+                            "[render_ahead] DECODE-FINE(ERR) media={:?} segment=[{},{}] next_frame={} errore={e}",
+                            segment.media_id,
+                            segment.source_start,
+                            segment.source_end,
+                            od.next_frame
+                        );
+                    }
+                    break;
+                }
             }
             // Rilettura economica (atomica) del target *live*, non solo
             // quello letto a inizio ciclo: se nel frattempo la testina si
@@ -2038,14 +2127,15 @@ mod tests {
         let path = make_test_clip("vv-app-render-ahead-test", "reuse.mp4", 3);
         let (media_a, _) = two_media_ids();
 
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
             Positioned::Opened
         );
 
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 1000, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 1000, false, false),
             Positioned::Seeked,
             "un seek reale su un media già aperto deve riusare il decoder, non riaprirlo"
         );
@@ -2064,9 +2154,10 @@ mod tests {
         let path_b = make_test_clip("vv-app-render-ahead-test", "swap_b.mp4", 2);
         let (media_a, _) = two_media_ids();
 
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path_a, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path_a, 0, false, false),
             Positioned::Opened
         );
 
@@ -2076,9 +2167,80 @@ mod tests {
         // restituirebbe `Reused` — riusando un decoder che punta al file
         // sbagliato.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path_b, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path_b, 0, false, false),
             Positioned::Opened,
             "il path è cambiato: deve riaprire sul nuovo, non riusare il decoder del vecchio"
+        );
+    }
+
+    /// Regressione per un bug reale, confermato dall'utente: `next_frame`
+    /// è solo quel che il decoder *crede* di aver già prodotto, non una
+    /// garanzia che sia ancora in cache — uno sfratto tra un ciclo e
+    /// l'altro (`reconcile`, o un budget stretto durante un fill
+    /// precedente) può aver rimosso la coda che il decoder pensa di
+    /// avere già dietro di sé. Qui si simula esattamente questo: un
+    /// decoder "avanzato" con `next_frame` oltre il target, ma con il
+    /// contenuto che next_frame presume di avere copiato rimosso a mano
+    /// dalla cache (come farebbe un `reconcile` reale) — `position_decoder`
+    /// deve accorgersene e forzare un seek reale, non fidarsi di
+    /// `next_frame` e restituire `Reused` su un buco.
+    #[test]
+    fn position_decoder_reseeks_when_next_frame_claims_coverage_the_cache_no_longer_has() {
+        let path = make_test_clip("vv-app-render-ahead-test", "stale_next_frame.mp4", 3);
+        let (media_a, _) = two_media_ids();
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        assert_eq!(
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            Positioned::Opened
+        );
+        // Decodifica e mette in cache qualche frame, come farebbe
+        // walk_and_fill — il decoder ora "crede" di essere avanti con
+        // tutto quel tratto genuinamente dietro di sé in cache.
+        for _ in 0..20 {
+            let od = open.get_mut(&media_a).unwrap();
+            match od.decoder.next_frame() {
+                Ok(Some((idx, frame))) => {
+                    caches.insert(media_a, idx, Arc::new(frame));
+                    od.next_frame = idx + 1;
+                }
+                _ => break,
+            }
+        }
+        let advanced_next_frame = open.get(&media_a).unwrap().next_frame;
+        assert!(
+            advanced_next_frame > 5,
+            "il decoder deve aver avanzato di parecchio"
+        );
+
+        // Simula uno sfratto reale: `reconcile` con una finestra che
+        // esclude deliberatamente un solo frame nel mezzo di quel che
+        // `next_frame` presume coperto — la cache perde quel frame senza
+        // che il decoder ne sappia nulla (esattamente quel che farebbe
+        // un budget stretto o una finestra che si restringe).
+        let gap_at = advanced_next_frame - 3;
+        let window = [
+            WantedRange {
+                media_id: media_a,
+                source_start: 0,
+                source_end: gap_at - 1,
+                timeline_start: 0,
+            },
+            WantedRange {
+                media_id: media_a,
+                source_start: gap_at + 1,
+                source_end: advanced_next_frame - 1,
+                timeline_start: gap_at + 1,
+            },
+        ];
+        caches.reconcile(0, &window, usize::MAX);
+
+        assert_eq!(
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            Positioned::Seeked,
+            "un buco lasciato da uno sfratto dietro a next_frame deve forzare un seek reale, \
+             non un Reused che lo lascia scoperto per sempre"
         );
     }
 
@@ -2094,19 +2256,26 @@ mod tests {
         let path = make_test_clip("vv-app-render-ahead-test", "steady.mp4", 3);
         let (media_a, _) = two_media_ids();
 
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
             Positioned::Opened
         );
 
-        // Decodifica qualche frame in avanti "a mano", come farebbe
-        // walk_and_fill, per simulare un decoder già bufferizzato oltre
-        // il target attuale.
+        // Decodifica qualche frame in avanti "a mano" *e* li inserisce in
+        // cache, come farebbe walk_and_fill, per simulare un decoder già
+        // bufferizzato oltre il target attuale — dalla riverifica di
+        // copertura in `position_decoder` (vedi la sua doc), un
+        // `next_frame` avanzato senza contenuto in cache dietro di sé
+        // non basterebbe più a evitare un seek.
         for _ in 0..20 {
             let od = open.get_mut(&media_a).unwrap();
             match od.decoder.next_frame() {
-                Ok(Some((idx, _))) => od.next_frame = idx + 1,
+                Ok(Some((idx, frame))) => {
+                    caches.insert(media_a, idx, Arc::new(frame));
+                    od.next_frame = idx + 1;
+                }
                 _ => break,
             }
         }
@@ -2117,7 +2286,7 @@ mod tests {
         // del decoder — lo stato normale durante il playback in avanti —
         // non deve riaprire/riazzerare il decoder.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
             Positioned::Reused
         );
         assert_eq!(
@@ -2480,19 +2649,23 @@ mod tests {
             &AtomicI64::new(60),
         );
 
-        // [0,63], non [(60,63)]: con keyint di default (250) e una clip
-        // di soli 100 frame, l'unico keyframe è a 0 — raggiungere il
-        // frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede comunque di
-        // decodificare in sequenza da lì (nessun modo di saltare i
-        // frame intermedi), e quei frame restano in cache perché
-        // genuinamente già decodificati. Quel che conta è che la
-        // finestra *non vada oltre* 63 (con `lookahead_secs` normale
-        // arriverebbe fino a 99, la fine della clip — vedi il test
-        // sopra): configurato a zero secondi, resta comunque il margine
-        // minimo, non letteralmente nulla.
+        // [56,63] (56 = 60 - MIN_MARGIN_FRAMES, dietro; 63 = 60 +
+        // MIN_MARGIN_FRAMES - 1, avanti): con keyint di default (250) e
+        // una clip di soli 100 frame, l'unico keyframe è a 0, quindi
+        // raggiungere ognuno dei due segmenti richiede comunque di
+        // decodificare in sequenza da lì — ma solo i frame dentro al
+        // segmento richiesto finiscono in cache (`idx >=
+        // segment.source_start`, vedi doc del fill), il tratto di puro
+        // transito [0,55]/[0,59] no: verrebbe scartato dal prossimo
+        // reconcile comunque (fuori da qualunque finestra voluta), non
+        // ha senso spendere budget per lui. Quel che conta è che la
+        // finestra *non vada oltre* [56,63] (con `lookahead_secs`
+        // normale arriverebbe fino a 99, la fine della clip — vedi il
+        // test sopra): configurato a zero secondi, resta comunque il
+        // margine minimo, non letteralmente nulla.
         assert_eq!(
             caches.cached_ranges(media_a),
-            vec![(0, 60 + MIN_MARGIN_FRAMES - 1)],
+            vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
             "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
@@ -2832,16 +3005,17 @@ mod tests {
     {
         let path = make_test_clip("vv-app-render-ahead-test", "same_media_two_segments.mp4", 3);
         let (media_a, _) = two_media_ids();
+        let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
 
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
         // (come ai due lati di un taglio), source_start 10 e poi 25.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 10, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 10, false, false),
             Positioned::Opened
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 25, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 25, false, false),
             Positioned::Reused,
             "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
         );
@@ -2851,12 +3025,12 @@ mod tests {
         // deve sembrare "tornato indietro" solo perché l'ultima chiamata
         // vista nel ciclo precedente era per il segmento successivo (25).
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 10, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 10, false, false),
             Positioned::Reused,
             "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 25, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 25, false, false),
             Positioned::Reused
         );
     }
@@ -3540,6 +3714,142 @@ mod tests {
             elapsed < Duration::from_millis(20),
             "20 cicli a testina ferma dopo un riaggancio anticipato non devono riseekare/\
              ridecodificare a ripetizione: impiegati {elapsed:?} in totale, attesi <20ms"
+        );
+    }
+
+    /// Regressione per un bug reale, confermato dall'utente con un log
+    /// diagnostico su un file 1080p60fps: il controllo di riaggancio
+    /// dentro `fill_segments` verificava due punti (`next_frame` e
+    /// `segment.source_end`) con due `contains` *indipendenti* — se
+    /// entrambi capitano per caso in due isole di cache separate (un
+    /// buco tra loro, lasciato da un fill precedente saturo di budget),
+    /// il controllo passava comunque, facendo credere che il segmento
+    /// fosse già coperto quando in realtà c'era un buco proprio nel
+    /// mezzo mai raggiunto né prima né dopo — permanente, perché il
+    /// decoder si fermava lì convinto di aver finito.
+    #[test]
+    fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
+        // GOP=10 esplicito: keyframe a 0,10,20,... — serve solo poterne
+        // prevedere uno vicino all'inizio del segmento richiesto, nessun
+        // altro requisito sulla distanza tra le due isole sotto.
+        let path =
+            make_test_clip_with_short_gop("vv-app-render-ahead-test", "bridge_gap.mp4", 4, 10);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        // `fill_segments` non ha bisogno di una timeline: lavora già a
+        // livello di segmento risolto.
+
+        let caches = SharedFrameCache::new();
+        // Due isole disconnesse, un buco vero in mezzo ([16,39], mai
+        // toccato da niente finora) — come lascerebbe un fill precedente
+        // saturo di budget.
+        for idx in 5..=15 {
+            caches.insert(media_a, idx, Arc::new(dummy_frame()));
+        }
+        for idx in 40..=50 {
+            caches.insert(media_a, idx, Arc::new(dummy_frame()));
+        }
+
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let segment = MediaSegment {
+            media_id: media_a,
+            source_start: 5,
+            source_end: 50,
+            timeline_start: 5,
+        };
+        let ctx = FillContext {
+            project: &project,
+            caches: &caches,
+            went_backward: false,
+            cache_budget_bytes: usize::MAX,
+            from_frame: 5,
+            proxy_enabled: false,
+            target: &AtomicI64::new(5),
+        };
+        let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
+
+        let ranges = caches.cached_ranges(media_a);
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 5 && e >= 50),
+            "il buco [16,39] tra le due isole deve essere colmato, non lasciato scoperto per \
+             sempre da un riaggancio prematuro: ranges={ranges:?}"
+        );
+    }
+
+    /// Regressione per lo stesso bug reale confermato dall'utente: anche
+    /// dopo aver corretto il riaggancio prematuro sopra, un budget
+    /// stretto poteva comunque impedire di colmare un buco lontano dal
+    /// keyframe più vicino — perché i frame di puro transito (decodificati
+    /// solo per attraversare un GOP lungo verso il segmento richiesto,
+    /// mai parte di nessuna finestra voluta) venivano inseriti in cache e
+    /// contati contro il budget come tutto il resto, potendo saturarlo
+    /// prima ancora di raggiungere il tratto realmente richiesto. Qui un
+    /// budget che basta per il segmento richiesto ma non per anche tutto
+    /// il transito che lo precede deve comunque riuscire a colmarlo.
+    #[test]
+    fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wanted_range() {
+        let path = make_test_clip_with_short_gop(
+            "vv-app-render-ahead-test",
+            "transit_budget.mp4",
+            4,
+            250, // GOP lungo: nessun keyframe tra 0 e il segmento richiesto
+        );
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Budget che basta solo per il segmento richiesto (80,90], 11
+        // frame, non per anche gli 80 frame di puro transito da
+        // decodificare per raggiungerlo dal keyframe a 0.
+        let frame_bytes = 320 * 240 * 3 / 2;
+        let tight_budget = frame_bytes * 11;
+        let segment = MediaSegment {
+            media_id: media_a,
+            source_start: 80,
+            source_end: 90,
+            timeline_start: 80,
+        };
+        let ctx = FillContext {
+            project: &project,
+            caches: &caches,
+            went_backward: false,
+            cache_budget_bytes: tight_budget,
+            from_frame: 80,
+            proxy_enabled: false,
+            target: &AtomicI64::new(80),
+        };
+        let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
+
+        let ranges = caches.cached_ranges(media_a);
+        assert!(
+            ranges.iter().any(|&(s, e)| s <= 80 && e >= 90),
+            "il segmento richiesto [80,90] deve essere raggiunto, non lasciato scoperto perché \
+             il budget si è esaurito sul transito prima di arrivarci: ranges={ranges:?}"
         );
     }
 
