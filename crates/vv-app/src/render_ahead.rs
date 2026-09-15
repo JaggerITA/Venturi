@@ -1204,6 +1204,25 @@ fn walk_and_fill(
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
         return outcome;
     }
+    // Un giro che arriva fin qui (nessun Break) ha finito tutto il lavoro
+    // utile per questa finestra, ma può aver inserito frame di puro
+    // transito (vedi doc di `transit_bytes` in `fill_segments`) che non
+    // appartengono a `window` — normalmente scartati dal prossimo
+    // `reconcile`, a inizio del prossimo giro, 50ms dopo. Nel frattempo
+    // però questo giro sta per restituire `caught_up: true`, che secondo
+    // `RenderAhead::is_caught_up` dice alla UI "puoi smettere di chiedere
+    // repaint" — e senza un altro repaint la UI resta bloccata proprio su
+    // quel fotogramma con il transito ancora dentro, mostrando una
+    // striscia "buffered" più larga del vero finché qualcos'altro (es.
+    // muovere il mouse) non forza per caso un repaint che rilegge lo
+    // stato nel frattempo già scartato (bug osservato dall'utente: la
+    // striscia si "ridimensiona" solo muovendo il mouse). Riconciliando
+    // subito, prima di dichiararsi `caught_up`, lo stato che la UI legge
+    // in quel momento è già quello vero — il riuso del transito *tra* i
+    // segmenti processati in questo stesso giro (il vero motivo per cui
+    // viene inserito, vedi sopra) è già avvenuto e resta intatto, si
+    // perde solo la sua eventuale sopravvivenza *oltre* la fine del giro.
+    caches.reconcile(from_frame, &window, cache_budget_bytes);
     WalkOutcome::SETTLED
 }
 
@@ -2705,23 +2724,26 @@ mod tests {
             &AtomicI64::new(60),
         );
 
-        // [0,63], non [(60,63)]: con keyint di default (250) e una clip
-        // di soli 100 frame, l'unico keyframe è a 0 — raggiungere il
-        // frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede comunque di
-        // decodificare in sequenza da lì (nessun modo di saltare i frame
-        // intermedi), e quei frame *di transito* restano comunque in
-        // cache come sottoprodotto (vedi doc di `transit_bytes` in
-        // `fill_segments` sul perché è voluto, non solo tollerato: senza
-        // questo riuso lo scrub all'indietro su sorgente a GOP lungo
-        // sarebbe visibilmente più lento di quello in avanti — bug
-        // segnalato dall'utente in un tentativo precedente che il
-        // riuso). Quel che conta per il margine minimo è che la finestra
-        // *voluta* non vada oltre 63 (con `lookahead_secs` normale
-        // arriverebbe fino a 99, la fine della clip — vedi il test
-        // sopra), non che la cache non contenga anche il transito.
+        // [56,63], non un intervallo più ampio: con keyint di default
+        // (250) e una clip di soli 100 frame, l'unico keyframe è a 0 —
+        // raggiungere il frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede di
+        // decodificare in sequenza da lì, e quei frame *di transito*
+        // restano in cache come sottoprodotto DURANTE il giro (vedi doc
+        // di `transit_bytes` in `fill_segments`: serve a far sì che il
+        // blocco dietro [56,59] li trovi già pronti invece di
+        // riattraversare da capo lo stesso GOP), ma un `reconcile` finale
+        // li scarta di nuovo prima che `walk_and_fill` dichiari
+        // `caught_up` (vedi il commento lì sul perché: altrimenti la UI,
+        // che smette di richiedere repaint su `caught_up`, può restare
+        // bloccata a mostrare quel transito come se fosse "buffered" fino
+        // al prossimo repaint per altri motivi — bug segnalato
+        // dall'utente, la striscia "si ridimensiona" solo muovendo il
+        // mouse). Il riuso *tra* i due segmenti di questo stesso giro è
+        // comunque già avvenuto prima di questo `reconcile` finale, solo
+        // la sua sopravvivenza oltre la fine del giro si perde.
         assert_eq!(
             caches.cached_ranges(media_a),
-            vec![(0, 60 + MIN_MARGIN_FRAMES - 1)],
+            vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
             "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
