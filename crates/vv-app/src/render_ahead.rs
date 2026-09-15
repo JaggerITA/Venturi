@@ -70,6 +70,26 @@ pub const DEFAULT_BEHIND_SECS: f64 = 2.0;
 /// aggressivo, non da anticipo vero e proprio.
 const MIN_MARGIN_FRAMES: FrameIdx = 4;
 
+/// Dimensione (in frame) dei blocchi in cui viene spezzata la finestra
+/// *dietro* la testina prima di decodificarla (vedi
+/// `chunk_behind_segments_near_to_far`): un segmento dietro copre
+/// `[source_start, source_end]` con `source_end` adiacente alla testina
+/// e `source_start` sul bordo lontano — decodificarlo in un solo seek,
+/// come per la finestra in avanti, produrrebbe i frame più vicini alla
+/// testina *per ultimi* (ffmpeg decodifica solo in avanti, non può
+/// "andare indietro" da `source_end`), l'opposto di quel che serve
+/// durante uno scrub all'indietro (segnalato dall'utente: il frame utile
+/// *subito* è quello adiacente alla testina, non quello più lontano).
+/// Spezzare in blocchi piccoli e riseekare a ognuno, dal più vicino al
+/// più lontano, riordina la priorità di decodifica senza cambiare quella
+/// della finestra in avanti (dove `source_start` È già la testina, un
+/// solo seek è già ottimo). Non frame-per-frame: ogni blocco costa un
+/// seek reale, quasi gratis su un proxy tutto-intra ma non su un
+/// sorgente long-GOP — abbastanza piccolo da sentirsi "immediato" (una
+/// manciata di frame), abbastanza grande da non moltiplicare i seek
+/// senza motivo.
+const BEHIND_CHUNK_FRAMES: FrameIdx = 15;
+
 fn store_secs(atomic: &AtomicU64, secs: f64) {
     atomic.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
 }
@@ -710,6 +730,41 @@ fn collect_media_segments_behind(
     segments
 }
 
+/// Spezza ogni segmento dietro la testina (`collect_media_segments_behind`,
+/// già ordinati dal più vicino al più lontano) in blocchi da al più
+/// `BEHIND_CHUNK_FRAMES`, ordinati anch'essi dal più vicino alla testina
+/// al più lontano — vedi la doc di `BEHIND_CHUNK_FRAMES` sul perché.
+/// `source_end` di un segmento è sempre il bordo adiacente alla testina
+/// (`collect_media_segments_behind`, sia per il primo segmento che per
+/// quelli oltre un taglio), quindi si parte da lì e si procede a ritroso
+/// verso `source_start`. Mappatura `timeline_start` per offset (stesso
+/// principio di `Clip::source_frame_at`: un clip non a velocità variabile
+/// ha una corrispondenza 1:1 tra spostamento in spazio sorgente e in
+/// spazio timeline, quindi il bordo sorgente di un blocco e il suo
+/// corrispondente in timeline si spostano della stessa quantità rispetto
+/// al segmento originale).
+fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
+    let mut chunks = Vec::new();
+    for segment in segments {
+        let mut chunk_end = segment.source_end;
+        loop {
+            let chunk_start = (chunk_end - BEHIND_CHUNK_FRAMES + 1).max(segment.source_start);
+            let offset = chunk_start - segment.source_start;
+            chunks.push(MediaSegment {
+                media_id: segment.media_id,
+                source_start: chunk_start,
+                source_end: chunk_end,
+                timeline_start: segment.timeline_start + offset,
+            });
+            if chunk_start == segment.source_start {
+                break;
+            }
+            chunk_end = chunk_start - 1;
+        }
+    }
+    chunks
+}
+
 /// Assicura che `open[media_id]` sia un decoder posizionato in modo da
 /// poter coprire `segment_start` decodificando in avanti in modo
 /// efficiente. Un decoder già aperto per questo media viene riusato —
@@ -961,7 +1016,11 @@ fn walk_and_fill(
     // riproduzione ha sempre priorità sul buffer dietro la testina, che è
     // solo una comodità per uno scrub avanti-indietro ravvicinato (vedi
     // doc di `DEFAULT_BEHIND_SECS`) — se il budget si esaurisce già qui, dietro
-    // non riceve nulla in questo ciclo, correttamente.
+    // non riceve nulla in questo ciclo, correttamente. Qui `source_start`
+    // di ogni segmento È già la testina (o il bordo del blocco
+    // precedente), quindi un solo seek per segmento decodifica già dal
+    // più vicino al più lontano — nessun bisogno di spezzarla in blocchi
+    // come sotto.
     if let ControlFlow::Break(outcome) = fill_segments(&forward_segments, &ctx, open) {
         return outcome;
     }
@@ -975,7 +1034,27 @@ fn walk_and_fill(
     // decodificata (non è mai stato un problema di posizionamento, è che
     // le due finestre vogliono il decoder in due punti diversi nello
     // stesso momento).
-    if let ControlFlow::Break(outcome) = fill_segments(&behind_segments, &ctx, open_behind) {
+    //
+    // Spezzata in blocchi dal più vicino al più lontano
+    // (`chunk_behind_segments_near_to_far`, vedi doc di
+    // `BEHIND_CHUNK_FRAMES`): un blocco lontano ha sempre `source_start`
+    // *dietro* a dove il decoder è appena arrivato (il blocco appena
+    // prima, più vicino) — un seek reale ci vuole sempre, a prescindere
+    // da quanto la testina *globale* si sia mossa (`went_backward` del
+    // ciclo intero non c'entra qui), quindi `went_backward: true` forzato
+    // solo per questa chiamata: `position_decoder` lo richiede per
+    // riconoscere "questo decoder ha superato la nuova posizione" quando
+    // la distanza rientra comunque nella soglia adattiva (vedi la sua
+    // doc). Il primo blocco (il più vicino) resta comunque `Reused`
+    // quando il decoder era già lì da un ciclo precedente: la condizione
+    // in `position_decoder` scatta solo se il decoder è *già oltre*
+    // l'inizio del blocco richiesto, mai per un decoder ancora dietro.
+    let behind_chunks = chunk_behind_segments_near_to_far(&behind_segments);
+    let behind_ctx = FillContext {
+        went_backward: true,
+        ..ctx
+    };
+    if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
         return outcome;
     }
     WalkOutcome::SETTLED
@@ -1435,6 +1514,57 @@ mod tests {
         assert_eq!(segments[0].source_end, 149);
     }
 
+    /// Un segmento dietro la testina più lungo di `BEHIND_CHUNK_FRAMES`
+    /// va spezzato in blocchi dal bordo vicino (`source_end`) al bordo
+    /// lontano (`source_start`), ognuno da al più `BEHIND_CHUNK_FRAMES`,
+    /// senza buchi né sovrapposizioni — vedi doc di
+    /// `chunk_behind_segments_near_to_far`.
+    #[test]
+    fn chunk_behind_segments_near_to_far_splits_from_the_near_edge_without_gaps() {
+        let (media_a, _) = two_media_ids();
+        let segment = MediaSegment {
+            media_id: media_a,
+            source_start: 100,
+            source_end: 132, // 33 frame: 2 blocchi da 15 + 1 da 3
+            timeline_start: 500,
+        };
+
+        let chunks = chunk_behind_segments_near_to_far(&[segment]);
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| (c.source_start, c.source_end))
+                .collect::<Vec<_>>(),
+            vec![(118, 132), (103, 117), (100, 102)],
+            "dal bordo vicino (132) al lontano (100), ognuno da al più BEHIND_CHUNK_FRAMES"
+        );
+        // `timeline_start` segue lo stesso offset di `source_start`
+        // rispetto al segmento originale (mappatura affine, vedi doc).
+        assert_eq!(chunks[0].timeline_start, 518);
+        assert_eq!(chunks[1].timeline_start, 503);
+        assert_eq!(chunks[2].timeline_start, 500);
+    }
+
+    /// Un segmento più corto di un blocco produce un solo blocco
+    /// identico al segmento originale — nessuna divisione superflua.
+    #[test]
+    fn chunk_behind_segments_near_to_far_keeps_a_short_segment_whole() {
+        let (media_a, _) = two_media_ids();
+        let segment = MediaSegment {
+            media_id: media_a,
+            source_start: 40,
+            source_end: 44,
+            timeline_start: 40,
+        };
+
+        let chunks = chunk_behind_segments_near_to_far(&[segment]);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].source_start, 40);
+        assert_eq!(chunks[0].source_end, 44);
+    }
+
     /// Test end-to-end: il worker attraversa un taglio netto tra due
     /// media diversi in un'unica finestra di lookahead, bufferizzando
     /// *entrambi* senza bisogno di alcun caso speciale — esattamente il
@@ -1481,7 +1611,14 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
+        let render_ahead = RenderAhead::spawn(
+            project,
+            timeline_id,
+            100_000_000,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+        );
         // Target vicino alla fine della prima clip: la finestra di
         // lookahead (3s = 75 frame a 25fps) attraversa abbondantemente il
         // taglio a 50.
@@ -1545,7 +1682,14 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
+        let render_ahead = RenderAhead::spawn(
+            project,
+            timeline_id,
+            100_000_000,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+        );
         render_ahead.set_target(40);
 
         // Aspetta che il buffer arrivi almeno fino al taglio.
@@ -1828,7 +1972,7 @@ mod tests {
             0,
             generous_budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -1888,7 +2032,7 @@ mod tests {
             60,
             generous_budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(60),
@@ -1902,6 +2046,88 @@ mod tests {
         assert!(
             ranges.iter().any(|&(s, e)| s <= 60 && e >= 99),
             "la finestra in avanti deve comunque essere coperta normalmente: {ranges:?}"
+        );
+    }
+
+    /// Regressione segnalata dall'utente: durante uno scrub all'indietro
+    /// il frame utile *subito* è quello adiacente alla testina (il bordo
+    /// vicino della finestra dietro), non quello sul bordo lontano — ma
+    /// decodificare un intero segmento dietro in un solo seek (come per
+    /// la finestra in avanti) produce i frame nell'ordine sbagliato:
+    /// ffmpeg decodifica solo in avanti da `source_start` (lontano) verso
+    /// `source_end` (vicino), quindi il frame più utile arriva per
+    /// ultimo. Con un budget che copre la finestra in avanti (piccola,
+    /// vicino alla fine della clip) più solo il primo blocco della
+    /// finestra dietro (`BEHIND_CHUNK_FRAMES`), il frame adiacente alla
+    /// testina deve comunque essere in cache, quello sul bordo lontano
+    /// no — prova diretta che `chunk_behind_segments_near_to_far`
+    /// riordina davvero la priorità di decodifica, non solo sulla carta.
+    #[test]
+    fn walk_and_fill_decodes_the_behind_window_nearest_frames_first_under_a_tight_budget() {
+        // GOP=1 (ogni frame un keyframe, come un proxy): un seek atterra
+        // esattamente dove richiesto, così il budget necessario per ogni
+        // blocco è prevedibile in frame esatti — con un GOP lungo (video
+        // "normale") il seek atterrerebbe al keyframe più vicino
+        // *prima* del bersaglio, rendendo il conto qui sotto fragile
+        // senza aggiungere nulla alla cosa sotto test (l'ordine di
+        // priorità dei blocchi, non quanto costi arrivarci).
+        let path =
+            make_test_clip_with_short_gop("vv-app-render-ahead-test", "behind_priority.mp4", 4, 1);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 100)],
+            muted: false,
+        }]));
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        // Testina a 95: finestra in avanti minuscola (solo [95,99], la
+        // clip finisce a 100), finestra dietro normale (2s = 50 frame,
+        // [45,94]). Budget per la finestra in avanti (5 frame) più *solo*
+        // il primo blocco della finestra dietro (`BEHIND_CHUNK_FRAMES`
+        // = 15 frame, [80,94]) — non abbastanza per raggiungere il bordo
+        // lontano a 45.
+        let frame_bytes = 320 * 240 * 3 / 2;
+        let tight_budget = frame_bytes * (5 + 15);
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            &mut open_behind,
+            95,
+            tight_budget,
+            false,
+            false,                  // proxy_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
+            &AtomicI64::new(95),
+        );
+
+        assert!(
+            caches.contains(media_a, 94),
+            "il frame adiacente alla testina (bordo vicino della finestra dietro) deve essere \
+             tra i primi decodificati, quindi in cache anche con un budget stretto"
+        );
+        assert!(
+            !caches.contains(media_a, 45),
+            "il frame sul bordo lontano della finestra dietro non deve essere raggiunto prima \
+             di quelli vicini alla testina, con un budget che copre solo il primo blocco"
         );
     }
 
@@ -2018,7 +2244,7 @@ mod tests {
             0,
             tiny_budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -2088,7 +2314,7 @@ mod tests {
             0,
             100_000_000,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &drifted_target,
@@ -2169,7 +2395,7 @@ mod tests {
             40,
             budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
@@ -2252,7 +2478,7 @@ mod tests {
             40,
             budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
@@ -2409,7 +2635,7 @@ mod tests {
             0,
             total_budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -2429,7 +2655,7 @@ mod tests {
             200,
             total_budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(200),
@@ -2477,7 +2703,14 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
+        let render_ahead = RenderAhead::spawn(
+            project,
+            timeline_id,
+            100_000_000,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+        );
         render_ahead.set_target(80);
 
         let start = std::time::Instant::now();
@@ -2551,7 +2784,14 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
+        let render_ahead = RenderAhead::spawn(
+            project,
+            timeline_id,
+            100_000_000,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+        );
         render_ahead.set_target(100);
 
         // Attendi non solo che il buffer copra 100, ma che i cicli di
@@ -2739,7 +2979,7 @@ mod tests {
                 from,
                 budget,
                 went_backward,
-                false, // proxy_enabled: irrilevante per questo test
+                false,                  // proxy_enabled: irrilevante per questo test
                 DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(from),
@@ -2766,7 +3006,7 @@ mod tests {
             80,
             budget,
             true,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(80),
@@ -2847,7 +3087,7 @@ mod tests {
             300,
             budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(300),
@@ -2870,7 +3110,7 @@ mod tests {
             270,
             budget,
             true,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(270),
@@ -2955,7 +3195,7 @@ mod tests {
             10,
             budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(10),
@@ -2971,7 +3211,7 @@ mod tests {
             target,
             budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
+            false,                  // proxy_enabled: irrilevante per questo test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(target),
@@ -2987,7 +3227,7 @@ mod tests {
                 target,
                 budget,
                 false,
-                false, // proxy_enabled: irrilevante per questo test
+                false,                  // proxy_enabled: irrilevante per questo test
                 DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(target),
