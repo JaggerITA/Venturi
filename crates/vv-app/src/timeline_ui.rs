@@ -297,6 +297,112 @@ fn draw_track_headers(
     );
 }
 
+/// Intervallo (in secondi) tra due tacche *maggiori* del righello, scelto
+/// dalla sequenza "1-2-5" (stessa usata dai grafici per assi leggibili) —
+/// il primo valore che tiene le tacche ad almeno `MIN_MAJOR_TICK_PX`
+/// l'una dall'altra alla scala corrente. Necessario perché
+/// `pixels_per_sec` copre un range enorme (0.1-800, vedi
+/// `MIN_PIXELS_PER_SEC`/`MAX_PIXELS_PER_SEC`): un intervallo fisso
+/// sarebbe illeggibile a un estremo o inutilmente denso all'altro.
+fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
+    const MIN_MAJOR_TICK_PX: f32 = 70.0;
+    const CANDIDATES: &[f64] = &[
+        1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0,
+        14400.0,
+    ];
+    CANDIDATES
+        .iter()
+        .copied()
+        .find(|&c| c as f32 * pixels_per_sec >= MIN_MAJOR_TICK_PX)
+        .unwrap_or(*CANDIDATES.last().unwrap())
+}
+
+/// `h:mm:ss` se >= un'ora, altrimenti `m:ss` — stesso stile sintetico dei
+/// timecode di un NLE per le etichette del righello (non serve la
+/// precisione al frame qui: quella la danno le tacche minori disegnate
+/// da `draw_ruler_ticks` quando lo zoom la rende leggibile).
+fn format_timecode(total_secs: f64) -> String {
+    let total_secs = total_secs.round().max(0.0) as i64;
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Disegna le tacche del righello: maggiori (linea a tutta altezza +
+/// etichetta mm:ss/h:mm:ss, intervallo adattivo — vedi
+/// `nice_tick_interval_secs`) sempre, minori (un trattino corto per ogni
+/// singolo frame, senza etichetta) solo quando lo zoom le rende
+/// effettivamente distinguibili (`px_per_frame` abbastanza largo) —
+/// sotto quella soglia sarebbero solo un addensamento illeggibile.
+fn draw_ruler_ticks(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    visible_x: egui::Rect,
+    pixels_per_sec: f32,
+    fps: f64,
+) {
+    if !visible_x.is_positive() {
+        return; // righello completamente fuori dal viewport scrollato
+    }
+    let tick_color = egui::Color32::from_gray(110);
+    let label_color = egui::Color32::from_gray(200);
+    let minor_color = egui::Color32::from_gray(70);
+
+    // Range in secondi/frame effettivamente visibile, non l'intera
+    // durata della timeline — vedi il commento al sito di chiamata sul
+    // perché (migliaia di tacche fuori schermo altrimenti).
+    let visible_start_secs = ((visible_x.min.x - origin.x) / pixels_per_sec.max(1e-6)) as f64;
+    let visible_end_secs = ((visible_x.max.x - origin.x) / pixels_per_sec.max(1e-6)) as f64;
+
+    let major_secs = nice_tick_interval_secs(pixels_per_sec);
+    let first_major = (visible_start_secs / major_secs).floor() as i64;
+    let last_major = (visible_end_secs / major_secs).ceil() as i64;
+    for i in first_major..=last_major {
+        let secs = i as f64 * major_secs;
+        if secs < 0.0 {
+            continue;
+        }
+        let x = origin.x + (secs * pixels_per_sec as f64) as f32;
+        painter.line_segment(
+            [
+                egui::pos2(x, origin.y),
+                egui::pos2(x, origin.y + RULER_HEIGHT),
+            ],
+            egui::Stroke::new(1.0, tick_color),
+        );
+        painter.text(
+            egui::pos2(x + 3.0, origin.y + 2.0),
+            egui::Align2::LEFT_TOP,
+            format_timecode(secs),
+            egui::FontId::proportional(10.0),
+            label_color,
+        );
+    }
+
+    const MIN_FRAME_TICK_PX: f32 = 6.0;
+    let px_per_frame = pixels_per_sec / fps.max(1e-9) as f32;
+    if px_per_frame >= MIN_FRAME_TICK_PX {
+        let first_frame = (visible_start_secs * fps).floor().max(0.0) as i64;
+        let last_frame = (visible_end_secs * fps).ceil().max(0.0) as i64;
+        const MINOR_TICK_HEIGHT: f32 = 6.0;
+        for frame in first_frame..=last_frame {
+            let x = origin.x + frame as f32 * px_per_frame;
+            painter.line_segment(
+                [
+                    egui::pos2(x, origin.y + RULER_HEIGHT - MINOR_TICK_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_HEIGHT),
+                ],
+                egui::Stroke::new(1.0, minor_color),
+            );
+        }
+    }
+}
+
 /// Ritorna `Some((media, frame))` se in questo frame l'utente ha rilasciato
 /// sulla timeline un elemento trascinato dal media pool: il chiamante (che
 /// ha accesso al media pool e alla history) se ne occupa, questa funzione si
@@ -425,6 +531,21 @@ pub fn show_timeline(
                 if ruler_resp.clicked() {
                     state.clear_selection();
                 }
+
+                // Marker temporali (tipici di un NLE: tacche maggiori con
+                // etichetta mm:ss/h:mm:ss a intervallo "pulito" adattivo
+                // allo zoom, più tacche minori per singolo frame quando
+                // lo zoom le rende leggibili) — richiesti per correlare a
+                // vista un fenomeno sulla timeline con quanti secondi/
+                // frame corrisponde, invece di dover stimare a occhio
+                // dalla sola larghezza delle clip.
+                // Limitata al rettangolo di clip *visibile* (la ScrollArea
+                // orizzontale ne ritaglia uno più stretto del content_width
+                // reale): senza, una timeline lunga zoomata al livello del
+                // singolo frame itererebbe migliaia di tacche fuori
+                // schermo a ogni repaint.
+                let visible_x = ui.clip_rect().intersect(ruler_rect);
+                draw_ruler_ticks(&painter, origin, visible_x, state.pixels_per_sec, fps);
 
                 // Striscia "buffered": una sottile fascia sul bordo inferiore
                 // del righello, colorata dove il player ha già frame in cache
@@ -1436,6 +1557,24 @@ fn snap_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deve restare tra le prime candidate (1-2-5) a bassissimo zoom, e
+    /// salire abbastanza da tenere le tacche leggibili anche a zoom
+    /// molto alto — non un valore fisso qualunque sia `pixels_per_sec`.
+    #[test]
+    fn nice_tick_interval_secs_grows_with_zoom_to_keep_ticks_readable() {
+        assert_eq!(nice_tick_interval_secs(800.0), 1.0);
+        assert_eq!(nice_tick_interval_secs(60.0), 2.0);
+        assert_eq!(nice_tick_interval_secs(10.0), 10.0);
+        assert_eq!(nice_tick_interval_secs(0.1), 900.0);
+    }
+
+    #[test]
+    fn format_timecode_switches_to_hours_only_past_one_hour() {
+        assert_eq!(format_timecode(5.0), "0:05");
+        assert_eq!(format_timecode(65.0), "1:05");
+        assert_eq!(format_timecode(3665.0), "1:01:05");
+    }
 
     fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual {
         ClipVisual {
