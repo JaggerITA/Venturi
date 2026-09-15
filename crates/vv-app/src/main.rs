@@ -183,15 +183,17 @@ struct VibeVideoApp {
     proxy_worker: Option<proxy_worker::ProxyWorker>,
     /// Toggle "cache read-ahead" (menu Timeline > Proxy, dove vive anche
     /// il toggle proxy — l'utente vuole provare se coi proxy attivi
-    /// serva ancora): quando `false`, `render_ahead` bufferizza solo il
-    /// frame esatto sotto la testina, niente avanti né dietro (vedi doc
-    /// di `render_ahead::RenderAhead::set_read_ahead_enabled`). Attivo
-    /// di default: senza, lo scrub/playback tornerebbe a dipendere
-    /// interamente dalla latenza di un seek+decode sincrono a ogni
-    /// singolo frame, esattamente ciò che il read-ahead esiste per
-    /// evitare — utile *disattivarlo* solo per misurare se, con un
-    /// proxy tutto-intra attivo (seek economico quanto un decode
-    /// singolo), quella latenza resta comunque trascurabile.
+    /// serva ancora): quando `false`, `render_ahead` riduce la finestra
+    /// bufferizzata al margine minimo (`render_ahead::MIN_MARGIN_FRAMES`,
+    /// pochi frame avanti e dietro, non i secondi normali — vedi doc di
+    /// `render_ahead::RenderAhead::set_read_ahead_enabled` sul perché
+    /// non è un margine letteralmente nullo). Attivo di default: senza,
+    /// lo scrub/playback tornerebbe a dipendere quasi interamente dalla
+    /// latenza di un seek+decode a ogni singolo frame, esattamente ciò
+    /// che il read-ahead esiste per evitare — utile *disattivarlo* solo
+    /// per misurare se, con un proxy tutto-intra attivo (seek economico
+    /// quanto un decode singolo), quella latenza resta comunque
+    /// trascurabile.
     read_ahead_enabled: bool,
 
     /// Clip la cui anteprima è attualmente mostrata: guida sia il player
@@ -2436,7 +2438,7 @@ impl eframe::App for VibeVideoApp {
                             .checkbox(&mut self.read_ahead_enabled, "Cache read-ahead")
                             .on_hover_text(
                                 "Bufferizza in anticipo qualche secondo avanti/dietro la testina, \
-                                 invece del solo frame esatto sotto di essa. Disattivalo per \
+                                 invece di un margine minimo di pochi frame. Disattivalo per \
                                  verificare se serve ancora con i proxy attivi (un seek su un \
                                  proxy tutto-intra è già economico quanto un decode singolo).",
                             )

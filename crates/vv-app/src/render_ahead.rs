@@ -54,6 +54,21 @@ const LOOKAHEAD_SECS: f64 = 3.0;
 /// avanti verso una zona mai visitata.
 const BEHIND_SECS: f64 = 2.0;
 
+/// Finestra (avanti e dietro, in frame) usata al posto di
+/// `LOOKAHEAD_SECS`/`BEHIND_SECS` quando il toggle "cache read-ahead" è
+/// disattivo (`RenderAhead::set_read_ahead_enabled`) — non zero: un
+/// margine letteralmente nullo (un solo frame, "decodifica esattamente
+/// quel che serve ora") è strutturalmente fragile anche svegliando il
+/// worker subito a ogni cambio di target (`Command::Wake`), perché resta
+/// comunque un design senza alcun cuscinetto contro la normale
+/// variabilità di timing (contesa CPU, scheduling del SO) — bug
+/// segnalato dall'utente: playback a scatti anche a 1x, indipendente dal
+/// proxy. Volutamente piccolo (pochi frame, non i secondi del read-ahead
+/// normale): l'obiettivo del toggle resta misurare l'effetto dei proxy
+/// con un anticipo minimo, non riattivare in silenzio un vero
+/// read-ahead.
+const MIN_MARGIN_FRAMES: FrameIdx = 4;
+
 /// Intervallo di poll del thread: ogni ciclo rivaluta il target corrente
 /// e completa quel che manca fino all'orizzonte di lookahead — una volta
 /// raggiunto, i cicli successivi trovano tutto già in cache e tornano
@@ -90,6 +105,13 @@ enum Command {
     /// risoluzione sbagliata) e i decoder aperti — non solo leggere un
     /// valore aggiornato al prossimo ciclo.
     SetProxyEnabled(bool),
+    /// Nessun payload: fa uscire subito il worker dall'attesa su
+    /// `recv_timeout` invece di aspettare fino a `POLL_INTERVAL` — vedi
+    /// `RenderAhead::set_target`. Non richiede alcuna gestione speciale
+    /// nei punti in cui i comandi vengono letti: riceverlo e basta fa
+    /// proseguire il loop, che rilegge `target` come farebbe comunque
+    /// al timeout naturale.
+    Wake,
     Stop,
 }
 
@@ -126,14 +148,15 @@ pub struct RenderAhead {
     /// completato almeno un ciclo non si sa ancora se c'è lavoro da fare.
     caught_up: Arc<AtomicBool>,
     /// Toggle "cache read-ahead" (attivo di default): quando `false`, la
-    /// finestra da bufferizzare si riduce al solo frame sotto la testina
-    /// (niente avanti, niente dietro) — vedi doc di
-    /// `set_read_ahead_enabled`. Un semplice atomico come `target`, non
-    /// un `Command`: a differenza del toggle proxy non serve reagire
-    /// alla transizione con un effetto collaterale sincrono (svuotare
-    /// la cache) — una finestra che si restringe lascia comunque
-    /// scartare il resto al prossimo `reconcile`, uno che si allarga lo
-    /// riempie di nuovo da sé.
+    /// finestra da bufferizzare si riduce al margine minimo
+    /// (`MIN_MARGIN_FRAMES`, pochi frame avanti e dietro, non i secondi
+    /// del read-ahead normale) — vedi doc di `set_read_ahead_enabled`.
+    /// Un semplice atomico come `target`, non un `Command`: a
+    /// differenza del toggle proxy non serve reagire alla transizione
+    /// con un effetto collaterale sincrono (svuotare la cache) — una
+    /// finestra che si restringe lascia comunque scartare il resto al
+    /// prossimo `reconcile`, una che si allarga lo riempie di nuovo da
+    /// sé.
     read_ahead_enabled: Arc<AtomicBool>,
     tx: mpsc::Sender<Command>,
     handle: Option<JoinHandle<()>>,
@@ -182,18 +205,28 @@ impl RenderAhead {
     /// da zero la finestra a ogni ciclo, quindi non serve distinguere i
     /// due casi (a differenza di `DecodeAhead::set_target`/`seek`). Se il
     /// target è realmente cambiato (non la chiamata ridondante che
-    /// `sync_render_ahead` fa comunque a ogni frame UI), segna subito
-    /// "non ancora bufferizzato": il worker lo confermerà/correggerà al
-    /// suo prossimo ciclo (al più `POLL_INTERVAL` dopo), ma senza questo
-    /// aggiornamento *immediato* la UI potrebbe leggere `is_caught_up()`
-    /// ancora `true` (stantio, da prima del cambio) nell'unico repaint
-    /// che segue subito l'interazione e smettere di richiederne altri —
-    /// lo stesso bug di fondo che questo intero meccanismo esiste per
-    /// risolvere, spostato di un frame invece che eliminato.
+    /// `sync_render_ahead` fa comunque a ogni frame UI):
+    ///
+    /// - segna subito "non ancora bufferizzato": il worker lo
+    ///   confermerà/correggerà al suo prossimo ciclo, ma senza questo
+    ///   aggiornamento *immediato* la UI potrebbe leggere
+    ///   `is_caught_up()` ancora `true` (stantio, da prima del cambio)
+    ///   nell'unico repaint che segue subito l'interazione e smettere
+    ///   di richiederne altri;
+    /// - manda `Command::Wake` per far reagire il worker subito invece
+    ///   di aspettare fino a `POLL_INTERVAL` (50ms) — con una finestra
+    ///   piena (read-ahead attivo) quei 50ms sono invisibili, ma con la
+    ///   finestra ridotta al margine minimo (read-ahead disattivo,
+    ///   vedi `set_read_ahead_enabled`) diventavano un tetto reale alla
+    ///   fluidità del playback: il worker non produceva più di un
+    ///   frame nuovo ogni 50ms, sotto qualunque framerate video comune
+    ///   (bug segnalato dall'utente, playback a scatti anche a 1x con
+    ///   read-ahead disattivo, indipendente dal proxy).
     pub fn set_target(&self, frame: FrameIdx) {
         let previous = self.target.swap(frame, Ordering::Relaxed);
         if previous != frame {
             self.caught_up.store(false, Ordering::Relaxed);
+            let _ = self.tx.send(Command::Wake);
         }
     }
 
@@ -202,11 +235,20 @@ impl RenderAhead {
     }
 
     /// Toggle "cache read-ahead": `false` riduce la finestra bufferizzata
-    /// al solo frame sotto la testina (niente avanti, niente dietro),
-    /// per verificare se serve ancora davvero con i proxy attivi (un
-    /// seek su un proxy tutto-intra costa quanto decodificare un frame
-    /// singolo, quindi in teoria il read-ahead diventa superfluo — non
-    /// per forza vero nella pratica, da qui il toggle per provarlo).
+    /// al margine minimo (`MIN_MARGIN_FRAMES`), per verificare se un
+    /// vero read-ahead di secondi serve ancora davvero con i proxy
+    /// attivi (un seek su un proxy tutto-intra costa quanto decodificare
+    /// un frame singolo, quindi in teoria il read-ahead diventa
+    /// superfluo — non per forza vero nella pratica, da qui il toggle
+    /// per provarlo). Non è un margine *zero*: un margine letteralmente
+    /// nullo (un solo frame, "decodifica esattamente quel che serve ora
+    /// e basta") si è rivelato strutturalmente fragile anche svegliando
+    /// il worker subito a ogni cambio di target (`set_target` →
+    /// `Command::Wake`) — resta comunque un design a margine minimo, non
+    /// zero, robusto contro la variabilità di timing (contesa CPU,
+    /// scheduling) che la sola reattività non può azzerare del tutto
+    /// (bug segnalato dall'utente: playback a scatti anche a 1x con
+    /// read-ahead disattivo).
     /// Segna subito "non ancora bufferizzato": la finestra sta per
     /// cambiare dimensione, l'utente deve vedere la UI reagire.
     pub fn set_read_ahead_enabled(&self, enabled: bool) {
@@ -422,6 +464,7 @@ fn worker_loop(
                     open.clear();
                     open_behind.clear();
                 }
+                Ok(Command::Wake) => {}
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -440,6 +483,7 @@ fn worker_loop(
                     open.clear();
                     open_behind.clear();
                 }
+                Ok(Command::Wake) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -461,6 +505,7 @@ fn worker_loop(
                     open.clear();
                     open_behind.clear();
                 }
+                Command::Wake => {}
             }
         }
 
@@ -803,22 +848,20 @@ fn walk_and_fill(
         return WalkOutcome::SETTLED;
     };
     let fps = timeline.fps.as_f64().max(1e-9);
-    // Col read-ahead disattivo, la finestra si riduce al solo frame
-    // sotto la testina — niente avanti, niente dietro (vedi doc di
-    // `RenderAhead::set_read_ahead_enabled`). `end_frame = from_frame +
-    // 1` copre esattamente `[from_frame, from_frame]`, `start_frame =
-    // from_frame` rende `collect_media_segments_behind` un giro a vuoto
-    // (nessun frame dietro voluto) — nessun caso speciale in più nel
-    // resto della funzione, sono ancora `collect_media_segments`/
-    // `collect_media_segments_behind` a decidere cosa c'è da fare, solo
-    // con una finestra diversa in ingresso.
+    // Col read-ahead disattivo, la finestra si riduce al margine minimo
+    // (`MIN_MARGIN_FRAMES`, non zero — vedi doc lì e di
+    // `RenderAhead::set_read_ahead_enabled`) invece dei secondi normali
+    // — nessun caso speciale in più nel resto della funzione, sono
+    // ancora `collect_media_segments`/`collect_media_segments_behind` a
+    // decidere cosa c'è da fare, solo con una finestra diversa in
+    // ingresso.
     let (lookahead_frames, behind_frames) = if read_ahead_enabled {
         (
             ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1),
             (BEHIND_SECS * fps).round() as FrameIdx,
         )
     } else {
-        (1, 0)
+        (MIN_MARGIN_FRAMES, MIN_MARGIN_FRAMES)
     };
     let end_frame = from_frame + lookahead_frames;
     let start_frame = (from_frame - behind_frames).max(0);
@@ -1776,12 +1819,12 @@ mod tests {
     }
 
     /// Toggle "cache read-ahead" disattivo: la finestra si riduce al
-    /// solo frame sotto la testina, niente avanti né dietro — anche con
-    /// budget generoso e una zona mai vista prima (che con read-ahead
-    /// attivo farebbe scattare sia la finestra in avanti sia quella di
-    /// retention, vedi il test sopra).
+    /// margine minimo (`MIN_MARGIN_FRAMES`), non ai secondi normali —
+    /// anche con budget generoso e una zona mai vista prima (che con
+    /// read-ahead attivo farebbe scattare sia la finestra in avanti sia
+    /// quella di retention, vedi il test sopra).
     #[test]
-    fn walk_and_fill_buffers_only_the_exact_frame_when_read_ahead_is_disabled() {
+    fn walk_and_fill_buffers_only_a_minimal_margin_when_read_ahead_is_disabled() {
         let path = make_test_clip("vv-app-render-ahead-test", "no_read_ahead.mp4", 4);
         let mut project = Project::default();
         let media_a = project.media_pool.insert(MediaItem {
@@ -1822,22 +1865,23 @@ mod tests {
             &AtomicI64::new(60),
         );
 
-        // [0,60], non [(60,60)]: con keyint di default (250) e una clip
+        // [0,63], non [(60,63)]: con keyint di default (250) e una clip
         // di soli 100 frame, l'unico keyframe è a 0 — raggiungere il
-        // frame 60 richiede comunque di decodificare in sequenza da lì
-        // (nessun modo di saltare i frame intermedi), e quei frame
-        // restano in cache perché genuinamente già decodificati. Quel
-        // che conta per il toggle è che la finestra *non vada oltre* 60
-        // (col read-ahead attivo arriverebbe fino a 99, la fine della
-        // clip — vedi il test sopra).
+        // frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede comunque di
+        // decodificare in sequenza da lì (nessun modo di saltare i
+        // frame intermedi), e quei frame restano in cache perché
+        // genuinamente già decodificati. Quel che conta per il toggle è
+        // che la finestra *non vada oltre* 63 (col read-ahead attivo
+        // arriverebbe fino a 99, la fine della clip — vedi il test
+        // sopra): il margine minimo è pochi frame, non secondi.
         assert_eq!(
             caches.cached_ranges(media_a),
-            vec![(0, 60)],
-            "col read-ahead disattivo la finestra non deve estendersi oltre la testina"
+            vec![(0, 60 + MIN_MARGIN_FRAMES - 1)],
+            "col read-ahead disattivo la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
             outcome.caught_up,
-            "una finestra di un solo frame, già coperta, deve risultare caught_up"
+            "una finestra minima, già coperta, deve risultare caught_up"
         );
     }
 
@@ -2457,6 +2501,81 @@ mod tests {
                 "timeout su scrub indietro: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Regressione per il bug segnalato dall'utente: playback a scatti
+    /// anche a 1x con `read_ahead_enabled=false`, perché `set_target`
+    /// aggiornava solo un atomico letto dal worker al più ogni
+    /// `POLL_INTERVAL` (50ms) — un tetto reale a ~20 frame/sec a
+    /// prescindere da quanto la decodifica fosse veloce (succedeva
+    /// anche coi proxy).
+    ///
+    /// Verifica la sola sveglia immediata (`Command::Wake`), isolata dal
+    /// margine minimo: un salto isolato per volta, con una scadenza
+    /// stretta (25ms, metà del vecchio `POLL_INTERVAL`) *dopo* aver
+    /// aspettato che il worker si stabilizzi sul target precedente —
+    /// senza sveglia immediata il worker rilegge `target` solo a un
+    /// prossimo ciclo di poll fisso, che cade in un istante scorrelato
+    /// da quando `set_target` è stato chiamato: il tempo di attesa
+    /// sarebbe distribuito uniformemente tra 0 e 50ms, quindi ripetuto
+    /// su più salti indipendenti la probabilità che *tutti* restino
+    /// sotto i 25ms per puro caso crolla rapidamente (verificato:
+    /// disabilitando temporaneamente l'invio di `Command::Wake` questo
+    /// test fallisce in modo riproducibile).
+    #[test]
+    fn render_ahead_reacts_to_each_target_change_faster_than_the_old_poll_interval() {
+        let path = make_test_clip("vv-app-render-ahead-test", "wake_on_change.mp4", 2);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 50,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 50)],
+            muted: false,
+        }]));
+
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, false);
+
+        let wait_for = |frame: FrameIdx| {
+            let start = std::time::Instant::now();
+            loop {
+                if render_ahead.get_frame(media_a, frame).is_some() {
+                    return start.elapsed();
+                }
+                assert!(
+                    start.elapsed() < Duration::from_millis(25),
+                    "frame {frame} non pronto entro una scadenza compatibile con la sveglia immediata"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+
+        // Primo target: nessuna scadenza stretta, il worker deve solo
+        // avviarsi (apertura del decoder inclusa).
+        render_ahead.set_target(0);
+        loop {
+            if render_ahead.get_frame(media_a, 0).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // Da qui in poi, ogni salto isolato ha 25ms per essere pronto.
+        for target in [10, 20, 30, 40] {
+            render_ahead.set_target(target);
+            wait_for(target);
         }
     }
 
