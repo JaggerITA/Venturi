@@ -490,6 +490,12 @@ impl OpenDecoder {
                 None => observed,
             });
         }
+        if debug_enabled() {
+            eprintln!(
+                "[render_ahead] ATTERRAGGIO idx={idx} last_keyframe_landed_prima={:?} estimated_gop_dopo={:?}",
+                self.last_keyframe_landed, self.estimated_gop
+            );
+        }
         self.last_keyframe_landed = Some(idx);
     }
 }
@@ -1274,6 +1280,17 @@ fn fill_segments(
             // che rende la finestra corrente stale.
             let live = ctx.target.load(Ordering::Relaxed);
             if (live - ctx.from_frame).abs() > threshold_frames {
+                if debug_enabled() {
+                    eprintln!(
+                        "[render_ahead] INTERROTTO media={:?} segment=[{},{}] live={live} from_frame={} threshold={threshold_frames} estimated_gop={:?} last_keyframe_landed={:?}",
+                        segment.media_id,
+                        segment.source_start,
+                        segment.source_end,
+                        ctx.from_frame,
+                        open.get(&segment.media_id).unwrap().estimated_gop,
+                        open.get(&segment.media_id).unwrap().last_keyframe_landed,
+                    );
+                }
                 return ControlFlow::Break(WalkOutcome {
                     interrupted: true,
                     caught_up: false,
