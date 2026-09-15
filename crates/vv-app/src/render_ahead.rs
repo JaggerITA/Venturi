@@ -70,30 +70,6 @@ pub const DEFAULT_BEHIND_SECS: f64 = 2.0;
 /// aggressivo, non da anticipo vero e proprio.
 const MIN_MARGIN_FRAMES: FrameIdx = 4;
 
-/// Margine extra (in secondi), oltre a `lookahead_secs`/`behind_secs`,
-/// entro cui un frame appena uscito dalla finestra voluta *non* viene
-/// scartato da `reconcile` — usato solo per decidere cosa tenere/sfrattare
-/// (`SharedFrameCache::reconcile`), mai per decidere cosa decodificare
-/// attivamente (`fill_segments` lavora sempre sulla finestra stretta,
-/// invariata). Risolve uno spreco reale segnalato dall'utente: scrub
-/// avanti-indietro ravvicinato (il caso comune, non un salto isolato)
-/// ricalcolava daccapo lo stesso transito ad ogni piccolo movimento,
-/// perché la finestra stretta lo scartava un istante dopo averlo appena
-/// decodificato. Con questo margine quel poco lavoro resta disponibile
-/// per qualche ciclo in più, sopravvivendo a un piccolo avanti-indietro.
-///
-/// Deliberatamente un unico valore fisso, uguale avanti e indietro:
-/// tenerlo semplice conta più che ottimizzarlo, ed è comunque limitato
-/// (non "tieni tutto per sempre" — quel tentativo, provato e poi
-/// revertato, aveva fatto crescere la cache senza limite, rubando CPU al
-/// playback in avanti) — la finestra allargata risultante resta di
-/// dimensione fissa e prevedibile, non funzione di quanto scrub è
-/// successo finora. Non copre un salto isolato che attraversa un intero
-/// GOP lontano (quel transito resta comunque scartato subito) — lì il
-/// problema è altrove ed è già coperto dal controllo di budget in
-/// `fill_segments`.
-const RETENTION_MARGIN_SECS: f64 = 2.0;
-
 /// Dimensione (in frame) dei blocchi in cui viene spezzata la finestra
 /// *dietro* la testina prima di decodificarla (vedi
 /// `chunk_behind_segments_near_to_far`): un segmento dietro copre
@@ -1117,25 +1093,9 @@ fn walk_and_fill(
     open.retain(|id, _| forward_media.contains(id));
     open_behind.retain(|id, _| behind_media.contains(id));
 
-    // Finestra *allargata* di un margine fisso (vedi doc di
-    // `RETENTION_MARGIN_SECS`), usata solo per decidere cosa tenere in
-    // `reconcile` — mai per decidere cosa decodificare attivamente, che
-    // resta `forward_segments`/`behind_segments` sopra, invariati. Un
-    // ricalcolo pieno via `collect_media_segments`/`_behind` (non
-    // un'espansione numerica dei segmenti stretti): attraversa
-    // correttamente eventuali tagli/cambi di media nella zona di
-    // margine, esattamente come già fanno per la finestra stretta.
-    let retention_margin_frames = (RETENTION_MARGIN_SECS * fps).round() as FrameIdx;
-    let retention_end_frame = end_frame + retention_margin_frames;
-    let retention_start_frame = (start_frame - retention_margin_frames).max(0);
-    let retention_forward_segments =
-        collect_media_segments(timeline, from_frame, retention_end_frame);
-    let retention_behind_segments =
-        collect_media_segments_behind(timeline, from_frame, retention_start_frame);
-
-    let window: Vec<WantedRange> = retention_forward_segments
+    let window: Vec<WantedRange> = forward_segments
         .iter()
-        .chain(retention_behind_segments.iter())
+        .chain(behind_segments.iter())
         .map(|s| WantedRange {
             media_id: s.media_id,
             source_start: s.source_start,
@@ -2802,28 +2762,27 @@ mod tests {
             &AtomicI64::new(60),
         );
 
-        // [6,63], non [56,63]: con keyint di default (250) e una clip di
-        // soli 100 frame, l'unico keyframe è a 0 — raggiungere il frame
-        // 63 (= 60 + MIN_MARGIN_FRAMES) richiede di decodificare in
-        // sequenza da lì, e quei frame *di transito* restano in cache
-        // come sottoprodotto DURANTE il giro (vedi doc di `transit_bytes`
-        // in `fill_segments`: serve a far sì che il blocco dietro [56,59]
-        // li trovi già pronti invece di riattraversare da capo lo stesso
-        // GOP). Un `reconcile` finale li scarta di nuovo prima che
-        // `walk_and_fill` dichiari `caught_up` — ma non fino al bordo
-        // stretto (56): la finestra usata da `reconcile` è allargata del
-        // margine di trattenimento (`RETENTION_MARGIN_SECS`, 2s = 50
-        // frame a 25fps qui), quindi tiene anche un po' di transito oltre
-        // 56, fino a 56-50=6 (`max(0, ...)`, qui non tocca lo zero). Il
-        // margine è voluto (vedi la sua doc: evita di ricalcolare lo
-        // stesso transito ad ogni piccolo scrub avanti-indietro) — questo
-        // test verifica solo che la finestra *voluta* resti minima, non
-        // che la cache non contenga anche un po' di margine in più.
+        // [56,63], non un intervallo più ampio: con keyint di default
+        // (250) e una clip di soli 100 frame, l'unico keyframe è a 0 —
+        // raggiungere il frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede di
+        // decodificare in sequenza da lì, e quei frame *di transito*
+        // restano in cache come sottoprodotto DURANTE il giro (vedi doc
+        // di `transit_bytes` in `fill_segments`: serve a far sì che il
+        // blocco dietro [56,59] li trovi già pronti invece di
+        // riattraversare da capo lo stesso GOP), ma un `reconcile` finale
+        // li scarta di nuovo prima che `walk_and_fill` dichiari
+        // `caught_up` (vedi il commento lì sul perché: altrimenti la UI,
+        // che smette di richiedere repaint su `caught_up`, può restare
+        // bloccata a mostrare quel transito come se fosse "buffered" fino
+        // al prossimo repaint per altri motivi — bug segnalato
+        // dall'utente, la striscia "si ridimensiona" solo muovendo il
+        // mouse). Il riuso *tra* i due segmenti di questo stesso giro è
+        // comunque già avvenuto prima di questo `reconcile` finale, solo
+        // la sua sopravvivenza oltre la fine del giro si perde.
         assert_eq!(
             caches.cached_ranges(media_a),
-            vec![(6, 60 + MIN_MARGIN_FRAMES - 1)],
-            "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo \
-             più il margine di trattenimento"
+            vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
+            "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
             outcome.caught_up,
@@ -3378,30 +3337,29 @@ mod tests {
     /// Regressione per il bug segnalato dall'utente: uno scrub
     /// all'indietro deve rigenerare il buffer per la nuova posizione,
     /// non restare bloccato sul frame in cache più vicino. Lo scrub qui
-    /// (370 frame) è scelto apposta *oltre* la finestra di retention
-    /// dietro la testina (`DEFAULT_BEHIND_SECS` + `RETENTION_MARGIN_SECS`,
-    /// 4s = 100 frame a 25fps): un vero scrub oltre quella finestra deve
-    /// ancora comportarsi come prima di quella finestra — rigenerare da
-    /// zero — perché qui non c'è nulla da riusare. Uno scrub *dentro* la
-    /// finestra invece non deve rigenerare nulla per costruzione (vedi
+    /// (70 frame) è scelto apposta *oltre* la finestra di retention
+    /// dietro la testina (`DEFAULT_BEHIND_SECS`, 2s = 50 frame a 25fps): un
+    /// vero scrub oltre quella finestra deve ancora comportarsi come
+    /// prima di quella finestra — rigenerare da zero — perché qui non
+    /// c'è nulla da riusare. Uno scrub *dentro* la finestra invece non
+    /// deve rigenerare nulla per costruzione (vedi
     /// `walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek`,
     /// che verifica esattamente quello). Prima del fix originale di
     /// questa regressione, restava bloccato sul frame in cache più
     /// vicino perché `position_decoder` considerava "abbastanza avanti"
     /// qualunque target ancora dietro a `next_frame` più di una soglia —
     /// ma `walk_and_fill` scarta ad ogni ciclo tutto ciò che è fuori
-    /// dalla finestra corrente (allargata del margine di trattenimento),
-    /// quindi anche un piccolo passo indietro oltre quella finestra cade
-    /// in territorio già scartato e irraggiungibile decodificando solo
-    /// in avanti.
+    /// dalla finestra corrente, quindi anche un piccolo passo indietro
+    /// oltre la finestra di retention cade in territorio già scartato e
+    /// irraggiungibile decodificando solo in avanti.
     #[test]
     fn render_ahead_catches_up_after_a_backward_seek_beyond_the_retention_window() {
-        let path = make_test_clip("vv-app-render-ahead-test", "small_backward_seek.mp4", 20);
+        let path = make_test_clip("vv-app-render-ahead-test", "small_backward_seek.mp4", 6);
         let mut project = Project::default();
         let media_a = project.media_pool.insert(MediaItem {
             path,
             meta: MediaMeta {
-                duration_frames: 500,
+                duration_frames: 150,
                 fps: Rational::new(25, 1),
                 width: 320,
                 height: 240,
@@ -3413,7 +3371,7 @@ mod tests {
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
-            clips: vec![media_clip(1, media_a, 0, 500)],
+            clips: vec![media_clip(1, media_a, 0, 150)],
             muted: false,
         }]));
 
@@ -3425,12 +3383,12 @@ mod tests {
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
-        render_ahead.set_target(400);
+        render_ahead.set_target(100);
 
-        // Attendi non solo che il buffer copra 400, ma che i cicli di
+        // Attendi non solo che il buffer copra 100, ma che i cicli di
         // poll successivi abbiano anche già scartato ciò che è rimasto
-        // fuori dalla finestra (avanti+dietro, allargata del margine di
-        // trattenimento) di 400 — compreso 30, che ne resta ben oltre.
+        // fuori dalla finestra (avanti+dietro) di 100 — compreso 30, che
+        // è 70 frame dietro, oltre i 50 della finestra di retention.
         // Altrimenti il test passerebbe per caso, perché il primo
         // riempimento (che decodifica dal keyframe più vicino, qui
         // l'inizio del file) include già 30 prima ancora che venga
@@ -3441,7 +3399,7 @@ mod tests {
         let start = std::time::Instant::now();
         loop {
             let ranges = render_ahead.cached_ranges_for(media_a);
-            if covers(&ranges, 400) && !covers(&ranges, 30) {
+            if covers(&ranges, 100) && !covers(&ranges, 30) {
                 break;
             }
             assert!(
@@ -3451,12 +3409,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // Scrub indietro di 370 frame (oltre la finestra di retention
-        // allargata, 100 frame): deve comunque rigenerare il buffer per
-        // la nuova posizione, non restare bloccato sul frame più vicino
-        // già in cache. Copertura di 30 (non "un range che parte
-        // esattamente lì"): il seek atterra sul keyframe più vicino a
-        // 30, che può essere anche prima di 30 stesso.
+        // Scrub indietro di 70 frame (oltre la finestra di retention di
+        // 50): deve comunque rigenerare il buffer per la nuova
+        // posizione, non restare bloccato sul frame più vicino già in
+        // cache. Copertura di 30 (non "un range che parte esattamente
+        // lì"): il seek atterra sul keyframe più vicino a 30, che può
+        // essere anche prima di 30 stesso.
         render_ahead.set_target(30);
         let start = std::time::Instant::now();
         loop {
@@ -3768,107 +3726,6 @@ mod tests {
         assert!(
             ranges.iter().any(|&(s, e)| s <= 250 && e >= 344),
             "l'intersezione [250,344] tra vecchia coda e nuova finestra deve restare un range contiguo: ranges={ranges:?} filled_up_to={filled_up_to}"
-        );
-    }
-
-    /// Regressione per lo spreco segnalato dall'utente: uno scrub
-    /// all'indietro *ravvicinato* (pochi frame per volta, il caso comune
-    /// di un vero trascinamento, non un salto isolato) ricalcolava da
-    /// capo lo stesso transito ad ogni piccolo movimento, perché la
-    /// finestra stretta lo scartava un istante dopo averlo appena
-    /// decodificato — "quando ricalcola tutti quei frame non ha ALCUN
-    /// SENSO buttarli via" (parole dell'utente). Qui il transito verso
-    /// il keyframe più vicino (240, con GOP=60) ricade *fuori* dalla
-    /// finestra stretta dopo un piccolo scrub di soli 5 frame, ma
-    /// *dentro* la finestra allargata dal margine di trattenimento
-    /// (`RETENTION_MARGIN_SECS`): deve sopravvivere al `reconcile` di
-    /// quel ciclo, pronto per un'eventuale ulteriore scrub nella stessa
-    /// zona, invece di essere scartato e dover essere ridecodificato da
-    /// capo alla prossima occasione.
-    #[test]
-    fn walk_and_fill_keeps_recently_computed_transit_across_a_small_backward_scrub() {
-        let path = make_test_clip_with_short_gop(
-            "vv-app-render-ahead-test",
-            "retention_margin.mp4",
-            20,
-            60,
-        );
-        let mut project = Project::default();
-        let media_a = project.media_pool.insert(MediaItem {
-            path,
-            meta: MediaMeta {
-                duration_frames: 500,
-                fps: Rational::new(25, 1),
-                width: 320,
-                height: 240,
-                has_audio: false,
-                sample_rate: 0,
-                channels: 0,
-            },
-            content_hash: 0,
-        });
-        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
-            kind: TrackKind::Video,
-            clips: vec![media_clip(1, media_a, 0, 500)],
-            muted: false,
-        }]));
-
-        let caches = SharedFrameCache::new();
-        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let generous_budget = 320 * 240 * 3 / 2 * 300;
-
-        // Bufferizza attorno a 300: con GOP=60 il blocco dietro [250,299]
-        // richiede di risalire al keyframe 240 e attraversarne un po' di
-        // transito (240-249) per raggiungerlo.
-        walk_and_fill(
-            &project,
-            timeline_id,
-            &caches,
-            &mut open,
-            &mut open_behind,
-            300,
-            generous_budget,
-            false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
-            DEFAULT_BEHIND_SECS,
-            &AtomicI64::new(300),
-        );
-        assert!(
-            caches
-                .cached_ranges(media_a)
-                .iter()
-                .any(|&(s, e)| s <= 240 && e >= 240),
-            "precondizione: 240 deve essere già in cache prima dello scrub, altrimenti il test \
-             non prova nulla: ranges={:?}",
-            caches.cached_ranges(media_a)
-        );
-
-        // Scrub indietro di soli 5 frame: 240 ricade fuori dalla nuova
-        // finestra stretta (dietro parte da 295-50=245) ma dentro quella
-        // allargata dal margine di trattenimento (245-50=195).
-        walk_and_fill(
-            &project,
-            timeline_id,
-            &caches,
-            &mut open,
-            &mut open_behind,
-            295,
-            generous_budget,
-            true,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
-            DEFAULT_BEHIND_SECS,
-            &AtomicI64::new(295),
-        );
-
-        let ranges = caches.cached_ranges(media_a);
-        assert!(
-            ranges.iter().any(|&(s, e)| s <= 240 && e >= 240),
-            "240 era transito appena calcolato, fuori dalla finestra stretta ma dentro il \
-             margine di trattenimento: non deve essere stato scartato dopo un piccolo scrub \
-             all'indietro: ranges={ranges:?}"
         );
     }
 
