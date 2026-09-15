@@ -240,31 +240,52 @@ impl SharedFrameCache {
     /// contraddirsi (`retain` dei media usciti dalla finestra,
     /// `evict_before` posizionale, sfratto LRU per capacità).
     ///
-    /// **Tier A — appartenenza alla finestra.** Scarta ogni frame il cui
-    /// `(media_id, idx)` non cade in *nessuno* degli intervalli di
-    /// `window` per quel media: copre insieme "dietro la testina",
-    /// "media uscito dalla finestra" e "oltre l'orizzonte di lookahead".
+    /// **Tier A — appartenenza del *media*.** Scarta ogni frame il cui
+    /// `media_id` non compare in *nessun* intervallo di `window`: un
+    /// media del tutto uscito dalla finestra (clip lasciata, timeline
+    /// cambiata) libera subito la sua memoria, senza aspettare che il
+    /// budget globale lo forzi. **Non** filtra per singolo `idx` — un
+    /// frame di puro transito (`render_ahead::fill_segments` decodifica
+    /// e inserisce anche i frame che attraversa solo per raggiungere il
+    /// tratto voluto da un keyframe lontano, non solo quello richiesto:
+    /// vedi la sua doc) sopravvive qui anche se il suo `idx` non cade in
+    /// nessun intervallo *voluto*, purché il suo media sia ancora
+    /// rilevante. Il motivo: quel transito spesso torna utile a un
+    /// prossimo giro vicino allo stesso keyframe durante uno scrub
+    /// continuo — buttarlo via a ogni ciclo (comportamento precedente)
+    /// vuol dire ridecodificarlo da capo ogni volta che il giro
+    /// successivo lo richiede di nuovo, anche quando il budget avrebbe
+    /// margine per tenerlo (bug segnalato dall'utente: "non è uno
+    /// spreco calcolare tutta quella roba e poi cestinarla?"). Resta
+    /// comunque soggetto al Tier B qui sotto, che lo tratta come la
+    /// priorità più bassa possibile da sfrattare (vedi doc di
+    /// `distance`) — non è mai tenuto *a scapito* di contenuto
+    /// realmente voluto.
     ///
     /// **Tier B — budget globale.** Se il totale supera `budget_bytes`,
-    /// sfratta i frame *ancora nella finestra* più LONTANI dalla testina
-    /// finché si rientra nel budget. **Mai per recency**: durante un
-    /// fill in avanti il frame proprio alla testina è il primo inserito —
-    /// il "meno recente" — e una LRU classica lo sfratterebbe per primo,
-    /// l'esatto opposto di quel che serve. La distanza è calcolata in
-    /// spazio *timeline* via `WantedRange::timeline_position_of`, non in
-    /// spazio sorgente: due frame ugualmente lontani in indice sorgente
-    /// possono corrispondere a distanze timeline molto diverse.
+    /// sfratta i frame più LONTANI dalla testina finché si rientra nel
+    /// budget — "lontano" include sia il tratto voluto più distante
+    /// (dentro `window` ma vicino ai suoi estremi) sia, con priorità
+    /// massima di sfratto, qualunque frame di puro transito sopravvissuto
+    /// al Tier A (vedi `distance`). **Mai per recency**: durante un fill
+    /// in avanti il frame proprio alla testina è il primo inserito — il
+    /// "meno recente" — e una LRU classica lo sfratterebbe per primo,
+    /// l'esatto opposto di quel che serve. La distanza dentro la finestra
+    /// è calcolata in spazio *timeline* via
+    /// `WantedRange::timeline_position_of`, non in spazio sorgente: due
+    /// frame ugualmente lontani in indice sorgente possono corrispondere
+    /// a distanze timeline molto diverse.
     pub fn reconcile(&self, playhead: FrameIdx, window: &[WantedRange], budget_bytes: usize) {
         let mut inner = self.inner.lock().unwrap();
         let inner = &mut *inner;
 
         // Tier A.
+        let relevant_media: std::collections::HashSet<MediaId> =
+            window.iter().map(|w| w.media_id).collect();
         let entries = &mut inner.entries;
         let bytes_used = &mut inner.bytes_used;
-        entries.retain(|&(media_id, idx), frame| {
-            let keep = window
-                .iter()
-                .any(|w| w.media_id == media_id && w.contains(idx));
+        entries.retain(|&(media_id, _), frame| {
+            let keep = relevant_media.contains(&media_id);
             if !keep {
                 *bytes_used -= frame_bytes(frame);
             }
@@ -318,9 +339,14 @@ impl SharedFrameCache {
 
 /// Distanza (in frame di *timeline*) di `(media_id, idx)` dalla testina,
 /// mappando via il primo `WantedRange` di `window` che lo contiene —
-/// `FrameIdx::MAX` se nessuno lo contiene (non dovrebbe succedere per un
-/// frame sopravvissuto al Tier A nello stesso pass, ma resta un
-/// fallback sicuro anziché un panic).
+/// `FrameIdx::MAX` se nessuno lo contiene. A differenza di quando questo
+/// fallback fu scritto, ora è un caso *atteso*, non solo un ripiego di
+/// sicurezza: un frame di puro transito (idx fuori da ogni intervallo
+/// voluto, ma il cui media è comunque rilevante — sopravvive al Tier A
+/// di `reconcile`, vedi la sua doc) ricade qui, ottenendo la priorità di
+/// sfratto più bassa possibile: il Tier B lo toglie sempre per primo,
+/// prima di qualunque frame realmente dentro `window`, non importa
+/// quanto quest'ultimo sia lontano dalla testina.
 fn distance(
     media_id: MediaId,
     idx: FrameIdx,
@@ -416,13 +442,18 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_reconcile_tier_a_drops_frames_outside_every_current_range() {
+    fn shared_cache_reconcile_tier_a_keeps_out_of_range_frames_of_a_still_relevant_media() {
         let (media_a, _) = two_media_ids();
         let cache = SharedFrameCache::new();
         for idx in [5, 50, 100] {
             cache.insert(media_a, idx, frame_of_size(4));
         }
-        // Solo 50 è dentro l'unico intervallo voluto in questo ciclo.
+        // Solo 50 è dentro l'unico intervallo voluto in questo ciclo, ma
+        // media_a resta rilevante (compare in `window`): 5 e 100 sono
+        // "transito" (vedi doc di `reconcile`) e, con budget di sobra,
+        // devono sopravvivere — buttarli via a ogni ciclo costringerebbe
+        // a ridecodificarli da capo ogni volta che tornano utili durante
+        // uno scrub continuo (bug segnalato dall'utente).
         let window = [WantedRange {
             media_id: media_a,
             source_start: 40,
@@ -431,8 +462,38 @@ mod tests {
         }];
         cache.reconcile(50, &window, 1_000_000);
 
-        assert_eq!(cache.cached_ranges(media_a), vec![(50, 50)]);
-        assert_eq!(cache.bytes_used(), 4);
+        assert_eq!(
+            cache.cached_ranges(media_a),
+            vec![(5, 5), (50, 50), (100, 100)]
+        );
+        assert_eq!(cache.bytes_used(), 12);
+    }
+
+    #[test]
+    fn shared_cache_reconcile_tier_b_evicts_out_of_range_transit_before_any_in_range_frame() {
+        let (media_a, _) = two_media_ids();
+        let cache = SharedFrameCache::new();
+        let window = [WantedRange {
+            media_id: media_a,
+            source_start: 0,
+            source_end: 99,
+            timeline_start: 0,
+        }];
+        // 90 è dentro la finestra voluta (per quanto lontano dalla
+        // testina); 200 non lo è per nessun intervallo, ma il media resta
+        // rilevante — è transito, sopravvive al Tier A. Budget stretto:
+        // deve saltare il transito, mai il frame voluto, anche se quello
+        // voluto è il più lontano possibile dentro la sua finestra.
+        cache.insert(media_a, 90, frame_of_size(4));
+        cache.insert(media_a, 200, frame_of_size(4));
+
+        cache.reconcile(0, &window, 4);
+
+        assert!(
+            cache.contains(media_a, 90),
+            "un frame dentro la finestra voluta non deve mai essere sfrattato per fare spazio al transito"
+        );
+        assert!(!cache.contains(media_a, 200));
     }
 
     #[test]

@@ -2289,11 +2289,15 @@ mod tests {
             "il decoder deve aver avanzato di parecchio"
         );
 
-        // Simula uno sfratto reale: `reconcile` con una finestra che
-        // esclude deliberatamente un solo frame nel mezzo di quel che
-        // `next_frame` presume coperto — la cache perde quel frame senza
-        // che il decoder ne sappia nulla (esattamente quel che farebbe
-        // un budget stretto o una finestra che si restringe).
+        // Simula uno sfratto reale: `reconcile` con un budget così
+        // stretto da poter tenere tutto tranne un frame, e una finestra
+        // in tre pezzi che rende quel frame nel mezzo artificiosamente
+        // "lontanissimo" (Tier B, non più Tier A — che con la
+        // separazione media/idx-nella-finestra, vedi la sua doc, non
+        // scarta più un `idx` fuori range da solo se il suo media resta
+        // rilevante) — la cache perde quel frame senza che il decoder ne
+        // sappia nulla, esattamente quel che farebbe un budget stretto
+        // reale su una finestra ampia.
         let gap_at = advanced_next_frame - 3;
         let window = [
             WantedRange {
@@ -2304,12 +2308,20 @@ mod tests {
             },
             WantedRange {
                 media_id: media_a,
+                source_start: gap_at,
+                source_end: gap_at,
+                timeline_start: 1_000_000, // lontanissimo dalla testina a 0
+            },
+            WantedRange {
+                media_id: media_a,
                 source_start: gap_at + 1,
                 source_end: advanced_next_frame - 1,
                 timeline_start: gap_at + 1,
             },
         ];
-        caches.reconcile(0, &window, usize::MAX);
+        let frames_inserted = advanced_next_frame; // uno per idx da 0 in su
+        let frame_bytes_each = caches.bytes_used() / frames_inserted as usize;
+        caches.reconcile(0, &window, caches.bytes_used() - frame_bytes_each);
 
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
@@ -2724,26 +2736,25 @@ mod tests {
             &AtomicI64::new(60),
         );
 
-        // [56,63], non un intervallo più ampio: con keyint di default
-        // (250) e una clip di soli 100 frame, l'unico keyframe è a 0 —
-        // raggiungere il frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede di
-        // decodificare in sequenza da lì, e quei frame *di transito*
-        // restano in cache come sottoprodotto DURANTE il giro (vedi doc
-        // di `transit_bytes` in `fill_segments`: serve a far sì che il
-        // blocco dietro [56,59] li trovi già pronti invece di
-        // riattraversare da capo lo stesso GOP), ma un `reconcile` finale
-        // li scarta di nuovo prima che `walk_and_fill` dichiari
-        // `caught_up` (vedi il commento lì sul perché: altrimenti la UI,
-        // che smette di richiedere repaint su `caught_up`, può restare
-        // bloccata a mostrare quel transito come se fosse "buffered" fino
-        // al prossimo repaint per altri motivi — bug segnalato
-        // dall'utente, la striscia "si ridimensiona" solo muovendo il
-        // mouse). Il riuso *tra* i due segmenti di questo stesso giro è
-        // comunque già avvenuto prima di questo `reconcile` finale, solo
-        // la sua sopravvivenza oltre la fine del giro si perde.
+        // [0,63], non [(56,63)]: con keyint di default (250) e una clip
+        // di soli 100 frame, l'unico keyframe è a 0 — raggiungere il
+        // frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede di decodificare in
+        // sequenza da lì, e quei frame *di transito* restano in cache
+        // anche dopo la fine del giro (vedi doc di `transit_bytes` in
+        // `fill_segments` e di `SharedFrameCache::reconcile`, Tier A: un
+        // frame fuori dalla finestra voluta non viene più scartato solo
+        // per questo, finché il suo media resta rilevante e il budget lo
+        // permette — qui `generous_budget` lo permette di sicuro). Quel
+        // che conta per il margine minimo è che la finestra *voluta* non
+        // vada oltre 63 (con `lookahead_secs` normale arriverebbe fino a
+        // 99, la fine della clip — vedi il test sopra), non che la cache
+        // non contenga anche il transito: tenerlo è voluto, non un
+        // effetto collaterale da nascondere (bug segnalato dall'utente:
+        // ridecodificare lo stesso transito ad ogni ciclo di scrub è
+        // spreco puro quando il budget avrebbe margine per tenerlo).
         assert_eq!(
             caches.cached_ranges(media_a),
-            vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
+            vec![(0, 60 + MIN_MARGIN_FRAMES - 1)],
             "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
@@ -3337,10 +3348,19 @@ mod tests {
             muted: false,
         }]));
 
+        // Budget stretto (non i 100MB di comodo altrove): il media resta
+        // rilevante per tutta la durata del test (Tier A, vedi doc di
+        // `SharedFrameCache::reconcile`, non scarta più un frame solo
+        // perché il suo idx è fuori dalla finestra corrente), quindi
+        // senza un budget che *forzi* il Tier B a intervenire il primo
+        // riempimento (che decodifica dal keyframe più vicino, qui
+        // l'inizio del file) lascerebbe 30 in cache per sempre — non
+        // perché "già scartato e da rigenerare" come vuole verificare
+        // questo test, ma solo perché mai sfrattato.
         let render_ahead = RenderAhead::spawn(
             project,
             timeline_id,
-            100_000_000,
+            6_000_000,
             false,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
@@ -3509,11 +3529,19 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget stretto: la finestra intera non ci sta in cache, quindi
-        // avanzando `evict_before` scarta davvero i frame dietro la
-        // testina invece di lasciarli semplicemente ancora presenti per
-        // caso.
-        let budget = 43_000_000;
+        // Budget stretto rispetto a quanto accumulato attraversando 0,
+        // 50, 100, 150, 200 in avanti: il media resta rilevante per
+        // tutto il test (Tier A, vedi doc di `SharedFrameCache::
+        // reconcile`, non scarta più un frame solo perché il suo idx è
+        // fuori dalla finestra del ciclo corrente), quindi senza un
+        // budget che *forzi* il Tier B a intervenire i frame intorno a 0
+        // resterebbero semplicemente ancora presenti per caso, non
+        // perché davvero scartati. Volutamente ben al di sotto del punto
+        // di pareggio (non solo "un po' stretto"): a quel confine il
+        // Tier B decide tra sfratti equidistanti con l'ordine di
+        // iterazione di una `HashMap`, non deterministico — un margine
+        // ampio evita un test che passa o fallisce a seconda dell'hash.
+        let budget = 5_000_000;
 
         // Playback in avanti su più cicli: `went_backward` è sempre
         // `false` (ogni target è >= al precedente), esattamente come lo
@@ -3539,9 +3567,9 @@ mod tests {
             );
         }
 
-        // A questo punto i frame intorno a 0 sono sicuramente sfrattati
-        // (evict_before ha scartato tutto ciò che è dietro alla testina
-        // ad ogni ciclo, l'ultimo dei quali è 200).
+        // A questo punto i frame intorno a 0 sono sicuramente sfrattati:
+        // il Tier B (budget stretto sopra) li ha tolti per fare posto a
+        // quelli via via più vicini alla testina finale (200).
         let ranges_before = caches.cached_ranges(media_a);
         assert!(
             !ranges_before.iter().any(|&(s, e)| s <= 80 && e >= 80),
