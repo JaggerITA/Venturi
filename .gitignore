@@ -2,3 +2,4 @@
 .vibevideo/proxies/
 .vibevideo/waveforms/
 *.vvproj.bak
+/container/shots/

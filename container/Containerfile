@@ -1,0 +1,49 @@
+# Ambiente per compilare/eseguire/testare vv-app "headless" (Xvfb, nessuna
+# GPU reale — Vulkan software via lavapipe, già dentro mesa-vulkan-drivers)
+# senza toccare la sessione grafica reale dell'utente. Vedi container/README.md
+# per come usarlo. Non contiene il sorgente: il repo va montato a runtime
+# (bind mount), così riflette sempre lo stato locale corrente senza dover
+# ricostruire l'immagine a ogni modifica.
+FROM fedora:44
+
+# ffmpeg-devel (con libx264) sta su RPM Fusion free, non nei repo Fedora
+# base — stesso motivo spiegato in ../README.md.
+RUN dnf install -y \
+        https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm && \
+    dnf install -y \
+        rust cargo \
+        ffmpeg ffmpeg-devel \
+        clang clang-devel \
+        wayland-devel libxkbcommon-devel libxkbcommon-x11 libX11-devel \
+        vulkan-loader-devel mesa-vulkan-drivers vulkan-tools \
+        alsa-lib-devel \
+        xorg-x11-server-Xvfb xdpyinfo \
+        xdotool \
+        ImageMagick \
+        procps-ng \
+    && dnf clean all
+
+# ALSA senza scheda audio reale: un device nullo evita che cpal fallisca
+# l'apertura dello stream all'avvio invece di limitarsi a non riprodurre
+# nulla (vv-app non ha bisogno dell'audio per essere testato visivamente).
+RUN printf 'pcm.!default {\n  type null\n}\nctl.!default {\n  type null\n}\n' \
+        > /etc/asound.conf
+
+# VK_ICD_FILENAMES fissato a lavapipe (software, aarch64 — il progetto
+# è comunque a target Apple Silicon/Asahi, vedi ARCHITECTURE.md): senza,
+# il loader Vulkan prova anche gli ICD hardware elencati in
+# /usr/share/vulkan/icd.d (nessuno reale nel container) prima di arrivare
+# a quello buono, riempiendo i log di errori "vkEnumeratePhysicalDevices
+# failed" innocui ma rumorosi.
+ENV DISPLAY=:99 \
+    XVFB_RESOLUTION=1280x800x24 \
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    CARGO_TARGET_DIR=/cargo-target \
+    VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json
+
+WORKDIR /workspace
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
