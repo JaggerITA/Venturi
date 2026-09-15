@@ -104,6 +104,12 @@ pub struct Decoder {
     /// `next_frame` deve solo drenare `receive_frame` senza rileggere
     /// pacchetti né richiamare `send_eof` di nuovo.
     eof_sent: bool,
+    /// Frame già decodificato durante `seek_to_time` (per verificarne
+    /// l'atterraggio, vedi la sua doc) e non ancora restituito al
+    /// chiamante — `next_frame` lo consuma per primo invece di leggere
+    /// un nuovo pacchetto, così un seek non "perde" il frame su cui ha
+    /// già pagato il costo di decodifica per il controllo.
+    pending: Option<(FrameIdx, FrameYuv420)>,
 }
 
 impl Decoder {
@@ -157,6 +163,7 @@ impl Decoder {
             time_base,
             fps,
             eof_sent: false,
+            pending: None,
         })
     }
 
@@ -172,20 +179,72 @@ impl Decoder {
         self.fps
     }
 
-    /// Seek al keyframe più vicino con timestamp <= `secs` (comportamento
-    /// di default di `avformat_seek_file`). Il decoder va flushato: i
-    /// reference frame da prima del seek non sono più validi.
+    /// Seek al keyframe più vicino con timestamp <= `secs`, *garantito*:
+    /// non basta chiedere ad `avformat_seek_file` di restare entro
+    /// `max_ts = ts` (provato, vedi sotto) — su un file reale con
+    /// B-frame (bug confermato dall'utente su un 1080p60fps: seek a
+    /// `target=749` atterrava su idx=751, il keyframe *successivo*, non
+    /// su 501 come dovrebbe) il demuxer mov/mp4 lo ignora comunque, non
+    /// solo in teoria ma osservato in pratica con un test dedicato.
+    /// `position_decoder` (`vv-app`) si aspetta un atterraggio `<=
+    /// segment_start` per poter poi decodificare in avanti fino a
+    /// raggiungerlo: un atterraggio troppo avanti salta silenziosamente
+    /// dei frame che nessuno decodifica più — un buco permanente nella
+    /// cache (mai altrimenti raggiunto, né prima né dopo), non solo un
+    /// frame sprecato.
+    ///
+    /// Quindi: decodifica subito il frame su cui il seek atterra (non
+    /// lazy come prima — il chiamante lo avrebbe comunque richiesto
+    /// súbito dopo con `next_frame`, bufferizzato qui in `pending`) e,
+    /// se il suo idx supera il target, riprova un secondo più indietro
+    /// (raddoppiando il passo a ogni tentativo, fino a un tetto di
+    /// sicurezza): un GOP reale anche lungo (minuti, non secondi) resta
+    /// coperto in pochissimi tentativi grazie al raddoppio, senza dover
+    /// conoscere in anticipo la vera posizione del keyframe precedente.
     pub fn seek_to_time(&mut self, secs: f64) -> Result<(), crate::MediaError> {
-        let ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
-        self.ictx.seek(ts, ..)?;
-        self.decoder.flush();
-        self.eof_sent = false;
+        let target_idx = (secs.max(0.0) * self.fps.as_f64()).round() as FrameIdx;
+        let mut ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+        // Un secondo in unità AV_TIME_BASE: passo iniziale del backoff,
+        // raddoppiato ad ogni tentativo — arriva a coprire un GOP di
+        // diversi minuti in una decina di tentativi senza doverne
+        // conoscere la lunghezza reale in anticipo.
+        let mut step = i64::from(ffmpeg::ffi::AV_TIME_BASE);
+        const MAX_RETRIES: u32 = 20;
+        for _ in 0..MAX_RETRIES {
+            self.ictx.seek(ts, ..ts)?;
+            self.decoder.flush();
+            self.eof_sent = false;
+            self.pending = None;
+            match self.decode_next_frame()? {
+                Some((idx, frame)) if idx > target_idx && ts > 0 => {
+                    ts = ts.saturating_sub(step).max(0);
+                    step = step.saturating_mul(2);
+                    let _ = frame; // scartato, si riprova più indietro
+                }
+                landed => {
+                    self.pending = landed;
+                    return Ok(());
+                }
+            }
+        }
         Ok(())
     }
 
     /// Decodifica il prossimo frame video disponibile in ordine di
     /// presentazione. `Ok(None)` a fine stream.
     pub fn next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
+        if let Some(landed) = self.pending.take() {
+            return Ok(Some(landed));
+        }
+        self.decode_next_frame()
+    }
+
+    /// Nucleo di `next_frame`, senza passare dal buffer `pending` — solo
+    /// `seek_to_time` lo chiama direttamente (per decodificare e
+    /// verificare l'atterraggio *prima* di bufferlo in `pending`, vedi la
+    /// sua doc); `next_frame` pubblico lo richiama solo dopo aver già
+    /// controllato `pending`.
+    fn decode_next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Video::empty();
 
         // Stream già esaurito in una chiamata precedente: non si può
@@ -371,6 +430,41 @@ mod tests {
         path
     }
 
+    fn make_test_clip_with_gop_and_bframes(
+        name: &str,
+        duration_secs: u32,
+        gop: u32,
+        bframes: u32,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("vv-media-decode-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=size=320x240:rate=25:duration={duration_secs}"),
+                "-c:v",
+                "libx264",
+                "-g",
+                &gop.to_string(),
+                "-keyint_min",
+                &gop.to_string(),
+                "-bf",
+                &bframes.to_string(),
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        path
+    }
+
     #[test]
     #[ignore = "misurazione manuale, non una asserzione di correttezza"]
     fn bench_decode_forward_through_a_large_gop() {
@@ -486,5 +580,41 @@ mod tests {
         // distanza dal frame 1.5s*25=37 non supera un GOP.
         assert!(idx <= 37, "idx={idx} dovrebbe essere <= al target");
         assert!(idx >= 37 - 10, "idx={idx} troppo lontano dal target");
+    }
+
+    /// Regressione per un bug reale, confermato dall'utente su un file
+    /// 1080p60fps con B-frame: `avformat_seek_file`, anche vincolando
+    /// `max_ts` al target (provato e verificato inefficace: il demuxer
+    /// mov/mp4 lo ignora), può comunque atterrare su un keyframe
+    /// *successivo* al target invece che sul precedente, quando il
+    /// target cade a un frame o due da un confine di keyframe — il
+    /// caso concreto era `target=749` che atterrava su `idx=751` invece
+    /// che su un keyframe precedente molto più indietro, lasciando
+    /// scoperti per sempre i frame in mezzo (vedi `seek_to_time`, che
+    /// ora si autocorregge riprovando più indietro finché non atterra
+    /// davvero `<=` al target). Non riprodotto dal contenuto sintetico
+    /// qui sotto (il file reale che ha innescato il bug aveva una
+    /// struttura B-frame che questo `testsrc` non replica), ma il
+    /// contratto (`idx <= target`) va rispettato comunque, vicino a
+    /// *ogni* confine di keyframe, non solo lontano da essi come nel
+    /// test sopra.
+    #[test]
+    fn decoder_seek_lands_at_or_before_target_near_every_keyframe_boundary() {
+        let path = make_test_clip_with_gop_and_bframes("seek_boundaries.mp4", 4, 25, 3);
+        // Keyframe a 0,25,50,75 (fps=25, g=25): un target a 1/2/3 frame
+        // prima di ciascuno è il caso limite che ha innescato il bug.
+        for keyframe in [25, 50, 75] {
+            for offset in [1, 2, 3] {
+                let target = keyframe - offset;
+                let mut decoder = Decoder::open(&path).unwrap();
+                decoder.seek_to_time(target as f64 / 25.0).unwrap();
+                let (idx, _) = decoder.next_frame().unwrap().expect("frame atteso");
+                assert!(
+                    idx <= target,
+                    "keyframe={keyframe} offset={offset} target={target}: \
+                     atterrato su idx={idx}, oltre il target"
+                );
+            }
+        }
     }
 }
