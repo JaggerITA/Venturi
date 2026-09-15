@@ -99,6 +99,20 @@ const MIN_MARGIN_FRAMES: FrameIdx = 4;
 /// cui un seek costa quasi niente.
 const BEHIND_CHUNK_FRAMES: FrameIdx = 15;
 
+/// Tetto di sicurezza sul transito (vedi il commento sopra
+/// `transit_bytes` in `fill_segments`), in *frame*, non in byte legati
+/// al budget condiviso — un budget stretto (l'utente può configurare
+/// "Cache video" molto in basso) non ha alcuna relazione con quanto sia
+/// lungo il GOP del sorgente: un tetto proporzionale al budget
+/// bloccherebbe il transito ben prima di un GOP anche solo moderatamente
+/// lungo, vanificando l'intero scopo del riuso. Volutamente generoso
+/// (50s a 60fps, più di qualunque keyint reale ragionevole) — serve solo
+/// contro un GOP patologico (es. un intero file con un unico keyframe),
+/// non come limite di memoria vero: quello resta il controllo sul
+/// tratto richiesto sopra, il transito è comunque sfrattato dal
+/// `reconcile` del prossimo ciclo se non serve più a nessuno.
+const TRANSIT_SAFETY_CAP_FRAMES: FrameIdx = 3000;
+
 fn store_secs(atomic: &AtomicU64, secs: f64) {
     atomic.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
 }
@@ -1277,6 +1291,18 @@ fn fill_segments(
         // falso positivo (0 per coincidenza già in cache) senza aver mai
         // scoperto la vera posizione del decoder.
         let mut resumed = false;
+        // Byte inseriti in questo giro per puro transito (`idx <
+        // segment.source_start`, vedi sotto) — sottratti dal controllo
+        // di budget per il tratto richiesto, così il proprio transito
+        // non può mai impedire a un segmento di raggiungere sé stesso
+        // (bug reale, confermato dall'utente: un budget stretto
+        // lasciava scoperto per sempre un segmento lontano dal keyframe
+        // più vicino). Il conteggio in frame (`transit_frames`, non
+        // derivato da questo) ha comunque un tetto di sicurezza
+        // indipendente (`TRANSIT_SAFETY_CAP_FRAMES`) per non esplodere
+        // senza limite su un GOP patologicamente lungo.
+        let mut transit_bytes: usize = 0;
+        let mut transit_frames: FrameIdx = 0;
         loop {
             let od = open.get_mut(&segment.media_id).unwrap();
             if od.next_frame > segment.source_end {
@@ -1330,26 +1356,26 @@ fn fill_segments(
                         od.just_repositioned = false;
                         threshold_frames = od.seek_threshold_frames();
                     }
-                    // Frame di puro transito verso il keyframe più
-                    // vicino, prima ancora di `segment.source_start`
-                    // (un GOP lungo può costringere il decoder a
-                    // riattraversarne parecchi per raggiungere un
-                    // segmento lontano dal proprio keyframe): niente
-                    // budget speso per loro, e niente controllo di
-                    // saturazione qui sotto. Il prossimo `reconcile` li
-                    // scarterebbe comunque (fuori da qualunque finestra
-                    // voluta) — spendere budget per loro poteva far
-                    // saturare la cache *prima* di raggiungere il
-                    // tratto realmente richiesto, lasciando per sempre
-                    // scoperto un buco appena oltre (bug reale,
-                    // confermato dall'utente: un segmento restava "da
-                    // processare" a ogni ciclo, la cache bloccata esatta
-                    // al budget senza mai crescere oltre).
+                    // `insert` sovrascrive innocuamente se `idx` è già
+                    // presente (decoder ripartito da un keyframe
+                    // precedente al punto richiesto): evita solo un ramo
+                    // che avanzi `next_frame` senza consumare davvero un
+                    // frame dal decoder (in passato causa di un
+                    // disallineamento tra la posizione tracciata e
+                    // quella reale).
+                    let frame_bytes = frame.y.len() + frame.u.len() + frame.v.len();
                     if idx >= segment.source_start {
-                        if ctx.caches.bytes_used() >= ctx.cache_budget_bytes {
+                        // Il controllo ignora `transit_bytes`: il
+                        // transito che *questo* giro ha già speso per
+                        // arrivare fin qui non deve mai poter impedire
+                        // al segmento di raggiungere sé stesso (vedi doc
+                        // di `transit_bytes`).
+                        if ctx.caches.bytes_used().saturating_sub(transit_bytes)
+                            >= ctx.cache_budget_bytes
+                        {
                             if debug_enabled() {
                                 eprintln!(
-                                    "[render_ahead] BUDGET-SATURO media={:?} segment=[{},{}] next_frame={} bytes_used={} budget={}",
+                                    "[render_ahead] BUDGET-SATURO media={:?} segment=[{},{}] next_frame={} bytes_used={} transit_bytes={transit_bytes} budget={}",
                                     segment.media_id,
                                     segment.source_start,
                                     segment.source_end,
@@ -1363,15 +1389,45 @@ fn fill_segments(
                                 caught_up: false,
                             });
                         }
-                        // `insert` sovrascrive innocuamente se `idx` è
-                        // già presente (decoder ripartito da un keyframe
-                        // precedente al punto richiesto): evita solo un
-                        // ramo che avanzi `next_frame` senza consumare
-                        // davvero un frame dal decoder (in passato causa
-                        // di un disallineamento tra la posizione
-                        // tracciata e quella reale).
-                        ctx.caches.insert(segment.media_id, idx, Arc::new(frame));
+                    } else {
+                        // Frame di puro transito verso il keyframe più
+                        // vicino, prima ancora di `segment.source_start`
+                        // (un GOP lungo può costringere il decoder a
+                        // riattraversarne parecchi per raggiungere un
+                        // segmento lontano dal proprio keyframe).
+                        // Inserito comunque (non solo decodificato e
+                        // scartato): se un altro segmento vicino, non
+                        // ancora processato in questo stesso giro, cade
+                        // nello stesso tratto di transito, lo trova già
+                        // pronto invece di dover riattraversare lo
+                        // stesso GOP da capo — lo scrub all'indietro su
+                        // sorgente a GOP lungo dipende da questo riuso
+                        // per restare comparabile in velocità allo
+                        // scrub in avanti (osservato dall'utente: senza,
+                        // visibilmente più lento). Il tetto di sicurezza
+                        // sotto (in frame, non nel budget condiviso —
+                        // vedi doc di `TRANSIT_SAFETY_CAP_FRAMES`) evita
+                        // comunque un'esplosione senza limite su un GOP
+                        // patologicamente lungo.
+                        if transit_frames >= TRANSIT_SAFETY_CAP_FRAMES {
+                            if debug_enabled() {
+                                eprintln!(
+                                    "[render_ahead] TRANSITO-ECCESSIVO media={:?} segment=[{},{}] next_frame={} transit_frames={transit_frames}",
+                                    segment.media_id,
+                                    segment.source_start,
+                                    segment.source_end,
+                                    od.next_frame,
+                                );
+                            }
+                            return ControlFlow::Break(WalkOutcome {
+                                interrupted: false,
+                                caught_up: false,
+                            });
+                        }
+                        transit_bytes += frame_bytes;
+                        transit_frames += 1;
                     }
+                    ctx.caches.insert(segment.media_id, idx, Arc::new(frame));
                     od.next_frame = idx + 1;
                     resumed = true;
                 }
@@ -2649,23 +2705,23 @@ mod tests {
             &AtomicI64::new(60),
         );
 
-        // [56,63] (56 = 60 - MIN_MARGIN_FRAMES, dietro; 63 = 60 +
-        // MIN_MARGIN_FRAMES - 1, avanti): con keyint di default (250) e
-        // una clip di soli 100 frame, l'unico keyframe è a 0, quindi
-        // raggiungere ognuno dei due segmenti richiede comunque di
-        // decodificare in sequenza da lì — ma solo i frame dentro al
-        // segmento richiesto finiscono in cache (`idx >=
-        // segment.source_start`, vedi doc del fill), il tratto di puro
-        // transito [0,55]/[0,59] no: verrebbe scartato dal prossimo
-        // reconcile comunque (fuori da qualunque finestra voluta), non
-        // ha senso spendere budget per lui. Quel che conta è che la
-        // finestra *non vada oltre* [56,63] (con `lookahead_secs`
-        // normale arriverebbe fino a 99, la fine della clip — vedi il
-        // test sopra): configurato a zero secondi, resta comunque il
-        // margine minimo, non letteralmente nulla.
+        // [0,63], non [(60,63)]: con keyint di default (250) e una clip
+        // di soli 100 frame, l'unico keyframe è a 0 — raggiungere il
+        // frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede comunque di
+        // decodificare in sequenza da lì (nessun modo di saltare i frame
+        // intermedi), e quei frame *di transito* restano comunque in
+        // cache come sottoprodotto (vedi doc di `transit_bytes` in
+        // `fill_segments` sul perché è voluto, non solo tollerato: senza
+        // questo riuso lo scrub all'indietro su sorgente a GOP lungo
+        // sarebbe visibilmente più lento di quello in avanti — bug
+        // segnalato dall'utente in un tentativo precedente che il
+        // riuso). Quel che conta per il margine minimo è che la finestra
+        // *voluta* non vada oltre 63 (con `lookahead_secs` normale
+        // arriverebbe fino a 99, la fine della clip — vedi il test
+        // sopra), non che la cache non contenga anche il transito.
         assert_eq!(
             caches.cached_ranges(media_a),
-            vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
+            vec![(0, 60 + MIN_MARGIN_FRAMES - 1)],
             "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
