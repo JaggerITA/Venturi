@@ -633,6 +633,7 @@ enum Positioned {
 /// (`timeline_start`, dove cade `source_start`) — necessaria per
 /// costruire i `WantedRange` passati a `SharedFrameCache::reconcile`,
 /// che ne ha bisogno per calcolare la distanza dalla testina.
+#[derive(Clone, Copy, Debug)]
 struct MediaSegment {
     media_id: MediaId,
     source_start: FrameIdx,
@@ -1090,8 +1091,32 @@ fn walk_and_fill(
     // precedente: la condizione in `position_decoder` scatta solo se il
     // decoder è *già oltre* l'inizio del blocco richiesto, mai per un
     // decoder ancora dietro.
-    let behind_chunks =
-        without_already_cached_chunks(caches, chunk_behind_segments_near_to_far(&behind_segments));
+    let all_behind_chunks = chunk_behind_segments_near_to_far(&behind_segments);
+    let behind_chunks = without_already_cached_chunks(caches, all_behind_chunks.clone());
+    if debug_enabled() {
+        eprintln!(
+            "[render_ahead] DIETRO from_frame={from_frame} behind_secs={behind_secs} behind_frames={behind_frames} blocchi_totali={} blocchi_da_processare={} bytes_used={} budget={cache_budget_bytes}",
+            all_behind_chunks.len(),
+            behind_chunks.len(),
+            caches.bytes_used(),
+        );
+        for c in &all_behind_chunks {
+            let processed = behind_chunks
+                .iter()
+                .any(|b| b.source_start == c.source_start && b.source_end == c.source_end);
+            eprintln!(
+                "[render_ahead]   blocco media={:?} [{},{}] {}",
+                c.media_id,
+                c.source_start,
+                c.source_end,
+                if processed {
+                    "DA PROCESSARE"
+                } else {
+                    "già in cache, saltato"
+                }
+            );
+        }
+    }
     let behind_ctx = FillContext {
         went_backward: true,
         ..ctx
