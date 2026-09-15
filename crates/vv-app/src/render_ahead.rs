@@ -1,5 +1,5 @@
 //! Buffer video a livello di *timeline*, non di singola clip: un thread
-//! dedicato cammina in avanti dal playhead per `LOOKAHEAD_SECS`,
+//! dedicato cammina in avanti dal playhead per `lookahead_secs`,
 //! attraversando quante clip servono (tagli netti, vuoti, stesso media o
 //! diverso — nessun caso speciale), e riempie una `SharedFrameCache`
 //! *unica*, condivisa da tutti i media della finestra, a budget globale
@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -38,11 +38,14 @@ use std::time::Duration;
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
-/// Quanti secondi di timeline tenere bufferizzati avanti dal playhead,
-/// attraversando quante clip servono per coprirli.
-const LOOKAHEAD_SECS: f64 = 3.0;
+/// Valore di default/iniziale per `RenderAhead::set_lookahead_secs` —
+/// quanti secondi di timeline tenere bufferizzati avanti dal playhead,
+/// attraversando quante clip servono per coprirli. Configurabile
+/// dall'utente (menu Playback > Proxy), non più un valore fisso.
+pub const DEFAULT_LOOKAHEAD_SECS: f64 = 3.0;
 
-/// Quanti secondi di timeline tenere bufferizzati anche *dietro* la
+/// Valore di default/iniziale per `RenderAhead::set_behind_secs` —
+/// quanti secondi di timeline tenere bufferizzati anche *dietro* la
 /// testina, oltre alla finestra in avanti sopra — deliberatamente molto
 /// più piccola: la priorità resta sempre in avanti (vedi l'ordine di
 /// fill in `walk_and_fill`, dietro riempito solo con quel che resta del
@@ -52,22 +55,28 @@ const LOOKAHEAD_SECS: f64 = 3.0;
 /// ogni piccolo passo indietro — non è un buffer di "rewind" per uno
 /// scrub lontano, quello resta correttamente costoso quanto un seek in
 /// avanti verso una zona mai visitata.
-const BEHIND_SECS: f64 = 2.0;
+pub const DEFAULT_BEHIND_SECS: f64 = 2.0;
 
-/// Finestra (avanti e dietro, in frame) usata al posto di
-/// `LOOKAHEAD_SECS`/`BEHIND_SECS` quando il toggle "cache read-ahead" è
-/// disattivo (`RenderAhead::set_read_ahead_enabled`) — non zero: un
-/// margine letteralmente nullo (un solo frame, "decodifica esattamente
-/// quel che serve ora") è strutturalmente fragile anche svegliando il
-/// worker subito a ogni cambio di target (`Command::Wake`), perché resta
-/// comunque un design senza alcun cuscinetto contro la normale
-/// variabilità di timing (contesa CPU, scheduling del SO) — bug
+/// Pavimento (in frame) applicato a `lookahead_secs`/`behind_secs`
+/// qualunque sia il valore configurato dall'utente, anche `0` — non
+/// zero: un margine letteralmente nullo (un solo frame, "decodifica
+/// esattamente quel che serve ora") è strutturalmente fragile anche
+/// svegliando il worker subito a ogni cambio di target (`Command::Wake`),
+/// perché resta comunque un design senza alcun cuscinetto contro la
+/// normale variabilità di timing (contesa CPU, scheduling del SO) — bug
 /// segnalato dall'utente: playback a scatti anche a 1x, indipendente dal
-/// proxy. Volutamente piccolo (pochi frame, non i secondi del read-ahead
-/// normale): l'obiettivo del toggle resta misurare l'effetto dei proxy
-/// con un anticipo minimo, non riattivare in silenzio un vero
-/// read-ahead.
+/// proxy. Volutamente piccolo (pochi frame, non i secondi di default):
+/// serve solo da rete di sicurezza per chi configura un anticipo troppo
+/// aggressivo, non da anticipo vero e proprio.
 const MIN_MARGIN_FRAMES: FrameIdx = 4;
+
+fn store_secs(atomic: &AtomicU64, secs: f64) {
+    atomic.store(secs.max(0.0).to_bits(), Ordering::Relaxed);
+}
+
+fn load_secs(atomic: &AtomicU64) -> f64 {
+    f64::from_bits(atomic.load(Ordering::Relaxed))
+}
 
 /// Intervallo di poll del thread: ogni ciclo rivaluta il target corrente
 /// e completa quel che manca fino all'orizzonte di lookahead — una volta
@@ -156,7 +165,8 @@ struct SharedState {
     target: Arc<AtomicI64>,
     cache_budget_bytes: Arc<AtomicUsize>,
     caught_up: Arc<AtomicBool>,
-    read_ahead_enabled: Arc<AtomicBool>,
+    lookahead_secs: Arc<AtomicU64>,
+    behind_secs: Arc<AtomicU64>,
 }
 
 /// Vedi il doc del modulo. Uno per `VibeVideoApp` (non uno per clip: la
@@ -170,17 +180,20 @@ pub struct RenderAhead {
     /// e `is_caught_up`. Parte da `false`: prima che il worker abbia
     /// completato almeno un ciclo non si sa ancora se c'è lavoro da fare.
     caught_up: Arc<AtomicBool>,
-    /// Toggle "cache read-ahead" (attivo di default): quando `false`, la
-    /// finestra da bufferizzare si riduce al margine minimo
-    /// (`MIN_MARGIN_FRAMES`, pochi frame avanti e dietro, non i secondi
-    /// del read-ahead normale) — vedi doc di `set_read_ahead_enabled`.
-    /// Un semplice atomico come `target`, non un `Command`: a
-    /// differenza del toggle proxy non serve reagire alla transizione
-    /// con un effetto collaterale sincrono (svuotare la cache) — una
-    /// finestra che si restringe lascia comunque scartare il resto al
-    /// prossimo `reconcile`, una che si allarga lo riempie di nuovo da
-    /// sé.
-    read_ahead_enabled: Arc<AtomicBool>,
+    /// Quanti secondi avanti/dietro la testina bufferizzare
+    /// (`DEFAULT_LOOKAHEAD_SECS`/`DEFAULT_BEHIND_SECS` all'avvio,
+    /// configurabile dall'utente — menu Playback > Proxy) — vedi
+    /// `set_lookahead_secs`/`set_behind_secs`. Un semplice atomico come
+    /// `target`, non un `Command`: a differenza del toggle proxy non
+    /// serve reagire alla transizione con un effetto collaterale
+    /// sincrono (svuotare la cache) — una finestra che si restringe
+    /// lascia comunque scartare il resto al prossimo `reconcile`, una
+    /// che si allarga lo riempie di nuovo da sé. Memorizzati come bit di
+    /// un `f64` in un `AtomicU64` (`store_secs`/`load_secs`): niente
+    /// atomic float nella std, e la precisione di un `f32`/frazione di
+    /// frame non serve qui.
+    lookahead_secs: Arc<AtomicU64>,
+    behind_secs: Arc<AtomicU64>,
     tx: mpsc::Sender<Command>,
     handle: Option<JoinHandle<()>>,
 }
@@ -191,13 +204,17 @@ impl RenderAhead {
         timeline_id: TimelineId,
         cache_budget_bytes: usize,
         proxy_enabled: bool,
-        read_ahead_enabled: bool,
+        lookahead_secs: f64,
+        behind_secs: f64,
     ) -> Self {
         let caches = Arc::new(SharedFrameCache::new());
         let target = Arc::new(AtomicI64::new(0));
         let budget = Arc::new(AtomicUsize::new(cache_budget_bytes));
         let caught_up = Arc::new(AtomicBool::new(false));
-        let read_ahead = Arc::new(AtomicBool::new(read_ahead_enabled));
+        let lookahead = Arc::new(AtomicU64::new(0));
+        store_secs(&lookahead, lookahead_secs);
+        let behind = Arc::new(AtomicU64::new(0));
+        store_secs(&behind, behind_secs);
         let (tx, rx) = mpsc::channel();
 
         let thread_shared = SharedState {
@@ -205,7 +222,8 @@ impl RenderAhead {
             target: target.clone(),
             cache_budget_bytes: budget.clone(),
             caught_up: caught_up.clone(),
-            read_ahead_enabled: read_ahead.clone(),
+            lookahead_secs: lookahead.clone(),
+            behind_secs: behind.clone(),
         };
         let handle = std::thread::spawn(move || {
             worker_loop(rx, thread_shared, project, timeline_id, proxy_enabled);
@@ -216,7 +234,8 @@ impl RenderAhead {
             target,
             cache_budget_bytes: budget,
             caught_up,
-            read_ahead_enabled: read_ahead,
+            lookahead_secs: lookahead,
+            behind_secs: behind,
             tx,
             handle: Some(handle),
         }
@@ -238,13 +257,13 @@ impl RenderAhead {
     ///   di richiederne altri;
     /// - manda `Command::Wake` per far reagire il worker subito invece
     ///   di aspettare fino a `POLL_INTERVAL` (50ms) — con una finestra
-    ///   piena (read-ahead attivo) quei 50ms sono invisibili, ma con la
-    ///   finestra ridotta al margine minimo (read-ahead disattivo,
-    ///   vedi `set_read_ahead_enabled`) diventavano un tetto reale alla
-    ///   fluidità del playback: il worker non produceva più di un
+    ///   ampia (`lookahead_secs` alto) quei 50ms sono invisibili, ma con
+    ///   una finestra stretta (`lookahead_secs`/`behind_secs` bassi,
+    ///   pavimentati a `MIN_MARGIN_FRAMES`) diventavano un tetto reale
+    ///   alla fluidità del playback: il worker non produceva più di un
     ///   frame nuovo ogni 50ms, sotto qualunque framerate video comune
     ///   (bug segnalato dall'utente, playback a scatti anche a 1x con
-    ///   read-ahead disattivo, indipendente dal proxy).
+    ///   una finestra ridotta al margine minimo, indipendente dal proxy).
     pub fn set_target(&self, frame: FrameIdx) {
         let previous = self.target.swap(frame, Ordering::Relaxed);
         if previous != frame {
@@ -257,25 +276,23 @@ impl RenderAhead {
         self.cache_budget_bytes.store(bytes, Ordering::Relaxed);
     }
 
-    /// Toggle "cache read-ahead": `false` riduce la finestra bufferizzata
-    /// al margine minimo (`MIN_MARGIN_FRAMES`), per verificare se un
-    /// vero read-ahead di secondi serve ancora davvero con i proxy
-    /// attivi (un seek su un proxy tutto-intra costa quanto decodificare
-    /// un frame singolo, quindi in teoria il read-ahead diventa
-    /// superfluo — non per forza vero nella pratica, da qui il toggle
-    /// per provarlo). Non è un margine *zero*: un margine letteralmente
-    /// nullo (un solo frame, "decodifica esattamente quel che serve ora
-    /// e basta") si è rivelato strutturalmente fragile anche svegliando
-    /// il worker subito a ogni cambio di target (`set_target` →
-    /// `Command::Wake`) — resta comunque un design a margine minimo, non
-    /// zero, robusto contro la variabilità di timing (contesa CPU,
-    /// scheduling) che la sola reattività non può azzerare del tutto
-    /// (bug segnalato dall'utente: playback a scatti anche a 1x con
-    /// read-ahead disattivo).
+    /// Quanti secondi di timeline bufferizzare in avanti dal playhead
+    /// (menu Playback > Proxy) — vedi doc di `DEFAULT_LOOKAHEAD_SECS`.
+    /// Qualunque valore, anche `0`, resta comunque pavimentato a
+    /// `MIN_MARGIN_FRAMES` da `walk_and_fill`: vedi la sua doc sul
+    /// perché un margine letteralmente nullo è strutturalmente fragile
+    /// anche con la sveglia immediata (`set_target` → `Command::Wake`).
     /// Segna subito "non ancora bufferizzato": la finestra sta per
     /// cambiare dimensione, l'utente deve vedere la UI reagire.
-    pub fn set_read_ahead_enabled(&self, enabled: bool) {
-        self.read_ahead_enabled.store(enabled, Ordering::Relaxed);
+    pub fn set_lookahead_secs(&self, secs: f64) {
+        store_secs(&self.lookahead_secs, secs);
+        self.caught_up.store(false, Ordering::Relaxed);
+    }
+
+    /// Quanti secondi di timeline bufferizzare anche *dietro* la testina
+    /// (menu Playback > Proxy) — vedi doc di `DEFAULT_BEHIND_SECS`.
+    pub fn set_behind_secs(&self, secs: f64) {
+        store_secs(&self.behind_secs, secs);
         self.caught_up.store(false, Ordering::Relaxed);
     }
 
@@ -460,7 +477,8 @@ fn worker_loop(
         target,
         cache_budget_bytes,
         caught_up,
-        read_ahead_enabled,
+        lookahead_secs,
+        behind_secs,
     } = shared;
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Decoder aperti per la finestra *dietro* la testina, separati da
@@ -545,7 +563,8 @@ fn worker_loop(
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
         let budget = cache_budget_bytes.load(Ordering::Relaxed);
-        let read_ahead = read_ahead_enabled.load(Ordering::Relaxed);
+        let lookahead = load_secs(&lookahead_secs);
+        let behind = load_secs(&behind_secs);
         let outcome = walk_and_fill(
             &project,
             timeline_id,
@@ -556,7 +575,8 @@ fn worker_loop(
             budget,
             went_backward,
             proxy_enabled,
-            read_ahead,
+            lookahead,
+            behind,
             &target,
         );
         retry_immediately = outcome.interrupted;
@@ -820,7 +840,7 @@ fn position_decoder(
     Positioned::Opened
 }
 
-/// Cammina `LOOKAHEAD_SECS` avanti da `from_frame` e riempie la
+/// Cammina `lookahead_secs` avanti da `from_frame` e riempie la
 /// `SharedFrameCache` (REFACTOR_PIPELINE.md §2) in ordine di priorità:
 /// i segmenti restituiti da `collect_media_segments` sono già ordinati
 /// dal più vicino alla testina al più lontano (si cammina la timeline in
@@ -877,28 +897,24 @@ fn walk_and_fill(
     cache_budget_bytes: usize,
     went_backward: bool,
     proxy_enabled: bool,
-    read_ahead_enabled: bool,
+    lookahead_secs: f64,
+    behind_secs: f64,
     target: &AtomicI64,
 ) -> WalkOutcome {
     let Some(timeline) = project.timelines.get(timeline_id) else {
         return WalkOutcome::SETTLED;
     };
     let fps = timeline.fps.as_f64().max(1e-9);
-    // Col read-ahead disattivo, la finestra si riduce al margine minimo
-    // (`MIN_MARGIN_FRAMES`, non zero — vedi doc lì e di
-    // `RenderAhead::set_read_ahead_enabled`) invece dei secondi normali
-    // — nessun caso speciale in più nel resto della funzione, sono
-    // ancora `collect_media_segments`/`collect_media_segments_behind` a
-    // decidere cosa c'è da fare, solo con una finestra diversa in
-    // ingresso.
-    let (lookahead_frames, behind_frames) = if read_ahead_enabled {
-        (
-            ((LOOKAHEAD_SECS * fps).round() as FrameIdx).max(1),
-            (BEHIND_SECS * fps).round() as FrameIdx,
-        )
-    } else {
-        (MIN_MARGIN_FRAMES, MIN_MARGIN_FRAMES)
-    };
+    // `lookahead_secs`/`behind_secs` sono configurabili dall'utente
+    // (menu Playback > Proxy, anche `0`) ma restano sempre pavimentati a
+    // `MIN_MARGIN_FRAMES` — vedi la sua doc sul perché un margine
+    // letteralmente nullo è strutturalmente fragile anche con la
+    // sveglia immediata su cambio target. Nessun caso speciale in più
+    // nel resto della funzione, sono ancora `collect_media_segments`/
+    // `collect_media_segments_behind` a decidere cosa c'è da fare, solo
+    // con una finestra diversa in ingresso.
+    let lookahead_frames = ((lookahead_secs * fps).round() as FrameIdx).max(MIN_MARGIN_FRAMES);
+    let behind_frames = ((behind_secs * fps).round() as FrameIdx).max(MIN_MARGIN_FRAMES);
     let end_frame = from_frame + lookahead_frames;
     let start_frame = (from_frame - behind_frames).max(0);
 
@@ -944,7 +960,7 @@ fn walk_and_fill(
     // In avanti prima, sempre: il frame che serve ORA per non fermare la
     // riproduzione ha sempre priorità sul buffer dietro la testina, che è
     // solo una comodità per uno scrub avanti-indietro ravvicinato (vedi
-    // doc di `BEHIND_SECS`) — se il budget si esaurisce già qui, dietro
+    // doc di `DEFAULT_BEHIND_SECS`) — se il budget si esaurisce già qui, dietro
     // non riceve nulla in questo ciclo, correttamente.
     if let ControlFlow::Break(outcome) = fill_segments(&forward_segments, &ctx, open) {
         return outcome;
@@ -1465,7 +1481,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
         // Target vicino alla fine della prima clip: la finestra di
         // lookahead (3s = 75 frame a 25fps) attraversa abbondantemente il
         // taglio a 50.
@@ -1529,7 +1545,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
         render_ahead.set_target(40);
 
         // Aspetta che il buffer arrivi almeno fino al taglio.
@@ -1813,7 +1829,8 @@ mod tests {
             generous_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
         );
 
@@ -1824,7 +1841,7 @@ mod tests {
         assert!(!outcome.interrupted);
     }
 
-    /// La finestra di retention dietro la testina (`BEHIND_SECS`) non è
+    /// La finestra di retention dietro la testina (`behind_secs`) non è
     /// solo "non scartare quel che c'è già": su una zona *mai visitata
     /// prima* deve venire davvero decodificata, non solo trattenuta se
     /// già presente — altrimenti uno scrub in una zona nuova poco dopo
@@ -1872,14 +1889,15 @@ mod tests {
             generous_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(60),
         );
 
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
-            "il tratto dietro la testina [40,59] (dentro BEHIND_SECS) deve essere stato decodificato, non solo trattenuto se già presente: {ranges:?}"
+            "il tratto dietro la testina [40,59] (dentro behind_secs) deve essere stato decodificato, non solo trattenuto se già presente: {ranges:?}"
         );
         assert!(
             ranges.iter().any(|&(s, e)| s <= 60 && e >= 99),
@@ -1887,13 +1905,13 @@ mod tests {
         );
     }
 
-    /// Toggle "cache read-ahead" disattivo: la finestra si riduce al
-    /// margine minimo (`MIN_MARGIN_FRAMES`), non ai secondi normali —
-    /// anche con budget generoso e una zona mai vista prima (che con
-    /// read-ahead attivo farebbe scattare sia la finestra in avanti sia
+    /// `lookahead_secs`/`behind_secs` configurati a `0`: la finestra si
+    /// riduce al margine minimo (`MIN_MARGIN_FRAMES`), non a zero — anche
+    /// con budget generoso e una zona mai vista prima (che con una
+    /// finestra normale farebbe scattare sia la finestra in avanti sia
     /// quella di retention, vedi il test sopra).
     #[test]
-    fn walk_and_fill_buffers_only_a_minimal_margin_when_read_ahead_is_disabled() {
+    fn walk_and_fill_buffers_only_a_minimal_margin_when_configured_to_zero_seconds() {
         let path = make_test_clip("vv-app-render-ahead-test", "no_read_ahead.mp4", 4);
         let mut project = Project::default();
         let media_a = project.media_pool.insert(MediaItem {
@@ -1930,7 +1948,8 @@ mod tests {
             generous_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            false, // read_ahead_enabled: quello sotto esame
+            0.0,   // lookahead_secs: quello sotto esame
+            0.0,   // behind_secs: quello sotto esame
             &AtomicI64::new(60),
         );
 
@@ -1939,14 +1958,15 @@ mod tests {
         // frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede comunque di
         // decodificare in sequenza da lì (nessun modo di saltare i
         // frame intermedi), e quei frame restano in cache perché
-        // genuinamente già decodificati. Quel che conta per il toggle è
-        // che la finestra *non vada oltre* 63 (col read-ahead attivo
+        // genuinamente già decodificati. Quel che conta è che la
+        // finestra *non vada oltre* 63 (con `lookahead_secs` normale
         // arriverebbe fino a 99, la fine della clip — vedi il test
-        // sopra): il margine minimo è pochi frame, non secondi.
+        // sopra): configurato a zero secondi, resta comunque il margine
+        // minimo, non letteralmente nulla.
         assert_eq!(
             caches.cached_ranges(media_a),
             vec![(0, 60 + MIN_MARGIN_FRAMES - 1)],
-            "col read-ahead disattivo la finestra non deve estendersi oltre il margine minimo"
+            "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
         );
         assert!(
             outcome.caught_up,
@@ -1999,7 +2019,8 @@ mod tests {
             tiny_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
         );
 
@@ -2068,7 +2089,8 @@ mod tests {
             100_000_000,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &drifted_target,
         );
         assert!(
@@ -2148,7 +2170,8 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
         );
 
@@ -2230,7 +2253,8 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
         );
 
@@ -2386,7 +2410,8 @@ mod tests {
             total_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
         );
         let frames_b_shared = frames_cached(&caches.cached_ranges(media_b));
@@ -2405,7 +2430,8 @@ mod tests {
             total_budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(200),
         );
         let ranges = caches.cached_ranges(media_b);
@@ -2451,7 +2477,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
         render_ahead.set_target(80);
 
         let start = std::time::Instant::now();
@@ -2488,7 +2514,7 @@ mod tests {
     /// all'indietro deve rigenerare il buffer per la nuova posizione,
     /// non restare bloccato sul frame in cache più vicino. Lo scrub qui
     /// (70 frame) è scelto apposta *oltre* la finestra di retention
-    /// dietro la testina (`BEHIND_SECS`, 2s = 50 frame a 25fps): un
+    /// dietro la testina (`DEFAULT_BEHIND_SECS`, 2s = 50 frame a 25fps): un
     /// vero scrub oltre quella finestra deve ancora comportarsi come
     /// prima di quella finestra — rigenerare da zero — perché qui non
     /// c'è nulla da riusare. Uno scrub *dentro* la finestra invece non
@@ -2525,7 +2551,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, true);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, DEFAULT_LOOKAHEAD_SECS, DEFAULT_BEHIND_SECS);
         render_ahead.set_target(100);
 
         // Attendi non solo che il buffer copra 100, ma che i cicli di
@@ -2574,8 +2600,8 @@ mod tests {
     }
 
     /// Regressione per il bug segnalato dall'utente: playback a scatti
-    /// anche a 1x con `read_ahead_enabled=false`, perché `set_target`
-    /// aggiornava solo un atomico letto dal worker al più ogni
+    /// anche a 1x con `lookahead_secs`/`behind_secs` a `0`, perché
+    /// `set_target` aggiornava solo un atomico letto dal worker al più ogni
     /// `POLL_INTERVAL` (50ms) — un tetto reale a ~20 frame/sec a
     /// prescindere da quanto la decodifica fosse veloce (succedeva
     /// anche coi proxy).
@@ -2615,7 +2641,7 @@ mod tests {
             muted: false,
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, false);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, 0.0, 0.0);
 
         let wait_for = |frame: FrameIdx| {
             let start = std::time::Instant::now();
@@ -2714,7 +2740,8 @@ mod tests {
                 budget,
                 went_backward,
                 false, // proxy_enabled: irrilevante per questo test
-                true,  // read_ahead_enabled: irrilevante per questo test
+                DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+                DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(from),
             );
         }
@@ -2740,7 +2767,8 @@ mod tests {
             budget,
             true,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(80),
         );
 
@@ -2753,7 +2781,7 @@ mod tests {
 
     /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
     /// all'indietro, la porzione già bufferizzata che ricade ancora
-    /// nella *nuova* finestra (avanti + dietro, vedi `BEHIND_SECS`) non
+    /// nella *nuova* finestra (avanti + dietro, vedi `behind_secs`) non
     /// deve essere ridecodificata — solo il singolo frame inevitabile
     /// (il keyframe su cui il seek atterra: senza deciderlo *ancora*
     /// dopo il seek, vedi doc di `position_decoder`). Con la finestra di
@@ -2820,7 +2848,8 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(300),
         );
         let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
@@ -2842,7 +2871,8 @@ mod tests {
             budget,
             true,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(270),
         );
 
@@ -2926,7 +2956,8 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(10),
         );
 
@@ -2941,7 +2972,8 @@ mod tests {
             budget,
             false,
             false, // proxy_enabled: irrilevante per questo test
-            true,  // read_ahead_enabled: irrilevante per questo test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            DEFAULT_BEHIND_SECS,
             &AtomicI64::new(target),
         );
         for _ in 0..15 {
@@ -2956,7 +2988,8 @@ mod tests {
                 budget,
                 false,
                 false, // proxy_enabled: irrilevante per questo test
-                true,  // read_ahead_enabled: irrilevante per questo test
+                DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+                DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(target),
             );
             let ranges = caches.cached_ranges(media_a);

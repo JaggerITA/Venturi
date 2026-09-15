@@ -181,20 +181,20 @@ struct VibeVideoApp {
     /// alla prima `import_media`, non subito: niente thread in più per
     /// una sessione che non importa mai media).
     proxy_worker: Option<proxy_worker::ProxyWorker>,
-    /// Toggle "cache read-ahead" (menu Timeline > Proxy, dove vive anche
-    /// il toggle proxy — l'utente vuole provare se coi proxy attivi
-    /// serva ancora): quando `false`, `render_ahead` riduce la finestra
-    /// bufferizzata al margine minimo (`render_ahead::MIN_MARGIN_FRAMES`,
-    /// pochi frame avanti e dietro, non i secondi normali — vedi doc di
-    /// `render_ahead::RenderAhead::set_read_ahead_enabled` sul perché
-    /// non è un margine letteralmente nullo). Attivo di default: senza,
-    /// lo scrub/playback tornerebbe a dipendere quasi interamente dalla
-    /// latenza di un seek+decode a ogni singolo frame, esattamente ciò
-    /// che il read-ahead esiste per evitare — utile *disattivarlo* solo
-    /// per misurare se, con un proxy tutto-intra attivo (seek economico
-    /// quanto un decode singolo), quella latenza resta comunque
-    /// trascurabile.
-    read_ahead_enabled: bool,
+    /// Quanti secondi di timeline bufferizzare in anticipo avanti/dietro
+    /// la testina (menu Playback > Proxy, dove vive anche il toggle
+    /// proxy) — vedi doc di `render_ahead::DEFAULT_LOOKAHEAD_SECS`/
+    /// `DEFAULT_BEHIND_SECS`. Configurabile perché il bilanciamento
+    /// giusto dipende da quanto è pesante il sorgente/proxy e da quanta
+    /// RAM l'utente vuole dedicarci — un valore fisso per tutti
+    /// avrebbe sempre sbagliato in una direzione o nell'altra. Restano
+    /// comunque pavimentati a `render_ahead::MIN_MARGIN_FRAMES` anche se
+    /// l'utente li porta a `0` (vedi la sua doc sul perché un margine
+    /// letteralmente nullo è strutturalmente fragile). Non persistono
+    /// tra un riavvio e l'altro, come ogni altra impostazione in
+    /// vibevideo oggi.
+    lookahead_secs: f64,
+    behind_secs: f64,
 
     /// Clip la cui anteprima è attualmente mostrata: guida sia il player
     /// (quale media riprodurre) sia il transform/gain applicati (milestone
@@ -318,7 +318,8 @@ impl Default for VibeVideoApp {
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             proxy_enabled: true,
             proxy_worker: None,
-            read_ahead_enabled: true,
+            lookahead_secs: render_ahead::DEFAULT_LOOKAHEAD_SECS,
+            behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
@@ -1088,7 +1089,8 @@ impl VibeVideoApp {
                 timeline_id,
                 self.cache_budget_bytes,
                 self.proxy_enabled,
-                self.read_ahead_enabled,
+                self.lookahead_secs,
+                self.behind_secs,
             ));
             self.render_ahead_generation = self.history.generation();
         }
@@ -2418,7 +2420,9 @@ impl eframe::App for VibeVideoApp {
                         ui.close();
                     }
                     ui.label("Ctrl+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
-                    ui.separator();
+                });
+
+                ui.menu_button("Playback", |ui| {
                     ui.menu_button("Proxy", |ui| {
                         if ui
                             .checkbox(&mut self.proxy_enabled, "Usa proxy")
@@ -2434,19 +2438,50 @@ impl eframe::App for VibeVideoApp {
                         {
                             render_ahead.set_proxy_enabled(self.proxy_enabled);
                         }
-                        if ui
-                            .checkbox(&mut self.read_ahead_enabled, "Cache read-ahead")
-                            .on_hover_text(
-                                "Bufferizza in anticipo qualche secondo avanti/dietro la testina, \
-                                 invece di un margine minimo di pochi frame. Disattivalo per \
-                                 verificare se serve ancora con i proxy attivi (un seek su un \
-                                 proxy tutto-intra è già economico quanto un decode singolo).",
-                            )
-                            .changed()
-                            && let Some(render_ahead) = &self.render_ahead
-                        {
-                            render_ahead.set_read_ahead_enabled(self.read_ahead_enabled);
-                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Read-ahead avanti:");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.lookahead_secs)
+                                        .range(0.0..=30.0)
+                                        .speed(0.1)
+                                        .suffix(" s"),
+                                )
+                                .on_hover_text(
+                                    "Quanti secondi di timeline bufferizzare in anticipo avanti \
+                                     dalla testina. Di più = scrub/playback più fluidi ma più RAM \
+                                     e CPU spesi su frame che potrebbero non servire mai; di meno \
+                                     = più leggero ma più probabile una breve attesa durante uno \
+                                     scrub veloce. Resta comunque un margine minimo anche a 0.",
+                                )
+                                .changed()
+                                && let Some(render_ahead) = &self.render_ahead
+                            {
+                                render_ahead.set_lookahead_secs(self.lookahead_secs);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Read-ahead dietro:");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut self.behind_secs)
+                                        .range(0.0..=30.0)
+                                        .speed(0.1)
+                                        .suffix(" s"),
+                                )
+                                .on_hover_text(
+                                    "Quanti secondi di timeline tenere bufferizzati anche dietro \
+                                     la testina, oltre alla finestra in avanti: rende economico \
+                                     uno scrub avanti-indietro ravvicinato senza dover \
+                                     ridecodificare ogni volta. Resta comunque un margine minimo \
+                                     anche a 0.",
+                                )
+                                .changed()
+                                && let Some(render_ahead) = &self.render_ahead
+                            {
+                                render_ahead.set_behind_secs(self.behind_secs);
+                            }
+                        });
                         ui.horizontal(|ui| {
                             ui.label("Cache video:");
                             // Espresso in MB nella UI, ma `cache_budget_bytes`
