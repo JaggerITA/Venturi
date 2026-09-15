@@ -805,12 +805,42 @@ fn without_already_cached_chunks(
     chunks
         .into_iter()
         .filter(|chunk| {
-            !caches
-                .cached_ranges(chunk.media_id)
-                .iter()
-                .any(|&(s, e)| s <= chunk.source_start && e >= chunk.source_end)
+            !range_fully_cached(caches, chunk.media_id, chunk.source_start, chunk.source_end)
         })
         .collect()
+}
+
+/// `true` se un singolo intervallo contiguo in cache copre già per intero
+/// `[start, end]` — usato per decidere se un segmento (dietro o avanti)
+/// può essere saltato del tutto, senza toccare il decoder. Necessario
+/// non solo per i blocchi dietro (vedi `without_already_cached_chunks`)
+/// ma per *qualunque* segmento: `OpenDecoder::next_frame` può restare
+/// "indietro" rispetto a `segment.source_start` anche per la finestra
+/// avanti, non solo per quella dietro — es. un riaggancio anticipato con
+/// una porzione già in cache (il ramo "resumed && contains" più sotto)
+/// lascia `next_frame` fermo a quel punto di raccordo, che può restare
+/// più indietro di `source_start` di quanto la soglia adattiva
+/// consideri normale: il ciclo successivo vedrebbe di nuovo un seek
+/// come necessario, decodificherebbe di nuovo la stessa porzione già in
+/// cache (innocuo ma sprecato) e si riaggancerebbe allo stesso punto,
+/// da capo — un loop stabile e permanente (osservato dall'utente:
+/// "loop continuo... non si ferma mai", isolato con
+/// VV_DEBUG_RENDER_AHEAD confrontando bytes_used/soglia/GOP fino a
+/// escludere sfratto per budget e stima del GOP collassata). Questo
+/// controllo, fatto *prima* di interpellare il decoder, evita di
+/// fidarsi della posizione che il decoder *crede* di avere quando la
+/// cache stessa può già rispondere alla domanda "serve altro lavoro
+/// qui?" in modo più affidabile.
+fn range_fully_cached(
+    caches: &SharedFrameCache,
+    media_id: MediaId,
+    start: FrameIdx,
+    end: FrameIdx,
+) -> bool {
+    caches
+        .cached_ranges(media_id)
+        .iter()
+        .any(|&(s, e)| s <= start && e >= end)
 }
 
 /// Assicura che `open[media_id]` sia un decoder posizionato in modo da
@@ -1167,6 +1197,21 @@ fn fill_segments(
         let Some(item) = ctx.project.media_pool.get(segment.media_id) else {
             continue;
         };
+        // Salta del tutto un segmento già interamente in cache, prima
+        // ancora di guardare dove il decoder *crede* di essere — vedi
+        // doc di `range_fully_cached` sul perché non ci si può fidare
+        // solo di `OpenDecoder::next_frame` qui (un riaggancio anticipato
+        // può lasciarlo "indietro" rispetto a `source_start` in modo
+        // permanente, altrimenti un loop di riseek-ridecodifica-riaggancio
+        // stabile e infinito, mai risolto da solo).
+        if range_fully_cached(
+            ctx.caches,
+            segment.media_id,
+            segment.source_start,
+            segment.source_end,
+        ) {
+            continue;
+        }
         // Proxy solo se il toggle è attivo *e* quello per questo media
         // è già pronto (REFACTOR_PIPELINE.md proxy) — il caso "toggle
         // attivo ma proxy non ancora generato in background" ricade sul
@@ -3278,18 +3323,17 @@ mod tests {
     /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
     /// all'indietro, la porzione già bufferizzata che ricade ancora
     /// nella *nuova* finestra (avanti + dietro, vedi `behind_secs`) non
-    /// deve essere ridecodificata — solo il singolo frame inevitabile
-    /// (il keyframe su cui il seek atterra: senza deciderlo *ancora*
-    /// dopo il seek, vedi doc di `position_decoder`). Con la finestra di
-    /// retention dietro la testina, lo scrub di 30 frame qui sotto
-    /// ricade interamente *dentro* quella finestra (50 frame): il
-    /// tratto [250,269] non viene nemmeno scartato da `reconcile`, la
-    /// riconnessione scatta appena il decoder atterra sul keyframe 250 e
-    /// decodifica quel singolo frame — non deve proseguire fino a 270
-    /// come nella versione senza retention. Verificato osservando
-    /// `OpenDecoder::next_frame` dopo il seek: deve fermarsi a 251
-    /// (keyframe 250 decodificato + 1), non continuare a ridecodificare
-    /// quel che è già lì.
+    /// deve essere ridecodificata — anzi, il decoder non va toccato per
+    /// niente (`range_fully_cached`, controllato *prima* di interpellarlo:
+    /// vedi la sua doc su un bug reale, confermato in produzione, causato
+    /// dal fidarsi della posizione che il decoder *crede* di avere invece
+    /// di chiedere alla cache). Con la finestra di retention dietro la
+    /// testina, lo scrub di 30 frame qui sotto ricade interamente
+    /// *dentro* quella finestra (50 frame): il tratto [250,269] non viene
+    /// nemmeno scartato da `reconcile`, quindi l'intero segmento richiesto
+    /// risulta già coperto e viene saltato di netto — `OpenDecoder::
+    /// next_frame` deve restare esattamente dov'era prima di questa
+    /// chiamata, prova diretta che nessun seek/decodifica è avvenuto.
     ///
     /// Nota (REFACTOR_PIPELINE.md §2, Tier A): con la `SharedFrameCache`
     /// a budget globale, `reconcile` scarta anche ciò che è *oltre*
@@ -3374,8 +3418,10 @@ mod tests {
 
         let next_frame_after = open.get(&media_a).unwrap().next_frame;
         assert_eq!(
-            next_frame_after, 251,
-            "deve fermarsi appena si ricongiunge con il buffer esistente (251, subito dopo il keyframe 250 su cui il seek atterra), non ridecodificare oltre: next_frame={next_frame_after}"
+            next_frame_after,
+            filled_up_to + 1,
+            "il segmento richiesto era già interamente in cache: il decoder non doveva essere \
+             toccato affatto, next_frame deve restare dov'era: next_frame={next_frame_after}"
         );
 
         // L'intersezione tra la vecchia coda e la nuova finestra
@@ -3390,6 +3436,110 @@ mod tests {
         assert!(
             ranges.iter().any(|&(s, e)| s <= 250 && e >= 344),
             "l'intersezione [250,344] tra vecchia coda e nuova finestra deve restare un range contiguo: ranges={ranges:?} filled_up_to={filled_up_to}"
+        );
+    }
+
+    /// Regressione per il loop infinito segnalato dall'utente e
+    /// diagnosticato con `VV_DEBUG_RENDER_AHEAD` su un file reale
+    /// (1080p60fps, GOP lungo, proxy disattivo): un piccolo scrub
+    /// all'indietro riaggancia il decoder in anticipo (come nel test
+    /// sopra) lasciando `next_frame` fermo *prima* di `source_start` —
+    /// abbastanza indietro da superare la soglia adattiva. Prima del
+    /// fix, ogni ciclo successivo con la testina *ferma* alla stessa
+    /// posizione vedeva comunque `segment_start > next_frame + soglia`
+    /// (la posizione del decoder non viene mai aggiornata da un ciclo
+    /// che lo salta), quindi riseekava, ridecodificava lo stesso tratto
+    /// già in cache fino a riagganciarsi allo stesso punto di prima — un
+    /// loop stabile e infinito, mai autolimitantesi. `range_fully_cached`
+    /// lo previene chiedendo alla cache *prima* di guardare la posizione
+    /// (presunta) del decoder.
+    #[test]
+    fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_seek() {
+        let path = make_test_clip("vv-app-render-ahead-test", "reconnect_loop.mp4", 20);
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 500,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 500)],
+            muted: false,
+        }]));
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let budget = 43_000_000; // capacità ~139 frame, come sopra
+
+        // Stesso setup del test sopra: riempimento iniziale a 300, poi
+        // un piccolo scrub indietro a 290 che riaggancia in anticipo.
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            &mut open_behind,
+            300,
+            budget,
+            false,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+            &AtomicI64::new(300),
+        );
+        walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            &mut open_behind,
+            290,
+            budget,
+            true,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+            &AtomicI64::new(290),
+        );
+
+        // 20 cicli successivi, testina ferma a 290 (nessuno scrub): nel
+        // bug originale ognuno riseekava e ridecodificava da capo,
+        // dominando il tempo totale (seek+decodifica reali, non solo
+        // controlli in memoria) — stessa soglia/logica del test di
+        // stabilità a riposo sopra.
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            walk_and_fill(
+                &project,
+                timeline_id,
+                &caches,
+                &mut open,
+                &mut open_behind,
+                290,
+                budget,
+                false,
+                false,
+                DEFAULT_LOOKAHEAD_SECS,
+                DEFAULT_BEHIND_SECS,
+                &AtomicI64::new(290),
+            );
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(20),
+            "20 cicli a testina ferma dopo un riaggancio anticipato non devono riseekare/\
+             ridecodificare a ripetizione: impiegati {elapsed:?} in totale, attesi <20ms"
         );
     }
 
