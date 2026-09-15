@@ -1278,69 +1278,25 @@ fn fill_segments(
         // Stima (risoluzione del media, YUV420 planare senza
         // l'arrotondamento per dimensioni dispari del decoder reale —
         // un margine di sicurezza volutamente semplice, non un conteggio
-        // byte-esatto) usata sotto per prevedere il costo *prima* di
-        // seekare/decodificare.
+        // byte-esatto) di quanto pesa UN frame di questo media. Se non
+        // c'è nemmeno spazio per un frame in più, non ha senso nemmeno
+        // tentare: il primo frame *voluto* fallirebbe comunque il
+        // controllo di budget più sotto, dopo aver già pagato il
+        // transito per arrivarci (costo CPU reale, non solo contabile —
+        // bug reale, confermato dall'utente con `behind_secs` alto su
+        // un GOP da 250 frame: loop infinito che rifaceva la stessa
+        // decodifica da 625MB ogni ~50ms, sempre respinta). Qui si
+        // guarda solo `bytes_used()`, mai una stima del transito
+        // necessario per arrivarci: un tentativo del genere (provato e
+        // poi tolto — bug reale, confermato dall'utente: bloccava il
+        // playback normale per secondi ogni volta che il transito
+        // stimato appariva grande, anche con budget ampiamente
+        // disponibile) viola la stessa regola che il controllo più
+        // sotto rispetta apposta — il transito non conta *mai* contro
+        // il budget del proprio tratto voluto, quindi non ha senso
+        // scartare un segmento sulla sola base di quanto transito
+        // servirebbe.
         let estimated_frame_bytes = (item.meta.width as usize * item.meta.height as usize * 3) / 2;
-        // Se un decoder è già stato aperto per questo media (in questo
-        // giro o in uno precedente) e ha già imparato la struttura del
-        // GOP da un atterraggio reale (`estimated_gop`/
-        // `last_keyframe_landed`, vedi `OpenDecoder::
-        // record_keyframe_landing`), possiamo prevedere *prima* di
-        // seekare quanto transito servirà per raggiungere questo
-        // segmento — i keyframe sono ragionevolmente equispaziati
-        // dall'ultimo osservato, quindi `(source_start - ultimo
-        // keyframe) mod stima_gop` è una stima della distanza dal
-        // keyframe più vicino <= `source_start` (solo una stima: i
-        // keyframe reali non sono perfettamente equispaziati, specie
-        // su un taglio di scena — nel peggiore dei casi si salta un
-        // segmento che sarebbe stato raggiungibile, mai il contrario:
-        // non fa mai credere coperto qualcosa che non lo è).
-        //
-        // Il transito in sé non conta contro il budget del *proprio*
-        // tratto voluto (`transit_bytes` più sotto, apposta perché un
-        // GOP lungo non deve mai poter bloccare un segmento dal
-        // raggiungere sé stesso) — ma se il transito stimato da solo
-        // supera già lo spazio libero, il poco che il segmento
-        // riuscisse comunque a raggiungere sarebbe solo il frame più
-        // lontano dalla testina di *tutta* la cache, il primo che il
-        // prossimo sfratto per budget (Tier B) toglierebbe di nuovo:
-        // decodificare comunque significa pagare il costo pieno del
-        // transito per un progresso che non sopravvive nemmeno a un
-        // ciclo. Prima non c'era un controllo qui: si scopriva il
-        // fallimento (o il progresso net-zero) solo *dopo* aver
-        // decodificato l'intero transito (costo CPU reale, non solo
-        // contabile) — e siccome a testina ferma nulla cambia da un
-        // ciclo al successivo, si ripeteva identico ad ogni poll, per
-        // sempre (bug reale, confermato dall'utente con `behind_secs`
-        // alto su un GOP da 250 frame: loop infinito che rifaceva la
-        // stessa decodifica da 625MB ogni ~50ms).
-        if let Some(od) = open.get(&segment.media_id)
-            && let (Some(gop), Some(anchor)) = (od.estimated_gop, od.last_keyframe_landed)
-        {
-            let estimated_transit_frames = (segment.source_start - anchor).rem_euclid(gop);
-            let estimated_transit_bytes = estimated_transit_frames as usize * estimated_frame_bytes;
-            if ctx.caches.bytes_used() + estimated_transit_bytes > ctx.cache_budget_bytes {
-                if debug_enabled() {
-                    eprintln!(
-                        "[render_ahead] TRANSITO-STIMATO-TROPPO-COSTOSO media={:?} segment=[{},{}] transito_stimato_frame={estimated_transit_frames} bytes_used={} budget={}",
-                        segment.media_id,
-                        segment.source_start,
-                        segment.source_end,
-                        ctx.caches.bytes_used(),
-                        ctx.cache_budget_bytes
-                    );
-                }
-                return ControlFlow::Break(WalkOutcome {
-                    interrupted: false,
-                    caught_up: false,
-                });
-            }
-        }
-        // Anche senza ancora una stima del GOP (primissimo tentativo su
-        // questo media/decoder), se non c'è nemmeno spazio per UN frame
-        // in più non ha senso tentare: fallirebbe comunque al primo
-        // frame voluto, dopo aver comunque pagato il transito per
-        // arrivarci.
         if ctx.caches.bytes_used() + estimated_frame_bytes > ctx.cache_budget_bytes {
             if debug_enabled() {
                 eprintln!(
@@ -4014,29 +3970,30 @@ mod tests {
     }
 
     /// Regressione per un bug reale, confermato dall'utente con un log
-    /// diagnostico su un file 1080p60fps e `behind_secs` alto: un
-    /// segmento il cui transito verso il keyframe più vicino richiede
-    /// attraversare un intero GOP veniva comunque decodificato per
-    /// intero (costo CPU reale, non solo contabile — nel caso
-    /// dell'utente, 625MB ogni ~50ms) prima di scoprire, solo al primo
-    /// frame *voluto*, che il budget non basta — e siccome a testina
-    /// ferma nulla cambia da un ciclo al successivo, si ripeteva
-    /// identico all'infinito. Qui si simula direttamente la situazione
-    /// in cui il decoder ha *già* imparato la struttura del GOP da
-    /// atterraggi precedenti (`estimated_gop`/`last_keyframe_landed`,
-    /// come capiterebbe dopo aver processato con successo dei blocchi
-    /// più vicini in cicli precedenti): il nuovo controllo deve stimare
-    /// il transito *prima* di seekare/decodificare e saltare subito il
-    /// segmento se quel transito da solo eccede già lo spazio libero —
-    /// zero byte decodificati, non solo zero byte tenuti.
+    /// diagnostico durante il playback normale su un file 1080p60fps
+    /// reale con GOP=250: un primo tentativo di questo controllo
+    /// stimava il transito necessario dal GOP osservato e saltava il
+    /// segmento se quella stima da sola eccedeva il budget — violando
+    /// la stessa regola che il controllo di budget sul frame *voluto*
+    /// rispetta apposta (il transito non conta mai contro il budget del
+    /// proprio tratto). L'effetto reale: il segmento *in avanti* (non
+    /// solo quelli dietro) restava bloccato per centinaia di frame
+    /// consecutivi ogni volta che la stima del transito appariva
+    /// grande, anche con ampio budget libero — playback che si blocca
+    /// per secondi ogni volta che la testina attraversa un confine di
+    /// GOP. Qui si verifica che un decoder "esperto" (che conosce già
+    /// GOP e ultimo keyframe, quindi stimerebbe un transito enorme per
+    /// un segmento lontano) NON impedisca comunque di riempire un
+    /// segmento vicino alla testina quando c'è budget di sobra — solo
+    /// la disponibilità di spazio per il tratto voluto conta, mai una
+    /// stima di quanto transito serva per arrivarci.
     #[test]
-    fn fill_segments_skips_a_segment_upfront_when_its_estimated_transit_alone_exceeds_the_remaining_budget()
-     {
+    fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_would_be_large() {
         let path = make_test_clip_with_short_gop(
             "vv-app-render-ahead-test",
-            "transit_too_costly.mp4",
+            "transit_estimate_does_not_block.mp4",
             4,
-            250,
+            25,
         );
         let mut project = Project::default();
         let media_a = project.media_pool.insert(MediaItem {
@@ -4055,50 +4012,55 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Decoder già "esperto": ha già osservato due atterraggi (a 750
-        // e 1000, distanza 250) prima di questa chiamata — esattamente
-        // come capiterebbe dopo aver riempito con successo dei blocchi
-        // più vicini in cicli precedenti.
+        // Decoder "esperto": conosce già GOP=25 e un keyframe a 0. Il
+        // segmento sotto (24,34) richiede un transito *reale* di 24
+        // frame (quasi un intero GOP) per essere raggiunto dal keyframe
+        // più vicino — genuino, non frutto di un ancoraggio vecchio: se
+        // il controllo lo stimasse e lo confrontasse col budget stretto
+        // sotto (che basta comunque per il tratto voluto, 11 frame),
+        // bloccherebbe il segmento nonostante sia in realtà
+        // raggiungibile.
+        let frame_bytes = 320 * 240 * 3 / 2;
         let mut od = OpenDecoder::fresh(Decoder::open(&path).unwrap(), path, false);
-        od.record_keyframe_landing(750);
-        od.record_keyframe_landing(1000);
+        od.record_keyframe_landing(0);
+        od.record_keyframe_landing(25);
         open.insert(media_a, od);
 
-        // Segmento lontano, in un GOP precedente rispetto all'ultimo
-        // atterraggio noto (1000): la stima del transito, (100 - 1000)
-        // mod 250 = 100, eccede da sola il budget stretto sotto — un
-        // solo frame ci starebbe (320*240*3/2 = 115_200), ma non 100
-        // frame di transito stimato (11_520_000).
         let segment = MediaSegment {
             media_id: media_a,
-            source_start: 100,
-            source_end: 110,
-            timeline_start: 100,
+            source_start: 24,
+            source_end: 34,
+            timeline_start: 24,
         };
-        let tight_budget = 1_000_000;
+        // Basta per il tratto voluto (11 frame) con ampio margine, ma
+        // meno del transito stimato (24 frame): con budget=frame_bytes*20
+        // il vecchio controllo (stima transito >= spazio libero, anche
+        // se quello spazio non serve affatto al transito) bloccava
+        // comunque.
+        let budget_enough_for_the_wanted_range_but_not_the_full_transit = frame_bytes * 20;
         let ctx = FillContext {
             project: &project,
             caches: &caches,
             went_backward: true,
-            cache_budget_bytes: tight_budget,
-            from_frame: 100,
+            cache_budget_bytes: budget_enough_for_the_wanted_range_but_not_the_full_transit,
+            from_frame: 24,
             proxy_enabled: false,
-            target: &AtomicI64::new(100),
+            target: &AtomicI64::new(24),
         };
         let outcome = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
         assert_eq!(
             outcome,
-            ControlFlow::Break(WalkOutcome {
-                interrupted: false,
-                caught_up: false,
-            }),
-            "un segmento il cui transito stimato eccede già il budget deve fermare il giro subito"
+            ControlFlow::Continue(()),
+            "il tratto voluto ha budget a sufficienza: non deve essere saltato solo perché il \
+             transito per arrivarci è stimato grande"
         );
         assert!(
-            caches.cached_ranges(media_a).is_empty(),
-            "non deve essere stato decodificato/inserito nulla: il salto va fatto *prima* di \
-             seekare, non dopo aver già pagato il transito"
+            caches
+                .cached_ranges(media_a)
+                .iter()
+                .any(|&(s, e)| s <= 24 && e >= 34),
+            "il segmento [24,34] deve essere in cache"
         );
     }
 
