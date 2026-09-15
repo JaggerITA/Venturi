@@ -95,6 +95,29 @@ const DEFAULT_SEEK_THRESHOLD_FRAMES: FrameIdx = 30;
 /// un'osservazione più stretta.
 const MAX_SEEK_THRESHOLD_FRAMES: FrameIdx = 300;
 
+/// Soglia usata al posto di quella imparata/di fallback quando il
+/// decoder è aperto su un proxy (REFACTOR_PIPELINE.md proxy): i proxy
+/// sono generati apposta interamente da keyframe (`g=1 keyint_min=1`,
+/// vedi `vv_media::proxy::generate_proxy`), quindi *ogni* frame è
+/// seekabile a costo pressoché nullo (osservato: seek riusati in
+/// microsecondi, non millisecondi) — non c'è alcun GOP da imparare a
+/// runtime, e usare comunque la stima adattiva (pensata per il sorgente
+/// reale, dove un seek deve ripartire da un keyframe lontano) è
+/// controproducente: durante uno scrub veloce e monotono i salti
+/// osservati tra due seek reali sono sempre ampi (mai un atterraggio
+/// ravvicinato che stringa la stima), quindi `estimated_gop` resta
+/// bloccato su valori grandi (decine/centinaia di frame) e
+/// `position_decoder` preferisce continuare a decodificare in sequenza
+/// invece di seekare — proprio l'inverso di quel che conviene per
+/// contenuto all-intra. Diagnosticato con un test di scrub aggressivo
+/// (`VV_DEBUG_RENDER_AHEAD=1`): ogni ciclo del worker restava bloccato
+/// 15-60ms a decodificare 30-75 frame "di troppo" prima di accorgersi
+/// che la testina era già altrove, più del tempo tra due tick di uno
+/// scrub veloce (quindi il worker non riusciva mai a recuperare mentre
+/// lo scrub proseguiva). Piccola ma non nulla (non `0`): un frame di
+/// margine evita un seek quando la testina è già esattamente lì.
+const PROXY_SEEK_THRESHOLD_FRAMES: FrameIdx = 1;
+
 enum Command {
     UpdateProject(Box<Project>, TimelineId),
     /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy): passa dal
@@ -352,6 +375,10 @@ struct OpenDecoder {
     /// riusare/seekare, va riaperto da zero sul nuovo indipendentemente
     /// da `needs_seek`.
     resolved_path: std::path::PathBuf,
+    /// `true` quando `resolved_path` è un proxy (REFACTOR_PIPELINE.md
+    /// proxy) — vedi `PROXY_SEEK_THRESHOLD_FRAMES` sul perché bypassa la
+    /// stima adattiva del GOP invece di limitarsi a inizializzarla.
+    is_all_intra: bool,
     next_frame: FrameIdx,
     /// `true` subito dopo un seek reale o la primissima apertura: il
     /// prossimo frame decodificato è per costruzione un keyframe (un
@@ -372,10 +399,11 @@ struct OpenDecoder {
 }
 
 impl OpenDecoder {
-    fn fresh(decoder: Decoder, resolved_path: std::path::PathBuf) -> Self {
+    fn fresh(decoder: Decoder, resolved_path: std::path::PathBuf, is_all_intra: bool) -> Self {
         Self {
             decoder,
             resolved_path,
+            is_all_intra,
             next_frame: 0,
             just_repositioned: true,
             last_keyframe_landed: None,
@@ -387,8 +415,12 @@ impl OpenDecoder {
     /// decodificare in sequenza (REFACTOR_PIPELINE.md §3.3): circa un GOP
     /// del media *osservato*, non un numero fisso uguale per tutti i
     /// media — con un fallback conservativo finché non c'è ancora
-    /// un'osservazione reale.
+    /// un'osservazione reale. Per un proxy (`is_all_intra`) niente stima
+    /// da imparare: vedi doc di `PROXY_SEEK_THRESHOLD_FRAMES`.
     fn seek_threshold_frames(&self) -> FrameIdx {
+        if self.is_all_intra {
+            return PROXY_SEEK_THRESHOLD_FRAMES;
+        }
         self.estimated_gop.unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
     }
 
@@ -722,6 +754,7 @@ fn position_decoder(
     path: &Path,
     segment_start: FrameIdx,
     went_backward: bool,
+    is_all_intra: bool,
 ) -> Positioned {
     // Un proxy appena diventato disponibile (o il toggle "usa proxy"
     // cambiato) fa risolvere un path diverso per lo stesso media: il
@@ -780,7 +813,10 @@ fn position_decoder(
             t.elapsed()
         );
     }
-    open.insert(media_id, OpenDecoder::fresh(decoder, path.to_path_buf()));
+    open.insert(
+        media_id,
+        OpenDecoder::fresh(decoder, path.to_path_buf(), is_all_intra),
+    );
     Positioned::Opened
 }
 
@@ -970,7 +1006,8 @@ fn fill_segments(
         // `generate_proxy` finisce (thread separato, vedi `main.rs`),
         // il prossimo ciclo lo trova su disco e ci passa da sé (il
         // confronto path in `position_decoder` se ne accorge).
-        let path = if ctx.proxy_enabled && vv_media::proxy::proxy_exists(item.content_hash) {
+        let is_proxy = ctx.proxy_enabled && vv_media::proxy::proxy_exists(item.content_hash);
+        let path = if is_proxy {
             vv_media::proxy::proxy_path_for(item.content_hash)
         } else {
             item.path.clone()
@@ -981,6 +1018,7 @@ fn fill_segments(
             &path,
             segment.source_start,
             ctx.went_backward,
+            is_proxy,
         ) == Positioned::Failed
         {
             continue;
@@ -1532,7 +1570,7 @@ mod tests {
     fn open_decoder_seek_threshold_uses_the_default_fallback_before_any_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_fresh.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let od = OpenDecoder::fresh(decoder, path.clone());
+        let od = OpenDecoder::fresh(decoder, path.clone(), false);
         assert_eq!(od.seek_threshold_frames(), DEFAULT_SEEK_THRESHOLD_FRAMES);
     }
 
@@ -1542,7 +1580,7 @@ mod tests {
     fn open_decoder_records_the_observed_gap_between_two_consecutive_landings() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_observed.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let mut od = OpenDecoder::fresh(decoder, path.clone());
+        let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
         od.record_keyframe_landing(25);
         od.record_keyframe_landing(50);
@@ -1558,7 +1596,7 @@ mod tests {
     fn open_decoder_gop_estimate_never_grows_from_a_wider_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_min.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let mut od = OpenDecoder::fresh(decoder, path.clone());
+        let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
         od.record_keyframe_landing(0);
         od.record_keyframe_landing(25); // distanza 25: stima = 25
@@ -1583,12 +1621,43 @@ mod tests {
     fn open_decoder_gop_estimate_is_capped_even_on_the_first_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_cap.mp4", 2);
         let decoder = Decoder::open(&path).unwrap();
-        let mut od = OpenDecoder::fresh(decoder, path.clone());
+        let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
         od.record_keyframe_landing(0);
         od.record_keyframe_landing(10_000);
 
         assert_eq!(od.seek_threshold_frames(), MAX_SEEK_THRESHOLD_FRAMES);
+    }
+
+    /// Regressione: uno scrub veloce e monotono (target sempre più
+    /// avanti, mai un atterraggio ravvicinato) su un proxy non deve far
+    /// restare `seek_threshold_frames` bloccata su una stima larga come
+    /// per il sorgente reale (`PROXY_SEEK_THRESHOLD_FRAMES` bypassa del
+    /// tutto la stima, vedi la sua doc) — è esattamente lo scenario
+    /// diagnosticato con `VV_DEBUG_RENDER_AHEAD=1`: senza il bypass, ogni
+    /// ciclo del worker restava bloccato 15-60ms a decodificare in
+    /// sequenza invece di seekare (quasi gratis su un proxy all-intra),
+    /// più del tempo tra due tick di uno scrub veloce.
+    #[test]
+    fn open_decoder_ignores_the_learned_gop_estimate_for_an_all_intra_proxy() {
+        let path = make_test_clip("vv-app-render-ahead-test", "gop_proxy_bypass.mp4", 2);
+        let decoder = Decoder::open(&path).unwrap();
+        let mut od = OpenDecoder::fresh(decoder, path.clone(), true);
+        assert_eq!(od.seek_threshold_frames(), PROXY_SEEK_THRESHOLD_FRAMES);
+
+        // Atterraggi larghi e mai ravvicinati, come durante uno scrub
+        // veloce e monotono: per un decoder "normale" la stima
+        // convergerebbe su un valore grande (il minimo osservato finora,
+        // qui 90) invece di stringersi verso il vero GOP.
+        od.record_keyframe_landing(90);
+        od.record_keyframe_landing(180);
+        od.record_keyframe_landing(270);
+
+        assert_eq!(
+            od.seek_threshold_frames(),
+            PROXY_SEEK_THRESHOLD_FRAMES,
+            "un proxy all-intra non deve mai usare la soglia imparata, qualunque atterraggio osservi"
+        );
     }
 
     /// Regressione: un seek reale per un media già aperto deve riusare
@@ -1615,12 +1684,12 @@ mod tests {
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, false),
+            position_decoder(&mut open, media_a, &path, 0, false, false),
             Positioned::Opened
         );
 
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 1000, false),
+            position_decoder(&mut open, media_a, &path, 1000, false, false),
             Positioned::Seeked,
             "un seek reale su un media già aperto deve riusare il decoder, non riaprirlo"
         );
@@ -1641,7 +1710,7 @@ mod tests {
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path_a, 0, false),
+            position_decoder(&mut open, media_a, &path_a, 0, false, false),
             Positioned::Opened
         );
 
@@ -1651,7 +1720,7 @@ mod tests {
         // restituirebbe `Reused` — riusando un decoder che punta al file
         // sbagliato.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path_b, 0, false),
+            position_decoder(&mut open, media_a, &path_b, 0, false, false),
             Positioned::Opened,
             "il path è cambiato: deve riaprire sul nuovo, non riusare il decoder del vecchio"
         );
@@ -1671,7 +1740,7 @@ mod tests {
 
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, false),
+            position_decoder(&mut open, media_a, &path, 0, false, false),
             Positioned::Opened
         );
 
@@ -1692,7 +1761,7 @@ mod tests {
         // del decoder — lo stato normale durante il playback in avanti —
         // non deve riaprire/riazzerare il decoder.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 0, false),
+            position_decoder(&mut open, media_a, &path, 0, false, false),
             Positioned::Reused
         );
         assert_eq!(
@@ -2217,11 +2286,11 @@ mod tests {
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
         // (come ai due lati di un taglio), source_start 10 e poi 25.
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 10, false),
+            position_decoder(&mut open, media_a, &path, 10, false, false),
             Positioned::Opened
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 25, false),
+            position_decoder(&mut open, media_a, &path, 25, false, false),
             Positioned::Reused,
             "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
         );
@@ -2231,12 +2300,12 @@ mod tests {
         // deve sembrare "tornato indietro" solo perché l'ultima chiamata
         // vista nel ciclo precedente era per il segmento successivo (25).
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 10, false),
+            position_decoder(&mut open, media_a, &path, 10, false, false),
             Positioned::Reused,
             "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
         );
         assert_eq!(
-            position_decoder(&mut open, media_a, &path, 25, false),
+            position_decoder(&mut open, media_a, &path, 25, false, false),
             Positioned::Reused
         );
     }
