@@ -1309,6 +1309,15 @@ impl VibeVideoApp {
                 .as_ref()
                 .is_some_and(|w| w.path == path && w.tier == tier);
             if is_new_window {
+                // La riproduzione è proseguita alla velocità precedente
+                // per tutto il tempo dello stretch in background: la
+                // testina ora è oltre `range_start_secs` (la posizione al
+                // momento della richiesta). `begin_speed_window` apre la
+                // finestra alla sua posizione locale 0 (= range_start_secs
+                // nello spazio originale) — senza questo seek la testina
+                // salterebbe indietro a quel punto invece di continuare da
+                // dove si trova davvero adesso.
+                let resume_at = player.position_secs();
                 if player
                     .begin_speed_window(
                         tier.tempo(),
@@ -1319,6 +1328,7 @@ impl VibeVideoApp {
                     )
                     .is_ok()
                 {
+                    player.seek_secs(resume_at);
                     self.playback_speed = tier.tempo();
                     self.speed_window = Some(SpeedWindowState {
                         path,
@@ -4488,6 +4498,9 @@ mod tests {
 
         app.handle_fast_playback_key(); // parte a 1x
         assert_eq!(app.playback_speed, 1.0);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let pos_at_2x_request = app.preview_player.as_ref().unwrap().position_secs();
+        let request_instant = Instant::now();
         app.handle_fast_playback_key(); // richiede 2x: audio presente, va in background
         assert_eq!(
             app.playback_speed, 1.0,
@@ -4495,18 +4508,30 @@ mod tests {
         );
         assert!(app.pending_speed_stretch.is_some());
 
-        let started_waiting = Instant::now();
-        let deadline = started_waiting + std::time::Duration::from_secs(5);
+        let deadline = request_instant + std::time::Duration::from_secs(5);
         while app.playback_speed != 2.0 && Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
             app.poll_speed_stretch_result();
         }
-        let wait = started_waiting.elapsed();
+        let wait = request_instant.elapsed();
         assert_eq!(app.playback_speed, 2.0, "lo stretch doveva completarsi");
         assert!(app.pending_speed_stretch.is_none());
         assert!(
             wait < std::time::Duration::from_secs(2),
             "la prima finestra (SPEED_WINDOW_SECS) deve tornare in una frazione di secondo, non nel tempo che servirebbe a stretchare l'intera traccia: wait={wait:?}"
+        );
+        // Bug: durante l'attesa dello stretch (`wait`) la riproduzione
+        // prosegue alla vecchia velocità (1x), quindi la testina avanza di
+        // circa `wait` secondi oltre `pos_at_2x_request` — applicare la
+        // finestra non deve farla tornare a `pos_at_2x_request` (dov'era
+        // al momento della richiesta), ma continuare da dove si trova
+        // davvero ora. Un margine di 50ms assorbe il jitter di scheduling
+        // dei sleep/poll qui sopra.
+        let pos_at_2x_applied = app.preview_player.as_ref().unwrap().position_secs();
+        let min_expected = pos_at_2x_request + wait.as_secs_f64() - 0.05;
+        assert!(
+            pos_at_2x_applied >= min_expected,
+            "la testina è tornata indietro quando lo speedup si è applicato invece di continuare da dove si trovava: pos_at_2x_request={pos_at_2x_request} wait={wait:?} min_expected={min_expected} pos_at_2x_applied={pos_at_2x_applied}"
         );
         assert!(
             app.speed_window.is_some(),
