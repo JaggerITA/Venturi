@@ -4305,6 +4305,11 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
+                "-ac",
+                "2", // stereo: `sine` di lavfi è mono di default, ma è il
+                     // caso reale più comune ed è l'unico che esercita
+                     // l'interleaving di `vv_audio::stretch_samples`
+                     // (vedi il bug planar/packed fissato in questo commit).
                 path.to_str().unwrap(),
             ])
             .status()

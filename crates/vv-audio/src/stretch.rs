@@ -65,10 +65,20 @@ pub fn stretch_samples(
         )
         .map_err(|e| e.to_string())?;
 
+    // `rubberband` negozia liberamente il formato interno e può restituire
+    // planar anche se l'input è packed: `aformat` dopo di lui forza di
+    // nuovo packed, altrimenti `drain_filtered` (che assume sempre un
+    // singolo piano interleaved) legge oltre la fine del primo piano non
+    // appena i canali sono più di uno (panic riprodotto con audio stereo).
     graph
         .output("in", 0)
         .and_then(|p| p.input("out", 0))
-        .and_then(|p| p.parse(&format!("rubberband=tempo={tempo}")))
+        .and_then(|p| {
+            p.parse(&format!(
+                "rubberband=tempo={tempo},aformat=sample_fmts={}",
+                format.name()
+            ))
+        })
         .map_err(|e| e.to_string())?;
     graph.validate().map_err(|e| e.to_string())?;
 
@@ -161,5 +171,33 @@ mod tests {
 
         let ratio = samples.len() as f64 / stretched.len() as f64;
         assert!((ratio - 4.0).abs() < 0.1, "ratio={ratio}");
+    }
+
+    /// Regressione: il filtro `rubberband` può restituire l'audio in
+    /// formato planar anche con input packed (vedi `aformat` dopo
+    /// `rubberband` in `stretch_samples`) — con un solo canale (mono) i
+    /// due formati coincidono in memoria, quindi solo un test con più
+    /// canali esercita davvero questo percorso.
+    #[test]
+    fn stretch_stereo_roughly_halves_duration_and_stays_interleaved() {
+        let sample_rate = 44_100;
+        let channels = 2u16;
+        let samples = sine(440.0, sample_rate, 5.0)
+            .into_iter()
+            .flat_map(|s| [s, s])
+            .collect::<Vec<_>>();
+
+        let stretched = stretch_samples(&samples, sample_rate, channels, 2.0).unwrap();
+
+        assert_eq!(
+            stretched.len() % channels as usize,
+            0,
+            "il buffer interleaved deve restare un multiplo esatto di channels"
+        );
+        let ratio = samples.len() as f64 / stretched.len() as f64;
+        assert!((ratio - 2.0).abs() < 0.05, "ratio={ratio}");
+
+        let peak = stretched.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
+        assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
     }
 }
