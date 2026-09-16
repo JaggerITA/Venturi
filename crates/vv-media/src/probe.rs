@@ -57,6 +57,43 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     })
 }
 
+/// Info su uno stream audio del contenitore, per l'import multi-traccia
+/// (vedi `audio_streams`).
+pub struct AudioStreamInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+/// Enumera *tutti* gli stream audio del contenitore, nell'ordine in cui
+/// compaiono (non l'euristica "best" di ffmpeg, che ne sceglie uno solo):
+/// questo è l'ordine che `Clip::audio_stream_index` e i parametri
+/// `stream_index` di `decode_audio_track`/`generate_waveform` si
+/// aspettano — l'indice N-esimo in questo vettore è lo stream audio
+/// N-esimo del file, a prescindere da quale sia "il migliore".
+///
+/// Un file con più tracce audio (es. un mix stereo *e* un 5.1 separato,
+/// come capita con sorgenti broadcast) va importato con una clip audio
+/// per ogni stream — vedi `VibeVideoApp::insert_media_clip` — invece di
+/// tenerne una sola (quella "best") e perdere silenziosamente le altre.
+pub fn audio_streams(path: &Path) -> Result<Vec<AudioStreamInfo>, crate::MediaError> {
+    ensure_init();
+    let input = ffmpeg::format::input(&path)?;
+    let mut out = Vec::new();
+    for stream in input.streams() {
+        if stream.parameters().medium() != ffmpeg::media::Type::Audio {
+            continue;
+        }
+        let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
+            .decoder()
+            .audio()?;
+        out.push(AudioStreamInfo {
+            sample_rate: decoder.rate(),
+            channels: decoder.channels(),
+        });
+    }
+    Ok(out)
+}
+
 /// Fingerprint economico di un file (path canonico + dimensione + data
 /// di modifica, FNV-1a), usato come `MediaItem::content_hash` — chiave
 /// dei proxy (`proxy.rs`) e di qualunque altra cache derivata dal

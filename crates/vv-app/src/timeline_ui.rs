@@ -91,6 +91,8 @@ pub struct ClipboardEntry {
     /// insieme (se c'è): permette di ricollegare le nuove clip incollate
     /// tra loro, dato che i `ClipId` originali non si riportano al paste.
     pub linked_index: Option<usize>,
+    /// Vedi `Clip::audio_stream_index`.
+    pub audio_stream_index: usize,
 }
 
 struct MarqueeDrag {
@@ -526,15 +528,15 @@ pub fn show_timeline(
     // proxy-backed può comunque essere già bufferizzata dal sorgente
     // pieno).
     proxy_ranges: &[(FrameIdx, FrameIdx)],
-    // Picchi audio già in memoria, a chiave `content_hash` del media
-    // (caricati dal file di cache dal chiamante, vedi
+    // Picchi audio già in memoria, a chiave `(content_hash, stream_index)`
+    // del media/clip (caricati dal file di cache dal chiamante, vedi
     // `VibeVideoApp::ensure_waveforms_loaded`): disegnati come waveform
     // dentro le clip audio. `None` per un media la cui waveform non è
     // ancora pronta (il worker la sta ancora generando) — la clip si
     // disegna come prima, senza waveform. Ogni voce porta anche la
     // durata della traccia audio, base temporale dei picchi (vedi
     // `draw_clip_waveform`).
-    waveform_cache: &std::collections::HashMap<u64, vv_media::Waveform>,
+    waveform_cache: &std::collections::HashMap<(u64, usize), vv_media::Waveform>,
     // Il player è in riproduzione (clip attiva in corso o vuoto
     // attraversato a orologio): durante la riproduzione la testina deve
     // sempre restare visibile, quindi la vista "volta pagina" per
@@ -1050,7 +1052,8 @@ pub fn show_timeline(
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && let ClipSource::Media(media_id) = &visual.clip.source
                         && let Some(item) = project.media_pool.get(*media_id)
-                        && let Some(wf) = waveform_cache.get(&item.content_hash)
+                        && let Some(wf) = waveform_cache
+                            .get(&(item.content_hash, visual.clip.audio_stream_index))
                     {
                         draw_clip_waveform(
                             &painter,
@@ -1862,6 +1865,7 @@ mod tests {
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
                 linked: None,
+                audio_stream_index: 0,
             },
             label: String::new(),
             color: egui::Color32::WHITE,
@@ -2140,6 +2144,7 @@ mod tests {
                 timeline_start: start,
                 effects: EffectStack::default(),
                 linked: None,
+                audio_stream_index: 0,
             },
             label: String::new(),
             color: egui::Color32::WHITE,
@@ -2324,6 +2329,7 @@ mod tests {
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
                 linked: None,
+                audio_stream_index: 0,
             };
             history.do_command(
                 &mut project,
@@ -2437,6 +2443,7 @@ mod tests {
             timeline_start: 0,
             effects: vv_core::EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         };
         history.do_command(
             &mut project,
@@ -2557,6 +2564,7 @@ mod tests {
             timeline_start: 0,
             effects: vv_core::EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         };
         history.do_command(
             &mut project,

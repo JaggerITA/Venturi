@@ -294,7 +294,8 @@ fn mix_audio_track(
                 continue;
             };
             let Some(audio) =
-                vv_media::decode_audio_track(&item.path).map_err(|e| e.to_string())?
+                vv_media::decode_audio_track(&item.path, clip.audio_stream_index)
+                    .map_err(|e| e.to_string())?
             else {
                 continue;
             };
@@ -465,6 +466,7 @@ mod tests {
                 ..EffectStack::default()
             },
             linked: None,
+            audio_stream_index: 0,
         }
     }
 
@@ -615,6 +617,7 @@ mod tests {
                 timeline_start: 0,
                 effects: EffectStack::default(),
                 linked: None,
+                audio_stream_index: 0,
             }],
             muted: false,
         }]);
@@ -825,7 +828,7 @@ mod tests {
         // encoder B-frame vista nei test di `vv_media::encode`.
         assert!((24..=25).contains(&count), "count={count}");
 
-        let audio = vv_media::decode_audio_track(&output_path)
+        let audio = vv_media::decode_audio_track(&output_path, 0)
             .unwrap()
             .expect("audio atteso nell'export");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);

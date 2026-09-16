@@ -60,25 +60,29 @@ pub fn waveforms_dir() -> PathBuf {
     base.join("vibevideo").join("waveforms")
 }
 
-/// Path del file di picchi per questo `content_hash`, che esista o no
-/// ancora — vedi `waveform_exists`.
-pub fn waveform_path_for(content_hash: u64) -> PathBuf {
-    waveforms_dir().join(format!("{content_hash:016x}.peaks"))
+/// Path del file di picchi per questo `content_hash`/`stream_index`, che
+/// esista o no ancora — vedi `waveform_exists`. Un media può avere più
+/// stream audio (vedi `probe::audio_streams`/`Clip::audio_stream_index`):
+/// ciascuno ha la propria waveform, chiave `content_hash` *e* indice dello
+/// stream, non solo `content_hash` (che identifica il file, non lo stream
+/// al suo interno).
+pub fn waveform_path_for(content_hash: u64, stream_index: usize) -> PathBuf {
+    waveforms_dir().join(format!("{content_hash:016x}_{stream_index}.peaks"))
 }
 
-/// Il file di picchi per questo `content_hash` è già stato generato *con
-/// il formato corrente*? Non un semplice `is_file()` (a differenza di
-/// `proxy::proxy_exists`): un file scritto da una versione precedente del
-/// formato (`PEAKS_VERSION` diverso) esiste ma `load_waveform` lo
-/// scarterebbe comunque, quindi va trattato come "da rigenerare" — altrimenti
-/// il worker lo salterebbe per sempre credendolo già pronto (bug osservato:
-/// dopo un bump di versione la waveform smette di comparire per ogni media
-/// importato in una sessione precedente, perché il file vecchio resta lì
-/// bloccando la rigenerazione). Legge solo l'header (12 byte), non l'intero
-/// file.
-pub fn waveform_exists(content_hash: u64) -> bool {
+/// Il file di picchi per questo `content_hash`/`stream_index` è già stato
+/// generato *con il formato corrente*? Non un semplice `is_file()` (a
+/// differenza di `proxy::proxy_exists`): un file scritto da una versione
+/// precedente del formato (`PEAKS_VERSION` diverso) esiste ma
+/// `load_waveform` lo scarterebbe comunque, quindi va trattato come "da
+/// rigenerare" — altrimenti il worker lo salterebbe per sempre credendolo
+/// già pronto (bug osservato: dopo un bump di versione la waveform smette
+/// di comparire per ogni media importato in una sessione precedente,
+/// perché il file vecchio resta lì bloccando la rigenerazione). Legge solo
+/// l'header (12 byte), non l'intero file.
+pub fn waveform_exists(content_hash: u64, stream_index: usize) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(waveform_path_for(content_hash)) else {
+    let Ok(mut f) = std::fs::File::open(waveform_path_for(content_hash, stream_index)) else {
         return false;
     };
     let mut header = [0u8; 8];
@@ -99,22 +103,30 @@ pub struct Waveform {
 
 /// Estrae i picchi della traccia audio di `source_path` in `num_peaks`
 /// bin (massimo assoluto per bin, in [0,1]) e li scrive **atomicamente** a
-/// `waveform_path_for(content_hash)`: prima un file temporaneo nella stessa
+/// `waveform_path_for(content_hash, stream_index)`: prima un file temporaneo nella stessa
 /// cartella, poi `rename` (atomico sullo stesso filesystem) — mai un file
 /// a metà scritto visibile a un lettore concorrente (la timeline, su un
 /// altro thread, potrebbe controllarlo in qualunque istante mentre questa
 /// funzione è ancora in corso).
 ///
-/// `Ok(None)` se il media non ha traccia audio (niente da disegnare).
+/// `stream_index` seleziona quale stream audio del contenitore (stesso
+/// ordine di `probe::audio_streams`, non l'euristica "best" di ffmpeg —
+/// vedi doc di `Clip::audio_stream_index`). `Ok(None)` se il media non ha
+/// uno stream audio a quell'indice (niente da disegnare).
 pub fn generate_waveform(
     source_path: &Path,
     content_hash: u64,
+    stream_index: usize,
     num_peaks: usize,
 ) -> Result<Option<Waveform>, crate::MediaError> {
     crate::probe::ensure_init();
 
     let mut ictx = ffmpeg::format::input(source_path)?;
-    let Some(audio_stream) = ictx.streams().best(Type::Audio) else {
+    let Some(audio_stream) = ictx
+        .streams()
+        .filter(|s| s.parameters().medium() == Type::Audio)
+        .nth(stream_index)
+    else {
         return Ok(None);
     };
     let audio_stream_index = audio_stream.index();
@@ -210,9 +222,9 @@ pub fn generate_waveform(
 
     let dir = waveforms_dir();
     std::fs::create_dir_all(&dir).map_err(io_err)?;
-    let final_path = waveform_path_for(content_hash);
+    let final_path = waveform_path_for(content_hash, stream_index);
     let tmp_path = dir.join(format!(
-        "{content_hash:016x}.tmp-{}.peaks",
+        "{content_hash:016x}_{stream_index}.tmp-{}.peaks",
         std::process::id()
     ));
     write_peaks_file(&tmp_path, &peaks, audio_duration_secs)?;
@@ -224,10 +236,11 @@ pub fn generate_waveform(
     }))
 }
 
-/// Carica i picchi già generati per `content_hash` dal file di cache, se
-/// esiste. `Ok(None)` se il file non c'è (da generare) o è corrotto.
-pub fn load_waveform(content_hash: u64) -> Option<Waveform> {
-    let path = waveform_path_for(content_hash);
+/// Carica i picchi già generati per `content_hash`/`stream_index` dal file
+/// di cache, se esiste. `Ok(None)` se il file non c'è (da generare) o è
+/// corrotto.
+pub fn load_waveform(content_hash: u64, stream_index: usize) -> Option<Waveform> {
+    let path = waveform_path_for(content_hash, stream_index);
     let bytes = std::fs::read(&path).ok()?;
     read_peaks_file(&bytes)
 }
@@ -409,14 +422,14 @@ mod tests {
     fn generate_waveform_produces_normalized_peaks_and_caches_to_disk() {
         let path = make_test_clip("source.mp4", 2);
         let content_hash = 0xCAFEBABE;
-        let _ = std::fs::remove_file(waveform_path_for(content_hash));
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
 
-        assert!(!waveform_exists(content_hash));
-        let wf = generate_waveform(&path, content_hash, 500)
+        assert!(!waveform_exists(content_hash, 0));
+        let wf = generate_waveform(&path, content_hash, 0, 500)
             .expect("generazione waveform fallita")
             .expect("audio atteso");
         assert_eq!(wf.peaks.len(), 500);
-        assert!(waveform_exists(content_hash));
+        assert!(waveform_exists(content_hash, 0));
 
         // Un seno a 440Hz non è silenzioso: il picco globale (normalizzato)
         // deve toccare 1.0 e i valori devono stare in [0,1].
@@ -428,7 +441,7 @@ mod tests {
         assert!((wf.audio_duration_secs - 2.0).abs() < 0.2, "dur={:?}", wf.audio_duration_secs);
 
         // Il file di cache, riletto, restituisce gli stessi picchi.
-        let reloaded = load_waveform(content_hash).expect("reload fallito");
+        let reloaded = load_waveform(content_hash, 0).expect("reload fallito");
         assert_eq!(reloaded.peaks, wf.peaks);
         assert!((reloaded.audio_duration_secs - wf.audio_duration_secs).abs() < 1e-9);
     }
@@ -461,8 +474,8 @@ mod tests {
         assert!(status.success());
 
         let content_hash = 0x51DE7357;
-        let _ = std::fs::remove_file(waveform_path_for(content_hash));
-        let wf = generate_waveform(&path, content_hash, 400)
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
+        let wf = generate_waveform(&path, content_hash, 0, 400)
             .expect("generazione waveform fallita")
             .expect("audio atteso");
 
@@ -507,7 +520,58 @@ mod tests {
             .expect("ffmpeg CLI non trovato");
         assert!(status.success());
 
-        let result = generate_waveform(&path, 0xDEADBEEF, 200).expect("generazione fallita");
+        let result = generate_waveform(&path, 0xDEADBEEF, 0, 200).expect("generazione fallita");
         assert!(result.is_none(), "nessuna traccia audio: nessun picco");
+    }
+
+    /// Un file con due stream audio (vedi `audio::decode_audio_track_selects_the_requested_stream_index_not_just_the_best`
+    /// per lo stesso fixture): la waveform generata per lo stream 1 deve
+    /// essere quella del *secondo* segnale, non ricadere sempre sul primo.
+    #[test]
+    fn generate_waveform_selects_the_requested_stream_index() {
+        let dir = std::env::temp_dir().join("vv-media-waveform-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two_streams.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=1",
+                "-map",
+                "0:a",
+                "-map",
+                "1:a",
+                "-c:a",
+                "aac",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let content_hash = 0x57EA2001;
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 1));
+
+        let first = generate_waveform(&path, content_hash, 0, 200)
+            .unwrap()
+            .expect("stream 0 atteso");
+        assert!((first.audio_duration_secs - 1.0).abs() < 0.2);
+
+        let second = generate_waveform(&path, content_hash, 1, 200)
+            .unwrap()
+            .expect("stream 1 atteso");
+        assert!((second.audio_duration_secs - 1.0).abs() < 0.2);
+
+        assert!(
+            generate_waveform(&path, content_hash, 2, 200).unwrap().is_none(),
+            "nessuno stream audio all'indice 2"
+        );
     }
 }

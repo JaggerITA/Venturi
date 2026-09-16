@@ -35,6 +35,7 @@ mod tests {
             timeline_start: start,
             effects: EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         }
     }
 

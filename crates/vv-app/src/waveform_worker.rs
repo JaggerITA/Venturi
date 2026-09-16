@@ -1,11 +1,13 @@
 //! Generazione delle waveform in background: thread dedicato che riceve
-//! `(path, content_hash, num_peaks)` da generare e li processa uno alla
-//! volta — stesso modello di `proxy_worker` (coda seriale, un thread solo,
-//! mai sul thread UI: la decodifica audio di un file lungo può richiedere
-//! secondi, inaccettabile bloccando i frame). Il file di picchi finisce
-//! nella cache globale su disco (`vv_media::waveform`, chiave
-//! `content_hash`), quindi è riusabile da un altro progetto che
-//! referenzia lo stesso file e sopravvive al riavvio dell'app.
+//! `(path, content_hash, stream_index, num_peaks)` da generare e li
+//! processa uno alla volta — stesso modello di `proxy_worker` (coda
+//! seriale, un thread solo, mai sul thread UI: la decodifica audio di un
+//! file lungo può richiedere secondi, inaccettabile bloccando i frame). Il
+//! file di picchi finisce nella cache globale su disco (`vv_media::waveform`,
+//! chiave `content_hash` + `stream_index` — un media può avere più stream
+//! audio, ciascuno con la propria waveform, vedi `Clip::audio_stream_index`),
+//! quindi è riusabile da un altro progetto che referenzia lo stesso file e
+//! sopravvive al riavvio dell'app.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -13,6 +15,7 @@ use std::sync::mpsc;
 struct Job {
     path: PathBuf,
     content_hash: u64,
+    stream_index: usize,
     num_peaks: usize,
 }
 
@@ -30,12 +33,13 @@ impl WaveformWorker {
                 // diversi nella stessa sessione, o rimasto da una sessione
                 // precedente): salta, non c'è nulla da rifare —
                 // `generate_waveform` non fa questo controllo da sé.
-                if vv_media::waveform::waveform_exists(job.content_hash) {
+                if vv_media::waveform::waveform_exists(job.content_hash, job.stream_index) {
                     continue;
                 }
                 match vv_media::waveform::generate_waveform(
                     &job.path,
                     job.content_hash,
+                    job.stream_index,
                     job.num_peaks,
                 ) {
                     Ok(Some(_)) => {}
@@ -59,13 +63,14 @@ impl WaveformWorker {
         }
     }
 
-    /// Accoda `path` (chiave `content_hash`) per la generazione della
-    /// waveform — non bloccante, ritorna subito.
-    pub fn enqueue(&self, path: PathBuf, content_hash: u64, num_peaks: usize) {
+    /// Accoda `path` (chiave `content_hash`/`stream_index`) per la
+    /// generazione della waveform — non bloccante, ritorna subito.
+    pub fn enqueue(&self, path: PathBuf, content_hash: u64, stream_index: usize, num_peaks: usize) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Job {
                 path,
                 content_hash,
+                stream_index,
                 num_peaks,
             });
         }

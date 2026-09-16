@@ -1684,6 +1684,7 @@ mod tests {
             timeline_start: start,
             effects: EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         }
     }
 
@@ -1706,6 +1707,7 @@ mod tests {
             timeline_start,
             effects: EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         }
     }
 
@@ -1718,6 +1720,7 @@ mod tests {
             timeline_start: start,
             effects: EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         }
     }
 

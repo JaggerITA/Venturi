@@ -272,6 +272,18 @@ pub struct Clip {
     /// insieme. Il collegamento è simmetrico: se `a.linked == Some(b)`
     /// allora `b.linked == Some(a)`. `None` per una clip indipendente.
     pub linked: Option<ClipId>,
+    /// Per una clip audio (`source: ClipSource::Media`, su una track
+    /// `TrackKind::Audio`): indice dello stream audio nel contenitore del
+    /// media (0 = primo stream audio, stesso ordine di
+    /// `vv_media::probe::audio_streams`). Ignorato per le clip video. Un
+    /// media con un solo stream audio (il caso comune) usa sempre 0; un
+    /// media con più stream audio (es. mix stereo *e* 5.1 separato) viene
+    /// importato con una clip per stream, ciascuna col proprio indice —
+    /// vedi `VibeVideoApp::insert_media_clip`. Default 0 per i progetti
+    /// salvati prima che questo campo esistesse (un solo stream audio per
+    /// clip, stesso comportamento di oggi).
+    #[serde(default)]
+    pub audio_stream_index: usize,
 }
 
 impl Clip {
@@ -596,6 +608,7 @@ mod timeline_tests {
             timeline_start,
             effects: EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         }
     }
 
@@ -786,6 +799,7 @@ mod timeline_tests {
             timeline_start: 60,
             effects: EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         };
         assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");
         assert_eq!(clip.source_frame_at(75), 215);

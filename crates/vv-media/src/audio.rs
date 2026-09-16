@@ -19,12 +19,23 @@ pub struct AudioBuffer {
     pub samples: Vec<f32>,
 }
 
-/// `Ok(None)` se il media non ha traccia audio.
-pub fn decode_audio_track(path: &Path) -> Result<Option<AudioBuffer>, crate::MediaError> {
+/// Decodifica lo stream audio N-esimo del contenitore (`stream_index`,
+/// stesso ordine di `probe::audio_streams` — non l'euristica "best" di
+/// ffmpeg, che ne sceglierebbe uno solo ignorando le altre tracce di un
+/// media multi-audio, vedi doc di `Clip::audio_stream_index`).
+/// `Ok(None)` se il media non ha uno stream audio a quell'indice.
+pub fn decode_audio_track(
+    path: &Path,
+    stream_index: usize,
+) -> Result<Option<AudioBuffer>, crate::MediaError> {
     crate::probe::ensure_init();
 
     let mut ictx = ffmpeg::format::input(&path)?;
-    let Some(audio_stream) = ictx.streams().best(Type::Audio) else {
+    let Some(audio_stream) = ictx
+        .streams()
+        .filter(|s| s.parameters().medium() == Type::Audio)
+        .nth(stream_index)
+    else {
         return Ok(None);
     };
     let audio_stream_index = audio_stream.index();
@@ -125,7 +136,7 @@ mod tests {
             .expect("ffmpeg CLI non trovato");
         assert!(status.success());
 
-        let audio = decode_audio_track(&path).unwrap().expect("audio atteso");
+        let audio = decode_audio_track(&path, 0).unwrap().expect("audio atteso");
         assert_eq!(audio.sample_rate, 48000);
         assert_eq!(audio.channels, 1);
 
@@ -139,5 +150,51 @@ mod tests {
         // Un seno a 440Hz non è silenzioso: il picco deve essere ben sopra 0.
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+    }
+
+    /// Un file con *due* stream audio (caso reale: mix stereo + 5.1
+    /// separato) deve poter decodificare l'uno o l'altro in base a
+    /// `stream_index`, non sempre "il migliore" secondo ffmpeg — qui
+    /// distinti per sample_rate (44100 vs 48000) per verificarlo senza
+    /// analisi spettrale.
+    #[test]
+    fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
+        let dir = std::env::temp_dir().join("vv-media-audio-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two_streams.mp4");
+
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=1",
+                "-map",
+                "0:a",
+                "-map",
+                "1:a",
+                "-c:a",
+                "aac",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let first = decode_audio_track(&path, 0).unwrap().expect("stream 0 atteso");
+        assert_eq!(first.sample_rate, 44100);
+
+        let second = decode_audio_track(&path, 1).unwrap().expect("stream 1 atteso");
+        assert_eq!(second.sample_rate, 48000);
+
+        assert!(
+            decode_audio_track(&path, 2).unwrap().is_none(),
+            "nessuno stream audio all'indice 2"
+        );
     }
 }

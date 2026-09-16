@@ -418,7 +418,7 @@ mod tests {
         assert!(meta.has_audio);
         assert_eq!(meta.channels, 2);
 
-        let audio = crate::audio::decode_audio_track(&path)
+        let audio = crate::audio::decode_audio_track(&path, 0)
             .unwrap()
             .expect("audio atteso");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);

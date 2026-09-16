@@ -70,6 +70,7 @@ mod tests {
             timeline_start: 0,
             effects,
             linked: None,
+            audio_stream_index: 0,
         });
 
         let dir = std::env::temp_dir().join("vv-core-persistence-test");

@@ -19,7 +19,7 @@ pub use cache::{FrameCache, SharedFrameCache, WantedRange};
 pub use decode::{ColorMatrix, Decoder, FrameYuv420, decode_first_frame};
 pub use encode::Encoder;
 pub use playback::{DecodeAhead, frame_cache_capacity};
-pub use probe::{content_fingerprint, probe};
+pub use probe::{AudioStreamInfo, audio_streams, content_fingerprint, probe};
 pub use waveform::{
     generate_waveform, load_waveform, recommended_num_peaks, waveform_exists, waveform_path_for,
     Waveform,

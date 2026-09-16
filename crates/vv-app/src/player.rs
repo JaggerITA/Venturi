@@ -68,15 +68,27 @@ impl Player {
     /// `VibeVideoApp::audio_cache`); ritorna anche il buffer usato (nuovo
     /// se decodificato ora, lo stesso passato se riusato) perché il
     /// chiamante possa aggiornarla.
+    ///
+    /// `audio_stream_index` seleziona quale stream audio del media
+    /// decodificare quando `cached_audio` è `None` (vedi
+    /// `vv_media::decode_audio_track`/`Clip::audio_stream_index`). Il
+    /// player dell'anteprima segue solo la clip *video* attiva
+    /// (`VibeVideoApp::open_audio_player` chiama sempre con indice 0, lo
+    /// stream "primario"): un'anteprima dal vivo che rispetti anche lo
+    /// stream scelto sulla clip *audio* è un'estensione futura, stesso
+    /// limite già noto di "player non ancora trim-aware" — l'export
+    /// invece mixa ogni clip audio con il proprio `audio_stream_index`
+    /// (vedi `export::mix_audio_track`).
     pub fn open(
         path: &Path,
         duration_secs: f64,
         fps: vv_core::Rational,
         cached_audio: Option<Arc<vv_media::AudioBuffer>>,
+        audio_stream_index: usize,
     ) -> Result<(Self, Option<Arc<vv_media::AudioBuffer>>), String> {
         let audio_buffer = match cached_audio {
             Some(buf) => Some(buf),
-            None => vv_media::decode_audio_track(path)
+            None => vv_media::decode_audio_track(path, audio_stream_index)
                 .map_err(|e| e.to_string())?
                 .map(Arc::new),
         };
@@ -351,7 +363,7 @@ mod tests {
     fn wall_clock_playback_advances_pauses_and_seeks() {
         let path = make_video_only_clip(3);
         let (mut player, _audio_buffer) =
-            Player::open(&path, 3.0, TEST_FPS, None).expect("apertura player fallita");
+            Player::open(&path, 3.0, TEST_FPS, None, 0).expect("apertura player fallita");
 
         assert_eq!(player.position_secs(), 0.0);
         assert!(!player.is_playing());
@@ -387,7 +399,7 @@ mod tests {
     #[test]
     fn seek_to_frame_round_trips_with_current_source_frame() {
         let path = make_video_only_clip(2);
-        let (mut player, _audio_buffer) = Player::open(&path, 2.0, TEST_FPS, None).unwrap();
+        let (mut player, _audio_buffer) = Player::open(&path, 2.0, TEST_FPS, None, 0).unwrap();
 
         player.seek_to_frame(20);
         assert_eq!(player.current_source_frame(), 20);

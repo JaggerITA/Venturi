@@ -305,8 +305,10 @@ struct VibeVideoApp {
     /// resta la fonte di verità (sopravvive al riavvio), la mappa è solo
     /// una cache della sessione. Il `Waveform` porta anche la durata della
     /// traccia audio: il disegno mappa i bin della clip sulla stessa base
-    /// temporale dei picchi (vedi `draw_clip_waveform`).
-    waveform_cache: HashMap<u64, vv_media::Waveform>,
+    /// temporale dei picchi (vedi `draw_clip_waveform`). Chiave
+    /// `(content_hash, stream_index)`: un media può avere più stream audio
+    /// (vedi `Clip::audio_stream_index`), ciascuno con la propria waveform.
+    waveform_cache: HashMap<(u64, usize), vv_media::Waveform>,
     /// Quanti secondi di timeline bufferizzare in anticipo avanti/dietro
     /// la testina (menu Playback > Proxy, dove vive anche il toggle
     /// proxy) — vedi doc di `render_ahead::DEFAULT_LOOKAHEAD_SECS`/
@@ -519,6 +521,15 @@ impl VibeVideoApp {
                 let has_audio = meta.has_audio;
                 let num_peaks =
                     vv_media::recommended_num_peaks(meta.duration_frames as f64 / meta.fps.as_f64());
+                // Un media può avere più stream audio (vedi doc di
+                // `Clip::audio_stream_index`): una waveform per ciascuno,
+                // non solo per il primo. Se il (ri)probe fallisce, ricade
+                // su un solo stream — comportamento di prima.
+                let num_audio_streams = if has_audio {
+                    vv_media::audio_streams(&path).map(|s| s.len().max(1)).unwrap_or(1)
+                } else {
+                    0
+                };
                 let media_id = self.project.media_pool.insert(vv_core::MediaItem {
                     path: path.clone(),
                     meta,
@@ -537,10 +548,10 @@ impl VibeVideoApp {
                 // non ne avrebbe mai una da disegnare (il worker
                 // restituirebbe `None` comunque, ma non serve nemmeno
                 // aprire il file).
-                if has_audio {
+                for stream_index in 0..num_audio_streams {
                     self.waveform_worker
                         .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
-                        .enqueue(path.clone(), content_hash, num_peaks);
+                        .enqueue(path.clone(), content_hash, stream_index, num_peaks);
                 }
                 self.preview_media(media_id);
             }
@@ -851,7 +862,11 @@ impl VibeVideoApp {
         self.pending_speed_stretch = None;
 
         let cached_audio = self.audio_cache.get(&path).cloned();
-        match Player::open(&path, duration_secs, meta.fps, cached_audio) {
+        // Indice 0 (stream "primario"): questo player segue solo la clip
+        // *video* attiva, non una specifica clip audio sulla timeline —
+        // vedi doc di `Player::open` sul perché la selezione per-clip non è
+        // ancora agganciata qui.
+        match Player::open(&path, duration_secs, meta.fps, cached_audio, 0) {
             Ok((player, audio_buffer)) => {
                 self.preview_player = Some(player);
                 if let Some(buffer) = audio_buffer {
@@ -1515,11 +1530,16 @@ impl VibeVideoApp {
                 if let vv_core::ClipSource::Media(media_id) = &clip.source
                     && let Some(item) = self.project.media_pool.get(*media_id)
                     && item.meta.has_audio
-                    && !self.waveform_cache.contains_key(&item.content_hash)
-                    && vv_media::waveform::waveform_exists(item.content_hash)
+                    && !self
+                        .waveform_cache
+                        .contains_key(&(item.content_hash, clip.audio_stream_index))
+                    && vv_media::waveform::waveform_exists(item.content_hash, clip.audio_stream_index)
                 {
-                    if let Some(peaks) = vv_media::waveform::load_waveform(item.content_hash) {
-                        self.waveform_cache.insert(item.content_hash, peaks);
+                    if let Some(peaks) =
+                        vv_media::waveform::load_waveform(item.content_hash, clip.audio_stream_index)
+                    {
+                        self.waveform_cache
+                            .insert((item.content_hash, clip.audio_stream_index), peaks);
                     }
                 }
             }
@@ -1690,6 +1710,7 @@ impl VibeVideoApp {
             timeline_start: video_start,
             effects,
             linked: None,
+            audio_stream_index: 0,
         };
         self.history.do_command(
             &mut self.project,
@@ -1821,12 +1842,24 @@ impl VibeVideoApp {
         self.insert_media_clip(timeline_id, media_id, &meta, start);
     }
 
-    /// Inserisce la clip video (e, se il media ha audio, la sua gemella
-    /// collegata sulla track audio) entrambe a `start`. Atterrano sempre
-    /// sulla prima (bottom-most) track video/audio, la stessa "di
+    /// Inserisce la clip video (e, se il media ha audio, una clip audio
+    /// per ogni stream audio del contenitore — vedi doc di
+    /// `Clip::audio_stream_index`) tutte a `start`. Il video atterra
+    /// sempre sulla prima (bottom-most) track video, la stessa "di
     /// default" finché l'utente non ne aggiunge altre a mano
-    /// (REFACTOR_PIPELINE.md B4) — un drop mirato su una track specifica
-    /// resta un'estensione futura, oggi non necessaria: le clip si possono
+    /// (REFACTOR_PIPELINE.md B4). Le clip audio atterrano sulle track
+    /// audio esistenti (bottom-up, una per stream); se non ce ne sono
+    /// abbastanza per il numero di stream, le mancanti vengono create al
+    /// volo (`AddTrack`) — ma se non esiste *nessuna* track audio (l'utente
+    /// le ha rimosse tutte, vedi doc di `RemoveTrack`) niente audio viene
+    /// inserito, stesso comportamento di un media senza audio.
+    ///
+    /// Solo la clip audio del *primo* stream viene collegata (`linked`) al
+    /// video — `Clip::linked` è un legame a coppia, non un gruppo: un
+    /// media con più stream audio produce quindi più clip audio non
+    /// collegate tra loro (l'utente può comunque selezionarle e spostarle
+    /// insieme a mano). Un drop mirato su una track specifica resta
+    /// un'estensione futura, oggi non necessaria: le clip si possono
     /// comunque trascinare su un'altra track dopo l'inserimento.
     fn insert_media_clip(
         &mut self,
@@ -1841,14 +1874,35 @@ impl VibeVideoApp {
             return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
         };
         let video_clip_id = self.project.alloc_clip_id();
-        // Se la clip ha anche audio, le due metà vengono collegate di
-        // default (vedi doc di `Clip::linked`): l'utente può scollegarle
-        // dal menu contestuale sulla clip, in timeline_ui.
-        let audio_track = meta
-            .has_audio
-            .then(|| self.project.timelines[timeline_id].first_track_index(TrackKind::Audio))
-            .flatten();
-        let audio_clip_id = audio_track.map(|_| self.project.alloc_clip_id());
+
+        let mut audio_track_indices: Vec<usize> = self.project.timelines[timeline_id]
+            .tracks_of_kind(TrackKind::Audio)
+            .map(|(i, _)| i)
+            .collect();
+
+        let num_audio_streams = if meta.has_audio && !audio_track_indices.is_empty() {
+            self.project
+                .media_pool
+                .get(media_id)
+                .and_then(|item| vv_media::audio_streams(&item.path).ok())
+                .map(|streams| streams.len().max(1))
+                .unwrap_or(1) // probe fallito: ricade su un solo stream, comportamento di prima
+        } else {
+            0
+        };
+
+        while audio_track_indices.len() < num_audio_streams {
+            let new_index = self.project.timelines[timeline_id].tracks.len();
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
+            );
+            audio_track_indices.push(new_index);
+        }
+
+        let audio_clip_ids: Vec<ClipId> = (0..num_audio_streams)
+            .map(|_| self.project.alloc_clip_id())
+            .collect();
 
         let video_clip = vv_core::Clip {
             id: video_clip_id,
@@ -1857,7 +1911,8 @@ impl VibeVideoApp {
             source_out: meta.duration_frames,
             timeline_start: start,
             effects: vv_core::EffectStack::default(),
-            linked: audio_clip_id,
+            linked: audio_clip_ids.first().copied(),
+            audio_stream_index: 0,
         };
         self.history.do_command(
             &mut self.project,
@@ -1868,21 +1923,24 @@ impl VibeVideoApp {
             }),
         );
 
-        if let (Some(audio_track), Some(audio_clip_id)) = (audio_track, audio_clip_id) {
+        for (stream_index, (&track_index, &clip_id)) in
+            audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
+        {
             let audio_clip = vv_core::Clip {
-                id: audio_clip_id,
+                id: clip_id,
                 source: vv_core::ClipSource::Media(media_id),
                 source_in: 0,
                 source_out: meta.duration_frames,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
-                linked: Some(video_clip_id),
+                linked: (stream_index == 0).then_some(video_clip_id),
+                audio_stream_index: stream_index,
             };
             self.history.do_command(
                 &mut self.project,
                 Box::new(vv_core::InsertClip {
                     timeline: timeline_id,
-                    track_index: audio_track,
+                    track_index,
                     clip: audio_clip,
                 }),
             );
@@ -2006,6 +2064,7 @@ impl VibeVideoApp {
                         source_out: clip.source_out,
                         effects: clip.effects.clone(),
                         linked_index: None,
+                        audio_stream_index: clip.audio_stream_index,
                     },
                 ))
             })
@@ -2294,6 +2353,7 @@ impl VibeVideoApp {
                 timeline_start: playhead + entry.relative_start,
                 effects: entry.effects.clone(),
                 linked: entry.linked_index.map(|j| new_ids[j]),
+                audio_stream_index: entry.audio_stream_index,
             };
             new_selection.insert((entry.track_index, new_ids[i]));
             commands.push(Box::new(vv_core::InsertClip {
@@ -3956,6 +4016,7 @@ mod tests {
             timeline_start: start,
             effects: vv_core::EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         };
         app.history.do_command(
             &mut app.project,
@@ -5159,6 +5220,7 @@ mod tests {
             timeline_start: 20,
             effects: vv_core::EffectStack::default(),
             linked: None,
+            audio_stream_index: 0,
         };
 
         // Dentro al trim: tradotto 1:1 con l'offset timeline_start-source_in.
@@ -5897,6 +5959,86 @@ mod tests {
         assert_eq!(
             app.project.timelines[timeline_id].tracks[0].clips[0].id,
             clip_id
+        );
+    }
+
+    /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il
+    /// bug reale che ha motivato `Clip::audio_stream_index`): l'import deve
+    /// creare una clip audio per stream, su track audio separate (la
+    /// seconda creata al volo, visto che di default la timeline ne ha una
+    /// sola), e collegare al video solo la prima (`Clip::linked` è a
+    /// coppia, non a gruppo — vedi doc di `insert_media_clip`).
+    #[test]
+    fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
+        let dir = std::env::temp_dir().join("vv-app-multi-audio-import-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two_audio_streams.mp4");
+
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=25:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path.clone());
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+
+        let timeline_id = app.timeline_id.unwrap();
+        let tl = &app.project.timelines[timeline_id];
+
+        assert_eq!(
+            tl.tracks.len(),
+            3,
+            "video + 2 track audio (una creata al volo per il secondo stream)"
+        );
+        assert_eq!(tl.tracks[0].kind, TrackKind::Video);
+        assert_eq!(tl.tracks[1].kind, TrackKind::Audio);
+        assert_eq!(tl.tracks[2].kind, TrackKind::Audio);
+        assert_eq!(tl.tracks[0].clips.len(), 1);
+        assert_eq!(tl.tracks[1].clips.len(), 1);
+        assert_eq!(tl.tracks[2].clips.len(), 1);
+
+        let video_clip = &tl.tracks[0].clips[0];
+        let audio_clip_0 = &tl.tracks[1].clips[0];
+        let audio_clip_1 = &tl.tracks[2].clips[0];
+
+        assert_eq!(audio_clip_0.audio_stream_index, 0);
+        assert_eq!(audio_clip_1.audio_stream_index, 1);
+
+        assert_eq!(video_clip.linked, Some(audio_clip_0.id));
+        assert_eq!(audio_clip_0.linked, Some(video_clip.id));
+        assert_eq!(
+            audio_clip_1.linked, None,
+            "solo il primo stream è collegato al video: `linked` è a coppia, non a gruppo"
         );
     }
 }
