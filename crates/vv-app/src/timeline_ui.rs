@@ -531,8 +531,10 @@ pub fn show_timeline(
     // `VibeVideoApp::ensure_waveforms_loaded`): disegnati come waveform
     // dentro le clip audio. `None` per un media la cui waveform non è
     // ancora pronta (il worker la sta ancora generando) — la clip si
-    // disegna come prima, senza waveform.
-    waveform_cache: &std::collections::HashMap<u64, Vec<f32>>,
+    // disegna come prima, senza waveform. Ogni voce porta anche la
+    // durata della traccia audio, base temporale dei picchi (vedi
+    // `draw_clip_waveform`).
+    waveform_cache: &std::collections::HashMap<u64, vv_media::Waveform>,
     // Il player è in riproduzione (clip attiva in corso o vuoto
     // attraversato a orologio): durante la riproduzione la testina deve
     // sempre restare visibile, quindi la vista "volta pagina" per
@@ -1048,15 +1050,16 @@ pub fn show_timeline(
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && let ClipSource::Media(media_id) = &visual.clip.source
                         && let Some(item) = project.media_pool.get(*media_id)
-                        && let Some(peaks) = waveform_cache.get(&item.content_hash)
+                        && let Some(wf) = waveform_cache.get(&item.content_hash)
                     {
                         draw_clip_waveform(
                             &painter,
                             clip_rect,
-                            peaks,
+                            &wf.peaks,
                             visual.clip.source_in,
                             visual.clip.source_out,
-                            item.meta.duration_frames,
+                            item.meta.fps.as_f64(),
+                            wf.audio_duration_secs,
                             ui.clip_rect(),
                         );
                     }
@@ -1399,29 +1402,38 @@ fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32) -> egui::Rect {
 /// colonna pixel della porzione *visibile* della clip, una linea
 /// verticale centrata sull'altezza della clip, con altezza proporzionale
 /// al picco del bin coperto da quella colonna. `peaks` sono i picchi di
-/// *tutto* il media (normalizzati in [0,1]); `source_in`/`source_out`/
-/// `duration_frames` ne selezionano la sotto-fascia della clip. Il
-/// picco per colonna è il massimo assoluto dei bin che la colonna copre —
-/// indipendente dallo zoom, così la forma resta la stessa a qualunque
-/// livello. `visible_rect` limita il disegno alla porzione a schermo
-/// (una clip lunga fuori dal viewport non viene iterata colonna per
-/// colonna).
+/// *tutto* il media (normalizzati in [0,1]); `source_in`/`source_out`
+/// (nello spazio frame nativo del media, `media_fps`) ne selezionano la
+/// sotto-fascia, mappata sull'asse temporale dell'audio (`audio_duration_secs`)
+/// — la stessa base temporale usata per dimensionare i bin in
+/// `vv_media::waveform::generate_waveform`, così la forma d'onda resta
+/// allineata al suono (e non stirata rispetto al video, che può avere una
+/// durata diversa dalla traccia audio). Il picco per colonna è il massimo
+/// assoluto dei bin che la colonna copre — indipendente dallo zoom, così
+/// la forma resta la stessa a qualunque livello. `visible_rect` limita il
+/// disegno alla porzione a schermo (una clip lunga fuori dal viewport non
+/// viene iterata colonna per colonna).
 fn draw_clip_waveform(
     painter: &egui::Painter,
     clip_rect: egui::Rect,
     peaks: &[f32],
     source_in: FrameIdx,
     source_out: FrameIdx,
-    duration_frames: FrameIdx,
+    media_fps: f64,
+    audio_duration_secs: f64,
     visible_rect: egui::Rect,
 ) {
-    if peaks.is_empty() || duration_frames <= 0 {
+    if peaks.is_empty() || audio_duration_secs <= 0.0 || media_fps <= 0.0 {
         return;
     }
-    // Sotto-fascia della clip nello spazio dei bin del media.
+    // Sotto-fascia della clip nello spazio dei bin del media: la posizione
+    // sorgente (frame nativi del media) → secondi → frazione della durata
+    // audio → indice di bin.
     let n = peaks.len() as f64;
-    let mut bin_start = (source_in as f64 / duration_frames as f64 * n).floor() as usize;
-    let mut bin_end = ((source_out as f64 / duration_frames as f64 * n).ceil() as usize).max(bin_start + 1);
+    let clip_start_secs = source_in as f64 / media_fps;
+    let clip_end_secs = source_out as f64 / media_fps;
+    let mut bin_start = (clip_start_secs / audio_duration_secs * n).floor() as usize;
+    let mut bin_end = ((clip_end_secs / audio_duration_secs * n).ceil() as usize).max(bin_start + 1);
     bin_start = bin_start.min(peaks.len());
     bin_end = bin_end.min(peaks.len());
     if bin_start >= bin_end {

@@ -14,6 +14,17 @@
 //! buffer intero in RAM) così anche un file da un'ora non gonfia la
 //! memoria — i picchi finali pesano ~4 byte × numero di bin, non i
 //! campioni.
+//!
+//! **Allineamento al suono.** I bin sono dimensionati sulla durata della
+//! *traccia audio* (non del container/video): la traccia audio può essere
+//! più corta o più lunga del video (es. il video finisce prima dell'audio,
+//! o viceversa), e dimensionare i bin sulla durata del container
+//! stirerebbe/comprimerebbe la waveform rispetto al suono reale — ogni
+//! evento audio cadrebbe in un bin sbagliato, spostando la forma d'onda
+//! rispetto al playback (bug segnalato: "la waveform è anticipata di mezzo
+//! secondo"). La durata audio viene salvata nel file di cache e usata
+//! anche dal disegno (vedi `draw_clip_waveform` in `timeline_ui`), così
+//! generazione e disegno usano la stessa base temporale.
 
 use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg::media::Type;
@@ -64,6 +75,15 @@ pub fn waveform_exists(content_hash: u64) -> bool {
     waveform_path_for(content_hash).is_file()
 }
 
+/// I picchi di una waveform e la durata della traccia audio che coprono
+/// (in secondi): la durata serve al disegno per mappare i bin della clip
+/// sulla stessa base temporale dei picchi (vedi doc del modulo).
+pub struct Waveform {
+    pub peaks: Vec<f32>,
+    /// Durata della traccia audio (in secondi) coperta da `peaks`.
+    pub audio_duration_secs: f64,
+}
+
 /// Estrae i picchi della traccia audio di `source_path` in `num_peaks`
 /// bin (massimo assoluto per bin, in [0,1]) e li scrive **atomicamente** a
 /// `waveform_path_for(content_hash)`: prima un file temporaneo nella stessa
@@ -77,7 +97,7 @@ pub fn generate_waveform(
     source_path: &Path,
     content_hash: u64,
     num_peaks: usize,
-) -> Result<Option<Vec<f32>>, crate::MediaError> {
+) -> Result<Option<Waveform>, crate::MediaError> {
     crate::probe::ensure_init();
 
     let mut ictx = ffmpeg::format::input(source_path)?;
@@ -102,12 +122,25 @@ pub fn generate_waveform(
         sample_rate,
     )?;
 
-    // Totale dei campioni (per dimensionare i bin) dalla durata del
-    // container, non dalla decodifica: un solo `stat`-like, nessun pass
-    // extra. La decodifica reale può differire di qualche campione
-    // (priming/padding dell'encoder) — il clamp sotto lo assorbe.
-    let duration_secs = ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
-    let total_samples = (duration_secs * sample_rate as f64) as usize;
+    // Durata della *traccia audio* (non del container): la base temporale
+    // sui cui dimensionare i bin. `audio_stream.duration()` è espresso nel
+    // time_base della *stream* (per l'audio ≈ 1/sample_rate), NON in
+    // AV_TIME_BASE: va riscalata con `duration * tb.num / tb.den` per
+    // ottenere i secondi. Se è 0/assente (alcuni formati non la segnalano,
+    // o la danno come sconosciuta, -1) ricade sulla durata del container.
+    let audio_duration_secs = {
+        let tb = audio_stream.time_base();
+        let d = audio_stream.duration() as f64 * tb.0 as f64 / tb.1 as f64;
+        if d > 0.0 {
+            d
+        } else {
+            // Alcuni formati non segnalano la durata della traccia audio:
+            // ricade sulla durata del container (stima ragionevole).
+            ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE)
+        }
+    };
+
+    let total_samples = (audio_duration_secs * sample_rate as f64) as usize;
     let samples_per_bin = (total_samples / num_peaks).max(1);
 
     let mut peaks = vec![0.0_f32; num_peaks];
@@ -169,10 +202,70 @@ pub fn generate_waveform(
         "{content_hash:016x}.tmp-{}.peaks",
         std::process::id()
     ));
-    write_peaks_file(&tmp_path, &peaks)?;
+    write_peaks_file(&tmp_path, &peaks, audio_duration_secs)?;
     std::fs::rename(&tmp_path, &final_path).map_err(io_err)?;
 
-    Ok(Some(peaks))
+    Ok(Some(Waveform {
+        peaks,
+        audio_duration_secs,
+    }))
+}
+
+/// Carica i picchi già generati per `content_hash` dal file di cache, se
+/// esiste. `Ok(None)` se il file non c'è (da generare) o è corrotto.
+pub fn load_waveform(content_hash: u64) -> Option<Waveform> {
+    let path = waveform_path_for(content_hash);
+    let bytes = std::fs::read(&path).ok()?;
+    read_peaks_file(&bytes)
+}
+
+/// Formato del file di picchi: magic (4 byte) + versione (u32 LE) +
+/// numero di picchi (u32 LE) + durata audio (f64 LE) + i picchi (f32 LE
+/// ciascuno). La versione permette di scartare i file generati da una
+/// versione precedente del formato senza doverli rigenerare a mano.
+const PEAKS_MAGIC: &[u8; 4] = b"vbwf";
+// v3: la durata audio è riscalata dal time_base della stream (v2 la
+// divideva per AV_TIME_BASE, sbagliando di ~sample_rate volte e
+// comprimendo i picchi nei primi bin — waveform desincronizzata).
+const PEAKS_VERSION: u32 = 3;
+
+fn write_peaks_file(path: &Path, peaks: &[f32], audio_duration_secs: f64) -> Result<(), crate::MediaError> {
+    let mut bytes = Vec::with_capacity(20 + peaks.len() * 4);
+    bytes.extend_from_slice(PEAKS_MAGIC);
+    bytes.extend_from_slice(&PEAKS_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(peaks.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&audio_duration_secs.to_le_bytes());
+    for p in peaks {
+        bytes.extend_from_slice(&p.to_le_bytes());
+    }
+    std::fs::write(path, bytes).map_err(io_err)
+}
+
+fn read_peaks_file(bytes: &[u8]) -> Option<Waveform> {
+    if bytes.len() < 20 || &bytes[..4] != PEAKS_MAGIC {
+        return None;
+    }
+    let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    if version != PEAKS_VERSION {
+        return None;
+    }
+    let count = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+    let audio_duration_secs = f64::from_le_bytes(bytes[12..20].try_into().ok()?);
+    if bytes.len() < 20 + count * 4 {
+        return None;
+    }
+    let mut peaks = Vec::with_capacity(count);
+    for chunk in bytes[20..20 + count * 4].as_chunks::<4>().0.iter() {
+        peaks.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Some(Waveform {
+        peaks,
+        audio_duration_secs,
+    })
+}
+
+fn io_err(e: std::io::Error) -> crate::MediaError {
+    crate::MediaError::NoStream(e.to_string())
 }
 
 /// Risample un frame audio in f32 packed e aggiorna i picchi: per ogni
@@ -204,55 +297,6 @@ fn push_resampled_peaks(
         *global_sample += 1;
     }
     Ok(())
-}
-
-/// Carica i picchi già generati per `content_hash` dal file di cache, se
-/// esiste. `Ok(None)` se il file non c'è (da generare) o è corrotto.
-pub fn load_waveform(content_hash: u64) -> Option<Vec<f32>> {
-    let path = waveform_path_for(content_hash);
-    let bytes = std::fs::read(&path).ok()?;
-    read_peaks_file(&bytes)
-}
-
-/// Formato del file di picchi: magic (4 byte) + versione (u32 LE) +
-/// numero di picchi (u32 LE) + i picchi (f32 LE ciascuno). La versione
-/// permette di scartare i file generati da una versione precedente del
-/// formato senza doverli rigenerare a mano.
-const PEAKS_MAGIC: &[u8; 4] = b"vbwf";
-const PEAKS_VERSION: u32 = 1;
-
-fn write_peaks_file(path: &Path, peaks: &[f32]) -> Result<(), crate::MediaError> {
-    let mut bytes = Vec::with_capacity(12 + peaks.len() * 4);
-    bytes.extend_from_slice(PEAKS_MAGIC);
-    bytes.extend_from_slice(&PEAKS_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(peaks.len() as u32).to_le_bytes());
-    for p in peaks {
-        bytes.extend_from_slice(&p.to_le_bytes());
-    }
-    std::fs::write(path, bytes).map_err(io_err)
-}
-
-fn read_peaks_file(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.len() < 12 || &bytes[..4] != PEAKS_MAGIC {
-        return None;
-    }
-    let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    if version != PEAKS_VERSION {
-        return None;
-    }
-    let count = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
-    if bytes.len() < 12 + count * 4 {
-        return None;
-    }
-    let mut peaks = Vec::with_capacity(count);
-    for chunk in bytes[12..12 + count * 4].as_chunks::<4>().0.iter() {
-        peaks.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Some(peaks)
-}
-
-fn io_err(e: std::io::Error) -> crate::MediaError {
-    crate::MediaError::NoStream(e.to_string())
 }
 
 #[cfg(test)]
@@ -306,13 +350,15 @@ mod tests {
             b.extend_from_slice(PEAKS_MAGIC);
             b.extend_from_slice(&PEAKS_VERSION.to_le_bytes());
             b.extend_from_slice(&(peaks.len() as u32).to_le_bytes());
+            b.extend_from_slice(&5.5f64.to_le_bytes());
             for p in &peaks {
                 b.extend_from_slice(&p.to_le_bytes());
             }
             b
         };
         let loaded = read_peaks_file(&bytes).expect("read fallito");
-        assert_eq!(loaded, peaks);
+        assert_eq!(loaded.peaks, peaks);
+        assert!((loaded.audio_duration_secs - 5.5).abs() < 1e-9);
     }
 
     #[test]
@@ -321,6 +367,7 @@ mod tests {
         bytes.extend_from_slice(b"XXXX");
         bytes.extend_from_slice(&PEAKS_VERSION.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f64.to_le_bytes());
         bytes.extend_from_slice(&0.5f32.to_le_bytes());
         assert!(read_peaks_file(&bytes).is_none());
 
@@ -328,6 +375,7 @@ mod tests {
         bytes.extend_from_slice(PEAKS_MAGIC);
         bytes.extend_from_slice(&99u32.to_le_bytes()); // versione sconosciuta
         bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f64.to_le_bytes());
         bytes.extend_from_slice(&0.5f32.to_le_bytes());
         assert!(read_peaks_file(&bytes).is_none());
     }
@@ -339,21 +387,25 @@ mod tests {
         let _ = std::fs::remove_file(waveform_path_for(content_hash));
 
         assert!(!waveform_exists(content_hash));
-        let peaks = generate_waveform(&path, content_hash, 500)
+        let wf = generate_waveform(&path, content_hash, 500)
             .expect("generazione waveform fallita")
             .expect("audio atteso");
-        assert_eq!(peaks.len(), 500);
+        assert_eq!(wf.peaks.len(), 500);
         assert!(waveform_exists(content_hash));
 
         // Un seno a 440Hz non è silenzioso: il picco globale (normalizzato)
         // deve toccare 1.0 e i valori devono stare in [0,1].
-        let peak = peaks.iter().cloned().fold(0.0_f32, f32::max);
+        let peak = wf.peaks.iter().cloned().fold(0.0_f32, f32::max);
         assert!((peak - 1.0).abs() < 1e-6, "peak={peak}, atteso 1.0 dopo normalizzazione");
-        assert!(peaks.iter().all(|p| (0.0..=1.0).contains(p)));
+        assert!(wf.peaks.iter().all(|p| (0.0..=1.0).contains(p)));
+
+        // La durata audio deve essere ~2s (il file è di 2s).
+        assert!((wf.audio_duration_secs - 2.0).abs() < 0.2, "dur={:?}", wf.audio_duration_secs);
 
         // Il file di cache, riletto, restituisce gli stessi picchi.
         let reloaded = load_waveform(content_hash).expect("reload fallito");
-        assert_eq!(reloaded, peaks);
+        assert_eq!(reloaded.peaks, wf.peaks);
+        assert!((reloaded.audio_duration_secs - wf.audio_duration_secs).abs() < 1e-9);
     }
 
     #[test]

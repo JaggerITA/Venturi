@@ -295,16 +295,18 @@ struct VibeVideoApp {
     /// la disegna. `None` finché non è mai stato importato nulla (stesso
     /// principio di `proxy_worker`).
     waveform_worker: Option<waveform_worker::WaveformWorker>,
-    /// Picchi audio già caricati in memoria, a chiave `content_hash` del
-    /// media: la timeline li legge a ogni frame per disegnare la waveform
-    /// delle clip audio, e il primo disegno di un media li carica dal
+    /// Waveform audio già caricata in memoria, a chiave `content_hash` del
+    /// media: la timeline la legge a ogni frame per disegnare la waveform
+    /// delle clip audio, e il primo disegno di un media la carica dal
     /// file di cache (`vv_media::waveform::load_waveform`) se il worker
-    /// l'ha già generato. In memoria (non riletto da disco a ogni frame)
+    /// l'ha già generata. In memoria (non riletta da disco a ogni frame)
     /// perché la timeline si ridisegna a ogni repaint e un `read` di un
     /// file da qualche MB a ogni frame sarebbe un I/O inutile; il file
     /// resta la fonte di verità (sopravvive al riavvio), la mappa è solo
-    /// una cache della sessione.
-    waveform_cache: HashMap<u64, Vec<f32>>,
+    /// una cache della sessione. Il `Waveform` porta anche la durata della
+    /// traccia audio: il disegno mappa i bin della clip sulla stessa base
+    /// temporale dei picchi (vedi `draw_clip_waveform`).
+    waveform_cache: HashMap<u64, vv_media::Waveform>,
     /// Quanti secondi di timeline bufferizzare in anticipo avanti/dietro
     /// la testina (menu Playback > Proxy, dove vive anche il toggle
     /// proxy) — vedi doc di `render_ahead::DEFAULT_LOOKAHEAD_SECS`/

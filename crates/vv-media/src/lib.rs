@@ -22,6 +22,7 @@ pub use playback::{DecodeAhead, frame_cache_capacity};
 pub use probe::{content_fingerprint, probe};
 pub use waveform::{
     generate_waveform, load_waveform, recommended_num_peaks, waveform_exists, waveform_path_for,
+    Waveform,
 };
 
 #[derive(Debug, thiserror::Error)]
