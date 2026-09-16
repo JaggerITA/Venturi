@@ -29,6 +29,26 @@ pub struct AudioPlayer {
     peak_left_bits: Arc<AtomicU32>,
     peak_right_bits: Arc<AtomicU32>,
     sample_rate: u32,
+    /// Canali della *sorgente* (quelli in cui arrivano i campioni passati
+    /// a `new`/`extend_samples`): serve a `extend_samples` per fare il
+    /// downmix di ogni chunk accodato con la stessa conversione usata in
+    /// apertura, vedi doc di `channels`.
+    source_channels: u16,
+    /// Canali con cui è stato aperto lo stream cpal — non necessariamente
+    /// uguali a `source_channels`: `new` fa il downmix/upmix al numero di
+    /// canali *nativo del device* (`Device::default_output_config`)
+    /// prima di aprire lo stream, invece di chiedere a cpal/PipeWire il
+    /// conteggio canali della sorgente as-is. Chiedere ad es. 6 canali
+    /// (un file con traccia audio 5.1) su un device stereo costringe
+    /// PipeWire a inserire uno stadio di remix nel suo grafo, che in
+    /// pratica introduce latenza in uscita udibile — il playhead segue la
+    /// posizione di *decodifica* (quanto scritto nel buffer del
+    /// callback), non l'istante in cui il suono esce dagli altoparlanti,
+    /// quindi quella latenza si vede come un disallineamento fisso tra
+    /// audio e waveform/playhead (bug segnalato: "il picco è a 51s ma la
+    /// waveform lo mostra a 49-50s", su un file con audio 5.1 riprodotto
+    /// su un device a 2 canali). Il downmix qui, prima di consegnare i
+    /// campioni a cpal, tiene la conversione fuori dal grafo PipeWire.
     channels: u16,
     /// Campioni interleaved dietro un lock invece di un `Arc<Vec<f32>>`
     /// immutabile: `extend_samples` vi accoda altro audio (finestra di
@@ -45,11 +65,25 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    pub fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Result<Self, String> {
+    /// `source_channels` sono i canali dei campioni interleaved passati
+    /// qui (tipicamente quelli della traccia audio decodificata): lo
+    /// stream cpal viene aperto invece al numero di canali nativo del
+    /// device di output (vedi doc del campo `channels`), con un downmix
+    /// (o upmix, es. mono su device stereo) fatto qui una sola volta sul
+    /// buffer intero anziché ad ogni callback.
+    pub fn new(samples: Vec<f32>, sample_rate: u32, source_channels: u16) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or("nessun device audio di output")?;
+
+        // Canali nativi del device: se non disponibili (raro), ricade sui
+        // canali della sorgente (comportamento di prima, nessun downmix).
+        let channels = device
+            .default_output_config()
+            .map(|c| c.channels())
+            .unwrap_or(source_channels);
+        let samples = downmix_interleaved(&samples, source_channels, channels);
 
         let config = cpal::StreamConfig {
             channels,
@@ -137,21 +171,24 @@ impl AudioPlayer {
             peak_left_bits,
             peak_right_bits,
             sample_rate,
+            source_channels,
             channels,
             samples,
         })
     }
 
-    /// Accoda altro audio interleaved (stesso `sample_rate`/canali di
-    /// apertura) in coda al buffer corrente, senza interrompere lo stream
-    /// né toccare la posizione di lettura — per estendere la finestra di
-    /// una riproduzione accelerata in corso (vedi doc del campo
-    /// `samples`).
+    /// Accoda altro audio interleaved (stesso `sample_rate`/canali *della
+    /// sorgente* passati a `new`, non necessariamente quelli dello stream
+    /// cpal aperto — vedi doc di `source_channels`/`channels`) in coda al
+    /// buffer corrente, senza interrompere lo stream né toccare la
+    /// posizione di lettura — per estendere la finestra di una
+    /// riproduzione accelerata in corso (vedi doc del campo `samples`).
     pub fn extend_samples(&self, more: &[f32]) {
+        let more = downmix_interleaved(more, self.source_channels, self.channels);
         self.samples
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(more);
+            .extend_from_slice(&more);
     }
 
     fn total_frames(&self) -> usize {
@@ -214,9 +251,115 @@ fn db_to_linear(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
+/// Converte campioni interleaved da `from` a `to` canali: nessuna semantica
+/// di layout (L/R/center/LFE/...) — non è un downmix "broadcast-accurate",
+/// solo un compromesso semplice e simmetrico che tiene l'audio comunque
+/// intelligibile e allineato ai tempi reali, evitando di chiedere a
+/// cpal/PipeWire un conteggio canali che il device non supporta nativamente
+/// (vedi doc del campo `AudioPlayer::channels` sul perché quello introduce
+/// latenza in uscita).
+///
+/// - `from == to` (o uno dei due è 0): nessuna conversione, copia diretta.
+/// - `to == 1`: media di tutti i canali sorgente per ogni frame.
+/// - `from > to` (downmix, es. 6→2): i canali sorgente sono distribuiti a
+///   turno sui canali di destinazione (`indice_sorgente % to`) e mediati —
+///   con l'ordine canali tipico ffmpeg per il 5.1 (L,R,C,LFE,Ls,Rs) questo
+///   raggruppa L,C,Ls sul primo canale e R,LFE,Rs sul secondo, cioè
+///   approssima un downmix stereo ragionevole senza dover conoscere il
+///   channel layout.
+/// - `from < to` (upmix, es. mono→stereo): i canali sorgente sono replicati
+///   a turno (`indice_dest % from`) sui canali di destinazione.
+fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
+    if from == to || from == 0 || to == 0 {
+        return samples.to_vec();
+    }
+    let from = from as usize;
+    let to = to as usize;
+    let frames = samples.len() / from;
+    let mut out = vec![0.0f32; frames * to];
+
+    if to == 1 {
+        for f in 0..frames {
+            let src = &samples[f * from..f * from + from];
+            out[f] = src.iter().sum::<f32>() / from as f32;
+        }
+        return out;
+    }
+
+    if from > to {
+        let mut sums = vec![0.0f32; to];
+        let mut counts = vec![0u32; to];
+        for f in 0..frames {
+            sums.fill(0.0);
+            counts.fill(0);
+            let src = &samples[f * from..f * from + from];
+            for (i, &s) in src.iter().enumerate() {
+                let bucket = i % to;
+                sums[bucket] += s;
+                counts[bucket] += 1;
+            }
+            let dst = &mut out[f * to..f * to + to];
+            for c in 0..to {
+                dst[c] = if counts[c] > 0 { sums[c] / counts[c] as f32 } else { 0.0 };
+            }
+        }
+    } else {
+        for f in 0..frames {
+            let src = &samples[f * from..f * from + from];
+            let dst = &mut out[f * to..f * to + to];
+            for c in 0..to {
+                dst[c] = src[c % from];
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downmix_interleaved_is_a_noop_when_channel_counts_match() {
+        let samples = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(downmix_interleaved(&samples, 2, 2), samples);
+    }
+
+    #[test]
+    fn downmix_interleaved_averages_all_channels_to_mono() {
+        // Un frame stereo [1.0, 0.0] -> mono deve dare la media, 0.5.
+        let samples = vec![1.0, 0.0, 0.5, 0.5];
+        let mono = downmix_interleaved(&samples, 2, 1);
+        assert_eq!(mono, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn downmix_interleaved_six_to_two_groups_even_and_odd_channels() {
+        // Ordine tipico ffmpeg per il 5.1(side): L,R,C,LFE,Ls,Rs. Con
+        // indice pari -> canale 0 (L,C,Ls) e dispari -> canale 1
+        // (R,LFE,Rs): un frame con L=1.0 e tutti gli altri a 0 deve finire
+        // quasi tutto sul canale 0 (media di 1.0,0.0,0.0 = 1/3), niente
+        // sul canale 1.
+        let l_only = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let stereo = downmix_interleaved(&l_only, 6, 2);
+        assert_eq!(stereo.len(), 2);
+        assert!((stereo[0] - (1.0 / 3.0)).abs() < 1e-6, "left={}", stereo[0]);
+        assert_eq!(stereo[1], 0.0);
+    }
+
+    #[test]
+    fn downmix_interleaved_upmixes_mono_by_duplicating_to_every_channel() {
+        let mono = vec![0.7, -0.3];
+        let stereo = downmix_interleaved(&mono, 1, 2);
+        assert_eq!(stereo, vec![0.7, 0.7, -0.3, -0.3]);
+    }
+
+    #[test]
+    fn downmix_interleaved_preserves_frame_count() {
+        let samples = vec![0.0f32; 6 * 100]; // 100 frame a 6 canali
+        let stereo = downmix_interleaved(&samples, 6, 2);
+        assert_eq!(stereo.len(), 2 * 100);
+    }
 
     #[test]
     fn db_to_linear_matches_known_reference_points() {
