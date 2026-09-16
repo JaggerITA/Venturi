@@ -52,6 +52,19 @@ pub struct TimelineState {
     /// permette di correggere l'offset di scroll per ancorare lo zoom alla
     /// testina.
     last_rendered_pps: f32,
+    /// "Voltare pagina" durante la riproduzione: se la testina esce
+    /// dall'area visibile della timeline, lo scroll orizzontale si sposta
+    /// per rimetterla in vista (posizionandola a un terzo del bordo
+    /// sinistro, come in un NLE). Si disattiva non appena l'utente
+    /// scorre manualmente la timeline (rilevato confrontando l'offset
+    /// persistito con quello che `show_timeline` ha scritto l'ultimo
+    /// frame — vedi `last_stored_scroll_x`).
+    pub auto_follow_playhead: bool,
+    /// Offset orizzontale (in pixel) della ScrollArea che `show_timeline`
+    /// ha scritto nell'ultimo frame: se al frame successivo lo stato
+    /// persistito ne contiene uno diverso, è l'utente che ha scrollato a
+    /// mano e l'auto-follow si spegne.
+    last_stored_scroll_x: Option<f32>,
     drag: Option<DragState>,
     /// Rettangolo di selezione in corso, in coordinate locali al contenuto
     /// scrollabile (senza l'offset di `origin`, così resta valido anche se
@@ -164,6 +177,10 @@ impl Default for TimelineState {
             // Stesso valore iniziale di `pixels_per_sec`: al primo frame non
             // c'è ancora nessuno zoom da compensare.
             last_rendered_pps: 60.0,
+            auto_follow_playhead: true,
+            // Nessun offset scritto ancora: al primo frame non c'è un
+            // confronto da fare.
+            last_stored_scroll_x: None,
             drag: None,
             marquee: None,
             selected_gap: None,
@@ -579,35 +596,78 @@ pub fn show_timeline(
     let mut pending: Option<PendingAction> = None;
 
     ui.horizontal_top(|ui| {
-        // Zoom ancorato alla testina: se `pixels_per_sec` è cambiato in
-        // questo frame (scorciatoie da tastiera/menu — che lo mutano prima
-        // del disegno — o Ctrl+scroll/pinch), correggiamo l'offset di scroll
-        // orizzontale perché la testina resti alla stessa posizione a
-        // schermo (senza di che lo zoom crescerebbe dal bordo sinistro
-        // *visibile*, non da dove l'utente sta guardando). L'offset si legge
-        // dallo stato persistito della ScrollArea qui sotto — stesso id, dato
-        // che `make_persistent_id` usa l'id stabile dell'Ui (non il
-        // contatore auto-id) — e si riscrive prima del `show`, che lo rilegge
-        // in `begin`; il clamp ai limiti di contenuto resta a carico di egui.
-        // (Nessun `scroll_to*` animato è usato sulla timeline, quindi nessun
-        // target in corso da contrastare.)
-        if state.pixels_per_sec != state.last_rendered_pps {
+        let scroll_id = ui.make_persistent_id(egui::IdSalt::new("timeline_scroll"));
+        {
+            // `ctx` è un borrow immutabile di `ui`: deve finire prima del
+            // `ScrollArea::show` di sotto (che prende `ui` in mutabile),
+            // quindi tutto l'uso pre-`show` di `ctx` sta in questo blocco.
             let ctx = ui.ctx();
             // Attenzione: `Id::with(IdSalt)` e `Id::with(&str)` producono id
             // *diversi* per la stessa stringa — qui serve la forma IdSalt,
             // identica a quella che la ScrollArea usa in `begin` (il builder
             // `.id_salt(...)` converte in `IdSalt`).
-            let scroll_id = ui.make_persistent_id(egui::IdSalt::new("timeline_scroll"));
-            if let Some(mut scroll_state) =
-                egui::containers::scroll_area::State::load(&ctx, scroll_id)
-            {
-                let playhead_secs = state.playhead as f64 / fps;
-                scroll_state.offset.x +=
-                    (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
-                scroll_state.store(&ctx, scroll_id);
+
+            // Zoom ancorato alla testina: se `pixels_per_sec` è cambiato in
+            // questo frame (scorciatoie da tastiera/menu — che lo mutano prima
+            // del disegno — o Ctrl+scroll/pinch), correggiamo l'offset di
+            // scroll orizzontale perché la testina resti alla stessa posizione
+            // a schermo (senza di che lo zoom crescerebbe dal bordo sinistro
+            // *visibile*, non da dove l'utente sta guardando). L'offset si
+            // legge dallo stato persistito della ScrollArea qui sotto — stesso
+            // id, dato che `make_persistent_id` usa l'id stabile dell'Ui (non
+            // il contatore auto-id) — e si riscrive prima del `show`, che lo
+            // rilegge in `begin`; il clamp ai limiti di contenuto resta a
+            // carico di egui. (Nessun `scroll_to*` animato è usato sulla
+            // timeline, quindi nessun target in corso da contrastare.)
+            if state.pixels_per_sec != state.last_rendered_pps {
+                if let Some(mut scroll_state) =
+                    egui::containers::scroll_area::State::load(&ctx, scroll_id)
+                {
+                    let playhead_secs = state.playhead as f64 / fps;
+                    scroll_state.offset.x +=
+                        (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
+                    scroll_state.store(&ctx, scroll_id);
+                }
             }
+            state.last_rendered_pps = state.pixels_per_sec;
+
+            // "Voltare pagina": se la testina è uscita dall'area visibile
+            // orizzontale, sposta lo scroll per rimetterla in vista,
+            // posizionandola a un terzo del bordo sinistro (come in un NLE).
+            // Il clamp ai limiti di contenuto è fatto qui con la stessa
+            // formula che egui usa in `begin` (`max(0, content - available)`),
+            // così il valore scritto è quello che egui manterrà e il confronto
+            // post-`show` che rileva lo scroll manuale non dà falsi positivi
+            // per il clamp.
+            if state.auto_follow_playhead {
+                let viewport_width =
+                    (ui.available_rect_before_wrap().width() - TRACK_HEADER_WIDTH).max(1.0);
+                let playhead_x = state.playhead as f32 * px_per_frame;
+                let visible_start =
+                    match egui::containers::scroll_area::State::load(&ctx, scroll_id) {
+                        Some(st) => st.offset.x,
+                        None => 0.0,
+                    };
+                let visible_end = visible_start + viewport_width;
+                const FOLLOW_MARGIN_FRAC: f32 = 1.0 / 3.0;
+                if playhead_x < visible_start || playhead_x > visible_end {
+                    let target = (playhead_x - viewport_width * FOLLOW_MARGIN_FRAC)
+                        .clamp(0.0, (content_width - viewport_width).max(0.0));
+                    if let Some(mut scroll_state) =
+                        egui::containers::scroll_area::State::load(&ctx, scroll_id)
+                    {
+                        scroll_state.offset.x = target;
+                        scroll_state.store(&ctx, scroll_id);
+                    }
+                }
+            }
+            // Offset che la ScrollArea ha (ri)scritto prima del `show`: lo
+            // confrontiamo con quello che sarà persistito *dopo* il `show` per
+            // capire se l'utente ha scrollato a mano in questo frame (egui
+            // applica i delta di scroll durante il `show`).
+            state.last_stored_scroll_x =
+                egui::containers::scroll_area::State::load(&ctx, scroll_id).map(|st| st.offset.x);
         }
-        state.last_rendered_pps = state.pixels_per_sec;
 
         draw_track_headers(ui, &track_kinds, content_height, &mut pending, state.playhead, fps);
 
@@ -1222,6 +1282,25 @@ pub fn show_timeline(
                     egui::Stroke::NONE,
                 ));
             });
+
+        // Rileva lo scroll manuale dell'utente: egui applica i delta di
+        // scroll (wheel/drag della barra) *durante* il `show` di sopra,
+        // quindi l'offset persistito a questo punto riflette anche la
+        // rotellina di questo frame. Se è diverso da quello che la
+        // ScrollArea aveva prima del `show` (letto in
+        // `last_stored_scroll_x`), è l'utente che ha scrollato a mano —
+        // l'auto-follow si disattica e non torna più a imporre la vista.
+        {
+            let ctx = ui.ctx();
+            if let Some(stored) = egui::containers::scroll_area::State::load(&ctx, scroll_id) {
+                if state
+                    .last_stored_scroll_x
+                    .is_some_and(|last| (stored.offset.x - last).abs() > 0.5)
+                {
+                    state.auto_follow_playhead = false;
+                }
+            }
+        }
     });
 
     if let Some(action) = pending {
