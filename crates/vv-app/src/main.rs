@@ -25,6 +25,7 @@ use frame_provider::FrameProvider;
 use player::Player;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -48,6 +49,45 @@ type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
 struct GapWallClock {
     started_at: Instant,
     start_frame: FrameIdx,
+}
+
+/// Le due velocità di riproduzione accelerata raggiungibili col tasto "a"
+/// (vedi `VibeVideoApp::handle_fast_playback_key`) — non un `f64` libero:
+/// solo questi due fattori vengono mai richiesti a `vv_audio::stretch_samples`,
+/// quindi la cache dei buffer stretchati (`VibeVideoApp::stretched_audio_cache`)
+/// può usarli come chiave `Hash`/`Eq` invece di un `f64` (non `Eq`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SpeedTier {
+    X2,
+    X4,
+}
+
+impl SpeedTier {
+    fn tempo(self) -> f64 {
+        match self {
+            SpeedTier::X2 => 2.0,
+            SpeedTier::X4 => 4.0,
+        }
+    }
+
+    fn from_multiplier(speed: f64) -> Option<Self> {
+        if (speed - 2.0).abs() < 1e-9 {
+            Some(SpeedTier::X2)
+        } else if (speed - 4.0).abs() < 1e-9 {
+            Some(SpeedTier::X4)
+        } else {
+            None
+        }
+    }
+}
+
+/// Esito di uno stretch audio calcolato in background (vedi
+/// `VibeVideoApp::request_playback_speed`), ricevuto via
+/// `VibeVideoApp::speed_stretch_rx`.
+struct StretchResult {
+    path: PathBuf,
+    tier: SpeedTier,
+    buffer: Result<std::sync::Arc<vv_media::AudioBuffer>, String>,
 }
 
 /// Snapshot dei campi della clip selezionata che servono al pannello
@@ -238,6 +278,34 @@ struct VibeVideoApp {
     /// riproduzione.
     gap_wall_clock: Option<GapWallClock>,
 
+    /// Moltiplicatore di velocità di riproduzione corrente (1.0/2.0/4.0),
+    /// impostato dal tasto "a" (`handle_fast_playback_key`) — la barra
+    /// spaziatrice mette sempre in pausa e riporta questo a 1.0
+    /// (`reset_playback_speed_to_normal`), come da richiesta utente. Si
+    /// applica sia al `Player` attivo (audio time-stretched a pitch
+    /// preservato, vedi `stretched_audio_cache`) sia al clock a parete di
+    /// `gap_wall_clock` per i vuoti in timeline (nessun audio lì, nessuno
+    /// stretch necessario). Non persiste tra un riavvio e l'altro.
+    playback_speed: f64,
+    /// Buffer audio già stretchati (pitch preservato, `vv_audio::stretch_samples`)
+    /// per `(path del media, SpeedTier)`, per non ricalcolarli ogni volta
+    /// che si torna a 2x/4x sullo stesso media nella stessa sessione —
+    /// stesso principio di `audio_cache`, ma tenuta separata perché non
+    /// tutti i media vengono mai riprodotti accelerati.
+    stretched_audio_cache: HashMap<(PathBuf, SpeedTier), std::sync::Arc<vv_media::AudioBuffer>>,
+    /// `(path, tier)` il cui stretch è stato accodato su un thread ma non è
+    /// ancora tornato (vedi `poll_speed_stretch_result`): evita di
+    /// spawnare più thread per la stessa richiesta se l'utente tiene
+    /// premuto "a" o preme altri tasti nel frattempo. `None` quando nessun
+    /// calcolo è in corso.
+    pending_speed_stretch: Option<(PathBuf, SpeedTier)>,
+    /// Estremi del canale usato dal thread di stretch per restituire il
+    /// risultato al thread UI (`poll_speed_stretch_result`, chiamato a
+    /// ogni frame) — `Sender` clonato per ogni thread spawnato in
+    /// `request_playback_speed`.
+    speed_stretch_tx: mpsc::Sender<StretchResult>,
+    speed_stretch_rx: mpsc::Receiver<StretchResult>,
+
     /// "Selection follows playhead": attiva di default, disattivabile
     /// dalle impostazioni. Quando attiva, spostare il playhead (scrub o
     /// click sul righello) o tagliare/eliminare seleziona automaticamente
@@ -298,6 +366,7 @@ struct ExportUiState {
 
 impl Default for VibeVideoApp {
     fn default() -> Self {
+        let (speed_stretch_tx, speed_stretch_rx) = mpsc::channel();
         Self {
             project: vv_core::Project::default(),
             history: vv_core::History::default(),
@@ -327,6 +396,11 @@ impl Default for VibeVideoApp {
             render_ahead: None,
             render_ahead_generation: 0,
             gap_wall_clock: None,
+            playback_speed: 1.0,
+            stretched_audio_cache: HashMap::new(),
+            pending_speed_stretch: None,
+            speed_stretch_tx,
+            speed_stretch_rx,
             selection_follows_playhead: true,
             properties_panel_open: true,
             snapping_enabled: true,
@@ -667,6 +741,11 @@ impl VibeVideoApp {
 
         self.preview_player = None;
         self.preview_error = None;
+        // Un nuovo `Player` parte sempre a 1x (vedi `Player::open`):
+        // qualunque richiesta di stretch in corso per il player precedente
+        // non ha più senso.
+        self.playback_speed = 1.0;
+        self.pending_speed_stretch = None;
 
         let cached_audio = self.audio_cache.get(&path).cloned();
         match Player::open(&path, duration_secs, meta.fps, cached_audio) {
@@ -861,11 +940,22 @@ impl VibeVideoApp {
         self.browsing_media = None;
         self.browsing_decode_ahead = None;
         if self.gap_wall_clock.take().is_some() {
+            self.reset_playback_speed_to_normal();
             return;
         }
         self.ensure_active_clip_matches_playhead(false);
-        if let Some(player) = &mut self.preview_player {
-            player.toggle_play_pause();
+        if self.preview_player.is_some() {
+            let will_pause = self.preview_player.as_ref().is_some_and(Player::is_playing);
+            if let Some(player) = &mut self.preview_player {
+                player.toggle_play_pause();
+            }
+            // La barra spaziatrice mette sempre in pausa a velocità
+            // normale (richiesta utente): un "a" successivo da fermo
+            // riparte quindi sempre a 1x, mai riprendendo l'ultima
+            // velocità accelerata.
+            if will_pause {
+                self.reset_playback_speed_to_normal();
+            }
             return;
         }
         if let Some(timeline_id) = self.timeline_id
@@ -901,7 +991,11 @@ impl VibeVideoApp {
 
         if let Some(gap) = &self.gap_wall_clock {
             let fps = self.project.timelines[timeline_id].fps.as_f64().max(1e-9);
-            let elapsed_frames = (gap.started_at.elapsed().as_secs_f64() * fps).round() as FrameIdx;
+            // Nessun audio da seguire in un vuoto, quindi nessuno stretch:
+            // la velocità corrente si applica come semplice moltiplicatore
+            // del clock a parete.
+            let elapsed_frames = (gap.started_at.elapsed().as_secs_f64() * fps * self.playback_speed)
+                .round() as FrameIdx;
             let mut frame = gap.start_frame + elapsed_frames;
             // Non superare mai l'inizio della prossima clip video: senza
             // un tetto, l'orologio a parete potrebbe scavalcare una clip
@@ -918,6 +1012,15 @@ impl VibeVideoApp {
                 .is_some()
             {
                 self.gap_wall_clock = None;
+                // Semplificazione deliberata: attraversare un vuoto verso
+                // una nuova clip riparte sempre a 1x, anche se si stava
+                // accelerando nel vuoto — `ensure_active_clip_matches_playhead`
+                // apre/riusa un `Player` che non ha idea della velocità
+                // "virtuale" applicata finora al solo clock a parete (che
+                // qui non suona nulla), quindi non c'è un buffer stretchato
+                // coerente da agganciargli subito.
+                self.playback_speed = 1.0;
+                self.pending_speed_stretch = None;
                 self.ensure_active_clip_matches_playhead(true);
                 if let Some(player) = &mut self.preview_player {
                     player.play();
@@ -935,18 +1038,181 @@ impl VibeVideoApp {
         else {
             return;
         };
-        let Some(player) = &self.preview_player else {
-            return;
-        };
-        if !player.is_playing() {
+        let is_playing = self.preview_player.as_ref().is_some_and(Player::is_playing);
+        if !is_playing {
+            // Copre anche l'auto-pausa a fine clip di `Player::tick()`
+            // (chiamato ogni frame prima di `drive_playback`), che non
+            // passa da `toggle_playback` e quindi non avrebbe altrimenti
+            // resettato la velocità.
+            self.reset_playback_speed_to_normal();
             return;
         }
+        let player = self.preview_player.as_ref().expect("Some appena verificato sopra");
 
         if player.current_source_frame() >= clip.source_out {
             self.advance_playback_past(timeline_id, clip.timeline_end());
         } else {
             let local = player.current_source_frame() - clip.source_in;
             self.timeline_state.playhead = clip.timeline_start + local;
+        }
+    }
+
+    /// Tasto "a": riproduce come la barra spaziatrice, ma se già in
+    /// riproduzione accelera (1x -> 2x -> 4x, resta a 4x oltre) invece di
+    /// mettere in pausa — solo la barra spaziatrice mette in pausa, anche
+    /// durante l'accelerazione (richiesta utente esplicita). Da fermo si
+    /// comporta esattamente come `toggle_playback`, che parte sempre a 1x.
+    fn handle_fast_playback_key(&mut self) {
+        let currently_playing = self.preview_player.as_ref().is_some_and(Player::is_playing)
+            || self.gap_wall_clock.is_some();
+        if !currently_playing {
+            self.toggle_playback();
+            return;
+        }
+        let next_speed = if self.playback_speed < 1.5 {
+            2.0
+        } else {
+            4.0 // già a 2x o 4x: sale a/resta a 4x, il massimo.
+        };
+        self.request_playback_speed(next_speed);
+    }
+
+    /// Riporta la riproduzione a velocità normale: sempre immediato (il
+    /// buffer audio originale, se c'è, è già in `audio_cache`), a
+    /// differenza di accelerare (vedi `request_playback_speed`). Chiamato
+    /// sia dalla barra spaziatrice (pausa) sia dall'auto-pausa a fine clip
+    /// — no-op se già a 1x.
+    fn reset_playback_speed_to_normal(&mut self) {
+        self.pending_speed_stretch = None;
+        if (self.playback_speed - 1.0).abs() < 1e-9 {
+            return;
+        }
+        self.playback_speed = 1.0;
+        let Some(path) = self.preview_path.clone() else {
+            return;
+        };
+        let original = self.audio_cache.get(&path).cloned();
+        if let Some(player) = &mut self.preview_player {
+            player.set_speed(1.0, original.as_ref());
+        }
+    }
+
+    /// Cambia la velocità di riproduzione della clip attiva a `speed`
+    /// (2.0/4.0, vedi `SpeedTier`). Se la clip ha una traccia audio e il
+    /// buffer già stretchato a `speed` non è ancora in
+    /// `stretched_audio_cache`, lo calcola su un thread separato (via
+    /// `vv_audio::stretch_samples`, non istantaneo per file lunghi) e
+    /// resta alla velocità corrente finché il risultato non arriva
+    /// (`poll_speed_stretch_result`) — mai un salto di velocità "a scatti"
+    /// nel frattempo, semplicemente l'accelerazione richiesta impiega un
+    /// istante in più a innescarsi. Clip senza audio (o nessuna clip sotto
+    /// il player, es. durante un vuoto): si applica subito, nessuno
+    /// stretch necessario.
+    fn request_playback_speed(&mut self, speed: f64) {
+        if (speed - self.playback_speed).abs() < 1e-9 {
+            return;
+        }
+        if self.preview_player.is_none() {
+            self.playback_speed = speed;
+            self.pending_speed_stretch = None;
+            return;
+        }
+        let Some(path) = self.preview_path.clone() else {
+            self.playback_speed = speed;
+            return;
+        };
+        let original = self.audio_cache.get(&path).cloned();
+        if original.is_none() {
+            if let Some(player) = &mut self.preview_player {
+                player.set_speed(speed, None);
+            }
+            self.playback_speed = speed;
+            self.pending_speed_stretch = None;
+            return;
+        }
+        if (speed - 1.0).abs() < 1e-9 {
+            if let Some(player) = &mut self.preview_player {
+                player.set_speed(1.0, original.as_ref());
+            }
+            self.playback_speed = 1.0;
+            self.pending_speed_stretch = None;
+            return;
+        }
+        let Some(tier) = SpeedTier::from_multiplier(speed) else {
+            return;
+        };
+        let cached = self
+            .stretched_audio_cache
+            .get(&(path.clone(), tier))
+            .cloned();
+        if let Some(buf) = cached {
+            if let Some(player) = &mut self.preview_player {
+                player.set_speed(speed, Some(&buf));
+            }
+            self.playback_speed = speed;
+            self.pending_speed_stretch = None;
+            return;
+        }
+        if self.pending_speed_stretch != Some((path.clone(), tier)) {
+            self.pending_speed_stretch = Some((path.clone(), tier));
+            let tx = self.speed_stretch_tx.clone();
+            // `unwrap`: appena verificato `is_none()` sopra.
+            let original = original.unwrap();
+            std::thread::spawn(move || {
+                let result = vv_audio::stretch_samples(
+                    &original.samples,
+                    original.sample_rate,
+                    original.channels,
+                    tier.tempo(),
+                )
+                .map(|samples| {
+                    std::sync::Arc::new(vv_media::AudioBuffer {
+                        sample_rate: original.sample_rate,
+                        channels: original.channels,
+                        samples,
+                    })
+                });
+                let _ = tx.send(StretchResult {
+                    path,
+                    tier,
+                    buffer: result,
+                });
+            });
+        }
+    }
+
+    /// Da chiamare a ogni frame UI: applica il risultato di uno stretch
+    /// audio calcolato in background (`request_playback_speed`), se
+    /// arrivato. Scarta un risultato che non corrisponde più a
+    /// `pending_speed_stretch` (superato da una richiesta più recente, es.
+    /// l'utente è tornato a 1x o ha cambiato clip nel frattempo) — lo mette
+    /// comunque in cache, così non va sprecato se richiesto di nuovo.
+    fn poll_speed_stretch_result(&mut self) {
+        while let Ok(result) = self.speed_stretch_rx.try_recv() {
+            let StretchResult { path, tier, buffer } = result;
+            let buf = match buffer {
+                Ok(buf) => buf,
+                Err(e) => {
+                    eprintln!("vv-app: stretch audio a {}x fallito: {e}", tier.tempo());
+                    if self.pending_speed_stretch == Some((path, tier)) {
+                        self.pending_speed_stretch = None;
+                    }
+                    continue;
+                }
+            };
+            self.stretched_audio_cache
+                .insert((path.clone(), tier), buf.clone());
+            if self.pending_speed_stretch != Some((path.clone(), tier)) {
+                continue;
+            }
+            self.pending_speed_stretch = None;
+            if self.preview_path.as_deref() != Some(path.as_path()) {
+                continue;
+            }
+            if let Some(player) = &mut self.preview_player {
+                player.set_speed(tier.tempo(), Some(&buf));
+                self.playback_speed = tier.tempo();
+            }
         }
     }
 
@@ -1113,7 +1379,34 @@ impl VibeVideoApp {
             render_ahead.update_project(&self.project, timeline_id);
             self.render_ahead_generation = generation;
         }
+        // A velocità >1x il playhead avanza più veloce nel tempo reale:
+        // serve più margine bufferizzato in avanti per non superare il
+        // prefetch (vedi doc di `effective_lookahead_secs`).
+        if self.playback_speed != 1.0 {
+            render_ahead.set_lookahead_secs(self.effective_lookahead_secs(timeline_id));
+        } else {
+            render_ahead.set_lookahead_secs(self.lookahead_secs);
+        }
         render_ahead.set_target(self.timeline_state.playhead);
+    }
+
+    /// `lookahead_secs` (base configurata dall'utente) scalato per
+    /// `self.playback_speed`, clampato a quanto entra nel budget di
+    /// memoria configurato (`cache_budget_bytes`) lasciando spazio anche
+    /// per `behind_secs` — oltre quel limite scalare ulteriormente
+    /// sarebbe comunque vanificato dagli sfratti Tier B di `render_ahead`
+    /// (budget insufficiente per la finestra richiesta). Non scende mai
+    /// sotto il valore base configurato dall'utente, anche a budget
+    /// strettissimo.
+    fn effective_lookahead_secs(&self, timeline_id: TimelineId) -> f64 {
+        let scaled = self.lookahead_secs * self.playback_speed;
+        let timeline = &self.project.timelines[timeline_id];
+        let fps = timeline.fps.as_f64().max(1e-9);
+        let (w, h) = timeline.resolution;
+        let frame_bytes = ((w as usize * h as usize * 3) / 2).max(1);
+        let max_frames = self.cache_budget_bytes / frame_bytes;
+        let max_secs = (max_frames as f64 / fps - self.behind_secs).max(self.lookahead_secs);
+        scaled.min(max_secs)
     }
 
     /// Crea una clip generatore SolidColor da 5s e la accoda in fondo alla
@@ -2202,6 +2495,7 @@ impl eframe::App for VibeVideoApp {
         if let Some(player) = &mut self.preview_player {
             player.tick();
         }
+        self.poll_speed_stretch_result();
 
         // Gain keyframeato: va aggiornato a ogni frame UI in base alla
         // posizione corrente del player (control-rate ~60Hz, non
@@ -2248,6 +2542,12 @@ impl eframe::App for VibeVideoApp {
             }
             if i.key_pressed(egui::Key::Space) {
                 self.toggle_playback();
+            }
+            // "a": come la barra spaziatrice, ma se già in riproduzione
+            // accelera invece di mettere in pausa (1x -> 2x -> 4x) — vedi
+            // doc di `handle_fast_playback_key`.
+            if i.key_pressed(egui::Key::A) {
+                self.handle_fast_playback_key();
             }
             // Ctrl+I (Cmd+I su macOS): import media, come il pulsante toolbar.
             if i.modifiers.command && i.key_pressed(egui::Key::I) {
@@ -3916,6 +4216,148 @@ mod tests {
             app.preview_player.as_ref().unwrap().is_playing(),
             "la riproduzione doveva continuare, non fermarsi"
         );
+    }
+
+    /// Tasto "a" su una clip senza audio (nessuno stretch coinvolto, il
+    /// caso "immediato" di `request_playback_speed`): da fermo parte a 1x
+    /// come la barra spaziatrice, poi cicla 1x -> 2x -> 4x e resta a 4x;
+    /// la barra spaziatrice mette sempre in pausa e riporta a 1x, anche da
+    /// accelerato.
+    #[test]
+    fn fast_playback_key_cycles_speed_and_space_always_resets_it() {
+        let dir = std::env::temp_dir().join("vv-app-fast-playback-key-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        app.timeline_state.playhead = 0;
+        app.ensure_active_clip_matches_playhead(false);
+
+        // Da fermo, "a" parte come la barra spaziatrice: a 1x.
+        app.handle_fast_playback_key();
+        assert!(app.preview_player.as_ref().unwrap().is_playing());
+        assert_eq!(app.playback_speed, 1.0);
+
+        app.handle_fast_playback_key();
+        assert_eq!(app.playback_speed, 2.0, "seconda pressione: 2x");
+        app.handle_fast_playback_key();
+        assert_eq!(app.playback_speed, 4.0, "terza pressione: 4x");
+        app.handle_fast_playback_key();
+        assert_eq!(app.playback_speed, 4.0, "oltre 4x resta a 4x");
+
+        app.toggle_playback(); // barra spaziatrice
+        assert!(!app.preview_player.as_ref().unwrap().is_playing());
+        assert_eq!(
+            app.playback_speed, 1.0,
+            "la pausa riporta sempre a velocità normale"
+        );
+
+        // Un "a" successivo da fermo riparte a 1x, non riprende 4x.
+        app.handle_fast_playback_key();
+        assert!(app.preview_player.as_ref().unwrap().is_playing());
+        assert_eq!(app.playback_speed, 1.0);
+    }
+
+    /// Come sopra ma con una clip *con* audio: `request_playback_speed`
+    /// deve calcolare lo stretch (pitch preservato) su un thread separato
+    /// e restare alla velocità corrente finché non è pronto, poi
+    /// applicarlo. Verifica anche che `Player::position_secs` (nello
+    /// spazio tempo del media originale) avanzi coerentemente più veloce
+    /// alla nuova velocità.
+    #[test]
+    fn fast_playback_with_audio_stretches_in_background_then_applies() {
+        let dir = std::env::temp_dir().join("vv-app-fast-playback-audio-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=3",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path.clone());
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        app.timeline_state.playhead = 0;
+        app.ensure_active_clip_matches_playhead(false);
+
+        app.handle_fast_playback_key(); // parte a 1x
+        assert_eq!(app.playback_speed, 1.0);
+        app.handle_fast_playback_key(); // richiede 2x: audio presente, va in background
+        assert_eq!(
+            app.playback_speed, 1.0,
+            "resta a 1x finché lo stretch non è pronto"
+        );
+        assert!(app.pending_speed_stretch.is_some());
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while app.playback_speed != 2.0 && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.poll_speed_stretch_result();
+        }
+        assert_eq!(app.playback_speed, 2.0, "lo stretch doveva completarsi");
+        assert!(app.pending_speed_stretch.is_none());
+        assert!(
+            app.stretched_audio_cache
+                .contains_key(&(path.clone(), SpeedTier::X2)),
+            "il buffer stretchato va messo in cache"
+        );
+        assert!(app.preview_player.as_ref().unwrap().is_playing());
+
+        let pos_before = app.preview_player.as_ref().unwrap().position_secs();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let pos_after = app.preview_player.as_ref().unwrap().position_secs();
+        let advanced = pos_after - pos_before;
+        assert!(
+            advanced > 0.4 && advanced < 1.0,
+            "a 2x, 300ms reali devono corrispondere a ~0.6s nello spazio tempo del media originale, advanced={advanced}"
+        );
+
+        // Richiedere di nuovo 2x (già in cache) deve essere immediato.
+        app.request_playback_speed(2.0);
+        assert_eq!(app.playback_speed, 2.0);
+
+        // Tornare a 1x è sempre immediato.
+        app.toggle_playback();
+        assert!(!app.preview_player.as_ref().unwrap().is_playing());
+        assert_eq!(app.playback_speed, 1.0);
     }
 
     /// Bug: "selection follows playhead" seguiva solo lo scrub manuale,

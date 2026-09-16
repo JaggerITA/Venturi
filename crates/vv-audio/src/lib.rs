@@ -11,3 +11,4 @@ pub mod output;
 pub mod stretch;
 
 pub use output::AudioPlayer;
+pub use stretch::stretch_samples;

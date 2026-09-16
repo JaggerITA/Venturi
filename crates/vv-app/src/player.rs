@@ -37,6 +37,13 @@ pub struct Player {
     playing: bool,
     wall_clock_started_at: Option<Instant>,
     wall_clock_base_secs: f64,
+    /// Moltiplicatore di velocità (1.0/2.0/4.0, vedi `set_speed`). Con
+    /// audio, `self.audio` a `speed != 1.0` contiene il buffer già
+    /// time-stretched (pitch preservato, `vv_audio::stretch_samples`) alla
+    /// velocità corrente, la cui timeline è compressa per quel fattore —
+    /// tutte le posizioni pubbliche (`position_secs`/`seek_secs`) restano
+    /// invece nello spazio tempo del media originale, tradotte qui.
+    speed: f64,
 }
 
 impl Player {
@@ -80,6 +87,7 @@ impl Player {
                 playing: false,
                 wall_clock_started_at: None,
                 wall_clock_base_secs: 0.0,
+                speed: 1.0,
             },
             audio_buffer,
         ))
@@ -144,7 +152,10 @@ impl Player {
     pub fn seek_secs(&mut self, secs: f64) {
         let secs = secs.clamp(0.0, self.duration_secs.max(0.0));
         if let Some(audio) = &self.audio {
-            audio.seek_seconds(secs);
+            // `audio` può contenere il buffer time-stretched a `self.speed`
+            // (vedi `set_speed`): la sua timeline è compressa per quel
+            // fattore, va tradotta prima di cercarci dentro.
+            audio.seek_seconds(secs / self.speed);
         }
         self.wall_clock_base_secs = secs;
         if self.playing {
@@ -152,20 +163,53 @@ impl Player {
         }
     }
 
+    /// Posizione nello spazio tempo del media *originale*, indipendente da
+    /// `speed` — vedi doc del campo `speed`.
     pub fn position_secs(&self) -> f64 {
         match &self.audio {
             // Il cursore dell'AudioPlayer avanza solo mentre `playing` è
             // vero (il callback lo controlla), quindi resta corretto anche
             // da fermo: nessun bisogno di un ramo separato per la pausa.
-            Some(audio) => audio.position_seconds(),
+            Some(audio) => audio.position_seconds() * self.speed,
             None if self.playing => {
                 self.wall_clock_base_secs
                     + self
                         .wall_clock_started_at
-                        .map(|t| t.elapsed().as_secs_f64())
+                        .map(|t| t.elapsed().as_secs_f64() * self.speed)
                         .unwrap_or(0.0)
             }
             None => self.wall_clock_base_secs,
+        }
+    }
+
+    /// Cambia il moltiplicatore di velocità (1.0/2.0/4.0). Per clip con
+    /// audio, `audio_buffer` deve essere il buffer da usare alla nuova
+    /// velocità: quello originale per tornare a 1.0, oppure quello già
+    /// elaborato da `vv_audio::stretch_samples(..., speed)` per 2.0/4.0 —
+    /// il chiamante (vedi `VibeVideoApp`) lo calcola/cache fuori dal thread
+    /// UI, perché lo stretch dell'intera traccia non è istantaneo. Riapre
+    /// l'`AudioPlayer` sul nuovo buffer mantenendo posizione e stato
+    /// play/pausa correnti (con un brevissimo scatto sullo stream audio,
+    /// stesso costo di un cambio clip). Per clip senza audio (fallback a
+    /// orologio a parete) `audio_buffer` è ignorato: la velocità si
+    /// applica direttamente al clock.
+    pub fn set_speed(&mut self, speed: f64, audio_buffer: Option<&Arc<vv_media::AudioBuffer>>) {
+        if (speed - self.speed).abs() < 1e-9 {
+            return;
+        }
+        let was_playing = self.playing;
+        let pos = self.position_secs();
+        self.speed = speed;
+        if let Some(buf) = audio_buffer {
+            self.audio =
+                vv_audio::AudioPlayer::new(buf.samples.clone(), buf.sample_rate, buf.channels)
+                    .ok();
+        }
+        self.playing = false;
+        self.wall_clock_started_at = None;
+        self.seek_secs(pos);
+        if was_playing {
+            self.play();
         }
     }
 
