@@ -45,6 +45,13 @@ pub struct TimelineState {
     selection_anchor: Option<ClipKey>,
     pub playhead: FrameIdx,
     pixels_per_sec: f32,
+    /// `pixels_per_sec` usato nell'ultimo passaggio di disegno della
+    /// timeline: il confronto col valore corrente in `show_timeline`
+    /// rileva lo zoom avvenuto *in questo frame* (da tastiera/menu — che
+    /// mutano `pixels_per_sec` prima del disegno — o da Ctrl+scroll) e
+    /// permette di correggere l'offset di scroll per ancorare lo zoom alla
+    /// testina.
+    last_rendered_pps: f32,
     drag: Option<DragState>,
     /// Rettangolo di selezione in corso, in coordinate locali al contenuto
     /// scrollabile (senza l'offset di `origin`, così resta valido anche se
@@ -154,6 +161,9 @@ impl Default for TimelineState {
             selection_anchor: None,
             playhead: 0,
             pixels_per_sec: 60.0,
+            // Stesso valore iniziale di `pixels_per_sec`: al primo frame non
+            // c'è ancora nessuno zoom da compensare.
+            last_rendered_pps: 60.0,
             drag: None,
             marquee: None,
             selected_gap: None,
@@ -194,6 +204,9 @@ impl TimelineState {
     /// Zoom orizzontale della timeline (moltiplica `pixels_per_sec` per un
     /// fattore fisso a ogni passo): usato dalla shortcut da tastiera in
     /// `main.rs`, oltre a Ctrl+scroll/pinch gestito dentro `show_timeline`.
+    /// Lo zoom è ancorato alla testina: `show_timeline` corregge l'offset
+    /// di scroll orizzontale così la testina resta alla stessa posizione a
+    /// schermo (non "cresce" dal bordo sinistro visibile).
     pub fn zoom_in(&mut self) {
         self.set_pixels_per_sec(self.pixels_per_sec * ZOOM_STEP);
     }
@@ -442,7 +455,10 @@ pub fn show_timeline(
     // zoom "globale" di egui, qui invece cambia solo la scala della
     // timeline): solo se il puntatore è sopra il pannello, altrimenti
     // scrollare con Ctrl premuto altrove (es. media pool) zoomerebbe la
-    // timeline per sbaglio.
+    // timeline per sbaglio. Le scorciatoie da tastiera/menu (zoom_in/
+    // zoom_out in main.rs) mutano `pixels_per_sec` ancora prima di qui:
+    // il confronto con `last_rendered_pps` sotto le cattura entrambe le
+    // origini.
     let panel_rect = ui.available_rect_before_wrap();
     let pointer_over_panel = ui
         .input(|i| i.pointer.hover_pos())
@@ -485,6 +501,36 @@ pub fn show_timeline(
     let mut pending: Option<PendingAction> = None;
 
     ui.horizontal_top(|ui| {
+        // Zoom ancorato alla testina: se `pixels_per_sec` è cambiato in
+        // questo frame (scorciatoie da tastiera/menu — che lo mutano prima
+        // del disegno — o Ctrl+scroll/pinch), correggiamo l'offset di scroll
+        // orizzontale perché la testina resti alla stessa posizione a
+        // schermo (senza di che lo zoom crescerebbe dal bordo sinistro
+        // *visibile*, non da dove l'utente sta guardando). L'offset si legge
+        // dallo stato persistito della ScrollArea qui sotto — stesso id, dato
+        // che `make_persistent_id` usa l'id stabile dell'Ui (non il
+        // contatore auto-id) — e si riscrive prima del `show`, che lo rilegge
+        // in `begin`; il clamp ai limiti di contenuto resta a carico di egui.
+        // (Nessun `scroll_to*` animato è usato sulla timeline, quindi nessun
+        // target in corso da contrastare.)
+        if state.pixels_per_sec != state.last_rendered_pps {
+            let ctx = ui.ctx();
+            // Attenzione: `Id::with(IdSalt)` e `Id::with(&str)` producono id
+            // *diversi* per la stessa stringa — qui serve la forma IdSalt,
+            // identica a quella che la ScrollArea usa in `begin` (il builder
+            // `.id_salt(...)` converte in `IdSalt`).
+            let scroll_id = ui.make_persistent_id(egui::IdSalt::new("timeline_scroll"));
+            if let Some(mut scroll_state) =
+                egui::containers::scroll_area::State::load(&ctx, scroll_id)
+            {
+                let playhead_secs = state.playhead as f64 / fps;
+                scroll_state.offset.x +=
+                    (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
+                scroll_state.store(&ctx, scroll_id);
+            }
+        }
+        state.last_rendered_pps = state.pixels_per_sec;
+
         draw_track_headers(ui, &track_kinds, content_height, &mut pending);
 
         egui::ScrollArea::horizontal()
@@ -2127,6 +2173,125 @@ mod tests {
         output.textures_delta.clear();
 
         assert_eq!(project.timelines[timeline_id].tracks.len(), 3);
+    }
+
+    /// Bug: lo zoom "cresceva" dal bordo sinistro *visibile* (o da 0) invece
+    /// che dalla testina. Correzione: quando `pixels_per_sec` cambia,
+    /// `show_timeline` corregge l'offset di scroll orizzontale così la
+    /// testina resta alla stessa posizione a schermo — `offset' = offset +
+    /// t_playhead * (pps' - pps)` — e uno zoom in/out ripetuto non la sposta.
+    #[test]
+    fn zoom_keeps_playhead_at_same_screen_position() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                vv_core::Track::new(TrackKind::Video),
+                vv_core::Track::new(TrackKind::Audio),
+            ],
+        });
+        let mut history = History::default();
+        // Clip lunga abbastanza da rendere la timeline scrollabile (contenuto
+        // più largo del viewport): senza, l'offset verrebbe clampato a 0 e il
+        // test non direbbe nulla.
+        let clip = Clip {
+            id: project.alloc_clip_id(),
+            source: vv_core::ClipSource::SolidColor,
+            source_in: 0,
+            source_out: 2500, // 100s a 25fps
+            timeline_start: 0,
+            effects: vv_core::EffectStack::default(),
+            linked: None,
+        };
+        history.do_command(
+            &mut project,
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: 0,
+                clip,
+            }),
+        );
+
+        let mut state = TimelineState::default();
+        state.playhead = 125; // t = 5s a 25fps
+
+        let ctx = egui::Context::default();
+        // Viewport realistico (800x600): con `RawInput::default()` il
+        // viewport headless è enorme (10000x10000) e il contenuto non
+        // sarebbe scrollabile — l'offset verrebbe clampato a 0 e il test
+        // non direbbe nulla.
+        let frame_input = || {
+            let mut input = egui::RawInput::default();
+            input.screen_rect = Some(egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(800.0, 600.0),
+            ));
+            input
+        };
+        let mut render_frame = |state: &mut TimelineState| {
+            let mut output = ctx.run_ui(frame_input(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    show_timeline(
+                        ui,
+                        &mut project,
+                        &mut history,
+                        timeline_id,
+                        &|_id| "media".to_string(),
+                        state,
+                        true,
+                        &[],
+                        &[],
+                    );
+                });
+            });
+            output.textures_delta.clear();
+        };
+
+        // Frame 1: inizializza lo stato della ScrollArea.
+        render_frame(&mut state);
+        let scroll_id = {
+            // Stesso id che `show_timeline` usa per la sua ScrollArea:
+            // `make_persistent_id` usa l'id *stabile* dell'Ui (non il
+            // contatore auto-id), quindi basta replicare la stessa
+            // struttura di nesting — CentralPanel -> `horizontal_top`,
+            // dove dentro `show_timeline` vive la ScrollArea. Attenzione a
+            // usare la forma `IdSalt` e non la stringa: `Id::with(IdSalt)` e
+            // `Id::with(&str)` danno id diversi per la stessa stringa.
+            let mut captured = None;
+            ctx.run_ui(frame_input(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        captured = Some(ui.make_persistent_id(egui::IdSalt::new("timeline_scroll")));
+                    });
+                });
+            });
+            captured.expect("id della ScrollArea")
+        };
+
+        // Simula l'utente che ha già scrollato: offset 30px.
+        {
+            let mut st = egui::containers::scroll_area::State::load(&ctx, scroll_id)
+                .expect("stato ScrollArea dopo frame 1");
+            assert_eq!(st.offset.x, 0.0);
+            st.offset.x = 30.0;
+            st.store(&ctx, scroll_id);
+        }
+
+        // Zoom in: pps 60 -> 75. La testina (t=5s) deve restare alla stessa
+        // posizione a schermo: offset' = 30 + 5 * (75 - 60) = 105.
+        state.zoom_in();
+        render_frame(&mut state);
+        let st = egui::containers::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        assert_eq!(st.offset.x, 105.0);
+
+        // Zoom out: pps 75 -> 60. La testina non si è mossa, quindi l'offset
+        // torna esattamente a 30.
+        state.zoom_out();
+        render_frame(&mut state);
+        let st = egui::containers::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        assert_eq!(st.offset.x, 30.0);
     }
 
     /// Bug: il pannello timeline (`Panel::bottom` con dentro
