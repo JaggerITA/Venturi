@@ -7,8 +7,8 @@
 //! ARCHITECTURE.md § Pipeline audio.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub struct AudioPlayer {
     _stream: cpal::Stream,
@@ -29,7 +29,19 @@ pub struct AudioPlayer {
     peak_left_bits: Arc<AtomicU32>,
     peak_right_bits: Arc<AtomicU32>,
     sample_rate: u32,
-    total_frames: usize,
+    channels: u16,
+    /// Campioni interleaved dietro un lock invece di un `Arc<Vec<f32>>`
+    /// immutabile: `extend_samples` vi accoda altro audio (finestra di
+    /// speed-up successiva, vedi `vv-app::player::Player`) senza dover
+    /// riaprire lo stream cpal, cosa che produrrebbe un piccolo click
+    /// udibile a ogni estensione — accettabile per un cambio di velocità
+    /// esplicito (raro), non per uno scorrimento di finestra continuo
+    /// ogni pochi secondi durante il fast-forward. Il lock è preso anche
+    /// dal callback realtime: tenuto per una copia di poche migliaia di
+    /// campioni, mai per un'allocazione (quella la fa solo lo scrittore,
+    /// fuori dal thread audio) — un compromesso pragmatico per un player
+    /// di anteprima, non pensato per latenze da DAW professionale.
+    samples: Arc<Mutex<Vec<f32>>>,
 }
 
 impl AudioPlayer {
@@ -50,10 +62,9 @@ impl AudioPlayer {
         let gain_linear_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let peak_left_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let peak_right_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
-        let total_frames = samples.len() / channels.max(1) as usize;
         let channels_usize = channels as usize;
 
-        let samples = Arc::new(samples);
+        let samples = Arc::new(Mutex::new(samples));
         let cb_samples = samples.clone();
         let cb_playing = playing.clone();
         let cb_position = position_frames.clone();
@@ -69,6 +80,8 @@ impl AudioPlayer {
                         data.fill(0.0);
                     } else {
                         let gain = f32::from_bits(cb_gain.load(Ordering::Relaxed));
+                        let buf = cb_samples.lock().unwrap_or_else(|e| e.into_inner());
+                        let total_frames = buf.len() / channels_usize.max(1);
                         let mut pos = cb_position.load(Ordering::Relaxed);
                         for frame in data.chunks_mut(channels_usize) {
                             if pos >= total_frames {
@@ -76,14 +89,14 @@ impl AudioPlayer {
                                 continue;
                             }
                             let start = pos * channels_usize;
-                            for (dst, src) in frame
-                                .iter_mut()
-                                .zip(&cb_samples[start..start + channels_usize])
+                            for (dst, src) in
+                                frame.iter_mut().zip(&buf[start..start + channels_usize])
                             {
                                 *dst = src * gain;
                             }
                             pos += 1;
                         }
+                        drop(buf);
                         cb_position.store(pos, Ordering::Relaxed);
                     }
                     // Picco (post-gain) di questo buffer per canale, per
@@ -124,8 +137,25 @@ impl AudioPlayer {
             peak_left_bits,
             peak_right_bits,
             sample_rate,
-            total_frames,
+            channels,
+            samples,
         })
+    }
+
+    /// Accoda altro audio interleaved (stesso `sample_rate`/canali di
+    /// apertura) in coda al buffer corrente, senza interrompere lo stream
+    /// né toccare la posizione di lettura — per estendere la finestra di
+    /// una riproduzione accelerata in corso (vedi doc del campo
+    /// `samples`).
+    pub fn extend_samples(&self, more: &[f32]) {
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(more);
+    }
+
+    fn total_frames(&self) -> usize {
+        self.samples.lock().unwrap_or_else(|e| e.into_inner()).len() / self.channels.max(1) as usize
     }
 
     /// Imposta il guadagno in decibel (0.0 = invariato, -inf teorico -> 0
@@ -163,7 +193,7 @@ impl AudioPlayer {
     pub fn seek_seconds(&self, secs: f64) {
         let frame = (secs.max(0.0) * self.sample_rate as f64) as usize;
         self.position_frames
-            .store(frame.min(self.total_frames), Ordering::Relaxed);
+            .store(frame.min(self.total_frames()), Ordering::Relaxed);
     }
 
     pub fn position_seconds(&self) -> f64 {
@@ -171,12 +201,12 @@ impl AudioPlayer {
     }
 
     pub fn duration_seconds(&self) -> f64 {
-        self.total_frames as f64 / self.sample_rate as f64
+        self.total_frames() as f64 / self.sample_rate as f64
     }
 
     /// `true` quando il playback ha raggiunto la fine del buffer.
     pub fn finished(&self) -> bool {
-        self.position_frames.load(Ordering::Relaxed) >= self.total_frames
+        self.position_frames.load(Ordering::Relaxed) >= self.total_frames()
     }
 }
 
@@ -196,5 +226,36 @@ mod tests {
         assert!((db_to_linear(6.0) - 1.9953).abs() < 1e-3);
         // -20dB = fattore 0.1 esatto.
         assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
+    }
+
+    /// Estendere il buffer non deve toccare la posizione di lettura né
+    /// interrompere lo stream: la finestra scorrevole del fast-forward
+    /// (vedi `vv-app::player::Player`) accoda audio mentre si suona senza
+    /// riaprire `AudioPlayer`, per evitare il click di una riapertura a
+    /// ogni estensione.
+    #[test]
+    fn extend_samples_grows_duration_without_disturbing_playback_position() {
+        let sample_rate = 44_100;
+        let channels = 1u16;
+        let initial: Vec<f32> = vec![0.5; sample_rate as usize]; // 1s
+        let player = AudioPlayer::new(initial, sample_rate, channels).unwrap();
+
+        assert!((player.duration_seconds() - 1.0).abs() < 1e-6);
+        player.seek_seconds(0.5);
+        assert!((player.position_seconds() - 0.5).abs() < 1e-6);
+
+        let more: Vec<f32> = vec![0.25; sample_rate as usize]; // +1s
+        player.extend_samples(&more);
+
+        assert!(
+            (player.duration_seconds() - 2.0).abs() < 1e-6,
+            "duration={}",
+            player.duration_seconds()
+        );
+        assert!(
+            (player.position_seconds() - 0.5).abs() < 1e-6,
+            "extend_samples non deve spostare la posizione di lettura"
+        );
+        assert!(!player.finished());
     }
 }

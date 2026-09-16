@@ -2,13 +2,17 @@
 //! `rubberband` di libavfilter (ffmpeg-next::filter) — già linkato nel
 //! ffmpeg di sistema (`--enable-librubberband`), nessun binding extra.
 //!
-//! Elabora l'intero buffer in un colpo solo (non è uno stretch realtime a
-//! blocchi): il chiamante lavora già su un buffer audio intero
-//! pre-decodificato in RAM (vedi `vv-app::player::Player`/
-//! `vv_media::decode_audio_track`), quindi non serve un filtro a bassa
-//! latenza per campione — un singolo passaggio batch è più semplice e
-//! sufficientemente veloce (va comunque chiamato fuori dal thread UI,
-//! vedi i chiamanti).
+//! Elabora un buffer per volta in un colpo solo (non è un filtro
+//! streaming a bassa latenza per campione, ma nemmeno pensato per
+//! l'intera traccia): il chiamante (`vv-app::main::VibeVideoApp`, vedi
+//! `SPEED_WINDOW_SECS`) gli passa una *finestra* di qualche secondo di
+//! audio pre-decodificato alla volta invece dell'intera traccia — su una
+//! clip lunga, stretchare tutti i minuti in un colpo solo prima di poter
+//! sentire qualunque cosa introduce un ritardo percepibile (anche
+//! diversi secondi) alla pressione del tasto velocità; una finestra
+//! piccola torna in ~100-200ms (misurato, vedi test `bench_window`) e la
+//! finestra successiva viene calcolata in background mentre la corrente
+//! sta ancora suonando.
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg::channel_layout::ChannelLayout;
@@ -199,5 +203,38 @@ mod tests {
 
         let peak = stretched.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+    }
+}
+
+#[cfg(test)]
+mod bench_window {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Non una garanzia hard-realtime, ma una soglia larga: stretchare la
+    /// finestra scelta da `vv-app` (`SPEED_WINDOW_SECS`, 8s) deve restare
+    /// ben sotto il secondo, altrimenti l'estensione in background
+    /// (triggerata quando restano `EXTEND_TRIGGER_MARGIN_SECS`, 4s, di
+    /// finestra non ancora suonata) rischierebbe di non fare in tempo a
+    /// 4x (1s di margine reale). Misurato in pratica ~150ms, vedi
+    /// commento nel modulo.
+    #[test]
+    fn stretching_an_8s_window_is_well_under_the_extension_margin() {
+        let sample_rate = 48_000u32;
+        let channels = 2u16;
+        let secs = 8.0;
+        let n = (sample_rate as f64 * secs) as usize;
+        let samples: Vec<f32> = (0..n * channels as usize)
+            .map(|i| (i as f32 * 0.01).sin())
+            .collect();
+        for tempo in [2.0, 4.0] {
+            let start = Instant::now();
+            stretch_samples(&samples, sample_rate, channels, tempo).unwrap();
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(800),
+                "tempo={tempo} elapsed={elapsed:?}, troppo lento per l'estensione in background"
+            );
+        }
     }
 }

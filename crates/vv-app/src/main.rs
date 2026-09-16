@@ -53,10 +53,8 @@ struct GapWallClock {
 
 /// Le due velocità di riproduzione accelerata raggiungibili col tasto "a"
 /// (vedi `VibeVideoApp::handle_fast_playback_key`) — non un `f64` libero:
-/// solo questi due fattori vengono mai richiesti a `vv_audio::stretch_samples`,
-/// quindi la cache dei buffer stretchati (`VibeVideoApp::stretched_audio_cache`)
-/// può usarli come chiave `Hash`/`Eq` invece di un `f64` (non `Eq`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// solo questi due fattori vengono mai richiesti a `vv_audio::stretch_samples`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpeedTier {
     X2,
     X4,
@@ -81,12 +79,68 @@ impl SpeedTier {
     }
 }
 
-/// Esito di uno stretch audio calcolato in background (vedi
-/// `VibeVideoApp::request_playback_speed`), ricevuto via
-/// `VibeVideoApp::speed_stretch_rx`.
+/// Durata (in secondi di *media originale*) di ogni finestra di audio
+/// stretchato per il fast-forward (tasto "a") — vedi
+/// `VibeVideoApp::request_speed_window`. Piccola apposta: stretchare
+/// l'intera traccia in un colpo solo introdurrebbe un ritardo
+/// percepibile (anche diversi secondi su una clip lunga) prima di
+/// sentire qualunque cosa dopo aver premuto il tasto; una finestra da 8s
+/// torna in ~150-200ms (vedi benchmark in `vv_audio::stretch`), la
+/// successiva viene calcolata in background mentre la corrente sta
+/// ancora suonando (vedi `EXTEND_TRIGGER_MARGIN_SECS`).
+const SPEED_WINDOW_SECS: f64 = 8.0;
+
+/// Quanti secondi di *media originale* non ancora suonati devono restare
+/// nella finestra corrente prima di accodarne in background la
+/// prossima (vedi `VibeVideoApp::poll_speed_window_extension`). Deve
+/// restare un margine comodo anche a 4x, dove questi secondi di audio
+/// originale corrispondono a un quarto in wall-clock reale (2s a 4x
+/// contro ~150-200ms di calcolo).
+const EXTEND_TRIGGER_MARGIN_SECS: f64 = 4.0;
+
+/// Richiesta di stretch (prima finestra o estensione) accodata su un
+/// thread ma non ancora tornata — vedi
+/// `VibeVideoApp::request_speed_window`/`poll_speed_stretch_result`.
+/// `range_start_secs` (spazio tempo del media originale) identifica la
+/// richiesta insieme a `path`/`tier`: un risultato che non corrisponde
+/// più esattamente a questi tre campi quando arriva è stato superato da
+/// una richiesta più recente (nuovo tier, tornati a 1x, cambiata clip) e
+/// va scartato.
+#[derive(Clone, PartialEq)]
+struct PendingSpeedStretch {
+    path: PathBuf,
+    tier: SpeedTier,
+    range_start_secs: f64,
+}
+
+/// Stato della finestra di audio accelerato attualmente caricata nel
+/// `Player` attivo (vedi `VibeVideoApp::speed_window`) — `None` quando non
+/// si sta accelerando (1x) o la clip attiva non ha audio (nessuna
+/// finestra da tracciare, la velocità si applica solo al clock interno).
+struct SpeedWindowState {
+    path: PathBuf,
+    tier: SpeedTier,
+    /// Fino a che punto (spazio tempo del media originale) la finestra
+    /// caricata copre già l'audio stretchato — quando il playhead si
+    /// avvicina a questo limite (`EXTEND_TRIGGER_MARGIN_SECS`), se ne
+    /// accoda dell'altra in background invece di aspettare che finisca.
+    covered_until_secs: f64,
+}
+
+/// Esito di uno stretch audio calcolato in background (prima finestra o
+/// estensione, vedi `VibeVideoApp::request_speed_window`), ricevuto via
+/// `VibeVideoApp::speed_stretch_rx`. `range_start_secs`/`range_end_secs`
+/// sono nello spazio tempo del *media originale*: identificano quale
+/// pezzo di traccia è stato stretchato, non quanto è durato il risultato
+/// (che dipende dal tempo e non serve qui — vedi
+/// `SpeedWindowState::covered_until_secs`, aggiornato con
+/// `range_end_secs` a prescindere da quanti campioni stretchati siano
+/// tornati).
 struct StretchResult {
     path: PathBuf,
     tier: SpeedTier,
+    range_start_secs: f64,
+    range_end_secs: f64,
     buffer: Result<std::sync::Arc<vv_media::AudioBuffer>, String>,
 }
 
@@ -282,27 +336,24 @@ struct VibeVideoApp {
     /// impostato dal tasto "a" (`handle_fast_playback_key`) — la barra
     /// spaziatrice mette sempre in pausa e riporta questo a 1.0
     /// (`reset_playback_speed_to_normal`), come da richiesta utente. Si
-    /// applica sia al `Player` attivo (audio time-stretched a pitch
-    /// preservato, vedi `stretched_audio_cache`) sia al clock a parete di
-    /// `gap_wall_clock` per i vuoti in timeline (nessun audio lì, nessuno
-    /// stretch necessario). Non persiste tra un riavvio e l'altro.
+    /// applica sia al `Player` attivo (audio time-stretched a finestre,
+    /// vedi `speed_window`) sia al clock a parete di `gap_wall_clock` per
+    /// i vuoti in timeline (nessun audio lì, nessuno stretch necessario).
+    /// Non persiste tra un riavvio e l'altro.
     playback_speed: f64,
-    /// Buffer audio già stretchati (pitch preservato, `vv_audio::stretch_samples`)
-    /// per `(path del media, SpeedTier)`, per non ricalcolarli ogni volta
-    /// che si torna a 2x/4x sullo stesso media nella stessa sessione —
-    /// stesso principio di `audio_cache`, ma tenuta separata perché non
-    /// tutti i media vengono mai riprodotti accelerati.
-    stretched_audio_cache: HashMap<(PathBuf, SpeedTier), std::sync::Arc<vv_media::AudioBuffer>>,
-    /// `(path, tier)` il cui stretch è stato accodato su un thread ma non è
-    /// ancora tornato (vedi `poll_speed_stretch_result`): evita di
-    /// spawnare più thread per la stessa richiesta se l'utente tiene
-    /// premuto "a" o preme altri tasti nel frattempo. `None` quando nessun
-    /// calcolo è in corso.
-    pending_speed_stretch: Option<(PathBuf, SpeedTier)>,
+    /// Stato della finestra di audio accelerato caricata nel `Player`
+    /// attivo — vedi `SpeedWindowState`. `None` a 1.0x o su una clip senza
+    /// audio.
+    speed_window: Option<SpeedWindowState>,
+    /// Richiesta di stretch (prima finestra o estensione) accodata su un
+    /// thread ma non ancora tornata (vedi `poll_speed_stretch_result`):
+    /// evita di spawnare più thread in parallelo per lo stesso lavoro.
+    /// `None` quando nessun calcolo è in corso.
+    pending_speed_stretch: Option<PendingSpeedStretch>,
     /// Estremi del canale usato dal thread di stretch per restituire il
     /// risultato al thread UI (`poll_speed_stretch_result`, chiamato a
     /// ogni frame) — `Sender` clonato per ogni thread spawnato in
-    /// `request_playback_speed`.
+    /// `request_speed_window`.
     speed_stretch_tx: mpsc::Sender<StretchResult>,
     speed_stretch_rx: mpsc::Receiver<StretchResult>,
 
@@ -397,7 +448,7 @@ impl Default for VibeVideoApp {
             render_ahead_generation: 0,
             gap_wall_clock: None,
             playback_speed: 1.0,
-            stretched_audio_cache: HashMap::new(),
+            speed_window: None,
             pending_speed_stretch: None,
             speed_stretch_tx,
             speed_stretch_rx,
@@ -745,6 +796,7 @@ impl VibeVideoApp {
         // qualunque richiesta di stretch in corso per il player precedente
         // non ha più senso.
         self.playback_speed = 1.0;
+        self.speed_window = None;
         self.pending_speed_stretch = None;
 
         let cached_audio = self.audio_cache.get(&path).cloned();
@@ -1020,6 +1072,7 @@ impl VibeVideoApp {
                 // qui non suona nulla), quindi non c'è un buffer stretchato
                 // coerente da agganciargli subito.
                 self.playback_speed = 1.0;
+                self.speed_window = None;
                 self.pending_speed_stretch = None;
                 self.ensure_active_clip_matches_playhead(true);
                 if let Some(player) = &mut self.preview_player {
@@ -1079,11 +1132,12 @@ impl VibeVideoApp {
 
     /// Riporta la riproduzione a velocità normale: sempre immediato (il
     /// buffer audio originale, se c'è, è già in `audio_cache`), a
-    /// differenza di accelerare (vedi `request_playback_speed`). Chiamato
+    /// differenza di accelerare (vedi `request_speed_window`). Chiamato
     /// sia dalla barra spaziatrice (pausa) sia dall'auto-pausa a fine clip
     /// — no-op se già a 1x.
     fn reset_playback_speed_to_normal(&mut self) {
         self.pending_speed_stretch = None;
+        self.speed_window = None;
         if (self.playback_speed - 1.0).abs() < 1e-9 {
             return;
         }
@@ -1093,21 +1147,18 @@ impl VibeVideoApp {
         };
         let original = self.audio_cache.get(&path).cloned();
         if let Some(player) = &mut self.preview_player {
-            player.set_speed(1.0, original.as_ref());
+            player.reset_speed(original.as_ref());
         }
     }
 
     /// Cambia la velocità di riproduzione della clip attiva a `speed`
-    /// (2.0/4.0, vedi `SpeedTier`). Se la clip ha una traccia audio e il
-    /// buffer già stretchato a `speed` non è ancora in
-    /// `stretched_audio_cache`, lo calcola su un thread separato (via
-    /// `vv_audio::stretch_samples`, non istantaneo per file lunghi) e
-    /// resta alla velocità corrente finché il risultato non arriva
-    /// (`poll_speed_stretch_result`) — mai un salto di velocità "a scatti"
-    /// nel frattempo, semplicemente l'accelerazione richiesta impiega un
-    /// istante in più a innescarsi. Clip senza audio (o nessuna clip sotto
+    /// (2.0/4.0, vedi `SpeedTier`). Clip senza audio (o nessuna clip sotto
     /// il player, es. durante un vuoto): si applica subito, nessuno
-    /// stretch necessario.
+    /// stretch necessario. Clip con audio: apre una *nuova* finestra a
+    /// partire dal playhead corrente (`request_speed_window`) — resta alla
+    /// velocità corrente finché la prima finestra non è pronta
+    /// (`poll_speed_stretch_result`, tipicamente ~150-200ms, vedi
+    /// `SPEED_WINDOW_SECS`), mai un salto "a scatti" nel frattempo.
     fn request_playback_speed(&mut self, speed: f64) {
         if (speed - self.playback_speed).abs() < 1e-9 {
             return;
@@ -1115,105 +1166,214 @@ impl VibeVideoApp {
         if self.preview_player.is_none() {
             self.playback_speed = speed;
             self.pending_speed_stretch = None;
+            self.speed_window = None;
             return;
         }
         let Some(path) = self.preview_path.clone() else {
             self.playback_speed = speed;
             return;
         };
-        let original = self.audio_cache.get(&path).cloned();
-        if original.is_none() {
+        let has_audio = self.audio_cache.contains_key(&path);
+        if !has_audio {
             if let Some(player) = &mut self.preview_player {
-                player.set_speed(speed, None);
+                player.set_speed_no_audio(speed);
             }
             self.playback_speed = speed;
             self.pending_speed_stretch = None;
+            self.speed_window = None;
             return;
         }
         if (speed - 1.0).abs() < 1e-9 {
-            if let Some(player) = &mut self.preview_player {
-                player.set_speed(1.0, original.as_ref());
-            }
-            self.playback_speed = 1.0;
-            self.pending_speed_stretch = None;
+            self.reset_playback_speed_to_normal();
             return;
         }
         let Some(tier) = SpeedTier::from_multiplier(speed) else {
             return;
         };
-        let cached = self
-            .stretched_audio_cache
-            .get(&(path.clone(), tier))
-            .cloned();
-        if let Some(buf) = cached {
-            if let Some(player) = &mut self.preview_player {
-                player.set_speed(speed, Some(&buf));
-            }
-            self.playback_speed = speed;
-            self.pending_speed_stretch = None;
+        // Nuovo tier richiesto esplicitamente (1x -> 2x, oppure un cambio
+        // di tier con una finestra già aperta, 2x -> 4x): sempre una
+        // finestra nuova dal playhead corrente, scartando quella
+        // precedente — mai per la sola estensione della finestra in corso
+        // (`poll_speed_window_extension`), che non deve riaprire lo
+        // stream audio.
+        let playhead_secs = self
+            .preview_player
+            .as_ref()
+            .map(Player::position_secs)
+            .unwrap_or(0.0);
+        self.request_speed_window(path, tier, playhead_secs);
+    }
+
+    /// Accoda su un thread separato lo stretch (pitch preservato) di
+    /// `SPEED_WINDOW_SECS` di audio *originale* a partire da
+    /// `range_start_secs`, clampato alla durata della clip — no-op se
+    /// `range_start_secs` è già a fine clip, o se una richiesta è già in
+    /// volo (`pending_speed_stretch`, mai più di una alla volta: una
+    /// nuova richiesta esplicita di tier la sovrascrive comunque, un
+    /// risultato ormai superato viene scartato in arrivo, vedi
+    /// `poll_speed_stretch_result`). Il chiamante (`request_playback_speed`
+    /// per la prima finestra di un tier, `poll_speed_window_extension` per
+    /// estenderla) non distingue i due casi qui: la distinzione tra "apri
+    /// una finestra nuova" ed "estendi quella corrente" si fa solo alla
+    /// ricezione del risultato, in base a cosa c'è in `speed_window` in
+    /// quel momento.
+    fn request_speed_window(&mut self, path: PathBuf, tier: SpeedTier, range_start_secs: f64) {
+        let Some(original) = self.audio_cache.get(&path).cloned() else {
+            return;
+        };
+        let duration_secs =
+            original.samples.len() as f64 / original.channels.max(1) as f64 / original.sample_rate as f64;
+        if range_start_secs >= duration_secs {
             return;
         }
-        if self.pending_speed_stretch != Some((path.clone(), tier)) {
-            self.pending_speed_stretch = Some((path.clone(), tier));
-            let tx = self.speed_stretch_tx.clone();
-            // `unwrap`: appena verificato `is_none()` sopra.
-            let original = original.unwrap();
-            std::thread::spawn(move || {
-                let result = vv_audio::stretch_samples(
-                    &original.samples,
-                    original.sample_rate,
-                    original.channels,
-                    tier.tempo(),
-                )
+        let range_end_secs = (range_start_secs + SPEED_WINDOW_SECS).min(duration_secs);
+        let start_frame = (range_start_secs * original.sample_rate as f64) as usize;
+        let end_frame = (range_end_secs * original.sample_rate as f64) as usize;
+        let channels_usize = original.channels as usize;
+        let slice_start = (start_frame * channels_usize).min(original.samples.len());
+        let slice_end = (end_frame * channels_usize).min(original.samples.len());
+        if slice_end <= slice_start {
+            return;
+        }
+        let slice = original.samples[slice_start..slice_end].to_vec();
+
+        self.pending_speed_stretch = Some(PendingSpeedStretch {
+            path: path.clone(),
+            tier,
+            range_start_secs,
+        });
+        let tx = self.speed_stretch_tx.clone();
+        let sample_rate = original.sample_rate;
+        let channels = original.channels;
+        std::thread::spawn(move || {
+            let result = vv_audio::stretch_samples(&slice, sample_rate, channels, tier.tempo())
                 .map(|samples| {
                     std::sync::Arc::new(vv_media::AudioBuffer {
-                        sample_rate: original.sample_rate,
-                        channels: original.channels,
+                        sample_rate,
+                        channels,
                         samples,
                     })
                 });
-                let _ = tx.send(StretchResult {
-                    path,
-                    tier,
-                    buffer: result,
-                });
+            let _ = tx.send(StretchResult {
+                path,
+                tier,
+                range_start_secs,
+                range_end_secs,
+                buffer: result,
             });
-        }
+        });
     }
 
     /// Da chiamare a ogni frame UI: applica il risultato di uno stretch
-    /// audio calcolato in background (`request_playback_speed`), se
-    /// arrivato. Scarta un risultato che non corrisponde più a
+    /// audio calcolato in background (`request_speed_window`), se
+    /// arrivato. Scarta un risultato che non corrisponde più esattamente a
     /// `pending_speed_stretch` (superato da una richiesta più recente, es.
-    /// l'utente è tornato a 1x o ha cambiato clip nel frattempo) — lo mette
-    /// comunque in cache, così non va sprecato se richiesto di nuovo.
+    /// l'utente è tornato a 1x, ha cambiato tier o clip nel frattempo).
     fn poll_speed_stretch_result(&mut self) {
         while let Ok(result) = self.speed_stretch_rx.try_recv() {
-            let StretchResult { path, tier, buffer } = result;
+            let StretchResult {
+                path,
+                tier,
+                range_start_secs,
+                range_end_secs,
+                buffer,
+            } = result;
+            let is_current_request = self.pending_speed_stretch.as_ref()
+                == Some(&PendingSpeedStretch {
+                    path: path.clone(),
+                    tier,
+                    range_start_secs,
+                });
             let buf = match buffer {
                 Ok(buf) => buf,
                 Err(e) => {
                     eprintln!("vv-app: stretch audio a {}x fallito: {e}", tier.tempo());
-                    if self.pending_speed_stretch == Some((path, tier)) {
+                    if is_current_request {
                         self.pending_speed_stretch = None;
                     }
                     continue;
                 }
             };
-            self.stretched_audio_cache
-                .insert((path.clone(), tier), buf.clone());
-            if self.pending_speed_stretch != Some((path.clone(), tier)) {
+            if !is_current_request {
                 continue;
             }
             self.pending_speed_stretch = None;
             if self.preview_path.as_deref() != Some(path.as_path()) {
                 continue;
             }
-            if let Some(player) = &mut self.preview_player {
-                player.set_speed(tier.tempo(), Some(&buf));
-                self.playback_speed = tier.tempo();
+            let Some(player) = &mut self.preview_player else {
+                continue;
+            };
+            let is_new_window = !self
+                .speed_window
+                .as_ref()
+                .is_some_and(|w| w.path == path && w.tier == tier);
+            if is_new_window {
+                if player
+                    .begin_speed_window(
+                        tier.tempo(),
+                        range_start_secs,
+                        buf.samples.clone(),
+                        buf.sample_rate,
+                        buf.channels,
+                    )
+                    .is_ok()
+                {
+                    self.playback_speed = tier.tempo();
+                    self.speed_window = Some(SpeedWindowState {
+                        path,
+                        tier,
+                        covered_until_secs: range_end_secs,
+                    });
+                }
+            } else {
+                player.extend_speed_window(&buf.samples);
+                if let Some(window) = &mut self.speed_window {
+                    window.covered_until_secs = range_end_secs;
+                }
             }
         }
+    }
+
+    /// Da chiamare a ogni frame UI mentre si è in riproduzione accelerata:
+    /// se il playhead si avvicina alla fine di ciò che la finestra
+    /// corrente copre già (`EXTEND_TRIGGER_MARGIN_SECS`), accoda in
+    /// background lo stretch del prossimo pezzo (`request_speed_window`)
+    /// così l'audio non si esaurisce mai mentre suona. No-op a 1x, senza
+    /// finestra attiva, con un'estensione già in volo, o a fine clip
+    /// (nessun altro pezzo da coprire).
+    fn poll_speed_window_extension(&mut self) {
+        if (self.playback_speed - 1.0).abs() < 1e-9 {
+            return;
+        }
+        if self.pending_speed_stretch.is_some() {
+            return;
+        }
+        let Some(window) = &self.speed_window else {
+            return;
+        };
+        let Some(player) = &self.preview_player else {
+            return;
+        };
+        if !player.is_playing() {
+            return;
+        }
+        let remaining = window.covered_until_secs - player.position_secs();
+        if remaining > EXTEND_TRIGGER_MARGIN_SECS {
+            return;
+        }
+        let Some(original) = self.audio_cache.get(&window.path) else {
+            return;
+        };
+        let duration_secs =
+            original.samples.len() as f64 / original.channels.max(1) as f64 / original.sample_rate as f64;
+        if window.covered_until_secs >= duration_secs {
+            return; // già coperta tutta la clip, niente da estendere.
+        }
+        let path = window.path.clone();
+        let tier = window.tier;
+        let range_start_secs = window.covered_until_secs;
+        self.request_speed_window(path, tier, range_start_secs);
     }
 
     /// Intervalli (in frame di *timeline*) attualmente bufferizzati per
@@ -2496,6 +2656,7 @@ impl eframe::App for VibeVideoApp {
             player.tick();
         }
         self.poll_speed_stretch_result();
+        self.poll_speed_window_extension();
 
         // Gain keyframeato: va aggiornato a ogni frame UI in base alla
         // posizione corrente del player (control-rate ~60Hz, non
@@ -4278,11 +4439,13 @@ mod tests {
     }
 
     /// Come sopra ma con una clip *con* audio: `request_playback_speed`
-    /// deve calcolare lo stretch (pitch preservato) su un thread separato
-    /// e restare alla velocità corrente finché non è pronto, poi
-    /// applicarlo. Verifica anche che `Player::position_secs` (nello
-    /// spazio tempo del media originale) avanzi coerentemente più veloce
-    /// alla nuova velocità.
+    /// deve calcolare lo stretch della prima finestra (pitch preservato,
+    /// `SPEED_WINDOW_SECS`, non l'intera traccia) su un thread separato e
+    /// restare alla velocità corrente finché non è pronto, poi
+    /// applicarlo — entro il tempo di un paio di finestre, non i secondi
+    /// che servirebbero a stretchare l'intera traccia. Verifica anche che
+    /// `Player::position_secs` (nello spazio tempo del media originale)
+    /// avanzi coerentemente più veloce alla nuova velocità.
     #[test]
     fn fast_playback_with_audio_stretches_in_background_then_applies() {
         let dir = std::env::temp_dir().join("vv-app-fast-playback-audio-test");
@@ -4332,17 +4495,22 @@ mod tests {
         );
         assert!(app.pending_speed_stretch.is_some());
 
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let started_waiting = Instant::now();
+        let deadline = started_waiting + std::time::Duration::from_secs(5);
         while app.playback_speed != 2.0 && Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
             app.poll_speed_stretch_result();
         }
+        let wait = started_waiting.elapsed();
         assert_eq!(app.playback_speed, 2.0, "lo stretch doveva completarsi");
         assert!(app.pending_speed_stretch.is_none());
         assert!(
-            app.stretched_audio_cache
-                .contains_key(&(path.clone(), SpeedTier::X2)),
-            "il buffer stretchato va messo in cache"
+            wait < std::time::Duration::from_secs(2),
+            "la prima finestra (SPEED_WINDOW_SECS) deve tornare in una frazione di secondo, non nel tempo che servirebbe a stretchare l'intera traccia: wait={wait:?}"
+        );
+        assert!(
+            app.speed_window.is_some(),
+            "una finestra di accelerazione deve essere attiva"
         );
         assert!(app.preview_player.as_ref().unwrap().is_playing());
 
@@ -4355,7 +4523,7 @@ mod tests {
             "a 2x, 300ms reali devono corrispondere a ~0.6s nello spazio tempo del media originale, advanced={advanced}"
         );
 
-        // Richiedere di nuovo 2x (già in cache) deve essere immediato.
+        // Richiedere di nuovo la stessa velocità è un no-op immediato.
         app.request_playback_speed(2.0);
         assert_eq!(app.playback_speed, 2.0);
 
@@ -4363,6 +4531,100 @@ mod tests {
         app.toggle_playback();
         assert!(!app.preview_player.as_ref().unwrap().is_playing());
         assert_eq!(app.playback_speed, 1.0);
+    }
+
+    /// Su una clip più lunga di `SPEED_WINDOW_SECS`, superare il confine
+    /// della prima finestra non deve mai fermare o far tornare indietro
+    /// il playhead: `poll_speed_window_extension` deve accodarne
+    /// un'altra in background in tempo.
+    #[test]
+    fn fast_playback_extends_the_window_seamlessly_past_its_boundary() {
+        let dir = std::env::temp_dir().join("vv-app-fast-playback-window-extension-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=15",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=15",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-ac",
+                "2",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path.clone());
+        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        app.add_media_to_timeline(media_id);
+        app.timeline_state.playhead = 0;
+        app.ensure_active_clip_matches_playhead(false);
+
+        app.toggle_playback(); // 1x
+        app.request_playback_speed(4.0);
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while app.playback_speed != 4.0 && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.poll_speed_stretch_result();
+        }
+        assert_eq!(
+            app.playback_speed, 4.0,
+            "la prima finestra a 4x doveva completarsi"
+        );
+        let first_covered = app.speed_window.as_ref().unwrap().covered_until_secs;
+        assert!(
+            (first_covered - SPEED_WINDOW_SECS).abs() < 1e-6,
+            "la prima finestra deve coprire esattamente SPEED_WINDOW_SECS su una clip più lunga: covered={first_covered}"
+        );
+
+        // A 4x, SPEED_WINDOW_SECS (8s di tempo originale) suonano in 2s
+        // reali: lasciamo girare "frame" simulati (come farebbe `ui()`)
+        // fino a superare abbondantemente quel confine, verificando che
+        // il playhead avanzi sempre (mai un salto all'indietro, mai uno
+        // stallo prolungato).
+        let deadline = Instant::now() + std::time::Duration::from_secs(6);
+        let mut max_position = 0.0;
+        while Instant::now() < deadline {
+            app.poll_speed_stretch_result();
+            app.poll_speed_window_extension();
+            let pos = app.preview_player.as_ref().unwrap().position_secs();
+            assert!(
+                pos >= max_position - 1e-6,
+                "il playhead non deve mai tornare indietro: pos={pos} max_position={max_position}"
+            );
+            max_position = pos;
+            if max_position > SPEED_WINDOW_SECS + 1.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert!(
+            max_position > SPEED_WINDOW_SECS,
+            "il playhead deve superare il confine della prima finestra senza fermarsi: max_position={max_position}"
+        );
+        let window = app.speed_window.as_ref().unwrap();
+        assert!(
+            window.covered_until_secs > SPEED_WINDOW_SECS,
+            "la finestra deve essere stata estesa oltre la prima: covered_until_secs={}",
+            window.covered_until_secs
+        );
+        assert!(app.preview_player.as_ref().unwrap().is_playing());
     }
 
     /// Bug: "selection follows playhead" seguiva solo lo scrub manuale,
