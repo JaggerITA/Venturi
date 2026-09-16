@@ -58,6 +58,7 @@ struct GapWallClock {
 enum SpeedTier {
     X2,
     X4,
+    X8,
 }
 
 impl SpeedTier {
@@ -65,6 +66,16 @@ impl SpeedTier {
         match self {
             SpeedTier::X2 => 2.0,
             SpeedTier::X4 => 4.0,
+            SpeedTier::X8 => 8.0,
+        }
+    }
+
+    /// Il tier raggiunto premendo "a" un'altra volta rispetto a questo —
+    /// vedi `VibeVideoApp::handle_fast_playback_key`. Resta a X8 oltre.
+    fn next(self) -> Self {
+        match self {
+            SpeedTier::X2 => SpeedTier::X4,
+            SpeedTier::X4 | SpeedTier::X8 => SpeedTier::X8,
         }
     }
 
@@ -73,6 +84,8 @@ impl SpeedTier {
             Some(SpeedTier::X2)
         } else if (speed - 4.0).abs() < 1e-9 {
             Some(SpeedTier::X4)
+        } else if (speed - 8.0).abs() < 1e-9 {
+            Some(SpeedTier::X8)
         } else {
             None
         }
@@ -1111,10 +1124,11 @@ impl VibeVideoApp {
     }
 
     /// Tasto "a": riproduce come la barra spaziatrice, ma se già in
-    /// riproduzione accelera (1x -> 2x -> 4x, resta a 4x oltre) invece di
-    /// mettere in pausa — solo la barra spaziatrice mette in pausa, anche
-    /// durante l'accelerazione (richiesta utente esplicita). Da fermo si
-    /// comporta esattamente come `toggle_playback`, che parte sempre a 1x.
+    /// riproduzione accelera (1x -> 2x -> 4x -> 8x, resta a 8x oltre,
+    /// vedi `SpeedTier::next`) invece di mettere in pausa — solo la barra
+    /// spaziatrice mette in pausa, anche durante l'accelerazione
+    /// (richiesta utente esplicita). Da fermo si comporta esattamente
+    /// come `toggle_playback`, che parte sempre a 1x.
     fn handle_fast_playback_key(&mut self) {
         let currently_playing = self.preview_player.as_ref().is_some_and(Player::is_playing)
             || self.gap_wall_clock.is_some();
@@ -1122,10 +1136,9 @@ impl VibeVideoApp {
             self.toggle_playback();
             return;
         }
-        let next_speed = if self.playback_speed < 1.5 {
-            2.0
-        } else {
-            4.0 // già a 2x o 4x: sale a/resta a 4x, il massimo.
+        let next_speed = match SpeedTier::from_multiplier(self.playback_speed) {
+            Some(tier) => tier.next().tempo(),
+            None => SpeedTier::X2.tempo(), // da 1x: primo scatto.
         };
         self.request_playback_speed(next_speed);
     }
@@ -2715,8 +2728,8 @@ impl eframe::App for VibeVideoApp {
                 self.toggle_playback();
             }
             // "a": come la barra spaziatrice, ma se già in riproduzione
-            // accelera invece di mettere in pausa (1x -> 2x -> 4x) — vedi
-            // doc di `handle_fast_playback_key`.
+            // accelera invece di mettere in pausa (1x -> 2x -> 4x -> 8x) —
+            // vedi doc di `handle_fast_playback_key`.
             if i.key_pressed(egui::Key::A) {
                 self.handle_fast_playback_key();
             }
@@ -4391,9 +4404,9 @@ mod tests {
 
     /// Tasto "a" su una clip senza audio (nessuno stretch coinvolto, il
     /// caso "immediato" di `request_playback_speed`): da fermo parte a 1x
-    /// come la barra spaziatrice, poi cicla 1x -> 2x -> 4x e resta a 4x;
-    /// la barra spaziatrice mette sempre in pausa e riporta a 1x, anche da
-    /// accelerato.
+    /// come la barra spaziatrice, poi cicla 1x -> 2x -> 4x -> 8x e resta a
+    /// 8x; la barra spaziatrice mette sempre in pausa e riporta a 1x,
+    /// anche da accelerato.
     #[test]
     fn fast_playback_key_cycles_speed_and_space_always_resets_it() {
         let dir = std::env::temp_dir().join("vv-app-fast-playback-key-test");
@@ -4433,7 +4446,9 @@ mod tests {
         app.handle_fast_playback_key();
         assert_eq!(app.playback_speed, 4.0, "terza pressione: 4x");
         app.handle_fast_playback_key();
-        assert_eq!(app.playback_speed, 4.0, "oltre 4x resta a 4x");
+        assert_eq!(app.playback_speed, 8.0, "quarta pressione: 8x");
+        app.handle_fast_playback_key();
+        assert_eq!(app.playback_speed, 8.0, "oltre 8x resta a 8x");
 
         app.toggle_playback(); // barra spaziatrice
         assert!(!app.preview_player.as_ref().unwrap().is_playing());
@@ -4561,10 +4576,14 @@ mod tests {
     /// Su una clip più lunga di `SPEED_WINDOW_SECS`, superare il confine
     /// della prima finestra non deve mai fermare o far tornare indietro
     /// il playhead: `poll_speed_window_extension` deve accodarne
-    /// un'altra in background in tempo.
-    #[test]
-    fn fast_playback_extends_the_window_seamlessly_past_its_boundary() {
-        let dir = std::env::temp_dir().join("vv-app-fast-playback-window-extension-test");
+    /// un'altra in background in tempo. Parametrizzato su `tempo`: a
+    /// velocità più alte il margine reale prima che l'estensione serva
+    /// davvero si restringe (`EXTEND_TRIGGER_MARGIN_SECS` di audio
+    /// originale corrispondono a sempre meno tempo reale), quindi vale la
+    /// pena coprire sia 4x che 8x, non solo il caso più comodo.
+    fn assert_fast_playback_extends_window_seamlessly(tempo: f64) {
+        let dir = std::env::temp_dir()
+            .join(format!("vv-app-fast-playback-window-extension-test-{tempo}x"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
         let status = std::process::Command::new("ffmpeg")
@@ -4600,16 +4619,16 @@ mod tests {
         app.ensure_active_clip_matches_playhead(false);
 
         app.toggle_playback(); // 1x
-        app.request_playback_speed(4.0);
+        app.request_playback_speed(tempo);
 
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        while app.playback_speed != 4.0 && Instant::now() < deadline {
+        while app.playback_speed != tempo && Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
             app.poll_speed_stretch_result();
         }
         assert_eq!(
-            app.playback_speed, 4.0,
-            "la prima finestra a 4x doveva completarsi"
+            app.playback_speed, tempo,
+            "la prima finestra a {tempo}x doveva completarsi"
         );
         let first_covered = app.speed_window.as_ref().unwrap().covered_until_secs;
         assert!(
@@ -4617,11 +4636,11 @@ mod tests {
             "la prima finestra deve coprire esattamente SPEED_WINDOW_SECS su una clip più lunga: covered={first_covered}"
         );
 
-        // A 4x, SPEED_WINDOW_SECS (8s di tempo originale) suonano in 2s
-        // reali: lasciamo girare "frame" simulati (come farebbe `ui()`)
-        // fino a superare abbondantemente quel confine, verificando che
-        // il playhead avanzi sempre (mai un salto all'indietro, mai uno
-        // stallo prolungato).
+        // A `tempo`x, SPEED_WINDOW_SECS (8s di tempo originale) suonano in
+        // 8/tempo secondi reali: lasciamo girare "frame" simulati (come
+        // farebbe `ui()`) fino a superare abbondantemente quel confine,
+        // verificando che il playhead avanzi sempre (mai un salto
+        // all'indietro, mai uno stallo prolungato).
         let deadline = Instant::now() + std::time::Duration::from_secs(6);
         let mut max_position = 0.0;
         while Instant::now() < deadline {
@@ -4650,6 +4669,19 @@ mod tests {
             window.covered_until_secs
         );
         assert!(app.preview_player.as_ref().unwrap().is_playing());
+    }
+
+    #[test]
+    fn fast_playback_extends_the_window_seamlessly_past_its_boundary_at_4x() {
+        assert_fast_playback_extends_window_seamlessly(4.0);
+    }
+
+    /// A 8x il margine reale prima che serva l'estensione è la metà che a
+    /// 4x (vedi doc di `assert_fast_playback_extends_window_seamlessly`)
+    /// — il caso a rischio introdotto aggiungendo questo tier.
+    #[test]
+    fn fast_playback_extends_the_window_seamlessly_past_its_boundary_at_8x() {
+        assert_fast_playback_extends_window_seamlessly(8.0);
     }
 
     /// Bug: "selection follows playhead" seguiva solo lo scrub manuale,

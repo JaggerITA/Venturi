@@ -213,10 +213,13 @@ mod bench_window {
 
     /// Non una garanzia hard-realtime, ma una soglia larga: stretchare la
     /// finestra scelta da `vv-app` (`SPEED_WINDOW_SECS`, 8s) deve restare
-    /// ben sotto il secondo, altrimenti l'estensione in background
-    /// (triggerata quando restano `EXTEND_TRIGGER_MARGIN_SECS`, 4s, di
-    /// finestra non ancora suonata) rischierebbe di non fare in tempo a
-    /// 4x (1s di margine reale). Misurato in pratica ~150ms, vedi
+    /// ben sotto il margine reale disponibile prima che l'estensione in
+    /// background (triggerata quando restano `EXTEND_TRIGGER_MARGIN_SECS`,
+    /// 4s, di finestra non ancora suonata) serva davvero — quel margine
+    /// in tempo *reale* si restringe con la velocità (4s di audio
+    /// originale sono 1s reale a 4x, 0.5s a 8x), quindi la soglia qui
+    /// scala di conseguenza (metà del margine reale, headroom 2x).
+    /// Misurato in pratica ~150ms indipendentemente dal tempo, vedi
     /// commento nel modulo.
     #[test]
     fn stretching_an_8s_window_is_well_under_the_extension_margin() {
@@ -227,13 +230,16 @@ mod bench_window {
         let samples: Vec<f32> = (0..n * channels as usize)
             .map(|i| (i as f32 * 0.01).sin())
             .collect();
-        for tempo in [2.0, 4.0] {
+        const EXTEND_TRIGGER_MARGIN_SECS: f64 = 4.0;
+        for tempo in [2.0, 4.0, 8.0] {
+            let real_margin_secs = EXTEND_TRIGGER_MARGIN_SECS / tempo;
+            let threshold = Duration::from_secs_f64(real_margin_secs / 2.0);
             let start = Instant::now();
             stretch_samples(&samples, sample_rate, channels, tempo).unwrap();
             let elapsed = start.elapsed();
             assert!(
-                elapsed < Duration::from_millis(800),
-                "tempo={tempo} elapsed={elapsed:?}, troppo lento per l'estensione in background"
+                elapsed < threshold,
+                "tempo={tempo} elapsed={elapsed:?} threshold={threshold:?}, troppo lento per l'estensione in background a questa velocità"
             );
         }
     }
