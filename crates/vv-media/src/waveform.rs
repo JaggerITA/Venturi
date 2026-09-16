@@ -498,6 +498,49 @@ mod tests {
         );
     }
 
+    /// Stessa transizione silenzio->tono del test stereo, ma su 6 canali
+    /// (5.1 side, l'esatto layout del file reale che ha esposto il bug
+    /// dei canali stereo — bbb_sunflower con traccia AC-3 5.1): verifica
+    /// che il fix `chunks_exact(channels)` regga anche channels > 2, non
+    /// solo il caso a 2 canali già coperto.
+    #[test]
+    fn six_channel_audio_peaks_are_not_compressed_into_the_first_half_of_bins() {
+        let dir = std::env::temp_dir().join("vv-media-waveform-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("six_channel_half_silent.mp4");
+        let tone = "if(lt(t,2),0,sin(2*PI*440*t))";
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("aevalsrc=exprs='{tone}|{tone}|{tone}|{tone}|{tone}|{tone}':s=48000:d=4:c=5.1"),
+                "-c:a",
+                "ac3",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let content_hash = 0x51DE7357_6C6C6C6C;
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
+        let wf = generate_waveform(&path, content_hash, 0, 400)
+            .expect("generazione waveform fallita")
+            .expect("audio atteso");
+
+        let first_loud_bin = wf
+            .peaks
+            .iter()
+            .position(|&p| p > 0.3)
+            .expect("il tono dovrebbe superare la soglia da qualche parte");
+        assert!(
+            (170..230).contains(&first_loud_bin),
+            "il tono inizia al bin {first_loud_bin} (atteso vicino al bin 200, metà dei 400 bin totali per una transizione a metà dei 4s)"
+        );
+    }
+
     #[test]
     fn generate_waveform_returns_none_for_a_video_without_audio() {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");

@@ -1402,20 +1402,23 @@ fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32) -> egui::Rect {
 }
 
 /// Disegna la waveform di una clip audio dentro `clip_rect`: per ogni
-/// colonna pixel della porzione *visibile* della clip, una linea
-/// verticale centrata sull'altezza della clip, con altezza proporzionale
-/// al picco del bin coperto da quella colonna. `peaks` sono i picchi di
-/// *tutto* il media (normalizzati in [0,1]); `source_in`/`source_out`
-/// (nello spazio frame nativo del media, `media_fps`) ne selezionano la
-/// sotto-fascia, mappata sull'asse temporale dell'audio (`audio_duration_secs`)
-/// — la stessa base temporale usata per dimensionare i bin in
-/// `vv_media::waveform::generate_waveform`, così la forma d'onda resta
-/// allineata al suono (e non stirata rispetto al video, che può avere una
-/// durata diversa dalla traccia audio). Il picco per colonna è il massimo
-/// assoluto dei bin che la colonna copre — indipendente dallo zoom, così
-/// la forma resta la stessa a qualunque livello. `visible_rect` limita il
-/// disegno alla porzione a schermo (una clip lunga fuori dal viewport non
-/// viene iterata colonna per colonna).
+/// colonna pixel della porzione *visibile* della clip, una linea verticale
+/// centrata sull'altezza della clip, con altezza proporzionale al picco nel
+/// bin corrispondente a quella colonna. `peaks` sono i picchi di *tutto* il
+/// media (normalizzati in [0,1]); `source_in`/`source_out` (nello spazio
+/// frame nativo del media, `media_fps`) selezionano la sotto-fascia
+/// temporale della clip, mappata sull'asse temporale dell'audio
+/// (`audio_duration_secs`) — la stessa base temporale usata per
+/// dimensionare i bin in `vv_media::waveform::generate_waveform`, così la
+/// forma d'onda resta allineata al suono (e non stirata rispetto al video,
+/// che può avere una durata leggermente diversa dalla traccia audio). Il bin
+/// di ogni colonna è calcolato dalla sua posizione *assoluta* nel tempo
+/// audio (non da un bordo di clip arrotondato e poi interpolato
+/// localmente): la stessa posizione temporale mappa sempre allo stesso bin
+/// a prescindere da dove cade il bordo della clip che la contiene, quindi
+/// dividere una clip (`SplitClip`) non sposta la forma d'onda disegnata.
+/// `visible_rect` limita il disegno alla porzione a schermo (una clip lunga
+/// fuori dal viewport non viene iterata colonna per colonna).
 fn draw_clip_waveform(
     painter: &egui::Painter,
     clip_rect: egui::Rect,
@@ -1429,20 +1432,11 @@ fn draw_clip_waveform(
     if peaks.is_empty() || audio_duration_secs <= 0.0 || media_fps <= 0.0 {
         return;
     }
-    // Sotto-fascia della clip nello spazio dei bin del media: la posizione
-    // sorgente (frame nativi del media) → secondi → frazione della durata
-    // audio → indice di bin.
-    let n = peaks.len() as f64;
     let clip_start_secs = source_in as f64 / media_fps;
     let clip_end_secs = source_out as f64 / media_fps;
-    let mut bin_start = (clip_start_secs / audio_duration_secs * n).floor() as usize;
-    let mut bin_end = ((clip_end_secs / audio_duration_secs * n).ceil() as usize).max(bin_start + 1);
-    bin_start = bin_start.min(peaks.len());
-    bin_end = bin_end.min(peaks.len());
-    if bin_start >= bin_end {
+    if clip_end_secs <= clip_start_secs {
         return;
     }
-    let clip_peaks = &peaks[bin_start..bin_end];
 
     // Porzione visibile della clip (nessuna colonna fuori dal viewport).
     let vis = clip_rect.intersect(visible_rect);
@@ -1455,12 +1449,17 @@ fn draw_clip_waveform(
     let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 140));
 
     let width = clip_rect.width();
-    let num_bins = clip_peaks.len() as f32;
     let mut x = vis.min.x;
     while x < vis.max.x {
-        let frac = (x - clip_rect.min.x) / width;
-        let bin = (frac * num_bins) as usize;
-        let peak = clip_peaks[bin.min(clip_peaks.len() - 1)];
+        let frac = ((x - clip_rect.min.x) / width) as f64;
+        let bin = waveform_bin_for_column(
+            frac,
+            clip_start_secs,
+            clip_end_secs,
+            audio_duration_secs,
+            peaks.len(),
+        );
+        let peak = peaks[bin];
         let h = (half_height * peak).max(0.5);
         painter.line_segment(
             [egui::pos2(x, center_y - h), egui::pos2(x, center_y + h)],
@@ -1468,6 +1467,26 @@ fn draw_clip_waveform(
         );
         x += 1.0;
     }
+}
+
+/// Indice del bin per una colonna a `frac` (0..1 della larghezza della
+/// *clip*, non dell'intero media): calcolato dalla posizione assoluta nel
+/// tempo audio (`clip_start_secs + frac*(clip_end_secs-clip_start_secs)`,
+/// poi diviso per `audio_duration_secs` del media intero), non da un bordo
+/// di clip arrotondato e poi interpolato localmente — vedi doc di
+/// `draw_clip_waveform` sul perché: la stessa posizione temporale deve
+/// mappare sempre allo stesso bin a prescindere da dove cade il bordo della
+/// clip che la contiene, altrimenti dividere una clip (`SplitClip`) sposta
+/// visibilmente la forma d'onda esattamente nel punto di taglio.
+fn waveform_bin_for_column(
+    frac: f64,
+    clip_start_secs: f64,
+    clip_end_secs: f64,
+    audio_duration_secs: f64,
+    num_peaks: usize,
+) -> usize {
+    let t_secs = clip_start_secs + frac * (clip_end_secs - clip_start_secs);
+    ((t_secs / audio_duration_secs * num_peaks as f64) as usize).min(num_peaks.saturating_sub(1))
 }
 
 /// Le clip il cui rettangolo interseca `rect` (coordinate locali): nucleo
@@ -1830,6 +1849,67 @@ fn snap_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bug segnalato: dividere una clip audio (`SplitClip`) spostava
+    /// visibilmente la forma d'onda disegnata esattamente nel punto di
+    /// taglio, perché il bin di ogni metà veniva ancorato a un
+    /// `bin_start`/`bin_end` arrotondato (floor/ceil) per *quella* metà e
+    /// poi interpolato localmente al suo interno — un arrotondamento
+    /// indipendente per ogni bordo di clip, invisibile sulla clip intera
+    /// (bordo solo alle estremità) ma discontinuo esattamente al taglio.
+    /// Con `waveform_bin_for_column` calcolato dalla posizione *assoluta*
+    /// nel tempo audio, lo stesso istante deve mappare sempre allo stesso
+    /// bin sia prima sia dopo la divisione.
+    #[test]
+    fn waveform_bin_for_column_is_continuous_across_a_clip_split() {
+        // Valori realistici da un caso reale (bbb_sunflower): fps video e
+        // durata audio del *media* leggermente diversi dalla durata del
+        // video, la causa dell'arrotondamento che il bug esponeva.
+        let media_fps = 60.0_f64;
+        let full_source_out: FrameIdx = 38074;
+        let audio_duration_secs = 634.144; // leggermente < 38074/60.0
+        let num_peaks = 63457;
+
+        let split_at: FrameIdx = 3120; // 52s a 60fps
+
+        for probe_secs in [51.5, 51.9, 52.0, 52.1, 52.5, 53.0] {
+            // Bin secondo la clip intera (non divisa): source_in=0,
+            // source_out=full_source_out.
+            let whole_clip_start = 0.0_f64;
+            let whole_clip_end = full_source_out as f64 / media_fps;
+            let frac_whole = probe_secs / whole_clip_end;
+            let bin_whole = waveform_bin_for_column(
+                frac_whole,
+                whole_clip_start,
+                whole_clip_end,
+                audio_duration_secs,
+                num_peaks,
+            );
+
+            // Stesso istante, ma dalla metà (sinistra o destra) prodotta da
+            // uno split a `split_at`.
+            let (clip_start_frame, clip_end_frame) = if probe_secs * media_fps < split_at as f64 {
+                (0, split_at)
+            } else {
+                (split_at, full_source_out)
+            };
+            let clip_start_secs = clip_start_frame as f64 / media_fps;
+            let clip_end_secs = clip_end_frame as f64 / media_fps;
+            let frac_half = (probe_secs - clip_start_secs) / (clip_end_secs - clip_start_secs);
+            let bin_half = waveform_bin_for_column(
+                frac_half,
+                clip_start_secs,
+                clip_end_secs,
+                audio_duration_secs,
+                num_peaks,
+            );
+
+            assert_eq!(
+                bin_whole, bin_half,
+                "a t={probe_secs}s la clip intera sceglie il bin {bin_whole} ma la metà dopo lo split sceglie {bin_half}: la forma d'onda si sposterebbe al taglio"
+            );
+        }
+    }
 
     /// Deve restare tra le prime candidate (1-2-5) a bassissimo zoom, e
     /// salire abbastanza da tenere le tacche leggibili anche a zoom
