@@ -990,6 +990,19 @@ pub fn show_timeline(
                     (raw.round() as FrameIdx).clamp(t.min_value, t.max_value)
                 });
 
+                // Impostati quando il drag/trim finisce, durante il loop
+                // qui sotto: `state.drag`/`state.trim` restano `Some` fino
+                // a *dopo* il loop (azzerati subito sotto, non con un
+                // `.take()` a metà) — altrimenti, per questo stesso frame,
+                // le clip del gruppo disegnate *dopo* la primaria (le
+                // successive nell'iterazione, cioè le track sottostanti)
+                // leggerebbero `state.drag` già `None` e ricadrebbero un
+                // istante sulla posizione pre-drag, un flash visibile
+                // esattamente sulle track sotto quella trascinata (bug
+                // segnalato).
+                let mut drag_finished = false;
+                let mut trim_finished = false;
+
                 // Clip.
                 for visual in &visuals {
                     let is_trimming_this = state.trim.as_ref().is_some_and(|t| {
@@ -1213,7 +1226,7 @@ pub fn show_timeline(
                             d.accum_px += resp.drag_delta().x;
                         }
                     } else if resp.drag_stopped() {
-                        if let Some(t) = state.trim.take()
+                        if let Some(t) = &state.trim
                             && t.clip_id == visual.clip.id
                         {
                             // Stesso valore (già clampato) mostrato
@@ -1245,19 +1258,20 @@ pub fn show_timeline(
                                 ));
                             }
                             pending = Some(PendingAction::Trim(trims));
-                        } else if let Some(d) = state.drag.take()
+                            trim_finished = true;
+                        } else if let Some(d) = &state.drag
                             && d.clip_id == visual.clip.id
                         {
                             // Stessa posizione (già clampata e agganciata alla
-                            // calamita) mostrata nell'anteprima durante il drag,
-                            // calcolata da `state.drag` prima del `take()` qui
-                            // sopra: quel che si vedeva è quel che si ottiene.
+                            // calamita) mostrata nell'anteprima durante il drag:
+                            // quel che si vedeva è quel che si ottiene.
                             let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
                             let mut moves = vec![(d.clip_id, d.track_index, new_start)];
                             for (partner_id, partner_track, offset) in &d.followers {
                                 moves.push((*partner_id, *partner_track, new_start + offset));
                             }
                             pending = Some(PendingAction::Move(moves));
+                            drag_finished = true;
                         }
                     } else if resp.clicked() {
                         let modifiers = click_modifiers(ui.input(|i| i.modifiers));
@@ -1291,6 +1305,14 @@ pub fn show_timeline(
                             ui.label("Seleziona almeno 2 clip per collegarle");
                         }
                     });
+                }
+                // Azzerati solo ora, non con un `.take()` a metà del loop
+                // sopra — vedi il commento su `drag_finished`/`trim_finished`.
+                if drag_finished {
+                    state.drag = None;
+                }
+                if trim_finished {
+                    state.trim = None;
                 }
 
                 // Playhead: linea verticale su tutta l'altezza, più una

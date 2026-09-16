@@ -278,9 +278,9 @@ pub struct Clip {
     /// audio dello stesso media, collegate di default all'import — un
     /// media può averne più di uno, vedi `audio_stream_index`): selezione,
     /// drag e cancellazione trattano l'intero gruppo come un'unità, non
-    /// solo una coppia. `None` per una clip indipendente. Un gruppo da un
-    /// solo membro non ha senso: chi scioglie un collegamento a due
-    /// riporta anche l'ultimo membro rimasto a `None` (vedi `UnlinkClip`).
+    /// solo una coppia. `None` per una clip indipendente. "Scollega"
+    /// scioglie l'intero gruppo (tutti i membri a `None`), non solo la
+    /// clip su cui è stato invocato (vedi `UnlinkClip`).
     /// `#[serde(default)]`: i progetti salvati prima di questo campo
     /// (quando il collegamento era una coppia `Option<ClipId>`) caricano
     /// tutte le clip come indipendenti — nessun modo di ricostruire i

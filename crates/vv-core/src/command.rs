@@ -618,18 +618,19 @@ impl Command for TrimClip {
     }
 }
 
-/// Scioglie il collegamento di *una* clip dal suo gruppo
-/// (`Clip::linked_group`), se ne ha uno: solo questa clip esce dal gruppo,
-/// gli altri membri restano collegati tra loro. Se dopo l'uscita il gruppo
-/// resta con un solo membro, anche quello viene riportato a `None` — un
-/// gruppo da 1 non ha senso (vedi doc di `Clip::linked_group`).
+/// Scioglie l'*intero gruppo collegato* (`Clip::linked_group`) di una clip,
+/// se ne ha uno: ogni membro del gruppo esce, non solo la clip su cui è
+/// stato invocato — "scollega" rompe il collegamento, non rimuove un
+/// singolo membro da un gruppo che continuerebbe a esistere per gli altri
+/// (comportamento segnalato come bug: cliccare "Scollega" su una clip di
+/// un gruppo da 3 lasciava le altre due ancora collegate tra loro).
 #[derive(Debug)]
 pub struct UnlinkClip {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
-    /// Le clip toccate (questa, più l'eventuale ultimo membro dissolto)
-    /// col loro `linked_group` *precedente*, per l'undo.
+    /// Ogni clip del gruppo sciolto, col suo `linked_group` *precedente*
+    /// (sempre lo stesso `Some(group)` per tutte), per l'undo.
     affected: Option<Vec<(usize, ClipId, Option<LinkGroupId>)>>,
 }
 
@@ -655,16 +656,11 @@ impl Command for UnlinkClip {
         else {
             return;
         };
-        let remaining: Vec<(usize, ClipId)> = tl
+        let affected: Vec<(usize, ClipId, Option<LinkGroupId>)> = tl
             .clips_in_group(group)
             .into_iter()
-            .filter(|&(_, id)| id != self.clip_id)
+            .map(|(track_index, clip_id)| (track_index, clip_id, Some(group)))
             .collect();
-
-        let mut affected = vec![(self.track_index, self.clip_id, Some(group))];
-        if remaining.len() == 1 {
-            affected.push((remaining[0].0, remaining[0].1, Some(group)));
-        }
         self.affected = Some(affected);
 
         let tl = &mut project.timelines[self.timeline];

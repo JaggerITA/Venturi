@@ -707,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn unlink_clip_removes_only_that_clip_and_undo_restores_it() {
+    fn unlink_clip_dissolves_the_whole_group_and_undo_restores_it() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
 
@@ -740,8 +740,6 @@ mod tests {
             Box::new(command::UnlinkClip::new(timeline, 0, video_id)),
         );
         let tl = &project.timelines[timeline];
-        // Un gruppo da 2: scollegare un membro scioglie anche l'altro (un
-        // gruppo da 1 non ha senso), non solo quello cliccato.
         assert_eq!(tl.tracks[0].clips[0].linked_group, None);
         assert_eq!(tl.tracks[1].clips[0].linked_group, None);
 
@@ -754,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn unlink_clip_in_a_group_of_three_leaves_the_other_two_linked() {
+    fn unlink_clip_in_a_group_of_three_dissolves_all_three_not_just_the_clicked_one() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
 
@@ -780,14 +778,23 @@ mod tests {
             Box::new(command::InsertClip { timeline, track_index: 1, clip: c }),
         );
 
+        // "Scollega" invocato su *a* soltanto: deve sciogliere l'intero
+        // gruppo (bug segnalato: lasciava b e c ancora collegate tra loro).
         history.do_command(
             &mut project,
             Box::new(command::UnlinkClip::new(timeline, 0, a_id)),
         );
         let tl = &project.timelines[timeline];
         let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
-        assert_eq!(find(a_id).linked_group, None, "a è uscita dal gruppo");
-        assert_eq!(find(b_id).linked_group, Some(group), "b e c restano collegate tra loro");
+        assert_eq!(find(a_id).linked_group, None);
+        assert_eq!(find(b_id).linked_group, None, "l'intero gruppo si scioglie, non solo a");
+        assert_eq!(find(c_id).linked_group, None);
+
+        history.undo(&mut project);
+        let tl = &project.timelines[timeline];
+        let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+        assert_eq!(find(a_id).linked_group, Some(group));
+        assert_eq!(find(b_id).linked_group, Some(group));
         assert_eq!(find(c_id).linked_group, Some(group));
     }
 
