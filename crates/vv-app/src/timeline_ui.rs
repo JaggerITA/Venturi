@@ -259,11 +259,15 @@ enum PendingAction {
 /// sempre almeno una track Video e una Audio evita di dover gestire un
 /// progetto senza una destinazione di default per nuove clip altrove
 /// (`VibeVideoApp::insert_media_clip`/`add_solid_color_clip`).
+/// In fondo alla colonna mostra anche il timestamp della posizione testina
+/// in formato HH:MM:SS:FF.
 fn draw_track_headers(
     ui: &mut egui::Ui,
     track_kinds: &[TrackKind],
     content_height: f32,
     pending: &mut Option<PendingAction>,
+    playhead: FrameIdx,
+    fps: f64,
 ) {
     ui.allocate_ui_with_layout(
         egui::vec2(TRACK_HEADER_WIDTH, content_height.max(RULER_HEIGHT)),
@@ -306,6 +310,17 @@ fn draw_track_headers(
                     *pending = Some(PendingAction::AddTrack(TrackKind::Audio));
                 }
             });
+
+            // Timestamp della posizione testina in formato HH:MM:SS:FF,
+            // sempre visibile nella colonna delle track header.
+            let playhead_secs = playhead as f64 / fps;
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(format_timecode(playhead_secs, fps))
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(220)),
+            );
         },
     );
 }
@@ -588,7 +603,7 @@ pub fn show_timeline(
         }
         state.last_rendered_pps = state.pixels_per_sec;
 
-        draw_track_headers(ui, &track_kinds, content_height, &mut pending);
+        draw_track_headers(ui, &track_kinds, content_height, &mut pending, state.playhead, fps);
 
         egui::ScrollArea::horizontal()
             .id_salt("timeline_scroll")
