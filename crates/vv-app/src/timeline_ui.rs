@@ -330,28 +330,31 @@ fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
         .unwrap_or(*CANDIDATES.last().unwrap())
 }
 
-/// `h:mm:ss` se >= un'ora, altrimenti `m:ss` — stesso stile sintetico dei
-/// timecode di un NLE per le etichette del righello (non serve la
-/// precisione al frame qui: quella la danno le tacche minori disegnate
-/// da `draw_ruler_ticks` quando lo zoom la rende leggibile).
-fn format_timecode(total_secs: f64) -> String {
-    let total_secs = total_secs.round().max(0.0) as i64;
-    let h = total_secs / 3600;
-    let m = (total_secs % 3600) / 60;
-    let s = total_secs % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
+/// Timecode HH:MM:SS:FRAME per le etichette del righello. Il frame è
+/// calcolato dalla frazione di secondo residua moltiplicata per l'fps della
+/// timeline (arrotondato all'intero più vicino, clampato a [0, fps-1]).
+fn format_timecode(total_secs: f64, fps: f64) -> String {
+    let total_secs = total_secs.max(0.0);
+    let frame_f = (total_secs * fps).round() as i64;
+    let h = frame_f / (fps as i64 * 3600);
+    let m = (frame_f / (fps as i64 * 60)) % 60;
+    let s = (frame_f / (fps as i64)) % 60;
+    let f = frame_f % (fps as i64);
+    format!("{h:02}:{m:02}:{s:02}:{f:02}")
 }
 
-/// Disegna le tacche del righello: maggiori (linea a tutta altezza +
-/// etichetta mm:ss/h:mm:ss, intervallo adattivo — vedi
-/// `nice_tick_interval_secs`) sempre, minori (un trattino corto per ogni
-/// singolo frame, senza etichetta) solo quando lo zoom le rende
-/// effettivamente distinguibili (`px_per_frame` abbastanza largo) —
-/// sotto quella soglia sarebbero solo un addensamento illeggibile.
+/// Sistema di tacche a 3 altezze che si adatta allo zoom:
+/// - Livello 0 (corto): ogni frame — visibile solo quando lo zoom è alto
+///   abbastanza da non farle toccare.
+/// - Livello 1 (medio): ogni N frames (N calcolato dinamicamente) — appare
+///   quando il livello 0 diventa troppo denso, scompare quando anche lui
+///   diventerebbe illeggibile.
+/// - Livello 2 (alto + etichetta HH:MM:SS:FF): intervallo adattivo "pulito"
+///   (sequenza 1-2-5) — sempre visibile, è il riferimento temporale.
+///
+/// Le soglie di visibilità sono in pixel: se due tacche successive dello
+/// stesso livello sarebbero più vicine di `MIN_TICK_SPACING_PX`, quel
+/// livello non si disegna (sarebbe solo un addensamento illeggibile).
 fn draw_ruler_ticks(
     painter: &egui::Painter,
     origin: egui::Pos2,
@@ -362,16 +365,25 @@ fn draw_ruler_ticks(
     if !visible_x.is_positive() {
         return; // righello completamente fuori dal viewport scrollato
     }
+
+    const MIN_TICK_SPACING_PX: f32 = 8.0;
     let tick_color = egui::Color32::from_gray(110);
     let label_color = egui::Color32::from_gray(200);
     let minor_color = egui::Color32::from_gray(70);
+    let medium_color = egui::Color32::from_gray(90);
 
-    // Range in secondi/frame effettivamente visibile, non l'intera
-    // durata della timeline — vedi il commento al sito di chiamata sul
-    // perché (migliaia di tacche fuori schermo altrimenti).
+    // Altezze dei tre livelli di tacche (dal basso verso l'alto).
+    const FRAME_TICK_HEIGHT: f32 = 5.0;
+    const MEDIUM_TICK_HEIGHT: f32 = 10.0;
+    const MAJOR_TICK_HEIGHT: f32 = RULER_HEIGHT;
+
+    // Range in secondi effettivamente visibile, non l'intera durata della
+    // timeline (migliaia di tacche fuori schermo altrimenti).
     let visible_start_secs = ((visible_x.min.x - origin.x) / pixels_per_sec.max(1e-6)) as f64;
     let visible_end_secs = ((visible_x.max.x - origin.x) / pixels_per_sec.max(1e-6)) as f64;
 
+    // Livello 2: tacche maggiori con etichetta HH:MM:SS:FF, intervallo
+    // adattivo "pulito" (sequenza 1-2-5) — sempre visibile.
     let major_secs = nice_tick_interval_secs(pixels_per_sec);
     let first_major = (visible_start_secs / major_secs).floor() as i64;
     let last_major = (visible_end_secs / major_secs).ceil() as i64;
@@ -382,32 +394,77 @@ fn draw_ruler_ticks(
         }
         let x = origin.x + (secs * pixels_per_sec as f64) as f32;
         painter.line_segment(
-            [
-                egui::pos2(x, origin.y),
-                egui::pos2(x, origin.y + RULER_HEIGHT),
-            ],
+            [egui::pos2(x, origin.y), egui::pos2(x, origin.y + MAJOR_TICK_HEIGHT)],
             egui::Stroke::new(1.0, tick_color),
         );
         painter.text(
             egui::pos2(x + 3.0, origin.y + 2.0),
             egui::Align2::LEFT_TOP,
-            format_timecode(secs),
+            format_timecode(secs, fps),
             egui::FontId::proportional(10.0),
             label_color,
         );
     }
 
-    const MIN_FRAME_TICK_PX: f32 = 6.0;
+    // Livello 1: tacche medie — intervalli "puliti" tra i frame, ad esempio
+    // ogni 5 o 10 frames a seconda dello zoom (calcolato dinamicamente).
+    // Visibili solo se non si sovrappongono alle maggiori e non sono troppo
+    // vicine tra loro.
     let px_per_frame = pixels_per_sec / fps.max(1e-9) as f32;
-    if px_per_frame >= MIN_FRAME_TICK_PX {
+
+    // Calcola l'intervallo in frame per le tacche medie: il più piccolo
+    // multiplo "pulito" (1, 2, 5, 10, 25, 50...) che tiene le tacche ad
+    // almeno MIN_TICK_SPACING_PX di distanza.
+    let medium_interval_frames = {
+        const MEDIUM_CANDIDATES: &[i64] = &[1, 2, 5, 10, 25, 50, 100, 250, 500];
+        MEDIUM_CANDIDATES
+            .iter()
+            .copied()
+            .find(|&c| c as f32 * px_per_frame >= MIN_TICK_SPACING_PX)
+            .unwrap_or(*MEDIUM_CANDIDATES.last().unwrap())
+    };
+
+    // Le tacche medie sono utili solo se sono più vicine delle maggiori e
+    // non si sovrappongono esattamente a loro (altrimenti sarebbero ridondanti).
+    let major_interval_frames = (major_secs * fps) as i64;
+    if medium_interval_frames < major_interval_frames {
         let first_frame = (visible_start_secs * fps).floor().max(0.0) as i64;
         let last_frame = (visible_end_secs * fps).ceil().max(0.0) as i64;
-        const MINOR_TICK_HEIGHT: f32 = 6.0;
-        for frame in first_frame..=last_frame {
+        for frame in (first_frame..=last_frame).step_by(medium_interval_frames as usize) {
+            // Salta le posizioni dove c'è già una tacca maggiore (ridondante).
+            let secs = frame as f64 / fps;
+            let major_at_this_pos = ((secs / major_secs).round() * major_secs - secs).abs() < 1e-9;
+            if major_at_this_pos {
+                continue;
+            }
             let x = origin.x + frame as f32 * px_per_frame;
             painter.line_segment(
                 [
-                    egui::pos2(x, origin.y + RULER_HEIGHT - MINOR_TICK_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_HEIGHT - MEDIUM_TICK_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_HEIGHT),
+                ],
+                egui::Stroke::new(1.0, medium_color),
+            );
+        }
+    }
+
+    // Livello 0: tacche per ogni singolo frame — le più corte, visibili solo
+    // quando lo zoom è alto abbastanza da non farle toccare.
+    if px_per_frame >= MIN_TICK_SPACING_PX {
+        let first_frame = (visible_start_secs * fps).floor().max(0.0) as i64;
+        let last_frame = (visible_end_secs * fps).ceil().max(0.0) as i64;
+        for frame in first_frame..=last_frame {
+            // Salta le posizioni dove c'è già una tacca media o maggiore.
+            let is_medium_pos = frame % medium_interval_frames == 0;
+            let secs = frame as f64 / fps;
+            let is_major_pos = ((secs / major_secs).round() * major_secs - secs).abs() < 1e-9;
+            if is_medium_pos || is_major_pos {
+                continue;
+            }
+            let x = origin.x + frame as f32 * px_per_frame;
+            painter.line_segment(
+                [
+                    egui::pos2(x, origin.y + RULER_HEIGHT - FRAME_TICK_HEIGHT),
                     egui::pos2(x, origin.y + RULER_HEIGHT),
                 ],
                 egui::Stroke::new(1.0, minor_color),
@@ -1616,10 +1673,15 @@ mod tests {
     }
 
     #[test]
-    fn format_timecode_switches_to_hours_only_past_one_hour() {
-        assert_eq!(format_timecode(5.0), "0:05");
-        assert_eq!(format_timecode(65.0), "1:05");
-        assert_eq!(format_timecode(3665.0), "1:01:05");
+    fn format_timecode_includes_frames_and_hours() {
+        // 25 fps: 5 secondi = frame 125, mostra HH:MM:SS:FF
+        assert_eq!(format_timecode(5.0, 25.0), "00:00:05:00");
+        // 65 secondi = 1 min 5 sec
+        assert_eq!(format_timecode(65.0, 25.0), "00:01:05:00");
+        // 3665 secondi = 1h 1m 5s
+        assert_eq!(format_timecode(3665.0, 25.0), "01:01:05:00");
+        // Con frazione di secondo: 0.4s a 25fps = frame 10
+        assert_eq!(format_timecode(5.4, 25.0), "00:00:05:10");
     }
 
     fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual {
