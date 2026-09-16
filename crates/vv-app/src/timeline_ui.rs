@@ -52,19 +52,6 @@ pub struct TimelineState {
     /// permette di correggere l'offset di scroll per ancorare lo zoom alla
     /// testina.
     last_rendered_pps: f32,
-    /// "Voltare pagina" durante la riproduzione: se la testina esce
-    /// dall'area visibile della timeline, lo scroll orizzontale si sposta
-    /// per rimetterla in vista (posizionandola a un terzo del bordo
-    /// sinistro, come in un NLE). Si disattiva non appena l'utente
-    /// scorre manualmente la timeline (rilevato confrontando l'offset
-    /// persistito con quello che `show_timeline` ha scritto l'ultimo
-    /// frame — vedi `last_stored_scroll_x`).
-    pub auto_follow_playhead: bool,
-    /// Offset orizzontale (in pixel) della ScrollArea che `show_timeline`
-    /// ha scritto nell'ultimo frame: se al frame successivo lo stato
-    /// persistito ne contiene uno diverso, è l'utente che ha scrollato a
-    /// mano e l'auto-follow si spegne.
-    last_stored_scroll_x: Option<f32>,
     drag: Option<DragState>,
     /// Rettangolo di selezione in corso, in coordinate locali al contenuto
     /// scrollabile (senza l'offset di `origin`, così resta valido anche se
@@ -177,10 +164,6 @@ impl Default for TimelineState {
             // Stesso valore iniziale di `pixels_per_sec`: al primo frame non
             // c'è ancora nessuno zoom da compensare.
             last_rendered_pps: 60.0,
-            auto_follow_playhead: true,
-            // Nessun offset scritto ancora: al primo frame non c'è un
-            // confronto da fare.
-            last_stored_scroll_x: None,
             drag: None,
             marquee: None,
             selected_gap: None,
@@ -543,6 +526,11 @@ pub fn show_timeline(
     // proxy-backed può comunque essere già bufferizzata dal sorgente
     // pieno).
     proxy_ranges: &[(FrameIdx, FrameIdx)],
+    // Il player è in riproduzione (clip attiva in corso o vuoto
+    // attraversato a orologio): durante la riproduzione la testina deve
+    // sempre restare visibile, quindi la vista "volta pagina" per
+    // seguirla quando esce dall'area visibile (vedi sotto).
+    playback_active: bool,
 ) -> Option<(vv_core::MediaId, FrameIdx)> {
     let mut media_drop = None;
 
@@ -631,15 +619,16 @@ pub fn show_timeline(
             }
             state.last_rendered_pps = state.pixels_per_sec;
 
-            // "Voltare pagina": se la testina è uscita dall'area visibile
-            // orizzontale, sposta lo scroll per rimetterla in vista,
-            // posizionandola a un terzo del bordo sinistro (come in un NLE).
-            // Il clamp ai limiti di contenuto è fatto qui con la stessa
-            // formula che egui usa in `begin` (`max(0, content - available)`),
-            // così il valore scritto è quello che egui manterrà e il confronto
-            // post-`show` che rileva lo scroll manuale non dà falsi positivi
-            // per il clamp.
-            if state.auto_follow_playhead {
+            // "Voltare pagina": durante la riproduzione la testina deve sempre
+            // restare visibile — se è uscita dall'area visibile orizzontale,
+            // sposta lo scroll per rimetterla in vista, posizionandola a un
+            // terzo del bordo sinistro (come in un NLE). Lo scroll manuale
+            // non compete: al frame successivo la vista torna a seguire la
+            // testina (in riproduzione ha sempre la precedenza). Il clamp ai
+            // limiti di contenuto è fatto qui con la stessa formula che egui
+            // usa in `begin` (`max(0, content - available)`), così il valore
+            // scritto è quello che egui manterrà.
+            if playback_active {
                 let viewport_width =
                     (ui.available_rect_before_wrap().width() - TRACK_HEADER_WIDTH).max(1.0);
                 let playhead_x = state.playhead as f32 * px_per_frame;
@@ -661,12 +650,6 @@ pub fn show_timeline(
                     }
                 }
             }
-            // Offset che la ScrollArea ha (ri)scritto prima del `show`: lo
-            // confrontiamo con quello che sarà persistito *dopo* il `show` per
-            // capire se l'utente ha scrollato a mano in questo frame (egui
-            // applica i delta di scroll durante il `show`).
-            state.last_stored_scroll_x =
-                egui::containers::scroll_area::State::load(&ctx, scroll_id).map(|st| st.offset.x);
         }
 
         draw_track_headers(ui, &track_kinds, content_height, &mut pending, state.playhead, fps);
@@ -1283,25 +1266,7 @@ pub fn show_timeline(
                 ));
             });
 
-        // Rileva lo scroll manuale dell'utente: egui applica i delta di
-        // scroll (wheel/drag della barra) *durante* il `show` di sopra,
-        // quindi l'offset persistito a questo punto riflette anche la
-        // rotellina di questo frame. Se è diverso da quello che la
-        // ScrollArea aveva prima del `show` (letto in
-        // `last_stored_scroll_x`), è l'utente che ha scrollato a mano —
-        // l'auto-follow si disattica e non torna più a imporre la vista.
-        {
-            let ctx = ui.ctx();
-            if let Some(stored) = egui::containers::scroll_area::State::load(&ctx, scroll_id) {
-                if state
-                    .last_stored_scroll_x
-                    .is_some_and(|last| (stored.offset.x - last).abs() > 0.5)
-                {
-                    state.auto_follow_playhead = false;
-                }
-            }
-        }
-    });
+        });
 
     if let Some(action) = pending {
         match action {
@@ -2286,6 +2251,7 @@ mod tests {
                     true,
                     &[],
                     &[],
+                    false,
                 );
             });
         });
@@ -2329,6 +2295,7 @@ mod tests {
                     true,
                     &[],
                     &[],
+                    false,
                 );
             });
         });
@@ -2405,6 +2372,7 @@ mod tests {
                         true,
                         &[],
                         &[],
+                        false,
                     );
                 });
             });
@@ -2518,6 +2486,7 @@ mod tests {
                             true,
                             &[],
                             &[],
+                            false,
                         );
                     });
                 last_height = panel_resp.response.rect.height();

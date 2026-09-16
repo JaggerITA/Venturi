@@ -3118,6 +3118,8 @@ impl eframe::App for VibeVideoApp {
                         self.snapping_enabled,
                         &buffered_ranges,
                         &proxy_ranges,
+                        self.preview_player.as_ref().is_some_and(Player::is_playing)
+                            || self.gap_wall_clock.is_some(),
                     );
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();
