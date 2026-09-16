@@ -273,7 +273,24 @@ fn draw_track_headers(
         egui::vec2(TRACK_HEADER_WIDTH, content_height.max(RULER_HEIGHT)),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
-            ui.add_space(RULER_HEIGHT);
+            // Timestamp della posizione testina in formato HH:MM:SS:FF,
+            // nella riga del righello (come in DaVinci Resolve). Font grande
+            // e monospaziato per leggibilità immediata.
+            let playhead_secs = playhead as f64 / fps;
+            ui.allocate_ui_with_layout(
+                egui::vec2(TRACK_HEADER_WIDTH, RULER_HEIGHT),
+                egui::Layout::top_down_justified(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(format_timecode(playhead_secs, fps))
+                            .monospace()
+                            .size(14.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                },
+            );
+
             for (track_index, kind) in track_kinds.iter().enumerate() {
                 ui.allocate_ui_with_layout(
                     egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
@@ -310,17 +327,6 @@ fn draw_track_headers(
                     *pending = Some(PendingAction::AddTrack(TrackKind::Audio));
                 }
             });
-
-            // Timestamp della posizione testina in formato HH:MM:SS:FF,
-            // sempre visibile nella colonna delle track header.
-            let playhead_secs = playhead as f64 / fps;
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(format_timecode(playhead_secs, fps))
-                    .monospace()
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(220)),
-            );
         },
     );
 }
