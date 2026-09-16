@@ -66,13 +66,26 @@ pub fn waveform_path_for(content_hash: u64) -> PathBuf {
     waveforms_dir().join(format!("{content_hash:016x}.peaks"))
 }
 
-/// Il file di picchi per questo `content_hash` è già stato generato?
-/// Un `stat` economico, fatto a ogni disegno invece di tenere stato in
-/// memoria: il file può comparire in qualunque momento dal worker
-/// separato, e un semplice `is_file()` non ha bisogno di sincronizzazione
-/// (lo stesso pattern di `proxy::proxy_exists`).
+/// Il file di picchi per questo `content_hash` è già stato generato *con
+/// il formato corrente*? Non un semplice `is_file()` (a differenza di
+/// `proxy::proxy_exists`): un file scritto da una versione precedente del
+/// formato (`PEAKS_VERSION` diverso) esiste ma `load_waveform` lo
+/// scarterebbe comunque, quindi va trattato come "da rigenerare" — altrimenti
+/// il worker lo salterebbe per sempre credendolo già pronto (bug osservato:
+/// dopo un bump di versione la waveform smette di comparire per ogni media
+/// importato in una sessione precedente, perché il file vecchio resta lì
+/// bloccando la rigenerazione). Legge solo l'header (12 byte), non l'intero
+/// file.
 pub fn waveform_exists(content_hash: u64) -> bool {
-    waveform_path_for(content_hash).is_file()
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(waveform_path_for(content_hash)) else {
+        return false;
+    };
+    let mut header = [0u8; 8];
+    if f.read_exact(&mut header).is_err() {
+        return false;
+    }
+    &header[..4] == PEAKS_MAGIC && u32::from_le_bytes(header[4..8].try_into().unwrap()) == PEAKS_VERSION
 }
 
 /// I picchi di una waveform e la durata della traccia audio che coprono
@@ -269,10 +282,18 @@ fn io_err(e: std::io::Error) -> crate::MediaError {
 }
 
 /// Risample un frame audio in f32 packed e aggiorna i picchi: per ogni
-/// campione, il bin `global_sample / samples_per_bin` prende il massimo
-/// assoluto visto finora. `global_sample` avanza del numero di campioni
-/// nel frame — così il bin di ogni campione è corretto anche se i frame
-/// hanno durate diverse (tipico di un decoder con priming/padding).
+/// *frame* audio (un campione per canale, es. L+R per lo stereo), il bin
+/// `global_sample / samples_per_bin` prende il massimo assoluto tra i
+/// canali di quel frame. `global_sample` avanza di un frame alla volta —
+/// non di un campione scalare alla volta: `samples_per_bin` è calcolato
+/// sulla durata audio in frame/secondo (`sample_rate`, indipendente dal
+/// numero di canali, vedi `generate_waveform`), quindi contare ogni
+/// campione interleaved (L *e* R separatamente) farebbe avanzare
+/// `global_sample` 2 volte più in fretta per l'audio stereo, comprimendo
+/// l'intera waveform nella prima metà dei bin — la forma d'onda sembrava
+/// sempre "disegnata in anticipo" rispetto al suono reale (bug non preso
+/// dai test perché usavano un segnale mono, dove il bug è invisibile per
+/// coincidenza: 1 canale = 1 incremento per frame).
 fn push_resampled_peaks(
     resampler: &mut Resampler,
     decoded: &ffmpeg::frame::Audio,
@@ -283,16 +304,20 @@ fn push_resampled_peaks(
 ) -> Result<(), crate::MediaError> {
     let mut resampled = ffmpeg::frame::Audio::empty();
     resampler.run(decoded, &mut resampled)?;
-    let byte_len = resampled.samples() * resampled.channels() as usize * 4;
+    let channels = resampled.channels() as usize;
+    let byte_len = resampled.samples() * channels * 4;
     let bytes = &resampled.data(0)[..byte_len];
     // Stesso pattern di `audio::push_resampled`: `as_chunks::<4>` (stabilizzata)
-    // dà i 4 byte di ogni campione f32 senza copie.
-    for chunk in bytes.as_chunks::<4>().0.iter() {
-        let value = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    // dà i 4 byte di ogni campione f32 senza copie; raggruppati poi a
+    // `channels` alla volta (un frame interleaved L,R,L,R,...).
+    for frame in bytes.as_chunks::<4>().0.chunks_exact(channels.max(1)) {
         let bin = (*global_sample / samples_per_bin).min(num_peaks - 1);
-        let abs = value.abs();
-        if abs > peaks[bin] {
-            peaks[bin] = abs;
+        for chunk in frame {
+            let value = f32::from_ne_bytes(*chunk);
+            let abs = value.abs();
+            if abs > peaks[bin] {
+                peaks[bin] = abs;
+            }
         }
         *global_sample += 1;
     }
@@ -406,6 +431,58 @@ mod tests {
         let reloaded = load_waveform(content_hash).expect("reload fallito");
         assert_eq!(reloaded.peaks, wf.peaks);
         assert!((reloaded.audio_duration_secs - wf.audio_duration_secs).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stereo_audio_peaks_are_not_compressed_into_the_first_half_of_bins() {
+        // 4s stereo: silenzio nei primi 2s, tono nei secondi 2s. Col bug
+        // (global_sample avanzava una volta per *campione interleaved*
+        // invece che una volta per *frame*, quindi 2 volte più in fretta
+        // per lo stereo) l'intera waveform finiva compressa/clampata nella
+        // prima metà dei bin, e il tono (che inizia a metà della durata
+        // reale) appariva già ai 3/4 della larghezza invece che all'ultimo
+        // quarto — "la waveform è in anticipo rispetto al suono".
+        let dir = std::env::temp_dir().join("vv-media-waveform-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stereo_half_silent.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc=exprs='if(lt(t,2),0,sin(2*PI*440*t))':s=48000:d=4:c=stereo",
+                "-c:a",
+                "aac",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let content_hash = 0x51DE7357;
+        let _ = std::fs::remove_file(waveform_path_for(content_hash));
+        let wf = generate_waveform(&path, content_hash, 400)
+            .expect("generazione waveform fallita")
+            .expect("audio atteso");
+
+        // Il tono inizia esattamente a metà della durata (2s su 4s): con
+        // 400 bin, il bin dov'esce dal silenzio deve stare vicino al bin
+        // 200 (metà larghezza). Col bug il clamp a `num_peaks - 1` nascondeva
+        // un controllo troppo debole su "solo prima/ultima porzione" (il
+        // tono, raddoppiato di velocità, restava comunque schiacciato
+        // nell'ultimissimo bin anziché sparire) — qui verifichiamo la
+        // *posizione* della transizione, non solo che il tono compaia da
+        // qualche parte.
+        let first_loud_bin = wf
+            .peaks
+            .iter()
+            .position(|&p| p > 0.3)
+            .expect("il tono dovrebbe superare la soglia da qualche parte");
+        assert!(
+            (170..230).contains(&first_loud_bin),
+            "il tono inizia al bin {first_loud_bin} (atteso vicino al bin 200, metà dei 400 bin totali per una transizione a metà dei 4s)"
+        );
     }
 
     #[test]
