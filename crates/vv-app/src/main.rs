@@ -1709,7 +1709,7 @@ impl VibeVideoApp {
             source_out: default_len,
             timeline_start: video_start,
             effects,
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         };
         self.history.do_command(
@@ -1784,27 +1784,28 @@ impl VibeVideoApp {
         }
     }
 
-    /// La gemella collegata (`Clip::linked`) di una clip, con la sua
-    /// track: `None` se non è collegata a nulla. Cerca su tutte le track
-    /// perché il chiamante conosce solo la track della clip di partenza.
-    fn linked_partner(
+    /// Le altre clip del gruppo collegato (`Clip::linked_group`) di una
+    /// clip, esclusa lei stessa: vuoto se non è collegata a nulla. Cerca su
+    /// tutte le track perché un gruppo può estendersi su più track.
+    fn group_members(
         &self,
         timeline_id: TimelineId,
         track_index: usize,
         clip_id: ClipId,
-    ) -> Option<(usize, ClipId)> {
-        let partner_id = self.project.timelines[timeline_id]
+    ) -> Vec<(usize, ClipId)> {
+        let Some(group) = self.project.timelines[timeline_id]
             .tracks
-            .get(track_index)?
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)?
-            .linked?;
-        let partner_track = self.project.timelines[timeline_id]
-            .tracks
-            .iter()
-            .position(|t| t.clips.iter().any(|c| c.id == partner_id))?;
-        Some((partner_track, partner_id))
+            .get(track_index)
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+            .and_then(|c| c.linked_group)
+        else {
+            return Vec::new();
+        };
+        self.project.timelines[timeline_id]
+            .clips_in_group(group)
+            .into_iter()
+            .filter(|&(_, id)| id != clip_id)
+            .collect()
     }
 
     /// Aggiunge il media in coda a ciascuna track (video e, se presente,
@@ -1854,13 +1855,12 @@ impl VibeVideoApp {
     /// le ha rimosse tutte, vedi doc di `RemoveTrack`) niente audio viene
     /// inserito, stesso comportamento di un media senza audio.
     ///
-    /// Solo la clip audio del *primo* stream viene collegata (`linked`) al
-    /// video — `Clip::linked` è un legame a coppia, non un gruppo: un
-    /// media con più stream audio produce quindi più clip audio non
-    /// collegate tra loro (l'utente può comunque selezionarle e spostarle
-    /// insieme a mano). Un drop mirato su una track specifica resta
-    /// un'estensione futura, oggi non necessaria: le clip si possono
-    /// comunque trascinare su un'altra track dopo l'inserimento.
+    /// Il video e *tutte* le clip audio (uno stream o più) finiscono nello
+    /// stesso gruppo collegato (`Clip::linked_group`): selezione, drag e
+    /// cancellazione le trattano come un'unica unità. Un drop mirato su una
+    /// track specifica resta un'estensione futura, oggi non necessaria: le
+    /// clip si possono comunque trascinare su un'altra track dopo
+    /// l'inserimento.
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
@@ -1911,7 +1911,7 @@ impl VibeVideoApp {
             source_out: meta.duration_frames,
             timeline_start: start,
             effects: vv_core::EffectStack::default(),
-            linked: audio_clip_ids.first().copied(),
+            linked_group: None, // collegate sotto, tutte insieme, dopo l'inserimento
             audio_stream_index: 0,
         };
         self.history.do_command(
@@ -1923,6 +1923,7 @@ impl VibeVideoApp {
             }),
         );
 
+        let mut group_targets: Vec<(usize, ClipId)> = vec![(video_track, video_clip_id)];
         for (stream_index, (&track_index, &clip_id)) in
             audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
         {
@@ -1933,7 +1934,7 @@ impl VibeVideoApp {
                 source_out: meta.duration_frames,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
-                linked: (stream_index == 0).then_some(video_clip_id),
+                linked_group: None,
                 audio_stream_index: stream_index,
             };
             self.history.do_command(
@@ -1944,13 +1945,23 @@ impl VibeVideoApp {
                     clip: audio_clip,
                 }),
             );
+            group_targets.push((track_index, clip_id));
+        }
+
+        if group_targets.len() >= 2 {
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::LinkClips::new(timeline_id, group_targets)),
+            );
         }
     }
 
-    /// Normal delete: rimuove *tutte* le clip selezionate (e la gemella
-    /// collegata di ciascuna, se c'è), lasciando un vuoto al loro posto.
-    /// Le altre track non si muovono. Un solo passo di history per tutte
-    /// insieme. L'ordine non conta: `LiftDelete` non sposta nient'altro.
+    /// Normal delete: rimuove *tutte* le clip selezionate, lasciando un
+    /// vuoto al loro posto. Le altre track non si muovono. Un solo passo di
+    /// history per tutte insieme. L'ordine non conta: `LiftDelete` non
+    /// sposta nient'altro. Non serve tirare dentro esplicitamente i gruppi
+    /// collegati: selezionare una clip collegata seleziona già tutto il suo
+    /// gruppo (vedi `TimelineState::set_selection`/i punti dove si clicca).
     fn delete_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1958,16 +1969,11 @@ impl VibeVideoApp {
         if self.timeline_state.selected.is_empty() {
             return;
         }
-        let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
-        let mut to_delete: BTreeSet<(usize, ClipId)> = selected.iter().copied().collect();
-        for &(track_index, clip_id) in &selected {
-            if let Some(partner) = self.linked_partner(timeline_id, track_index, clip_id) {
-                to_delete.insert(partner);
-            }
-        }
-
-        let commands: Vec<Box<dyn vv_core::Command>> = to_delete
-            .into_iter()
+        let commands: Vec<Box<dyn vv_core::Command>> = self
+            .timeline_state
+            .selected
+            .iter()
+            .copied()
             .map(|(track_index, clip_id)| {
                 Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id))
                     as Box<dyn vv_core::Command>
@@ -2020,11 +2026,10 @@ impl VibeVideoApp {
         }
     }
 
-    /// Copia le clip selezionate (+ la gemella collegata di ciascuna, se
-    /// non già anch'essa selezionata esplicitamente — stesso principio di
-    /// `delete_selected`) in `timeline_state.clipboard`, pronte per
-    /// `paste_clipboard_at_playhead`. No-op se non c'è nulla di
-    /// selezionato.
+    /// Copia le clip selezionate in `timeline_state.clipboard`, pronte per
+    /// `paste_clipboard_at_playhead`. No-op se non c'è nulla di selezionato.
+    /// Non serve tirare dentro esplicitamente i gruppi collegati: selezionare
+    /// una clip collegata seleziona già tutto il suo gruppo.
     fn copy_selected_clips(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -2032,19 +2037,15 @@ impl VibeVideoApp {
         if self.timeline_state.selected.is_empty() {
             return;
         }
-        let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
-        let mut to_copy: BTreeSet<(usize, ClipId)> = selected.iter().copied().collect();
-        for &(track_index, clip_id) in &selected {
-            if let Some(partner) = self.linked_partner(timeline_id, track_index, clip_id) {
-                to_copy.insert(partner);
-            }
-        }
 
         let tl = &self.project.timelines[timeline_id];
-        // (id originale, gemella originale, entry) — l'id e la gemella
-        // servono solo per risolvere `linked_index` qui sotto, non entrano
-        // nell'entry salvata (i vecchi ClipId non sopravvivono al paste).
-        let mut collected: Vec<(ClipId, Option<ClipId>, timeline_ui::ClipboardEntry)> = to_copy
+        // Il `LinkGroupId` originale non sopravvive al paste (va
+        // riallocato), serve solo qui per capire quali entry erano nello
+        // stesso gruppo al momento della copia — rimappato sotto in
+        // `link_tag`, indici locali all'operazione di copia.
+        let mut collected: Vec<(Option<vv_core::LinkGroupId>, timeline_ui::ClipboardEntry)> = self
+            .timeline_state
+            .selected
             .iter()
             .filter_map(|&(track_index, clip_id)| {
                 let clip = tl
@@ -2054,8 +2055,7 @@ impl VibeVideoApp {
                     .iter()
                     .find(|c| c.id == clip_id)?;
                 Some((
-                    clip_id,
-                    clip.linked,
+                    clip.linked_group,
                     timeline_ui::ClipboardEntry {
                         track_index,
                         relative_start: clip.timeline_start,
@@ -2063,7 +2063,7 @@ impl VibeVideoApp {
                         source_in: clip.source_in,
                         source_out: clip.source_out,
                         effects: clip.effects.clone(),
-                        linked_index: None,
+                        link_tag: None,
                         audio_stream_index: clip.audio_stream_index,
                     },
                 ))
@@ -2076,21 +2076,23 @@ impl VibeVideoApp {
 
         let anchor = collected
             .iter()
-            .map(|(_, _, e)| e.relative_start)
+            .map(|(_, e)| e.relative_start)
             .min()
             .unwrap_or(0);
-        for (_, _, e) in &mut collected {
+        for (_, e) in &mut collected {
             e.relative_start -= anchor;
         }
-        for i in 0..collected.len() {
-            if let Some(partner_id) = collected[i].1
-                && let Some(j) = collected.iter().position(|(id, _, _)| *id == partner_id)
-            {
-                collected[i].2.linked_index = Some(j);
+
+        let mut tag_of: std::collections::HashMap<vv_core::LinkGroupId, u64> =
+            std::collections::HashMap::new();
+        for (group, e) in &mut collected {
+            if let Some(g) = group {
+                let next_tag = tag_of.len() as u64;
+                e.link_tag = Some(*tag_of.entry(*g).or_insert(next_tag));
             }
         }
 
-        self.timeline_state.clipboard = collected.into_iter().map(|(_, _, e)| e).collect();
+        self.timeline_state.clipboard = collected.into_iter().map(|(_, e)| e).collect();
     }
 
     /// `(timeline_start, timeline_end, source_in)` di una clip, se esiste.
@@ -2194,15 +2196,17 @@ impl VibeVideoApp {
     /// la clip sottostante" invece di quella appena incollata, anche se
     /// coperta visivamente).
     ///
-    /// Dividere una clip la scollega temporaneamente dalla sua gemella
-    /// (comportamento di `SplitClip`): se la gemella è *anche lei* tra le
-    /// track coinvolte in `ranges` (il caso comune: si incolla sempre la
-    /// coppia video+audio insieme, vedi `copy_selected_clips`), viene
-    /// divisa a sua volta con lo stesso taglio e le nuove metà vengono
-    /// ricollegate subito dopo — stesso principio di
-    /// `split_all_at_playhead`. Se la gemella non è tra `ranges` (si sta
-    /// incollando solo un lato) resta scollegata: limite noto, accettabile
-    /// perché non incide sulla riproduzione.
+    /// Dividere una clip non tocca il `linked_group` della metà sinistra
+    /// (`SplitClip`, vedi doc): resta collegata a chiunque altro condivida
+    /// il gruppo, split o no. La metà *destra* invece è nuova e parte
+    /// scollegata — se altri membri del gruppo sono *anche loro* tra le
+    /// track coinvolte in `ranges` (il caso comune: si incolla sempre
+    /// l'intero gruppo video+audio insieme, vedi `copy_selected_clips`) e
+    /// vengono divisi dallo stesso taglio, le loro metà destre vengono
+    /// ricollegate tra loro subito dopo — stesso principio di
+    /// `split_all_at_playhead`. Un membro del gruppo fuori da `ranges` (si
+    /// sta incollando solo una parte del gruppo) resta semplicemente
+    /// intoccato, ancora nel gruppo originale.
     ///
     /// I comandi vengono accodati a `commands`, non eseguiti subito: il
     /// chiamante li unisce in un'unica `CompositeCommand` insieme
@@ -2220,7 +2224,7 @@ impl VibeVideoApp {
             if new_start >= new_end {
                 continue;
             }
-            let overlapping: Vec<(ClipId, FrameIdx, FrameIdx, FrameIdx, Option<ClipId>)> =
+            let overlapping: Vec<(ClipId, FrameIdx, FrameIdx, FrameIdx, Option<vv_core::LinkGroupId>)> =
                 self.project.timelines[timeline_id]
                     .tracks
                     .get(track_index)
@@ -2234,14 +2238,14 @@ impl VibeVideoApp {
                                     c.timeline_start,
                                     c.timeline_end(),
                                     c.source_in,
-                                    c.linked,
+                                    c.linked_group,
                                 )
                             })
                             .collect()
                     })
                     .unwrap_or_default();
 
-            for (clip_id, old_start, old_end, source_in, linked) in overlapping {
+            for (clip_id, old_start, old_end, source_in, group) in overlapping {
                 if !processed.insert((track_index, clip_id)) {
                     continue;
                 }
@@ -2257,47 +2261,41 @@ impl VibeVideoApp {
                     commands,
                 );
 
-                let Some(partner_id) = linked else { continue };
-                let Some((partner_track, _)) =
-                    self.linked_partner(timeline_id, track_index, clip_id)
-                else {
-                    continue;
-                };
-                if !range_tracks.contains(&partner_track)
-                    || !processed.insert((partner_track, partner_id))
-                {
-                    continue;
-                }
-                let Some((p_start, p_end, p_source_in)) =
-                    self.clip_bounds(timeline_id, partner_track, partner_id)
-                else {
-                    continue;
-                };
-                let partner_split = self.resolve_overlap(
-                    timeline_id,
-                    partner_track,
-                    partner_id,
-                    p_start,
-                    p_end,
-                    p_source_in,
-                    new_start,
-                    new_end,
-                    commands,
-                );
+                let Some(_group) = group else { continue };
+                let mut new_rights: Vec<(usize, ClipId)> = split_halves
+                    .map(|(_left, right)| (track_index, right))
+                    .into_iter()
+                    .collect();
 
-                if let (Some((left, right)), Some((partner_left, partner_right))) =
-                    (split_halves, partner_split)
-                {
-                    commands.push(Box::new(vv_core::LinkClips::new(
+                for (member_track, member_id) in self.group_members(timeline_id, track_index, clip_id) {
+                    if !range_tracks.contains(&member_track)
+                        || !processed.insert((member_track, member_id))
+                    {
+                        continue;
+                    }
+                    let Some((m_start, m_end, m_source_in)) =
+                        self.clip_bounds(timeline_id, member_track, member_id)
+                    else {
+                        continue;
+                    };
+                    let member_split = self.resolve_overlap(
                         timeline_id,
-                        (track_index, left),
-                        (partner_track, partner_left),
-                    )));
-                    commands.push(Box::new(vv_core::LinkClips::new(
-                        timeline_id,
-                        (track_index, right),
-                        (partner_track, partner_right),
-                    )));
+                        member_track,
+                        member_id,
+                        m_start,
+                        m_end,
+                        m_source_in,
+                        new_start,
+                        new_end,
+                        commands,
+                    );
+                    if let Some((_, right)) = member_split {
+                        new_rights.push((member_track, right));
+                    }
+                }
+
+                if new_rights.len() >= 2 {
+                    commands.push(Box::new(vv_core::LinkClips::new(timeline_id, new_rights)));
                 }
             }
         }
@@ -2352,7 +2350,7 @@ impl VibeVideoApp {
                 source_out: entry.source_out,
                 timeline_start: playhead + entry.relative_start,
                 effects: entry.effects.clone(),
-                linked: entry.linked_index.map(|j| new_ids[j]),
+                linked_group: None, // ricollegate sotto, per link_tag
                 audio_stream_index: entry.audio_stream_index,
             };
             new_selection.insert((entry.track_index, new_ids[i]));
@@ -2361,6 +2359,25 @@ impl VibeVideoApp {
                 track_index: entry.track_index,
                 clip,
             }));
+        }
+
+        // Ricollega le entry che condividevano un `link_tag` al momento
+        // della copia: un nuovo `LinkClips` (gruppo nuovo) per ogni tag con
+        // 2+ entry incollate.
+        let mut by_tag: std::collections::HashMap<u64, Vec<(usize, ClipId)>> =
+            std::collections::HashMap::new();
+        for (i, entry) in entries.iter().enumerate() {
+            if let Some(tag) = entry.link_tag {
+                by_tag
+                    .entry(tag)
+                    .or_default()
+                    .push((entry.track_index, new_ids[i]));
+            }
+        }
+        for targets in by_tag.into_values() {
+            if targets.len() >= 2 {
+                commands.push(Box::new(vv_core::LinkClips::new(timeline_id, targets)));
+            }
         }
 
         self.history.do_command(
@@ -2422,9 +2439,10 @@ impl VibeVideoApp {
                 .map(|c| c.timeline_start)
                 .unwrap_or(0);
             let mut also_remove = Vec::new();
-            if let Some(partner) = self.linked_partner(timeline_id, track_index, clip_id) {
-                processed.insert(partner);
-                also_remove.push(partner);
+            for member in self.group_members(timeline_id, track_index, clip_id) {
+                if processed.insert(member) {
+                    also_remove.push(member);
+                }
             }
             units.push(((track_index, clip_id), start, also_remove));
         }
@@ -2452,20 +2470,19 @@ impl VibeVideoApp {
     /// T): comportamento standard da "lametta", non richiede una
     /// selezione (bug: "il taglio funzionava solo sulla track
     /// selezionata"). Un solo passo di history per l'intero taglio.
-    /// Taglia con T tutte le clip sotto al playhead, su ogni track. Le
-    /// coppie collegate (`Clip::linked`) i cui *entrambi* i membri vengono
-    /// tagliati nello stesso punto restano collegate anche dopo: metà
-    /// sinistra con metà sinistra, metà destra con metà destra. Senza
-    /// questo, `SplitClip` scollegherebbe sempre entrambe le metà (comportamento
-    /// corretto quando si taglia una sola clip di una coppia, perché lì
-    /// solo un pezzo rappresenta ancora l'intera durata collegata), e
-    /// selezionare il video dopo un taglio non evidenzierebbe più l'audio.
+    /// I gruppi collegati (`Clip::linked_group`) i cui membri vengono
+    /// tagliati insieme nello stesso punto restano collegati anche dopo:
+    /// `SplitClip` non tocca il `linked_group` della metà sinistra (resta
+    /// la stessa clip, solo accorciata), quindi serve solo ricollegare tra
+    /// loro le metà *destre* (clip nuove, che partono scollegate) — un
+    /// nuovo `LinkClips` per ogni gruppo originale con 2+ membri tagliati.
     fn split_all_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         let playhead = self.timeline_state.playhead;
-        let targets: Vec<(usize, ClipId, Option<ClipId>)> = self.project.timelines[timeline_id]
+        let targets: Vec<(usize, ClipId, Option<vv_core::LinkGroupId>)> = self.project.timelines
+            [timeline_id]
             .tracks
             .iter()
             .enumerate()
@@ -2474,17 +2491,12 @@ impl VibeVideoApp {
                     .clips
                     .iter()
                     .filter(move |c| playhead > c.timeline_start && playhead < c.timeline_end())
-                    .map(move |c| (track_index, c.id, c.linked))
+                    .map(move |c| (track_index, c.id, c.linked_group))
             })
             .collect();
         if targets.is_empty() {
             return;
         }
-
-        let target_ids: std::collections::HashSet<ClipId> =
-            targets.iter().map(|(_, id, _)| *id).collect();
-        let track_of: std::collections::HashMap<ClipId, usize> =
-            targets.iter().map(|(t, id, _)| (*id, *t)).collect();
 
         // Id della metà destra pre-allocato per ogni target, cosi da
         // poterlo usare subito per i comandi di ricollegamento.
@@ -2503,27 +2515,20 @@ impl VibeVideoApp {
             })
             .collect();
 
-        let mut relinked = std::collections::HashSet::new();
-        for (track_index, clip_id, linked) in &targets {
-            let Some(partner_id) = linked else {
-                continue;
-            };
-            if !target_ids.contains(partner_id) || relinked.contains(clip_id) {
-                continue;
+        let mut right_halves_by_group: std::collections::HashMap<vv_core::LinkGroupId, Vec<(usize, ClipId)>> =
+            std::collections::HashMap::new();
+        for (track_index, clip_id, group) in &targets {
+            if let Some(g) = group {
+                right_halves_by_group
+                    .entry(*g)
+                    .or_default()
+                    .push((*track_index, new_ids[clip_id]));
             }
-            relinked.insert(*clip_id);
-            relinked.insert(*partner_id);
-            let partner_track = track_of[partner_id];
-            commands.push(Box::new(vv_core::LinkClips::new(
-                timeline_id,
-                (*track_index, *clip_id),
-                (partner_track, *partner_id),
-            )));
-            commands.push(Box::new(vv_core::LinkClips::new(
-                timeline_id,
-                (*track_index, new_ids[clip_id]),
-                (partner_track, new_ids[partner_id]),
-            )));
+        }
+        for right_halves in right_halves_by_group.into_values() {
+            if right_halves.len() >= 2 {
+                commands.push(Box::new(vv_core::LinkClips::new(timeline_id, right_halves)));
+            }
         }
 
         self.history.do_command(
@@ -2551,9 +2556,7 @@ impl VibeVideoApp {
                 .max_by_key(|(track_index, _, _)| *track_index)
         {
             let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
-            if let Some(partner) = self.linked_partner(timeline_id, *video_track, *video_clip_id) {
-                selected.insert(partner);
-            }
+            selected.extend(self.group_members(timeline_id, *video_track, *video_clip_id));
             self.timeline_state
                 .set_selection(selected, Some((*video_track, *video_clip_id)));
         }
@@ -4015,7 +4018,7 @@ mod tests {
             source_out: len,
             timeline_start: start,
             effects: vv_core::EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         };
         app.history.do_command(
@@ -5136,10 +5139,11 @@ mod tests {
     /// entrambe le metà (comportamento corretto per un taglio "singolo",
     /// ma non quando entrambi i membri della coppia vengono tagliati
     /// insieme nello stesso punto): dopo, selezionare il video non
-    /// evidenziava più l'audio. Le metà sinistra/destra devono restare
-    /// collegate tra loro.
+    /// evidenziava più l'audio. Le metà sinistre restano nel gruppo
+    /// originale (SplitClip non lo tocca), le metà destre vengono
+    /// ricollegate tra loro in un gruppo nuovo.
     #[test]
-    fn split_all_at_playhead_keeps_linked_pair_linked_on_both_halves() {
+    fn split_all_at_playhead_keeps_linked_group_on_both_halves() {
         let mut app = VibeVideoApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
@@ -5148,8 +5152,7 @@ mod tests {
             &mut app.project,
             Box::new(vv_core::LinkClips::new(
                 timeline_id,
-                (0, video_id),
-                (1, audio_id),
+                vec![(0, video_id), (1, audio_id)],
             )),
         );
 
@@ -5165,10 +5168,18 @@ mod tests {
         let audio_right = &tl.tracks[1].clips[1];
         assert_eq!(video_left.id, video_id);
         assert_eq!(audio_left.id, audio_id);
-        assert_eq!(video_left.linked, Some(audio_left.id));
-        assert_eq!(audio_left.linked, Some(video_left.id));
-        assert_eq!(video_right.linked, Some(audio_right.id));
-        assert_eq!(audio_right.linked, Some(video_right.id));
+        let left_group = video_left
+            .linked_group
+            .expect("le metà sinistre restano collegate");
+        assert_eq!(audio_left.linked_group, Some(left_group));
+        let right_group = video_right
+            .linked_group
+            .expect("le metà destre vengono ricollegate tra loro");
+        assert_eq!(audio_right.linked_group, Some(right_group));
+        assert_ne!(
+            left_group, right_group,
+            "le metà destre hanno un gruppo nuovo, non quello della sinistra"
+        );
         assert_ne!(video_right.id, video_id);
         assert_ne!(audio_right.id, audio_id);
 
@@ -5180,13 +5191,15 @@ mod tests {
             BTreeSet::from([(0, video_id), (1, audio_id)])
         );
 
-        // Un solo undo annulla i due tagli *e* i due ricollegamenti.
+        // Un solo undo annulla il taglio e il ricollegamento delle metà
+        // destre: le metà sinistre non erano mai state toccate, restano nel
+        // gruppo originale.
         app.history.undo(&mut app.project);
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
-        assert_eq!(tl.tracks[0].clips[0].linked, Some(audio_id));
-        assert_eq!(tl.tracks[1].clips[0].linked, Some(video_id));
+        assert_eq!(tl.tracks[0].clips[0].linked_group, Some(left_group));
+        assert_eq!(tl.tracks[1].clips[0].linked_group, Some(left_group));
     }
 
     #[test]
@@ -5219,7 +5232,7 @@ mod tests {
             source_out: 150,
             timeline_start: 20,
             effects: vv_core::EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         };
 
@@ -5262,7 +5275,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_selected_removes_linked_audio_partner_together() {
+    fn delete_selected_removes_every_selected_clip_together() {
         let mut app = VibeVideoApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
@@ -5272,20 +5285,20 @@ mod tests {
             &mut app.project,
             Box::new(vv_core::LinkClips::new(
                 timeline_id,
-                (0, video_id),
-                (1, audio_id),
+                vec![(0, video_id), (1, audio_id)],
             )),
         );
 
-        app.timeline_state.selected = BTreeSet::from([(0, video_id)]);
+        // La selezione contiene già l'intero gruppo, come farebbe un click
+        // reale (vedi `timeline_ui::expand_to_linked_groups`):
+        // `delete_selected` si fida di questo invariante, non tira dentro
+        // esplicitamente i collegamenti.
+        app.timeline_state.selected = BTreeSet::from([(0, video_id), (1, audio_id)]);
         app.delete_selected();
 
         let tl = &app.project.timelines[timeline_id];
         assert!(tl.tracks[0].clips.is_empty());
-        assert!(
-            tl.tracks[1].clips.is_empty(),
-            "la clip audio collegata deve sparire insieme al video"
-        );
+        assert!(tl.tracks[1].clips.is_empty());
         assert!(app.timeline_state.selected.is_empty());
 
         // Un solo undo ripristina entrambe (CompositeCommand).
@@ -5322,7 +5335,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_then_paste_relinks_a_linked_pair_to_each_other_not_to_the_originals() {
+    fn copy_then_paste_relinks_a_linked_group_to_each_other_not_to_the_originals() {
         let mut app = VibeVideoApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
@@ -5331,14 +5344,13 @@ mod tests {
             &mut app.project,
             Box::new(vv_core::LinkClips::new(
                 timeline_id,
-                (0, video_id),
-                (1, audio_id),
+                vec![(0, video_id), (1, audio_id)],
             )),
         );
 
-        // Selezionare solo il video deve comunque copiare anche l'audio
-        // collegato (stesso principio di `delete_selected`).
-        app.timeline_state.selected = BTreeSet::from([(0, video_id)]);
+        // Selezione già completa (come da un click reale sul gruppo, vedi
+        // `timeline_ui::expand_to_linked_groups`).
+        app.timeline_state.selected = BTreeSet::from([(0, video_id), (1, audio_id)]);
         app.copy_selected_clips();
         assert_eq!(app.timeline_state.clipboard.len(), 2);
 
@@ -5351,12 +5363,14 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         let new_video = &tl.tracks[0].clips[1];
         let new_audio = &tl.tracks[1].clips[1];
-        assert_eq!(new_video.linked, Some(new_audio.id));
-        assert_eq!(new_audio.linked, Some(new_video.id));
+        let new_group = new_video
+            .linked_group
+            .expect("le clip incollate restano collegate tra loro");
+        assert_eq!(new_audio.linked_group, Some(new_group));
         assert_ne!(
-            new_video.linked,
-            Some(video_id),
-            "non collegata all'originale"
+            Some(new_group),
+            tl.tracks[0].clips[0].linked_group,
+            "non collegata al gruppo originale"
         );
     }
 
@@ -5580,12 +5594,12 @@ mod tests {
         assert_eq!(halves[1].timeline_end(), 20);
     }
 
-    /// Se lo split coinvolge una coppia collegata (paste della coppia
+    /// Se lo split coinvolge un gruppo collegato (paste della coppia
     /// video+audio copiata insieme, che quindi taglia entrambe le track
     /// nello stesso punto), le due metà nuove devono restare collegate
     /// *tra loro*, non alla vecchia gemella (persa nello split).
     #[test]
-    fn paste_splitting_a_linked_pair_relinks_the_new_halves_to_each_other() {
+    fn paste_splitting_a_linked_group_relinks_the_new_halves_to_each_other() {
         let mut app = VibeVideoApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20); // [0,20)
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20); // [0,20)
@@ -5594,8 +5608,7 @@ mod tests {
             &mut app.project,
             Box::new(vv_core::LinkClips::new(
                 timeline_id,
-                (0, video_id),
-                (1, audio_id),
+                vec![(0, video_id), (1, audio_id)],
             )),
         );
 
@@ -5605,11 +5618,11 @@ mod tests {
             &mut app.project,
             Box::new(vv_core::LinkClips::new(
                 timeline_id,
-                (0, src_video),
-                (1, src_audio),
+                vec![(0, src_video), (1, src_audio)],
             )),
         );
-        app.timeline_state.selected = BTreeSet::from([(0, src_video)]);
+        // Selezione già completa (come da un click reale sul gruppo).
+        app.timeline_state.selected = BTreeSet::from([(0, src_video), (1, src_audio)]);
         app.copy_selected_clips();
         assert_eq!(app.timeline_state.clipboard.len(), 2);
 
@@ -5635,10 +5648,15 @@ mod tests {
 
         assert_eq!(video_halves.len(), 2);
         assert_eq!(audio_halves.len(), 2);
-        assert_eq!(video_halves[0].linked, Some(audio_halves[0].id));
-        assert_eq!(audio_halves[0].linked, Some(video_halves[0].id));
-        assert_eq!(video_halves[1].linked, Some(audio_halves[1].id));
-        assert_eq!(audio_halves[1].linked, Some(video_halves[1].id));
+        let left_group = video_halves[0]
+            .linked_group
+            .expect("la metà sinistra resta nel gruppo originale");
+        assert_eq!(audio_halves[0].linked_group, Some(left_group));
+        let right_group = video_halves[1]
+            .linked_group
+            .expect("la metà destra viene ricollegata alla sua gemella");
+        assert_eq!(audio_halves[1].linked_group, Some(right_group));
+        assert_ne!(left_group, right_group);
     }
 
     /// Richiesta: "inserisci un indicatore visivo delle porzioni di
@@ -5966,8 +5984,8 @@ mod tests {
     /// bug reale che ha motivato `Clip::audio_stream_index`): l'import deve
     /// creare una clip audio per stream, su track audio separate (la
     /// seconda creata al volo, visto che di default la timeline ne ha una
-    /// sola), e collegare al video solo la prima (`Clip::linked` è a
-    /// coppia, non a gruppo — vedi doc di `insert_media_clip`).
+    /// sola), e collegarle tutte insieme (video compreso) nello stesso
+    /// gruppo — vedi doc di `insert_media_clip`.
     #[test]
     fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
         let dir = std::env::temp_dir().join("vv-app-multi-audio-import-test");
@@ -6034,11 +6052,14 @@ mod tests {
         assert_eq!(audio_clip_0.audio_stream_index, 0);
         assert_eq!(audio_clip_1.audio_stream_index, 1);
 
-        assert_eq!(video_clip.linked, Some(audio_clip_0.id));
-        assert_eq!(audio_clip_0.linked, Some(video_clip.id));
+        // Video e *tutti* gli stream audio finiscono nello stesso gruppo
+        // collegato (`Clip::linked_group`), non solo il primo.
+        let group = video_clip.linked_group.expect("il video è collegato");
+        assert_eq!(audio_clip_0.linked_group, Some(group));
         assert_eq!(
-            audio_clip_1.linked, None,
-            "solo il primo stream è collegato al video: `linked` è a coppia, non a gruppo"
+            audio_clip_1.linked_group,
+            Some(group),
+            "anche il secondo stream audio fa parte dello stesso gruppo"
         );
     }
 }

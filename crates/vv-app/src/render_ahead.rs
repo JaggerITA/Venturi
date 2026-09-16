@@ -1683,7 +1683,7 @@ mod tests {
             source_out: len,
             timeline_start: start,
             effects: EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         }
     }
@@ -1706,7 +1706,7 @@ mod tests {
             source_out: source_in + len,
             timeline_start,
             effects: EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         }
     }
@@ -1719,7 +1719,7 @@ mod tests {
             source_out: len,
             timeline_start: start,
             effects: EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         }
     }

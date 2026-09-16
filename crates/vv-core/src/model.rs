@@ -11,6 +11,13 @@ new_key_type! {
     pub struct TimelineId;
 }
 
+/// Id di un gruppo di clip collegate (vedi `Clip::linked_group`): un
+/// contatore semplice come `ClipId`, non una chiave slotmap (nessuna arena
+/// dedicata — l'appartenenza al gruppo è solo questo campo su ogni `Clip`,
+/// niente registro separato da tenere sincronizzato).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LinkGroupId(pub u64);
+
 /// Le Clip vivono in `Vec<Clip>` dentro ogni Track (non in un'arena
 /// slotmap): l'ordine è significativo (tempo sulla track) e l'iterazione
 /// sequenziale per il compositing beneficia della località in memoria.
@@ -267,11 +274,20 @@ pub struct Clip {
     /// Posizione nello spazio della Timeline che contiene questa clip.
     pub timeline_start: FrameIdx,
     pub effects: EffectStack,
-    /// Clip "gemella" (tipicamente audio<->video dello stesso media,
-    /// collegate di default all'import): un drag nella timeline le muove
-    /// insieme. Il collegamento è simmetrico: se `a.linked == Some(b)`
-    /// allora `b.linked == Some(a)`. `None` per una clip indipendente.
-    pub linked: Option<ClipId>,
+    /// Gruppo di clip collegate (tipicamente video + tutti gli stream
+    /// audio dello stesso media, collegate di default all'import — un
+    /// media può averne più di uno, vedi `audio_stream_index`): selezione,
+    /// drag e cancellazione trattano l'intero gruppo come un'unità, non
+    /// solo una coppia. `None` per una clip indipendente. Un gruppo da un
+    /// solo membro non ha senso: chi scioglie un collegamento a due
+    /// riporta anche l'ultimo membro rimasto a `None` (vedi `UnlinkClip`).
+    /// `#[serde(default)]`: i progetti salvati prima di questo campo
+    /// (quando il collegamento era una coppia `Option<ClipId>`) caricano
+    /// tutte le clip come indipendenti — nessun modo di ricostruire i
+    /// vecchi collegamenti da un formato diverso, ma comunque un
+    /// downgrade "sicuro" (l'utente può ricollegarle a mano).
+    #[serde(default)]
+    pub linked_group: Option<LinkGroupId>,
     /// Per una clip audio (`source: ClipSource::Media`, su una track
     /// `TrackKind::Audio`): indice dello stream audio nel contenitore del
     /// media (0 = primo stream audio, stesso ordine di
@@ -450,6 +466,25 @@ impl Timeline {
             .enumerate()
             .find_map(|(i, t)| t.clips.iter().find(|c| c.id == clip_id).map(|c| (i, c)))
     }
+
+    /// Tutte le clip (con il loro indice di track) che condividono
+    /// `group`, su qualunque track — un semplice scan, non un indice
+    /// secondario da tenere sincronizzato (vedi doc di `LinkGroupId`): la
+    /// timeline è dell'ordine di decine/centinaia di clip, e questo si
+    /// chiama solo da un'interazione utente (click, inizio drag), mai per
+    /// frame.
+    pub fn clips_in_group(&self, group: LinkGroupId) -> Vec<(usize, ClipId)> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(i, t)| {
+                t.clips
+                    .iter()
+                    .filter(move |c| c.linked_group == Some(group))
+                    .map(move |c| (i, c.id))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -457,12 +492,20 @@ pub struct Project {
     pub media_pool: SlotMap<MediaId, MediaItem>,
     pub timelines: SlotMap<TimelineId, Timeline>,
     next_clip_id: u64,
+    #[serde(default)]
+    next_link_group_id: u64,
 }
 
 impl Project {
     pub fn alloc_clip_id(&mut self) -> ClipId {
         let id = ClipId(self.next_clip_id);
         self.next_clip_id += 1;
+        id
+    }
+
+    pub fn alloc_link_group_id(&mut self) -> LinkGroupId {
+        let id = LinkGroupId(self.next_link_group_id);
+        self.next_link_group_id += 1;
         id
     }
 }
@@ -607,7 +650,7 @@ mod timeline_tests {
             source_out: len,
             timeline_start,
             effects: EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         }
     }
@@ -798,7 +841,7 @@ mod timeline_tests {
             source_out: 300,
             timeline_start: 60,
             effects: EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         };
         assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");

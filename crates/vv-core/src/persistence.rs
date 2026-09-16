@@ -69,7 +69,7 @@ mod tests {
             source_out: 50,
             timeline_start: 0,
             effects,
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         });
 

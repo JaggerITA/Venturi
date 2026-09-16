@@ -2,8 +2,8 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipId, FrameIdx, Interpolation, Keyframed, Project, Rgba, TimelineId, Track, TrackKind,
-    Transform,
+    Clip, ClipId, FrameIdx, Interpolation, Keyframed, LinkGroupId, Project, Rgba, TimelineId, Track,
+    TrackKind, Transform,
 };
 
 pub trait Command: std::fmt::Debug {
@@ -470,9 +470,10 @@ impl Command for MoveClip {
 }
 
 /// Sposta più clip in un unico passo di history (un solo undo le riporta
-/// indietro tutte insieme): serve per trascinare clip collegate
-/// (`Clip::linked`, tipicamente audio+video della stessa sorgente), che
-/// devono muoversi come una singola unità agli occhi dell'utente.
+/// indietro tutte insieme): serve per trascinare la selezione corrente,
+/// che contiene sempre un gruppo collegato per intero se ce n'è uno
+/// (`Clip::linked_group`, tipicamente audio+video della stessa sorgente),
+/// che deve muoversi come una singola unità agli occhi dell'utente.
 #[derive(Debug)]
 pub struct MoveClips {
     pub timeline: TimelineId,
@@ -617,15 +618,19 @@ impl Command for TrimClip {
     }
 }
 
-/// Scollega una clip dalla sua gemella (`Clip::linked`), se ne ha una.
-/// Cerca la gemella su tutte le track della timeline (il chiamante deve
-/// conoscere solo la track della clip cliccata, non quella della gemella).
+/// Scioglie il collegamento di *una* clip dal suo gruppo
+/// (`Clip::linked_group`), se ne ha uno: solo questa clip esce dal gruppo,
+/// gli altri membri restano collegati tra loro. Se dopo l'uscita il gruppo
+/// resta con un solo membro, anche quello viene riportato a `None` — un
+/// gruppo da 1 non ha senso (vedi doc di `Clip::linked_group`).
 #[derive(Debug)]
 pub struct UnlinkClip {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
-    removed_link: Option<(ClipId, usize)>,
+    /// Le clip toccate (questa, più l'eventuale ultimo membro dissolto)
+    /// col loro `linked_group` *precedente*, per l'undo.
+    affected: Option<Vec<(usize, ClipId, Option<LinkGroupId>)>>,
 }
 
 impl UnlinkClip {
@@ -634,82 +639,77 @@ impl UnlinkClip {
             timeline,
             track_index,
             clip_id,
-            removed_link: None,
+            affected: None,
         }
     }
 }
 
 impl Command for UnlinkClip {
     fn apply(&mut self, project: &mut Project) {
-        let tl = &mut project.timelines[self.timeline];
-        let Some(partner_id) = tl
+        let tl = &project.timelines[self.timeline];
+        let Some(group) = tl
             .tracks
             .get(self.track_index)
             .and_then(|t| t.clips.iter().find(|c| c.id == self.clip_id))
-            .and_then(|c| c.linked)
+            .and_then(|c| c.linked_group)
         else {
             return;
         };
-        let partner_track = tl
-            .tracks
-            .iter()
-            .position(|t| t.clips.iter().any(|c| c.id == partner_id));
+        let remaining: Vec<(usize, ClipId)> = tl
+            .clips_in_group(group)
+            .into_iter()
+            .filter(|&(_, id)| id != self.clip_id)
+            .collect();
 
-        if let Some(c) = tl.tracks[self.track_index]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == self.clip_id)
-        {
-            c.linked = None;
+        let mut affected = vec![(self.track_index, self.clip_id, Some(group))];
+        if remaining.len() == 1 {
+            affected.push((remaining[0].0, remaining[0].1, Some(group)));
         }
-        if let Some(pt) = partner_track
-            && let Some(c) = tl.tracks[pt].clips.iter_mut().find(|c| c.id == partner_id)
-        {
-            c.linked = None;
+        self.affected = Some(affected);
+
+        let tl = &mut project.timelines[self.timeline];
+        for (track_index, clip_id, _) in self.affected.as_ref().unwrap() {
+            if let Some(c) = tl.tracks[*track_index].clips.iter_mut().find(|c| c.id == *clip_id) {
+                c.linked_group = None;
+            }
         }
-        self.removed_link = partner_track.map(|pt| (partner_id, pt));
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some((partner_id, partner_track)) = self.removed_link else {
+        let Some(affected) = &self.affected else {
             return;
         };
         let tl = &mut project.timelines[self.timeline];
-        if let Some(c) = tl.tracks[self.track_index]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == self.clip_id)
-        {
-            c.linked = Some(partner_id);
-        }
-        if let Some(c) = tl.tracks[partner_track]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == partner_id)
-        {
-            c.linked = Some(self.clip_id);
+        for (track_index, clip_id, old_group) in affected {
+            if let Some(c) = tl.tracks[*track_index].clips.iter_mut().find(|c| c.id == *clip_id) {
+                c.linked_group = *old_group;
+            }
         }
     }
 }
 
-/// Collega due clip tra loro (`Clip::linked` su entrambe). Se una delle
-/// due era già collegata a qualcos'altro, quel vecchio collegamento viene
-/// sostituito (non è a tre: un collegamento è sempre tra esattamente due
-/// clip).
+/// Collega un insieme di clip nello stesso gruppo (`Clip::linked_group`):
+/// selezione, drag e cancellazione trattano un gruppo come un'unità.
+/// Qualunque gruppo precedente delle clip coinvolte viene sovrascritto (non
+/// unito) — collegare è una scelta esplicita di un insieme esatto, non
+/// un'unione di gruppi preesistenti. No-op se `targets` ha meno di 2 clip
+/// (niente da collegare).
 #[derive(Debug)]
 pub struct LinkClips {
     pub timeline: TimelineId,
-    pub a: (usize, ClipId),
-    pub b: (usize, ClipId),
-    previous: Option<(Option<ClipId>, Option<ClipId>)>,
+    pub targets: Vec<(usize, ClipId)>,
+    /// Allocato la prima volta che `apply` gira, poi riusato invariato sui
+    /// redo successivi — mai un nuovo id ad ogni redo.
+    group_id: Option<LinkGroupId>,
+    previous: Option<Vec<Option<LinkGroupId>>>,
 }
 
 impl LinkClips {
-    pub fn new(timeline: TimelineId, a: (usize, ClipId), b: (usize, ClipId)) -> Self {
+    pub fn new(timeline: TimelineId, targets: Vec<(usize, ClipId)>) -> Self {
         Self {
             timeline,
-            a,
-            b,
+            targets,
+            group_id: None,
             previous: None,
         }
     }
@@ -717,56 +717,52 @@ impl LinkClips {
 
 impl Command for LinkClips {
     fn apply(&mut self, project: &mut Project) {
-        let tl = &mut project.timelines[self.timeline];
-        let a_prev = tl.tracks[self.a.0]
-            .clips
-            .iter()
-            .find(|c| c.id == self.a.1)
-            .map(|c| c.linked);
-        let b_prev = tl.tracks[self.b.0]
-            .clips
-            .iter()
-            .find(|c| c.id == self.b.1)
-            .map(|c| c.linked);
-        let (Some(a_prev), Some(b_prev)) = (a_prev, b_prev) else {
+        if self.targets.len() < 2 {
             return;
-        };
-        self.previous = Some((a_prev, b_prev));
-
-        if let Some(c) = tl.tracks[self.a.0]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == self.a.1)
-        {
-            c.linked = Some(self.b.1);
         }
-        if let Some(c) = tl.tracks[self.b.0]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == self.b.1)
-        {
-            c.linked = Some(self.a.1);
+        let group_id = self
+            .group_id
+            .unwrap_or_else(|| project.alloc_link_group_id());
+        self.group_id = Some(group_id);
+
+        let tl = &project.timelines[self.timeline];
+        let previous: Vec<Option<LinkGroupId>> = self
+            .targets
+            .iter()
+            .map(|(track_index, clip_id)| {
+                tl.tracks
+                    .get(*track_index)
+                    .and_then(|t| t.clips.iter().find(|c| c.id == *clip_id))
+                    .and_then(|c| c.linked_group)
+            })
+            .collect();
+        self.previous = Some(previous);
+
+        let tl = &mut project.timelines[self.timeline];
+        for (track_index, clip_id) in &self.targets {
+            if let Some(c) = tl
+                .tracks
+                .get_mut(*track_index)
+                .and_then(|t| t.clips.iter_mut().find(|c| c.id == *clip_id))
+            {
+                c.linked_group = Some(group_id);
+            }
         }
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some((a_prev, b_prev)) = self.previous else {
+        let Some(previous) = &self.previous else {
             return;
         };
         let tl = &mut project.timelines[self.timeline];
-        if let Some(c) = tl.tracks[self.a.0]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == self.a.1)
-        {
-            c.linked = a_prev;
-        }
-        if let Some(c) = tl.tracks[self.b.0]
-            .clips
-            .iter_mut()
-            .find(|c| c.id == self.b.1)
-        {
-            c.linked = b_prev;
+        for ((track_index, clip_id), old) in self.targets.iter().zip(previous.iter()) {
+            if let Some(c) = tl
+                .tracks
+                .get_mut(*track_index)
+                .and_then(|t| t.clips.iter_mut().find(|c| c.id == *clip_id))
+            {
+                c.linked_group = *old;
+            }
         }
     }
 }
@@ -782,12 +778,6 @@ pub struct SplitClip {
     pub clip_id: ClipId,
     pub split_at: FrameIdx,
     original_source_out: Option<FrameIdx>,
-    /// Collegamento della clip originale prima dello split (per l'undo):
-    /// dividere una clip collegata la scollega, perché il collegamento
-    /// riguardava l'intera durata e ora ne resta valido solo un pezzo. Non
-    /// dividiamo anche la clip gemella: quel comportamento più complesso
-    /// resta un'estensione futura.
-    original_linked: Option<Option<ClipId>>,
     new_clip_id: Option<ClipId>,
     /// Se impostato (`with_new_clip_id`), l'id della metà destra è questo
     /// invece di uno allocato al volo: serve a chi orchestra più split
@@ -809,7 +799,6 @@ impl SplitClip {
             clip_id,
             split_at,
             original_source_out: None,
-            original_linked: None,
             new_clip_id: None,
             preallocated_new_clip_id: None,
         }
@@ -843,15 +832,18 @@ impl Command for SplitClip {
         let split_source = clip.source_in + offset;
 
         self.original_source_out = Some(clip.source_out);
-        self.original_linked = Some(clip.linked);
         let mut second_half = clip.clone();
         clip.source_out = split_source;
-        clip.linked = None;
-
+        // `clip` (la metà sinistra) mantiene il suo `linked_group`
+        // invariato: è la stessa clip di prima, solo accorciata, e resta
+        // collegata a chiunque altro condivida quel gruppo (che sia stato
+        // diviso insieme o no). La metà destra è una clip nuova, che parte
+        // scollegata — chi orchestra più split insieme (`split_all_at_playhead`)
+        // ricollega le metà destre tra loro con un `LinkClips` a parte.
         second_half.id = new_id;
         second_half.source_in = split_source;
         second_half.timeline_start = self.split_at;
-        second_half.linked = None;
+        second_half.linked_group = None;
         self.new_clip_id = Some(new_id);
 
         let insert_at = track
@@ -870,7 +862,6 @@ impl Command for SplitClip {
         track.clips.retain(|c| c.id != new_clip_id);
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
             clip.source_out = original_source_out;
-            clip.linked = self.original_linked.flatten();
         }
     }
 }

@@ -34,7 +34,7 @@ mod tests {
             source_out: len,
             timeline_start: start,
             effects: EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         }
     }
@@ -707,14 +707,15 @@ mod tests {
     }
 
     #[test]
-    fn unlink_clip_clears_both_sides_and_undo_restores_both() {
+    fn unlink_clip_removes_only_that_clip_and_undo_restores_it() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
 
         let mut video = make_clip(&mut project, 0, 10);
         let mut audio = make_clip(&mut project, 0, 10);
-        video.linked = Some(audio.id);
-        audio.linked = Some(video.id);
+        let group = project.alloc_link_group_id();
+        video.linked_group = Some(group);
+        audio.linked_group = Some(group);
         let (video_id, audio_id) = (video.id, audio.id);
 
         history.do_command(
@@ -739,66 +740,110 @@ mod tests {
             Box::new(command::UnlinkClip::new(timeline, 0, video_id)),
         );
         let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips[0].linked, None);
-        assert_eq!(tl.tracks[1].clips[0].linked, None);
+        // Un gruppo da 2: scollegare un membro scioglie anche l'altro (un
+        // gruppo da 1 non ha senso), non solo quello cliccato.
+        assert_eq!(tl.tracks[0].clips[0].linked_group, None);
+        assert_eq!(tl.tracks[1].clips[0].linked_group, None);
 
         history.undo(&mut project);
         let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips[0].linked, Some(audio_id));
-        assert_eq!(tl.tracks[1].clips[0].linked, Some(video_id));
+        assert_eq!(tl.tracks[0].clips[0].linked_group, Some(group));
+        assert_eq!(tl.tracks[1].clips[0].linked_group, Some(group));
+        assert_eq!(video_id, tl.tracks[0].clips[0].id);
+        assert_eq!(audio_id, tl.tracks[1].clips[0].id);
     }
 
     #[test]
-    fn link_clips_sets_both_sides_and_undo_restores_previous() {
+    fn unlink_clip_in_a_group_of_three_leaves_the_other_two_linked() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut a = make_clip(&mut project, 0, 10);
+        let mut b = make_clip(&mut project, 0, 10);
+        let mut c = make_clip(&mut project, 0, 10);
+        let group = project.alloc_link_group_id();
+        a.linked_group = Some(group);
+        b.linked_group = Some(group);
+        c.linked_group = Some(group);
+        let (a_id, b_id, c_id) = (a.id, b.id, c.id);
+
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 0, clip: a }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 0, clip: b }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 1, clip: c }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::UnlinkClip::new(timeline, 0, a_id)),
+        );
+        let tl = &project.timelines[timeline];
+        let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+        assert_eq!(find(a_id).linked_group, None, "a è uscita dal gruppo");
+        assert_eq!(find(b_id).linked_group, Some(group), "b e c restano collegate tra loro");
+        assert_eq!(find(c_id).linked_group, Some(group));
+    }
+
+    #[test]
+    fn link_clips_groups_an_arbitrary_number_and_undo_restores_previous() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
 
         let video = make_clip(&mut project, 0, 10);
         let video_id = video.id;
-        let audio = make_clip(&mut project, 0, 10);
-        let audio_id = audio.id;
+        let audio_a = make_clip(&mut project, 0, 10);
+        let audio_a_id = audio_a.id;
+        let audio_b = make_clip(&mut project, 0, 10);
+        let audio_b_id = audio_b.id;
         history.do_command(
             &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 0,
-                clip: video,
-            }),
+            Box::new(command::InsertClip { timeline, track_index: 0, clip: video }),
         );
         history.do_command(
             &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 1,
-                clip: audio,
-            }),
+            Box::new(command::InsertClip { timeline, track_index: 1, clip: audio_a }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 1, clip: audio_b }),
         );
 
         history.do_command(
             &mut project,
             Box::new(command::LinkClips::new(
                 timeline,
-                (0, video_id),
-                (1, audio_id),
+                vec![(0, video_id), (1, audio_a_id), (1, audio_b_id)],
             )),
         );
         let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips[0].linked, Some(audio_id));
-        assert_eq!(tl.tracks[1].clips[0].linked, Some(video_id));
+        let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+        let group = find(video_id).linked_group.expect("collegata");
+        assert_eq!(find(audio_a_id).linked_group, Some(group));
+        assert_eq!(find(audio_b_id).linked_group, Some(group));
 
         history.undo(&mut project);
         let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips[0].linked, None);
-        assert_eq!(tl.tracks[1].clips[0].linked, None);
+        let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+        assert_eq!(find(video_id).linked_group, None);
+        assert_eq!(find(audio_a_id).linked_group, None);
+        assert_eq!(find(audio_b_id).linked_group, None);
     }
 
     #[test]
-    fn split_clip_clears_link_on_both_halves_and_undo_restores_it() {
+    fn split_clip_keeps_the_group_on_the_left_half_and_starts_the_right_half_unlinked() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
 
         let mut video = make_clip(&mut project, 0, 20);
-        video.linked = Some(ClipId(999)); // gemella fittizia, non serve che esista per questo test
+        let group = project.alloc_link_group_id();
+        video.linked_group = Some(group);
         let video_id = video.id;
         history.do_command(
             &mut project,
@@ -814,12 +859,19 @@ mod tests {
             Box::new(command::SplitClip::new(timeline, 0, video_id, 8)),
         );
         let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips[0].linked, None);
-        assert_eq!(tl.tracks[0].clips[1].linked, None);
+        assert_eq!(
+            tl.tracks[0].clips[0].linked_group,
+            Some(group),
+            "la metà sinistra è la stessa clip di prima, accorciata: resta nel gruppo"
+        );
+        assert_eq!(
+            tl.tracks[0].clips[1].linked_group, None,
+            "la metà destra è una clip nuova, parte scollegata"
+        );
 
         history.undo(&mut project);
         let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips[0].linked, Some(ClipId(999)));
+        assert_eq!(tl.tracks[0].clips[0].linked_group, Some(group));
     }
 
     #[test]

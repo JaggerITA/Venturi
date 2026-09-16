@@ -1,9 +1,11 @@
 //! Widget timeline multi-traccia: disegna tracce/clip, gestisce
 //! multi-selezione (click semplice, ctrl+click per aggiungere/togglere,
 //! shift+click per un range, rettangolo di selezione trascinando da
-//! un'area vuota), drag orizzontale (con clip collegate che si muovono
-//! insieme, vedi `Clip::linked`), menu contestuale per collegare/scollegare,
-//! e il playhead. Ogni mutazione del progetto passa da
+//! un'area vuota — ognuna espande sempre alla chiusura dei gruppi
+//! collegati, vedi `expand_to_linked_groups`), drag orizzontale (l'intera
+//! selezione si muove insieme, vedi `drag_group_for`/`Clip::linked_group`),
+//! menu contestuale per collegare/scollegare, e il playhead. Ogni mutazione
+//! del progetto passa da
 //! `History::do_command`, mai da una modifica diretta del `Project`; i
 //! cambi di sola selezione invece mutano `TimelineState` direttamente,
 //! visto che non toccano `project`/`history`.
@@ -12,7 +14,7 @@
 //! egui nidificati): per una griglia densa di rettangoli come una timeline
 //! dà più controllo e meno overhead dei container annidati.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use vv_core::{
     Clip, ClipId, ClipSource, EffectStack, FrameIdx, History, Project, TimelineId, Track,
@@ -87,10 +89,12 @@ pub struct ClipboardEntry {
     pub source_in: FrameIdx,
     pub source_out: FrameIdx,
     pub effects: EffectStack,
-    /// Indice in `TimelineState::clipboard` della gemella collegata copiata
-    /// insieme (se c'è): permette di ricollegare le nuove clip incollate
-    /// tra loro, dato che i `ClipId` originali non si riportano al paste.
-    pub linked_index: Option<usize>,
+    /// Tag locale all'operazione di copia (non un vero `LinkGroupId`, che
+    /// va riallocato al paste): entry con lo stesso tag `Some(_)` erano nel
+    /// gruppo collegato al momento della copia — permette di ricollegare
+    /// le nuove clip incollate tra loro, dato che i `ClipId`/`LinkGroupId`
+    /// originali non si riportano al paste.
+    pub link_tag: Option<u64>,
     /// Vedi `Clip::audio_stream_index`.
     pub audio_stream_index: usize,
 }
@@ -101,20 +105,28 @@ struct MarqueeDrag {
 }
 
 struct DragState {
+    /// La clip su cui l'utente ha effettivamente premuto per iniziare il
+    /// drag: la sua posizione pilota lo snap (vedi
+    /// `dragged_primary_new_start`), le altre in `followers` la seguono
+    /// mantenendo l'offset relativo catturato a inizio drag.
     clip_id: ClipId,
     track_index: usize,
     original_start: FrameIdx,
     accum_px: f32,
     /// Range valido per il *nuovo `timeline_start` della clip primaria*,
-    /// già combinato con quello della gemella collegata se presente (vedi
-    /// `drag_range`): min/max, non un "upper" grezzo da cui sottrarre la
-    /// lunghezza a ogni uso.
+    /// già combinato con quello di ogni clip in `followers` (vedi
+    /// `combined_drag_range`): min/max, non un "upper" grezzo da cui
+    /// sottrarre la lunghezza a ogni uso.
     min_start: FrameIdx,
     max_start: FrameIdx,
-    /// (clip_id, track_index, offset) della gemella collegata, se c'è:
-    /// `offset` è la distanza fissa `gemella.timeline_start -
-    /// primaria.timeline_start` catturata all'inizio del drag.
-    linked: Option<(ClipId, usize, FrameIdx)>,
+    /// (clip_id, track_index, offset) di ogni altra clip che si muove
+    /// insieme alla primaria in questo drag — l'intera selezione corrente
+    /// al momento in cui il drag è iniziato (che contiene sempre un intero
+    /// gruppo collegato, mai una parte, vedi doc del modulo) più il gruppo
+    /// della clip cliccata se non era già selezionata. `offset` è la
+    /// distanza fissa `quella.timeline_start - primaria.timeline_start`
+    /// catturata all'inizio del drag.
+    followers: Vec<(ClipId, usize, FrameIdx)>,
 }
 
 /// Trim di un bordo, tenuto separato da `DragState` (mossa vera e propria)
@@ -135,13 +147,13 @@ struct TrimState {
     /// `combined_trim_range`).
     min_value: FrameIdx,
     max_value: FrameIdx,
-    /// (clip_id, track_index) della gemella collegata, se c'è: stesso
-    /// bordo viene trimmato lì con lo stesso identico `new_value` — le
-    /// clip collegate condividono lo stesso spazio numerico
-    /// `source_in`/`source_out`/`timeline_start` per costruzione (vedi
-    /// `insert_media_clip` in `main.rs`), quindi non serve un offset come
-    /// per `DragState::linked`.
-    linked: Option<(ClipId, usize)>,
+    /// (clip_id, track_index) di ogni altra clip del gruppo collegato: lo
+    /// stesso bordo viene trimmato anche lì con lo stesso identico
+    /// `new_value` — le clip collegate condividono lo stesso spazio
+    /// numerico `source_in`/`source_out`/`timeline_start` per costruzione
+    /// (vedi `insert_media_clip` in `main.rs`), quindi non serve un offset
+    /// come per `DragState::followers`.
+    linked_others: Vec<(ClipId, usize)>,
 }
 
 /// Distanza (in pixel schermo) dal bordo di una clip entro cui un drag
@@ -238,13 +250,15 @@ struct ClipVisual {
 /// sola selezione non passano di qui: mutano `state` direttamente, dato
 /// che non serve né `project` né `history`.
 enum PendingAction {
-    /// (clip_id, track_index, new_start) per una o due clip (collegate).
+    /// (clip_id, track_index, new_start) per ogni clip del gruppo trascinato.
     Move(Vec<(ClipId, usize, FrameIdx)>),
-    /// (clip_id, track_index, edge, new_source_in/new_source_out) per una
-    /// o due clip (collegate).
+    /// (clip_id, track_index, edge, new_source_in/new_source_out) per ogni
+    /// clip del gruppo collegato.
     Trim(Vec<(ClipId, usize, TrimEdge, FrameIdx)>),
     Unlink(usize, ClipId),
-    Link(usize, ClipId, usize, ClipId),
+    /// Collega tutte le clip elencate (track_index, clip_id) in un unico
+    /// gruppo nuovo — almeno 2.
+    Link(Vec<ClipKey>),
     /// Aggiunge una track vuota del tipo dato (REFACTOR_PIPELINE.md B4).
     AddTrack(TrackKind),
     /// Rimuove la track a questo indice (e le sue clip).
@@ -867,7 +881,7 @@ pub fn show_timeline(
                     if let Some(m) = state.marquee.take() {
                         let rect = egui::Rect::from_two_pos(m.start, m.current);
                         let hits = clips_intersecting_rect(&visuals, px_per_frame, rect);
-                        state.selected = hits.iter().copied().collect();
+                        state.selected = expand_to_linked_groups(&visuals, hits.iter().copied());
                         state.selection_anchor = hits.first().copied();
                         state.selected_gap = None;
                     }
@@ -953,9 +967,7 @@ pub fn show_timeline(
                         .map(|v| v.clip.timeline_len())
                         .unwrap_or(0);
                     let mut exclude = vec![d.clip_id];
-                    if let Some((partner_id, _, _)) = d.linked {
-                        exclude.push(partner_id);
-                    }
+                    exclude.extend(d.followers.iter().map(|(id, _, _)| *id));
                     snap_frame(
                         candidate,
                         len,
@@ -978,17 +990,11 @@ pub fn show_timeline(
                     (raw.round() as FrameIdx).clamp(t.min_value, t.max_value)
                 });
 
-                // Le gemelle collegate di tutte le clip selezionate vanno
-                // evidenziate insieme a loro (le clip audio+video sono
-                // collegate di default): calcolato una volta sola, non per
-                // ogni clip.
-                let linked_ids = selected_linked_clip_ids(&visuals, &state.selected);
-
                 // Clip.
                 for visual in &visuals {
                     let is_trimming_this = state.trim.as_ref().is_some_and(|t| {
                         t.clip_id == visual.clip.id
-                            || t.linked == Some((visual.clip.id, visual.track_index))
+                            || t.linked_others.contains(&(visual.clip.id, visual.track_index))
                     });
                     let (display_start, display_len) = if is_trimming_this
                         && let (Some(t), Some(new_value)) = (&state.trim, trimmed_primary_new_value)
@@ -1005,14 +1011,14 @@ pub fn show_timeline(
                     } else {
                         let start = match (&state.drag, dragged_primary_new_start) {
                             (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
-                            (Some(d), Some(new_start)) => match d.linked {
-                                Some((partner_id, partner_track, offset))
-                                    if partner_id == visual.clip.id
-                                        && partner_track == visual.track_index =>
-                                {
-                                    new_start + offset
-                                }
-                                _ => visual.clip.timeline_start,
+                            (Some(d), Some(new_start)) => match d
+                                .followers
+                                .iter()
+                                .find(|(id, track, _)| {
+                                    *id == visual.clip.id && *track == visual.track_index
+                                }) {
+                                Some((_, _, offset)) => new_start + offset,
+                                None => visual.clip.timeline_start,
                             },
                             _ => visual.clip.timeline_start,
                         };
@@ -1030,10 +1036,11 @@ pub fn show_timeline(
                     let id = ui.id().with("clip").with(visual.clip.id.0);
                     let resp = ui.interact(clip_rect, id, egui::Sense::click_and_drag());
 
-                    let is_selected = state
-                        .selected
-                        .contains(&(visual.track_index, visual.clip.id))
-                        || linked_ids.contains(&visual.clip.id);
+                    // La selezione contiene sempre un gruppo collegato per
+                    // intero (vedi `expand_to_linked_groups`), quindi non
+                    // serve più evidenziare separatamente le gemelle non
+                    // formalmente selezionate.
+                    let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
                     let stroke = if is_selected {
                         egui::Stroke::new(2.0, egui::Color32::WHITE)
                     } else {
@@ -1094,7 +1101,7 @@ pub fn show_timeline(
                         egui::FontId::proportional(12.0),
                         egui::Color32::BLACK,
                     );
-                    if visual.clip.linked.is_some() {
+                    if visual.clip.linked_group.is_some() {
                         // Due anelli disegnati a mano invece del glifo Unicode
                         // "🔗": su alcune combinazioni piattaforma/driver (es.
                         // Asahi Linux) i font bundled di egui non lo
@@ -1145,7 +1152,7 @@ pub fn show_timeline(
                         let press_pos = ui.input(|i| i.pointer.press_origin());
                         match press_pos.and_then(edge_at) {
                             Some(edge) => {
-                                let (min_value, max_value, linked) = combined_trim_range(
+                                let (min_value, max_value, linked_others) = combined_trim_range(
                                     &visuals,
                                     project,
                                     visual.track_index,
@@ -1164,15 +1171,24 @@ pub fn show_timeline(
                                     accum_px: 0.0,
                                     min_value,
                                     max_value: max_value.max(min_value),
-                                    linked,
+                                    linked_others,
                                 });
                             }
                             None => {
-                                let (min_start, max_start, linked) = combined_drag_range(
+                                let drag_group = drag_group_for(
+                                    &state.selected,
+                                    &visuals,
+                                    (visual.track_index, visual.clip.id),
+                                );
+                                state.selected = drag_group.clone();
+                                state.selection_anchor = Some((visual.track_index, visual.clip.id));
+
+                                let others: Vec<ClipKey> = drag_group.into_iter().collect();
+                                let (min_start, max_start, followers) = combined_drag_range(
                                     &visuals,
                                     visual.track_index,
                                     visual.clip.id,
-                                    visual.clip.linked,
+                                    &others,
                                 );
 
                                 state.drag = Some(DragState {
@@ -1182,7 +1198,7 @@ pub fn show_timeline(
                                     accum_px: 0.0,
                                     min_start,
                                     max_start: max_start.max(min_start),
-                                    linked,
+                                    followers,
                                 });
                             }
                         }
@@ -1211,10 +1227,12 @@ pub fn show_timeline(
                             };
                             let mut trims =
                                 vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
-                            if let Some((partner_id, partner_track)) = t.linked
-                                && let Some(partner) =
+                            for &(partner_id, partner_track) in &t.linked_others {
+                                let Some(partner) =
                                     visuals.iter().find(|v| v.clip.id == partner_id)
-                            {
+                                else {
+                                    continue;
+                                };
                                 let partner_new_source_value = match t.edge {
                                     TrimEdge::Start => partner.clip.source_in + delta,
                                     TrimEdge::End => partner.clip.source_out + delta,
@@ -1236,8 +1254,8 @@ pub fn show_timeline(
                             // sopra: quel che si vedeva è quel che si ottiene.
                             let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
                             let mut moves = vec![(d.clip_id, d.track_index, new_start)];
-                            if let Some((partner_id, partner_track, offset)) = d.linked {
-                                moves.push((partner_id, partner_track, new_start + offset));
+                            for (partner_id, partner_track, offset) in &d.followers {
+                                moves.push((*partner_id, *partner_track, new_start + offset));
                             }
                             pending = Some(PendingAction::Move(moves));
                         }
@@ -1251,28 +1269,26 @@ pub fn show_timeline(
                             &visuals,
                             px_per_frame,
                         );
-                        state.selected = selected;
+                        state.selected = expand_to_linked_groups(&visuals, selected);
                         state.selection_anchor = anchor;
                         state.selected_gap = None;
                     }
 
                     resp.context_menu(|ui| {
-                        if visual.clip.linked.is_some() {
-                            if ui.button("Scollega audio/video").clicked() {
+                        if visual.clip.linked_group.is_some() {
+                            if ui.button("Scollega").clicked() {
                                 pending =
                                     Some(PendingAction::Unlink(visual.track_index, visual.clip.id));
                                 ui.close();
                             }
-                        } else if state.selected.len() == 2 {
+                        } else if state.selected.len() >= 2 {
                             if ui.button("Collega").clicked() {
-                                let mut two = state.selected.iter().copied();
-                                let a = two.next().expect("len() == 2");
-                                let b = two.next().expect("len() == 2");
-                                pending = Some(PendingAction::Link(a.0, a.1, b.0, b.1));
+                                pending =
+                                    Some(PendingAction::Link(state.selected.iter().copied().collect()));
                                 ui.close();
                             }
                         } else {
-                            ui.label("Seleziona esattamente 2 clip per collegarle");
+                            ui.label("Seleziona almeno 2 clip per collegarle");
                         }
                     });
                 }
@@ -1337,14 +1353,10 @@ pub fn show_timeline(
                     Box::new(vv_core::UnlinkClip::new(timeline_id, track_index, clip_id)),
                 );
             }
-            PendingAction::Link(track_a, clip_a, track_b, clip_b) => {
+            PendingAction::Link(targets) => {
                 history.do_command(
                     project,
-                    Box::new(vv_core::LinkClips::new(
-                        timeline_id,
-                        (track_a, clip_a),
-                        (track_b, clip_b),
-                    )),
+                    Box::new(vv_core::LinkClips::new(timeline_id, targets)),
                 );
             }
             PendingAction::AddTrack(kind) => {
@@ -1656,96 +1668,139 @@ fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (F
     )
 }
 
-/// Gli id delle gemelle collegate di tutte le clip selezionate: vanno
-/// evidenziate insieme alla selezione (le clip audio+video sono collegate
-/// di default) anche se non fanno formalmente parte di `selected`.
-fn selected_linked_clip_ids(
+/// Espande un insieme di clip alla chiusura dei loro gruppi collegati
+/// (`Clip::linked_group`): se una clip è collegata, l'intero gruppo entra
+/// nel risultato, non solo lei. Selezione, drag e cancellazione trattano un
+/// gruppo come un'unità (vedi doc del modulo) — questa è l'unica funzione
+/// che materializza quell'invariante, chiamata da ogni punto che scrive
+/// `TimelineState::selected` a partire da un'interazione diretta con la
+/// timeline (click, ctrl+click, shift+click, rettangolo).
+fn expand_to_linked_groups(
     visuals: &[ClipVisual],
+    keys: impl IntoIterator<Item = ClipKey>,
+) -> BTreeSet<ClipKey> {
+    let mut result: BTreeSet<ClipKey> = BTreeSet::new();
+    for key @ (track_index, clip_id) in keys {
+        result.insert(key);
+        let group = visuals
+            .iter()
+            .find(|v| v.track_index == track_index && v.clip.id == clip_id)
+            .and_then(|v| v.clip.linked_group);
+        if let Some(group) = group {
+            for v in visuals.iter().filter(|v| v.clip.linked_group == Some(group)) {
+                result.insert((v.track_index, v.clip.id));
+            }
+        }
+    }
+    result
+}
+
+/// L'insieme di clip che deve muoversi insieme quando si inizia un drag su
+/// `clicked` (bug segnalato: trascinare una clip dentro una multi-selezione
+/// non spostava le altre). Se `clicked` fa già parte di `selected`, il drag
+/// segue *l'intera selezione corrente* — che contiene sempre un gruppo
+/// collegato per intero, vedi `expand_to_linked_groups`, quindi non serve
+/// unirla esplicitamente al gruppo qui. Se `clicked` non è selezionata,
+/// trascinarla sostituisce la selezione con lei (+ il suo gruppo
+/// collegato) — comportamento standard da NLE: un drag su una clip fuori
+/// dalla selezione corrente non deve trascinarsi dietro una selezione
+/// precedente e scorrelata.
+fn drag_group_for(
     selected: &BTreeSet<ClipKey>,
-) -> HashSet<ClipId> {
-    visuals
-        .iter()
-        .filter(|v| selected.contains(&(v.track_index, v.clip.id)))
-        .filter_map(|v| v.clip.linked)
-        .collect()
+    visuals: &[ClipVisual],
+    clicked: ClipKey,
+) -> BTreeSet<ClipKey> {
+    if selected.contains(&clicked) {
+        selected.clone()
+    } else {
+        expand_to_linked_groups(visuals, [clicked])
+    }
 }
 
 /// Range valido per il `timeline_start` di `clip_id`, combinato con quello
-/// della sua gemella collegata (se `linked` è `Some`): il drag deve
-/// rispettare i vincoli di *entrambe*, tradotti nello spazio della clip
-/// primaria. Restituisce anche (id, track, offset) della gemella, pronti
-/// per essere salvati in `DragState`.
+/// di ogni altra clip in `others` (tipicamente l'intera selezione corrente,
+/// vedi il chiamante): il drag deve rispettare i vincoli di *tutte*,
+/// tradotti nello spazio della clip primaria. Restituisce anche (id, track,
+/// offset) di ognuna, pronti per essere salvati in `DragState::followers`.
 fn combined_drag_range(
     visuals: &[ClipVisual],
     track_index: usize,
     clip_id: ClipId,
-    linked: Option<ClipId>,
-) -> (FrameIdx, FrameIdx, Option<(ClipId, usize, FrameIdx)>) {
-    let (min_start, max_start) = drag_range(visuals, track_index, clip_id);
+    others: &[ClipKey],
+) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize, FrameIdx)>) {
+    let (mut min_start, mut max_start) = drag_range(visuals, track_index, clip_id);
 
-    let Some(partner_id) = linked else {
-        return (min_start, max_start, None);
-    };
-    let Some(partner) = visuals.iter().find(|v| v.clip.id == partner_id) else {
-        return (min_start, max_start, None);
-    };
     let Some(this_start) = visuals
         .iter()
         .find(|v| v.track_index == track_index && v.clip.id == clip_id)
         .map(|v| v.clip.timeline_start)
     else {
-        return (min_start, max_start, None);
+        return (min_start, max_start, Vec::new());
     };
 
-    let offset = partner.clip.timeline_start - this_start;
-    let (p_min, p_max) = drag_range(visuals, partner.track_index, partner_id);
-    (
-        min_start.max(p_min - offset),
-        max_start.min(p_max - offset),
-        Some((partner_id, partner.track_index, offset)),
-    )
+    let mut followers = Vec::new();
+    for &(other_track, other_id) in others {
+        if other_track == track_index && other_id == clip_id {
+            continue;
+        }
+        let Some(other) = visuals
+            .iter()
+            .find(|v| v.track_index == other_track && v.clip.id == other_id)
+        else {
+            continue;
+        };
+        let offset = other.clip.timeline_start - this_start;
+        let (o_min, o_max) = drag_range(visuals, other_track, other_id);
+        min_start = min_start.max(o_min - offset);
+        max_start = max_start.min(o_max - offset);
+        followers.push((other_id, other_track, offset));
+    }
+    (min_start, max_start, followers)
 }
 
 /// Range valido (in frame timeline) per il nuovo valore della coordinata
 /// trimmata (`timeline_start` per `Start`, `timeline_end()` per `End`),
-/// combinato con quello della gemella collegata se presente — stesso
+/// combinato con quello di ogni altra clip del gruppo collegato — stesso
 /// principio di `combined_drag_range`, ma per il trim: qui il vincolo è
 /// dato sia dal vicino sulla stessa track sia dal bordo del *sorgente*
 /// (non si può trimmare oltre l'inizio/la fine reale del media). Ritorna
-/// anche (clip_id, track_index) della gemella, pronti per `TrimState`.
+/// anche (clip_id, track_index) di ogni altro membro, pronti per
+/// `TrimState::linked_others`.
 fn combined_trim_range(
     visuals: &[ClipVisual],
     project: &Project,
     track_index: usize,
     clip_id: ClipId,
     edge: TrimEdge,
-) -> (FrameIdx, FrameIdx, Option<(ClipId, usize)>) {
+) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize)>) {
     let Some(visual) = visuals
         .iter()
         .find(|v| v.track_index == track_index && v.clip.id == clip_id)
     else {
-        return (0, FrameIdx::MAX, None);
+        return (0, FrameIdx::MAX, Vec::new());
     };
-    let (min1, max1) = single_trim_range(visuals, project, track_index, &visual.clip, edge);
+    let (mut min_value, mut max_value) =
+        single_trim_range(visuals, project, track_index, &visual.clip, edge);
 
-    let Some(partner_id) = visual.clip.linked else {
-        return (min1, max1, None);
+    let Some(group) = visual.clip.linked_group else {
+        return (min_value, max_value, Vec::new());
     };
-    let Some(partner) = visuals.iter().find(|v| v.clip.id == partner_id) else {
-        return (min1, max1, None);
-    };
-    let (min2, max2) =
-        single_trim_range(visuals, project, partner.track_index, &partner.clip, edge);
-
     // Le clip collegate condividono lo stesso spazio numerico
     // source_in/source_out/timeline_start (vedi `insert_media_clip` in
-    // main.rs): lo stesso identico `new_value` si applica a entrambe,
-    // quindi il range valido è l'intersezione dei due.
-    (
-        min1.max(min2),
-        max1.min(max2),
-        Some((partner_id, partner.track_index)),
-    )
+    // main.rs): lo stesso identico `new_value` si applica a tutte, quindi
+    // il range valido è l'intersezione di tutte.
+    let mut linked_others = Vec::new();
+    for other in visuals
+        .iter()
+        .filter(|v| v.clip.linked_group == Some(group) && v.clip.id != clip_id)
+    {
+        let (o_min, o_max) =
+            single_trim_range(visuals, project, other.track_index, &other.clip, edge);
+        min_value = min_value.max(o_min);
+        max_value = max_value.min(o_max);
+        linked_others.push((other.clip.id, other.track_index));
+    }
+    (min_value, max_value, linked_others)
 }
 
 fn single_trim_range(
@@ -1944,7 +1999,7 @@ mod tests {
                 source_out: len,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
-                linked: None,
+                linked_group: None,
                 audio_stream_index: 0,
             },
             label: String::new(),
@@ -1957,51 +2012,104 @@ mod tests {
         id: u64,
         start: FrameIdx,
         len: FrameIdx,
-        linked: u64,
+        group: u64,
     ) -> ClipVisual {
         let mut v = visual(track_index, id, start, len);
-        v.clip.linked = Some(ClipId(linked));
+        v.clip.linked_group = Some(vv_core::LinkGroupId(group));
         v
     }
 
     #[test]
-    fn selected_linked_clip_ids_finds_the_partners() {
-        let visuals = vec![visual_linked(0, 1, 0, 10, 2), visual_linked(1, 2, 0, 10, 1)];
+    fn expand_to_linked_groups_includes_the_whole_group() {
+        let visuals = vec![visual_linked(0, 1, 0, 10, 100), visual_linked(1, 2, 0, 10, 100)];
+        assert_eq!(
+            expand_to_linked_groups(&visuals, [(0, ClipId(1))]),
+            BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]),
+            "selezionando il video deve espandere anche all'audio collegato"
+        );
+        assert_eq!(
+            expand_to_linked_groups(&visuals, [(1, ClipId(2))]),
+            BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]),
+            "e viceversa, partendo dall'audio"
+        );
+    }
+
+    #[test]
+    fn expand_to_linked_groups_is_a_noop_for_unlinked_clips() {
+        let visuals = vec![visual(0, 1, 0, 10)];
+        assert_eq!(
+            expand_to_linked_groups(&visuals, [(0, ClipId(1))]),
+            BTreeSet::from([(0, ClipId(1))])
+        );
+        assert_eq!(expand_to_linked_groups(&visuals, []), BTreeSet::new());
+    }
+
+    #[test]
+    fn expand_to_linked_groups_handles_independent_groups_and_groups_larger_than_two() {
+        // Un gruppo da 2 e uno da 3, indipendenti, entrambi punto di
+        // partenza: l'intero gruppo di ciascuno deve comparire nel
+        // risultato, non solo un partner.
+        let visuals = vec![
+            visual_linked(0, 1, 0, 10, 100),
+            visual_linked(1, 2, 0, 10, 100),
+            visual_linked(0, 3, 20, 10, 200),
+            visual_linked(1, 4, 20, 10, 200),
+            visual_linked(2, 5, 20, 10, 200),
+        ];
+        let result = expand_to_linked_groups(&visuals, [(0, ClipId(1)), (0, ClipId(3))]);
+        assert_eq!(
+            result,
+            BTreeSet::from([
+                (0, ClipId(1)),
+                (1, ClipId(2)),
+                (0, ClipId(3)),
+                (1, ClipId(4)),
+                (2, ClipId(5)),
+            ])
+        );
+    }
+
+    /// Bug segnalato: con CTRL+click/rettangolo selezionavo 2+ clip *non*
+    /// collegate tra loro, poi trascinandone una le altre non seguivano —
+    /// il drag guardava solo il gruppo collegato della clip cliccata,
+    /// ignorando il resto della selezione.
+    #[test]
+    fn drag_group_for_follows_the_whole_multi_selection_even_without_a_link() {
+        let visuals = vec![
+            visual(0, 1, 0, 10),
+            visual(1, 2, 30, 10),
+            visual(2, 3, 60, 10),
+        ];
+        // 3 clip non collegate tra loro, tutte selezionate a mano (CTRL+click).
+        let selected = BTreeSet::from([(0, ClipId(1)), (1, ClipId(2)), (2, ClipId(3))]);
+
+        // Trascinandone una qualunque, il drag deve seguire l'intera
+        // selezione — non solo lei.
+        assert_eq!(
+            drag_group_for(&selected, &visuals, (1, ClipId(2))),
+            selected
+        );
+    }
+
+    #[test]
+    fn drag_group_for_replaces_the_selection_when_dragging_an_unselected_clip() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(1, 2, 30, 10)];
+        // Selezione precedente e scorrelata: trascinare una clip fuori da
+        // essa non deve trascinarsela dietro.
         let selected = BTreeSet::from([(0, ClipId(1))]);
         assert_eq!(
-            selected_linked_clip_ids(&visuals, &selected),
-            HashSet::from([ClipId(2)]),
-            "selezionando il video deve trovare l'audio collegato"
-        );
-        let selected = BTreeSet::from([(1, ClipId(2))]);
-        assert_eq!(
-            selected_linked_clip_ids(&visuals, &selected),
-            HashSet::from([ClipId(1)]),
-            "e viceversa, selezionando l'audio deve trovare il video"
+            drag_group_for(&selected, &visuals, (1, ClipId(2))),
+            BTreeSet::from([(1, ClipId(2))])
         );
     }
 
     #[test]
-    fn selected_linked_clip_ids_is_empty_when_unlinked_or_unselected() {
-        let visuals = vec![visual(0, 1, 0, 10)];
-        assert!(selected_linked_clip_ids(&visuals, &BTreeSet::from([(0, ClipId(1))])).is_empty());
-        assert!(selected_linked_clip_ids(&visuals, &BTreeSet::new()).is_empty());
-    }
-
-    #[test]
-    fn selected_linked_clip_ids_collects_partners_of_every_selected_clip() {
-        // Due coppie collegate indipendenti, entrambe selezionate: le
-        // gemelle di *entrambe* vanno evidenziate.
-        let visuals = vec![
-            visual_linked(0, 1, 0, 10, 2),
-            visual_linked(1, 2, 0, 10, 1),
-            visual_linked(0, 3, 20, 10, 4),
-            visual_linked(1, 4, 20, 10, 3),
-        ];
-        let selected = BTreeSet::from([(0, ClipId(1)), (0, ClipId(3))]);
+    fn drag_group_for_expands_to_the_link_group_when_dragging_an_unselected_linked_clip() {
+        let visuals = vec![visual_linked(0, 1, 0, 10, 100), visual_linked(1, 2, 0, 10, 100)];
+        let selected = BTreeSet::new();
         assert_eq!(
-            selected_linked_clip_ids(&visuals, &selected),
-            HashSet::from([ClipId(2), ClipId(4)])
+            drag_group_for(&selected, &visuals, (0, ClipId(1))),
+            BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))])
         );
     }
 
@@ -2166,11 +2274,11 @@ mod tests {
     }
 
     #[test]
-    fn combined_drag_range_unlinked_matches_plain_drag_range() {
+    fn combined_drag_range_with_no_others_matches_plain_drag_range() {
         let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 30)];
-        let (min, max, linked) = combined_drag_range(&visuals, 0, ClipId(2), None);
+        let (min, max, followers) = combined_drag_range(&visuals, 0, ClipId(2), &[]);
         assert_eq!((min, max), drag_range(&visuals, 0, ClipId(2)));
-        assert!(linked.is_none());
+        assert!(followers.is_empty());
     }
 
     #[test]
@@ -2186,10 +2294,10 @@ mod tests {
         ];
         // Da sola track 0 permetterebbe [10, MAX-30]; la gemella sulla
         // track 1 la restringe a max_start <= 25 (stesso offset, 0).
-        let (min, max, linked) = combined_drag_range(&visuals, 0, ClipId(2), Some(ClipId(3)));
+        let (min, max, followers) = combined_drag_range(&visuals, 0, ClipId(2), &[(1, ClipId(3))]);
         assert_eq!(min, 10);
         assert_eq!(max, 25);
-        assert_eq!(linked, Some((ClipId(3), 1, 0)));
+        assert_eq!(followers, vec![(ClipId(3), 1, 0)]);
     }
 
     #[test]
@@ -2200,10 +2308,32 @@ mod tests {
             visual(1, 2, 15, 20), // gemella, track 1, start=15 (offset=5)
             visual(1, 3, 60, 5),  // vincola la gemella: max_start <= 60-20=40
         ];
-        let (_, max, linked) = combined_drag_range(&visuals, 0, ClipId(1), Some(ClipId(2)));
+        let (_, max, followers) = combined_drag_range(&visuals, 0, ClipId(1), &[(1, ClipId(2))]);
         // vincolo gemella tradotto: primaria.max_start <= 40 - offset(5) = 35
         assert_eq!(max, 35);
-        assert_eq!(linked, Some((ClipId(2), 1, 5)));
+        assert_eq!(followers, vec![(ClipId(2), 1, 5)]);
+    }
+
+    #[test]
+    fn combined_drag_range_intersects_a_group_of_three() {
+        // Gruppo da 3 su 3 track diverse, ognuna con un vincolo diverso.
+        let visuals = vec![
+            visual(0, 1, 10, 10), // primaria, track 0, start=10, nessun vicino
+            visual(1, 2, 10, 10), // stesso start, vincolata da un vicino a 25
+            visual(1, 5, 35, 5),
+            visual(2, 3, 10, 10), // stesso start, vincolata da un vicino a 22
+            visual(2, 6, 32, 5),
+        ];
+        let (min, max, followers) =
+            combined_drag_range(&visuals, 0, ClipId(1), &[(1, ClipId(2)), (2, ClipId(3))]);
+        assert_eq!(min, 0);
+        // track1: max_start <= 35-10=25; track2: max_start <= 32-10=22 (più stretto)
+        assert_eq!(max, 22);
+        assert_eq!(
+            followers,
+            vec![(ClipId(2), 1, 0), (ClipId(3), 2, 0)],
+            "entrambe le altre clip del gruppo, con offset 0 (stesso start)"
+        );
     }
 
     fn media_clip_visual(
@@ -2223,7 +2353,7 @@ mod tests {
                 source_out,
                 timeline_start: start,
                 effects: EffectStack::default(),
-                linked: None,
+                linked_group: None,
                 audio_stream_index: 0,
             },
             label: String::new(),
@@ -2323,19 +2453,20 @@ mod tests {
         let project = Project::default();
         // Video [10,30), collegato all'audio [10,30) sulla track 1; un
         // vicino sulla track audio limita l'estensione della fine a 35.
+        let group = Some(vv_core::LinkGroupId(9));
         let mut video = visual(0, 1, 10, 20);
-        video.clip.linked = Some(ClipId(2));
+        video.clip.linked_group = group;
         let mut audio = visual(1, 2, 10, 20);
-        audio.clip.linked = Some(ClipId(1));
+        audio.clip.linked_group = group;
         let visuals = vec![video, audio, visual(1, 3, 35, 10)];
 
-        let (_, max_value, linked) =
+        let (_, max_value, linked_others) =
             combined_trim_range(&visuals, &project, 0, ClipId(1), TrimEdge::End);
         assert_eq!(
             max_value, 35,
             "vincolo della gemella si applica anche al video"
         );
-        assert_eq!(linked, Some((ClipId(2), 1)));
+        assert_eq!(linked_others, vec![(ClipId(2), 1)]);
     }
 
     #[test]
@@ -2408,7 +2539,7 @@ mod tests {
                 source_out: len,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
-                linked: None,
+                linked_group: None,
                 audio_stream_index: 0,
             };
             history.do_command(
@@ -2522,7 +2653,7 @@ mod tests {
             source_out: 2500, // 100s a 25fps
             timeline_start: 0,
             effects: vv_core::EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         };
         history.do_command(
@@ -2643,7 +2774,7 @@ mod tests {
             source_out: 10,
             timeline_start: 0,
             effects: vv_core::EffectStack::default(),
-            linked: None,
+            linked_group: None,
             audio_stream_index: 0,
         };
         history.do_command(
