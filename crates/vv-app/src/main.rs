@@ -19,6 +19,7 @@ mod player;
 mod proxy_worker;
 mod render_ahead;
 mod timeline_ui;
+mod waveform_worker;
 
 use eframe::wgpu;
 use frame_provider::FrameProvider;
@@ -288,6 +289,22 @@ struct VibeVideoApp {
     /// alla prima `import_media`, non subito: niente thread in più per
     /// una sessione che non importa mai media).
     proxy_worker: Option<proxy_worker::ProxyWorker>,
+    /// Genera in background la waveform (picchi audio) di ogni media
+    /// importato con audio (vedi `vv_media::waveform`): sempre attivo,
+    /// come il proxy, così la waveform è già pronta appena la timeline
+    /// la disegna. `None` finché non è mai stato importato nulla (stesso
+    /// principio di `proxy_worker`).
+    waveform_worker: Option<waveform_worker::WaveformWorker>,
+    /// Picchi audio già caricati in memoria, a chiave `content_hash` del
+    /// media: la timeline li legge a ogni frame per disegnare la waveform
+    /// delle clip audio, e il primo disegno di un media li carica dal
+    /// file di cache (`vv_media::waveform::load_waveform`) se il worker
+    /// l'ha già generato. In memoria (non riletto da disco a ogni frame)
+    /// perché la timeline si ridisegna a ogni repaint e un `read` di un
+    /// file da qualche MB a ogni frame sarebbe un I/O inutile; il file
+    /// resta la fonte di verità (sopravvive al riavvio), la mappa è solo
+    /// una cache della sessione.
+    waveform_cache: HashMap<u64, Vec<f32>>,
     /// Quanti secondi di timeline bufferizzare in anticipo avanti/dietro
     /// la testina (menu Playback > Proxy, dove vive anche il toggle
     /// proxy) — vedi doc di `render_ahead::DEFAULT_LOOKAHEAD_SECS`/
@@ -451,6 +468,8 @@ impl Default for VibeVideoApp {
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             proxy_enabled: true,
             proxy_worker: None,
+            waveform_worker: None,
+            waveform_cache: HashMap::new(),
             lookahead_secs: render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
             active_clip: None,
@@ -491,6 +510,13 @@ impl VibeVideoApp {
                 // l'import: un `content_hash` sbagliato al più fa
                 // rigenerare un proxy che poteva essere riusato).
                 let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
+                // Letti *prima* dell'insert (che muove `meta`): servono
+                // per decidere se accodare la waveform (solo i media con
+                // audio) e quanti picchi generare (proporzionali alla
+                // durata).
+                let has_audio = meta.has_audio;
+                let num_peaks =
+                    vv_media::recommended_num_peaks(meta.duration_frames as f64 / meta.fps.as_f64());
                 let media_id = self.project.media_pool.insert(vv_core::MediaItem {
                     path: path.clone(),
                     meta,
@@ -504,6 +530,16 @@ impl VibeVideoApp {
                 self.proxy_worker
                     .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
                     .enqueue(path.clone(), content_hash);
+                // Waveform solo per i media con audio: la timeline la
+                // disegna solo sulle clip audio, e un media senza audio
+                // non ne avrebbe mai una da disegnare (il worker
+                // restituirebbe `None` comunque, ma non serve nemmeno
+                // aprire il file).
+                if has_audio {
+                    self.waveform_worker
+                        .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
+                        .enqueue(path.clone(), content_hash, num_peaks);
+                }
                 self.preview_media(media_id);
             }
             Err(e) => self.import_error = Some(e.to_string()),
@@ -1458,6 +1494,34 @@ impl VibeVideoApp {
             }
         }
         ranges
+    }
+
+    /// Carica in memoria la waveform (picchi audio) di ogni media audio
+    /// presente sulla timeline, se il file di cache esiste ma non è ancora
+    /// nella mappa della sessione: la timeline la disegna a ogni frame, e
+    /// un `read` di un file da qualche MB a ogni repaint sarebbe un I/O
+    /// inutile. Il file resta la fonte di verità (sopravvive al riavvio,
+    /// generato dal `waveform_worker`); la mappa è solo una cache della
+    /// sessione. Chiamato prima di `show_timeline`, che poi legge i picchi
+    /// dalla mappa via la closure `waveform_peaks` che gli passa.
+    fn ensure_waveforms_loaded(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Audio) {
+            for clip in &track.clips {
+                if let vv_core::ClipSource::Media(media_id) = &clip.source
+                    && let Some(item) = self.project.media_pool.get(*media_id)
+                    && item.meta.has_audio
+                    && !self.waveform_cache.contains_key(&item.content_hash)
+                    && vv_media::waveform::waveform_exists(item.content_hash)
+                {
+                    if let Some(peaks) = vv_media::waveform::load_waveform(item.content_hash) {
+                        self.waveform_cache.insert(item.content_hash, peaks);
+                    }
+                }
+            }
+        }
     }
 
     /// Continua la riproduzione oltre la fine (nello spazio timeline) della
@@ -3108,6 +3172,10 @@ impl eframe::App for VibeVideoApp {
                     if self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up()) {
                         ui.ctx().request_repaint();
                     }
+                    // Picchi audio già in memoria (caricati dal file di cache
+                    // la prima volta che servono, vedi `ensure_waveforms_loaded`):
+                    // la timeline li disegna come waveform sulle clip audio.
+                    self.ensure_waveforms_loaded();
                     media_drop = timeline_ui::show_timeline(
                         ui,
                         &mut self.project,
@@ -3118,6 +3186,7 @@ impl eframe::App for VibeVideoApp {
                         self.snapping_enabled,
                         &buffered_ranges,
                         &proxy_ranges,
+                        &self.waveform_cache,
                         self.preview_player.as_ref().is_some_and(Player::is_playing)
                             || self.gap_wall_clock.is_some(),
                     );

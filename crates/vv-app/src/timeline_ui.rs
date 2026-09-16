@@ -526,6 +526,13 @@ pub fn show_timeline(
     // proxy-backed può comunque essere già bufferizzata dal sorgente
     // pieno).
     proxy_ranges: &[(FrameIdx, FrameIdx)],
+    // Picchi audio già in memoria, a chiave `content_hash` del media
+    // (caricati dal file di cache dal chiamante, vedi
+    // `VibeVideoApp::ensure_waveforms_loaded`): disegnati come waveform
+    // dentro le clip audio. `None` per un media la cui waveform non è
+    // ancora pronta (il worker la sta ancora generando) — la clip si
+    // disegna come prima, senza waveform.
+    waveform_cache: &std::collections::HashMap<u64, Vec<f32>>,
     // Il player è in riproduzione (clip attiva in corso o vuoto
     // attraversato a orologio): durante la riproduzione la testina deve
     // sempre restare visibile, quindi la vista "volta pagina" per
@@ -1031,6 +1038,29 @@ pub fn show_timeline(
                     painter.rect_filled(clip_rect, 4.0, visual.color);
                     painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
 
+                    // Waveform audio: dentro la clip, solo per le clip
+                    // audio di un media la cui waveform è già pronta
+                    // (il worker l'ha generata e il chiamante l'ha caricata
+                    // in `waveform_cache`). Il picco per ogni colonna
+                    // pixel è il massimo assoluto dei bin che quella
+                    // colonna copre — indipendente dallo zoom, così la
+                    // forma resta la stessa a qualunque livello.
+                    if track_kinds[visual.track_index] == TrackKind::Audio
+                        && let ClipSource::Media(media_id) = &visual.clip.source
+                        && let Some(item) = project.media_pool.get(*media_id)
+                        && let Some(peaks) = waveform_cache.get(&item.content_hash)
+                    {
+                        draw_clip_waveform(
+                            &painter,
+                            clip_rect,
+                            peaks,
+                            visual.clip.source_in,
+                            visual.clip.source_out,
+                            item.meta.duration_frames,
+                            ui.clip_rect(),
+                        );
+                    }
+
                     // Striscia "proxy": sulla clip stessa (non sul righello
                     // della timeline, dove viveva prima) — il proxy è una
                     // proprietà *per clip*, non di un punto della timeline,
@@ -1363,6 +1393,66 @@ fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32) -> egui::Rect {
     let y = RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
     let w = (visual.clip.timeline_len() as f32 * px_per_frame).max(2.0);
     egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0))
+}
+
+/// Disegna la waveform di una clip audio dentro `clip_rect`: per ogni
+/// colonna pixel della porzione *visibile* della clip, una linea
+/// verticale centrata sull'altezza della clip, con altezza proporzionale
+/// al picco del bin coperto da quella colonna. `peaks` sono i picchi di
+/// *tutto* il media (normalizzati in [0,1]); `source_in`/`source_out`/
+/// `duration_frames` ne selezionano la sotto-fascia della clip. Il
+/// picco per colonna è il massimo assoluto dei bin che la colonna copre —
+/// indipendente dallo zoom, così la forma resta la stessa a qualunque
+/// livello. `visible_rect` limita il disegno alla porzione a schermo
+/// (una clip lunga fuori dal viewport non viene iterata colonna per
+/// colonna).
+fn draw_clip_waveform(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    peaks: &[f32],
+    source_in: FrameIdx,
+    source_out: FrameIdx,
+    duration_frames: FrameIdx,
+    visible_rect: egui::Rect,
+) {
+    if peaks.is_empty() || duration_frames <= 0 {
+        return;
+    }
+    // Sotto-fascia della clip nello spazio dei bin del media.
+    let n = peaks.len() as f64;
+    let mut bin_start = (source_in as f64 / duration_frames as f64 * n).floor() as usize;
+    let mut bin_end = ((source_out as f64 / duration_frames as f64 * n).ceil() as usize).max(bin_start + 1);
+    bin_start = bin_start.min(peaks.len());
+    bin_end = bin_end.min(peaks.len());
+    if bin_start >= bin_end {
+        return;
+    }
+    let clip_peaks = &peaks[bin_start..bin_end];
+
+    // Porzione visibile della clip (nessuna colonna fuori dal viewport).
+    let vis = clip_rect.intersect(visible_rect);
+    if !vis.is_positive() {
+        return;
+    }
+
+    let center_y = clip_rect.center().y;
+    let half_height = clip_rect.height() / 2.0;
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 140));
+
+    let width = clip_rect.width();
+    let num_bins = clip_peaks.len() as f32;
+    let mut x = vis.min.x;
+    while x < vis.max.x {
+        let frac = (x - clip_rect.min.x) / width;
+        let bin = (frac * num_bins) as usize;
+        let peak = clip_peaks[bin.min(clip_peaks.len() - 1)];
+        let h = (half_height * peak).max(0.5);
+        painter.line_segment(
+            [egui::pos2(x, center_y - h), egui::pos2(x, center_y + h)],
+            stroke,
+        );
+        x += 1.0;
+    }
 }
 
 /// Le clip il cui rettangolo interseca `rect` (coordinate locali): nucleo
@@ -2251,6 +2341,7 @@ mod tests {
                     true,
                     &[],
                     &[],
+                    &std::collections::HashMap::new(),
                     false,
                 );
             });
@@ -2295,6 +2386,7 @@ mod tests {
                     true,
                     &[],
                     &[],
+                    &std::collections::HashMap::new(),
                     false,
                 );
             });
@@ -2372,6 +2464,7 @@ mod tests {
                         true,
                         &[],
                         &[],
+                        &std::collections::HashMap::new(),
                         false,
                     );
                 });
@@ -2486,6 +2579,7 @@ mod tests {
                             true,
                             &[],
                             &[],
+                            &std::collections::HashMap::new(),
                             false,
                         );
                     });
