@@ -418,6 +418,9 @@ struct VibeVideoApp {
     /// ogni volta la clip.
     selection_follows_playhead: bool,
 
+    /// Audio durante lo scrub (menu Timeline): attivo di default.
+    scrub_audio: bool,
+
     arrow_hold: Option<ArrowHold>,
 
     /// Il pannello proprietà (a destra del viewer) è visibile? Attivo di
@@ -510,6 +513,7 @@ impl Default for VibeVideoApp {
             speed_stretch_tx,
             speed_stretch_rx,
             selection_follows_playhead: true,
+            scrub_audio: true,
             arrow_hold: None,
             properties_panel_open: true,
             snapping_enabled: true,
@@ -1140,8 +1144,17 @@ impl VibeVideoApp {
             self.timeline_state.playhead = target;
             self.ensure_active_clip_matches_playhead(true);
             self.sync_selection_to_playhead();
+            self.play_scrub_audio();
         }
         true
+    }
+
+    fn play_scrub_audio(&mut self) {
+        if self.scrub_audio
+            && let Some(player) = &mut self.preview_player
+        {
+            player.play_scrub_snippet();
+        }
     }
 
     /// Fa play/pause sulla clip sotto al playhead, senza bisogno che sia
@@ -2954,6 +2967,9 @@ impl eframe::App for VibeVideoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(player) = &mut self.preview_player {
             player.tick();
+            if player.is_scrub_snippet_active() {
+                ui.ctx().request_repaint();
+            }
         }
         self.poll_speed_stretch_result();
         self.poll_speed_window_extension();
@@ -3184,6 +3200,8 @@ impl eframe::App for VibeVideoApp {
                     .on_hover_text(
                         "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
                     );
+                    ui.checkbox(&mut self.scrub_audio, "Audio durante lo scrub")
+                        .on_hover_text("Suona un breve frammento audio a ogni spostamento manuale del playhead");
                     ui.separator();
                     if ui.button("Zoom avanti (Ctrl++)").clicked() {
                         self.timeline_state.zoom_in();
@@ -3458,6 +3476,9 @@ impl eframe::App for VibeVideoApp {
 
         if self.browsing_media.is_none() {
             self.ensure_active_clip_matches_playhead(user_scrubbed_playhead);
+            if user_scrubbed_playhead {
+                self.play_scrub_audio();
+            }
             // `drive_playback` avanza il playhead da sé durante la
             // riproduzione: senza questo confronto, "selection follows
             // playhead" seguiva solo lo scrub manuale (già coperto sopra

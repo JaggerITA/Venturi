@@ -54,7 +54,13 @@ pub struct Player {
     /// estesa (`extend_speed_window`) — solo `AudioPlayer::extend_samples`
     /// fa crescere il buffer dietro le quinte.
     window_origin_secs: f64,
+    /// Frammento di scrub in corso (`play_scrub_snippet`): quando fermarlo
+    /// e dove riportare la posizione, visto che l'audio intanto avanza.
+    scrub_snippet: Option<(Instant, f64)>,
 }
+
+/// Durata del frammento audio suonato a ogni spostamento durante lo scrub.
+const SCRUB_SNIPPET: std::time::Duration = std::time::Duration::from_millis(80);
 
 impl Player {
     /// `fps` è quello nativo del media (da `MediaMeta`, non più letto da
@@ -111,6 +117,7 @@ impl Player {
                 wall_clock_base_secs: 0.0,
                 speed: 1.0,
                 window_origin_secs: 0.0,
+                scrub_snippet: None,
             },
             audio_buffer,
         ))
@@ -120,6 +127,7 @@ impl Player {
         if self.playing {
             return;
         }
+        self.stop_scrub_snippet();
         self.playing = true;
         match &self.audio {
             Some(audio) => audio.play(),
@@ -128,6 +136,7 @@ impl Player {
     }
 
     pub fn pause(&mut self) {
+        self.stop_scrub_snippet();
         if !self.playing {
             return;
         }
@@ -154,6 +163,34 @@ impl Player {
         self.playing
     }
 
+    /// Suona un breve frammento dalla posizione corrente senza entrare in
+    /// riproduzione (`is_playing` resta `false`). No-op se in riproduzione
+    /// o senza audio.
+    pub fn play_scrub_snippet(&mut self) {
+        if self.playing {
+            return;
+        }
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        let pos = self.position_secs();
+        audio.play();
+        self.scrub_snippet = Some((Instant::now() + SCRUB_SNIPPET, pos));
+    }
+
+    pub fn is_scrub_snippet_active(&self) -> bool {
+        self.scrub_snippet.is_some()
+    }
+
+    fn stop_scrub_snippet(&mut self) {
+        if let Some((_, pos)) = self.scrub_snippet.take() {
+            if let Some(audio) = &self.audio {
+                audio.pause();
+            }
+            self.seek_secs(pos);
+        }
+    }
+
     /// Gain statico della clip in dB (milestone 5: `EffectStack::gain_db`).
     /// No-op se la clip non ha audio.
     pub fn set_gain_db(&self, db: f32) {
@@ -174,6 +211,9 @@ impl Player {
 
     pub fn seek_secs(&mut self, secs: f64) {
         let secs = secs.clamp(0.0, self.duration_secs.max(0.0));
+        if let Some((stop_at, _)) = self.scrub_snippet {
+            self.scrub_snippet = Some((stop_at, secs));
+        }
         if let Some(audio) = &self.audio {
             // `audio` può contenere solo una finestra di audio
             // time-stretched a `self.speed` a partire da
@@ -343,6 +383,12 @@ impl Player {
     /// clip (altrimenti il wall clock continuerebbe a correre oltre la
     /// durata).
     pub fn tick(&mut self) {
+        if self
+            .scrub_snippet
+            .is_some_and(|(stop_at, _)| Instant::now() >= stop_at)
+        {
+            self.stop_scrub_snippet();
+        }
         if self.playing && self.position_secs() >= self.duration_secs {
             self.pause();
             self.wall_clock_base_secs = self.duration_secs;
