@@ -3,8 +3,10 @@ pub mod model;
 pub mod persistence;
 
 pub use command::{
-    AddTrack, Command, CompositeCommand, History, InsertClip, KeyframeTarget, KeyframeValue,
-    LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveTrack, RippleDeleteAllTracks,
+    AddTrack, Command, CompositeCommand, GroupMark, History, InsertClip, KeyframeTarget,
+    KeyframeValue,
+    LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
+    RippleDeleteAllTracks,
     RippleDeleteGap, SetClipColor, SetClipGain, SetClipTransform, SplitClip, TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,
 };
@@ -38,6 +40,59 @@ mod tests {
             audio_stream_index: 0,
             rate: Rational::one(),
         }
+    }
+
+    fn insert_media(project: &mut Project) -> MediaId {
+        project.media_pool.insert(MediaItem {
+            path: "a.mp4".into(),
+            meta: MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 1920,
+                height: 1080,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 7,
+        })
+    }
+
+    #[test]
+    fn remove_media_leaves_its_clips_offline_and_undo_reconnects_them() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let media = insert_media(&mut project);
+
+        let mut clip = make_clip(&mut project, 0, 10);
+        clip.source = ClipSource::Media(media);
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip,
+            }),
+        );
+
+        history.do_command(&mut project, Box::new(command::RemoveMedia::new(media)));
+        assert!(project.media_pool.is_empty());
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        let ClipSource::Media(dangling) = clip.source else {
+            panic!("la clip deve restare in timeline, solo senza media");
+        };
+        assert!(project.media_pool.get(dangling).is_none());
+
+        // L'undo reinserisce con una chiave slotmap nuova: la clip deve
+        // puntare a quella, non alla vecchia.
+        history.undo(&mut project);
+        assert_eq!(project.media_pool.len(), 1);
+        let restored = project.media_pool.keys().next().unwrap();
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert!(matches!(clip.source, ClipSource::Media(id) if id == restored));
+
+        history.redo(&mut project);
+        assert!(project.media_pool.is_empty());
     }
 
     #[test]

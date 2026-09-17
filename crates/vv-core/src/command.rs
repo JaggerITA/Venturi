@@ -2,9 +2,10 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipId, FrameIdx, Interpolation, Keyframed, LinkGroupId, Project, Rgba, TimelineId, Track,
-    TrackKind, Transform,
+    Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem,
+    Project, Rgba, TimelineId, Track, TrackKind, Transform,
 };
+use std::cell::{Cell, RefCell};
 
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
@@ -40,6 +41,10 @@ impl Command for CompositeCommand {
     }
 }
 
+/// Punto di inizio di un gruppo di undo, vedi `History::begin_group`.
+#[derive(Debug, Clone, Copy)]
+pub struct GroupMark(usize);
+
 #[derive(Default)]
 pub struct History {
     undo_stack: Vec<Box<dyn Command>>,
@@ -53,6 +58,25 @@ impl History {
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
         self.generation += 1;
+    }
+
+    /// Inizio di un gruppo: i comandi eseguiti da qui fino a `end_group`
+    /// diventeranno un unico passo di undo. Serve quando una sola azione
+    /// dell'utente si scompone in più comandi (es. il drop di più media,
+    /// che inserisce una clip per stream audio e crea le track mancanti):
+    /// senza, ogni pezzo richiederebbe il suo Ctrl+Z.
+    pub fn begin_group(&mut self) -> GroupMark {
+        GroupMark(self.undo_stack.len())
+    }
+
+    pub fn end_group(&mut self, mark: GroupMark) {
+        let commands = self.undo_stack.split_off(mark.0.min(self.undo_stack.len()));
+        if commands.len() > 1 {
+            self.undo_stack
+                .push(Box::new(CompositeCommand::new(commands)));
+        } else {
+            self.undo_stack.extend(commands);
+        }
     }
 
     pub fn undo(&mut self, project: &mut Project) {
@@ -1227,6 +1251,52 @@ impl Command for RemoveKeyframe {
             KeyframeValue::Color(v) => {
                 if let Some(color) = &mut clip.effects.color {
                     color.upsert(self.frame, v, interp);
+                }
+            }
+        }
+    }
+}
+
+/// Rimuove un media dal media pool. Le clip che lo usano restano in
+/// timeline e diventano "offline" (la loro `MediaId` non risolve più).
+///
+/// `slotmap` non permette di reinserire con la stessa chiave, quindi
+/// l'undo ottiene una `MediaId` nuova e deve riscrivere i riferimenti in
+/// tutte le clip; per lo stesso motivo lo stato (item rimosso e id
+/// corrente) sta dietro a `Cell`/`RefCell`: `Command::undo` prende `&self`.
+#[derive(Debug)]
+pub struct RemoveMedia {
+    media: Cell<MediaId>,
+    removed: RefCell<Option<MediaItem>>,
+}
+
+impl RemoveMedia {
+    pub fn new(media: MediaId) -> Self {
+        Self {
+            media: Cell::new(media),
+            removed: RefCell::new(None),
+        }
+    }
+}
+
+impl Command for RemoveMedia {
+    fn apply(&mut self, project: &mut Project) {
+        *self.removed.borrow_mut() = project.media_pool.remove(self.media.get());
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(item) = self.removed.borrow_mut().take() else {
+            return;
+        };
+        let old = self.media.get();
+        let new = project.media_pool.insert(item);
+        self.media.set(new);
+        for timeline in project.timelines.values_mut() {
+            for track in &mut timeline.tracks {
+                for clip in &mut track.clips {
+                    if matches!(clip.source, ClipSource::Media(id) if id == old) {
+                        clip.source = ClipSource::Media(new);
+                    }
                 }
             }
         }

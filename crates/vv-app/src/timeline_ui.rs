@@ -758,6 +758,20 @@ impl MediaDrag {
     }
 }
 
+/// Payload effettivo del drag&drop: più media selezionati insieme nel
+/// media pool vengono accodati sulla timeline nell'ordine in cui compaiono
+/// lì, quindi il payload è una lista ordinata, non un singolo media.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaDragSet {
+    pub items: Vec<MediaDrag>,
+}
+
+impl MediaDragSet {
+    pub fn one(drag: MediaDrag) -> Self {
+        Self { items: vec![drag] }
+    }
+}
+
 /// Quanto occupa sulla timeline il media trascinato: la sua durata in
 /// frame sorgente conformata all'fps della timeline (vedi `Clip::rate`).
 /// `1/1` se il media non è (più) nel pool.
@@ -774,6 +788,50 @@ fn drag_timeline_len(
     drag.timeline_len(rate)
 }
 
+/// Lunghezza totale del drop: i media accodati uno dopo l'altro.
+fn drag_set_timeline_len(
+    project: &Project,
+    timeline_fps: vv_core::Rational,
+    set: &MediaDragSet,
+) -> FrameIdx {
+    set.items
+        .iter()
+        .map(|d| drag_timeline_len(project, timeline_fps, d))
+        .sum()
+}
+
+/// Un segmento del ghost di drop: offset dall'inizio del drop, lunghezza e
+/// se il media porta anche audio. I media vengono accodati uno dopo l'altro
+/// (vedi `insert_media_clip`), quindi il ghost li mostra separati e non come
+/// un unico blocco lungo quanto la somma.
+struct DragSegment {
+    offset: FrameIdx,
+    len: FrameIdx,
+    has_audio: bool,
+}
+
+fn drag_set_segments(
+    project: &Project,
+    timeline_fps: vv_core::Rational,
+    set: &MediaDragSet,
+) -> Vec<DragSegment> {
+    let mut offset = 0;
+    set.items
+        .iter()
+        .filter(|d| project.media_pool.contains_key(d.media_id))
+        .map(|d| {
+            let len = drag_timeline_len(project, timeline_fps, d);
+            let seg = DragSegment {
+                offset,
+                len,
+                has_audio: project.media_pool[d.media_id].meta.has_audio,
+            };
+            offset += len;
+            seg
+        })
+        .collect()
+}
+
 /// Dove piazzare un media rilasciato dal media pool. `Default`: track di
 /// sempre (vedi `insert_media_clip`). `NewVideoTrack`/`NewAudioTrack`:
 /// rilasciato nella fascia vuota sopra al gruppo Video o sotto al gruppo
@@ -785,8 +843,8 @@ pub enum MediaDropTarget {
     NewAudioTrack,
 }
 
-/// `Some((media, frame, target))` se in questo frame è stato rilasciato un
-/// elemento trascinato dal media pool; il chiamante se ne occupa.
+/// `Some((media, frame, target))` se in questo frame sono stati rilasciati
+/// uno o più elementi trascinati dal media pool; il chiamante se ne occupa.
 pub fn show_timeline(
     ui: &mut egui::Ui,
     project: &mut Project,
@@ -827,7 +885,7 @@ pub fn show_timeline(
     // sempre restare visibile, quindi la vista "volta pagina" per
     // seguirla quando esce dall'area visibile (vedi sotto).
     playback_active: bool,
-) -> Option<(MediaDrag, FrameIdx, MediaDropTarget)> {
+) -> Option<(MediaDragSet, FrameIdx, MediaDropTarget)> {
     let mut media_drop = None;
 
     // Zoom orizzontale (Alt+scroll, vedi `zoom_modifier` in `main`, o
@@ -860,7 +918,11 @@ pub fn show_timeline(
         for (track_index, track) in tl.tracks.iter().enumerate() {
             for clip in &track.clips {
                 max_end = max_end.max(clip.timeline_end());
-                let (label, color) = clip_label_and_color(clip, track, media_labels);
+                let offline = matches!(
+                    &clip.source,
+                    ClipSource::Media(id) if !project.media_pool.contains_key(*id)
+                );
+                let (label, color) = clip_label_and_color(clip, track, offline, media_labels);
                 visuals.push(ClipVisual {
                     track_index,
                     clip: clip.clone(),
@@ -1225,64 +1287,67 @@ pub fn show_timeline(
                 // legato a chi ha "vinto" l'interazione, non a questo drop).
                 // Nei margini il drop spetta alle zone "nuova track" sotto.
                 if pointer_over_tracks
-                    && let Some(drag) = marquee_resp.dnd_hover_payload::<MediaDrag>()
+                    && let Some(drag) = marquee_resp.dnd_hover_payload::<MediaDragSet>()
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-                    && let Some(item) = project.media_pool.get(drag.media_id)
+                    && drag.items.iter().any(|d| project.media_pool.contains_key(d.media_id))
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag_timeline_len(project, timeline_fps, &drag),
+                        drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    let ghost_height = if item.meta.has_audio {
-                        2.0 * ROW_HEIGHT
-                    } else {
-                        ROW_HEIGHT
-                    };
-                    let ghost_rect = egui::Rect::from_min_size(
-                        egui::pos2(
-                            origin.x + frame as f32 * px_per_frame,
-                            origin.y + row_y.first().copied().unwrap_or(RULER_HEIGHT),
-                        ),
-                        egui::vec2(
-                            drag_timeline_len(project, timeline_fps, &drag) as f32 * px_per_frame,
-                            ghost_height,
-                        ),
-                    );
-                    painter.rect_filled(
-                        ghost_rect,
-                        4.0,
-                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
-                    );
-                    painter.rect_stroke(
-                        ghost_rect,
-                        4.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
-                        egui::StrokeKind::Inside,
-                    );
+                    let ghost_top =
+                        origin.y + row_y.first().copied().unwrap_or(RULER_HEIGHT);
+                    for seg in drag_set_segments(project, timeline_fps, &drag) {
+                        let height = if seg.has_audio {
+                            2.0 * ROW_HEIGHT
+                        } else {
+                            ROW_HEIGHT
+                        };
+                        let x = origin.x + (frame + seg.offset) as f32 * px_per_frame;
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(x, ghost_top),
+                            egui::vec2(seg.len as f32 * px_per_frame, height),
+                        )
+                        // Un filo di margine fra un segmento e il successivo:
+                        // senza, i bordi combaciano e le clip accodate
+                        // sembrano un blocco unico.
+                        .shrink2(egui::vec2(1.0, 0.0));
+                        painter.rect_filled(
+                            rect,
+                            4.0,
+                            egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
+                        );
+                        painter.rect_stroke(
+                            rect,
+                            4.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                 }
                 if pointer_over_tracks
-                    && let Some(drag) = marquee_resp.dnd_release_payload::<MediaDrag>()
+                    && let Some(drag) = marquee_resp.dnd_release_payload::<MediaDragSet>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag_timeline_len(project, timeline_fps, &drag),
+                        drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*drag, frame, MediaDropTarget::Default));
+                    media_drop = Some(((*drag).clone(), frame, MediaDropTarget::Default));
                 }
 
                 // Zone "aggiungi una nuova track": margini sopra/sotto ai
@@ -1297,7 +1362,7 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if above_video_resp
-                    .dnd_hover_payload::<MediaDrag>()
+                    .dnd_hover_payload::<MediaDragSet>()
                     .is_some()
                 {
                     painter.rect_filled(
@@ -1319,21 +1384,21 @@ pub fn show_timeline(
                         egui::Color32::from_rgb(200, 255, 200),
                     );
                 }
-                if let Some(drag) = above_video_resp.dnd_release_payload::<MediaDrag>()
+                if let Some(drag) = above_video_resp.dnd_release_payload::<MediaDragSet>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag_timeline_len(project, timeline_fps, &drag),
+                        drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*drag, frame, MediaDropTarget::NewVideoTrack));
+                    media_drop = Some(((*drag).clone(), frame, MediaDropTarget::NewVideoTrack));
                 }
 
                 let below_audio_rect = egui::Rect::from_min_size(
@@ -1349,7 +1414,7 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if below_audio_resp
-                    .dnd_hover_payload::<MediaDrag>()
+                    .dnd_hover_payload::<MediaDragSet>()
                     .is_some()
                 {
                     painter.rect_filled(
@@ -1371,21 +1436,21 @@ pub fn show_timeline(
                         egui::Color32::from_rgb(200, 255, 200),
                     );
                 }
-                if let Some(drag) = below_audio_resp.dnd_release_payload::<MediaDrag>()
+                if let Some(drag) = below_audio_resp.dnd_release_payload::<MediaDragSet>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag_timeline_len(project, timeline_fps, &drag),
+                        drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*drag, frame, MediaDropTarget::NewAudioTrack));
+                    media_drop = Some(((*drag).clone(), frame, MediaDropTarget::NewAudioTrack));
                 }
 
                 if marquee_resp.drag_started() {
@@ -2082,13 +2147,20 @@ pub fn show_timeline(
     media_drop
 }
 
+/// `offline`: il media della clip non è più nel media pool (cancellato da
+/// lì, vedi `vv_core::RemoveMedia`) — la clip resta in timeline ma si tinge
+/// di rosso, e il player mostra "Media offline".
 fn clip_label_and_color(
     clip: &Clip,
     track: &Track,
+    offline: bool,
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
 ) -> (String, egui::Color32) {
     match &clip.source {
         vv_core::ClipSource::Media(media_id) => {
+            if offline {
+                return ("⚠ Media offline".to_string(), OFFLINE_COLOR);
+            }
             let label = media_labels(*media_id);
             let color = if track.kind == TrackKind::Video {
                 egui::Color32::from_rgb(90, 140, 200)
@@ -2684,6 +2756,9 @@ fn snap_frame(
 
 const PROXY_STRIP_HEIGHT: f32 = 4.0;
 /// Colore dell'indicatore "proxy disponibile", condiviso col media pool.
+/// Clip il cui media non è più nel media pool.
+pub const OFFLINE_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 50, 50);
+
 pub const PROXY_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(220, 151, 52, 220);
 
 fn paint_proxy_strip(painter: &egui::Painter, rect: egui::Rect) {
@@ -3384,6 +3459,39 @@ mod tests {
             content_hash: 0,
         });
         (project, media_id)
+    }
+
+    #[test]
+    fn drag_set_segments_are_queued_one_after_the_other() {
+        let (mut project, a) = project_with_media(30);
+        let b = project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/y.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 50,
+                fps: vv_core::Rational::new(25, 1),
+                width: 100,
+                height: 100,
+                has_audio: true,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            content_hash: 1,
+        });
+        let fps = vv_core::Rational::new(25, 1);
+        let set = MediaDragSet {
+            items: vec![
+                MediaDrag::whole(a, &project.media_pool[a].meta),
+                MediaDrag::whole(b, &project.media_pool[b].meta),
+            ],
+        };
+        let segments = drag_set_segments(&project, fps, &set);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| (s.offset, s.len, s.has_audio))
+                .collect::<Vec<_>>(),
+            vec![(0, 30, false), (30, 50, true)]
+        );
     }
 
     #[test]

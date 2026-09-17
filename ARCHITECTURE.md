@@ -228,7 +228,11 @@ vibevideo/
 
 Fatto:
 - Import (anche multi-stream audio), media pool con anteprima, drag sulla
-  timeline.
+  timeline (più elementi selezionati insieme vengono accodati nell'ordine
+  del pannello), multi-selezione (click, ctrl, shift, rettangolo) e
+  cancellazione (Del/Backspace) degli elementi: le clip che usavano un
+  media cancellato restano in timeline in rosso e il viewer mostra "Media
+  offline" (`vv_core::RemoveMedia`).
 - Timeline multi-traccia: aggiunta track, drag, trim, split al playhead (T),
   normal delete (Del/Backspace), ripple delete (tasto "<"), copia/incolla,
   collega/scollega, multi-selezione (click, ctrl, shift, rettangolo),

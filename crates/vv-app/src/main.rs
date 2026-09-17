@@ -15,6 +15,7 @@
 
 mod export;
 mod frame_provider;
+mod media_pool;
 mod mix_buffers;
 mod proxy_worker;
 mod render_ahead;
@@ -142,12 +143,23 @@ enum PendingEffectChange {
     RemoveColorKeyframe(usize, ClipId, FrameIdx),
 }
 
+/// Dove atterrano le clip di un drop dal media pool, risolto una volta per
+/// l'intero drop (vedi `resolve_drop_tracks`): `extra_audio` è la track
+/// audio creata al volo, che ha la precedenza sulle esistenti.
+#[derive(Debug, Clone, Copy)]
+struct DropTracks {
+    video: usize,
+    extra_audio: Option<usize>,
+}
+
 /// Quale rappresentazione di texture del viewer è quella corrente — vedi
 /// doc di `VibeVideoApp::last_viewer_frame_kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewerFrameKind {
     SolidColor,
     Video,
+    /// La clip sotto la testina punta a un media non più nel media pool.
+    Offline,
 }
 
 struct VibeVideoApp {
@@ -155,6 +167,7 @@ struct VibeVideoApp {
     history: vv_core::History,
     timeline_id: Option<TimelineId>,
     timeline_state: timeline_ui::TimelineState,
+    media_pool_state: media_pool::MediaPoolState,
     import_error: Option<String>,
 
     preview_meta: Option<vv_core::MediaMeta>,
@@ -386,6 +399,7 @@ impl Default for VibeVideoApp {
             history: vv_core::History::default(),
             timeline_id: None,
             timeline_state: timeline_ui::TimelineState::default(),
+            media_pool_state: media_pool::MediaPoolState::default(),
             import_error: None,
             preview_meta: None,
             preview_error: None,
@@ -1554,27 +1568,105 @@ impl VibeVideoApp {
             timeline_ui::MediaDrag::whole(media_id, &meta),
             &meta,
             video_start,
-            timeline_ui::MediaDropTarget::Default,
+            DropTracks {
+                video: video_track,
+                extra_audio: None,
+            },
         );
     }
 
     /// Come `add_media_to_timeline`, ma piazza la clip a `start` (posizione
     /// e `target` dal drag&drop sulla timeline, vedi `MediaDropTarget`).
+    #[cfg(test)]
     fn add_media_to_timeline_at(
         &mut self,
         drag: timeline_ui::MediaDrag,
         start: FrameIdx,
         target: timeline_ui::MediaDropTarget,
     ) {
-        let Some(item) = self.project.media_pool.get(drag.media_id) else {
+        self.add_media_set_to_timeline_at(
+            &timeline_ui::MediaDragSet::one(drag),
+            start,
+            target,
+        );
+    }
+
+    /// Drop di uno o più media dal media pool: vengono accodati a partire da
+    /// `start` nell'ordine del set (quello in cui compaiono nel media pool),
+    /// ognuno subito dopo il precedente. Le eventuali track nuove
+    /// (`MediaDropTarget::New*`) si creano una volta sola per l'intero drop,
+    /// non una per media.
+    fn add_media_set_to_timeline_at(
+        &mut self,
+        set: &timeline_ui::MediaDragSet,
+        start: FrameIdx,
+        target: timeline_ui::MediaDropTarget,
+    ) {
+        let drops: Vec<(timeline_ui::MediaDrag, vv_core::MediaMeta)> = set
+            .items
+            .iter()
+            .filter(|d| d.source_len() > 0)
+            .filter_map(|d| {
+                let item = self.project.media_pool.get(d.media_id)?;
+                Some((*d, item.meta.clone()))
+            })
+            .collect();
+        let Some((_, first_meta)) = drops.first() else {
             return;
         };
-        if drag.source_len() <= 0 {
+        let timeline_id = self.ensure_timeline_for(first_meta);
+        let any_audio = drops.iter().any(|(_, meta)| meta.has_audio);
+        // Un drop solo = un solo Ctrl+Z, anche se dentro sono N clip (una
+        // per stream audio di ogni media) più le track create al volo.
+        let group = self.history.begin_group();
+        let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_audio) else {
+            self.history.end_group(group);
             return;
+        };
+
+        let timeline_fps = self.project.timelines[timeline_id].fps;
+        let mut cursor = start;
+        for (drag, meta) in &drops {
+            self.insert_media_clip(timeline_id, *drag, meta, cursor, tracks);
+            let rate = vv_core::Rational::conform_rate(timeline_fps, meta.fps);
+            cursor += drag.timeline_len(rate);
         }
-        let meta = item.meta.clone();
-        let timeline_id = self.ensure_timeline_for(&meta);
-        self.insert_media_clip(timeline_id, drag, &meta, start, target);
+        self.history.end_group(group);
+    }
+
+    /// Crea le track richieste da `target` (una volta sola per drop) e
+    /// restituisce dove andranno le clip.
+    fn resolve_drop_tracks(
+        &mut self,
+        timeline_id: TimelineId,
+        target: timeline_ui::MediaDropTarget,
+        any_audio: bool,
+    ) -> Option<DropTracks> {
+        let video = if target == timeline_ui::MediaDropTarget::NewVideoTrack {
+            let new_index = self.project.timelines[timeline_id].tracks.len();
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+            );
+            new_index
+        } else {
+            // Nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`.
+            self.project.timelines[timeline_id].first_track_index(TrackKind::Video)?
+        };
+        let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
+            let new_index = self.project.timelines[timeline_id].tracks.len();
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
+            );
+            Some(new_index)
+        } else {
+            None
+        };
+        Some(DropTracks {
+            video,
+            extra_audio,
+        })
     }
 
     /// Inserisce la clip video (e una clip audio per stream, vedi
@@ -1593,28 +1685,14 @@ impl VibeVideoApp {
         drag: timeline_ui::MediaDrag,
         meta: &vv_core::MediaMeta,
         start: FrameIdx,
-        target: timeline_ui::MediaDropTarget,
+        tracks: DropTracks,
     ) {
         let media_id = drag.media_id;
         let rate = vv_core::Rational::conform_rate(
             self.project.timelines[timeline_id].fps,
             meta.fps,
         );
-        let video_track = if target == timeline_ui::MediaDropTarget::NewVideoTrack {
-            let new_index = self.project.timelines[timeline_id].tracks.len();
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
-            );
-            new_index
-        } else {
-            let Some(video_track) =
-                self.project.timelines[timeline_id].first_track_index(TrackKind::Video)
-            else {
-                return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
-            };
-            video_track
-        };
+        let video_track = tracks.video;
         let video_clip_id = self.project.alloc_clip_id();
 
         let mut audio_track_indices: Vec<usize> = self.project.timelines[timeline_id]
@@ -1622,15 +1700,11 @@ impl VibeVideoApp {
             .map(|(i, _)| i)
             .collect();
 
-        if target == timeline_ui::MediaDropTarget::NewAudioTrack && meta.has_audio {
-            let new_index = self.project.timelines[timeline_id].tracks.len();
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
-            );
-            // In testa: il primo stream deve atterrare sulla track appena
-            // creata, non su una già esistente.
-            audio_track_indices.insert(0, new_index);
+        // In testa: il primo stream deve atterrare sulla track appena
+        // creata per questo drop, non su una già esistente.
+        if let Some(extra) = tracks.extra_audio {
+            audio_track_indices.retain(|i| *i != extra);
+            audio_track_indices.insert(0, extra);
         }
 
         let num_audio_streams = if meta.has_audio && !audio_track_indices.is_empty() {
@@ -1711,12 +1785,44 @@ impl VibeVideoApp {
         }
     }
 
+    /// Ctrl+A: seleziona tutte le clip della timeline.
+    fn select_all_clips(&mut self) {
+        self.select_clips(|_| true);
+    }
+
+    /// Alt+Y: seleziona dalla testina in avanti — la clip sotto alla
+    /// testina è inclusa, quelle che finiscono prima restano fuori.
+    fn select_clips_from_playhead(&mut self) {
+        let playhead = self.timeline_state.playhead;
+        self.select_clips(|clip| clip.timeline_end() > playhead);
+    }
+
     /// Normal delete: rimuove *tutte* le clip selezionate, lasciando un
     /// vuoto al loro posto. Le altre track non si muovono. Un solo passo di
     /// history per tutte insieme. L'ordine non conta: `LiftDelete` non
     /// sposta nient'altro. Non serve tirare dentro esplicitamente i gruppi
     /// collegati: selezionare una clip collegata seleziona già tutto il suo
     /// gruppo (vedi `TimelineState::set_selection`/i punti dove si clicca).
+    fn select_clips(&mut self, keep: impl Fn(&vv_core::Clip) -> bool) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let selected: BTreeSet<(usize, ClipId)> = self.project.timelines[timeline_id]
+            .tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(track_index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .filter(|clip| keep(clip))
+                    .map(move |clip| (track_index, clip.id))
+            })
+            .collect();
+        let anchor = selected.iter().next().copied();
+        self.timeline_state.set_selection(selected, anchor);
+    }
+
     fn delete_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1740,6 +1846,52 @@ impl VibeVideoApp {
         );
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
+    }
+
+    /// Canc/Backspace sul media pool: toglie i media selezionati. Le clip
+    /// che li usano restano in timeline e diventano offline (vedi
+    /// `vv_core::RemoveMedia`).
+    fn delete_selected_media(&mut self) {
+        if self.media_pool_state.selected.is_empty() {
+            return;
+        }
+        let commands: Vec<Box<dyn vv_core::Command>> = self
+            .media_pool_state
+            .selected
+            .iter()
+            .copied()
+            .map(|id| Box::new(vv_core::RemoveMedia::new(id)) as Box<dyn vv_core::Command>)
+            .collect();
+        if self
+            .browsing_media
+            .is_some_and(|id| self.media_pool_state.selected.contains(&id))
+        {
+            self.stop_browsing();
+        }
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+        self.media_pool_state.clear();
+    }
+
+    /// La clip attiva punta a un media non piu' nel media pool.
+    fn active_clip_media_offline(&self) -> bool {
+        if self.browsing_media.is_some() {
+            return false;
+        }
+        let (Some(timeline_id), Some((track_index, clip_id))) = (self.timeline_id, self.active_clip)
+        else {
+            return false;
+        };
+        self.project.timelines[timeline_id]
+            .tracks
+            .get(track_index)
+            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+            .is_some_and(|c| match &c.source {
+                vv_core::ClipSource::Media(id) => !self.project.media_pool.contains_key(*id),
+                vv_core::ClipSource::SolidColor => false,
+            })
     }
 
     /// Gestisce gli eventi Copy/Paste della tastiera per la clipboard della
@@ -2420,6 +2572,96 @@ fn show_drag_ghost(ui: &egui::Ui, id: egui::Id, label: &str) {
         });
 }
 
+/// Larghezza della colonna "Durata": la stessa nell'intestazione e nelle
+/// righe, così restano allineate.
+const DURATION_COL_W: f32 = 64.0;
+
+/// Altezza della barra di intestazione del media pool.
+const HEADER_HEIGHT: f32 = 22.0;
+
+/// Intestazione a colonne del media pool: ogni cella è cliccabile per
+/// intero (non solo la scritta), come nella lista di un file manager.
+fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::MediaPoolState) {
+    use media_pool::SortKey;
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(width, HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let duration_w = DURATION_COL_W.min(width);
+    let (name_rect, duration_rect) = (
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right() - duration_w, rect.bottom())),
+        egui::Rect::from_min_max(egui::pos2(rect.right() - duration_w, rect.top()), rect.right_bottom()),
+    );
+    let sort = state.sort;
+    for (key, label, cell) in [
+        (SortKey::Name, "Nome", name_rect),
+        (SortKey::Duration, "Durata", duration_rect),
+    ] {
+        let resp = ui.interact(
+            cell,
+            ui.id().with(("media_pool_header", label)),
+            egui::Sense::click(),
+        );
+        let active = sort.key == key;
+        let bg = if resp.hovered() {
+            ui.visuals().widgets.hovered.weak_bg_fill
+        } else if active {
+            ui.visuals().widgets.active.weak_bg_fill
+        } else {
+            ui.visuals().widgets.inactive.weak_bg_fill
+        };
+        ui.painter().rect_filled(cell, 0.0, bg);
+        let text_color = ui.visuals().strong_text_color();
+        ui.painter().text(
+            cell.left_center() + egui::vec2(6.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(13.0),
+            text_color,
+        );
+        if active {
+            // Triangolino disegnato a mano invece di un carattere: quelli
+            // dei font di sistema sono alti e appuntiti, questo è schiacciato.
+            let c = egui::pos2(cell.right() - 10.0, cell.center().y);
+            let (w, h) = (4.5, 2.5);
+            let points = if sort.ascending {
+                vec![
+                    egui::pos2(c.x - w, c.y + h),
+                    egui::pos2(c.x + w, c.y + h),
+                    egui::pos2(c.x, c.y - h),
+                ]
+            } else {
+                vec![
+                    egui::pos2(c.x - w, c.y - h),
+                    egui::pos2(c.x + w, c.y - h),
+                    egui::pos2(c.x, c.y + h),
+                ]
+            };
+            ui.painter().add(egui::Shape::convex_polygon(
+                points,
+                text_color,
+                egui::Stroke::NONE,
+            ));
+        }
+        if resp.clicked() {
+            state.toggle_sort(key);
+        }
+    }
+}
+
+/// Durata di un media per la colonna del pannello: MM:SS, con le ore solo
+/// quando ci sono.
+fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> String {
+    let secs = (duration_frames.max(0) as f64 / fps.max(1e-9)).round() as u64;
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 fn file_label(path: &std::path::Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -2673,7 +2915,13 @@ impl eframe::App for VibeVideoApp {
             };
             arrow_input.1 = i.time;
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
-                self.delete_selected();
+                // Il pannello che ha ricevuto l'ultimo click decide chi
+                // cancella: media pool o timeline.
+                if self.media_pool_state.focused {
+                    self.delete_selected_media();
+                } else {
+                    self.delete_selected();
+                }
             }
             // Tasto fisico "<" (il 102° tasto ISO, tra Shift sinistro e Z
             // sui layout europei/italiani — `IntlBackslash` in egui,
@@ -2706,8 +2954,16 @@ impl eframe::App for VibeVideoApp {
             // "a": come la barra spaziatrice, ma se già in riproduzione
             // accelera invece di mettere in pausa (1x -> 2x -> 4x -> 8x) —
             // vedi doc di `handle_fast_playback_key`.
-            if i.key_pressed(egui::Key::A) {
+            if i.key_pressed(egui::Key::A) && !i.modifiers.command && !i.modifiers.alt {
                 self.handle_fast_playback_key();
+            }
+            // Ctrl+A: seleziona tutte le clip; Alt+Y: solo quelle dalla
+            // testina in avanti.
+            if i.modifiers.command && i.key_pressed(egui::Key::A) {
+                self.select_all_clips();
+            }
+            if i.modifiers.alt && i.key_pressed(egui::Key::Y) {
+                self.select_clips_from_playhead();
             }
             // Ctrl+I (Cmd+I su macOS): import media, come il pulsante toolbar.
             if i.modifiers.command && i.key_pressed(egui::Key::I) {
@@ -3044,9 +3300,13 @@ impl eframe::App for VibeVideoApp {
         // posizione: qui basta un semplice drop-ovunque che la crei al volo
         // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
         // media a frame 0.
-        let mut media_drop: Option<(timeline_ui::MediaDrag, FrameIdx, timeline_ui::MediaDropTarget)> =
+        let mut media_drop: Option<(
+            timeline_ui::MediaDragSet,
+            FrameIdx,
+            timeline_ui::MediaDropTarget,
+        )> =
             None;
-        let mut dropped_on_empty_timeline: Option<timeline_ui::MediaDrag> = None;
+        let mut dropped_on_empty_timeline: Option<timeline_ui::MediaDragSet> = None;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
             .resizable(true)
@@ -3112,16 +3372,16 @@ impl eframe::App for VibeVideoApp {
                     let drop_id = ui.id().with("timeline_drop_zone_empty");
                     let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
                     dropped_on_empty_timeline = drop_resp
-                        .dnd_release_payload::<timeline_ui::MediaDrag>()
-                        .map(|arc| *arc);
+                        .dnd_release_payload::<timeline_ui::MediaDragSet>()
+                        .map(|arc| (*arc).clone());
                     ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
                 }
             });
         if let Some(drag) = dropped_on_empty_timeline {
-            self.add_media_to_timeline_at(drag, 0, timeline_ui::MediaDropTarget::Default);
+            self.add_media_set_to_timeline_at(&drag, 0, timeline_ui::MediaDropTarget::Default);
         }
         if let Some((drag, start, target)) = media_drop {
-            self.add_media_to_timeline_at(drag, start, target);
+            self.add_media_set_to_timeline_at(&drag, start, target);
         }
 
         // L'utente ha trascinato/cliccato il playhead in questo frame?
@@ -3173,10 +3433,9 @@ impl eframe::App for VibeVideoApp {
 
         let mut preview_action = None;
         let mut pending_effect = None;
-        egui::Panel::left("media_pool")
+        let pool_panel = egui::Panel::left("media_pool")
             .default_size(260.0)
             .show(ui, |ui| {
-                ui.heading("Media Pool");
                 if let Some(err) = &self.import_error {
                     ui.colored_label(egui::Color32::RED, err);
                 }
@@ -3203,6 +3462,7 @@ impl eframe::App for VibeVideoApp {
                         }
                     }
                 }
+                media_pool_header(ui, &mut self.media_pool_state);
                 // auto_shrink([false, false]): senza, la ScrollArea (e
                 // quindi il pannello stesso) si restringe alla larghezza
                 // del contenuto invece di riempire quella assegnata dal
@@ -3220,6 +3480,31 @@ impl eframe::App for VibeVideoApp {
                                 (id, file_label(&item.path), item.meta.clone(), item.content_hash)
                             })
                             .collect();
+                        let mut items = items;
+                        media_pool::sort_items(
+                            &mut items,
+                            self.media_pool_state.sort,
+                            |(_, label, ..)| label.as_str(),
+                            |(_, _, meta, _)| {
+                                meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9)
+                            },
+                        );
+                        let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
+                        let drags: Vec<timeline_ui::MediaDrag> = items
+                            .iter()
+                            .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
+                            .collect();
+                        // Sfondo interagibile per il rettangolo di selezione,
+                        // richiesto *prima* degli elementi: nell'hit-test di
+                        // egui vince l'ultimo, quindi cliccare un elemento non
+                        // fa partire il rettangolo (stesso schema del marquee
+                        // in `timeline_ui::show_timeline`).
+                        let bg = ui.interact(
+                            ui.available_rect_before_wrap(),
+                            ui.id().with("media_pool_bg"),
+                            egui::Sense::click_and_drag(),
+                        );
+                        let mut item_rects: Vec<(MediaId, egui::Rect)> = Vec::new();
                         for (id, label, meta, content_hash) in items {
                             let proxy_state = self
                                 .proxy_worker
@@ -3275,7 +3560,18 @@ impl eframe::App for VibeVideoApp {
                                         });
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| match proxy_state {
+                                            |ui| {
+                                                ui.add_sized(
+                                                    egui::vec2(DURATION_COL_W, ui.available_height()),
+                                                    egui::Label::new(
+                                                        egui::RichText::new(format_duration(
+                                                            meta.duration_frames,
+                                                            meta.fps.as_f64(),
+                                                        ))
+                                                        .monospace(),
+                                                    ),
+                                                );
+                                                match proxy_state {
                                                 Some(proxy_worker::ProxyState::Generating(f)) => {
                                                     proxy_progress_ring(ui, Some(f))
                                                         .on_hover_text(format!("Generazione proxy {:.0}%", f * 100.0));
@@ -3289,6 +3585,7 @@ impl eframe::App for VibeVideoApp {
                                                         .on_hover_text("Proxy non generato");
                                                 }
                                                 _ => {}
+                                                }
                                             },
                                         );
                                     });
@@ -3311,9 +3608,54 @@ impl eframe::App for VibeVideoApp {
                             let resp = ui
                                 .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
                                 .on_hover_text(
-                                    "Doppio click: anteprima · trascina sulla timeline per aggiungere",
+                                    "Click: seleziona (ctrl/shift per più elementi) · doppio click: anteprima · trascina sulla timeline per aggiungere",
                                 );
-                            resp.dnd_set_drag_payload(timeline_ui::MediaDrag::whole(id, &meta));
+                            item_rects.push((id, group_resp.rect));
+                            if self.media_pool_state.selected.contains(&id) {
+                                ui.painter().rect_stroke(
+                                    group_resp.rect,
+                                    4.0,
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.painter().rect_filled(
+                                    group_resp.rect,
+                                    4.0,
+                                    egui::Color32::from_white_alpha(18),
+                                );
+                            }
+                            if resp.clicked() {
+                                let modifiers = ui.input(|i| i.modifiers);
+                                self.media_pool_state.click(id, modifiers, &order);
+                            }
+                            // Trascinare un elemento fuori dalla selezione la
+                            // sostituisce con lui (come in timeline, vedi
+                            // `timeline_ui::drag_group_for`).
+                            if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
+                                self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
+                            }
+                            // Trascinare un elemento della selezione trascina
+                            // l'intera selezione, nell'ordine del pannello: la
+                            // timeline le accoda una dopo l'altra.
+                            let payload = if self.media_pool_state.selected.len() > 1
+                                && self.media_pool_state.selected.contains(&id)
+                            {
+                                timeline_ui::MediaDragSet {
+                                    items: drags
+                                        .iter()
+                                        .filter(|d| {
+                                            self.media_pool_state.selected.contains(&d.media_id)
+                                        })
+                                        .copied()
+                                        .collect(),
+                                }
+                            } else {
+                                timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
+                                    id, &meta,
+                                ))
+                            };
+                            let dragged_count = payload.items.len();
+                            resp.dnd_set_drag_payload(payload);
                             if resp.double_clicked() {
                                 preview_action = Some(id);
                             }
@@ -3322,11 +3664,60 @@ impl eframe::App for VibeVideoApp {
                             // visivo che il drag fosse partito (l'elemento
                             // del media pool resta al suo posto, invariato).
                             if resp.dragged() {
-                                show_drag_ghost(ui, interact_id, &label);
+                                let ghost = if dragged_count > 1 {
+                                    format!("{dragged_count} elementi")
+                                } else {
+                                    label.clone()
+                                };
+                                show_drag_ghost(ui, interact_id, &ghost);
                             }
+                        }
+
+                        if bg.drag_started() {
+                            if let Some(pos) = bg.interact_pointer_pos() {
+                                self.media_pool_state.marquee = Some((pos, pos));
+                            }
+                        } else if bg.dragged() {
+                            if let (Some((_, end)), Some(pos)) =
+                                (&mut self.media_pool_state.marquee, bg.interact_pointer_pos())
+                            {
+                                *end = pos;
+                            }
+                        } else if bg.drag_stopped() {
+                            if let Some((start, end)) = self.media_pool_state.marquee.take() {
+                                let rect = egui::Rect::from_two_pos(start, end);
+                                let hits = item_rects
+                                    .iter()
+                                    .filter(|(_, r)| r.intersects(rect))
+                                    .map(|(id, _)| *id);
+                                self.media_pool_state.set_marquee_selection(hits);
+                            }
+                        } else if bg.clicked() {
+                            self.media_pool_state.clear();
+                        }
+                        if let Some((start, end)) = self.media_pool_state.marquee {
+                            let rect = egui::Rect::from_two_pos(start, end);
+                            ui.painter().rect_filled(
+                                rect,
+                                0.0,
+                                egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                            );
+                            ui.painter().rect_stroke(
+                                rect,
+                                0.0,
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                                egui::StrokeKind::Inside,
+                            );
                         }
                     });
             });
+        // Chi ha ricevuto l'ultimo click decide a chi va Canc/Backspace.
+        if let Some(pos) = ui
+            .ctx()
+            .input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
+        {
+            self.media_pool_state.focused = pool_panel.response.rect.contains(pos);
+        }
 
         if self.properties_panel_open {
             egui::Panel::right("properties")
@@ -3767,7 +4158,10 @@ impl eframe::App for VibeVideoApp {
                 }
             });
 
-            if let Some(((w, h), rgba)) = solid_color_frame_info {
+            let media_offline = self.active_clip_media_offline();
+            if media_offline {
+                self.last_viewer_frame_kind = Some(ViewerFrameKind::Offline);
+            } else if let Some(((w, h), rgba)) = solid_color_frame_info {
                 // Immagine sintetica generata su CPU (nessun frame
                 // decodificato da comporre): niente da guadagnare a
                 // tenerla sulla GPU, resta sul path gestito da egui.
@@ -3869,6 +4263,14 @@ impl eframe::App for VibeVideoApp {
                         );
                     }
                 }
+                Some(ViewerFrameKind::Offline) => {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 70, 70),
+                            egui::RichText::new("⚠  Media offline").size(24.0),
+                        );
+                    });
+                }
                 None => {
                     if let Some(err) = &self.preview_error {
                         ui.colored_label(egui::Color32::RED, format!("Errore player: {err}"));
@@ -3891,11 +4293,13 @@ impl eframe::App for VibeVideoApp {
                 let resp = ui
                     .interact(rect, drag_id, egui::Sense::drag())
                     .on_hover_text("Trascina sulla timeline per aggiungere la porzione tra in e out");
-                resp.dnd_set_drag_payload(timeline_ui::MediaDrag {
-                    media_id,
-                    source_in,
-                    source_out,
-                });
+                resp.dnd_set_drag_payload(timeline_ui::MediaDragSet::one(
+                    timeline_ui::MediaDrag {
+                        media_id,
+                        source_in,
+                        source_out,
+                    },
+                ));
                 if resp.dragged()
                     && let Some(item) = self.project.media_pool.get(media_id)
                 {
@@ -4061,6 +4465,181 @@ mod tests {
         });
         app.timeline_id = Some(timeline_id);
         (app, media_id)
+    }
+
+    #[test]
+    fn dropping_several_media_appends_them_in_pool_order() {
+        let (mut app, media_a) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            50,
+        );
+        let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/vv-b.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 30,
+                fps: vv_core::Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 2,
+        });
+        let timeline_id = app.timeline_id.unwrap();
+        let drag = |app: &VibeVideoApp, id: MediaId| {
+            timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        };
+        let set = timeline_ui::MediaDragSet {
+            items: vec![drag(&app, media_a), drag(&app, media_b)],
+        };
+
+        app.add_media_set_to_timeline_at(&set, 100, timeline_ui::MediaDropTarget::Default);
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].timeline_start, 100);
+        assert_eq!(clips[0].timeline_len(), 50);
+        assert_eq!(
+            clips[1].timeline_start, 150,
+            "il secondo media parte dove finisce il primo"
+        );
+        assert_eq!(clips[1].timeline_len(), 30);
+        assert!(matches!(clips[0].source, vv_core::ClipSource::Media(id) if id == media_a));
+        assert!(matches!(clips[1].source, vv_core::ClipSource::Media(id) if id == media_b));
+    }
+
+    /// Un drop = un solo Ctrl+Z, anche con più media, più stream audio e
+    /// una track creata al volo.
+    #[test]
+    fn dropping_several_media_is_a_single_undo_step() {
+        let (mut app, media_a) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            50,
+        );
+        let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/vv-b.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 30,
+                fps: vv_core::Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: true,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            content_hash: 2,
+        });
+        let timeline_id = app.timeline_id.unwrap();
+        let tracks_before = app.project.timelines[timeline_id].tracks.len();
+        let drag = |app: &VibeVideoApp, id: MediaId| {
+            timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        };
+        let set = timeline_ui::MediaDragSet {
+            items: vec![drag(&app, media_a), drag(&app, media_b)],
+        };
+
+        app.add_media_set_to_timeline_at(&set, 0, timeline_ui::MediaDropTarget::NewVideoTrack);
+        let clips_after_drop: usize = app.project.timelines[timeline_id]
+            .tracks
+            .iter()
+            .map(|t| t.clips.len())
+            .sum();
+        assert!(clips_after_drop >= 3, "video + audio di entrambi i media");
+
+        app.history.undo(&mut app.project);
+
+        let tl = &app.project.timelines[timeline_id];
+        assert!(
+            tl.tracks.iter().all(|t| t.clips.is_empty()),
+            "un solo Ctrl+Z deve togliere tutte le clip del drop"
+        );
+        assert_eq!(tl.tracks.len(), tracks_before, "e anche la track creata dal drop");
+    }
+
+    /// Drop multiplo sulla fascia "nuova track video": la track si crea una
+    /// volta sola per l'intero drop, non una per media.
+    #[test]
+    fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
+        let (mut app, media_a) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            50,
+        );
+        let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/vv-b.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 30,
+                fps: vv_core::Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 2,
+        });
+        let timeline_id = app.timeline_id.unwrap();
+        let tracks_before = app.project.timelines[timeline_id].tracks.len();
+        let drag = |app: &VibeVideoApp, id: MediaId| {
+            timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        };
+        let set = timeline_ui::MediaDragSet {
+            items: vec![drag(&app, media_a), drag(&app, media_b)],
+        };
+
+        app.add_media_set_to_timeline_at(&set, 0, timeline_ui::MediaDropTarget::NewVideoTrack);
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks.len(), tracks_before + 1);
+        assert_eq!(tl.tracks[tracks_before].clips.len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_media_leaves_its_clip_in_timeline_but_offline() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            100,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        let meta = app.project.media_pool[media_id].meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+        app.active_clip = Some((0, clip_id));
+
+        app.media_pool_state.selected = BTreeSet::from([media_id]);
+        app.delete_selected_media();
+
+        assert!(app.project.media_pool.is_empty());
+        assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
+        assert!(app.active_clip_media_offline());
+        assert!(app.media_pool_state.selected.is_empty());
+
+        app.history.undo(&mut app.project);
+        assert!(
+            !app.active_clip_media_offline(),
+            "l'undo deve riagganciare la clip al media reinserito"
+        );
+    }
+
+    #[test]
+    fn deleting_a_media_being_previewed_stops_the_preview() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            100,
+        );
+        app.browsing_media = Some(media_id);
+        app.media_pool_state.selected = BTreeSet::from([media_id]);
+        app.delete_selected_media();
+        assert_eq!(app.browsing_media, None);
     }
 
     #[test]
@@ -4872,6 +5451,33 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    #[test]
+    fn select_all_clips_takes_every_track() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let b = make_timeline_with_clip(&mut app, 1, 30, 20);
+        app.select_all_clips();
+        assert_eq!(
+            app.timeline_state.selected,
+            BTreeSet::from([(0, a), (1, b)])
+        );
+    }
+
+    #[test]
+    fn select_clips_from_playhead_skips_the_ones_that_already_ended() {
+        let mut app = VibeVideoApp::default();
+        let before = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let under = make_timeline_with_clip(&mut app, 1, 20, 20);
+        let after = make_timeline_with_clip(&mut app, 0, 50, 20);
+        app.timeline_state.playhead = 25;
+        app.select_clips_from_playhead();
+        assert_eq!(
+            app.timeline_state.selected,
+            BTreeSet::from([(0, after), (1, under)])
+        );
+        assert!(!app.timeline_state.selected.contains(&(0, before)));
     }
 
     #[test]
