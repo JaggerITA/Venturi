@@ -265,26 +265,33 @@ impl<T: Lerp + Clone> Keyframed<T> {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transform {
-    /// Rettangolo di crop in coordinate normalizzate [0,1] sul frame
-    /// sorgente: taglia i bordi della clip e basta — quel che resta non
-    /// viene ricentrato né ingrandito, continua a cadere dov'era nel frame
-    /// di output (dietro la parte tagliata si vede il layer sotto).
+    /// Quanto tagliare da ciascun lato (sinistra, alto, destra, basso), in
+    /// pixel del media alla sua risoluzione *nativa* (non del proxy): `0` =
+    /// quel lato non è tagliato. Il crop
+    /// taglia e basta — quel che resta non viene ricentrato né ingrandito,
+    /// continua a cadere dov'era nel frame di output (dietro la parte
+    /// tagliata si vede il layer sotto).
     pub crop: [f32; 4], // left, top, right, bottom
-    /// Sfumatura del bordo di crop, in frazioni del frame sorgente.
+    /// Sfumatura del bordo di crop, in pixel del media:
+    /// negativa la sfuma verso l'interno del crop, positiva verso l'esterno
+    /// (quindi si vede solo dove qualcosa è stato tagliato), `0` taglio
+    /// netto.
     pub crop_softness: f32,
     /// Ingrandimento della clip *rispetto al frame di output*, per asse
     /// (X, Y), attorno all'`anchor`: con abbastanza zoom una clip di aspect
     /// ratio diverso da quello della timeline arriva a coprirlo tutto,
     /// bande comprese.
     pub zoom: [f32; 2],
-    /// Spostamento della clip dentro il frame di output, in frazioni della
-    /// sua larghezza/altezza (X positivo = verso destra, Y positivo = verso
-    /// il basso). Non sposta il contenuto dentro la clip.
+    /// Spostamento della clip dentro il frame di output, in pixel di
+    /// timeline (X positivo = verso destra, Y positivo = verso l'alto): su
+    /// una timeline 1920x1080, `X = 960` la sposta di mezzo frame. Non
+    /// sposta il contenuto dentro la clip.
     pub position: [f32; 2],
     /// Rotazione in gradi, oraria, attorno all'`anchor`.
     pub rotation: f32,
-    /// Pivot di zoom e rotazione, in frazioni del frame di output a partire
-    /// dal centro della clip (`[0, 0]` = il suo centro).
+    /// Pivot di zoom e rotazione, in pixel di timeline a partire dal centro
+    /// della clip (`[0, 0]` = il suo centro), con gli stessi versi di
+    /// `position` (Y positivo verso l'alto).
     pub anchor: [f32; 2],
     /// Specchiatura orizzontale (X) e verticale (Y).
     pub flip: [bool; 2],
@@ -293,7 +300,7 @@ pub struct Transform {
 impl Default for Transform {
     fn default() -> Self {
         Self {
-            crop: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
             crop_softness: 0.0,
             zoom: [1.0, 1.0],
             position: [0.0, 0.0],
@@ -784,7 +791,7 @@ mod keyframe_tests {
             flip: [true, true],
         };
         let mid = Transform::lerp(&a, &b, 0.5);
-        assert_eq!(mid.crop, [0.1, 0.1, 0.9, 0.9]);
+        assert_eq!(mid.crop, [0.1, 0.1, 0.4, 0.4]);
         assert_eq!(mid.crop_softness, 0.2);
         assert_eq!(mid.zoom, [2.0, 3.0]);
         assert_eq!(mid.position, [0.5, -0.5]);

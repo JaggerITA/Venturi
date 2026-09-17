@@ -51,6 +51,21 @@ pub fn media_source_frame(clip: &Clip, timeline_frame: FrameIdx) -> Option<(Medi
     Some((*media_id, clip.source_frame_at(timeline_frame)))
 }
 
+/// Risoluzione *nativa* del media di `clip` — le unità in cui il crop del
+/// `Transform` è espresso, che non sono quelle del frame decodificato
+/// quando si sta usando un proxy. `(1, 1)` per una clip senza media (o con
+/// un media sparito dal pool): non c'è nulla da croppare.
+pub fn clip_source_size(project: &Project, clip: &Clip) -> (u32, u32) {
+    match &clip.source {
+        ClipSource::Media(id) => project
+            .media_pool
+            .get(*id)
+            .map(|m| (m.meta.width, m.meta.height))
+            .unwrap_or((1, 1)),
+        ClipSource::SolidColor => (1, 1),
+    }
+}
+
 /// `vv_render::YuvFrame` in prestito da un `vv_media::FrameYuv420` — il
 /// compositor (vv-render) non dipende da vv-media (stessa convenzione
 /// già in uso per il resto della sua API, prende piani di byte grezzi,

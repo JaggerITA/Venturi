@@ -114,6 +114,11 @@ struct ClipPanelInfo {
     start: FrameIdx,
     len: FrameIdx,
     is_solid_color: bool,
+    /// Risoluzione nativa del media della clip e risoluzione della
+    /// timeline: le unità dei parametri in pixel del `Transform` (il crop
+    /// nella prima, posizione e anchor nella seconda).
+    source_size: (u32, u32),
+    timeline_size: (u32, u32),
     transform_constant: bool,
     transform_kf_here: bool,
     transform: vv_core::Transform,
@@ -157,6 +162,8 @@ enum PreviewLayer {
     Video {
         frame: std::sync::Arc<vv_media::FrameYuv420>,
         transform: vv_core::Transform,
+        /// Risoluzione nativa del media (non del proxy): le unità del crop.
+        source_size: (u32, u32),
     },
     Solid(vv_core::Rgba),
 }
@@ -1490,11 +1497,11 @@ impl VibeVideoApp {
     /// presente nell'app reale — vedi `main()`; `None` solo nei test che
     /// costruiscono `VibeVideoApp` con `Default` senza una finestra, dove
     /// semplicemente non c'è nulla da mostrare per questo frame).
-    fn show_composited(&mut self, layers: &[vv_render::Layer], out_w: u32, out_h: u32) {
+    fn show_composited(&mut self, layers: &[vv_render::Layer], output: vv_render::OutputFrame) {
         let Some(render_state) = self.egui_render_state.clone() else {
             return;
         };
-        let texture = self.compositor.render_layers_to_texture(layers, out_w, out_h);
+        let texture = self.compositor.render_layers_to_texture(layers, output);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut renderer = render_state.renderer.write();
         match self.video_texture_id {
@@ -1513,7 +1520,8 @@ impl VibeVideoApp {
             }
         }
         drop(renderer);
-        self.video_display_size = Some(egui::vec2(out_w as f32, out_h as f32));
+        self.video_display_size =
+            Some(egui::vec2(output.width as f32, output.height as f32));
         self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
     }
 
@@ -1564,7 +1572,11 @@ impl VibeVideoApp {
                         .frame_for(&self.project, clip, timeline_frame)
                         .ok()?;
                     match frame {
-                        Some(frame) => layers.push(PreviewLayer::Video { frame, transform }),
+                        Some(frame) => layers.push(PreviewLayer::Video {
+                            frame,
+                            transform,
+                            source_size: frame_provider::clip_source_size(&self.project, clip),
+                        }),
                         None if i == topmost => return None,
                         None => {}
                     }
@@ -2792,13 +2804,21 @@ fn param_row(
 }
 
 /// Un campo numerico di un parametro a due assi (X/Y).
-fn axis_field(ui: &mut egui::Ui, axis: &str, value: &mut f32, speed: f64) -> bool {
+fn axis_field(
+    ui: &mut egui::Ui,
+    axis: &str,
+    value: &mut f32,
+    speed: f64,
+    decimals: usize,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
     ui.label(axis);
     ui.add(
         egui::DragValue::new(value)
             .speed(speed)
-            .fixed_decimals(3)
-            .min_decimals(3),
+            .range(range)
+            .fixed_decimals(decimals)
+            .min_decimals(decimals),
     )
     .changed()
 }
@@ -2810,6 +2830,7 @@ fn slider_field(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     speed: f64,
+    decimals: usize,
 ) -> bool {
     let slider = ui.add(
         egui::Slider::new(value, range.clone())
@@ -2820,8 +2841,8 @@ fn slider_field(
         egui::DragValue::new(value)
             .speed(speed)
             .range(range)
-            .fixed_decimals(3)
-            .min_decimals(3),
+            .fixed_decimals(decimals)
+            .min_decimals(decimals),
     );
     slider.changed() || drag.changed()
 }
@@ -3909,6 +3930,7 @@ impl eframe::App for VibeVideoApp {
                         ui.heading("Clip selezionata");
 
                         let clip_info = self.timeline_id.and_then(|timeline_id| {
+                            let timeline_size = self.project.timelines[timeline_id].resolution;
                             self.project.timelines[timeline_id]
                                 .tracks
                                 .get(track_index)?
@@ -3922,6 +3944,11 @@ impl eframe::App for VibeVideoApp {
                                         c.source,
                                         vv_core::ClipSource::SolidColor
                                     ),
+                                    source_size: frame_provider::clip_source_size(
+                                        &self.project,
+                                        c,
+                                    ),
+                                    timeline_size,
                                     transform_constant: c.effects.transform.is_constant(),
                                     transform_kf_here: c
                                         .effects
@@ -3965,6 +3992,8 @@ impl eframe::App for VibeVideoApp {
                             start,
                             len,
                             is_solid_color,
+                            source_size,
+                            timeline_size,
                             transform_constant,
                             transform_kf_here,
                             mut transform,
@@ -4023,12 +4052,14 @@ impl eframe::App for VibeVideoApp {
 
                             section(ui, "Transform");
                             let (changed, reset) = param_row(ui, "Zoom", |ui| {
-                                let mut changed = axis_field(ui, "X", &mut transform.zoom[0], 0.01);
+                                let mut changed =
+                                    axis_field(ui, "X", &mut transform.zoom[0], 0.01, 3, 0.01..=20.0);
                                 if link_button(ui, &mut self.zoom_link).changed() && self.zoom_link {
                                     transform.zoom[1] = transform.zoom[0];
                                     changed = true;
                                 }
-                                let y_changed = axis_field(ui, "Y", &mut transform.zoom[1], 0.01);
+                                let y_changed =
+                                    axis_field(ui, "Y", &mut transform.zoom[1], 0.01, 3, 0.01..=20.0);
                                 if self.zoom_link {
                                     // Il link vale in entrambi i versi: chi
                                     // è stato mosso detta l'altro.
@@ -4046,9 +4077,30 @@ impl eframe::App for VibeVideoApp {
                                 transform_changed = true;
                             }
 
+                            // Posizione e anchor point in pixel di timeline,
+                            // crop in pixel del media: le unità in cui
+                            // `Transform` li tiene.
+                            // Fuori dal frame di un frame intero: abbastanza
+                            // per far uscire di scena la clip, non di più.
+                            let (frame_w, frame_h) =
+                                (timeline_size.0 as f32, timeline_size.1 as f32);
                             let (changed, reset) = param_row(ui, "Posizione", |ui| {
-                                let x = axis_field(ui, "X", &mut transform.position[0], 0.005);
-                                let y = axis_field(ui, "Y", &mut transform.position[1], 0.005);
+                                let x = axis_field(
+                                    ui,
+                                    "X",
+                                    &mut transform.position[0],
+                                    1.0,
+                                    1,
+                                    -frame_w..=frame_w,
+                                );
+                                let y = axis_field(
+                                    ui,
+                                    "Y",
+                                    &mut transform.position[1],
+                                    1.0,
+                                    1,
+                                    -frame_h..=frame_h,
+                                );
                                 x || y
                             });
                             transform_changed |= changed;
@@ -4058,7 +4110,7 @@ impl eframe::App for VibeVideoApp {
                             }
 
                             let (changed, reset) = param_row(ui, "Rotazione", |ui| {
-                                slider_field(ui, &mut transform.rotation, -180.0..=180.0, 0.5)
+                                slider_field(ui, &mut transform.rotation, -180.0..=180.0, 0.5, 1)
                             });
                             transform_changed |= changed;
                             if reset {
@@ -4067,8 +4119,22 @@ impl eframe::App for VibeVideoApp {
                             }
 
                             let (changed, reset) = param_row(ui, "Anchor point", |ui| {
-                                let x = axis_field(ui, "X", &mut transform.anchor[0], 0.005);
-                                let y = axis_field(ui, "Y", &mut transform.anchor[1], 0.005);
+                                let x = axis_field(
+                                    ui,
+                                    "X",
+                                    &mut transform.anchor[0],
+                                    1.0,
+                                    1,
+                                    -frame_w..=frame_w,
+                                );
+                                let y = axis_field(
+                                    ui,
+                                    "Y",
+                                    &mut transform.anchor[1],
+                                    1.0,
+                                    1,
+                                    -frame_h..=frame_h,
+                                );
                                 x || y
                             });
                             transform_changed |= changed;
@@ -4098,29 +4164,45 @@ impl eframe::App for VibeVideoApp {
 
                             ui.add_space(6.0);
                             section(ui, "Cropping");
-                            let crop_rows: [(&str, usize, std::ops::RangeInclusive<f32>); 4] = [
-                                ("Crop sinistra", 0, 0.0..=0.99),
-                                ("Crop destra", 2, 0.01..=1.0),
-                                ("Crop alto", 1, 0.0..=0.99),
-                                ("Crop basso", 3, 0.01..=1.0),
-                            ];
-                            for (label, index, range) in crop_rows {
+                            let (source_w, source_h) =
+                                (source_size.0 as f32, source_size.1 as f32);
+                            for (label, index, limit) in [
+                                ("Crop sinistra", 0, source_w),
+                                ("Crop destra", 2, source_w),
+                                ("Crop alto", 1, source_h),
+                                ("Crop basso", 3, source_h),
+                            ] {
                                 let (changed, reset) = param_row(ui, label, |ui| {
-                                    slider_field(ui, &mut transform.crop[index], range, 0.002)
+                                    slider_field(
+                                        ui,
+                                        &mut transform.crop[index],
+                                        0.0..=limit,
+                                        1.0,
+                                        1,
+                                    )
                                 });
                                 transform_changed |= changed;
                                 if reset {
-                                    transform.crop[index] =
-                                        vv_core::Transform::default().crop[index];
+                                    transform.crop[index] = 0.0;
                                     transform_changed = true;
                                 }
                             }
-                            // Margine minimo per non invertire il rettangolo di crop.
-                            transform.crop[0] = transform.crop[0].min(transform.crop[2] - 0.01);
-                            transform.crop[1] = transform.crop[1].min(transform.crop[3] - 0.01);
+                            // I due tagli opposti non possono mangiarsi tutto
+                            // il frame a vicenda: almeno un pixel resta.
+                            transform.crop[0] =
+                                transform.crop[0].min(source_w - 1.0 - transform.crop[2]);
+                            transform.crop[1] =
+                                transform.crop[1].min(source_h - 1.0 - transform.crop[3]);
 
                             let (changed, reset) = param_row(ui, "Sfumatura", |ui| {
-                                slider_field(ui, &mut transform.crop_softness, 0.0..=0.5, 0.002)
+                                let limit = source_w.min(source_h) / 2.0;
+                                slider_field(
+                                    ui,
+                                    &mut transform.crop_softness,
+                                    -limit..=limit,
+                                    1.0,
+                                    1,
+                                )
                             });
                             transform_changed |= changed;
                             if reset {
@@ -4370,8 +4452,12 @@ impl eframe::App for VibeVideoApp {
                     let layer = vv_render::Layer::Video {
                         frame: frame_provider::as_render_yuv_frame(&frame),
                         transform,
+                        source_size: (frame.width, frame.height),
                     };
-                    self.show_composited(&[layer], frame.width, frame.height);
+                    self.show_composited(
+                        &[layer],
+                        vv_render::OutputFrame::exact(frame.width, frame.height),
+                    );
                 }
             } else if let Some(layers) = layers {
                 let video_size = layers
@@ -4388,26 +4474,29 @@ impl eframe::App for VibeVideoApp {
                         // (proxy compreso) allargata all'aspect della
                         // timeline: le bande si vedono già in editing senza
                         // upscalare il contenuto.
-                        let (out_w, out_h) = match self.timeline_id {
-                            Some(id) => vv_render::fit_output_size(
-                                size,
-                                self.project.timelines[id].resolution,
-                            ),
-                            None => size,
-                        };
+                        let timeline_size = self
+                            .timeline_id
+                            .map_or(size, |id| self.project.timelines[id].resolution);
+                        let (out_w, out_h) = vv_render::fit_output_size(size, timeline_size);
                         let render_layers: Vec<vv_render::Layer> = layers
                             .iter()
                             .map(|l| match l {
-                                PreviewLayer::Video { frame, transform } => {
-                                    vv_render::Layer::Video {
-                                        frame: frame_provider::as_render_yuv_frame(frame),
-                                        transform: *transform,
-                                    }
-                                }
+                                PreviewLayer::Video {
+                                    frame,
+                                    transform,
+                                    source_size,
+                                } => vv_render::Layer::Video {
+                                    frame: frame_provider::as_render_yuv_frame(frame),
+                                    transform: *transform,
+                                    source_size: *source_size,
+                                },
                                 PreviewLayer::Solid(rgba) => vv_render::Layer::Solid(*rgba),
                             })
                             .collect();
-                        self.show_composited(&render_layers, out_w, out_h);
+                        self.show_composited(
+                            &render_layers,
+                            vv_render::OutputFrame::scaled(out_w, out_h, timeline_size),
+                        );
                     }
                     // Nessun frame decodificato da comporre (solo clip
                     // SolidColor, o un vuoto sulla track video — che come in

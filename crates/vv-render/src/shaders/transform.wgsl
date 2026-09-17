@@ -14,7 +14,8 @@ struct TransformUniform {
     // frame sorgente viene inscritto nell'output mantenendo il suo
     // aspect ratio invece di essere deformato. z: rotazione in radianti
     // (positiva = oraria). w: sfumatura dei bordi di crop, in frazioni
-    // del frame sorgente.
+    // del frame sorgente: negativa verso l'interno del crop, positiva
+    // verso l'esterno.
     fit_rot: vec4<f32>,
     // anchor.x, anchor.y (pivot di zoom e rotazione, in frazioni del
     // frame di output dal centro della clip), flip.x, flip.y (0 o 1).
@@ -123,19 +124,35 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let crop_min = transform.crop.xy;
     let crop_max = transform.crop.zw;
-    // Fuori dal crop (o fuori dalla clip): trasparente, si vede il layer
-    // sotto. Il crop taglia e basta — non ricentra né ridimensiona quel
-    // che resta, che continua a cadere dov'era nel frame.
-    if (any(source_uv < crop_min) || any(source_uv > crop_max)) {
+    let softness = transform.fit_rot.w;
+
+    // Fuori dalla clip non c'è nulla da mostrare (la sfumatura verso
+    // l'esterno non deve spalmare il bordo del sorgente).
+    if (any(source_uv < vec2<f32>(0.0, 0.0)) || any(source_uv > vec2<f32>(1.0, 1.0))) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    // Sfumatura del bordo di crop: quanto si è dentro il rettangolo, sul
-    // lato più vicino.
+
+    // Quanto si è dentro il rettangolo di crop, sul lato più vicino:
+    // negativo fuori. La sfumatura è una rampa di alpha attorno a quel
+    // bordo — verso l'interno per valori negativi, verso l'esterno (oltre
+    // il crop, quindi visibile solo dove qualcosa è stato tagliato) per
+    // valori positivi.
+    let inside = min(source_uv - crop_min, crop_max - source_uv);
+    let edge_distance = min(inside.x, inside.y);
     var alpha = 1.0;
-    let softness = transform.fit_rot.w;
-    if (softness > 0.0) {
-        let inside = min(source_uv - crop_min, crop_max - source_uv);
-        alpha = smoothstep(0.0, softness, min(inside.x, inside.y));
+    if (softness < 0.0) {
+        if (edge_distance < 0.0) {
+            return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        }
+        alpha = smoothstep(0.0, -softness, edge_distance);
+    } else if (softness > 0.0) {
+        if (edge_distance < -softness) {
+            return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        }
+        alpha = smoothstep(-softness, 0.0, edge_distance);
+    } else if (edge_distance < 0.0) {
+        // Crop netto: si vede il layer sotto.
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
     // U/V sono a metà risoluzione (4:2:0): campionarli alla stessa uv

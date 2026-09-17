@@ -148,10 +148,16 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 3. Lo shader inscrive il sorgente nel frame di output mantenendone
    l'aspect ratio — bande (letterbox/pillarbox) invece di deformare, es.
    una clip 9:16 in una timeline 16:9 — e ci applica il `Transform`
-   ragionando in coordinate di *output*: `zoom` (per asse) e `rotation`
-   agiscono attorno all'`anchor`, `position` sposta la clip nel frame,
-   `flip` la specchia, `crop` ne taglia i bordi — con `crop_softness` che
-   li sfuma via alpha — senza ricentrare né ridimensionare il resto.
+   ragionando in coordinate di *output*, con l'asse Y verso l'alto come in
+   un NLE (lo shader lo gira, le uv puntano in basso) e i parametri in
+   pixel — di timeline per posizione e anchor, del media (risoluzione
+   nativa, non del proxy) per crop e sfumatura, convertiti in frazioni
+   nell'uniform (`OutputFrame`, `Layer::Video::source_size`): `zoom` (per asse) e
+   `rotation` agiscono attorno all'`anchor`, `position` sposta la clip nel
+   frame, `flip` la specchia, `crop` taglia ciascun lato di una frazione
+   (0 = intatto) — con `crop_softness` che sfuma il bordo via alpha, verso
+   l'interno se negativa e verso l'esterno se positiva —
+   senza ricentrare né ridimensionare il resto.
 4. Un pass per layer sulla stessa texture, in alpha-over
    (`Compositor::render_layers`): le bande del layer sopra escono con alpha
    0 e lasciano vedere quello sotto. Una clip SolidColor è il clear del
@@ -261,7 +267,8 @@ Fatto:
   (tenute premute scorrono a 0.5x), audio di tutte le track, scrub audio,
   audiometer.
 - Effetti: zoom X/Y (con link), posizione, rotazione, anchor point, flip,
-  crop dei quattro lati con sfumatura, gain, colore SolidColor; statici o a
+  crop dei quattro lati con sfumatura (verso l'interno o l'esterno), tutto
+  in pixel, gain, colore SolidColor; statici o a
   keyframe (Hold/Linear/EaseInOut) dal pannello proprietà, organizzato in
   sezioni Transform e Cropping con reset per singolo parametro.
 - Clip con fps diverso da quello della timeline conformate

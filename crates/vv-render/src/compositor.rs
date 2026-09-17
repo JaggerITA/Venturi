@@ -101,8 +101,45 @@ pub enum Layer<'a> {
     Video {
         frame: YuvFrame<'a>,
         transform: Transform,
+        /// Risoluzione *nativa* del media, in cui è espresso il crop in
+        /// pixel del `Transform`: non quella di `frame`, che può essere un
+        /// proxy a risoluzione ridotta.
+        source_size: (u32, u32),
     },
     Solid(vv_core::Rgba),
+}
+
+/// Il frame di output di una composizione: la risoluzione in pixel della
+/// texture prodotta e quella *logica* della timeline, in cui sono espressi
+/// posizione e anchor point del `Transform`. Le due coincidono nell'export;
+/// l'anteprima compone alla risoluzione del frame decodificato (proxy
+/// compreso, vedi `fit_output_size`), quindi più piccola.
+#[derive(Debug, Clone, Copy)]
+pub struct OutputFrame {
+    pub width: u32,
+    pub height: u32,
+    pub timeline_size: (u32, u32),
+}
+
+impl OutputFrame {
+    /// Output alla risoluzione della timeline.
+    pub fn exact(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            timeline_size: (width, height),
+        }
+    }
+
+    /// Output a una risoluzione diversa da quella della timeline, con lo
+    /// stesso aspect ratio.
+    pub fn scaled(width: u32, height: u32, timeline_size: (u32, u32)) -> Self {
+        Self {
+            width,
+            height,
+            timeline_size,
+        }
+    }
 }
 
 #[repr(C)]
@@ -121,27 +158,51 @@ impl TransformUniform {
         matrix: ColorMatrix,
         full_range: bool,
         fit: [f32; 2],
-        output_aspect: f32,
+        output: OutputFrame,
+        source_size: (u32, u32),
     ) -> Self {
+        // Il `Transform` è in pixel — di timeline per posizione e anchor,
+        // del media per il crop; lo shader lavora in coordinate
+        // normalizzate.
+        let (frame_w, frame_h) = (
+            output.timeline_size.0.max(1) as f32,
+            output.timeline_size.1.max(1) as f32,
+        );
+        let (source_w, source_h) = (source_size.0.max(1) as f32, source_size.1.max(1) as f32);
         Self {
-            crop: t.crop,
-            zoom_pos: [t.zoom[0], t.zoom[1], t.position[0], t.position[1]],
+            // Dai tagli per lato al rettangolo che lo shader campiona.
+            crop: [
+                t.crop[0] / source_w,
+                t.crop[1] / source_h,
+                1.0 - t.crop[2] / source_w,
+                1.0 - t.crop[3] / source_h,
+            ],
+            // L'asse Y del modello punta in alto (come in un NLE), quello
+            // delle uv in basso.
+            zoom_pos: [
+                t.zoom[0],
+                t.zoom[1],
+                t.position[0] / frame_w,
+                -t.position[1] / frame_h,
+            ],
             fit_rot: [
                 fit[0],
                 fit[1],
                 t.rotation.to_radians(),
-                t.crop_softness.max(0.0),
+                // La sfumatura segue il crop: pixel del media, e sull'asse
+                // più corto, così resta isotropa.
+                t.crop_softness / source_w.min(source_h),
             ],
             anchor_flip: [
-                t.anchor[0],
-                t.anchor[1],
+                t.anchor[0] / frame_w,
+                -t.anchor[1] / frame_h,
                 if t.flip[0] { 1.0 } else { 0.0 },
                 if t.flip[1] { 1.0 } else { 0.0 },
             ],
             color: [
                 matrix.shader_id(),
                 if full_range { 1.0 } else { 0.0 },
-                output_aspect,
+                output.width as f32 / output.height.max(1) as f32,
                 0.0,
             ],
         }
@@ -278,24 +339,23 @@ impl Compositor {
     }
 
     /// Applica `transform` a un frame YUV420 e restituisce il risultato
-    /// come RGBA8 denso (`output_w * output_h * 4` byte), ridimensionato a
-    /// `output_w x output_h`. Fa un readback GPU→CPU: per il path
+    /// come RGBA8 denso (`output.width * output.height * 4` byte). Fa un
+    /// readback GPU→CPU: per il path
     /// zero-copy verso l'anteprima egui vedi
     /// [`Compositor::render_frame_to_texture`].
     pub fn render_frame(
         &self,
         frame: &YuvFrame,
         transform: &Transform,
-        output_w: u32,
-        output_h: u32,
+        output: OutputFrame,
     ) -> Vec<u8> {
         self.render_layers(
             &[Layer::Video {
                 frame: frame.borrowed(),
                 transform: *transform,
+                source_size: (frame.width, frame.height),
             }],
-            output_w,
-            output_h,
+            output,
         )
     }
 
@@ -304,8 +364,9 @@ impl Compositor {
     /// sopra il precedente in alpha-over, così le zone scoperte di quello
     /// in cima (bande di letterbox, vedi `fit_factors`) mostrano quello
     /// sotto invece del nero.
-    pub fn render_layers(&self, layers: &[Layer], output_w: u32, output_h: u32) -> Vec<u8> {
-        let output_texture = self.render_layers_to_texture(layers, output_w, output_h);
+    pub fn render_layers(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
+        let output_texture = self.render_layers_to_texture(layers, output);
+        let (output_w, output_h) = (output.width, output.height);
 
         // wgpu richiede che ogni riga del buffer di destinazione sia
         // allineata a COPY_BYTES_PER_ROW_ALIGNMENT: il buffer può quindi
@@ -383,16 +444,15 @@ impl Compositor {
         &self,
         frame: &YuvFrame,
         transform: &Transform,
-        output_w: u32,
-        output_h: u32,
+        output: OutputFrame,
     ) -> wgpu::Texture {
         self.render_layers_to_texture(
             &[Layer::Video {
                 frame: frame.borrowed(),
                 transform: *transform,
+                source_size: (frame.width, frame.height),
             }],
-            output_w,
-            output_h,
+            output,
         )
     }
 
@@ -401,10 +461,9 @@ impl Compositor {
     pub fn render_layers_to_texture(
         &self,
         layers: &[Layer],
-        output_w: u32,
-        output_h: u32,
+        output: OutputFrame,
     ) -> wgpu::Texture {
-        let output_texture = self.output_texture(output_w, output_h);
+        let output_texture = self.output_texture(output.width, output.height);
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
@@ -431,13 +490,18 @@ impl Compositor {
                     };
                     self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
                 }
-                Layer::Video { frame, transform } => {
+                Layer::Video {
+                    frame,
+                    transform,
+                    source_size,
+                } => {
                     let load = if i == 0 {
                         wgpu::LoadOp::Clear(BLACK)
                     } else {
                         wgpu::LoadOp::Load
                     };
-                    let bind_group = self.layer_bind_group(frame, transform, output_w, output_h);
+                    let bind_group =
+                        self.layer_bind_group(frame, transform, output, *source_size);
                     self.pass(&mut encoder, &output_view, load, Some(&bind_group));
                 }
             }
@@ -454,8 +518,8 @@ impl Compositor {
         &self,
         frame: &YuvFrame,
         transform: &Transform,
-        output_w: u32,
-        output_h: u32,
+        output: OutputFrame,
+        source_size: (u32, u32),
     ) -> wgpu::BindGroup {
         let plane_texture = |label: &str, data: &[u8], w: u32, h: u32| {
             self.device.create_texture_with_data(
@@ -501,9 +565,10 @@ impl Compositor {
             frame.full_range,
             fit_factors(
                 (frame.width as f32, frame.height as f32),
-                (output_w as f32, output_h as f32),
+                (output.width as f32, output.height as f32),
             ),
-            output_w as f32 / output_h.max(1) as f32,
+            output,
+            source_size,
         );
         let uniform_buffer = self
             .device
@@ -772,7 +837,7 @@ mod tests {
     fn identity_transform_passes_through_solid_color() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(8, 8, 128, 128, 128, ColorMatrix::Bt601, true);
-        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 8, 8);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(8, 8));
 
         assert_eq!(out.len(), 8 * 8 * 4);
         // Croma neutra (128) e range full: Y=128 mappa a R=G=B=128 a
@@ -803,7 +868,7 @@ mod tests {
 
         for (matrix, full_range) in cases {
             let input = solid_frame(2, 2, y, u, v, matrix, full_range);
-            let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 2, 2);
+            let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(2, 2));
             let expected = yuv_to_rgb_reference(y, u, v, matrix, full_range);
             let got = &out[0..3];
             for i in 0..3 {
@@ -824,12 +889,12 @@ mod tests {
         let input = quadrant_frame();
 
         let transform = Transform {
-            crop: [0.0, 0.0, 0.5, 0.5], // solo il quadrante alto-sinistra
+            crop: [0.0, 0.0, 2.0, 2.0], // via metà destra e metà bassa (2 px su 4)
             zoom: [1.0, 1.0],
             position: [0.0, 0.0],
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let pixel = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -848,12 +913,12 @@ mod tests {
         let input = quadrant_frame();
 
         let transform = Transform {
-            crop: [0.5, 0.5, 1.0, 1.0],
+            crop: [2.0, 2.0, 0.0, 0.0],
             zoom: [1.0, 1.0],
             position: [0.0, 0.0],
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let pixel = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -867,7 +932,7 @@ mod tests {
     fn taller_source_in_wider_output_gets_black_side_bars() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
-        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 32, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(32, 16));
 
         let pixel = |x: usize, y: usize| {
             let i = (y * 32 + x) * 4;
@@ -883,7 +948,7 @@ mod tests {
     fn matching_aspect_ratio_leaves_no_bars() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
-        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 16, 32);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(16, 32));
 
         for corner in [0usize, 15, 16 * 31, 16 * 32 - 1] {
             let i = corner * 4;
@@ -902,16 +967,16 @@ mod tests {
         let compositor = Compositor::new_headless();
         let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
 
-        let bars = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 32, 16);
+        let bars = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(32, 16));
         assert_eq!(&bars[0..4], &[0, 0, 0, 255], "a zoom 1 restano le bande");
 
         let transform = Transform {
-            crop: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
             zoom: [5.0, 5.0], // > 32/16 : 8/16, cioè il fattore che copre la larghezza
             position: [0.0, 0.0],
             ..Transform::default()
         };
-        let zoomed = compositor.render_frame(&input.as_yuv_frame(), &transform, 32, 16);
+        let zoomed = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(32, 16));
         for px in zoomed.as_chunks::<4>().0 {
             assert_close_rgba(*px, [255, 255, 255, 255]);
         }
@@ -925,12 +990,12 @@ mod tests {
         let input = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false);
 
         let transform = Transform {
-            crop: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
             zoom: [1.0, 1.0],
-            position: [0.5, 0.0], // mezzo frame a destra
+            position: [8.0, 0.0], // mezzo frame a destra (output 16x16)
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let pixel = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -950,7 +1015,7 @@ mod tests {
             rotation: 90.0,
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let pixel = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -968,10 +1033,10 @@ mod tests {
         let input = quadrant_frame();
         let transform = Transform {
             zoom: [2.0, 2.0],
-            anchor: [-0.5, -0.5],
+            anchor: [-8.0, 8.0], // angolo alto-sinistra della clip (output 16x16)
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let pixel = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -985,6 +1050,82 @@ mod tests {
         assert_close_rgba(pixel(10, 10), [40, 40, 40, 255]);
     }
 
+    /// Posizione e anchor sono in pixel *di timeline*: l'anteprima compone
+    /// a risoluzione ridotta (proxy), ma una clip spostata di mezzo frame
+    /// resta spostata di mezzo frame.
+    #[test]
+    fn position_is_in_timeline_pixels_whatever_the_output_resolution() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false);
+        let transform = Transform {
+            position: [960.0, 0.0], // mezzo frame su una timeline 1920x1080
+            ..Transform::default()
+        };
+        // Output a 1/120 della timeline: la clip deve comunque partire da
+        // metà frame.
+        let out = compositor.render_frame(
+            &input.as_yuv_frame(),
+            &transform,
+            OutputFrame::scaled(16, 9, (1920, 1080)),
+        );
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        assert_eq!(pixel(2, 4), [0, 0, 0, 255], "metà sinistra: vuota");
+        assert_close_rgba(pixel(13, 4), [255, 255, 255, 255]);
+    }
+
+    /// Il crop è in pixel del media alla sua risoluzione nativa: su un
+    /// proxy (frame decodificato più piccolo) taglia la stessa porzione.
+    #[test]
+    fn crop_is_in_native_source_pixels_even_on_a_proxy_frame() {
+        let compositor = Compositor::new_headless();
+        // Frame decodificato 4x4 per un media nativo 1920x1080.
+        let input = quadrant_frame();
+        let transform = Transform {
+            crop: [0.0, 0.0, 960.0, 540.0], // via metà destra e metà bassa
+            ..Transform::default()
+        };
+        let out = compositor.render_layers(
+            &[Layer::Video {
+                frame: input.as_yuv_frame(),
+                transform,
+                source_size: (1920, 1080),
+            }],
+            OutputFrame::scaled(16, 16, (1920, 1080)),
+        );
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        assert_close_rgba(pixel(4, 4), [40, 40, 40, 255]);
+        assert_eq!(pixel(12, 12), [0, 0, 0, 255]);
+    }
+
+    /// L'asse Y è quello di un NLE, non quello delle uv: positivo = in alto.
+    #[test]
+    fn a_positive_y_position_lifts_the_clip() {
+        let compositor = Compositor::new_headless();
+        let input = quadrant_frame();
+        let transform = Transform {
+            position: [0.0, 8.0], // mezzo frame in su (output 16x16)
+            ..Transform::default()
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        // Alzata di mezzo frame: in alto resta la metà bassa della clip, in
+        // basso non c'è più niente.
+        assert_close_rgba(pixel(4, 4), [160, 160, 160, 255]);
+        assert_eq!(pixel(4, 12), [0, 0, 0, 255]);
+    }
+
     #[test]
     fn flip_mirrors_the_clip_on_each_axis() {
         let compositor = Compositor::new_headless();
@@ -993,7 +1134,7 @@ mod tests {
             flip: [true, false],
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let pixel = |x: usize, y: usize| {
             let i = (y * 16 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -1004,17 +1145,18 @@ mod tests {
     }
 
     /// La sfumatura agisce sull'alpha: sul bordo del crop il layer diventa
-    /// via via trasparente invece di tagliare di netto.
+    /// via via trasparente invece di tagliare di netto. Negativa = verso
+    /// l'interno del crop.
     #[test]
-    fn crop_softness_fades_the_edge_instead_of_cutting_it() {
+    fn negative_crop_softness_fades_inward_from_the_edge() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(16, 16, 235, 128, 128, ColorMatrix::Bt709, false);
         let transform = Transform {
-            crop: [0.0, 0.0, 0.5, 1.0],
-            crop_softness: 0.1,
+            crop: [0.0, 0.0, 8.0, 0.0], // via la metà destra (8 px su 16)
+            crop_softness: -1.6,
             ..Transform::default()
         };
-        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
 
         // Clear nero sotto: più ci si avvicina al bordo del crop, più scuro.
@@ -1026,6 +1168,31 @@ mod tests {
             luma(6, 8),
             luma(7, 8)
         );
+        assert_eq!(luma(9, 8), 0, "oltre il crop non si sfuma, si taglia");
+    }
+
+    /// Sfumatura positiva: la rampa cade *oltre* il bordo di crop, quindi
+    /// si vede solo dove qualcosa è stato tagliato.
+    #[test]
+    fn positive_crop_softness_fades_outward_past_the_edge() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(16, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+        let transform = Transform {
+            crop: [0.0, 0.0, 8.0, 0.0],
+            crop_softness: 1.6,
+            ..Transform::default()
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+        let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
+
+        assert!(luma(7, 8) > 200, "dentro il crop resta pieno fino al bordo");
+        assert!(
+            luma(8, 8) > 0 && luma(8, 8) < luma(7, 8),
+            "appena oltre il bordo si sfuma invece di sparire: {} {}",
+            luma(7, 8),
+            luma(8, 8)
+        );
+        assert_eq!(luma(12, 8), 0, "oltre la rampa non resta nulla");
     }
 
     /// Il caso segnalato dall'utente: clip 9:16 in cima a una 16:9 in una
@@ -1042,14 +1209,15 @@ mod tests {
                 Layer::Video {
                     frame: below.as_yuv_frame(),
                     transform: Transform::default(),
+                    source_size: (below.width, below.height),
                 },
                 Layer::Video {
                     frame: above.as_yuv_frame(),
                     transform: Transform::default(),
+                    source_size: (above.width, above.height),
                 },
             ],
-            32,
-            16,
+            OutputFrame::exact(32, 16),
         );
 
         let pixel = |x: usize, y: usize| {
@@ -1070,6 +1238,7 @@ mod tests {
                 Layer::Video {
                     frame: below.as_yuv_frame(),
                     transform: Transform::default(),
+                    source_size: (below.width, below.height),
                 },
                 Layer::Solid(vv_core::Rgba {
                     r: 1.0,
@@ -1078,8 +1247,7 @@ mod tests {
                     a: 1.0,
                 }),
             ],
-            16,
-            16,
+            OutputFrame::exact(16, 16),
         );
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
     }
@@ -1087,7 +1255,7 @@ mod tests {
     #[test]
     fn no_layers_renders_a_black_frame() {
         let compositor = Compositor::new_headless();
-        let out = compositor.render_layers(&[], 4, 4);
+        let out = compositor.render_layers(&[], OutputFrame::exact(4, 4));
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[0, 0, 0, 255]));
     }
 
@@ -1102,7 +1270,7 @@ mod tests {
     fn output_size_can_differ_from_input_size() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(4, 4, 1, 2, 3, ColorMatrix::Bt601, true);
-        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 37, 21);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(37, 21));
         assert_eq!(out.len(), 37 * 21 * 4);
     }
 
@@ -1179,8 +1347,8 @@ mod tests {
             ..Transform::default()
         };
 
-        let via_readback = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
-        let texture = compositor.render_frame_to_texture(&input.as_yuv_frame(), &transform, 16, 16);
+        let via_readback = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+        let texture = compositor.render_frame_to_texture(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let via_texture = read_back(&compositor, &texture, 16, 16);
 
         assert_eq!(

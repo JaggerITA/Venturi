@@ -12,5 +12,5 @@ pub mod compositor;
 pub mod generator;
 pub mod text;
 
-pub use compositor::{fit_output_size, ColorMatrix, Compositor, Layer, YuvFrame};
+pub use compositor::{fit_output_size, ColorMatrix, Compositor, Layer, OutputFrame, YuvFrame};
 pub use generator::solid_color_frame;

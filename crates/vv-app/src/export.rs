@@ -29,7 +29,9 @@ use vv_audio::mixer::{
     MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, prepare_mix_buffer, timeline_frame_to_sample,
 };
 
-use crate::frame_provider::{FrameProvider, as_render_yuv_frame, media_source_frame};
+use crate::frame_provider::{
+    FrameProvider, as_render_yuv_frame, clip_source_size, media_source_frame,
+};
 
 const PROJECT_CHANNELS: u16 = 2;
 
@@ -249,7 +251,10 @@ fn render_video_frame(
                 // `None` = source_out oltre la fine reale del file: quel
                 // layer semplicemente non c'è (nero se è l'unico), meglio
                 // che un panic o il congelamento dell'ultimo frame valido.
-                decoded.push((provider.frame_for(project, clip, frame)?, Some(transform)));
+                decoded.push((
+                    provider.frame_for(project, clip, frame)?,
+                    Some((transform, clip_source_size(project, clip))),
+                ));
             }
             ClipSource::SolidColor => decoded.push((None, None)),
         }
@@ -259,9 +264,10 @@ fn render_video_frame(
         .iter()
         .zip(&decoded)
         .filter_map(|(clip, (frame_yuv, transform))| match (frame_yuv, transform) {
-            (Some(f), Some(transform)) => Some(vv_render::Layer::Video {
+            (Some(f), Some((transform, source_size))) => Some(vv_render::Layer::Video {
                 frame: as_render_yuv_frame(f),
                 transform: *transform,
+                source_size: *source_size,
             }),
             (None, Some(_)) => None,
             _ => {
@@ -282,7 +288,10 @@ fn render_video_frame(
         })
         .collect();
 
-    Ok(compositor.render_layers(&layers, resolution.0, resolution.1))
+    Ok(compositor.render_layers(
+        &layers,
+        vv_render::OutputFrame::exact(resolution.0, resolution.1),
+    ))
 }
 
 /// Mix di tutte le track audio a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
