@@ -13,6 +13,7 @@ struct TransformUniform {
     // x/y: fattori di letterbox (>1 sull'asse che resta scoperto): il
     // frame sorgente viene inscritto nell'output mantenendo il suo
     // aspect ratio invece di essere deformato, z/w inutilizzati.
+    //
     fit: vec4<f32>,
     // x: matrice colore (0=BT.601, 1=BT.709, 2=BT.2020, vedi
     //    vv_media::ColorMatrix). y: 1.0 se range full (JPEG), 0.0 se
@@ -87,31 +88,32 @@ fn yuv_to_rgb(y_sample: f32, u_sample: f32, v_sample: f32, matrix_id: i32, full_
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let crop_min = transform.crop.xy;
-    let crop_max = transform.crop.zw;
-    let crop_size = crop_max - crop_min;
-    let crop_center = (crop_min + crop_max) * 0.5;
-
     let zoom = max(transform.zoom_pos.x, 0.0001);
     let position = transform.zoom_pos.yz;
 
-    let centered = (in.uv - vec2<f32>(0.5, 0.5)) * transform.fit.xy;
-    // Alpha 0, non nero opaco: sulle bande deve vedersi il layer sotto
-    // (il pass è in alpha-over, vedi Compositor::render_layers).
-    if (abs(centered.x) > 0.5 || abs(centered.y) > 0.5) {
+    // Dallo spazio dell'output a quello del sorgente, l'inverso di come si
+    // ragiona sulla clip: `position` la sposta dentro il frame, `zoom` la
+    // ingrandisce attorno al proprio centro (quindi può arrivare a coprire
+    // tutto il frame, anche partendo da un aspect ratio diverso), `fit` la
+    // inscrive senza deformarla (vedi Compositor::fit_factors).
+    let centered = (in.uv - vec2<f32>(0.5, 0.5) - position) / zoom * transform.fit.xy;
+    let source_uv = centered + vec2<f32>(0.5, 0.5);
+
+    let crop_min = transform.crop.xy;
+    let crop_max = transform.crop.zw;
+    // Fuori dal crop (o fuori dalla clip): trasparente, si vede il layer
+    // sotto. Il crop taglia e basta — non ricentra né ridimensiona quel
+    // che resta, che continua a cadere dov'era nel frame.
+    if (any(source_uv < crop_min) || any(source_uv > crop_max)) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    let sample_uv = crop_center + (centered / zoom) * crop_size - position;
-
-    // Fuori dal crop: clamp sul bordo piuttosto che leggere fuori texture.
-    let clamped = clamp(sample_uv, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 
     // U/V sono a metà risoluzione (4:2:0): campionarli alla stessa uv
     // del piano Y con un sampler bilineare fa anche l'upsampling della
     // croma, gratis.
-    let y_sample = textureSample(y_tex, input_sampler, clamped).r;
-    let u_sample = textureSample(u_tex, input_sampler, clamped).r;
-    let v_sample = textureSample(v_tex, input_sampler, clamped).r;
+    let y_sample = textureSample(y_tex, input_sampler, source_uv).r;
+    let u_sample = textureSample(u_tex, input_sampler, source_uv).r;
+    let v_sample = textureSample(v_tex, input_sampler, source_uv).r;
 
     let matrix_id = i32(transform.color.x);
     let full_range = transform.color.y > 0.5;

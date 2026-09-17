@@ -254,9 +254,18 @@ impl<T: Lerp + Clone> Keyframed<T> {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transform {
-    /// Rettangolo di crop in coordinate normalizzate [0,1] sul frame sorgente.
+    /// Rettangolo di crop in coordinate normalizzate [0,1] sul frame
+    /// sorgente: taglia i bordi della clip e basta — quel che resta non
+    /// viene ricentrato né ingrandito, continua a cadere dov'era nel frame
+    /// di output (dietro la parte tagliata si vede il layer sotto).
     pub crop: [f32; 4], // left, top, right, bottom
+    /// Ingrandimento della clip *rispetto al frame di output*, attorno al
+    /// proprio centro: con abbastanza zoom una clip di aspect ratio diverso
+    /// da quello della timeline arriva a coprirlo tutto, bande comprese.
     pub zoom: f32,
+    /// Spostamento della clip dentro il frame di output, in frazioni della
+    /// sua larghezza/altezza (X positivo = verso destra, Y positivo = verso
+    /// il basso). Non sposta il contenuto dentro la clip.
     pub position: [f32; 2],
 }
 

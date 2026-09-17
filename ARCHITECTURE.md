@@ -145,10 +145,12 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 2. Upload dei piani YUV, conversione a RGB nello shader
    (`vv-render/src/shaders/transform.wgsl`, matrice BT.601/709/2020 e range
    dal sorgente).
-3. Lo shader applica crop (sample rect) e zoom/posizione, e inscrive il
-   sorgente nel frame di output mantenendone l'aspect ratio: bande nere
-   (letterbox/pillarbox) invece di deformare, es. una clip 9:16 in una
-   timeline 16:9.
+3. Lo shader inscrive il sorgente nel frame di output mantenendone
+   l'aspect ratio — bande (letterbox/pillarbox) invece di deformare, es.
+   una clip 9:16 in una timeline 16:9 — e ci applica il `Transform`
+   ragionando in coordinate di *output*: `zoom` ingrandisce la clip nel
+   frame (fino a coprirlo tutto), `position` la sposta nel frame, `crop`
+   ne taglia i bordi senza ricentrare né ridimensionare il resto.
 4. Un pass per layer sulla stessa texture, in alpha-over
    (`Compositor::render_layers`): le bande del layer sopra escono con alpha
    0 e lasciano vedere quello sotto. Una clip SolidColor è il clear del

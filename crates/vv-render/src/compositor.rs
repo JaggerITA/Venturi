@@ -487,7 +487,7 @@ impl Compositor {
             frame.matrix,
             frame.full_range,
             fit_factors(
-                cropped_size(frame, transform),
+                (frame.width as f32, frame.height as f32),
                 (output_w as f32, output_h as f32),
             ),
         );
@@ -583,16 +583,6 @@ impl Compositor {
             pass.draw(0..3, 0..1);
         }
     }
-}
-
-/// Dimensioni della porzione di sorgente effettivamente mostrata: è
-/// quella, non il frame intero, a determinare l'aspect ratio da
-/// preservare quando il crop non è simmetrico.
-fn cropped_size(frame: &YuvFrame, t: &Transform) -> (f32, f32) {
-    (
-        frame.width as f32 * (t.crop[2] - t.crop[0]).abs().max(f32::EPSILON),
-        frame.height as f32 * (t.crop[3] - t.crop[1]).abs().max(f32::EPSILON),
-    )
 }
 
 /// Fattori di letterbox/pillarbox passati allo shader: >1 sull'asse che
@@ -817,8 +807,11 @@ mod tests {
         }
     }
 
+    /// Il crop taglia e basta: quel che resta continua a cadere dov'era
+    /// nel frame, non viene ricentrato né ingrandito per riempirlo (dove è
+    /// stato tagliato si vede il layer sotto, qui il nero del clear).
     #[test]
-    fn crop_to_top_left_quadrant_shows_only_that_color() {
+    fn crop_cuts_without_moving_what_is_left() {
         let compositor = Compositor::new_headless();
         let input = quadrant_frame();
 
@@ -828,30 +821,36 @@ mod tests {
             position: [0.0, 0.0],
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
 
-        // Solo il pixel centrale, non tutta l'immagine: ai bordi del crop il
-        // filtro bilineare sfuma legittimamente coi texel vicini (specie
-        // all'angolo dove convergono tutti e 4 i quadranti) — non è un bug
-        // della matematica di crop, è come ci si aspetta si comporti un
-        // sampler lineare. Il centro del crop invece cade tra due texel
-        // dello stesso colore, quindi deve restare puro. Croma neutra: R
-        // deve combaciare esattamente con la Y di quel quadrante (40).
-        assert_close_rgba(center_pixel(&out, 16, 16), [40, 40, 40, 255]);
+        // Croma neutra: R combacia esattamente con la Y del quadrante (40).
+        assert_close_rgba(pixel(4, 4), [40, 40, 40, 255]);
+        assert_eq!(pixel(12, 4), [0, 0, 0, 255], "alto-destra: tagliato");
+        assert_eq!(pixel(4, 12), [0, 0, 0, 255], "basso-sinistra: tagliato");
+        assert_eq!(pixel(12, 12), [0, 0, 0, 255], "basso-destra: tagliato");
     }
 
     #[test]
-    fn crop_to_bottom_right_quadrant_shows_only_that_color() {
+    fn crop_to_bottom_right_quadrant_leaves_it_in_the_bottom_right() {
         let compositor = Compositor::new_headless();
         let input = quadrant_frame();
 
         let transform = Transform {
-            crop: [0.5, 0.5, 1.0, 1.0], // quadrante basso-destra
+            crop: [0.5, 0.5, 1.0, 1.0],
             zoom: 1.0,
             position: [0.0, 0.0],
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
 
-        assert_close_rgba(center_pixel(&out, 16, 16), [220, 220, 220, 255]);
+        assert_close_rgba(pixel(12, 12), [220, 220, 220, 255]);
+        assert_eq!(pixel(4, 4), [0, 0, 0, 255], "alto-sinistra: tagliato");
     }
 
     #[test]
@@ -883,6 +882,50 @@ mod tests {
                 [255, 255, 255, 255],
             );
         }
+    }
+
+    /// Lo zoom ingrandisce la clip *rispetto al frame di output*: una 9:16
+    /// zoomata abbastanza arriva a coprire tutto un frame 16:9, bande
+    /// comprese (caso segnalato dall'utente).
+    #[test]
+    fn zoom_enlarges_the_clip_until_it_covers_the_whole_output_frame() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+
+        let bars = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 32, 16);
+        assert_eq!(&bars[0..4], &[0, 0, 0, 255], "a zoom 1 restano le bande");
+
+        let transform = Transform {
+            crop: [0.0, 0.0, 1.0, 1.0],
+            zoom: 5.0, // > 32/16 : 8/16, cioè il fattore che copre la larghezza
+            position: [0.0, 0.0],
+        };
+        let zoomed = compositor.render_frame(&input.as_yuv_frame(), &transform, 32, 16);
+        for px in zoomed.as_chunks::<4>().0 {
+            assert_close_rgba(*px, [255, 255, 255, 255]);
+        }
+    }
+
+    /// La posizione sposta la clip *dentro* il frame, non il contenuto
+    /// dentro la clip.
+    #[test]
+    fn position_moves_the_clip_inside_the_output_frame() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false);
+
+        let transform = Transform {
+            crop: [0.0, 0.0, 1.0, 1.0],
+            zoom: 1.0,
+            position: [0.5, 0.0], // mezzo frame a destra
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        assert_eq!(pixel(2, 8), [0, 0, 0, 255], "metà sinistra: clip uscita");
+        assert_close_rgba(pixel(14, 8), [255, 255, 255, 255]);
     }
 
     /// Il caso segnalato dall'utente: clip 9:16 in cima a una 16:9 in una
