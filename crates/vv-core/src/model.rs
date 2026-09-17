@@ -362,13 +362,7 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    /// La clip attiva su `track_index` al frame `frame`, se c'è. Prima
-    /// vivevano tre copie quasi identiche di questa stessa ricerca lineare
-    /// (`VibeVideoApp::clip_at` in vv-app/main.rs, `active_clip_at` in
-    /// vv-app/export.rs, e concettualmente dentro la logica di preload
-    /// per-clip in main.rs): estratta qui una volta sola perché sia
-    /// export sia il render-ahead a livello di timeline la usano allo
-    /// stesso modo.
+    /// La clip attiva su `track_index` al frame `frame`, se c'è.
     pub fn active_clip_at(&self, track_index: usize, frame: FrameIdx) -> Option<&Clip> {
         self.tracks
             .get(track_index)?

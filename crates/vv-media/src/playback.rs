@@ -2,9 +2,8 @@
 //! partire da un target (aggiornato su seek) e riempie la `FrameCache`.
 //! Vedi ARCHITECTURE.md § Pipeline di decode + cache.
 //!
-//! Un solo worker per ora (un player = una clip aperta alla volta): il pool
-//! di worker per il decode-ahead multi-clip è un'estensione futura, non
-//! necessaria finché il player lavora su una sola clip (milestone 2).
+//! Usato solo dall'anteprima di un media dal media pool; il buffer della
+//! timeline è `vv-app::render_ahead`.
 
 use crate::cache::FrameCache;
 use crate::decode::Decoder;
@@ -58,7 +57,7 @@ pub struct DecodeAhead {
 /// contro rallentamenti di decodifica transitori.
 const MIN_CACHE_FRAMES: usize = 24;
 
-/// Quanti frame RGBA8 (`width*height*4` byte l'uno, non compressi) entrano
+/// Quanti frame da `width*height*4` byte l'uno entrano
 /// in `budget_bytes`, con un minimo di `MIN_CACHE_FRAMES`. Funzione pura
 /// (nessuna apertura di file/thread) per poterla testare senza dipendere
 /// da ffmpeg.
@@ -75,11 +74,11 @@ impl DecodeAhead {
     /// La capacità della cache (in frame) è derivata da `cache_budget_bytes`
     /// (un budget di *memoria*, non un conteggio di frame) e dalla
     /// risoluzione reale del media, scoperta solo qui dopo l'apertura:
-    /// frame RGBA8 non compressi pesano `width*height*4` byte l'uno, quindi
+    /// un frame decodificato pesa in proporzione a `width*height`, quindi
     /// un conteggio fisso di frame ha un costo in RAM molto diverso a
     /// seconda della sorgente (un 1080p e un 4K differiscono di ~4x). Un
-    /// budget fisso invece garantisce un tetto di memoria prevedibile per
-    /// player aperto qualunque sia la risoluzione, *e* dà automaticamente
+    /// budget fisso invece garantisce un tetto di memoria prevedibile
+    /// qualunque sia la risoluzione, *e* dà automaticamente
     /// più margine di riproduzione fluida (più frame pre-decodificati)
     /// alle sorgenti più leggere invece di limitarle tutte allo stesso
     /// conteggio pensato per il caso peggiore (bug segnalato: cache

@@ -75,7 +75,7 @@ impl FrameCache {
     /// capacità — proporzionale a quanti frame nuovi arrivano, non a
     /// quanto la testina si è mossa. Se la testina avanza a piccoli
     /// passi (mai abbastanza per un seek reale, vedi
-    /// `SEEK_THRESHOLD_FRAMES` in `render_ahead`) e il decoder resta
+    /// `seek_threshold_frames` in `render_ahead`) e il decoder resta
     /// comodamente avanti, il "fronte" del buffer può restare bloccato
     /// molto indietro rispetto alla testina per un tempo indefinito,
     /// mentre la coda si allunga di pochi frame ad ogni ciclo — lo

@@ -1,13 +1,12 @@
 //! Compositor GPU (wgpu), generatori (`generator`) e overlay testo
 //! (`text`) — vedi ARCHITECTURE.md § Compositing GPU.
-//! Milestone 5: crop + zoom + gain via shader (`compositor`), input in
-//! YUV420 planare con conversione a RGB nello shader
-//! (REFACTOR_PIPELINE.md B3) — `Compositor::new` può condividere il
-//! device wgpu di `eframe`/`egui-wgpu` per un path di rendering
-//! zero-copy (B2), oppure usare un device indipendente
-//! (`Compositor::new_headless`, per l'export e i test). Milestone 6:
-//! generatore SolidColor (`generator`). Overlay testo (`text`) resta
-//! uno scheletro.
+//! Crop + zoom via shader (`compositor`), input in YUV420 planare con
+//! conversione a RGB nello shader (REFACTOR_PIPELINE.md B3) —
+//! `Compositor::new` può condividere il device wgpu di `eframe`/`egui-wgpu`
+//! per un path di rendering zero-copy (B2), oppure usare un device
+//! indipendente (`Compositor::new_headless`, per l'export e i test).
+//! Generatore SolidColor (`generator`). Overlay testo (`text`) non ancora
+//! implementato.
 
 pub mod compositor;
 pub mod generator;

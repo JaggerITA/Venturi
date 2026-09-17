@@ -1,10 +1,9 @@
 //! Decodifica dell'intera traccia audio di un media in un buffer
 //! interleaved f32.
 //!
-//! Milestone 2: l'MVP decodifica tutta la traccia in anticipo. Per singole
-//! clip di durata "da editing" è un approccio semplice e corretto; lo
-//! streaming a chunk per file molto lunghi è un'ottimizzazione futura, non
-//! necessaria finché il player lavora su una clip alla volta.
+//! La traccia intera finisce in RAM (il mixer ne tiene una copia a 48 kHz per
+//! stream usato): semplice e corretto per durate da editing, lo streaming a
+//! chunk per file molto lunghi resta un'ottimizzazione possibile.
 
 use ffmpeg::ChannelLayout;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
@@ -143,7 +142,7 @@ mod tests {
     use std::process::Command;
 
     /// PCM stereo in MKV ha layout canali "unknown": falliva con
-    /// "Input changed" e il player non avanzava.
+    /// "Input changed".
     #[test]
     fn decode_audio_track_handles_unspecified_channel_layout() {
         let dir = std::env::temp_dir().join("vv-media-audio-test");

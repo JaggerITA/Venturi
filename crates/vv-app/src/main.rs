@@ -259,17 +259,16 @@ struct VibeVideoApp {
     lookahead_secs: f64,
     behind_secs: f64,
 
-    /// Clip la cui anteprima è attualmente mostrata: guida sia il player
-    /// (quale media riprodurre) sia il transform/gain applicati (milestone
-    /// 5). `None` se non c'è ancora una clip selezionata.
+    /// Clip video mostrata nel viewer (quella sotto al playhead), da cui si
+    /// leggono frame e transform. `None` su un vuoto o durante l'anteprima
+    /// dal media pool.
     active_clip: Option<(usize, ClipId)>,
     compositor: vv_render::Compositor,
 
     /// Ultimo `timeline_state.playhead` già gestito da
-    /// `ensure_active_clip_matches_playhead`: usato per distinguere "il
-    /// player sta scrivendo il playhead lui stesso durante il playback"
-    /// (nessun seek da fare, lo fa già avanzare la decodifica) da "l'utente
-    /// ha trascinato il playhead da fermo" (serve un seek esplicito).
+    /// `ensure_active_clip_matches_playhead`: distingue il playhead mosso
+    /// dal clock audio durante il playback (nessun seek) da uno spostato
+    /// dall'utente (seek del clock).
     last_synced_playhead: FrameIdx,
 
     /// Media aperto tramite il pulsante "Anteprima" del media pool (non
@@ -342,7 +341,7 @@ struct VibeVideoApp {
     project_error: Option<String>,
 
     /// Audiometer (toggle in Visualizza): una fascia stretta a destra
-    /// della timeline con il livello del player attivo. Attivo di
+    /// della timeline con il livello dell'audio in uscita. Attivo di
     /// default, come nella maggior parte degli NLE.
     audiometer_enabled: bool,
     /// Valori (sinistra, destra) mostrati dal meter stereo, con un
@@ -521,7 +520,7 @@ impl VibeVideoApp {
 
     /// Sostituisce il progetto corrente con quello caricato da `path`:
     /// azzera tutto lo stato UI/di sessione legato al *vecchio* progetto
-    /// (selezione, playhead, history, player/anteprima) — sarebbe
+    /// (selezione, playhead, history, audio/anteprima) — sarebbe
     /// incoerente riferito al nuovo. `timeline_id` diventa la prima (e di
     /// norma unica, con l'UI attuale) timeline del progetto caricato.
     fn load_project_from(&mut self, path: PathBuf) {
@@ -683,8 +682,8 @@ impl VibeVideoApp {
         }
     }
 
-    /// Due barre verticali (sinistra/destra) col livello del player
-    /// attivo, disegnate in tutto lo spazio disponibile in `ui` (chi
+    /// Due barre verticali (sinistra/destra) col livello dell'audio in
+    /// uscita, disegnate in tutto lo spazio disponibile in `ui` (chi
     /// chiama ne ha già ritagliato una fascia stretta, vedi il pannello
     /// "audiometer" annidato in quello "timeline"). Non una misura
     /// professionale: solo il picco assoluto per canale dell'ultimo
@@ -774,7 +773,7 @@ impl VibeVideoApp {
 
     /// La clip Video attiva (track più in alto tra quelle che ne hanno una
     /// in quel punto, `Timeline::active_video_clip_at`) al frame `frame`,
-    /// con la sua track — quella che il player/il viewer devono seguire.
+    /// con la sua track — quella che il viewer mostra.
     fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, ClipId)> {
         let timeline_id = self.timeline_id?;
         self.project.timelines[timeline_id]
@@ -1045,8 +1044,7 @@ impl VibeVideoApp {
     /// un `read` di un file da qualche MB a ogni repaint sarebbe un I/O
     /// inutile. Il file resta la fonte di verità (sopravvive al riavvio,
     /// generato dal `waveform_worker`); la mappa è solo una cache della
-    /// sessione. Chiamato prima di `show_timeline`, che poi legge i picchi
-    /// dalla mappa via la closure `waveform_peaks` che gli passa.
+    /// sessione. Chiamato prima di `show_timeline`, che riceve la mappa.
     fn ensure_waveforms_loaded(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1227,7 +1225,7 @@ impl VibeVideoApp {
             .map(|c| &c.effects)
     }
 
-    /// Il frame video grezzo (RGBA, non ancora composito) da mostrare nel
+    /// Il frame video grezzo (YUV420, non ancora composito) da mostrare nel
     /// viewer in questo momento, con la posizione (frame *sorgente*, per
     /// valutare il transform keyframeato) a cui corrisponde — `None` se
     /// non c'è ancora nulla di pronto. Due sorgenti possibili, mai
@@ -1650,7 +1648,7 @@ impl VibeVideoApp {
         } else if old_start < new_start && old_end > new_end {
             // Il nuovo intervallo cade nel mezzo: divide la clip in due,
             // poi accorcia la metà destra dal suo bordo sinistro fino a
-            // `new_end` (la stessa formula usata sotto per `TrimStart`,
+            // `new_end` (la stessa formula usata sotto per `TrimEdge::Start`,
             // applicata alla clip *originale*: vedi nota lì).
             let right_id = self.project.alloc_clip_id();
             commands.push(Box::new(
@@ -1697,9 +1695,8 @@ impl VibeVideoApp {
     /// `ranges`, per far posto a nuove clip che stanno per essere inserite
     /// lì (paste): le clip già presenti che si sovrappongono vengono
     /// accorciate, divise o rimosse — mai lasciate sovrapposte con la
-    /// nuova clip sopra (bug segnalato: "il player continua a riprodurre
-    /// la clip sottostante" invece di quella appena incollata, anche se
-    /// coperta visivamente).
+    /// nuova clip sopra (bug segnalato: l'anteprima riproduceva la clip
+    /// sottostante invece di quella appena incollata).
     ///
     /// Dividere una clip non tocca il `linked_group` della metà sinistra
     /// (`SplitClip`, vedi doc): resta collegata a chiunque altro condivida
@@ -2051,7 +2048,7 @@ impl VibeVideoApp {
         // la sua gemella audio collegata, esplicitamente, non tramite il
         // generico "clip sotto al playhead" (che per costruzione sarebbe
         // la metà destra, dato che il playhead è esattamente al suo
-        // inizio: `clip_at` usa `start <= playhead < end`). L'intento più
+        // inizio: `active_clip_at` usa `start <= playhead < end`). L'intento più
         // comune dopo un taglio è rivedere/eliminare ciò che sta *prima*
         // del punto appena tagliato, non dopo. Con più track video, "la
         // track video" del taglio è quella più in alto tra quelle tagliate
@@ -2624,10 +2621,7 @@ impl eframe::App for VibeVideoApp {
                         });
                         ui.horizontal(|ui| {
                             ui.label("Cache video:");
-                            // Espresso in MB nella UI, ma `cache_budget_bytes`
-                            // resta in byte internamente (vedi doc del campo):
-                            // effetto solo sui player aperti *dopo* la
-                            // modifica, non su uno già in corso.
+                            // Espresso in MB nella UI, `cache_budget_bytes` in byte.
                             let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
                             if ui
                                 .add(
@@ -2636,10 +2630,9 @@ impl eframe::App for VibeVideoApp {
                                         .suffix(" MB"),
                                 )
                                 .on_hover_text(
-                                    "Quanta RAM pre-decodificare per il player aperto: di più = \
+                                    "Quanta RAM usare per i frame pre-decodificati: di più = \
                                      scrub/playback più fluidi, di meno = meno rischio di esaurire \
-                                     la memoria (soprattutto con sorgenti 4K+). Effetto dal \
-                                     prossimo cambio clip.",
+                                     la memoria (soprattutto con sorgenti 4K+).",
                                 )
                                 .changed()
                             {
@@ -2691,7 +2684,7 @@ impl eframe::App for VibeVideoApp {
         // sempre il playhead della timeline tradotto nello spazio frame
         // sorgente della clip *selezionata* (source_in + offset locale,
         // clampato dentro la clip) — indipendente da quale clip stia
-        // effettivamente riproducendo il player, così modificare le
+        // effettivamente mostrando il viewer, così modificare le
         // proprietà di una clip diversa da quella attiva resta coerente
         // con quello che si vede scorrendo la timeline fin lì.
         // Il pannello proprietà mostra l'editor completo solo quando la
@@ -3564,8 +3557,7 @@ mod tests {
     /// di quella di default) ha una clip più corta al centro di quella
     /// della prima. `active_video_clip_at` deve vedere quella in cima dove
     /// c'è, e tornare a quella sotto appena finisce — la stessa
-    /// generalizzazione che il player/il viewer usano per seguire il
-    /// playhead.
+    /// regola che il viewer usa per seguire il playhead.
     #[test]
     fn active_video_clip_at_prefers_the_topmost_video_track() {
         let mut app = VibeVideoApp::default();
@@ -4640,7 +4632,7 @@ mod tests {
     }
 
     /// Bug segnalato: incollare una clip sopra un'altra la copriva solo
-    /// visivamente, ma il player continuava a riprodurre quella
+    /// visivamente, ma l'anteprima continuava a riprodurre quella
     /// sottostante. Se il nuovo intervallo copre *interamente* una clip
     /// esistente, quella va rimossa del tutto (`make_room_for_ranges`).
     #[test]

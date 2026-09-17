@@ -3,12 +3,10 @@
 //! `Decoder` apre lo stream video di un media e permette di decodificare
 //! frame in sequenza (`next_frame`) o dopo un seek (`seek_to_time`).
 //! `sws_scale` normalizza *qualunque* formato pixel/profondità/sottocampionamento
-//! in ingresso (YUV420P, NV12, YUV422, 10-bit, ecc. — la stessa robustezza
-//! che aveva quando il target era RGBA) a YUV420P planare 8-bit: la
+//! in ingresso (YUV420P, NV12, YUV422, 10-bit, ecc.) a YUV420P planare 8-bit: la
 //! conversione YUV→RGB *finale* resta sulla GPU, nello shader del
 //! compositor (REFACTOR_PIPELINE.md B3) — qui si esce con tre piani
-//! densi (Y/U/V) invece di un RGBA già espanso, ~2.5× meno byte per
-//! frame in cache a parità di risoluzione.
+//! densi (Y/U/V), ~2.5× meno byte per frame in cache di un RGBA.
 //!
 //! La matrice di conversione (BT.601/709/2020) e il range (limited/full)
 //! vanno letti dal frame *decodificato originale* (prima dello scaling:

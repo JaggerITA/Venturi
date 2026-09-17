@@ -734,8 +734,8 @@ pub fn show_timeline(
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
     state: &mut TimelineState,
     snapping_enabled: bool,
-    // Intervalli (in frame di timeline) già decodificati/in cache nel
-    // player aperto in questo momento — disegnati come una sottile
+    // Intervalli (in frame di timeline) già decodificati/in cache in
+    // `RenderAhead` — disegnati come una sottile
     // striscia "buffered" nel righello (richiesta: "visualizzare durante
     // la riproduzione come viene fatto il buffer"), stesso principio dei
     // player video comuni (es. la barra grigia sotto la barra di
@@ -762,8 +762,7 @@ pub fn show_timeline(
     // durata della traccia audio, base temporale dei picchi (vedi
     // `draw_clip_waveform`).
     waveform_cache: &std::collections::HashMap<(u64, usize), vv_media::Waveform>,
-    // Il player è in riproduzione (clip attiva in corso o vuoto
-    // attraversato a orologio): durante la riproduzione la testina deve
+    // La timeline è in riproduzione: durante la riproduzione la testina deve
     // sempre restare visibile, quindi la vista "volta pagina" per
     // seguirla quando esce dall'area visibile (vedi sotto).
     playback_active: bool,
@@ -1036,7 +1035,7 @@ pub fn show_timeline(
                 draw_ruler_ticks(&painter, origin, visible_x, state.pixels_per_sec, fps);
 
                 // Striscia "buffered": una sottile fascia sul bordo inferiore
-                // del righello, colorata dove il player ha già frame in cache
+                // del righello, colorata dove ci sono già frame in cache
                 // (vedi doc del parametro `buffered_ranges`). Sotto alla linea
                 // della playhead (disegnata più avanti) così resta visibile
                 // anche quando la playhead ci passa sopra.
@@ -2627,11 +2626,7 @@ mod tests {
 
     /// Bug segnalato: dividere una clip audio (`SplitClip`) spostava
     /// visibilmente la forma d'onda disegnata esattamente nel punto di
-    /// taglio, perché il bin di ogni metà veniva ancorato a un
-    /// `bin_start`/`bin_end` arrotondato (floor/ceil) per *quella* metà e
-    /// poi interpolato localmente al suo interno — un arrotondamento
-    /// indipendente per ogni bordo di clip, invisibile sulla clip intera
-    /// (bordo solo alle estremità) ma discontinuo esattamente al taglio.
+    /// taglio, perché ogni metà arrotondava i propri bin ai suoi bordi.
     /// Con `waveform_bin_for_column` calcolato dalla posizione *assoluta*
     /// nel tempo audio, lo stesso istante deve mappare sempre allo stesso
     /// bin sia prima sia dopo la divisione.

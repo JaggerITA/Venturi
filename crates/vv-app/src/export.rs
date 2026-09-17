@@ -4,7 +4,7 @@
 //! dall'anteprima in `main.rs` (`active_clip_effects`,
 //! `EffectStack::*.value_at`). Nessun audio device, nessuna finestra: pensata
 //! per girare su un thread dedicato a partire da uno snapshot di `Project`
-//! clonato al click di "Esporta" (vedi `VibeVideoApp::export` in `main.rs`),
+//! clonato al click di "Esporta" (vedi `VibeVideoApp::start_export` in `main.rs`),
 //! non sul `Project` live della UI.
 //!
 //! Limiti v1, coerenti con lo stato attuale del progetto (ARCHITECTURE.md):

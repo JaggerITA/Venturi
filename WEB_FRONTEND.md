@@ -50,9 +50,9 @@ timer dedicato invece che dal ciclo di ridisegno di egui).
 
 Punti da portare via da `vv-app/src/main.rs` pressoché invariati (sono già
 Rust puro, testato con gli unit test esistenti):
-`TimelineAudio`, `History`, `clip_at`, `linked_partner`,
+`TimelineAudio`, `History`, `group_members`,
 `ensure_active_clip_matches_playhead`, `drive_playback`,
-`sync_selection_to_playhead`, `split_all_at_playhead`, `delete_selected`,
+`sync_selection_to_playhead`, `split_at_playhead`, `delete_selected`,
 `ripple_delete_selected`, `add_media_to_timeline`.
 
 ## Canale di controllo (comandi + stato)
@@ -74,7 +74,7 @@ progetto resta su LAN con pochissimi client).
 ```
 
 Sul lato server, ogni messaggio si traduce in una chiamata diretta ai
-metodi già esistenti su `VibeVideoApp`-equivalente (`split_all_at_playhead`,
+metodi già esistenti su `VibeVideoApp`-equivalente (`split_at_playhead`,
 `ripple_delete_selected`, ecc.) o in un `History::do_command` con il
 `Command` di `vv-core` corrispondente costruito dai campi del messaggio.
 

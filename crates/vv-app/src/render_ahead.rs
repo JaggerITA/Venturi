@@ -4,15 +4,7 @@
 //! diverso — nessun caso speciale), e riempie una `SharedFrameCache`
 //! *unica*, condivisa da tutti i media della finestra, a budget globale
 //! in byte con sfratto per priorità-distanza-dalla-testina (vedi
-//! `vv_media::cache` e REFACTOR_PIPELINE.md §2 — sostituisce una
-//! generazione precedente di questo modulo che usava N cache
-//! indipendenti con budget diviso, la cui divisione arbitraria era
-//! radice di più di un bug). Sostituisce a sua volta il sistema di
-//! preload "per clip" ancora precedente (`GapPlayback`/`NextPreload`/
-//! `is_seamless_continuation`), che richiedeva un caso a parte per ogni
-//! nuovo scenario incontrato (proposta dell'utente, che ha notato con
-//! l'indicatore "buffered" che il buffer si fermava sempre al bordo
-//! della clip successiva).
+//! `vv_media::cache` e REFACTOR_PIPELINE.md §2).
 //!
 //! Il rendering (compositing crop/zoom via `vv_render::Compositor`) resta
 //! sul thread UI, invariato: qui si bufferizza solo il decode — il passo
@@ -886,17 +878,10 @@ fn range_fully_cached(
 ///   fuori dalla finestra corrente — anche un passo indietro di un solo
 ///   frame cade subito fuori finestra e viene scartato).
 ///
-/// `went_backward` è deciso una volta per l'intero ciclo (non da uno
-/// stato per-media come in una versione precedente di questo codice):
+/// `went_backward` è deciso una volta per l'intero ciclo, non per media:
 /// un taglio produce più segmenti per lo stesso media nella stessa
-/// finestra (la clip prima e quella dopo), e derivare "sono tornato
-/// indietro?" da uno stato per-media aggiornato mentre si itera sui
-/// segmenti si è dimostrato fragile due volte (vedi git log) — sporcato
-/// dall'ordine di elaborazione dei segmenti nello stesso ciclo, poi
-/// reso "sticky" da un tentativo di correzione. Con un'unica decisione
-/// globale per ciclo, il caso multi-segmento non può più contaminarla:
-/// non viene mai letta né scritta prima di sapere se la testina si è
-/// davvero mossa.
+/// finestra, e uno stato per-media aggiornato mentre si itera sui
+/// segmenti verrebbe sporcato dall'ordine di elaborazione.
 ///
 /// Quando serve un seek per lo stesso media già aperto, va fatto sul
 /// decoder *esistente* (`seek_to_time`), non riaprendo il file da
@@ -3053,8 +3038,7 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Capacità ~60 frame YUV420 (width*height*3/2 byte/frame, non
-        // più i 4 byte/pixel RGBA da prima di REFACTOR_PIPELINE.md B3):
+        // Capacità ~60 frame YUV420 (width*height*3/2 byte/frame):
         // meno di quanto i due segmenti insieme chiederebbero (~20 + ~55),
         // ma più di quanto ciascuno chiede da solo — costringe la
         // condivisione della stessa cache a contare davvero.
@@ -3095,21 +3079,13 @@ mod tests {
     /// posizionare la testina appena prima del punto di taglio: la
     /// finestra di lookahead include comunque un pezzo di entrambe le
     /// metà, due segmenti dello stesso media), ogni ciclo di poll
-    /// rielabora gli stessi due segmenti nello stesso ordine. In una
-    /// versione precedente di questo codice, `requested_start` (stato
-    /// *per media*, aggiornato dentro il loop sui segmenti) veniva
-    /// sovrascritto con il `segment_start` dell'*ultimo* segmento
-    /// processato: al ciclo successivo, rielaborando il *primo* segmento
-    /// (source_start più basso), il confronto lo leggeva sempre come
-    /// "tornato indietro" — scatenando un seek reale a ogni singolo
-    /// ciclo pur restando fermi. Con `went_backward` deciso una volta
-    /// sola per ciclo (non per segmento, vedi doc di `position_decoder`)
-    /// il caso multi-segmento non può proprio più presentarsi: verificato
-    /// qui passando esplicitamente `false` (testina ferma) a entrambi i
-    /// segmenti in entrambi i cicli.
+    /// rielabora gli stessi due segmenti nello stesso ordine: il secondo
+    /// segmento non deve far sembrare "tornato indietro" il primo e
+    /// scatenare un seek reale a ogni ciclo pur restando fermi (vedi doc
+    /// di `position_decoder` su `went_backward`). Verificato passando
+    /// `false` (testina ferma) a entrambi i segmenti in entrambi i cicli.
     ///
-    /// Gap tra i due segmenti (10 e 25, non 10 e 50 come in una versione
-    /// precedente di questo test) scelto apposta sotto
+    /// Gap tra i due segmenti (10 e 25) scelto apposta sotto
     /// `DEFAULT_SEEK_THRESHOLD_FRAMES`: qui `position_decoder` viene
     /// chiamato direttamente, senza mai decodificare un frame reale, quindi
     /// nessuna osservazione del GOP avviene mai e la soglia resta al
@@ -3509,14 +3485,10 @@ mod tests {
     /// Regressione generale: dopo un po' di playback in avanti su più
     /// cicli, uno scrub all'indietro verso una posizione più recente del
     /// primissimo target mai visto deve comunque far ricalcolare il
-    /// buffer per la nuova posizione. Ha già scoperto due bug diversi in
-    /// due iterazioni di questo codice: prima un `requested_start`
-    /// per-media che restava "sticky" dopo un fix mal fatto (un `.min()`
-    /// invece di una sovrascrittura), poi — nella versione attuale —
-    /// verifica che il `went_backward` calcolato una volta per ciclo
-    /// (qui simulato esplicitamente dal test, come farebbe
-    /// `worker_loop`) funzioni correttamente su una sequenza realistica
-    /// di cicli, non solo su un singolo salto indietro isolato.
+    /// buffer per la nuova posizione. Verifica che `went_backward`,
+    /// calcolato una volta per ciclo (qui simulato come farebbe
+    /// `worker_loop`), regga una sequenza realistica di cicli, non solo un
+    /// singolo salto indietro isolato.
     #[test]
     fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum() {
         let path = make_test_clip_with_short_gop(

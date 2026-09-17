@@ -6,17 +6,15 @@
 //! in `export.rs`). La mappatura clip→frame-sorgente
 //! (`vv_core::Clip::source_frame_at`) è la stessa per entrambe — qui
 //! cambia solo *come* il frame a quella posizione viene procurato, non
-//! *dove* si trova (REFACTOR_PIPELINE.md B1). Prima delle due strategie
-//! rifacevano ciascuna la propria mappatura, identiche solo perché
-//! coincidono quando `EffectStack::speed == 1`: al primo time-remap
-//! reale (milestone 7) sarebbero divergenti senza questo posto unico.
+//! *dove* si trova (REFACTOR_PIPELINE.md B1): il time-remap (milestone 7)
+//! andrà cambiato in un posto solo.
 
 use std::sync::Arc;
 use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project};
 use vv_media::FrameYuv420;
 
-/// Procura il frame YUV420 decodificato (REFACTOR_PIPELINE.md B3: non
-/// più RGBA, la conversione a RGB avviene nello shader del compositor)
+/// Procura il frame YUV420 decodificato (REFACTOR_PIPELINE.md B3: la
+/// conversione a RGB avviene nello shader del compositor)
 /// per una clip Media a una data posizione di timeline. `&mut self`
 /// perché l'implementazione per l'export tiene stato (il decoder aperto
 /// per la clip attiva) — quella per l'anteprima non ne ha bisogno, ma
