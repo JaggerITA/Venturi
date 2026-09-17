@@ -311,6 +311,154 @@ impl Default for Transform {
     }
 }
 
+/// Un parametro scalare del transform: ognuno ha i propri keyframe, come
+/// nell'inspector di un NLE (il `Transform` a un dato frame è la
+/// valutazione di tutti insieme, vedi [`TransformTracks::value_at`]).
+/// `flip` non è qui: non ha valori intermedi da interpolare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransformParam {
+    ZoomX,
+    ZoomY,
+    PositionX,
+    PositionY,
+    Rotation,
+    AnchorX,
+    AnchorY,
+    CropLeft,
+    CropTop,
+    CropRight,
+    CropBottom,
+    CropSoftness,
+}
+
+impl TransformParam {
+    pub const ALL: [Self; 12] = [
+        Self::ZoomX,
+        Self::ZoomY,
+        Self::PositionX,
+        Self::PositionY,
+        Self::Rotation,
+        Self::AnchorX,
+        Self::AnchorY,
+        Self::CropLeft,
+        Self::CropTop,
+        Self::CropRight,
+        Self::CropBottom,
+        Self::CropSoftness,
+    ];
+
+    /// Posizione in `TransformTracks::params` — l'ordine di `ALL`.
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|p| *p == self).expect("ALL li elenca tutti")
+    }
+
+    /// Il valore che ha in un `Transform` già valutato.
+    pub fn of(self, t: &Transform) -> f32 {
+        match self {
+            Self::ZoomX => t.zoom[0],
+            Self::ZoomY => t.zoom[1],
+            Self::PositionX => t.position[0],
+            Self::PositionY => t.position[1],
+            Self::Rotation => t.rotation,
+            Self::AnchorX => t.anchor[0],
+            Self::AnchorY => t.anchor[1],
+            Self::CropLeft => t.crop[0],
+            Self::CropTop => t.crop[1],
+            Self::CropRight => t.crop[2],
+            Self::CropBottom => t.crop[3],
+            Self::CropSoftness => t.crop_softness,
+        }
+    }
+}
+
+/// Il transform di una clip: un `Keyframed<f32>` per parametro, così ogni
+/// parametro si anima per conto suo, più il flip (non animabile).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransformTracks {
+    /// Uno per `TransformParam`, nell'ordine di `TransformParam::ALL`.
+    params: Vec<Keyframed<f32>>,
+    pub flip: [bool; 2],
+}
+
+impl Default for TransformTracks {
+    fn default() -> Self {
+        Self::constant(Transform::default())
+    }
+}
+
+impl TransformTracks {
+    pub fn constant(t: Transform) -> Self {
+        Self {
+            params: TransformParam::ALL
+                .iter()
+                .map(|p| Keyframed::constant(p.of(&t)))
+                .collect(),
+            flip: t.flip,
+        }
+    }
+
+    pub fn track(&self, param: TransformParam) -> &Keyframed<f32> {
+        &self.params[param.index()]
+    }
+
+    pub fn track_mut(&mut self, param: TransformParam) -> &mut Keyframed<f32> {
+        &mut self.params[param.index()]
+    }
+
+    /// `true` se nessun parametro ha keyframe.
+    pub fn is_constant(&self) -> bool {
+        self.params.iter().all(|k| k.is_constant())
+    }
+
+    pub fn value_at(&self, frame: FrameIdx) -> Transform {
+        let v = |p: TransformParam| self.track(p).value_at(frame);
+        Transform {
+            crop: [
+                v(TransformParam::CropLeft),
+                v(TransformParam::CropTop),
+                v(TransformParam::CropRight),
+                v(TransformParam::CropBottom),
+            ],
+            crop_softness: v(TransformParam::CropSoftness),
+            zoom: [v(TransformParam::ZoomX), v(TransformParam::ZoomY)],
+            position: [v(TransformParam::PositionX), v(TransformParam::PositionY)],
+            rotation: v(TransformParam::Rotation),
+            anchor: [v(TransformParam::AnchorX), v(TransformParam::AnchorY)],
+            flip: self.flip,
+        }
+    }
+
+    /// Il keyframe più vicino a `frame` *prima* di esso, tra quelli dei
+    /// parametri dati: serve alle frecce di navigazione del pannello.
+    pub fn previous_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
+        params
+            .iter()
+            .filter_map(|p| {
+                self.track(*p)
+                    .keyframes()
+                    .iter()
+                    .rev()
+                    .find(|(f, _, _)| *f < frame)
+                    .map(|(f, _, _)| *f)
+            })
+            .max()
+    }
+
+    /// Simmetrica di `previous_keyframe`, in avanti.
+    pub fn next_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
+        params
+            .iter()
+            .filter_map(|p| {
+                self.track(*p)
+                    .keyframes()
+                    .iter()
+                    .find(|(f, _, _)| *f > frame)
+                    .map(|(f, _, _)| *f)
+            })
+            .min()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Rgba {
     pub r: f32,
@@ -347,7 +495,7 @@ pub enum ClipSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectStack {
-    pub transform: Keyframed<Transform>,
+    pub transform: TransformTracks,
     pub speed: Keyframed<f32>,
     pub gain_db: Keyframed<f32>,
     pub text: Vec<TextOverlay>,
@@ -357,7 +505,7 @@ pub struct EffectStack {
 impl Default for EffectStack {
     fn default() -> Self {
         Self {
-            transform: Keyframed::constant(Transform::default()),
+            transform: TransformTracks::default(),
             speed: Keyframed::constant(1.0),
             gain_db: Keyframed::constant(0.0),
             text: Vec::new(),
@@ -775,6 +923,46 @@ mod keyframe_tests {
             k.remove_at(5),
             None,
             "rimuovere due volte non deve fare nulla"
+        );
+    }
+
+    #[test]
+    fn transform_tracks_animate_each_param_on_its_own() {
+        let mut tracks = TransformTracks::default();
+        tracks
+            .track_mut(TransformParam::PositionX)
+            .upsert(0, 0.0, Interpolation::Linear);
+        tracks
+            .track_mut(TransformParam::PositionX)
+            .upsert(10, 100.0, Interpolation::Linear);
+
+        assert_eq!(tracks.value_at(5).position, [50.0, 0.0]);
+        assert_eq!(
+            tracks.value_at(5).zoom,
+            [1.0, 1.0],
+            "gli altri parametri restano al loro default"
+        );
+        assert!(!tracks.is_constant());
+    }
+
+    #[test]
+    fn transform_tracks_find_the_nearest_keyframe_in_each_direction() {
+        let mut tracks = TransformTracks::default();
+        tracks
+            .track_mut(TransformParam::Rotation)
+            .upsert(10, 0.0, Interpolation::Linear);
+        tracks
+            .track_mut(TransformParam::ZoomX)
+            .upsert(30, 2.0, Interpolation::Linear);
+
+        let both = [TransformParam::Rotation, TransformParam::ZoomX];
+        assert_eq!(tracks.previous_keyframe(&both, 20), Some(10));
+        assert_eq!(tracks.next_keyframe(&both, 20), Some(30));
+        assert_eq!(tracks.previous_keyframe(&both, 10), None, "non se stesso");
+        assert_eq!(
+            tracks.next_keyframe(&[TransformParam::Rotation], 20),
+            None,
+            "solo i keyframe dei parametri chiesti"
         );
     }
 

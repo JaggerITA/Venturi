@@ -3,7 +3,7 @@
 
 use crate::model::{
     Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem,
-    Project, Rgba, TimelineId, Track, TrackKind, Transform,
+    Project, Rgba, TimelineId, Track, TrackKind, Transform, TransformParam,
 };
 use std::cell::{Cell, RefCell};
 
@@ -899,24 +899,149 @@ impl Command for SplitClip {
     }
 }
 
-/// Imposta il transform (crop/zoom/position) *statico* di una clip, cioè
-/// `effects.transform.default` (milestone 5, prima parte: valori statici,
-/// i keyframe arrivano dopo — vedi ARCHITECTURE.md § Milestone 5).
+/// Imposta il valore *statico* di un parametro del transform, cioè il
+/// `default` del suo `Keyframed` (ogni parametro ha i suoi keyframe, vedi
+/// `TransformTracks`).
 #[derive(Debug)]
-pub struct SetClipTransform {
+pub struct SetClipTransformParam {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
-    pub new_value: Transform,
-    old_value: Option<Transform>,
+    pub param: TransformParam,
+    pub new_value: f32,
+    old_value: Option<f32>,
 }
 
-impl SetClipTransform {
+impl SetClipTransformParam {
     pub fn new(
         timeline: TimelineId,
         track_index: usize,
         clip_id: ClipId,
-        new_value: Transform,
+        param: TransformParam,
+        new_value: f32,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            param,
+            new_value,
+            old_value: None,
+        }
+    }
+}
+
+impl Command for SetClipTransformParam {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        let track = clip.effects.transform.track_mut(self.param);
+        self.old_value = Some(track.default);
+        track.default = self.new_value;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old_value) = self.old_value else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.effects.transform.track_mut(self.param).default = old_value;
+        }
+    }
+}
+
+/// Riporta un gruppo di parametri del transform al valore di default,
+/// keyframe compresi: è il reset di una sezione del pannello proprietà
+/// (Transform o Cropping), non di un parametro singolo.
+#[derive(Debug)]
+pub struct ResetTransformParams {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub params: Vec<TransformParam>,
+    /// `true` per il gruppo Transform, che comprende anche il flip.
+    pub reset_flip: bool,
+    previous: Option<(Vec<Keyframed<f32>>, [bool; 2])>,
+}
+
+impl ResetTransformParams {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        params: Vec<TransformParam>,
+        reset_flip: bool,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            params,
+            reset_flip,
+            previous: None,
+        }
+    }
+}
+
+impl Command for ResetTransformParams {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        let defaults = Transform::default();
+        let previous = self
+            .params
+            .iter()
+            .map(|p| clip.effects.transform.track(*p).clone())
+            .collect();
+        self.previous = Some((previous, clip.effects.transform.flip));
+        for param in &self.params {
+            *clip.effects.transform.track_mut(*param) = Keyframed::constant(param.of(&defaults));
+        }
+        if self.reset_flip {
+            clip.effects.transform.flip = defaults.flip;
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some((previous, flip)) = &self.previous else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        for (param, track) in self.params.iter().zip(previous) {
+            *clip.effects.transform.track_mut(*param) = track.clone();
+        }
+        if self.reset_flip {
+            clip.effects.transform.flip = *flip;
+        }
+    }
+}
+
+/// Specchiatura della clip: non è un parametro animabile (nessun valore
+/// intermedio tra specchiato e no), quindi ha il suo comando invece di
+/// passare da `SetClipTransformParam`.
+#[derive(Debug)]
+pub struct SetClipFlip {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub new_value: [bool; 2],
+    old_value: Option<[bool; 2]>,
+}
+
+impl SetClipFlip {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        new_value: [bool; 2],
     ) -> Self {
         Self {
             timeline,
@@ -928,14 +1053,14 @@ impl SetClipTransform {
     }
 }
 
-impl Command for SetClipTransform {
+impl Command for SetClipFlip {
     fn apply(&mut self, project: &mut Project) {
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
             return;
         };
-        self.old_value = Some(clip.effects.transform.default);
-        clip.effects.transform.default = self.new_value;
+        self.old_value = Some(clip.effects.transform.flip);
+        clip.effects.transform.flip = self.new_value;
     }
 
     fn undo(&self, project: &mut Project) {
@@ -944,7 +1069,7 @@ impl Command for SetClipTransform {
         };
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.effects.transform.default = old_value;
+            clip.effects.transform.flip = old_value;
         }
     }
 }
@@ -1059,7 +1184,7 @@ impl Command for SetClipColor {
 /// basterà aggiungere una variante qui, non un'altra coppia di comandi.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyframeValue {
-    Transform(Transform),
+    TransformParam(TransformParam, f32),
     Gain(f32),
     Color(Rgba),
 }
@@ -1108,15 +1233,12 @@ impl Command for UpsertKeyframe {
             return;
         };
         match self.value {
-            KeyframeValue::Transform(v) => {
-                self.previous = clip
-                    .effects
-                    .transform
+            KeyframeValue::TransformParam(param, v) => {
+                let track = clip.effects.transform.track_mut(param);
+                self.previous = track
                     .keyframe_at(self.frame)
-                    .map(|(v, i)| (KeyframeValue::Transform(v), i));
-                clip.effects
-                    .transform
-                    .upsert(self.frame, v, self.interpolation);
+                    .map(|(v, i)| (KeyframeValue::TransformParam(param, v), i));
+                track.upsert(self.frame, v, self.interpolation);
             }
             KeyframeValue::Gain(v) => {
                 self.previous = clip
@@ -1146,8 +1268,11 @@ impl Command for UpsertKeyframe {
             return;
         };
         match &self.previous {
-            Some((KeyframeValue::Transform(v), i)) => {
-                clip.effects.transform.upsert(self.frame, *v, *i);
+            Some((KeyframeValue::TransformParam(param, v), i)) => {
+                clip.effects
+                    .transform
+                    .track_mut(*param)
+                    .upsert(self.frame, *v, *i);
             }
             Some((KeyframeValue::Gain(v), i)) => {
                 clip.effects.gain_db.upsert(self.frame, *v, *i);
@@ -1158,8 +1283,8 @@ impl Command for UpsertKeyframe {
                 }
             }
             None => match self.value {
-                KeyframeValue::Transform(_) => {
-                    clip.effects.transform.remove_at(self.frame);
+                KeyframeValue::TransformParam(param, _) => {
+                    clip.effects.transform.track_mut(param).remove_at(self.frame);
                 }
                 KeyframeValue::Gain(_) => {
                     clip.effects.gain_db.remove_at(self.frame);
@@ -1176,7 +1301,7 @@ impl Command for UpsertKeyframe {
 
 #[derive(Debug, Clone, Copy)]
 pub enum KeyframeTarget {
-    Transform,
+    TransformParam(TransformParam),
     Gain,
     Color,
 }
@@ -1218,11 +1343,12 @@ impl Command for RemoveKeyframe {
             return;
         };
         self.removed = match self.target {
-            KeyframeTarget::Transform => clip
+            KeyframeTarget::TransformParam(param) => clip
                 .effects
                 .transform
+                .track_mut(param)
                 .remove_at(self.frame)
-                .map(|(v, i)| (KeyframeValue::Transform(v), i)),
+                .map(|(v, i)| (KeyframeValue::TransformParam(param, v), i)),
             KeyframeTarget::Gain => clip
                 .effects
                 .gain_db
@@ -1246,7 +1372,11 @@ impl Command for RemoveKeyframe {
             return;
         };
         match value {
-            KeyframeValue::Transform(v) => clip.effects.transform.upsert(self.frame, v, interp),
+            KeyframeValue::TransformParam(param, v) => clip
+                .effects
+                .transform
+                .track_mut(param)
+                .upsert(self.frame, v, interp),
             KeyframeValue::Gain(v) => clip.effects.gain_db.upsert(self.frame, v, interp),
             KeyframeValue::Color(v) => {
                 if let Some(color) = &mut clip.effects.color {

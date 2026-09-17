@@ -7,7 +7,9 @@ pub use command::{
     KeyframeValue,
     LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     RippleDeleteAllTracks,
-    RippleDeleteGap, SetClipColor, SetClipGain, SetClipTransform, SplitClip, TrimClip, TrimEdge,
+    ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain,
+    SetClipTransformParam, SplitClip,
+    TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
@@ -484,19 +486,14 @@ mod tests {
             }),
         );
 
-        let new_transform = Transform {
-            crop: [0.1, 0.1, 0.9, 0.9],
-            zoom: [2.0, 2.0],
-            position: [0.1, -0.1],
-            ..Transform::default()
-        };
         history.do_command(
             &mut project,
-            Box::new(command::SetClipTransform::new(
+            Box::new(command::SetClipTransformParam::new(
                 timeline,
                 0,
                 a_id,
-                new_transform,
+                TransformParam::ZoomX,
+                2.0,
             )),
         );
         history.do_command(
@@ -504,18 +501,88 @@ mod tests {
             Box::new(command::SetClipGain::new(timeline, 0, a_id, -6.0)),
         );
 
+        let zoom_x = |p: &Project| {
+            p.timelines[timeline].tracks[0].clips[0]
+                .effects
+                .transform
+                .track(TransformParam::ZoomX)
+                .default
+        };
+        assert_eq!(zoom_x(&project), 2.0);
+        assert_eq!(
+            project.timelines[timeline].tracks[0].clips[0]
+                .effects
+                .gain_db
+                .default,
+            -6.0
+        );
+
+        history.undo(&mut project);
+        assert_eq!(
+            project.timelines[timeline].tracks[0].clips[0]
+                .effects
+                .gain_db
+                .default,
+            0.0
+        );
+        assert_eq!(zoom_x(&project), 2.0);
+
+        history.undo(&mut project);
+        assert_eq!(zoom_x(&project), 1.0);
+    }
+
+    /// Il reset di una sezione del pannello: i parametri tornano al
+    /// default, keyframe compresi, e l'undo li rimette com'erano.
+    #[test]
+    fn reset_transform_params_clears_keyframes_and_undo_restores_them() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let clip = make_clip(&mut project, 0, 20);
+        let a_id = clip.id;
+        let mut history = History::default();
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::UpsertKeyframe::new(
+                timeline,
+                0,
+                a_id,
+                5,
+                command::KeyframeValue::TransformParam(TransformParam::ZoomX, 3.0),
+                Interpolation::Linear,
+            )),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipFlip::new(timeline, 0, a_id, [true, false])),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::ResetTransformParams::new(
+                timeline,
+                0,
+                a_id,
+                vec![TransformParam::ZoomX],
+                true,
+            )),
+        );
+
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.transform.default.zoom, [2.0, 2.0]);
-        assert_eq!(clip.effects.gain_db.default, -6.0);
+        assert!(clip.effects.transform.is_constant(), "keyframe azzerati");
+        assert_eq!(clip.effects.transform.value_at(5).zoom, [1.0, 1.0]);
+        assert_eq!(clip.effects.transform.flip, [false, false]);
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.gain_db.default, 0.0);
-        assert_eq!(clip.effects.transform.default.zoom, [2.0, 2.0]);
-
-        history.undo(&mut project);
-        let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.transform.default.zoom, [1.0, 1.0]);
+        assert_eq!(clip.effects.transform.value_at(5).zoom, [3.0, 1.0]);
+        assert_eq!(clip.effects.transform.flip, [true, false]);
     }
 
     #[test]
@@ -633,10 +700,7 @@ mod tests {
                 0,
                 a_id,
                 5,
-                command::KeyframeValue::Transform(Transform {
-                    zoom: [2.0, 2.0],
-                    ..Transform::default()
-                }),
+                command::KeyframeValue::TransformParam(TransformParam::ZoomX, 2.0),
                 Interpolation::Linear,
             )),
         );
@@ -647,7 +711,7 @@ mod tests {
                 timeline,
                 0,
                 a_id,
-                command::KeyframeTarget::Transform,
+                command::KeyframeTarget::TransformParam(TransformParam::ZoomX),
                 5,
             )),
         );
@@ -656,7 +720,15 @@ mod tests {
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.transform.keyframe_at(5).unwrap().0.zoom, [2.0, 2.0]);
+        assert_eq!(
+            clip.effects
+                .transform
+                .track(TransformParam::ZoomX)
+                .keyframe_at(5)
+                .unwrap()
+                .0,
+            2.0
+        );
     }
 
     fn white() -> Rgba {

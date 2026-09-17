@@ -76,7 +76,7 @@ struct Clip {
 }
 
 struct EffectStack {
-    transform: Keyframed<Transform>,  // crop + zoom X/Y + posizione + rotazione + anchor + flip
+    transform: TransformTracks,  // un Keyframed<f32> per parametro + flip
     speed: Keyframed<f32>,            // nel modello, non ancora applicato
     gain_db: Keyframed<f32>,
     text: Vec<TextOverlay>,           // nel modello, non ancora applicato
@@ -270,8 +270,11 @@ Fatto:
   crop dei quattro lati con sfumatura (verso l'interno o l'esterno), tutto
   in pixel, gain, colore SolidColor; statici o a
   keyframe (Hold/Linear/EaseInOut) dal pannello proprietà, diviso nelle
-  schede Video (sezioni Transform e Cropping, con reset per singolo
-  parametro) e Audio (gain). I valori mostrati sono quelli della prima clip
+  schede Video (sezioni Transform e Cropping, reset per parametro e per
+  sezione) e Audio (gain). Ogni parametro del transform ha i propri
+  keyframe (`TransformTracks`): il diamante della riga è rosso quando la
+  testina è su un keyframe, e altrimenti porta le frecce per saltare al
+  keyframe più vicino in quella direzione. I valori mostrati sono quelli della prima clip
   selezionata su quel tipo di track; ogni modifica va a tutte le altre come
   un solo comando (`CompositeCommand`, quindi un solo undo).
 - Clip con fps diverso da quello della timeline conformate
