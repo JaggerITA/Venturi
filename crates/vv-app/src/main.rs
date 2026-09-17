@@ -2833,7 +2833,25 @@ fn build_effect_command(
     }
 }
 
+/// Su Wayland winit manda `Started` per lo scroll ad alta risoluzione ma
+/// quasi mai `Ended`: egui resta "in touch" e somma i modificatori in OR,
+/// quindi Alt rimane attivo (zoom bloccato) dopo il rilascio. Come `Move`
+/// ogni evento usa invece i modificatori correnti.
+fn unstick_wheel_modifiers(raw_input: &mut egui::RawInput) {
+    for event in &mut raw_input.events {
+        if let egui::Event::MouseWheel { phase, .. } = event
+            && *phase == egui::TouchPhase::Start
+        {
+            *phase = egui::TouchPhase::Move;
+        }
+    }
+}
+
 impl eframe::App for VibeVideoApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        unstick_wheel_modifiers(raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(player) = &mut self.preview_player {
             player.tick();
@@ -5135,6 +5153,34 @@ mod tests {
         app.toggle_playback();
 
         assert!(app.gap_wall_clock.is_none());
+    }
+
+    #[test]
+    fn alt_released_mid_wheel_gesture_stops_zooming() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|o| o.input_options.zoom_modifier = egui::Modifiers::ALT);
+        let wheel = |phase, modifiers| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 2.0),
+            phase,
+            modifiers,
+        };
+        let mut zooms = Vec::new();
+        for (phase, modifiers) in [
+            (egui::TouchPhase::Start, egui::Modifiers::ALT),
+            (egui::TouchPhase::Move, egui::Modifiers::ALT),
+            (egui::TouchPhase::Move, egui::Modifiers::NONE),
+        ] {
+            let mut raw_input = egui::RawInput {
+                events: vec![egui::Event::ModifiersChanged(modifiers), wheel(phase, modifiers)],
+                ..Default::default()
+            };
+            unstick_wheel_modifiers(&mut raw_input);
+            ctx.run_ui(raw_input, |_| {}).textures_delta.clear();
+            zooms.push(ctx.input(|i| i.zoom_delta()));
+        }
+        assert_ne!(zooms[1], 1.0, "con Alt lo scroll zooma");
+        assert_eq!(zooms[2], 1.0, "rilasciato Alt lo scroll non zooma più");
     }
 
     /// Senza selezione T taglia tutte le track in un colpo solo.
