@@ -228,6 +228,11 @@ struct VibeVideoApp {
     /// alla prima `import_media`, non subito: niente thread in più per
     /// una sessione che non importa mai media).
     proxy_worker: Option<proxy_worker::ProxyWorker>,
+    /// L'export ha messo in pausa il worker dei proxy, e va ripreso alla
+    /// fine. `false` se era già in pausa quando l'export è partito: in
+    /// quel caso la pausa è una scelta dell'utente, e l'export non deve
+    /// annullarla riprendendo da sé.
+    proxy_paused_for_export: bool,
     /// Genera in background la waveform (picchi audio) di ogni media
     /// importato con audio (vedi `vv_media::waveform`): sempre attivo,
     /// come il proxy, così la waveform è già pronta appena la timeline
@@ -393,6 +398,7 @@ impl Default for VibeVideoApp {
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             proxy_enabled: true,
             proxy_worker: None,
+            proxy_paused_for_export: false,
             waveform_worker: None,
             thumbnail_worker: None,
             thumbnails: HashMap::new(),
@@ -678,6 +684,8 @@ impl VibeVideoApp {
             return;
         };
 
+        self.pause_proxies_for_export();
+
         let total = self.project.timelines[timeline_id].total_frames();
         let (mark_in, mark_out) = self.timeline_state.export_marks.resolve(total);
         let project = self.project.clone();
@@ -766,8 +774,43 @@ impl VibeVideoApp {
             ui.ctx().request_repaint();
         }
 
+        if done {
+            self.resume_proxies_after_export();
+        }
+
         if should_close && let Some(state) = self.export.take() {
             let _ = state.handle.join();
+        }
+    }
+
+    /// Mette in pausa la generazione dei proxy per la durata
+    /// dell'export: un encode di proxy in corso contende CPU e ffmpeg
+    /// all'encode dell'export, che resta praticamente fermo finché la
+    /// coda dei proxy non si svuota (bug segnalato). Se era già in pausa
+    /// non segna nulla, così `resume_proxies_after_export` non annulla
+    /// una pausa scelta dall'utente.
+    fn pause_proxies_for_export(&mut self) {
+        let Some(worker) = &self.proxy_worker else {
+            return;
+        };
+        if worker.is_paused() {
+            return;
+        }
+        worker.set_paused(true);
+        self.proxy_paused_for_export = true;
+    }
+
+    /// Riprende la generazione dei proxy messa in pausa da `start_export`
+    /// — solo se è stata lei a metterla in pausa (vedi
+    /// `proxy_paused_for_export`). Idempotente: chiamata a ogni frame
+    /// finché la finestra di export resta aperta.
+    fn resume_proxies_after_export(&mut self) {
+        if !self.proxy_paused_for_export {
+            return;
+        }
+        self.proxy_paused_for_export = false;
+        if let Some(worker) = &self.proxy_worker {
+            worker.set_paused(false);
         }
     }
 
@@ -5523,6 +5566,28 @@ mod tests {
             assert!(worker.state(item.content_hash).is_some());
             assert!(app.thumbnails.contains_key(&item.content_hash));
         }
+    }
+
+    /// L'export mette in pausa la generazione dei proxy (che altrimenti
+    /// gli contende CPU e ffmpeg, tenendolo fermo) e la riprende alla
+    /// fine — ma non riprende una pausa scelta dall'utente.
+    #[test]
+    fn export_pauses_the_proxy_queue_and_resumes_it_afterwards() {
+        let mut app = VibeVideoApp::default();
+        app.proxy_worker = Some(proxy_worker::ProxyWorker::spawn());
+
+        app.pause_proxies_for_export();
+        assert!(app.proxy_worker.as_ref().unwrap().is_paused());
+        app.resume_proxies_after_export();
+        assert!(!app.proxy_worker.as_ref().unwrap().is_paused());
+
+        app.proxy_worker.as_ref().unwrap().set_paused(true);
+        app.pause_proxies_for_export();
+        app.resume_proxies_after_export();
+        assert!(
+            app.proxy_worker.as_ref().unwrap().is_paused(),
+            "una pausa dell'utente non va annullata dalla fine dell'export"
+        );
     }
 
     fn browse_fixture(name: &str) -> (VibeVideoApp, MediaId) {
