@@ -2234,7 +2234,7 @@ impl VibeVideoApp {
     /// l'intero gruppo video+audio insieme, vedi `copy_selected_clips`) e
     /// vengono divisi dallo stesso taglio, le loro metà destre vengono
     /// ricollegate tra loro subito dopo — stesso principio di
-    /// `split_all_at_playhead`. Un membro del gruppo fuori da `ranges` (si
+    /// `split_at_playhead`. Un membro del gruppo fuori da `ranges` (si
     /// sta incollando solo una parte del gruppo) resta semplicemente
     /// intoccato, ancora nel gruppo originale.
     ///
@@ -2429,7 +2429,7 @@ impl VibeVideoApp {
     /// sinistra (per `timeline_start` decrescente) così che rimuoverne una
     /// non alteri la posizione — e quindi l'ordinamento già calcolato —
     /// delle altre non ancora processate: stesso principio già usato in
-    /// `split_all_at_playhead` per evitare doppi spostamenti.
+    /// `split_at_playhead` per evitare doppi spostamenti.
     fn ripple_delete_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -2496,21 +2496,21 @@ impl VibeVideoApp {
         self.sync_selection_to_playhead();
     }
 
-    /// Divide *tutte* le clip che coprono il playhead, su ogni track (tasto
-    /// T): comportamento standard da "lametta", non richiede una
-    /// selezione (bug: "il taglio funzionava solo sulla track
-    /// selezionata"). Un solo passo di history per l'intero taglio.
+    /// Divide al playhead le clip selezionate che lo coprono o, senza
+    /// selezione, tutte quelle che lo coprono su ogni track (tasto T).
+    /// Un solo passo di history per l'intero taglio.
     /// I gruppi collegati (`Clip::linked_group`) i cui membri vengono
     /// tagliati insieme nello stesso punto restano collegati anche dopo:
     /// `SplitClip` non tocca il `linked_group` della metà sinistra (resta
     /// la stessa clip, solo accorciata), quindi serve solo ricollegare tra
     /// loro le metà *destre* (clip nuove, che partono scollegate) — un
     /// nuovo `LinkClips` per ogni gruppo originale con 2+ membri tagliati.
-    fn split_all_at_playhead(&mut self) {
+    fn split_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         let playhead = self.timeline_state.playhead;
+        let selected = &self.timeline_state.selected;
         let targets: Vec<(usize, ClipId, Option<vv_core::LinkGroupId>)> = self.project.timelines
             [timeline_id]
             .tracks
@@ -2521,6 +2521,7 @@ impl VibeVideoApp {
                     .clips
                     .iter()
                     .filter(move |c| playhead > c.timeline_start && playhead < c.timeline_end())
+                    .filter(move |c| selected.is_empty() || selected.contains(&(track_index, c.id)))
                     .map(move |c| (track_index, c.id, c.linked_group))
             })
             .collect();
@@ -2874,7 +2875,7 @@ impl eframe::App for VibeVideoApp {
                 self.ripple_delete_selected();
             }
             if i.key_pressed(egui::Key::T) && !i.modifiers.command {
-                self.split_all_at_playhead();
+                self.split_at_playhead();
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
@@ -3028,10 +3029,10 @@ impl eframe::App for VibeVideoApp {
                     }
                     if ui
                         .button("Dividi (T)")
-                        .on_hover_text("Taglia tutte le clip sotto al playhead, su ogni track")
+                        .on_hover_text("Taglia al playhead le clip selezionate, o tutte se non c'è selezione")
                         .clicked()
                     {
-                        self.split_all_at_playhead();
+                        self.split_at_playhead();
                         ui.close();
                     }
                 });
@@ -3335,7 +3336,7 @@ impl eframe::App for VibeVideoApp {
             // riproduzione"). Il confronto prima/dopo, anziché una sync
             // incondizionata, lascia intatta un'eventuale selezione
             // esplicita impostata nello stesso frame da altrove (es.
-            // `split_all_at_playhead`) quando il playhead in realtà non
+            // `split_at_playhead`) quando il playhead in realtà non
             // si muove (caso normale: taglio da fermo).
             let playhead_before_playback = self.timeline_state.playhead;
             self.drive_playback();
@@ -4537,7 +4538,7 @@ mod tests {
 
         // Taglia la clip (50 frame) a metà: due clip, [0,25) e [25,50).
         app.timeline_state.playhead = 25;
-        app.split_all_at_playhead();
+        app.split_at_playhead();
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(
             tl.tracks[0].clips.len(),
@@ -4890,7 +4891,7 @@ mod tests {
         let first_clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
         app.timeline_state.playhead = 25;
-        app.split_all_at_playhead();
+        app.split_at_playhead();
         let second_clip_id = app.project.timelines[timeline_id].tracks[0].clips[1].id;
 
         app.timeline_state.playhead = 0;
@@ -5136,12 +5137,9 @@ mod tests {
         assert!(app.gap_wall_clock.is_none());
     }
 
-    /// Riproduce il bug segnalato: tagliare con T richiedeva di
-    /// selezionare esplicitamente la track video, e ogni track andava
-    /// tagliata separatamente. `split_all_at_playhead` non deve dipendere
-    /// dalla selezione e deve tagliare tutte le track in un colpo solo.
+    /// Senza selezione T taglia tutte le track in un colpo solo.
     #[test]
-    fn split_all_at_playhead_cuts_every_track_without_selection() {
+    fn split_at_playhead_cuts_every_track_without_selection() {
         let mut app = VibeVideoApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
@@ -5149,7 +5147,7 @@ mod tests {
 
         assert!(app.timeline_state.selected.is_empty());
         app.timeline_state.playhead = 8;
-        app.split_all_at_playhead();
+        app.split_at_playhead();
 
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 2, "track video tagliata");
@@ -5168,6 +5166,22 @@ mod tests {
         assert_eq!(tl.tracks[1].clips.len(), 1);
     }
 
+    #[test]
+    fn split_at_playhead_cuts_only_selected_clips() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        make_timeline_with_clip(&mut app, 1, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.set_single_selection(Some((0, video_id)));
+        app.timeline_state.playhead = 8;
+        app.split_at_playhead();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 2, "clip selezionata tagliata");
+        assert_eq!(tl.tracks[1].clips.len(), 1, "clip non selezionata intatta");
+    }
+
     /// Bug: tagliare con T una coppia video+audio collegata scollegava
     /// entrambe le metà (comportamento corretto per un taglio "singolo",
     /// ma non quando entrambi i membri della coppia vengono tagliati
@@ -5176,7 +5190,7 @@ mod tests {
     /// originale (SplitClip non lo tocca), le metà destre vengono
     /// ricollegate tra loro in un gruppo nuovo.
     #[test]
-    fn split_all_at_playhead_keeps_linked_group_on_both_halves() {
+    fn split_at_playhead_keeps_linked_group_on_both_halves() {
         let mut app = VibeVideoApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
@@ -5190,7 +5204,7 @@ mod tests {
         );
 
         app.timeline_state.playhead = 8;
-        app.split_all_at_playhead();
+        app.split_at_playhead();
 
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 2);

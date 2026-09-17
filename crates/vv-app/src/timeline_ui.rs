@@ -1056,14 +1056,21 @@ pub fn show_timeline(
                     };
                     painter.rect_filled(track_rect, 0.0, bg);
                 }
-                // Esclude i margini di centratura: lì non c'è nessuna track
-                // da (de)selezionare.
                 let track_area_rect = egui::Rect::from_min_size(
                     egui::pos2(origin.x, origin.y + RULER_HEIGHT + top_margin),
                     egui::vec2(content_width, rows_height),
                 );
+                // Anche i margini di centratura: il rettangolo di selezione
+                // può partire da lì.
+                let marquee_area_rect = egui::Rect::from_min_max(
+                    egui::pos2(origin.x, origin.y + RULER_HEIGHT),
+                    egui::pos2(origin.x + content_width, origin.y + visual_height),
+                );
+                let pointer_over_tracks = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .is_some_and(|p| track_area_rect.contains(p));
                 let marquee_resp = ui.interact(
-                    track_area_rect,
+                    marquee_area_rect,
                     ui.id().with("timeline_marquee"),
                     egui::Sense::click_and_drag(),
                 );
@@ -1113,7 +1120,9 @@ pub fn show_timeline(
                 // egui. La posizione del rilascio va letta da `i.pointer`
                 // direttamente per lo stesso motivo (`interact_pointer_pos()` è
                 // legato a chi ha "vinto" l'interazione, non a questo drop).
-                if let Some(media_id) = marquee_resp.dnd_hover_payload::<vv_core::MediaId>()
+                // Nei margini il drop spetta alle zone "nuova track" sotto.
+                if pointer_over_tracks
+                    && let Some(media_id) = marquee_resp.dnd_hover_payload::<vv_core::MediaId>()
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                     && let Some(item) = project.media_pool.get(*media_id)
                 {
@@ -1155,7 +1164,8 @@ pub fn show_timeline(
                         egui::StrokeKind::Inside,
                     );
                 }
-                if let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
+                if pointer_over_tracks
+                    && let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
@@ -1317,33 +1327,36 @@ pub fn show_timeline(
                 } else if marquee_resp.clicked()
                     && let Some(pos) = marquee_resp.interact_pointer_pos()
                     && !press_over_a_clip(pos)
-                    && !row_order.is_empty()
                 {
-                    // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
-                    // da un'altra clip sulla stessa track, non lo spazio in
-                    // coda dopo l'ultima), lo si seleziona — comportamento alla
-                    // DaVinci Resolve, dà al vuoto un'identità cliccabile e
-                    // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
-                    let local = to_local(pos);
-                    let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
-                    // Inverso di `row_y`: `y` locale -> riga -> `track_index`.
-                    let y_in_rows = (local.y - RULER_HEIGHT - top_margin).max(0.0);
-                    let video_rows_height = video_count as f32 * ROW_HEIGHT;
-                    let row = if y_in_rows < video_rows_height {
-                        (y_in_rows / ROW_HEIGHT).floor() as usize
+                    if row_order.is_empty() || !track_area_rect.contains(pos) {
+                        state.clear_selection();
                     } else {
-                        let after_divider = (y_in_rows - video_rows_height - divider_height).max(0.0);
-                        video_count + (after_divider / ROW_HEIGHT).floor() as usize
-                    };
-                    let row = row.min(track_count.saturating_sub(1));
-                    let track_index = row_order[row];
-                    match gap_at(&visuals, track_index, frame) {
-                        Some((gap_start, gap_end)) => {
-                            state.selected.clear();
-                            state.selection_anchor = None;
-                            state.selected_gap = Some((track_index, gap_start, gap_end));
+                        // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
+                        // da un'altra clip sulla stessa track, non lo spazio in
+                        // coda dopo l'ultima), lo si seleziona — comportamento alla
+                        // DaVinci Resolve, dà al vuoto un'identità cliccabile e
+                        // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
+                        let local = to_local(pos);
+                        let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
+                        // Inverso di `row_y`: `y` locale -> riga -> `track_index`.
+                        let y_in_rows = (local.y - RULER_HEIGHT - top_margin).max(0.0);
+                        let video_rows_height = video_count as f32 * ROW_HEIGHT;
+                        let row = if y_in_rows < video_rows_height {
+                            (y_in_rows / ROW_HEIGHT).floor() as usize
+                        } else {
+                            let after_divider = (y_in_rows - video_rows_height - divider_height).max(0.0);
+                            video_count + (after_divider / ROW_HEIGHT).floor() as usize
+                        };
+                        let row = row.min(track_count.saturating_sub(1));
+                        let track_index = row_order[row];
+                        match gap_at(&visuals, track_index, frame) {
+                            Some((gap_start, gap_end)) => {
+                                state.selected.clear();
+                                state.selection_anchor = None;
+                                state.selected_gap = Some((track_index, gap_start, gap_end));
+                            }
+                            None => state.clear_selection(),
                         }
-                        None => state.clear_selection(),
                     }
                 }
                 if let Some(m) = &state.marquee {

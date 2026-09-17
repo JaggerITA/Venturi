@@ -777,7 +777,7 @@ pub struct SplitClip {
     new_clip_id: Option<ClipId>,
     /// Se impostato (`with_new_clip_id`), l'id della metà destra è questo
     /// invece di uno allocato al volo: serve a chi orchestra più split
-    /// collegati (vedi `split_all_at_playhead`) per conoscere in anticipo
+    /// collegati (vedi `split_at_playhead`) per conoscere in anticipo
     /// gli id delle metà e poterle ricollegare con un comando successivo.
     preallocated_new_clip_id: Option<ClipId>,
 }
@@ -834,7 +834,7 @@ impl Command for SplitClip {
         // invariato: è la stessa clip di prima, solo accorciata, e resta
         // collegata a chiunque altro condivida quel gruppo (che sia stato
         // diviso insieme o no). La metà destra è una clip nuova, che parte
-        // scollegata — chi orchestra più split insieme (`split_all_at_playhead`)
+        // scollegata — chi orchestra più split insieme (`split_at_playhead`)
         // ricollega le metà destre tra loro con un `LinkClips` a parte.
         second_half.id = new_id;
         second_half.source_in = split_source;
