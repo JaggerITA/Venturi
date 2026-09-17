@@ -978,10 +978,12 @@ impl VibeVideoApp {
                 let local = (self.timeline_state.playhead - clip.timeline_start)
                     .clamp(0, clip.timeline_len().saturating_sub(1));
                 let target = clip.source_in + local;
-                if let Some(player) = &mut self.preview_player
-                    && player.current_source_frame() != target
+                if self
+                    .preview_player
+                    .as_ref()
+                    .is_some_and(|p| p.current_source_frame() != target)
                 {
-                    player.seek_to_frame(target);
+                    self.seek_preview_player_to_frame(target);
                 }
             }
             vv_core::ClipSource::SolidColor => {
@@ -1050,8 +1052,39 @@ impl VibeVideoApp {
         let local = (self.timeline_state.playhead - clip.timeline_start)
             .clamp(0, clip.timeline_len().saturating_sub(1));
         let target = clip.source_in + local;
+        self.seek_preview_player_to_frame(target);
+    }
+
+    /// Seek del player attivo che, in fast forward, riapre la finestra di
+    /// audio accelerato se `frame` ne esce: altrimenti il seek verrebbe
+    /// clampato al bordo della finestra e la testina tornerebbe indietro.
+    /// Nell'attesa del nuovo stretch la testina resta ferma su `frame`.
+    fn seek_preview_player_to_frame(&mut self, frame: FrameIdx) {
+        let Some(player) = &mut self.preview_player else {
+            return;
+        };
+        let secs = frame as f64 / player.fps().max(1e-9);
+        if player.speed_window_covers_secs(secs) {
+            player.seek_to_frame(frame);
+            return;
+        }
+        if let (Some(tier), Some(path)) = (
+            SpeedTier::from_multiplier(self.playback_speed),
+            self.preview_path.clone(),
+        ) {
+            self.pending_speed_stretch = None;
+            self.request_speed_window(path, tier, secs);
+            if self.pending_speed_stretch.is_some() {
+                self.speed_window = None;
+                if let Some(player) = &mut self.preview_player {
+                    player.restart_speed_window_at(secs);
+                }
+                return;
+            }
+        }
+        self.reset_playback_speed_to_normal();
         if let Some(player) = &mut self.preview_player {
-            player.seek_to_frame(target);
+            player.seek_to_frame(frame);
         }
     }
 
@@ -1392,6 +1425,12 @@ impl VibeVideoApp {
                 // salterebbe indietro a quel punto invece di continuare da
                 // dove si trova davvero adesso.
                 let resume_at = player.position_secs();
+                // La testina è stata spostata fuori da questo pezzo mentre
+                // lo stretch era in corso: se ne chiede uno da lì.
+                if !(range_start_secs..range_end_secs).contains(&resume_at) {
+                    self.request_speed_window(path, tier, resume_at);
+                    continue;
+                }
                 if player
                     .begin_speed_window(
                         tier.tempo(),

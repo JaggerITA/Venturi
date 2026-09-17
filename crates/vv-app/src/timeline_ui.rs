@@ -991,7 +991,26 @@ pub fn show_timeline(
                     ui.id().with("timeline_ruler"),
                     egui::Sense::click_and_drag(),
                 );
-                if let Some(pos) = ruler_resp.interact_pointer_pos() {
+                // Su un click conta dove è stato rilasciato: se il frame è
+                // arrivato in ritardo, `interact_pointer_pos` è già
+                // l'ultima posizione del mouse dopo il rilascio.
+                let ruler_pos = if ruler_resp.clicked() {
+                    ui.input(|i| {
+                        i.events.iter().rev().find_map(|e| match e {
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed: false,
+                                ..
+                            } => Some(*pos),
+                            _ => None,
+                        })
+                    })
+                    .or_else(|| ruler_resp.interact_pointer_pos())
+                } else {
+                    ruler_resp.interact_pointer_pos()
+                };
+                if let Some(pos) = ruler_pos {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     state.playhead =

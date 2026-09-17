@@ -187,6 +187,23 @@ impl Player {
         }
     }
 
+    /// `false` se `secs` (spazio del media originale) cade fuori dalla
+    /// finestra di audio accelerato caricata: un seek lì verrebbe
+    /// clampato al bordo della finestra.
+    pub fn speed_window_covers_secs(&self, secs: f64) -> bool {
+        match &self.audio {
+            Some(audio) if (self.speed - 1.0).abs() >= 1e-9 => {
+                let end = self.window_origin_secs + audio.duration_seconds() * self.speed;
+                secs >= self.window_origin_secs && secs < end
+            }
+            _ => true,
+        }
+    }
+
+    pub fn fps(&self) -> f64 {
+        self.fps
+    }
+
     /// Posizione nello spazio tempo del media *originale*, indipendente da
     /// `speed` — vedi doc del campo `speed`.
     pub fn position_secs(&self) -> f64 {
@@ -260,9 +277,7 @@ impl Player {
     /// sola estensione della finestra corrente, che passa invece da
     /// `extend_speed_window` per non riaprire lo stream audio (vedi doc
     /// di `vv_audio::AudioPlayer::extend_samples`). Mantiene lo stato
-    /// play/pausa corrente; un brevissimo scatto sullo stream audio è
-    /// accettato qui (stesso costo di un cambio clip), a differenza
-    /// dell'estensione.
+    /// play/pausa corrente.
     pub fn begin_speed_window(
         &mut self,
         tempo: f64,
@@ -271,20 +286,30 @@ impl Player {
         sample_rate: u32,
         channels: u16,
     ) -> Result<(), String> {
-        let was_playing = self.playing;
-        self.audio = Some(vv_audio::AudioPlayer::new(
-            window_samples,
-            sample_rate,
-            channels,
-        )?);
+        match &self.audio {
+            // Stesso media, quindi stesso formato: niente riapertura dello stream.
+            Some(audio) => audio.replace_samples(&window_samples),
+            None => {
+                let audio = vv_audio::AudioPlayer::new(window_samples, sample_rate, channels)?;
+                if self.playing {
+                    audio.play();
+                }
+                self.audio = Some(audio);
+            }
+        }
         self.speed = tempo;
         self.window_origin_secs = original_start_secs;
-        self.playing = false;
         self.wall_clock_started_at = None;
-        if was_playing {
-            self.play();
-        }
         Ok(())
+    }
+
+    /// Svuota la finestra accelerata e la fa ripartire da `secs`: silenzio
+    /// e posizione ferma lì finché `begin_speed_window` non la riempie.
+    pub fn restart_speed_window_at(&mut self, secs: f64) {
+        if let Some(audio) = &self.audio {
+            audio.replace_samples(&[]);
+        }
+        self.window_origin_secs = secs;
     }
 
     /// Accoda altro audio (stessa finestra/tempo di `begin_speed_window`)

@@ -191,6 +191,16 @@ impl AudioPlayer {
             .extend_from_slice(&more);
     }
 
+    /// Sostituisce l'intero buffer (stessi `sample_rate`/canali sorgente di
+    /// `new`) e riporta la posizione a 0, senza riaprire lo stream cpal:
+    /// riaprirlo blocca il thread chiamante per centinaia di ms.
+    pub fn replace_samples(&self, samples: &[f32]) {
+        let samples = downmix_interleaved(samples, self.source_channels, self.channels);
+        let mut buf = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        *buf = samples;
+        self.position_frames.store(0, Ordering::Relaxed);
+    }
+
     fn total_frames(&self) -> usize {
         self.samples.lock().unwrap_or_else(|e| e.into_inner()).len() / self.channels.max(1) as usize
     }
