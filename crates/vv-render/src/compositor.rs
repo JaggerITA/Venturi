@@ -110,7 +110,8 @@ pub enum Layer<'a> {
 struct TransformUniform {
     crop: [f32; 4],
     zoom_pos: [f32; 4],
-    fit: [f32; 4],
+    fit_rot: [f32; 4],
+    anchor_flip: [f32; 4],
     color: [f32; 4],
 }
 
@@ -120,15 +121,27 @@ impl TransformUniform {
         matrix: ColorMatrix,
         full_range: bool,
         fit: [f32; 2],
+        output_aspect: f32,
     ) -> Self {
         Self {
             crop: t.crop,
-            zoom_pos: [t.zoom, t.position[0], t.position[1], 0.0],
-            fit: [fit[0], fit[1], 0.0, 0.0],
+            zoom_pos: [t.zoom[0], t.zoom[1], t.position[0], t.position[1]],
+            fit_rot: [
+                fit[0],
+                fit[1],
+                t.rotation.to_radians(),
+                t.crop_softness.max(0.0),
+            ],
+            anchor_flip: [
+                t.anchor[0],
+                t.anchor[1],
+                if t.flip[0] { 1.0 } else { 0.0 },
+                if t.flip[1] { 1.0 } else { 0.0 },
+            ],
             color: [
                 matrix.shader_id(),
                 if full_range { 1.0 } else { 0.0 },
-                0.0,
+                output_aspect,
                 0.0,
             ],
         }
@@ -490,6 +503,7 @@ impl Compositor {
                 (frame.width as f32, frame.height as f32),
                 (output_w as f32, output_h as f32),
             ),
+            output_w as f32 / output_h.max(1) as f32,
         );
         let uniform_buffer = self
             .device
@@ -707,12 +721,6 @@ mod tests {
         }
     }
 
-    fn center_pixel(rgba: &[u8], width: u32, height: u32) -> [u8; 4] {
-        let x = width / 2;
-        let y = height / 2;
-        let idx = ((y * width + x) * 4) as usize;
-        rgba[idx..idx + 4].try_into().unwrap()
-    }
 
     /// Anche per una croma "neutra" (128), 128/255 non è esattamente
     /// 0.5: un residuo di pochi livelli negli 8 bit è quantizzazione
@@ -817,8 +825,9 @@ mod tests {
 
         let transform = Transform {
             crop: [0.0, 0.0, 0.5, 0.5], // solo il quadrante alto-sinistra
-            zoom: 1.0,
+            zoom: [1.0, 1.0],
             position: [0.0, 0.0],
+            ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
         let pixel = |x: usize, y: usize| {
@@ -840,8 +849,9 @@ mod tests {
 
         let transform = Transform {
             crop: [0.5, 0.5, 1.0, 1.0],
-            zoom: 1.0,
+            zoom: [1.0, 1.0],
             position: [0.0, 0.0],
+            ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
         let pixel = |x: usize, y: usize| {
@@ -897,8 +907,9 @@ mod tests {
 
         let transform = Transform {
             crop: [0.0, 0.0, 1.0, 1.0],
-            zoom: 5.0, // > 32/16 : 8/16, cioè il fattore che copre la larghezza
+            zoom: [5.0, 5.0], // > 32/16 : 8/16, cioè il fattore che copre la larghezza
             position: [0.0, 0.0],
+            ..Transform::default()
         };
         let zoomed = compositor.render_frame(&input.as_yuv_frame(), &transform, 32, 16);
         for px in zoomed.as_chunks::<4>().0 {
@@ -915,8 +926,9 @@ mod tests {
 
         let transform = Transform {
             crop: [0.0, 0.0, 1.0, 1.0],
-            zoom: 1.0,
+            zoom: [1.0, 1.0],
             position: [0.5, 0.0], // mezzo frame a destra
+            ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
         let pixel = |x: usize, y: usize| {
@@ -926,6 +938,94 @@ mod tests {
 
         assert_eq!(pixel(2, 8), [0, 0, 0, 255], "metà sinistra: clip uscita");
         assert_close_rgba(pixel(14, 8), [255, 255, 255, 255]);
+    }
+
+    /// Rotazione di 90°: il quadrante alto-sinistra finisce in alto a
+    /// destra (rotazione oraria), e su un output quadrato non si deforma.
+    #[test]
+    fn rotation_turns_the_clip_clockwise_around_its_center() {
+        let compositor = Compositor::new_headless();
+        let input = quadrant_frame();
+        let transform = Transform {
+            rotation: 90.0,
+            ..Transform::default()
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        assert_close_rgba(pixel(12, 4), [40, 40, 40, 255]);
+        assert_close_rgba(pixel(4, 4), [160, 160, 160, 255]);
+    }
+
+    /// L'anchor point sposta il pivot dello zoom: zoomando attorno
+    /// all'angolo alto-sinistra della clip, quell'angolo resta fermo.
+    #[test]
+    fn zoom_scales_around_the_anchor_point() {
+        let compositor = Compositor::new_headless();
+        let input = quadrant_frame();
+        let transform = Transform {
+            zoom: [2.0, 2.0],
+            anchor: [-0.5, -0.5],
+            ..Transform::default()
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        // Con il pivot sull'angolo alto-sinistra della clip, il quadrante
+        // alto-sinistra si allarga fino a coprire da solo tutto il frame:
+        // con il pivot al centro, a (10, 10) si vedrebbe invece il
+        // quadrante basso-destra.
+        assert_close_rgba(pixel(2, 2), [40, 40, 40, 255]);
+        assert_close_rgba(pixel(10, 10), [40, 40, 40, 255]);
+    }
+
+    #[test]
+    fn flip_mirrors_the_clip_on_each_axis() {
+        let compositor = Compositor::new_headless();
+        let input = quadrant_frame();
+        let transform = Transform {
+            flip: [true, false],
+            ..Transform::default()
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 16 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+
+        assert_close_rgba(pixel(12, 4), [40, 40, 40, 255]);
+        assert_close_rgba(pixel(4, 4), [100, 100, 100, 255]);
+    }
+
+    /// La sfumatura agisce sull'alpha: sul bordo del crop il layer diventa
+    /// via via trasparente invece di tagliare di netto.
+    #[test]
+    fn crop_softness_fades_the_edge_instead_of_cutting_it() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(16, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+        let transform = Transform {
+            crop: [0.0, 0.0, 0.5, 1.0],
+            crop_softness: 0.1,
+            ..Transform::default()
+        };
+        let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
+        let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
+
+        // Clear nero sotto: più ci si avvicina al bordo del crop, più scuro.
+        assert!(luma(4, 8) > 200, "lontano dal bordo: pieno");
+        assert!(
+            luma(7, 8) < luma(6, 8) && luma(6, 8) < luma(4, 8),
+            "gradiente verso il bordo: {} {} {}",
+            luma(4, 8),
+            luma(6, 8),
+            luma(7, 8)
+        );
     }
 
     /// Il caso segnalato dall'utente: clip 9:16 in cima a una 16:9 in una
@@ -1074,8 +1174,9 @@ mod tests {
         let input = quadrant_frame();
         let transform = Transform {
             crop: [0.0, 0.0, 0.5, 0.5],
-            zoom: 1.0,
+            zoom: [1.0, 1.0],
             position: [0.0, 0.0],
+            ..Transform::default()
         };
 
         let via_readback = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);

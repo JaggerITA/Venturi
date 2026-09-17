@@ -8,17 +8,22 @@
 struct TransformUniform {
     // left, top, right, bottom in coordinate normalizzate [0,1] sul source.
     crop: vec4<f32>,
-    // zoom, position.x, position.y, (inutilizzato, per l'allineamento a 16 byte)
+    // zoom.x, zoom.y, position.x, position.y
     zoom_pos: vec4<f32>,
     // x/y: fattori di letterbox (>1 sull'asse che resta scoperto): il
     // frame sorgente viene inscritto nell'output mantenendo il suo
-    // aspect ratio invece di essere deformato, z/w inutilizzati.
-    //
-    fit: vec4<f32>,
+    // aspect ratio invece di essere deformato. z: rotazione in radianti
+    // (positiva = oraria). w: sfumatura dei bordi di crop, in frazioni
+    // del frame sorgente.
+    fit_rot: vec4<f32>,
+    // anchor.x, anchor.y (pivot di zoom e rotazione, in frazioni del
+    // frame di output dal centro della clip), flip.x, flip.y (0 o 1).
+    anchor_flip: vec4<f32>,
     // x: matrice colore (0=BT.601, 1=BT.709, 2=BT.2020, vedi
     //    vv_media::ColorMatrix). y: 1.0 se range full (JPEG), 0.0 se
-    //    limited (MPEG) — vedi vv_media::FrameYuv420::full_range. z/w
-    //    inutilizzati, per l'allineamento a 16 byte.
+    //    limited (MPEG) — vedi vv_media::FrameYuv420::full_range.
+    //    z: aspect ratio dell'output (w/h), serve a far ruotare senza
+    //    deformare. w inutilizzato, per l'allineamento a 16 byte.
     color: vec4<f32>,
 };
 
@@ -88,16 +93,33 @@ fn yuv_to_rgb(y_sample: f32, u_sample: f32, v_sample: f32, matrix_id: i32, full_
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let zoom = max(transform.zoom_pos.x, 0.0001);
-    let position = transform.zoom_pos.yz;
+    let zoom = max(abs(transform.zoom_pos.xy), vec2<f32>(0.0001, 0.0001));
+    let position = transform.zoom_pos.zw;
+    let anchor = transform.anchor_flip.xy;
+    let angle = transform.fit_rot.z;
+    let aspect = max(transform.color.z, 0.0001);
 
     // Dallo spazio dell'output a quello del sorgente, l'inverso di come si
-    // ragiona sulla clip: `position` la sposta dentro il frame, `zoom` la
-    // ingrandisce attorno al proprio centro (quindi può arrivare a coprire
-    // tutto il frame, anche partendo da un aspect ratio diverso), `fit` la
-    // inscrive senza deformarla (vedi Compositor::fit_factors).
-    let centered = (in.uv - vec2<f32>(0.5, 0.5) - position) / zoom * transform.fit.xy;
-    let source_uv = centered + vec2<f32>(0.5, 0.5);
+    // ragiona sulla clip: `position` la sposta dentro il frame, rotazione e
+    // `zoom` la girano e la ingrandiscono attorno all'anchor point (quindi
+    // lo zoom può arrivare a coprire tutto il frame, anche partendo da un
+    // aspect ratio diverso), `fit` la inscrive senza deformarla (vedi
+    // Compositor::fit_factors).
+    var q = in.uv - vec2<f32>(0.5, 0.5) - position - anchor;
+    // La rotazione va fatta in uno spazio isotropo, altrimenti un frame non
+    // quadrato la trasformerebbe in una deformazione a taglio.
+    q = vec2<f32>(q.x * aspect, q.y);
+    let cs = cos(angle);
+    let sn = sin(angle);
+    q = vec2<f32>(q.x * cs + q.y * sn, -q.x * sn + q.y * cs);
+    q = vec2<f32>(q.x / aspect, q.y);
+    q = q / zoom + anchor;
+
+    let flip = vec2<f32>(
+        select(1.0, -1.0, transform.anchor_flip.z > 0.5),
+        select(1.0, -1.0, transform.anchor_flip.w > 0.5),
+    );
+    let source_uv = q * flip * transform.fit_rot.xy + vec2<f32>(0.5, 0.5);
 
     let crop_min = transform.crop.xy;
     let crop_max = transform.crop.zw;
@@ -106,6 +128,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // che resta, che continua a cadere dov'era nel frame.
     if (any(source_uv < crop_min) || any(source_uv > crop_max)) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    // Sfumatura del bordo di crop: quanto si è dentro il rettangolo, sul
+    // lato più vicino.
+    var alpha = 1.0;
+    let softness = transform.fit_rot.w;
+    if (softness > 0.0) {
+        let inside = min(source_uv - crop_min, crop_max - source_uv);
+        alpha = smoothstep(0.0, softness, min(inside.x, inside.y));
     }
 
     // U/V sono a metà risoluzione (4:2:0): campionarli alla stessa uv
@@ -118,5 +148,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let matrix_id = i32(transform.color.x);
     let full_range = transform.color.y > 0.5;
     let rgb = yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range);
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(rgb, alpha);
 }

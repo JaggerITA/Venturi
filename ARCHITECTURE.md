@@ -76,7 +76,7 @@ struct Clip {
 }
 
 struct EffectStack {
-    transform: Keyframed<Transform>,  // crop rect + zoom + posizione
+    transform: Keyframed<Transform>,  // crop + zoom X/Y + posizione + rotazione + anchor + flip
     speed: Keyframed<f32>,            // nel modello, non ancora applicato
     gain_db: Keyframed<f32>,
     text: Vec<TextOverlay>,           // nel modello, non ancora applicato
@@ -148,9 +148,10 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 3. Lo shader inscrive il sorgente nel frame di output mantenendone
    l'aspect ratio — bande (letterbox/pillarbox) invece di deformare, es.
    una clip 9:16 in una timeline 16:9 — e ci applica il `Transform`
-   ragionando in coordinate di *output*: `zoom` ingrandisce la clip nel
-   frame (fino a coprirlo tutto), `position` la sposta nel frame, `crop`
-   ne taglia i bordi senza ricentrare né ridimensionare il resto.
+   ragionando in coordinate di *output*: `zoom` (per asse) e `rotation`
+   agiscono attorno all'`anchor`, `position` sposta la clip nel frame,
+   `flip` la specchia, `crop` ne taglia i bordi — con `crop_softness` che
+   li sfuma via alpha — senza ricentrare né ridimensionare il resto.
 4. Un pass per layer sulla stessa texture, in alpha-over
    (`Compositor::render_layers`): le bande del layer sopra escono con alpha
    0 e lasciano vedere quello sotto. Una clip SolidColor è il clear del
@@ -259,8 +260,10 @@ Fatto:
 - Playback: Spazio play/pausa, "a" fast forward, frecce frame per frame
   (tenute premute scorrono a 0.5x), audio di tutte le track, scrub audio,
   audiometer.
-- Effetti: crop/zoom/posizione, gain, colore SolidColor; statici o a
-  keyframe (Hold/Linear/EaseInOut) dal pannello proprietà.
+- Effetti: zoom X/Y (con link), posizione, rotazione, anchor point, flip,
+  crop dei quattro lati con sfumatura, gain, colore SolidColor; statici o a
+  keyframe (Hold/Linear/EaseInOut) dal pannello proprietà, organizzato in
+  sezioni Transform e Cropping con reset per singolo parametro.
 - Clip con fps diverso da quello della timeline conformate
   all'inserimento (`Clip::rate`), in anteprima e in export.
 - Proxy e waveform in background.

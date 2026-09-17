@@ -486,8 +486,9 @@ mod tests {
 
         let new_transform = Transform {
             crop: [0.1, 0.1, 0.9, 0.9],
-            zoom: 2.0,
+            zoom: [2.0, 2.0],
             position: [0.1, -0.1],
+            ..Transform::default()
         };
         history.do_command(
             &mut project,
@@ -504,17 +505,17 @@ mod tests {
         );
 
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.transform.default.zoom, 2.0);
+        assert_eq!(clip.effects.transform.default.zoom, [2.0, 2.0]);
         assert_eq!(clip.effects.gain_db.default, -6.0);
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         assert_eq!(clip.effects.gain_db.default, 0.0);
-        assert_eq!(clip.effects.transform.default.zoom, 2.0);
+        assert_eq!(clip.effects.transform.default.zoom, [2.0, 2.0]);
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.transform.default.zoom, 1.0);
+        assert_eq!(clip.effects.transform.default.zoom, [1.0, 1.0]);
     }
 
     #[test]
@@ -633,7 +634,7 @@ mod tests {
                 a_id,
                 5,
                 command::KeyframeValue::Transform(Transform {
-                    zoom: 2.0,
+                    zoom: [2.0, 2.0],
                     ..Transform::default()
                 }),
                 Interpolation::Linear,
@@ -655,7 +656,7 @@ mod tests {
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.effects.transform.keyframe_at(5).unwrap().0.zoom, 2.0);
+        assert_eq!(clip.effects.transform.keyframe_at(5).unwrap().0.zoom, [2.0, 2.0]);
     }
 
     fn white() -> Rgba {

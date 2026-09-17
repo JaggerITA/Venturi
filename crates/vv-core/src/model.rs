@@ -210,11 +210,22 @@ impl Lerp for Transform {
         }
         Self {
             crop,
-            zoom: f32::lerp(&a.zoom, &b.zoom, t),
+            crop_softness: f32::lerp(&a.crop_softness, &b.crop_softness, t),
+            zoom: [
+                f32::lerp(&a.zoom[0], &b.zoom[0], t),
+                f32::lerp(&a.zoom[1], &b.zoom[1], t),
+            ],
             position: [
                 f32::lerp(&a.position[0], &b.position[0], t),
                 f32::lerp(&a.position[1], &b.position[1], t),
             ],
+            rotation: f32::lerp(&a.rotation, &b.rotation, t),
+            anchor: [
+                f32::lerp(&a.anchor[0], &b.anchor[0], t),
+                f32::lerp(&a.anchor[1], &b.anchor[1], t),
+            ],
+            // Un flip non ha vie di mezzo: scatta a metà interpolazione.
+            flip: if t < 0.5 { a.flip } else { b.flip },
         }
     }
 }
@@ -259,22 +270,36 @@ pub struct Transform {
     /// viene ricentrato né ingrandito, continua a cadere dov'era nel frame
     /// di output (dietro la parte tagliata si vede il layer sotto).
     pub crop: [f32; 4], // left, top, right, bottom
-    /// Ingrandimento della clip *rispetto al frame di output*, attorno al
-    /// proprio centro: con abbastanza zoom una clip di aspect ratio diverso
-    /// da quello della timeline arriva a coprirlo tutto, bande comprese.
-    pub zoom: f32,
+    /// Sfumatura del bordo di crop, in frazioni del frame sorgente.
+    pub crop_softness: f32,
+    /// Ingrandimento della clip *rispetto al frame di output*, per asse
+    /// (X, Y), attorno all'`anchor`: con abbastanza zoom una clip di aspect
+    /// ratio diverso da quello della timeline arriva a coprirlo tutto,
+    /// bande comprese.
+    pub zoom: [f32; 2],
     /// Spostamento della clip dentro il frame di output, in frazioni della
     /// sua larghezza/altezza (X positivo = verso destra, Y positivo = verso
     /// il basso). Non sposta il contenuto dentro la clip.
     pub position: [f32; 2],
+    /// Rotazione in gradi, oraria, attorno all'`anchor`.
+    pub rotation: f32,
+    /// Pivot di zoom e rotazione, in frazioni del frame di output a partire
+    /// dal centro della clip (`[0, 0]` = il suo centro).
+    pub anchor: [f32; 2],
+    /// Specchiatura orizzontale (X) e verticale (Y).
+    pub flip: [bool; 2],
 }
 
 impl Default for Transform {
     fn default() -> Self {
         Self {
             crop: [0.0, 0.0, 1.0, 1.0],
-            zoom: 1.0,
+            crop_softness: 0.0,
+            zoom: [1.0, 1.0],
             position: [0.0, 0.0],
+            rotation: 0.0,
+            anchor: [0.0, 0.0],
+            flip: [false, false],
         }
     }
 }
@@ -748,20 +773,24 @@ mod keyframe_tests {
 
     #[test]
     fn transform_lerp_interpolates_each_field() {
-        let a = Transform {
-            crop: [0.0, 0.0, 1.0, 1.0],
-            zoom: 1.0,
-            position: [0.0, 0.0],
-        };
+        let a = Transform::default();
         let b = Transform {
             crop: [0.2, 0.2, 0.8, 0.8],
-            zoom: 3.0,
+            crop_softness: 0.4,
+            zoom: [3.0, 5.0],
             position: [1.0, -1.0],
+            rotation: 90.0,
+            anchor: [0.2, 0.4],
+            flip: [true, true],
         };
         let mid = Transform::lerp(&a, &b, 0.5);
         assert_eq!(mid.crop, [0.1, 0.1, 0.9, 0.9]);
-        assert_eq!(mid.zoom, 2.0);
+        assert_eq!(mid.crop_softness, 0.2);
+        assert_eq!(mid.zoom, [2.0, 3.0]);
         assert_eq!(mid.position, [0.5, -0.5]);
+        assert_eq!(mid.rotation, 45.0);
+        assert_eq!(mid.anchor, [0.1, 0.2]);
+        assert_eq!(mid.flip, [true, true], "il flip scatta a metà, non sfuma");
     }
 
     #[test]

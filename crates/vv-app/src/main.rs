@@ -365,6 +365,10 @@ struct VibeVideoApp {
     /// `timeline_ui::snap_frame`.
     snapping_enabled: bool,
 
+    /// Zoom X e Y del pannello Transform tenuti insieme (il lucchetto tra i
+    /// due campi): preferenza della UI, non del progetto.
+    zoom_link: bool,
+
     /// Export in corso (milestone 9), se c'è: `None` quando nessun export
     /// è attivo. Il thread lavora su uno snapshot di `Project` clonato al
     /// click di "Esporta", non sul progetto live — vedi `export.rs`.
@@ -444,6 +448,7 @@ impl Default for VibeVideoApp {
             arrow_hold: None,
             properties_panel_open: true,
             snapping_enabled: true,
+            zoom_link: true,
             export: None,
             current_project_path: None,
             project_error: None,
@@ -2751,6 +2756,88 @@ fn file_label(path: &std::path::Path) -> String {
 /// Disegnato a mano (non i glifi Unicode "◇"/"◆") perché su alcune
 /// combinazioni piattaforma/driver (es. Asahi Linux) i font bundled di
 /// egui non li renderizzano — appaiono come quadratini vuoti.
+/// Larghezza della colonna delle etichette nel pannello dei parametri:
+/// tutte allineate a destra, come nell'inspector di un NLE.
+const PARAM_LABEL_WIDTH: f32 = 96.0;
+
+/// Una riga del pannello dei parametri: etichetta, controlli, e in fondo
+/// il bottone di ripristino di quel solo parametro. Torna
+/// `(valore cambiato, reset cliccato)`.
+fn param_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    contents: impl FnOnce(&mut egui::Ui) -> bool,
+) -> (bool, bool) {
+    let mut changed = false;
+    let mut reset = false;
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(PARAM_LABEL_WIDTH, 18.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.label(label);
+            },
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            reset = ui
+                .small_button("↺")
+                .on_hover_text("Ripristina questo parametro")
+                .clicked();
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                changed = contents(ui);
+            });
+        });
+    });
+    (changed, reset)
+}
+
+/// Un campo numerico di un parametro a due assi (X/Y).
+fn axis_field(ui: &mut egui::Ui, axis: &str, value: &mut f32, speed: f64) -> bool {
+    ui.label(axis);
+    ui.add(
+        egui::DragValue::new(value)
+            .speed(speed)
+            .fixed_decimals(3)
+            .min_decimals(3),
+    )
+    .changed()
+}
+
+/// Un parametro a un valore solo: slider più campo numerico, come
+/// nell'inspector di riferimento.
+fn slider_field(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f64,
+) -> bool {
+    let slider = ui.add(
+        egui::Slider::new(value, range.clone())
+            .show_value(false)
+            .trailing_fill(false),
+    );
+    let drag = ui.add(
+        egui::DragValue::new(value)
+            .speed(speed)
+            .range(range)
+            .fixed_decimals(3)
+            .min_decimals(3),
+    );
+    slider.changed() || drag.changed()
+}
+
+/// Il lucchetto che tiene insieme i due assi dello zoom.
+fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Response {
+    let mut response = ui
+        .selectable_label(*linked, "🔗")
+        .on_hover_text("Tieni insieme zoom X e Y");
+    if response.clicked() {
+        *linked = !*linked;
+        response.mark_changed();
+    }
+    response
+}
+
 fn keyframe_button(
     ui: &mut egui::Ui,
     is_constant: bool,
@@ -3895,29 +3982,10 @@ impl eframe::App for VibeVideoApp {
                             ui.label(format!("Frame corrente (source): {source_frame}"));
 
                             ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label("Crop / zoom / posizione");
-                                if keyframe_button(ui, transform_constant, transform_kf_here)
-                                    .clicked()
-                                {
-                                    pending_effect = Some(if transform_kf_here {
-                                        PendingEffectChange::RemoveTransformKeyframe(
-                                            track_index,
-                                            clip_id,
-                                            source_frame,
-                                        )
-                                    } else {
-                                        PendingEffectChange::UpsertTransformKeyframe(
-                                            track_index,
-                                            clip_id,
-                                            source_frame,
-                                            transform,
-                                        )
-                                    });
-                                }
-                            });
-                            if !transform_constant {
-                                ui.small(format!(
+                            let mut transform_changed = false;
+                            let mut keyframe_clicked = false;
+                            let animated_note = (!transform_constant).then(|| {
+                                format!(
                                     "{} keyframe · animato",
                                     self.timeline_id
                                         .and_then(|tid| self.project.timelines[tid].tracks
@@ -3927,56 +3995,160 @@ impl eframe::App for VibeVideoApp {
                                             .find(|c| c.id == clip_id))
                                         .map(|c| c.effects.transform.keyframes().len())
                                         .unwrap_or(0)
-                                ));
+                                )
+                            });
+
+                            // Un solo `Keyframed<Transform>` dietro le due
+                            // sezioni: il diamante è lo stesso keyframe, da
+                            // qualunque delle due lo si clicchi.
+                            let mut section = |ui: &mut egui::Ui, title: &str| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(title).strong());
+                                    if let Some(note) = &animated_note {
+                                        ui.small(note);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            keyframe_clicked |= keyframe_button(
+                                                ui,
+                                                transform_constant,
+                                                transform_kf_here,
+                                            )
+                                            .clicked();
+                                        },
+                                    );
+                                });
+                            };
+
+                            section(ui, "Transform");
+                            let (changed, reset) = param_row(ui, "Zoom", |ui| {
+                                let mut changed = axis_field(ui, "X", &mut transform.zoom[0], 0.01);
+                                if link_button(ui, &mut self.zoom_link).changed() && self.zoom_link {
+                                    transform.zoom[1] = transform.zoom[0];
+                                    changed = true;
+                                }
+                                let y_changed = axis_field(ui, "Y", &mut transform.zoom[1], 0.01);
+                                if self.zoom_link {
+                                    // Il link vale in entrambi i versi: chi
+                                    // è stato mosso detta l'altro.
+                                    if changed {
+                                        transform.zoom[1] = transform.zoom[0];
+                                    } else if y_changed {
+                                        transform.zoom[0] = transform.zoom[1];
+                                    }
+                                }
+                                changed || y_changed
+                            });
+                            transform_changed |= changed;
+                            if reset {
+                                transform.zoom = vv_core::Transform::default().zoom;
+                                transform_changed = true;
                             }
 
-                            let mut transform_changed = false;
-                            transform_changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut transform.crop[0], 0.0..=0.99)
-                                        .text("sinistra"),
-                                )
-                                .changed();
-                            transform_changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut transform.crop[1], 0.0..=0.99)
-                                        .text("alto"),
-                                )
-                                .changed();
-                            transform_changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut transform.crop[2], 0.01..=1.0)
-                                        .text("destra"),
-                                )
-                                .changed();
-                            transform_changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut transform.crop[3], 0.01..=1.0)
-                                        .text("basso"),
-                                )
-                                .changed();
+                            let (changed, reset) = param_row(ui, "Posizione", |ui| {
+                                let x = axis_field(ui, "X", &mut transform.position[0], 0.005);
+                                let y = axis_field(ui, "Y", &mut transform.position[1], 0.005);
+                                x || y
+                            });
+                            transform_changed |= changed;
+                            if reset {
+                                transform.position = [0.0, 0.0];
+                                transform_changed = true;
+                            }
+
+                            let (changed, reset) = param_row(ui, "Rotazione", |ui| {
+                                slider_field(ui, &mut transform.rotation, -180.0..=180.0, 0.5)
+                            });
+                            transform_changed |= changed;
+                            if reset {
+                                transform.rotation = 0.0;
+                                transform_changed = true;
+                            }
+
+                            let (changed, reset) = param_row(ui, "Anchor point", |ui| {
+                                let x = axis_field(ui, "X", &mut transform.anchor[0], 0.005);
+                                let y = axis_field(ui, "Y", &mut transform.anchor[1], 0.005);
+                                x || y
+                            });
+                            transform_changed |= changed;
+                            if reset {
+                                transform.anchor = [0.0, 0.0];
+                                transform_changed = true;
+                            }
+
+                            let (changed, reset) = param_row(ui, "Flip", |ui| {
+                                let x = ui
+                                    .selectable_label(transform.flip[0], "⬌")
+                                    .on_hover_text("Specchia in orizzontale")
+                                    .clicked();
+                                let y = ui
+                                    .selectable_label(transform.flip[1], "⬍")
+                                    .on_hover_text("Specchia in verticale")
+                                    .clicked();
+                                transform.flip[0] ^= x;
+                                transform.flip[1] ^= y;
+                                x || y
+                            });
+                            transform_changed |= changed;
+                            if reset {
+                                transform.flip = [false, false];
+                                transform_changed = true;
+                            }
+
+                            ui.add_space(6.0);
+                            section(ui, "Cropping");
+                            let crop_rows: [(&str, usize, std::ops::RangeInclusive<f32>); 4] = [
+                                ("Crop sinistra", 0, 0.0..=0.99),
+                                ("Crop destra", 2, 0.01..=1.0),
+                                ("Crop alto", 1, 0.0..=0.99),
+                                ("Crop basso", 3, 0.01..=1.0),
+                            ];
+                            for (label, index, range) in crop_rows {
+                                let (changed, reset) = param_row(ui, label, |ui| {
+                                    slider_field(ui, &mut transform.crop[index], range, 0.002)
+                                });
+                                transform_changed |= changed;
+                                if reset {
+                                    transform.crop[index] =
+                                        vv_core::Transform::default().crop[index];
+                                    transform_changed = true;
+                                }
+                            }
                             // Margine minimo per non invertire il rettangolo di crop.
                             transform.crop[0] = transform.crop[0].min(transform.crop[2] - 0.01);
                             transform.crop[1] = transform.crop[1].min(transform.crop[3] - 0.01);
 
-                            transform_changed |= ui
-                                .add(egui::Slider::new(&mut transform.zoom, 0.1..=5.0).text("zoom"))
-                                .changed();
-                            transform_changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut transform.position[0], -1.0..=1.0)
-                                        .text("posizione X"),
-                                )
-                                .changed();
-                            transform_changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut transform.position[1], -1.0..=1.0)
-                                        .text("posizione Y"),
-                                )
-                                .changed();
+                            let (changed, reset) = param_row(ui, "Sfumatura", |ui| {
+                                slider_field(ui, &mut transform.crop_softness, 0.0..=0.5, 0.002)
+                            });
+                            transform_changed |= changed;
+                            if reset {
+                                transform.crop_softness = 0.0;
+                                transform_changed = true;
+                            }
+
+                            ui.add_space(4.0);
                             if ui.button("Reset transform").clicked() {
                                 transform = vv_core::Transform::default();
                                 transform_changed = true;
+                            }
+
+                            if keyframe_clicked {
+                                pending_effect = Some(if transform_kf_here {
+                                    PendingEffectChange::RemoveTransformKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                    )
+                                } else {
+                                    PendingEffectChange::UpsertTransformKeyframe(
+                                        track_index,
+                                        clip_id,
+                                        source_frame,
+                                        transform,
+                                    )
+                                });
                             }
                             if transform_changed {
                                 pending_effect = Some(if transform_constant {
@@ -5020,7 +5192,7 @@ mod tests {
         let timeline_id = app.timeline_id.unwrap();
 
         let transform = vv_core::Transform {
-            zoom: 2.5,
+            zoom: [2.5, 2.5],
             ..vv_core::Transform::default()
         };
         app.history.do_command(
@@ -5056,7 +5228,7 @@ mod tests {
             ),
         );
         let transform = vv_core::Transform {
-            zoom: 1.5,
+            zoom: [1.5, 1.5],
             ..vv_core::Transform::default()
         };
         app.history.do_command(
@@ -5069,7 +5241,7 @@ mod tests {
 
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert_eq!(clip.effects.gain_db.default, -3.0);
-        assert_eq!(clip.effects.transform.default.zoom, 1.5);
+        assert_eq!(clip.effects.transform.default.zoom, [1.5, 1.5]);
     }
 
     #[test]
