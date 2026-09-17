@@ -1657,13 +1657,7 @@ pub fn show_timeline(
                         s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
                     });
                     let label_offset_y = if is_proxy_backed {
-                        const PROXY_STRIP_HEIGHT: f32 = 4.0;
-                        let proxy_color = egui::Color32::from_rgba_unmultiplied(255, 175, 60, 220);
-                        let strip_rect = egui::Rect::from_min_size(
-                            clip_rect.left_top() + egui::vec2(1.0, 1.0),
-                            egui::vec2(clip_rect.width() - 2.0, PROXY_STRIP_HEIGHT),
-                        );
-                        painter.rect_filled(strip_rect, 2.0, proxy_color);
+                        paint_proxy_strip(&painter, clip_rect);
                         2.0 + PROXY_STRIP_HEIGHT
                     } else {
                         2.0
@@ -2618,6 +2612,18 @@ fn snap_frame(
         }
     }
     best.map_or(candidate_start, |(_, new_start)| new_start)
+}
+
+const PROXY_STRIP_HEIGHT: f32 = 4.0;
+/// Colore dell'indicatore "proxy disponibile", condiviso col media pool.
+pub const PROXY_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(220, 151, 52, 220);
+
+fn paint_proxy_strip(painter: &egui::Painter, rect: egui::Rect) {
+    let strip_rect = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(1.0, 1.0),
+        egui::vec2(rect.width() - 2.0, PROXY_STRIP_HEIGHT),
+    );
+    painter.rect_filled(strip_rect, 2.0, PROXY_COLOR);
 }
 
 #[cfg(test)]

@@ -73,6 +73,17 @@ pub fn proxy_exists(content_hash: u64) -> bool {
 /// potrebbero controllarlo in qualunque istante mentre questa funzione
 /// è ancora in corso).
 pub fn generate_proxy(source_path: &Path, content_hash: u64) -> Result<PathBuf, crate::MediaError> {
+    generate_proxy_with_progress(source_path, content_hash, |_| true)
+}
+
+/// Come `generate_proxy`, ma chiama `on_frame(frame_scritti)` dopo ogni
+/// frame: può bloccare (pausa) e, se restituisce `false`, la generazione
+/// si interrompe con errore senza lasciare file su disco.
+pub fn generate_proxy_with_progress(
+    source_path: &Path,
+    content_hash: u64,
+    mut on_frame: impl FnMut(u64) -> bool,
+) -> Result<PathBuf, crate::MediaError> {
     crate::probe::ensure_init();
 
     let mut decoder = Decoder::open(source_path)?;
@@ -98,7 +109,7 @@ pub fn generate_proxy(source_path: &Path, content_hash: u64) -> Result<PathBuf, 
         std::process::id()
     ));
 
-    {
+    let written = (|| {
         let mut enc = ProxyEncoder::new(
             &tmp_path,
             dst_w,
@@ -110,10 +121,22 @@ pub fn generate_proxy(source_path: &Path, content_hash: u64) -> Result<PathBuf, 
             first_frame.full_range,
         )?;
         enc.write_frame(&first_frame)?;
+        let mut frames = 1u64;
+        if !on_frame(frames) {
+            return Err(crate::MediaError::Cancelled);
+        }
         while let Some((_, frame)) = decoder.next_frame()? {
             enc.write_frame(&frame)?;
+            frames += 1;
+            if !on_frame(frames) {
+                return Err(crate::MediaError::Cancelled);
+            }
         }
-        enc.finish()?;
+        enc.finish()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
 
     std::fs::rename(&tmp_path, &final_path).map_err(io_err)?;

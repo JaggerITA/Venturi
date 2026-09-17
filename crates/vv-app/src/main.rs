@@ -18,6 +18,7 @@ mod frame_provider;
 mod mix_buffers;
 mod proxy_worker;
 mod render_ahead;
+mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
 mod waveform_worker;
@@ -230,6 +231,10 @@ struct VibeVideoApp {
     /// la disegna. `None` finché non è mai stato importato nulla (stesso
     /// principio di `proxy_worker`).
     waveform_worker: Option<waveform_worker::WaveformWorker>,
+    thumbnail_worker: Option<thumbnail_worker::ThumbnailWorker>,
+    /// Miniature del media pool per `content_hash`; `None` = richiesta in
+    /// corso o fallita (evita di riaccodarla a ogni frame).
+    thumbnails: HashMap<u64, Option<egui::TextureHandle>>,
     /// Waveform audio già caricata in memoria, a chiave `content_hash` del
     /// media: la timeline la legge a ogni frame per disegnare la waveform
     /// delle clip audio, e il primo disegno di un media la carica dal
@@ -382,6 +387,8 @@ impl Default for VibeVideoApp {
             proxy_enabled: true,
             proxy_worker: None,
             waveform_worker: None,
+            thumbnail_worker: None,
+            thumbnails: HashMap::new(),
             waveform_cache: HashMap::new(),
             lookahead_secs: render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
@@ -409,9 +416,36 @@ impl Default for VibeVideoApp {
 
 impl VibeVideoApp {
     fn import_media(&mut self, path: PathBuf) {
+        match self.add_media_to_pool(path) {
+            Ok(media_id) => {
+                self.import_error = None;
+                self.preview_media(media_id);
+            }
+            Err(e) => self.import_error = Some(e),
+        }
+    }
+
+    /// Import multiplo: anteprima solo dell'ultimo media importato, errori
+    /// raccolti invece che sovrascritti a vicenda.
+    fn import_media_files(&mut self, paths: Vec<PathBuf>) {
+        let mut errors = Vec::new();
+        let mut last_imported = None;
+        for path in paths {
+            let label = file_label(&path);
+            match self.add_media_to_pool(path) {
+                Ok(media_id) => last_imported = Some(media_id),
+                Err(e) => errors.push(format!("{label}: {e}")),
+            }
+        }
+        self.import_error = (!errors.is_empty()).then(|| errors.join("\n"));
+        if let Some(media_id) = last_imported {
+            self.preview_media(media_id);
+        }
+    }
+
+    fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
         match vv_media::probe(&path) {
             Ok(meta) => {
-                self.import_error = None;
                 self.ensure_timeline_for(&meta);
                 // Fingerprint economico (path+dimensione+mtime, non i
                 // byte del file: vedi doc di `content_fingerprint`),
@@ -447,9 +481,7 @@ impl VibeVideoApp {
                 // già pronto, non se viene generato — così è già lì
                 // quando/se l'utente lo riattiva, invece di aspettare la
                 // prima volta che serve davvero.
-                self.proxy_worker
-                    .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
-                    .enqueue(path.clone(), content_hash);
+                self.enqueue_media_background_jobs(media_id);
                 // Waveform solo per i media con audio: la timeline la
                 // disegna solo sulle clip audio, e un media senza audio
                 // non ne avrebbe mai una da disegnare (il worker
@@ -460,20 +492,60 @@ impl VibeVideoApp {
                         .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
                         .enqueue(path.clone(), content_hash, stream_index, num_peaks);
                 }
-                self.preview_media(media_id);
+                Ok(media_id)
             }
-            Err(e) => self.import_error = Some(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     }
 
-    // Apre il file dialog e importa il file scelto (usato dal pulsante
+    /// Proxy e miniatura di un media del pool, sia appena importato sia
+    /// da un progetto aperto.
+    fn enqueue_media_background_jobs(&mut self, media_id: MediaId) {
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
+        self.proxy_worker
+            .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
+            .enqueue(item.path.clone(), item.content_hash, item.meta.duration_frames.max(0) as u64);
+        if !self.thumbnails.contains_key(&item.content_hash) {
+            self.thumbnails.insert(item.content_hash, None);
+            self.thumbnail_worker
+                .get_or_insert_with(thumbnail_worker::ThumbnailWorker::spawn)
+                .enqueue(
+                    item.path.clone(),
+                    item.content_hash,
+                    item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
+                );
+        }
+    }
+
+    fn poll_thumbnails(&mut self, ctx: &egui::Context) {
+        let Some(worker) = &mut self.thumbnail_worker else {
+            return;
+        };
+        for (content_hash, thumb) in worker.drain() {
+            let texture = thumb.map(|t| {
+                ctx.load_texture(
+                    format!("thumbnail-{content_hash:016x}"),
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [t.width as usize, t.height as usize],
+                        &t.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            self.thumbnails.insert(content_hash, texture);
+        }
+    }
+
+    // Apre il file dialog e importa i file scelti (usato dal pulsante
     // toolbar e dalla shortcut Ctrl+I).
     fn import_media_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(paths) = rfd::FileDialog::new()
             .add_filter("video", &["mp4", "mov", "mkv", "avi"])
-            .pick_file()
+            .pick_files()
         {
-            self.import_media(path);
+            self.import_media_files(paths);
         }
     }
 
@@ -561,6 +633,10 @@ impl VibeVideoApp {
                     }
                 }
                 self.render_ahead_generation = self.history.generation();
+                let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
+                for media_id in media_ids {
+                    self.enqueue_media_background_jobs(media_id);
+                }
             }
             Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
         }
@@ -2104,6 +2180,34 @@ fn track_end(project: &vv_core::Project, timeline_id: TimelineId, track_index: u
         .unwrap_or(0)
 }
 
+/// Anello di avanzamento; `None` = in coda (solo l'anello di sfondo).
+fn proxy_progress_ring(ui: &mut egui::Ui, fraction: Option<f32>) -> egui::Response {
+    const SIZE: f32 = 34.0;
+    const STROKE: f32 = 3.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::hover());
+    let painter = ui.painter();
+    let center = rect.center();
+    let radius = (SIZE - STROKE) / 2.0;
+    let track_color = ui.visuals().widgets.inactive.bg_fill;
+    painter.circle_stroke(center, radius, egui::Stroke::new(STROKE, track_color));
+    if let Some(fraction) = fraction {
+        let fraction = fraction.clamp(0.0, 1.0);
+        let segments = ((fraction * 48.0).ceil() as usize).max(1);
+        let start = -std::f32::consts::FRAC_PI_2;
+        let points: Vec<egui::Pos2> = (0..=segments)
+            .map(|i| {
+                let angle = start + std::f32::consts::TAU * fraction * i as f32 / segments as f32;
+                center + radius * egui::vec2(angle.cos(), angle.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(STROKE, ui.visuals().selection.bg_fill),
+        ));
+    }
+    response
+}
+
 fn file_label(path: &std::path::Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -2322,6 +2426,10 @@ impl eframe::App for VibeVideoApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_thumbnails(&ui.ctx().clone());
+        if self.thumbnail_worker.as_ref().is_some_and(|w| w.has_pending()) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if let Some(audio) = &mut self.timeline_audio {
             audio.tick();
             self.playback_speed = audio.speed();
@@ -2852,6 +2960,29 @@ impl eframe::App for VibeVideoApp {
                 if let Some(err) = &self.import_error {
                     ui.colored_label(egui::Color32::RED, err);
                 }
+                if let Some(worker) = &self.proxy_worker {
+                    let progress = worker.progress();
+                    let paused = worker.is_paused();
+                    if progress.finished < progress.total {
+                        ui.horizontal(|ui| {
+                            let label = if paused { "Riprendi" } else { "Pausa" };
+                            if ui
+                                .small_button(label)
+                                .on_hover_text("Generazione proxy in background")
+                                .clicked()
+                            {
+                                worker.set_paused(!paused);
+                            }
+                            ui.add(
+                                egui::ProgressBar::new(progress.fraction)
+                                    .text(format!("Proxy {}/{}", progress.finished, progress.total)),
+                            );
+                        });
+                        if !paused {
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
                 // auto_shrink([false, false]): senza, la ScrollArea (e
                 // quindi il pannello stesso) si restringe alla larghezza
                 // del contenuto invece di riempire quella assegnata dal
@@ -2861,25 +2992,96 @@ impl eframe::App for VibeVideoApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let items: Vec<(MediaId, String, vv_core::MediaMeta)> = self
+                        let items: Vec<(MediaId, String, vv_core::MediaMeta, u64)> = self
                             .project
                             .media_pool
                             .iter()
-                            .map(|(id, item)| (id, file_label(&item.path), item.meta.clone()))
+                            .map(|(id, item)| {
+                                (id, file_label(&item.path), item.meta.clone(), item.content_hash)
+                            })
                             .collect();
-                        for (id, label, meta) in items {
+                        for (id, label, meta, content_hash) in items {
+                            let proxy_state = self
+                                .proxy_worker
+                                .as_ref()
+                                .and_then(|w| w.state(content_hash));
+                            let thumbnail = self.thumbnails.get(&content_hash).cloned().flatten();
                             let group_resp = ui
                                 .group(|ui| {
-                                    ui.label(&label);
-                                    ui.small(format!(
-                                        "{}x{} · {:.2}fps · {}",
-                                        meta.width,
-                                        meta.height,
-                                        meta.fps.as_f64(),
-                                        if meta.has_audio { "audio" } else { "muto" }
-                                    ));
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        let thumb_size = egui::vec2(64.0, 36.0);
+                                        match &thumbnail {
+                                            Some(texture) => {
+                                                let tex_size = texture.size_vec2();
+                                                let scale = (thumb_size.x / tex_size.x)
+                                                    .min(thumb_size.y / tex_size.y);
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    thumb_size,
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
+                                                egui::Image::new(texture)
+                                                    .fit_to_exact_size(tex_size * scale)
+                                                    .paint_at(
+                                                        ui,
+                                                        egui::Rect::from_center_size(
+                                                            rect.center(),
+                                                            tex_size * scale,
+                                                        ),
+                                                    );
+                                            }
+                                            None => {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    thumb_size,
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    2.0,
+                                                    ui.visuals().extreme_bg_color,
+                                                );
+                                            }
+                                        }
+                                        ui.vertical(|ui| {
+                                            ui.label(&label);
+                                            ui.small(format!(
+                                                "{}x{} · {:.2}fps · {}",
+                                                meta.width,
+                                                meta.height,
+                                                meta.fps.as_f64(),
+                                                if meta.has_audio { "audio" } else { "muto" }
+                                            ));
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| match proxy_state {
+                                                Some(proxy_worker::ProxyState::Generating(f)) => {
+                                                    proxy_progress_ring(ui, Some(f))
+                                                        .on_hover_text(format!("Generazione proxy {:.0}%", f * 100.0));
+                                                }
+                                                Some(proxy_worker::ProxyState::Queued) => {
+                                                    proxy_progress_ring(ui, None)
+                                                        .on_hover_text("Proxy in coda");
+                                                }
+                                                Some(proxy_worker::ProxyState::Failed) => {
+                                                    ui.colored_label(egui::Color32::RED, "!")
+                                                        .on_hover_text("Proxy non generato");
+                                                }
+                                                _ => {}
+                                            },
+                                        );
+                                    });
                                 })
                                 .response;
+                            if proxy_state == Some(proxy_worker::ProxyState::Ready) {
+                                let rect = group_resp.rect.shrink(1.0);
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
+                                    1.0,
+                                    timeline_ui::PROXY_COLOR,
+                                );
+                            }
                             // Doppio click: anteprima nel player (sostituisce
                             // il vecchio pulsante "Anteprima"). Trascinamento:
                             // droppato sulla timeline aggiunge il media
@@ -4938,6 +5140,40 @@ mod tests {
             app.proxy_timeline_ranges().is_empty(),
             "col toggle disattivato non deve segnalare nulla, anche col proxy pronto"
         );
+    }
+
+    #[test]
+    fn import_media_files_imports_every_file_and_queues_their_proxies() {
+        let dir = std::env::temp_dir().join("vv-app-multi-import-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = ["a.mp4", "b.mp4"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                let status = std::process::Command::new("ffmpeg")
+                    .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1"])
+                    .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", path.to_str().unwrap()])
+                    .status()
+                    .expect("ffmpeg CLI non trovato");
+                assert!(status.success());
+                path
+            })
+            .collect();
+
+        let mut app = VibeVideoApp::default();
+        let mut with_bad = paths.clone();
+        with_bad.push(dir.join("inesistente.mp4"));
+        app.import_media_files(with_bad);
+
+        assert_eq!(app.project.media_pool.len(), 2);
+        let err = app.import_error.as_deref().expect("errore del file mancante atteso");
+        assert!(err.contains("inesistente.mp4"), "{err}");
+        let worker = app.proxy_worker.as_ref().unwrap();
+        assert_eq!(worker.progress().total, 2);
+        for item in app.project.media_pool.values() {
+            assert!(worker.state(item.content_hash).is_some());
+            assert!(app.thumbnails.contains_key(&item.content_hash));
+        }
     }
 
     /// Test end-to-end del bug segnalato ("il buffer si ferma sempre al
