@@ -257,7 +257,7 @@ impl AudioPlayer {
     }
 }
 
-fn db_to_linear(db: f32) -> f32 {
+pub(crate) fn db_to_linear(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
@@ -279,7 +279,7 @@ fn db_to_linear(db: f32) -> f32 {
 ///   channel layout.
 /// - `from < to` (upmix, es. mono→stereo): i canali sorgente sono replicati
 ///   a turno (`indice_dest % from`) sui canali di destinazione.
-fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
+pub(crate) fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
     if from == to || from == 0 || to == 0 {
         return samples.to_vec();
     }

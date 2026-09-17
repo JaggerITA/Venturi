@@ -15,6 +15,7 @@
 
 mod export;
 mod frame_provider;
+mod mix_buffers;
 mod player;
 mod proxy_worker;
 mod render_ahead;

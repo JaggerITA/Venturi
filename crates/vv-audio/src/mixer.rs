@@ -1,2 +1,647 @@
-//! Mix delle track audio attive al tempo corrente: somma + gain (dB,
-//! keyframeable, interpolato a blocchi) + mute/solo. TODO: milestone 2.
+//! Mixer continuo delle track audio della timeline: snapshot immutabile
+//! delle clip (costruito dal thread UI) + `mix_range`, funzione pura usata
+//! sia dal callback cpal sia dall'export, così anteprima ed export
+//! producono lo stesso mix.
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use vv_core::{ClipSource, FrameIdx, Keyframed, Project, Timeline, TrackKind};
+
+use crate::output::{db_to_linear, downmix_interleaved};
+
+pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
+/// Granularità control-rate (~60Hz) del gain keyframeato, non sample-accurate.
+pub const GAIN_BLOCK_FRAMES: u64 = 800;
+
+pub struct MixClip {
+    /// In frame audio di timeline (un campione per canale).
+    pub start: u64,
+    pub len: u64,
+    /// Frame audio di `buffer` corrispondente a `start`.
+    pub source_offset: u64,
+    /// Interleaved a `sample_rate`/`channels` dello snapshot.
+    pub buffer: Arc<Vec<f32>>,
+    pub gain_db: Keyframed<f32>,
+    pub source_in: FrameIdx,
+    pub clip_fps: f64,
+}
+
+pub struct MixSnapshot {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub clips: Vec<MixClip>,
+}
+
+impl MixSnapshot {
+    pub fn empty(sample_rate: u32, channels: u16) -> Self {
+        Self {
+            sample_rate,
+            channels,
+            clips: Vec::new(),
+        }
+    }
+
+    /// `buffer_for(path, audio_stream_index)` restituisce il buffer già
+    /// preparato con `prepare_mix_buffer` a `sample_rate`/`channels`; `None`
+    /// (non ancora decodificato, o senza audio) esclude la clip: suona
+    /// silenzio.
+    pub fn from_timeline(
+        project: &Project,
+        timeline: &Timeline,
+        sample_rate: u32,
+        channels: u16,
+        mut buffer_for: impl FnMut(&Path, usize) -> Option<Arc<Vec<f32>>>,
+    ) -> Self {
+        let fps = timeline.fps.as_f64().max(1e-9);
+        let ch = channels.max(1) as u64;
+        let mut clips = Vec::new();
+        for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
+            if track.muted {
+                continue;
+            }
+            for clip in &track.clips {
+                let ClipSource::Media(media_id) = &clip.source else {
+                    continue;
+                };
+                let Some(item) = project.media_pool.get(*media_id) else {
+                    continue;
+                };
+                let Some(buffer) = buffer_for(&item.path, clip.audio_stream_index) else {
+                    continue;
+                };
+                let clip_fps = item.meta.fps.as_f64().max(1e-9);
+                let buffer_frames = buffer.len() as u64 / ch;
+                let source_offset = seconds_to_frames(clip.source_in as f64 / clip_fps, sample_rate)
+                    .min(buffer_frames);
+                let len = seconds_to_frames(clip.timeline_len() as f64 / clip_fps, sample_rate)
+                    .min(buffer_frames - source_offset);
+                if len == 0 {
+                    continue;
+                }
+                clips.push(MixClip {
+                    start: timeline_frame_to_sample(clip.timeline_start, fps, sample_rate),
+                    len,
+                    source_offset,
+                    buffer,
+                    gain_db: clip.effects.gain_db.clone(),
+                    source_in: clip.source_in,
+                    clip_fps,
+                });
+            }
+        }
+        Self {
+            sample_rate,
+            channels,
+            clips,
+        }
+    }
+}
+
+fn seconds_to_frames(secs: f64, sample_rate: u32) -> u64 {
+    (secs.max(0.0) * sample_rate as f64).round() as u64
+}
+
+pub fn timeline_frame_to_sample(frame: FrameIdx, fps: f64, sample_rate: u32) -> u64 {
+    seconds_to_frames(frame as f64 / fps.max(1e-9), sample_rate)
+}
+
+pub fn sample_to_timeline_frame(sample: u64, fps: f64, sample_rate: u32) -> FrameIdx {
+    (sample as f64 / sample_rate as f64 * fps).floor() as FrameIdx
+}
+
+/// Converte un buffer decodificato al formato del mix.
+pub fn prepare_mix_buffer(
+    samples: &[f32],
+    src_rate: u32,
+    src_channels: u16,
+    sample_rate: u32,
+    channels: u16,
+) -> Vec<f32> {
+    resample_and_remix(samples, src_channels, src_rate, channels, sample_rate)
+}
+
+/// Scrive in `out` (interleaved, `snapshot.channels` canali) il mix a
+/// partire dal frame audio di timeline `start`. Niente allocazioni: gira
+/// nel callback realtime.
+pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
+    out.fill(0.0);
+    let ch = snapshot.channels as usize;
+    if ch == 0 {
+        return;
+    }
+    let end = start + (out.len() / ch) as u64;
+    for clip in &snapshot.clips {
+        let clip_end = clip.start + clip.len;
+        let to = end.min(clip_end);
+        let mut f = start.max(clip.start);
+        while f < to {
+            let in_clip = f - clip.start;
+            let block = in_clip / GAIN_BLOCK_FRAMES;
+            let block_end = (clip.start + (block + 1) * GAIN_BLOCK_FRAMES).min(to);
+            let gain = block_gain_linear(clip, block, snapshot.sample_rate);
+
+            let src = ((clip.source_offset + in_clip) as usize) * ch;
+            let dst = ((f - start) as usize) * ch;
+            let count = ((block_end - f) as usize * ch).min(clip.buffer.len().saturating_sub(src));
+            for (d, s) in out[dst..dst + count]
+                .iter_mut()
+                .zip(&clip.buffer[src..src + count])
+            {
+                *d += s * gain;
+            }
+            f = block_end;
+        }
+    }
+}
+
+fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
+    if clip.gain_db.is_constant() {
+        return db_to_linear(clip.gain_db.default);
+    }
+    let secs = (block * GAIN_BLOCK_FRAMES) as f64 / sample_rate as f64;
+    let source_frame = clip.source_in + (secs * clip.clip_fps).round() as FrameIdx;
+    db_to_linear(clip.gain_db.value_at(source_frame))
+}
+
+/// Ricampiona (interpolazione lineare, senza filtro anti-aliasing) e
+/// converte i canali di un buffer interleaved.
+pub fn resample_and_remix(
+    samples: &[f32],
+    src_channels: u16,
+    src_rate: u32,
+    dst_channels: u16,
+    dst_rate: u32,
+) -> Vec<f32> {
+    if src_channels == 0 || dst_channels == 0 {
+        return Vec::new();
+    }
+    let remixed = downmix_interleaved(samples, src_channels, dst_channels);
+    if src_rate == dst_rate {
+        return remixed;
+    }
+
+    let ch = dst_channels as usize;
+    let src_frames = remixed.len() / ch;
+    if src_frames == 0 {
+        return Vec::new();
+    }
+    let dst_frames = (src_frames as f64 * dst_rate as f64 / src_rate as f64).round() as usize;
+    let mut out = Vec::with_capacity(dst_frames * ch);
+    for i in 0..dst_frames {
+        let src_pos = i as f64 * src_rate as f64 / dst_rate as f64;
+        let i0 = (src_pos.floor() as usize).min(src_frames - 1);
+        let i1 = (i0 + 1).min(src_frames - 1);
+        let t = (src_pos - i0 as f64) as f32;
+        for c in 0..ch {
+            let a = remixed[i0 * ch + c];
+            let b = remixed[i1 * ch + c];
+            out.push(a + (b - a) * t);
+        }
+    }
+    out
+}
+
+/// Stream cpal unico che suona `mix_range` sullo snapshot corrente. La
+/// posizione (frame audio di timeline) è il clock del playback.
+pub struct Mixer {
+    _stream: cpal::Stream,
+    playing: Arc<AtomicBool>,
+    position: Arc<AtomicU64>,
+    pending: Arc<Mutex<Option<Arc<MixSnapshot>>>>,
+    /// Snapshot pubblicati ancora referenziati dal callback: tenerli qui
+    /// garantisce che l'ultimo drop (con deallocazione) avvenga sul thread
+    /// UI, mai in quello audio.
+    retained: Vec<Arc<MixSnapshot>>,
+    peak_left_bits: Arc<AtomicU32>,
+    peak_right_bits: Arc<AtomicU32>,
+    sample_rate: u32,
+    channels: u16,
+}
+
+impl Mixer {
+    pub fn new() -> Result<Self, String> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("nessun device audio di output")?;
+        let channels = device
+            .default_output_config()
+            .map(|c| c.channels())
+            .unwrap_or(2);
+        let sample_rate = PROJECT_SAMPLE_RATE;
+        let config = cpal::StreamConfig {
+            channels,
+            sample_rate,
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let playing = Arc::new(AtomicBool::new(false));
+        let position = Arc::new(AtomicU64::new(0));
+        let initial = Arc::new(MixSnapshot::empty(sample_rate, channels));
+        let pending = Arc::new(Mutex::new(None));
+        let peak_left_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+        let peak_right_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+
+        let cb_playing = playing.clone();
+        let cb_position = position.clone();
+        let cb_pending = pending.clone();
+        let cb_peak_left = peak_left_bits.clone();
+        let cb_peak_right = peak_right_bits.clone();
+        let mut current = initial.clone();
+        let ch = channels.max(1) as usize;
+
+        let stream = device
+            .build_output_stream(
+                config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if let Ok(mut slot) = cb_pending.try_lock()
+                        && let Some(next) = slot.take()
+                    {
+                        current = next;
+                    }
+                    if cb_playing.load(Ordering::Relaxed) && current.channels as usize == ch {
+                        let pos = cb_position.load(Ordering::Relaxed);
+                        mix_range(&current, pos, data);
+                        // Un seek arrivato durante il mix vince sull'avanzamento.
+                        let _ = cb_position.compare_exchange(
+                            pos,
+                            pos + (data.len() / ch) as u64,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
+                    } else {
+                        data.fill(0.0);
+                    }
+                    let (l, r) = stereo_peak(data, ch);
+                    cb_peak_left.store(l.to_bits(), Ordering::Relaxed);
+                    cb_peak_right.store(r.to_bits(), Ordering::Relaxed);
+                },
+                move |err| eprintln!("vv-audio: errore stream mixer: {err}"),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        stream.play().map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            _stream: stream,
+            playing,
+            position,
+            pending,
+            retained: vec![initial],
+            peak_left_bits,
+            peak_right_bits,
+            sample_rate,
+            channels,
+        })
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    pub fn set_snapshot(&mut self, snapshot: Arc<MixSnapshot>) {
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
+        self.retained.retain(|s| Arc::strong_count(s) > 1);
+        self.retained.push(snapshot);
+    }
+
+    pub fn play(&self) {
+        self.playing.store(true, Ordering::Relaxed);
+    }
+
+    pub fn pause(&self) {
+        self.playing.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing.load(Ordering::Relaxed)
+    }
+
+    pub fn seek(&self, timeline_sample: u64) {
+        self.position.store(timeline_sample, Ordering::Relaxed);
+    }
+
+    pub fn position(&self) -> u64 {
+        self.position.load(Ordering::Relaxed)
+    }
+
+    pub fn peak_linear_stereo(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.peak_left_bits.load(Ordering::Relaxed)),
+            f32::from_bits(self.peak_right_bits.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+fn stereo_peak(data: &[f32], channels: usize) -> (f32, f32) {
+    let mut left = 0.0f32;
+    let mut right = 0.0f32;
+    for frame in data.chunks(channels.max(1)) {
+        if let Some(&s) = frame.first() {
+            left = left.max(s.abs());
+        }
+        match frame.get(1) {
+            Some(&s) => right = right.max(s.abs()),
+            None => right = left,
+        }
+    }
+    (left, right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use vv_core::{
+        Clip, ClipId, EffectStack, Interpolation, MediaItem, MediaMeta, Rational, Track,
+    };
+
+    const RATE: u32 = 100;
+
+    fn clip_at(media: vv_core::MediaId, start: FrameIdx, source_in: FrameIdx, len: FrameIdx) -> Clip {
+        Clip {
+            id: ClipId(0),
+            source: ClipSource::Media(media),
+            source_in,
+            source_out: source_in + len,
+            timeline_start: start,
+            effects: EffectStack::default(),
+            linked_group: None,
+            audio_stream_index: 0,
+        }
+    }
+
+    /// Progetto a 10 fps con due media (`a.wav`, `b.wav`): a `RATE` = 100
+    /// ogni frame di timeline sono 10 frame audio.
+    fn project() -> (Project, vv_core::MediaId, vv_core::MediaId) {
+        let mut project = Project::default();
+        let meta = MediaMeta {
+            duration_frames: 100,
+            fps: Rational::new(10, 1),
+            width: 0,
+            height: 0,
+            has_audio: true,
+            sample_rate: RATE,
+            channels: 1,
+        };
+        let a = project.media_pool.insert(MediaItem {
+            path: PathBuf::from("a.wav"),
+            meta: meta.clone(),
+            content_hash: 1,
+        });
+        let b = project.media_pool.insert(MediaItem {
+            path: PathBuf::from("b.wav"),
+            meta,
+            content_hash: 2,
+        });
+        (project, a, b)
+    }
+
+    fn timeline(tracks: Vec<Track>) -> Timeline {
+        Timeline {
+            name: "t".into(),
+            fps: Rational::new(10, 1),
+            resolution: (4, 2),
+            tracks,
+        }
+    }
+
+    fn audio_track(clips: Vec<Clip>) -> Track {
+        Track {
+            kind: TrackKind::Audio,
+            clips,
+            muted: false,
+        }
+    }
+
+    /// Mono: `a` vale sempre 0.5, `b` è una rampa (campione i = i/1000);
+    /// stream 1 di `a` vale 0.25.
+    fn buffers(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+        match (path.to_str()?, stream) {
+            ("a.wav", 0) => Some(Arc::new(vec![0.5; 1000])),
+            ("a.wav", 1) => Some(Arc::new(vec![0.25; 1000])),
+            ("b.wav", 0) => Some(Arc::new((0..1000).map(|i| i as f32 / 1000.0).collect())),
+            _ => None,
+        }
+    }
+
+    fn render(project: &Project, tl: &Timeline, start: u64, frames: usize) -> Vec<f32> {
+        let snap = MixSnapshot::from_timeline(project, tl, RATE, 1, buffers);
+        let mut out = vec![9.0; frames];
+        mix_range(&snap, start, &mut out);
+        out
+    }
+
+    #[test]
+    fn gap_is_silence() {
+        let (project, a, _) = project();
+        let tl = timeline(vec![audio_track(vec![clip_at(a, 5, 0, 2)])]);
+        let out = render(&project, &tl, 0, 50);
+        assert!(out.iter().all(|&s| s == 0.0));
+        let empty = timeline(vec![]);
+        assert!(render(&project, &empty, 0, 10).iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn offset_clip_plays_its_source_range_at_its_timeline_position() {
+        let (project, _, b) = project();
+        // Timeline frame 2 (= audio 20) suona la sorgente dal frame 3 (= audio 30).
+        let tl = timeline(vec![audio_track(vec![clip_at(b, 2, 3, 1)])]);
+        let out = render(&project, &tl, 15, 20);
+        assert!(out[..5].iter().all(|&s| s == 0.0));
+        for i in 0..10 {
+            assert_eq!(out[5 + i], (30 + i) as f32 / 1000.0);
+        }
+        assert!(out[15..].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn overlapping_clips_on_different_tracks_are_summed() {
+        let (project, a, b) = project();
+        let tl = timeline(vec![
+            audio_track(vec![clip_at(a, 0, 0, 5)]),
+            audio_track(vec![clip_at(b, 0, 0, 5)]),
+        ]);
+        let out = render(&project, &tl, 10, 5);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(*s, 0.5 + (10 + i) as f32 / 1000.0);
+        }
+    }
+
+    #[test]
+    fn muted_track_is_excluded() {
+        let (project, a, b) = project();
+        let mut muted = audio_track(vec![clip_at(a, 0, 0, 5)]);
+        muted.muted = true;
+        let tl = timeline(vec![muted, audio_track(vec![clip_at(b, 0, 0, 5)])]);
+        let out = render(&project, &tl, 0, 5);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(*s, i as f32 / 1000.0);
+        }
+    }
+
+    #[test]
+    fn video_tracks_are_ignored() {
+        let (project, a, _) = project();
+        let mut video = audio_track(vec![clip_at(a, 0, 0, 5)]);
+        video.kind = TrackKind::Video;
+        let tl = timeline(vec![video]);
+        assert!(render(&project, &tl, 0, 20).iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn constant_gain_scales_the_clip() {
+        let (project, a, _) = project();
+        let mut clip = clip_at(a, 0, 0, 5);
+        clip.effects.gain_db = Keyframed::constant(-6.0206);
+        let tl = timeline(vec![audio_track(vec![clip])]);
+        for s in render(&project, &tl, 0, 10) {
+            assert!((s - 0.25).abs() < 1e-3, "s={s}");
+        }
+    }
+
+    #[test]
+    fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
+        let (project, a, _) = project();
+        // Lunga abbastanza da coprire più blocchi di gain.
+        let blocks = 3;
+        let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
+        let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
+        let mut gain = Keyframed::constant(0.0f32);
+        gain.upsert(0, 0.0, Interpolation::Hold);
+        // Dal secondo blocco (audio 800 = frame sorgente 80) in poi: -inf pratico.
+        gain.upsert(80, -200.0, Interpolation::Hold);
+        clip.effects.gain_db = gain;
+        let tl = timeline(vec![audio_track(vec![clip])]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, |_, _| {
+            Some(Arc::new(vec![0.5; len_frames]))
+        });
+        let mut out = vec![0.0; len_frames];
+        mix_range(&snap, 0, &mut out);
+        let block = GAIN_BLOCK_FRAMES as usize;
+        assert!(out[..block].iter().all(|&s| s == 0.5));
+        assert!(out[block..].iter().all(|&s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn audio_stream_index_selects_the_buffer() {
+        let (project, a, _) = project();
+        let mut clip = clip_at(a, 0, 0, 5);
+        clip.audio_stream_index = 1;
+        let tl = timeline(vec![audio_track(vec![clip])]);
+        assert!(render(&project, &tl, 0, 10).iter().all(|&s| s == 0.25));
+    }
+
+    #[test]
+    fn clip_whose_buffer_is_not_ready_is_silent() {
+        let (project, a, b) = project();
+        let tl = timeline(vec![
+            audio_track(vec![clip_at(a, 0, 0, 5)]),
+            audio_track(vec![clip_at(b, 0, 0, 5)]),
+        ]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, |p, s| {
+            (p != Path::new("b.wav")).then(|| buffers(p, s)).flatten()
+        });
+        let mut out = vec![0.0; 10];
+        mix_range(&snap, 0, &mut out);
+        assert!(out.iter().all(|&s| s == 0.5));
+    }
+
+    #[test]
+    fn clip_longer_than_its_buffer_is_clamped() {
+        let (project, a, _) = project();
+        let tl = timeline(vec![audio_track(vec![clip_at(a, 0, 95, 20)])]);
+        let out = render(&project, &tl, 0, 100);
+        assert!(out[..50].iter().all(|&s| s == 0.5));
+        assert!(out[50..].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn mix_is_independent_of_how_the_range_is_split() {
+        let (project, a, b) = project();
+        let mut ca = clip_at(a, 1, 0, 30);
+        let mut kf = Keyframed::constant(0.0f32);
+        kf.upsert(0, 0.0, Interpolation::Linear);
+        kf.upsert(30, -12.0, Interpolation::Linear);
+        ca.effects.gain_db = kf;
+        let tl = timeline(vec![
+            audio_track(vec![ca]),
+            audio_track(vec![clip_at(b, 7, 2, 20)]),
+        ]);
+        let whole = render(&project, &tl, 0, 400);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, buffers);
+        let mut chunked = vec![0.0; 400];
+        for (i, chunk) in chunked.chunks_mut(37).enumerate() {
+            mix_range(&snap, (i * 37) as u64, chunk);
+        }
+        assert_eq!(whole, chunked);
+    }
+
+    #[test]
+    fn stereo_mix_keeps_channels_interleaved() {
+        let (project, a, _) = project();
+        let tl = timeline(vec![audio_track(vec![clip_at(a, 1, 0, 1)])]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, |_, _| {
+            Some(Arc::new([0.1, 0.9].repeat(100)))
+        });
+        let mut out = vec![0.0; 40];
+        mix_range(&snap, 5, &mut out);
+        assert!(out[..10].iter().all(|&s| s == 0.0));
+        for f in out[10..30].chunks(2) {
+            assert_eq!(f, [0.1, 0.9]);
+        }
+        assert!(out[30..].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn mixer_seek_and_snapshot_swaps_do_not_reopen_or_leak() {
+        let mut mixer = Mixer::new().unwrap();
+        mixer.seek(12_345);
+        assert_eq!(mixer.position(), 12_345, "in pausa la posizione non avanza");
+        for _ in 0..50 {
+            let snap = MixSnapshot::empty(mixer.sample_rate(), mixer.channels());
+            mixer.set_snapshot(Arc::new(snap));
+        }
+        assert!(mixer.retained.len() <= 3, "retained={}", mixer.retained.len());
+    }
+
+    #[test]
+    fn sample_and_frame_conversions_round_trip() {
+        let fps = 25.0;
+        for frame in [0, 1, 24, 25, 1234] {
+            let s = timeline_frame_to_sample(frame, fps, PROJECT_SAMPLE_RATE);
+            assert_eq!(sample_to_timeline_frame(s, fps, PROJECT_SAMPLE_RATE), frame);
+        }
+    }
+
+    #[test]
+    fn resample_and_remix_is_a_no_op_when_rate_and_channels_already_match() {
+        let samples = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(resample_and_remix(&samples, 2, 48000, 2, 48000), samples);
+    }
+
+    #[test]
+    fn resample_and_remix_duplicates_mono_to_stereo() {
+        let out = resample_and_remix(&[0.5, -0.5], 1, 48000, 2, 48000);
+        assert_eq!(out, vec![0.5, 0.5, -0.5, -0.5]);
+    }
+
+    #[test]
+    fn resample_and_remix_averages_stereo_to_mono() {
+        let out = resample_and_remix(&[1.0, 0.0, 0.0, 1.0], 2, 48000, 1, 48000);
+        assert_eq!(out, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn resample_and_remix_changes_frame_count_proportionally_to_rate() {
+        let samples: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let out = resample_and_remix(&samples, 1, 100, 1, 50);
+        assert!((45..=55).contains(&out.len()), "len={}", out.len());
+    }
+}

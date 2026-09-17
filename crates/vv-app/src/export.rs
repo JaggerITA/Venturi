@@ -15,26 +15,22 @@
 //! REFACTOR_PIPELINE.md B4); `EffectStack::speed` non applicato (nessun
 //! time-remap: milestone 7 non ancora fatta).
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    Clip, ClipId, ClipSource, FrameIdx, Keyframed, Project, Rgba, Timeline, TimelineId, TrackKind,
+    Clip, ClipId, ClipSource, FrameIdx, Project, Rgba, Timeline, TimelineId, TrackKind,
+};
+
+use vv_audio::mixer::{
+    MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, prepare_mix_buffer, timeline_frame_to_sample,
 };
 
 use crate::frame_provider::{FrameProvider, as_render_yuv_frame, media_source_frame};
 
-/// Sample rate/canali a cui viene mixata la traccia audio prima
-/// dell'encode, indipendentemente da quelli nativi dei singoli media
-/// (vedi `resample_and_remix`).
-const PROJECT_SAMPLE_RATE: u32 = 48_000;
-const PROJECT_CHANNELS: usize = 2;
-/// Ampiezza (in campioni per canale) dei blocchi su cui viene campionato
-/// il gain keyframeato in fase di mix: stessa granularità control-rate
-/// (~60Hz) già usata dall'anteprima in tempo reale
-/// (`apply_active_clip_gain` in `main.rs`), non sample-accurate.
-const GAIN_BLOCK_FRAMES: usize = 800;
+const PROJECT_CHANNELS: u16 = 2;
 
 #[derive(Default)]
 pub struct ExportProgress {
@@ -168,7 +164,7 @@ pub fn export_timeline(
         timeline.resolution.0,
         timeline.resolution.1,
         timeline.fps,
-        has_audio_track.then_some((PROJECT_SAMPLE_RATE, PROJECT_CHANNELS as u16)),
+        has_audio_track.then_some((PROJECT_SAMPLE_RATE, PROJECT_CHANNELS)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -266,193 +262,59 @@ fn render_video_frame(
     }
 }
 
-/// Decodifica/gaina/mixa *tutte* le track audio in un unico buffer PCM f32
-/// interleaved a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`, lungo
-/// `total_frames` (nello spazio frame della timeline) — silenzio nei buchi
-/// e dove non c'è alcuna traccia audio (REFACTOR_PIPELINE.md B4: N track
-/// audio invece di una sola fissa, sommate nello stesso buffer — a
-/// differenza del video, per l'audio "sovrapposto" ha senso sommare per
-/// davvero, non serve un mixer in tempo reale per farlo bene: l'export non
-/// ha vincoli di latenza, il vero mixer continuo di B5 serve solo per
-/// l'anteprima dal vivo).
+/// Mix di tutte le track audio a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
+/// lungo `total_frames` di timeline: stessa `mix_range` dell'anteprima.
 fn mix_audio_track(
     project: &Project,
     timeline: &Timeline,
     total_frames: FrameIdx,
 ) -> Result<Vec<f32>, String> {
-    let fps = timeline.fps.as_f64().max(1e-9);
-    let total_out_frames =
-        (total_frames as f64 / fps * PROJECT_SAMPLE_RATE as f64).round() as usize;
-    let mut mixed = vec![0.0_f32; total_out_frames * PROJECT_CHANNELS];
-
+    let mut buffers: HashMap<(PathBuf, usize), Option<Arc<Vec<f32>>>> = HashMap::new();
     for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
         for clip in &track.clips {
             let ClipSource::Media(media_id) = &clip.source else {
-                continue; // SolidColor non ha audio.
+                continue;
             };
             let Some(item) = project.media_pool.get(*media_id) else {
                 continue;
             };
-            let Some(audio) =
-                vv_media::decode_audio_track(&item.path, clip.audio_stream_index)
-                    .map_err(|e| e.to_string())?
-            else {
-                continue;
-            };
-            if audio.samples.is_empty() {
+            let key = (item.path.clone(), clip.audio_stream_index);
+            if buffers.contains_key(&key) {
                 continue;
             }
-
-            let src_channels = audio.channels as usize;
-            let src_rate = audio.sample_rate as f64;
-            let clip_fps = item.meta.fps.as_f64().max(1e-9);
-
-            // [source_in, source_out) del clip, tradotto da frame sorgente
-            // (fps nativo del media) a campioni nel buffer decodificato.
-            let start = ((clip.source_in as f64 / clip_fps * src_rate).round() as usize
-                * src_channels)
-                .min(audio.samples.len());
-            let end = ((clip.source_out as f64 / clip_fps * src_rate).round() as usize
-                * src_channels)
-                .min(audio.samples.len());
-            if start >= end {
-                continue;
-            }
-            let mut slice = audio.samples[start..end].to_vec();
-
-            apply_gain(
-                &mut slice,
-                src_channels,
-                audio.sample_rate,
-                clip_fps,
-                clip.source_in,
-                &clip.effects.gain_db,
-            );
-
-            let resampled = resample_and_remix(
-                &slice,
-                src_channels,
-                audio.sample_rate,
-                PROJECT_CHANNELS,
-                PROJECT_SAMPLE_RATE,
-            );
-
-            let dst_start_frame =
-                (clip.timeline_start as f64 / fps * PROJECT_SAMPLE_RATE as f64).round() as usize;
-            let dst_start = dst_start_frame * PROJECT_CHANNELS;
-            for (i, &s) in resampled.iter().enumerate() {
-                if let Some(m) = mixed.get_mut(dst_start + i) {
-                    *m += s;
-                }
-            }
+            let buffer = vv_media::decode_audio_track(&item.path, clip.audio_stream_index)
+                .map_err(|e| e.to_string())?
+                .map(|audio| {
+                    Arc::new(prepare_mix_buffer(
+                        &audio.samples,
+                        audio.sample_rate,
+                        audio.channels,
+                        PROJECT_SAMPLE_RATE,
+                        PROJECT_CHANNELS,
+                    ))
+                });
+            buffers.insert(key, buffer);
         }
     }
 
+    let snapshot = MixSnapshot::from_timeline(
+        project,
+        timeline,
+        PROJECT_SAMPLE_RATE,
+        PROJECT_CHANNELS,
+        |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned().flatten(),
+    );
+    let fps = timeline.fps.as_f64();
+    let total_out_frames = timeline_frame_to_sample(total_frames, fps, PROJECT_SAMPLE_RATE);
+    let mut mixed = vec![0.0_f32; total_out_frames as usize * PROJECT_CHANNELS as usize];
+    mix_range(&snapshot, 0, &mut mixed);
     Ok(mixed)
-}
-
-/// Applica il gain (dB, keyframeato) a `samples` (interleaved,
-/// `channels` canali, `src_rate` Hz) — a blocchi di `GAIN_BLOCK_FRAMES`
-/// campioni per canale, campionando `gain_db` una volta per blocco al
-/// frame sorgente corrispondente (non sample-accurate, stessa granularità
-/// control-rate già usata dall'anteprima in tempo reale). `source_in` è
-/// l'offset del clip nello spazio frame sorgente: `samples[0]` corrisponde
-/// esattamente a quel frame.
-fn apply_gain(
-    samples: &mut [f32],
-    channels: usize,
-    src_rate: u32,
-    clip_fps: f64,
-    source_in: FrameIdx,
-    gain_db: &Keyframed<f32>,
-) {
-    if channels == 0 {
-        return;
-    }
-    if gain_db.is_constant() {
-        let linear = db_to_linear(gain_db.value_at(0));
-        if linear != 1.0 {
-            for s in samples.iter_mut() {
-                *s *= linear;
-            }
-        }
-        return;
-    }
-
-    let block_len = GAIN_BLOCK_FRAMES * channels;
-    let mut offset = 0;
-    while offset < samples.len() {
-        let end = (offset + block_len).min(samples.len());
-        let secs = (offset / channels) as f64 / src_rate as f64;
-        let source_frame = source_in + (secs * clip_fps).round() as FrameIdx;
-        let linear = db_to_linear(gain_db.value_at(source_frame));
-        for s in &mut samples[offset..end] {
-            *s *= linear;
-        }
-        offset += block_len;
-    }
-}
-
-fn db_to_linear(db: f32) -> f32 {
-    10f32.powf(db / 20.0)
-}
-
-/// Ricampiona (interpolazione lineare) e normalizza il numero di canali di
-/// un buffer PCM f32 interleaved. Non un resampler professionale (niente
-/// filtro anti-aliasing): per l'export va bene — la sorgente è già stata
-/// decodificata a piena qualità, e la differenza percettibile è minima sul
-/// contenuto tipico (parlato/musica) di un progetto di editing. Se
-/// rate/canali coincidono già è un no-op (nessuna copia sprecata oltre
-/// quella per canali diversi).
-fn resample_and_remix(
-    samples: &[f32],
-    src_channels: usize,
-    src_rate: u32,
-    dst_channels: usize,
-    dst_rate: u32,
-) -> Vec<f32> {
-    let remixed: Vec<f32> = match (src_channels, dst_channels) {
-        (a, b) if a == b => samples.to_vec(),
-        (1, 2) => samples.iter().flat_map(|&s| [s, s]).collect(),
-        (2, 1) => samples
-            .chunks_exact(2)
-            .map(|c| (c[0] + c[1]) * 0.5)
-            .collect(),
-        (src, dst) if src > 0 => samples
-            .chunks_exact(src)
-            .flat_map(|frame| std::iter::repeat_n(frame[0], dst))
-            .collect(),
-        _ => Vec::new(),
-    };
-
-    if src_rate == dst_rate || dst_channels == 0 {
-        return remixed;
-    }
-
-    let src_frames = remixed.len() / dst_channels;
-    if src_frames == 0 {
-        return Vec::new();
-    }
-    let dst_frames = (src_frames as f64 * dst_rate as f64 / src_rate as f64).round() as usize;
-    let mut out = Vec::with_capacity(dst_frames * dst_channels);
-    for i in 0..dst_frames {
-        let src_pos = i as f64 * src_rate as f64 / dst_rate as f64;
-        let i0 = (src_pos.floor() as usize).min(src_frames - 1);
-        let i1 = (i0 + 1).min(src_frames - 1);
-        let t = (src_pos - i0 as f64) as f32;
-        for ch in 0..dst_channels {
-            let a = remixed[i0 * dst_channels + ch];
-            let b = remixed[i1 * dst_channels + ch];
-            out.push(a + (b - a) * t);
-        }
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vv_core::{Clip, EffectStack, Track, TrackKind};
+    use vv_core::{Clip, EffectStack, Keyframed, Track, TrackKind};
 
     fn solid_color_clip(id: u64, start: FrameIdx, len: FrameIdx, color: Rgba) -> Clip {
         Clip {
@@ -692,56 +554,9 @@ mod tests {
         let mixed = mix_audio_track(&project, &tl, 25).unwrap();
         assert_eq!(
             mixed.len(),
-            (PROJECT_SAMPLE_RATE as usize) * PROJECT_CHANNELS
+            (PROJECT_SAMPLE_RATE as usize) * PROJECT_CHANNELS as usize
         );
         assert!(mixed.iter().all(|&s| s == 0.0));
-    }
-
-    #[test]
-    fn resample_and_remix_is_a_no_op_when_rate_and_channels_already_match() {
-        let samples = vec![0.1, 0.2, 0.3, 0.4];
-        let out = resample_and_remix(&samples, 2, 48000, 2, 48000);
-        assert_eq!(out, samples);
-    }
-
-    #[test]
-    fn resample_and_remix_duplicates_mono_to_stereo() {
-        let samples = vec![0.5, -0.5];
-        let out = resample_and_remix(&samples, 1, 48000, 2, 48000);
-        assert_eq!(out, vec![0.5, 0.5, -0.5, -0.5]);
-    }
-
-    #[test]
-    fn resample_and_remix_averages_stereo_to_mono() {
-        let samples = vec![1.0, 0.0, 0.0, 1.0];
-        let out = resample_and_remix(&samples, 2, 48000, 1, 48000);
-        assert_eq!(out, vec![0.5, 0.5]);
-    }
-
-    #[test]
-    fn resample_and_remix_changes_frame_count_proportionally_to_rate() {
-        let samples: Vec<f32> = (0..100).map(|i| i as f32).collect(); // mono, 100 frame
-        let out = resample_and_remix(&samples, 1, 100, 1, 50);
-        // Dimezzando il rate, ci si aspetta circa la metà dei frame.
-        assert!((45..=55).contains(&out.len()), "len={}", out.len());
-    }
-
-    #[test]
-    fn apply_gain_at_zero_db_is_a_no_op() {
-        let mut samples = vec![0.5_f32, -0.3, 0.2, 0.1];
-        let gain = Keyframed::constant(0.0_f32);
-        apply_gain(&mut samples, 2, 48000, 25.0, 0, &gain);
-        assert_eq!(samples, vec![0.5, -0.3, 0.2, 0.1]);
-    }
-
-    #[test]
-    fn apply_gain_scales_samples_by_the_linear_equivalent_of_the_db_value() {
-        let mut samples = vec![1.0_f32; 4];
-        let gain = Keyframed::constant(-6.0206_f32); // ~metà ampiezza
-        apply_gain(&mut samples, 1, 48000, 25.0, 0, &gain);
-        for s in samples {
-            assert!((s - 0.5).abs() < 0.001, "s={s}");
-        }
     }
 
     #[test]
