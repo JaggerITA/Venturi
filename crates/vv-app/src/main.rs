@@ -45,6 +45,25 @@ const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 /// se c'è).
 type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
 
+/// Dopo quanto (s) una freccia tenuta premuta smette di fare il passo
+/// singolo e inizia a scorrere a `ARROW_HOLD_SPEED`.
+const ARROW_HOLD_DELAY_SECS: f64 = 0.3;
+const ARROW_HOLD_SPEED: f64 = 0.5;
+
+/// Freccia sinistra/destra tenuta premuta (`VibeVideoApp::arrow_hold`).
+struct ArrowHold {
+    direction: FrameIdx,
+    pressed_at: f64,
+    start_frame: FrameIdx,
+}
+
+/// Posizione della testina con una freccia premuta da `elapsed` secondi:
+/// un frame subito, poi scorrimento continuo dopo `ARROW_HOLD_DELAY_SECS`.
+fn arrow_hold_target(hold: &ArrowHold, elapsed: f64, fps: f64) -> FrameIdx {
+    let scrolled = ((elapsed - ARROW_HOLD_DELAY_SECS).max(0.0) * fps * ARROW_HOLD_SPEED) as FrameIdx;
+    (hold.start_frame + hold.direction * (1 + scrolled)).max(0)
+}
+
 /// Stato di `VibeVideoApp::gap_wall_clock` — vedi il suo doc per il
 /// quadro generale.
 struct GapWallClock {
@@ -399,6 +418,8 @@ struct VibeVideoApp {
     /// ogni volta la clip.
     selection_follows_playhead: bool,
 
+    arrow_hold: Option<ArrowHold>,
+
     /// Il pannello proprietà (a destra del viewer) è visibile? Attivo di
     /// default; l'utente può nasconderlo (✕ nel pannello, o la checkbox in
     /// toolbar) e farlo ricomparire al bisogno. Da non confondere con "non
@@ -489,6 +510,7 @@ impl Default for VibeVideoApp {
             speed_stretch_tx,
             speed_stretch_rx,
             selection_follows_playhead: true,
+            arrow_hold: None,
             properties_panel_open: true,
             snapping_enabled: true,
             export: None,
@@ -1086,6 +1108,40 @@ impl VibeVideoApp {
         if let Some(player) = &mut self.preview_player {
             player.seek_to_frame(frame);
         }
+    }
+
+    /// Frecce sinistra/destra: un frame indietro/avanti, tenendo premuto
+    /// scorre a `ARROW_HOLD_SPEED`. Mette in pausa se si sta riproducendo.
+    /// Ritorna `true` finché una freccia è premuta.
+    fn step_playhead_with_arrows(&mut self, direction: Option<FrameIdx>, time: f64) -> bool {
+        let Some(direction) = direction else {
+            self.arrow_hold = None;
+            return false;
+        };
+        let Some(timeline_id) = self.timeline_id else {
+            return false;
+        };
+        if self.arrow_hold.as_ref().is_none_or(|h| h.direction != direction) {
+            let playing = self.preview_player.as_ref().is_some_and(Player::is_playing)
+                || self.gap_wall_clock.is_some();
+            if playing {
+                self.toggle_playback();
+            }
+            self.arrow_hold = Some(ArrowHold {
+                direction,
+                pressed_at: time,
+                start_frame: self.timeline_state.playhead,
+            });
+        }
+        let hold = self.arrow_hold.as_ref().expect("impostato sopra");
+        let fps = self.project.timelines[timeline_id].fps.as_f64();
+        let target = arrow_hold_target(hold, time - hold.pressed_at, fps);
+        if target != self.timeline_state.playhead {
+            self.timeline_state.playhead = target;
+            self.ensure_active_clip_matches_playhead(true);
+            self.sync_selection_to_playhead();
+        }
+        true
     }
 
     /// Fa play/pause sulla clip sotto al playhead, senza bisogno che sia
@@ -2924,7 +2980,17 @@ impl eframe::App for VibeVideoApp {
         // appena premo Ctrl+C su una clip", panic "Failed to acquire
         // RwLock write... Deadlock?").
         let mut clipboard_events: Vec<egui::Event> = Vec::new();
+        let mut arrow_input = (None, 0.0);
         ui.input(|i| {
+            arrow_input.0 = match (
+                i.key_down(egui::Key::ArrowLeft),
+                i.key_down(egui::Key::ArrowRight),
+            ) {
+                (true, false) => Some(-1),
+                (false, true) => Some(1),
+                _ => None,
+            };
+            arrow_input.1 = i.time;
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 self.delete_selected();
             }
@@ -3003,6 +3069,9 @@ impl eframe::App for VibeVideoApp {
             }
         });
         self.handle_clipboard_events(ui, &clipboard_events);
+        if self.step_playhead_with_arrows(arrow_input.0, arrow_input.1) {
+            ui.ctx().request_repaint();
+        }
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -5442,6 +5511,25 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    #[test]
+    fn arrows_step_one_frame_then_scroll_at_half_speed_while_held() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 1000);
+        app.timeline_state.playhead = 100;
+
+        app.step_playhead_with_arrows(Some(1), 10.0);
+        assert_eq!(app.timeline_state.playhead, 101, "un frame subito");
+        app.step_playhead_with_arrows(Some(1), 10.2);
+        assert_eq!(app.timeline_state.playhead, 101, "prima del ritardo resta lì");
+        // 25fps a 0.5x: 1s dopo il ritardo = 12 frame in più.
+        app.step_playhead_with_arrows(Some(1), 10.0 + ARROW_HOLD_DELAY_SECS + 1.0);
+        assert_eq!(app.timeline_state.playhead, 113);
+
+        app.step_playhead_with_arrows(None, 12.0);
+        app.step_playhead_with_arrows(Some(-1), 12.1);
+        assert_eq!(app.timeline_state.playhead, 112, "rilasciata, un nuovo passo singolo");
     }
 
     #[test]
