@@ -1826,52 +1826,63 @@ impl VibeVideoApp {
             .first_track_index(TrackKind::Video)
             .unwrap_or(0);
         let video_start = track_end(&self.project, timeline_id, video_track);
-        self.insert_media_clip(timeline_id, media_id, &meta, video_start);
+        self.insert_media_clip(
+            timeline_id,
+            media_id,
+            &meta,
+            video_start,
+            timeline_ui::MediaDropTarget::Default,
+        );
     }
 
-    /// Come `add_media_to_timeline`, ma piazza la clip (e la sua gemella
-    /// audio, se c'è) esattamente a `start`, invece che in coda: usato dal
-    /// drag&drop dal media pool sulla timeline, dove la posizione viene dal
-    /// punto orizzontale in cui l'utente rilascia (vedi
-    /// `timeline_ui::show_timeline`).
-    fn add_media_to_timeline_at(&mut self, media_id: MediaId, start: FrameIdx) {
+    /// Come `add_media_to_timeline`, ma piazza la clip a `start` (posizione
+    /// e `target` dal drag&drop sulla timeline, vedi `MediaDropTarget`).
+    fn add_media_to_timeline_at(
+        &mut self,
+        media_id: MediaId,
+        start: FrameIdx,
+        target: timeline_ui::MediaDropTarget,
+    ) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
         let meta = item.meta.clone();
         let timeline_id = self.ensure_timeline_for(&meta);
-        self.insert_media_clip(timeline_id, media_id, &meta, start);
+        self.insert_media_clip(timeline_id, media_id, &meta, start, target);
     }
 
-    /// Inserisce la clip video (e, se il media ha audio, una clip audio
-    /// per ogni stream audio del contenitore — vedi doc di
-    /// `Clip::audio_stream_index`) tutte a `start`. Il video atterra
-    /// sempre sulla prima (bottom-most) track video, la stessa "di
-    /// default" finché l'utente non ne aggiunge altre a mano
-    /// (REFACTOR_PIPELINE.md B4). Le clip audio atterrano sulle track
-    /// audio esistenti (bottom-up, una per stream); se non ce ne sono
-    /// abbastanza per il numero di stream, le mancanti vengono create al
-    /// volo (`AddTrack`) — ma se non esiste *nessuna* track audio (l'utente
-    /// le ha rimosse tutte, vedi doc di `RemoveTrack`) niente audio viene
-    /// inserito, stesso comportamento di un media senza audio.
+    /// Inserisce la clip video (e una clip audio per stream, vedi
+    /// `Clip::audio_stream_index`) a `start`. `target` (`MediaDropTarget`)
+    /// sceglie la track video/audio di destinazione: `Default` è quella di
+    /// sempre, `NewVideoTrack`/`NewAudioTrack` ne creano una al volo (solo
+    /// se il media ha davvero audio da piazzarci, per `NewAudioTrack`).
+    /// Se le track audio non bastano per il numero di stream, le mancanti
+    /// vengono comunque create.
     ///
-    /// Il video e *tutte* le clip audio (uno stream o più) finiscono nello
-    /// stesso gruppo collegato (`Clip::linked_group`): selezione, drag e
-    /// cancellazione le trattano come un'unica unità. Un drop mirato su una
-    /// track specifica resta un'estensione futura, oggi non necessaria: le
-    /// clip si possono comunque trascinare su un'altra track dopo
-    /// l'inserimento.
+    /// Video e clip audio finiscono nello stesso gruppo collegato
+    /// (`Clip::linked_group`).
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
         media_id: MediaId,
         meta: &vv_core::MediaMeta,
         start: FrameIdx,
+        target: timeline_ui::MediaDropTarget,
     ) {
-        let Some(video_track) =
-            self.project.timelines[timeline_id].first_track_index(TrackKind::Video)
-        else {
-            return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
+        let video_track = if target == timeline_ui::MediaDropTarget::NewVideoTrack {
+            let new_index = self.project.timelines[timeline_id].tracks.len();
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+            );
+            new_index
+        } else {
+            let Some(video_track) =
+                self.project.timelines[timeline_id].first_track_index(TrackKind::Video)
+            else {
+                return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
+            };
+            video_track
         };
         let video_clip_id = self.project.alloc_clip_id();
 
@@ -1879,6 +1890,17 @@ impl VibeVideoApp {
             .tracks_of_kind(TrackKind::Audio)
             .map(|(i, _)| i)
             .collect();
+
+        if target == timeline_ui::MediaDropTarget::NewAudioTrack && meta.has_audio {
+            let new_index = self.project.timelines[timeline_id].tracks.len();
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
+            );
+            // In testa: il primo stream deve atterrare sulla track appena
+            // creata, non su una già esistente.
+            audio_track_indices.insert(0, new_index);
+        }
 
         let num_audio_streams = if meta.has_audio && !audio_track_indices.is_empty() {
             self.project
@@ -3193,7 +3215,7 @@ impl eframe::App for VibeVideoApp {
         // posizione: qui basta un semplice drop-ovunque che la crei al volo
         // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
         // media a frame 0.
-        let mut media_drop: Option<(MediaId, FrameIdx)> = None;
+        let mut media_drop: Option<(MediaId, FrameIdx, timeline_ui::MediaDropTarget)> = None;
         let mut dropped_on_empty_timeline: Option<MediaId> = None;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
@@ -3268,8 +3290,8 @@ impl eframe::App for VibeVideoApp {
         if let Some(media_id) = dropped_on_empty_timeline {
             self.add_media_to_timeline(media_id);
         }
-        if let Some((media_id, start)) = media_drop {
-            self.add_media_to_timeline_at(media_id, start);
+        if let Some((media_id, start, target)) = media_drop {
+            self.add_media_to_timeline_at(media_id, start, target);
         }
 
         // L'utente ha trascinato/cliccato il playhead in questo frame?
@@ -5832,8 +5854,8 @@ mod tests {
         let media_b = media_ids.next().unwrap();
         drop(media_ids);
 
-        app.add_media_to_timeline_at(media_a, 0); // [0,50)
-        app.add_media_to_timeline_at(media_b, 50); // [50,75), adiacente
+        app.add_media_to_timeline_at(media_a, 0, timeline_ui::MediaDropTarget::Default); // [0,50)
+        app.add_media_to_timeline_at(media_b, 50, timeline_ui::MediaDropTarget::Default); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
         let clip_b = app.project.timelines[timeline_id].tracks[0].clips[1].clone();
 
@@ -5897,8 +5919,8 @@ mod tests {
         let media_b = media_ids.next().unwrap();
         drop(media_ids);
 
-        app.add_media_to_timeline_at(media_a, 0); // [0,50)
-        app.add_media_to_timeline_at(media_b, 50); // [50,75), adiacente
+        app.add_media_to_timeline_at(media_a, 0, timeline_ui::MediaDropTarget::Default); // [0,50)
+        app.add_media_to_timeline_at(media_b, 50, timeline_ui::MediaDropTarget::Default); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
         let clip_b_id = app.project.timelines[timeline_id].tracks[0].clips[1].id;
         let clip_a_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;

@@ -25,6 +25,8 @@ const ROW_HEIGHT: f32 = 40.0;
 const RULER_HEIGHT: f32 = 20.0;
 const MIN_TIMELINE_SECS: f64 = 20.0;
 const TRAILING_MARGIN_SECS: f64 = 5.0;
+/// Altezza del separatore trascinabile fra il gruppo Video e il gruppo Audio.
+const GROUP_DIVIDER_HEIGHT: f32 = 8.0;
 /// Colonna fissa a sinistra della timeline (etichetta track + rimuovi),
 /// non coinvolta nello scroll orizzontale — vedi `draw_track_headers`.
 const TRACK_HEADER_WIDTH: f32 = 100.0;
@@ -73,6 +75,9 @@ pub struct TimelineState {
     /// stato copiato nulla in questa sessione.
     pub clipboard: Vec<ClipboardEntry>,
     trim: Option<TrimState>,
+    /// Margine sopra al gruppo Video se l'utente ha trascinato il
+    /// separatore (vedi `GROUP_DIVIDER_HEIGHT`); `None` = centrato di default.
+    track_top_margin: Option<f32>,
 }
 
 /// Una clip copiata: né l'id né il `timeline_start` assoluto sopravvivono
@@ -183,6 +188,7 @@ impl Default for TimelineState {
             selected_gap: None,
             clipboard: Vec::new(),
             trim: None,
+            track_top_margin: None,
         }
     }
 }
@@ -259,92 +265,130 @@ enum PendingAction {
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
     /// gruppo nuovo — almeno 2.
     Link(Vec<ClipKey>),
-    /// Aggiunge una track vuota del tipo dato (REFACTOR_PIPELINE.md B4).
-    AddTrack(TrackKind),
     /// Rimuove la track a questo indice (e le sue clip).
     RemoveTrack(usize),
 }
 
-/// Disegna l'etichetta (Video/Audio) e il pulsante di rimozione di ogni
-/// track, in una colonna fissa a sinistra che non scorre con il contenuto
-/// orizzontale, più due pulsanti per aggiungerne una nuova in fondo
-/// (REFACTOR_PIPELINE.md B4) — l'unico modo per l'utente di ottenere più
-/// di una track video/audio, dato che il modello dati e il resto di questa
-/// UI (drag, selezione, comandi) sono già generici sul numero di track.
-/// La rimozione dell'ultima track di un tipo è disabilitata: mantenere
-/// sempre almeno una track Video e una Audio evita di dover gestire un
-/// progetto senza una destinazione di default per nuove clip altrove
-/// (`VibeVideoApp::insert_media_clip`/`add_solid_color_clip`).
-/// In fondo alla colonna mostra anche il timestamp della posizione testina
-/// in formato HH:MM:SS:FF.
+/// Ordine di disegno: gruppo Video (decrescente per `track_index` — la
+/// track appena aggiunta trascinando sopra finisce in cima, come V2 sopra
+/// V1 in un NLE) seguito dal gruppo Audio (crescente, dove appendere basta
+/// già a mettere la nuova track in fondo). Indipendente da come le track
+/// sono intercalate in `Track::tracks`, che conta solo per il compositing.
+fn track_row_order(track_kinds: &[TrackKind]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..track_kinds.len())
+        .filter(|&i| track_kinds[i] == TrackKind::Video)
+        .collect();
+    order.reverse();
+    order.extend((0..track_kinds.len()).filter(|&i| track_kinds[i] == TrackKind::Audio));
+    order
+}
+
+/// Colonna fissa a sinistra: etichetta e "×" di ogni track, alle stesse
+/// `row_y` del contenuto scrollabile, più il timestamp della testina.
+/// Disegnata a mano (painter + `ui.interact`, non widget in flow): un
+/// `ui.add_space` legato all'altezza del pannello qui dentro farebbe
+/// crescere `Panel::bottom` all'infinito (vedi bug "il pannello prende
+/// tutto lo spazio all'apertura").
 fn draw_track_headers(
     ui: &mut egui::Ui,
     track_kinds: &[TrackKind],
-    content_height: f32,
+    row_order: &[usize],
+    row_y: &[f32],
+    video_count: usize,
+    divider_height: f32,
+    natural_content_height: f32,
     pending: &mut Option<PendingAction>,
     playhead: FrameIdx,
     fps: f64,
 ) {
-    ui.allocate_ui_with_layout(
-        egui::vec2(TRACK_HEADER_WIDTH, content_height.max(RULER_HEIGHT)),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            // Timestamp della posizione testina in formato HH:MM:SS:FF,
-            // nella riga del righello (come in DaVinci Resolve). Font grande
-            // e monospaziato per leggibilità immediata.
-            let playhead_secs = playhead as f64 / fps;
-            ui.allocate_ui_with_layout(
-                egui::vec2(TRACK_HEADER_WIDTH, RULER_HEIGHT),
-                egui::Layout::top_down_justified(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(format_timecode(playhead_secs, fps))
-                            .monospace()
-                            .size(14.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    );
-                },
-            );
-
-            for (track_index, kind) in track_kinds.iter().enumerate() {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let label = match kind {
-                            TrackKind::Video => "Video",
-                            TrackKind::Audio => "Audio",
-                        };
-                        ui.label(label);
-                        let is_last_of_kind =
-                            track_kinds.iter().filter(|k| *k == kind).count() <= 1;
-                        let remove =
-                            ui.add_enabled(!is_last_of_kind, egui::Button::new("×").small());
-                        if remove
-                            .on_hover_text(if is_last_of_kind {
-                                "Non si può rimuovere l'ultima track di questo tipo"
-                            } else {
-                                "Rimuovi track"
-                            })
-                            .clicked()
-                        {
-                            *pending = Some(PendingAction::RemoveTrack(track_index));
-                        }
-                    },
-                );
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.small_button("+ Video").clicked() {
-                    *pending = Some(PendingAction::AddTrack(TrackKind::Video));
-                }
-                if ui.small_button("+ Audio").clicked() {
-                    *pending = Some(PendingAction::AddTrack(TrackKind::Audio));
-                }
-            });
-        },
+    let (rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(TRACK_HEADER_WIDTH, natural_content_height.max(RULER_HEIGHT)),
+        egui::Sense::hover(),
     );
+    let origin = rect.min;
+    let text_color = ui.visuals().text_color();
+
+    // Timestamp della posizione testina in formato HH:MM:SS:FF, nella riga
+    // del righello (come in DaVinci Resolve).
+    let playhead_secs = playhead as f64 / fps;
+    ui.painter().text(
+        egui::pos2(origin.x + TRACK_HEADER_WIDTH / 2.0, origin.y + RULER_HEIGHT / 2.0),
+        egui::Align2::CENTER_CENTER,
+        format_timecode(playhead_secs, fps),
+        egui::FontId::monospace(14.0),
+        egui::Color32::WHITE,
+    );
+
+    for &track_index in row_order {
+        let kind = track_kinds[track_index];
+        let row_rect = egui::Rect::from_min_size(
+            egui::pos2(origin.x, origin.y + row_y[track_index]),
+            egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
+        );
+        let label = match kind {
+            TrackKind::Video => "Video",
+            TrackKind::Audio => "Audio",
+        };
+        ui.painter().text(
+            row_rect.left_center() + egui::vec2(6.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(14.0),
+            text_color,
+        );
+
+        let is_last_of_kind = track_kinds.iter().filter(|k| **k == kind).count() <= 1;
+        const REMOVE_BTN_SIZE: f32 = 18.0;
+        let remove_rect = egui::Rect::from_center_size(
+            egui::pos2(row_rect.right() - 14.0, row_rect.center().y),
+            egui::vec2(REMOVE_BTN_SIZE, REMOVE_BTN_SIZE),
+        );
+        let sense = if is_last_of_kind {
+            egui::Sense::hover()
+        } else {
+            egui::Sense::click()
+        };
+        let remove_resp = ui
+            .interact(remove_rect, ui.id().with("remove_track").with(track_index), sense)
+            .on_hover_text(if is_last_of_kind {
+                "Non si può rimuovere l'ultima track di questo tipo"
+            } else {
+                "Rimuovi track"
+            });
+        if !is_last_of_kind && remove_resp.hovered() {
+            ui.painter()
+                .rect_filled(remove_rect, 3.0, egui::Color32::from_gray(70));
+        }
+        ui.painter().text(
+            remove_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(14.0),
+            if is_last_of_kind {
+                egui::Color32::from_gray(90)
+            } else {
+                text_color
+            },
+        );
+        if remove_resp.clicked() {
+            *pending = Some(PendingAction::RemoveTrack(track_index));
+        }
+    }
+
+    // Linea guida del separatore, alla stessa posizione di quella (ben più
+    // larga e quindi più facile da afferrare) disegnata nell'area
+    // scrollabile — condividono lo stesso stato (`TimelineState::
+    // track_top_margin`), quindi trascinare di là sposta anche questa.
+    if divider_height > 0.0 && video_count < row_order.len() {
+        let audio_first_track = row_order[video_count];
+        let divider_top = origin.y + row_y[audio_first_track] - divider_height;
+        ui.painter().hline(
+            egui::Rangef::new(origin.x, origin.x + TRACK_HEADER_WIDTH),
+            divider_top + divider_height / 2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+        );
+    }
+
 }
 
 /// Intervallo (in secondi) tra due tacche *maggiori* del righello, scelto
@@ -510,11 +554,19 @@ fn draw_ruler_ticks(
     }
 }
 
-/// Ritorna `Some((media, frame))` se in questo frame l'utente ha rilasciato
-/// sulla timeline un elemento trascinato dal media pool: il chiamante (che
-/// ha accesso al media pool e alla history) se ne occupa, questa funzione si
-/// limita a disegnare l'anteprima del punto di atterraggio e a calcolare il
-/// frame dalla posizione orizzontale del rilascio.
+/// Dove piazzare un media rilasciato dal media pool. `Default`: track di
+/// sempre (vedi `insert_media_clip`). `NewVideoTrack`/`NewAudioTrack`:
+/// rilasciato nella fascia vuota sopra al gruppo Video o sotto al gruppo
+/// Audio, crea al volo quella track e la usa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaDropTarget {
+    Default,
+    NewVideoTrack,
+    NewAudioTrack,
+}
+
+/// `Some((media, frame, target))` se in questo frame è stato rilasciato un
+/// elemento trascinato dal media pool; il chiamante se ne occupa.
 pub fn show_timeline(
     ui: &mut egui::Ui,
     project: &mut Project,
@@ -556,7 +608,7 @@ pub fn show_timeline(
     // sempre restare visibile, quindi la vista "volta pagina" per
     // seguirla quando esce dall'area visibile (vedi sotto).
     playback_active: bool,
-) -> Option<(vv_core::MediaId, FrameIdx)> {
+) -> Option<(vv_core::MediaId, FrameIdx, MediaDropTarget)> {
     let mut media_drop = None;
 
     // Zoom orizzontale (Ctrl+scroll o pinch — stesso gesto usato per lo
@@ -603,8 +655,53 @@ pub fn show_timeline(
     };
 
     let total_secs = (max_end_frames as f64 / fps + TRAILING_MARGIN_SECS).max(MIN_TIMELINE_SECS);
-    let content_width = (total_secs * state.pixels_per_sec as f64) as f32;
-    let content_height = RULER_HEIGHT + track_count as f32 * ROW_HEIGHT;
+    // A zoom basso il contenuto naturale è più stretto del pannello: forziamo
+    // almeno `viewport_width` così il righello arriva sempre al bordo.
+    let viewport_width = (panel_rect.width() - TRACK_HEADER_WIDTH).max(1.0);
+    let content_width =
+        ((total_secs * state.pixels_per_sec as f64) as f32).max(viewport_width);
+
+    let row_order = track_row_order(&track_kinds);
+    let mut row_of_track = vec![0usize; track_count];
+    for (row, &track_index) in row_order.iter().enumerate() {
+        row_of_track[track_index] = row;
+    }
+    let video_count = track_kinds.iter().filter(|k| **k == TrackKind::Video).count();
+    let audio_count = track_count - video_count;
+    let divider_height = if video_count > 0 && audio_count > 0 {
+        GROUP_DIVIDER_HEIGHT
+    } else {
+        0.0
+    };
+    let rows_height = track_count as f32 * ROW_HEIGHT + divider_height;
+
+    // Centrate di default: lo spazio verticale non occupato dalle track si
+    // divide a metà sopra/sotto, salvo che l'utente abbia trascinato il
+    // separatore (`track_top_margin`).
+    let avail_below_ruler = (panel_rect.height() - RULER_HEIGHT).max(0.0);
+    let slack = (avail_below_ruler - rows_height).max(0.0);
+    let default_top_margin = slack / 2.0;
+    let top_margin = state
+        .track_top_margin
+        .unwrap_or(default_top_margin)
+        .clamp(0.0, slack);
+    // Anche zona di drop "nuova track" sopra/sotto ai gruppi (vedi sotto);
+    // a zero, quella zona semplicemente sparisce.
+    let bottom_margin = slack - top_margin;
+    // Indipendente dall'altezza del pannello (mai in un `ui.allocate_*`,
+    // altrimenti `Panel::bottom` rincorre lo spazio richiesto all'infinito).
+    let content_height = RULER_HEIGHT + rows_height;
+    let visual_height = RULER_HEIGHT + avail_below_ruler.max(rows_height);
+
+    // `y` locale di ogni track (indicizzata da `track_index`), coerente con
+    // `clip_local_rect`.
+    let row_y: Vec<f32> = (0..track_count)
+        .map(|track_index| {
+            let row = row_of_track[track_index];
+            let extra = if row >= video_count { divider_height } else { 0.0 };
+            RULER_HEIGHT + top_margin + row as f32 * ROW_HEIGHT + extra
+        })
+        .collect();
 
     let mut pending: Option<PendingAction> = None;
 
@@ -677,7 +774,18 @@ pub fn show_timeline(
             }
         }
 
-        draw_track_headers(ui, &track_kinds, content_height, &mut pending, state.playhead, fps);
+        draw_track_headers(
+            ui,
+            &track_kinds,
+            &row_order,
+            &row_y,
+            video_count,
+            divider_height,
+            content_height,
+            &mut pending,
+            state.playhead,
+            fps,
+        );
 
         egui::ScrollArea::horizontal()
             .id_salt("timeline_scroll")
@@ -697,14 +805,20 @@ pub fn show_timeline(
                     egui::vec2(content_width, content_height),
                     egui::Sense::hover(),
                 );
-                let painter = ui.painter_at(rect);
                 let origin = rect.min;
+                // Non allocato: solo per non far ritagliare i margini di
+                // centratura dal clip del painter (vedi `visual_height`).
+                let visual_rect = egui::Rect::from_min_size(
+                    origin,
+                    egui::vec2(content_width, visual_height),
+                );
+                let painter = ui.painter_at(visual_rect);
                 let to_local = |pos: egui::Pos2| egui::pos2(pos.x - origin.x, pos.y - origin.y);
                 let press_over_a_clip = |pos: egui::Pos2| {
                     let local = to_local(pos);
                     visuals
                         .iter()
-                        .any(|v| clip_local_rect(v, px_per_frame).contains(local))
+                        .any(|v| clip_local_rect(v, px_per_frame, &row_y).contains(local))
                 };
 
                 // Ruler: click/drag per spostare il playhead.
@@ -766,28 +880,67 @@ pub fn show_timeline(
                 // controllo `press_over_a_clip` la rende no-op se il punto di
                 // partenza è comunque dentro una clip: doppia sicurezza contro
                 // un click che "ruba" l'interazione a una clip.
-                for track_index in 0..track_count {
-                    let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
+                for (row, &track_index) in row_order.iter().enumerate() {
+                    let y = origin.y + row_y[track_index];
                     let track_rect = egui::Rect::from_min_size(
                         egui::pos2(origin.x, y),
                         egui::vec2(content_width, ROW_HEIGHT),
                     );
-                    let bg = if track_index % 2 == 0 {
+                    let bg = if row % 2 == 0 {
                         egui::Color32::from_gray(32)
                     } else {
                         egui::Color32::from_gray(27)
                     };
                     painter.rect_filled(track_rect, 0.0, bg);
                 }
+                // Esclude i margini di centratura: lì non c'è nessuna track
+                // da (de)selezionare.
                 let track_area_rect = egui::Rect::from_min_size(
-                    egui::pos2(origin.x, origin.y + RULER_HEIGHT),
-                    egui::vec2(content_width, content_height - RULER_HEIGHT),
+                    egui::pos2(origin.x, origin.y + RULER_HEIGHT + top_margin),
+                    egui::vec2(content_width, rows_height),
                 );
                 let marquee_resp = ui.interact(
                     track_area_rect,
                     ui.id().with("timeline_marquee"),
                     egui::Sense::click_and_drag(),
                 );
+
+                // Separatore trascinabile Video/Audio. Interagito *dopo*
+                // `marquee_resp` per vincere l'hit-test su questa fascia
+                // sottile (stesso pattern delle clip sotto).
+                if divider_height > 0.0 {
+                    let divider_top = origin.y
+                        + RULER_HEIGHT
+                        + top_margin
+                        + video_count as f32 * ROW_HEIGHT;
+                    let divider_rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.x, divider_top),
+                        egui::vec2(content_width, divider_height),
+                    );
+                    let divider_resp = ui.interact(
+                        divider_rect,
+                        ui.id().with("timeline_track_split"),
+                        egui::Sense::drag(),
+                    );
+                    if divider_resp.hovered() || divider_resp.dragged() {
+                        ui.ctx()
+                            .output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
+                    }
+                    if divider_resp.dragged() {
+                        state.track_top_margin =
+                            Some((top_margin + divider_resp.drag_delta().y).clamp(0.0, slack));
+                    }
+                    let line_color = if divider_resp.hovered() || divider_resp.dragged() {
+                        egui::Color32::from_gray(160)
+                    } else {
+                        egui::Color32::from_gray(80)
+                    };
+                    painter.hline(
+                        divider_rect.x_range(),
+                        divider_rect.center().y,
+                        egui::Stroke::new(1.0, line_color),
+                    );
+                }
 
                 // Drag&drop dal media pool: `dnd_hover_payload`/`dnd_release_payload`
                 // guardano `contains_pointer` invece di `hovered` (che sarebbe
@@ -820,7 +973,7 @@ pub fn show_timeline(
                     let ghost_rect = egui::Rect::from_min_size(
                         egui::pos2(
                             origin.x + frame as f32 * px_per_frame,
-                            origin.y + RULER_HEIGHT,
+                            origin.y + row_y.first().copied().unwrap_or(RULER_HEIGHT),
                         ),
                         egui::vec2(
                             item.meta.duration_frames as f32 * px_per_frame,
@@ -858,7 +1011,120 @@ pub fn show_timeline(
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*media_id, frame));
+                    media_drop = Some((*media_id, frame, MediaDropTarget::Default));
+                }
+
+                // Zone "aggiungi una nuova track": margini sopra/sotto ai
+                // gruppi (altezza zero se non c'è margine, vedi sopra).
+                let above_video_rect = egui::Rect::from_min_size(
+                    egui::pos2(origin.x, origin.y + RULER_HEIGHT),
+                    egui::vec2(content_width, top_margin),
+                );
+                let above_video_resp = ui.interact(
+                    above_video_rect,
+                    ui.id().with("timeline_new_video_track_zone"),
+                    egui::Sense::hover(),
+                );
+                if above_video_resp
+                    .dnd_hover_payload::<vv_core::MediaId>()
+                    .is_some()
+                {
+                    painter.rect_filled(
+                        above_video_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60),
+                    );
+                    painter.rect_stroke(
+                        above_video_rect,
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+                        egui::StrokeKind::Inside,
+                    );
+                    painter.text(
+                        above_video_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "+ nuova track Video",
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_rgb(200, 255, 200),
+                    );
+                }
+                if let Some(media_id) = above_video_resp.dnd_release_payload::<vv_core::MediaId>()
+                    && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                {
+                    let raw_frame =
+                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    let len = project
+                        .media_pool
+                        .get(*media_id)
+                        .map(|item| item.meta.duration_frames)
+                        .unwrap_or(0);
+                    let frame = snap_frame(
+                        raw_frame,
+                        len,
+                        &visuals,
+                        &[],
+                        px_per_frame,
+                        snapping_enabled,
+                    )
+                    .max(0);
+                    media_drop = Some((*media_id, frame, MediaDropTarget::NewVideoTrack));
+                }
+
+                let below_audio_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        origin.x,
+                        origin.y + RULER_HEIGHT + top_margin + rows_height,
+                    ),
+                    egui::vec2(content_width, bottom_margin),
+                );
+                let below_audio_resp = ui.interact(
+                    below_audio_rect,
+                    ui.id().with("timeline_new_audio_track_zone"),
+                    egui::Sense::hover(),
+                );
+                if below_audio_resp
+                    .dnd_hover_payload::<vv_core::MediaId>()
+                    .is_some()
+                {
+                    painter.rect_filled(
+                        below_audio_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60),
+                    );
+                    painter.rect_stroke(
+                        below_audio_rect,
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+                        egui::StrokeKind::Inside,
+                    );
+                    painter.text(
+                        below_audio_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "+ nuova track Audio",
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_rgb(200, 255, 200),
+                    );
+                }
+                if let Some(media_id) = below_audio_resp.dnd_release_payload::<vv_core::MediaId>()
+                    && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                {
+                    let raw_frame =
+                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    let len = project
+                        .media_pool
+                        .get(*media_id)
+                        .map(|item| item.meta.duration_frames)
+                        .unwrap_or(0);
+                    let frame = snap_frame(
+                        raw_frame,
+                        len,
+                        &visuals,
+                        &[],
+                        px_per_frame,
+                        snapping_enabled,
+                    )
+                    .max(0);
+                    media_drop = Some((*media_id, frame, MediaDropTarget::NewAudioTrack));
                 }
 
                 if marquee_resp.drag_started() {
@@ -880,7 +1146,7 @@ pub fn show_timeline(
                 } else if marquee_resp.drag_stopped() {
                     if let Some(m) = state.marquee.take() {
                         let rect = egui::Rect::from_two_pos(m.start, m.current);
-                        let hits = clips_intersecting_rect(&visuals, px_per_frame, rect);
+                        let hits = clips_intersecting_rect(&visuals, px_per_frame, &row_y, rect);
                         state.selected = expand_to_linked_groups(&visuals, hits.iter().copied());
                         state.selection_anchor = hits.first().copied();
                         state.selected_gap = None;
@@ -888,6 +1154,7 @@ pub fn show_timeline(
                 } else if marquee_resp.clicked()
                     && let Some(pos) = marquee_resp.interact_pointer_pos()
                     && !press_over_a_clip(pos)
+                    && !row_order.is_empty()
                 {
                     // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
                     // da un'altra clip sulla stessa track, non lo spazio in
@@ -896,9 +1163,17 @@ pub fn show_timeline(
                     // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
                     let local = to_local(pos);
                     let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
-                    let track_index =
-                        ((local.y - RULER_HEIGHT) / ROW_HEIGHT).floor().max(0.0) as usize;
-                    let track_index = track_index.min(track_count.saturating_sub(1));
+                    // Inverso di `row_y`: `y` locale -> riga -> `track_index`.
+                    let y_in_rows = (local.y - RULER_HEIGHT - top_margin).max(0.0);
+                    let video_rows_height = video_count as f32 * ROW_HEIGHT;
+                    let row = if y_in_rows < video_rows_height {
+                        (y_in_rows / ROW_HEIGHT).floor() as usize
+                    } else {
+                        let after_divider = (y_in_rows - video_rows_height - divider_height).max(0.0);
+                        video_count + (after_divider / ROW_HEIGHT).floor() as usize
+                    };
+                    let row = row.min(track_count.saturating_sub(1));
+                    let track_index = row_order[row];
                     match gap_at(&visuals, track_index, frame) {
                         Some((gap_start, gap_end)) => {
                             state.selected.clear();
@@ -930,8 +1205,10 @@ pub fn show_timeline(
                 // selezionata (vedi `is_selected` più sotto), ma su un
                 // rettangolo vuoto — dà al vuoto un feedback visivo di essere
                 // "selezionato" come richiesto.
-                if let Some((track_index, gap_start, gap_end)) = state.selected_gap {
-                    let y = origin.y + RULER_HEIGHT + track_index as f32 * ROW_HEIGHT;
+                if let Some((track_index, gap_start, gap_end)) = state.selected_gap
+                    && let Some(&row_y_val) = row_y.get(track_index)
+                {
+                    let y = origin.y + row_y_val;
                     let gap_rect = egui::Rect::from_min_size(
                         egui::pos2(origin.x + gap_start as f32 * px_per_frame, y + 2.0),
                         egui::vec2(
@@ -1039,7 +1316,7 @@ pub fn show_timeline(
                     };
 
                     let x = origin.x + display_start as f32 * px_per_frame;
-                    let y = origin.y + RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
+                    let y = origin.y + row_y[visual.track_index];
                     let w = (display_len as f32 * px_per_frame).max(2.0);
                     let clip_rect = egui::Rect::from_min_size(
                         egui::pos2(x, y + 2.0),
@@ -1282,6 +1559,7 @@ pub fn show_timeline(
                             modifiers,
                             &visuals,
                             px_per_frame,
+                            &row_y,
                         );
                         state.selected = expand_to_linked_groups(&visuals, selected);
                         state.selection_anchor = anchor;
@@ -1324,7 +1602,7 @@ pub fn show_timeline(
                 painter.line_segment(
                     [
                         egui::pos2(px, origin.y),
-                        egui::pos2(px, origin.y + content_height),
+                        egui::pos2(px, origin.y + visual_height),
                     ],
                     egui::Stroke::new(2.0, playhead_color),
                 );
@@ -1381,9 +1659,6 @@ pub fn show_timeline(
                     Box::new(vv_core::LinkClips::new(timeline_id, targets)),
                 );
             }
-            PendingAction::AddTrack(kind) => {
-                history.do_command(project, Box::new(vv_core::AddTrack::new(timeline_id, kind)));
-            }
             PendingAction::RemoveTrack(track_index) => {
                 history.do_command(
                     project,
@@ -1427,10 +1702,11 @@ fn clip_label_and_color(
 /// coordinate locali al contenuto scrollabile (senza l'offset di
 /// `origin`): condiviso dal disegno vero e proprio e dai test di
 /// intersezione (marquee-select, shift+click), così i due usano
-/// esattamente la stessa geometria.
-fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32) -> egui::Rect {
+/// esattamente la stessa geometria. `row_y[visual.track_index]` dà la `y`
+/// locale della riga.
+fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32, row_y: &[f32]) -> egui::Rect {
     let x = visual.clip.timeline_start as f32 * px_per_frame;
-    let y = RULER_HEIGHT + visual.track_index as f32 * ROW_HEIGHT;
+    let y = row_y[visual.track_index];
     let w = (visual.clip.timeline_len() as f32 * px_per_frame).max(2.0);
     egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0))
 }
@@ -1529,11 +1805,12 @@ fn waveform_bin_for_column(
 fn clips_intersecting_rect(
     visuals: &[ClipVisual],
     px_per_frame: f32,
+    row_y: &[f32],
     rect: egui::Rect,
 ) -> Vec<ClipKey> {
     visuals
         .iter()
-        .filter(|v| clip_local_rect(v, px_per_frame).intersects(rect))
+        .filter(|v| clip_local_rect(v, px_per_frame, row_y).intersects(rect))
         .map(|v| (v.track_index, v.clip.id))
         .collect()
 }
@@ -1604,6 +1881,7 @@ fn apply_click_selection(
     modifiers: ClickModifiers,
     visuals: &[ClipVisual],
     px_per_frame: f32,
+    row_y: &[f32],
 ) -> (BTreeSet<ClipKey>, Option<ClipKey>) {
     match modifiers {
         ClickModifiers::Plain => (BTreeSet::from([clicked]), Some(clicked)),
@@ -1619,15 +1897,17 @@ fn apply_click_selection(
             let anchor_rect = visuals
                 .iter()
                 .find(|v| (v.track_index, v.clip.id) == effective_anchor)
-                .map(|v| clip_local_rect(v, px_per_frame));
+                .map(|v| clip_local_rect(v, px_per_frame, row_y));
             let clicked_rect = visuals
                 .iter()
                 .find(|v| (v.track_index, v.clip.id) == clicked)
-                .map(|v| clip_local_rect(v, px_per_frame));
+                .map(|v| clip_local_rect(v, px_per_frame, row_y));
             let set = match (anchor_rect, clicked_rect) {
-                (Some(a), Some(c)) => clips_intersecting_rect(visuals, px_per_frame, a.union(c))
-                    .into_iter()
-                    .collect(),
+                (Some(a), Some(c)) => {
+                    clips_intersecting_rect(visuals, px_per_frame, row_y, a.union(c))
+                        .into_iter()
+                        .collect()
+                }
                 _ => BTreeSet::from([clicked]),
             };
             (set, Some(effective_anchor))
@@ -2011,6 +2291,11 @@ mod tests {
         assert_eq!(format_timecode(5.4, 25.0), "00:00:05:10");
     }
 
+    /// `row_y` "identità" (nessun raggruppamento/margine) per i test.
+    fn test_row_y(n: usize) -> Vec<f32> {
+        (0..n).map(|i| RULER_HEIGHT + i as f32 * ROW_HEIGHT).collect()
+    }
+
     fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual {
         ClipVisual {
             track_index,
@@ -2146,6 +2431,7 @@ mod tests {
             ClickModifiers::Plain,
             &visuals,
             10.0,
+            &test_row_y(2),
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(2))]));
         assert_eq!(anchor, Some((0, ClipId(2))));
@@ -2162,6 +2448,7 @@ mod tests {
             ClickModifiers::Toggle,
             &visuals,
             10.0,
+            &test_row_y(2),
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(1)), (0, ClipId(2))]));
 
@@ -2173,6 +2460,7 @@ mod tests {
             ClickModifiers::Toggle,
             &visuals,
             10.0,
+            &test_row_y(2),
         );
         assert_eq!(selected2, BTreeSet::from([(0, ClipId(2))]));
     }
@@ -2194,6 +2482,7 @@ mod tests {
             ClickModifiers::Range,
             &visuals,
             1.0,
+            &test_row_y(1),
         );
         assert_eq!(
             selected,
@@ -2218,6 +2507,7 @@ mod tests {
             ClickModifiers::Range,
             &visuals,
             1.0,
+            &test_row_y(2),
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]));
     }
@@ -2233,6 +2523,7 @@ mod tests {
             ClickModifiers::Range,
             &visuals,
             1.0,
+            &test_row_y(1),
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(1))]));
         assert_eq!(anchor, Some((0, ClipId(1))));
@@ -2247,8 +2538,10 @@ mod tests {
         ];
         // Rettangolo che copre solo l'area della clip 1 e 3 (colonna
         // iniziale, entrambe le track), non la 2.
-        let rect = clip_local_rect(&visuals[0], 1.0).union(clip_local_rect(&visuals[2], 1.0));
-        let hits: BTreeSet<_> = clips_intersecting_rect(&visuals, 1.0, rect)
+        let row_y = test_row_y(2);
+        let rect =
+            clip_local_rect(&visuals[0], 1.0, &row_y).union(clip_local_rect(&visuals[2], 1.0, &row_y));
+        let hits: BTreeSet<_> = clips_intersecting_rect(&visuals, 1.0, &row_y, rect)
             .into_iter()
             .collect();
         assert_eq!(hits, BTreeSet::from([(0, ClipId(1)), (1, ClipId(3))]));
