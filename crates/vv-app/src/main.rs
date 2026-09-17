@@ -940,10 +940,9 @@ impl VibeVideoApp {
         let mut frame = self.timeline_audio().position_frame(fps);
         if frame >= end {
             frame = end;
-            let audio = self.timeline_audio();
-            audio.pause();
-            audio.seek_frame(end, fps);
+            self.timeline_audio().pause();
             self.reset_playback_speed_to_normal();
+            self.timeline_audio().seek_frame(end, fps);
         }
         self.timeline_state.playhead = frame;
         self.active_clip = self.active_video_clip_at(frame);
@@ -967,10 +966,15 @@ impl VibeVideoApp {
         self.request_playback_speed(1.0);
     }
 
+    /// 1x subito; le velocità accelerate quando il loro audio stretchato
+    /// è pronto (vedi `TimelineAudio::request_speed`).
     fn request_playback_speed(&mut self, speed: f64) {
-        self.playback_speed = speed;
-        if let Some(audio) = &mut self.timeline_audio {
-            audio.set_speed(speed);
+        match &mut self.timeline_audio {
+            Some(audio) => {
+                audio.request_speed(speed);
+                self.playback_speed = audio.speed();
+            }
+            None => self.playback_speed = speed,
         }
     }
 
@@ -2323,6 +2327,7 @@ impl eframe::App for VibeVideoApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(audio) = &mut self.timeline_audio {
             audio.tick();
+            self.playback_speed = audio.speed();
             if audio.is_scrub_snippet_active() {
                 ui.ctx().request_repaint();
             }
@@ -4089,23 +4094,33 @@ mod tests {
         assert_eq!(app.timeline_state.playhead, 30);
     }
 
+    /// Come fa `ui()` a ogni frame, finché lo stretch non porta a `speed`.
+    fn wait_for_playback_speed(app: &mut VibeVideoApp, speed: f64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.playback_speed != speed {
+            assert!(std::time::Instant::now() < deadline, "velocità {speed}x mai applicata");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let audio = app.timeline_audio();
+            audio.tick();
+            app.playback_speed = audio.speed();
+        }
+    }
+
     /// Tasto "a": da fermo parte a 1x, poi 2x -> 4x -> 8x e resta a 8x; la
     /// barra spaziatrice mette sempre in pausa e riporta a 1x.
     #[test]
     fn fast_playback_key_cycles_speed_and_space_always_resets_it() {
         let mut app = VibeVideoApp::default();
-        make_timeline_with_clip(&mut app, 0, 0, 500);
+        make_timeline_with_clip(&mut app, 0, 0, 5000);
 
         app.handle_fast_playback_key();
         assert!(app.is_timeline_playing());
         assert_eq!(app.playback_speed, 1.0);
 
-        app.handle_fast_playback_key();
-        assert_eq!(app.playback_speed, 2.0, "seconda pressione: 2x");
-        app.handle_fast_playback_key();
-        assert_eq!(app.playback_speed, 4.0, "terza pressione: 4x");
-        app.handle_fast_playback_key();
-        assert_eq!(app.playback_speed, 8.0, "quarta pressione: 8x");
+        for expected in [2.0, 4.0, 8.0] {
+            app.handle_fast_playback_key();
+            wait_for_playback_speed(&mut app, expected);
+        }
         app.handle_fast_playback_key();
         assert_eq!(app.playback_speed, 8.0, "oltre 8x resta a 8x");
 
@@ -4124,7 +4139,9 @@ mod tests {
         make_timeline_with_clip(&mut app, 0, 0, 5000);
         app.toggle_playback();
         app.request_playback_speed(4.0);
-        let before = clock_frame(&app);
+        wait_for_playback_speed(&mut app, 4.0);
+        app.drive_playback();
+        let before = app.timeline_state.playhead;
         std::thread::sleep(std::time::Duration::from_millis(400));
         app.drive_playback();
         // 400ms a 4x = 1.6s = 40 frame.
@@ -4201,6 +4218,15 @@ mod tests {
         app.sync_timeline_audio();
         assert_eq!(peak(&app, 10), 0.0, "la vecchia posizione ora è silenzio");
         assert!(peak(&app, 60) > 0.1, "la clip suona nella nuova posizione");
+
+        // Il fast forward stretcha il mix, non un media.
+        app.timeline_state.playhead = 50;
+        app.toggle_playback();
+        app.request_playback_speed(2.0);
+        wait_for_playback_speed(&mut app, 2.0);
+        let stretched = app.timeline_audio().stretched_peak().unwrap();
+        assert!(stretched > 0.1, "stretched={stretched}");
+        app.toggle_playback();
 
         app.project.timelines[timeline_id].tracks[audio_track].muted = true;
         app.history.do_command(

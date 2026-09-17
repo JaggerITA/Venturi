@@ -203,17 +203,71 @@ pub fn resample_and_remix(
     out
 }
 
-/// Stream cpal unico che suona `mix_range` sullo snapshot corrente. La
-/// posizione (frame audio di timeline) è il clock del playback.
+/// Audio già stretchato a `tempo` (fast forward): il frame `i` della
+/// concatenazione di `chunks` corrisponde al frame audio di timeline
+/// `origin + i * tempo`.
+#[derive(Clone)]
+pub struct StretchedWindow {
+    pub tempo: u64,
+    pub origin: u64,
+    pub chunks: Vec<Arc<Vec<f32>>>,
+}
+
+impl StretchedWindow {
+    pub fn frames(&self, channels: u16) -> u64 {
+        let ch = channels.max(1) as usize;
+        self.chunks.iter().map(|c| (c.len() / ch) as u64).sum()
+    }
+
+    /// Primo frame audio di timeline non coperto.
+    pub fn covered_until(&self, channels: u16) -> u64 {
+        self.origin + self.frames(channels) * self.tempo
+    }
+}
+
+/// Ciò che il callback suona: il mix, oppure a velocità > 1x la finestra
+/// stretchata.
+pub struct MixerState {
+    pub mix: Arc<MixSnapshot>,
+    pub stretched: Option<StretchedWindow>,
+}
+
+/// Scrive in `out` l'audio stretchato che corrisponde al frame audio di
+/// timeline `position`; silenzio fuori dalla finestra. Niente allocazioni.
+pub fn render_stretched(window: &StretchedWindow, channels: u16, position: u64, out: &mut [f32]) {
+    out.fill(0.0);
+    let ch = channels as usize;
+    if ch == 0 || window.tempo == 0 || position < window.origin {
+        return;
+    }
+    let mut skip = ((position - window.origin) / window.tempo) as usize * ch;
+    let mut written = 0;
+    for chunk in &window.chunks {
+        if skip >= chunk.len() {
+            skip -= chunk.len();
+            continue;
+        }
+        let take = (chunk.len() - skip).min(out.len() - written);
+        out[written..written + take].copy_from_slice(&chunk[skip..skip + take]);
+        written += take;
+        skip = 0;
+        if written == out.len() {
+            break;
+        }
+    }
+}
+
+/// Stream cpal unico che suona lo stato corrente. La posizione (frame
+/// audio di timeline) è il clock del playback.
 pub struct Mixer {
     _stream: cpal::Stream,
     playing: Arc<AtomicBool>,
     position: Arc<AtomicU64>,
-    pending: Arc<Mutex<Option<Arc<MixSnapshot>>>>,
-    /// Snapshot pubblicati ancora referenziati dal callback: tenerli qui
+    pending: Arc<Mutex<Option<Arc<MixerState>>>>,
+    /// Stati pubblicati ancora referenziati dal callback: tenerli qui
     /// garantisce che l'ultimo drop (con deallocazione) avvenga sul thread
     /// UI, mai in quello audio.
-    retained: Vec<Arc<MixSnapshot>>,
+    retained: Vec<Arc<MixerState>>,
     peak_left_bits: Arc<AtomicU32>,
     peak_right_bits: Arc<AtomicU32>,
     sample_rate: u32,
@@ -239,7 +293,10 @@ impl Mixer {
 
         let playing = Arc::new(AtomicBool::new(false));
         let position = Arc::new(AtomicU64::new(0));
-        let initial = Arc::new(MixSnapshot::empty(sample_rate, channels));
+        let initial = Arc::new(MixerState {
+            mix: Arc::new(MixSnapshot::empty(sample_rate, channels)),
+            stretched: None,
+        });
         let pending = Arc::new(Mutex::new(None));
         let peak_left_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let peak_right_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
@@ -261,13 +318,23 @@ impl Mixer {
                     {
                         current = next;
                     }
-                    if cb_playing.load(Ordering::Relaxed) && current.channels as usize == ch {
+                    if cb_playing.load(Ordering::Relaxed) && current.mix.channels as usize == ch {
                         let pos = cb_position.load(Ordering::Relaxed);
-                        mix_range(&current, pos, data);
+                        let frames = (data.len() / ch) as u64;
+                        let advance = match &current.stretched {
+                            Some(window) => {
+                                render_stretched(window, channels, pos, data);
+                                frames * window.tempo
+                            }
+                            None => {
+                                mix_range(&current.mix, pos, data);
+                                frames
+                            }
+                        };
                         // Un seek arrivato durante il mix vince sull'avanzamento.
                         let _ = cb_position.compare_exchange(
                             pos,
-                            pos + (data.len() / ch) as u64,
+                            pos + advance,
                             Ordering::Relaxed,
                             Ordering::Relaxed,
                         );
@@ -305,10 +372,10 @@ impl Mixer {
         self.channels
     }
 
-    pub fn set_snapshot(&mut self, snapshot: Arc<MixSnapshot>) {
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot.clone());
+    pub fn set_state(&mut self, state: Arc<MixerState>) {
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(state.clone());
         self.retained.retain(|s| Arc::strong_count(s) > 1);
-        self.retained.push(snapshot);
+        self.retained.push(state);
     }
 
     pub fn play(&self) {
@@ -605,10 +672,49 @@ mod tests {
         mixer.seek(12_345);
         assert_eq!(mixer.position(), 12_345, "in pausa la posizione non avanza");
         for _ in 0..50 {
-            let snap = MixSnapshot::empty(mixer.sample_rate(), mixer.channels());
-            mixer.set_snapshot(Arc::new(snap));
+            let mix = Arc::new(MixSnapshot::empty(mixer.sample_rate(), mixer.channels()));
+            mixer.set_state(Arc::new(MixerState {
+                mix,
+                stretched: None,
+            }));
         }
         assert!(mixer.retained.len() <= 3, "retained={}", mixer.retained.len());
+    }
+
+    fn window(tempo: u64, origin: u64, chunks: &[&[f32]]) -> StretchedWindow {
+        StretchedWindow {
+            tempo,
+            origin,
+            chunks: chunks.iter().map(|c| Arc::new(c.to_vec())).collect(),
+        }
+    }
+
+    #[test]
+    fn stretched_window_maps_timeline_position_to_stretched_frames() {
+        let w = window(4, 100, &[&[1.0, 2.0, 3.0], &[4.0, 5.0]]);
+        assert_eq!(w.covered_until(1), 120);
+
+        let mut out = [9.0; 3];
+        render_stretched(&w, 1, 100, &mut out);
+        assert_eq!(out, [1.0, 2.0, 3.0]);
+
+        // Posizione 110 = frame stretchato 2, attraverso il confine dei chunk.
+        render_stretched(&w, 1, 110, &mut out);
+        assert_eq!(out, [3.0, 4.0, 5.0]);
+
+        render_stretched(&w, 1, 116, &mut out);
+        assert_eq!(out, [5.0, 0.0, 0.0], "oltre la fine: silenzio");
+        render_stretched(&w, 1, 50, &mut out);
+        assert_eq!(out, [0.0; 3], "prima dell'origine: silenzio");
+    }
+
+    #[test]
+    fn stretched_window_keeps_stereo_frames_aligned() {
+        let w = window(2, 0, &[&[0.1, 0.2, 0.3, 0.4], &[0.5, 0.6]]);
+        assert_eq!(w.covered_until(2), 6);
+        let mut out = [0.0; 4];
+        render_stretched(&w, 2, 2, &mut out);
+        assert_eq!(out, [0.3, 0.4, 0.5, 0.6]);
     }
 
     #[test]

@@ -4,9 +4,9 @@
 //!
 //! Elabora un buffer per volta in un colpo solo (non è un filtro
 //! streaming a bassa latenza per campione, ma nemmeno pensato per
-//! l'intera traccia): il chiamante (`vv-app::main::VibeVideoApp`, vedi
-//! `SPEED_WINDOW_SECS`) gli passa una *finestra* di qualche secondo di
-//! audio pre-decodificato alla volta invece dell'intera traccia — su una
+//! l'intera traccia): il chiamante (`vv-app::timeline_audio`, vedi
+//! `WINDOW_FRAMES`) gli passa una *finestra* di qualche secondo di
+//! mix alla volta invece dell'intera traccia — su una
 //! clip lunga, stretchare tutti i minuti in un colpo solo prima di poter
 //! sentire qualunque cosa introduce un ritardo percepibile (anche
 //! diversi secondi) alla pressione del tasto velocità; una finestra
@@ -212,7 +212,7 @@ mod bench_window {
     use std::time::{Duration, Instant};
 
     /// Non una garanzia hard-realtime, ma una soglia larga: stretchare la
-    /// finestra scelta da `vv-app` (`SPEED_WINDOW_SECS`, 8s) deve restare
+    /// finestra scelta da `vv-app` (`WINDOW_FRAMES` in `timeline_audio`, 8s) deve restare
     /// ben sotto il margine reale disponibile prima che l'estensione in
     /// background (triggerata quando restano `EXTEND_TRIGGER_MARGIN_SECS`,
     /// 4s, di finestra non ancora suonata) serva davvero — quel margine
