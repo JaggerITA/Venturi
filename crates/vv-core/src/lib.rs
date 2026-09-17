@@ -36,6 +36,7 @@ mod tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         }
     }
 
@@ -297,6 +298,94 @@ mod tests {
         let tl = &project.timelines[timeline];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[0].clips[0].source_out, 20);
+    }
+
+    /// Clip a 59,94 fps su timeline a 60: le due metà devono restare
+    /// attaccate e coprire esattamente l'intervallo di prima, anche se il
+    /// taglio si arrotonda al bordo del frame sorgente più vicino.
+    #[test]
+    fn split_clip_on_a_conformed_clip_covers_the_original_exactly() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut a = make_clip(&mut project, 100, 6000);
+        a.rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        let a_id = a.id;
+        let (original_start, original_end) = (a.timeline_start, a.timeline_end());
+        let original_source = (a.source_in, a.source_out);
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        let split_at = original_start + 2500;
+        history.do_command(
+            &mut project,
+            Box::new(command::SplitClip::new(timeline, 0, a_id, split_at)),
+        );
+
+        let clips = &project.timelines[timeline].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        let (first, second) = (&clips[0], &clips[1]);
+        assert_eq!(first.timeline_start, original_start);
+        assert_eq!(
+            second.timeline_start,
+            first.timeline_end(),
+            "né buchi né sovrapposizioni tra le due metà"
+        );
+        assert_eq!(second.timeline_end(), original_end, "stessa copertura");
+        assert_eq!((first.source_in, second.source_out), original_source);
+        assert_eq!(first.source_out, second.source_in);
+        assert!(
+            (second.timeline_start - split_at).abs() <= 1,
+            "taglio entro un frame da quello richiesto"
+        );
+
+        history.undo(&mut project);
+        let clips = &project.timelines[timeline].tracks[0].clips;
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].timeline_start, original_start);
+        assert_eq!(clips[0].timeline_end(), original_end);
+    }
+
+    /// Trim del bordo sinistro di una clip conformata: la fine sulla
+    /// timeline non si muove, e `timeline_start` segue la *durata* nuova
+    /// (non il delta in frame sorgente, un'altra unità di misura).
+    #[test]
+    fn trim_start_on_a_conformed_clip_keeps_the_timeline_end_fixed() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut a = make_clip(&mut project, 1000, 6000);
+        a.rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        let a_id = a.id;
+        let original_end = a.timeline_end();
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::Start, 3000)),
+        );
+
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.source_in, 3000);
+        assert_eq!(clip.timeline_end(), original_end);
+        assert_eq!(clip.timeline_len(), 3003, "3000 frame a 59,94 su 60 fps");
+
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!((clip.source_in, clip.timeline_start), (0, 1000));
     }
 
     #[test]

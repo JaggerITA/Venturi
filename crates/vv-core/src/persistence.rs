@@ -28,7 +28,12 @@ pub fn save_project(project: &Project, path: &Path) -> Result<(), PersistenceErr
 
 pub fn load_project(path: &Path) -> Result<Project, PersistenceError> {
     let contents = std::fs::read_to_string(path)?;
-    Ok(ron::from_str(&contents)?)
+    let mut project: Project = ron::from_str(&contents)?;
+    // `Clip::rate` è derivato dagli fps: ricalcolarlo qui sistema i
+    // progetti salvati prima che il campo esistesse (clip a fps diverso
+    // da quello della timeline, fuori sync).
+    project.refresh_clip_rates();
+    Ok(project)
 }
 
 #[cfg(test)]
@@ -71,6 +76,7 @@ mod tests {
             effects,
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         });
 
         let dir = std::env::temp_dir().join("vv-core-persistence-test");

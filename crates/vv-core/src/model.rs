@@ -37,9 +37,70 @@ impl Rational {
         Self { num, den }
     }
 
+    pub const fn one() -> Self {
+        Self { num: 1, den: 1 }
+    }
+
     pub fn as_f64(self) -> f64 {
         self.num as f64 / self.den as f64
     }
+
+    pub fn is_one(self) -> bool {
+        self.den != 0 && self.num == self.den
+    }
+
+    /// Frame di timeline per frame sorgente di un media a `media_fps` su
+    /// una timeline a `timeline_fps`, ridotto ai minimi termini (vedi
+    /// `Clip::rate`).
+    pub fn conform_rate(timeline_fps: Rational, media_fps: Rational) -> Self {
+        let mut num = timeline_fps.num as i64 * media_fps.den as i64;
+        let mut den = timeline_fps.den as i64 * media_fps.num as i64;
+        if num <= 0 || den <= 0 {
+            return Self::one();
+        }
+        let g = gcd(num, den);
+        num /= g;
+        den /= g;
+        // Un rapporto irriducibile che non entra in i32 (fps esotici su
+        // entrambi i lati) viene approssimato: meglio un milionesimo di
+        // errore che un overflow.
+        if num > i32::MAX as i64 || den > i32::MAX as i64 {
+            let approx = (num as f64 / den as f64 * 1_000_000.0).round() as i64;
+            return Self::new(approx.clamp(1, i32::MAX as i64) as i32, 1_000_000);
+        }
+        Self::new(num as i32, den as i32)
+    }
+
+    /// `round(frames * self)`, mezzi verso l'alto. Identità esatta per
+    /// `1/1`, così una clip non conformata resta bit-per-bit come prima.
+    pub fn scale_round(self, frames: FrameIdx) -> FrameIdx {
+        if self.is_one() || self.num <= 0 || self.den <= 0 {
+            return frames;
+        }
+        let (num, den) = (self.num as i128, self.den as i128);
+        let v = frames as i128;
+        ((2 * v * num + den).div_euclid(2 * den)) as FrameIdx
+    }
+
+    /// Il più grande `n` tale che `scale_round(n) <= scaled`: l'inverso di
+    /// `scale_round`, cioè "quale frame sorgente copre questa posizione".
+    pub fn unscale_round(self, scaled: FrameIdx) -> FrameIdx {
+        if self.is_one() || self.num <= 0 || self.den <= 0 {
+            return scaled;
+        }
+        let (num, den) = (self.num as i128, self.den as i128);
+        let a = (2 * scaled as i128 + 1) * den;
+        let b = 2 * num;
+        (-((-a).div_euclid(b)) - 1) as FrameIdx // ceil(a/b) - 1
+    }
+}
+
+fn gcd(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a.max(1)
 }
 
 /// Indice di frame, sempre relativo al contesto in cui è usato: frame
@@ -300,11 +361,36 @@ pub struct Clip {
     /// clip, stesso comportamento di oggi).
     #[serde(default)]
     pub audio_stream_index: usize,
+    /// Frame di timeline per frame sorgente: `fps timeline / fps media`
+    /// (`Rational::conform_rate`). `1/1` per SolidColor e per un media
+    /// allo stesso fps della timeline. Un rapporto invece di una durata
+    /// memorizzata perché `source_in`/`source_out` devono restare l'unica
+    /// fonte di verità: un trim non può far divergere i due valori.
+    /// Default `1/1` per i progetti salvati prima di questo campo, che
+    /// `Project::refresh_clip_rates` ricalcola al caricamento.
+    #[serde(default = "Rational::one")]
+    pub rate: Rational,
 }
 
 impl Clip {
-    pub fn timeline_len(&self) -> FrameIdx {
+    /// Posizione di timeline di `source_frame` *relativa all'origine dei
+    /// frame sorgente* (non a questa clip). Ancorare la scala al frame
+    /// sorgente assoluto, invece che all'offset dentro la clip, rende la
+    /// mappatura additiva: dividere una clip in due dà esattamente la
+    /// stessa copertura di timeline dell'originale, senza buchi né
+    /// sovrapposizioni (vedi `SplitClip`).
+    fn scaled(&self, source_frame: FrameIdx) -> FrameIdx {
+        self.rate.scale_round(source_frame)
+    }
+
+    /// Durata in frame *sorgente*, per i conti che vivono in quello
+    /// spazio (quanti frame del media serve decodificare).
+    pub fn source_len(&self) -> FrameIdx {
         self.source_out - self.source_in
+    }
+
+    pub fn timeline_len(&self) -> FrameIdx {
+        self.scaled(self.source_out) - self.scaled(self.source_in)
     }
 
     pub fn timeline_end(&self) -> FrameIdx {
@@ -324,8 +410,28 @@ impl Clip {
     /// applicato qui) sarebbero divergenti senza un posto unico da
     /// cambiare. Quel cambio va qui, non ai due chiamanti.
     pub fn source_frame_at(&self, timeline_frame: FrameIdx) -> FrameIdx {
-        self.source_in + (timeline_frame - self.timeline_start)
+        source_frame_of(self.rate, self.timeline_start, self.source_in, timeline_frame)
     }
+
+    /// Inverso di `source_frame_at`: dove cade `source_frame` sulla
+    /// timeline. Accetta anche frame fuori dal trim della clip (serve ai
+    /// limiti di trim: dove cadrebbe il frame 0, o l'ultimo frame reale
+    /// del media, se la clip fosse allungata fin lì).
+    pub fn timeline_frame_at(&self, source_frame: FrameIdx) -> FrameIdx {
+        self.timeline_start + self.scaled(source_frame) - self.scaled(self.source_in)
+    }
+}
+
+/// `Clip::source_frame_at` per un chiamante che ha i campi della clip
+/// sciolti invece della clip stessa (`vv-app::resolve_overlap` lavora su
+/// uno stato letto prima di accodare comandi).
+pub fn source_frame_of(
+    rate: Rational,
+    timeline_start: FrameIdx,
+    source_in: FrameIdx,
+    timeline_frame: FrameIdx,
+) -> FrameIdx {
+    rate.unscale_round(timeline_frame - timeline_start + rate.scale_round(source_in))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -502,6 +608,26 @@ impl Project {
         self.next_link_group_id += 1;
         id
     }
+
+    /// Ricalcola `Clip::rate` di ogni clip Media dall'fps del suo media e
+    /// da quello della timeline che la contiene. Chiamata al caricamento
+    /// (`load_project`): un progetto salvato prima che il campo esistesse
+    /// arriva con `rate` a `1/1` e si conforma da sé. Idempotente — il
+    /// rapporto è comunque derivato, non un dato indipendente.
+    pub fn refresh_clip_rates(&mut self) {
+        let media_pool = &self.media_pool;
+        for timeline in self.timelines.values_mut() {
+            let timeline_fps = timeline.fps;
+            for clip in timeline.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+                let ClipSource::Media(media_id) = &clip.source else {
+                    continue;
+                };
+                if let Some(item) = media_pool.get(*media_id) {
+                    clip.rate = Rational::conform_rate(timeline_fps, item.meta.fps);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +772,7 @@ mod timeline_tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         }
     }
 
@@ -837,6 +964,7 @@ mod timeline_tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         };
         assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");
         assert_eq!(clip.source_frame_at(75), 215);
@@ -877,6 +1005,148 @@ mod timeline_tests {
             ],
         };
         assert_eq!(tl.total_frames(), 25);
+    }
+
+    fn media_clip_at(
+        rate: Rational,
+        source_in: FrameIdx,
+        source_out: FrameIdx,
+        timeline_start: FrameIdx,
+    ) -> Clip {
+        Clip {
+            id: ClipId(1),
+            source: ClipSource::SolidColor,
+            source_in,
+            source_out,
+            timeline_start,
+            effects: EffectStack::default(),
+            linked_group: None,
+            audio_stream_index: 0,
+            rate,
+        }
+    }
+
+    /// 59,94 fps su una timeline a 60: la clip dura in timeline quanto
+    /// dura davvero (0,1% in più di frame), non 1:1 come i frame sorgente.
+    #[test]
+    fn a_clip_slower_than_the_timeline_lasts_longer_in_timeline_frames() {
+        let rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        assert_eq!(rate, Rational::new(1001, 1000));
+
+        // 15 minuti di sorgente a 59,94 fps.
+        let source_len = 53_946;
+        let clip = media_clip_at(rate, 0, source_len, 0);
+        assert_eq!(clip.source_len(), source_len);
+        assert_eq!(clip.timeline_len(), 54_000, "15 minuti esatti a 60 fps");
+    }
+
+    #[test]
+    fn source_frame_at_maps_the_edges_and_never_drifts_over_fifteen_minutes() {
+        let rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        let clip = media_clip_at(rate, 0, 53_946, 120);
+
+        assert_eq!(clip.source_frame_at(120), 0, "primo frame della clip");
+        assert_eq!(
+            clip.source_frame_at(clip.timeline_end() - 1),
+            53_945,
+            "ultimo frame sorgente sull'ultimo frame di timeline"
+        );
+
+        // Nessuna deriva accumulata: a ogni istante il frame sorgente
+        // mostrato resta quello che compete al tempo reale trascorso
+        // (tolleranza di mezzo frame, l'arrotondamento inevitabile).
+        for t in (0..clip.timeline_len()).step_by(137) {
+            let secs = t as f64 / 60.0;
+            let expected = secs * (60000.0 / 1001.0);
+            let got = clip.source_frame_at(120 + t) as f64;
+            assert!(
+                (got - expected).abs() <= 0.5,
+                "a {secs}s: atteso ~{expected}, ottenuto {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_frame_at_maps_a_faster_media_by_skipping_frames() {
+        // 50 fps su timeline a 25: due frame sorgente per frame timeline.
+        let rate = Rational::conform_rate(Rational::new(25, 1), Rational::new(50, 1));
+        assert_eq!(rate, Rational::new(1, 2));
+        let clip = media_clip_at(rate, 0, 100, 0);
+        assert_eq!(clip.timeline_len(), 50);
+        assert_eq!(clip.source_frame_at(0), 0);
+        assert_eq!(clip.source_frame_at(1), 2);
+        assert_eq!(clip.source_frame_at(49), 98);
+    }
+
+    #[test]
+    fn source_frame_at_maps_a_slower_media_by_repeating_frames() {
+        // 25 fps su timeline a 30: 6 frame di timeline ogni 5 sorgente.
+        let rate = Rational::conform_rate(Rational::new(30, 1), Rational::new(25, 1));
+        assert_eq!(rate, Rational::new(6, 5));
+        let clip = media_clip_at(rate, 0, 25, 0);
+        assert_eq!(clip.timeline_len(), 30, "1s a 25 fps dura 1s a 30 fps");
+        let sources: Vec<FrameIdx> = (0..6).map(|t| clip.source_frame_at(t)).collect();
+        assert_eq!(sources, vec![0, 1, 2, 2, 3, 4], "un frame ripetuto su sei");
+    }
+
+    #[test]
+    fn rate_one_behaves_exactly_like_before() {
+        let clip = media_clip_at(Rational::one(), 200, 300, 60);
+        assert_eq!(clip.timeline_len(), 100);
+        assert_eq!(clip.source_frame_at(60), 200);
+        assert_eq!(clip.source_frame_at(75), 215);
+        assert_eq!(clip.timeline_frame_at(215), 75);
+    }
+
+    #[test]
+    fn timeline_frame_at_is_the_inverse_of_source_frame_at() {
+        let rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        let clip = media_clip_at(rate, 1_000, 5_000, 300);
+        for s in (clip.source_in..clip.source_out).step_by(7) {
+            assert_eq!(clip.source_frame_at(clip.timeline_frame_at(s)), s);
+        }
+        assert_eq!(clip.timeline_frame_at(clip.source_in), clip.timeline_start);
+        assert_eq!(clip.timeline_frame_at(clip.source_out), clip.timeline_end());
+    }
+
+    #[test]
+    fn refresh_clip_rates_conforms_a_clip_loaded_without_a_rate() {
+        let mut project = Project::default();
+        let media_id = project.media_pool.insert(MediaItem {
+            path: "/tmp/x.mp4".into(),
+            meta: MediaMeta {
+                duration_frames: 1000,
+                fps: Rational::new(60000, 1001),
+                width: 1920,
+                height: 1080,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        let mut clip = media_clip_at(Rational::one(), 0, 1000, 0);
+        clip.source = ClipSource::Media(media_id);
+        let timeline_id = project.timelines.insert(Timeline {
+            name: "T".into(),
+            fps: Rational::new(60, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                clips: vec![clip, media_clip_at(Rational::one(), 0, 10, 2000)],
+                muted: false,
+            }],
+        });
+
+        project.refresh_clip_rates();
+
+        let clips = &project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips[0].rate, Rational::new(1001, 1000));
+        assert_eq!(
+            clips[1].rate,
+            Rational::one(),
+            "una SolidColor non si conforma a nulla"
+        );
     }
 
     #[test]

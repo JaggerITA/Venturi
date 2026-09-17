@@ -95,6 +95,9 @@ pub struct ClipboardEntry {
     pub source: ClipSource,
     pub source_in: FrameIdx,
     pub source_out: FrameIdx,
+    /// Vedi `Clip::rate`: serve a sapere quanto occuperà in timeline la
+    /// clip incollata (`timeline_len`).
+    pub rate: vv_core::Rational,
     pub effects: EffectStack,
     /// Tag locale all'operazione di copia (non un vero `LinkGroupId`, che
     /// va riallocato al paste): entry con lo stesso tag `Some(_)` erano nel
@@ -104,6 +107,13 @@ pub struct ClipboardEntry {
     pub link_tag: Option<u64>,
     /// Vedi `Clip::audio_stream_index`.
     pub audio_stream_index: usize,
+}
+
+impl ClipboardEntry {
+    /// Durata che occuperà in timeline una volta incollata.
+    pub fn timeline_len(&self) -> FrameIdx {
+        self.rate.scale_round(self.source_out) - self.rate.scale_round(self.source_in)
+    }
 }
 
 struct MarqueeDrag {
@@ -734,9 +744,34 @@ impl MediaDrag {
         }
     }
 
-    pub fn len(&self) -> FrameIdx {
+    /// Durata in frame *sorgente* (fps del media): i marker in/out
+    /// dell'anteprima vivono in quello spazio.
+    pub fn source_len(&self) -> FrameIdx {
         self.source_out - self.source_in
     }
+
+    /// Quanto occuperà sulla timeline, conformato a `rate` (vedi
+    /// `Clip::rate`): quel che conta per il ghost del drop e per la
+    /// calamita, che lavorano in frame di timeline.
+    pub fn timeline_len(&self, rate: vv_core::Rational) -> FrameIdx {
+        rate.scale_round(self.source_out) - rate.scale_round(self.source_in)
+    }
+}
+
+/// Quanto occupa sulla timeline il media trascinato: la sua durata in
+/// frame sorgente conformata all'fps della timeline (vedi `Clip::rate`).
+/// `1/1` se il media non è (più) nel pool.
+fn drag_timeline_len(
+    project: &Project,
+    timeline_fps: vv_core::Rational,
+    drag: &MediaDrag,
+) -> FrameIdx {
+    let rate = project
+        .media_pool
+        .get(drag.media_id)
+        .map(|item| vv_core::Rational::conform_rate(timeline_fps, item.meta.fps))
+        .unwrap_or_else(vv_core::Rational::one);
+    drag.timeline_len(rate)
 }
 
 /// Dove piazzare un media rilasciato dal media pool. `Default`: track di
@@ -813,7 +848,8 @@ pub fn show_timeline(
         }
     }
 
-    let fps = project.timelines[timeline_id].fps.as_f64();
+    let timeline_fps = project.timelines[timeline_id].fps;
+    let fps = timeline_fps.as_f64();
     let px_per_frame = state.pixels_per_sec / fps.max(1.0) as f32;
 
     // --- pass 1: raccogli i dati da disegnare (borrow immutabile) ---
@@ -1197,7 +1233,7 @@ pub fn show_timeline(
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag.len(),
+                        drag_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
@@ -1215,7 +1251,7 @@ pub fn show_timeline(
                             origin.y + row_y.first().copied().unwrap_or(RULER_HEIGHT),
                         ),
                         egui::vec2(
-                            drag.len() as f32 * px_per_frame,
+                            drag_timeline_len(project, timeline_fps, &drag) as f32 * px_per_frame,
                             ghost_height,
                         ),
                     );
@@ -1239,7 +1275,7 @@ pub fn show_timeline(
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag.len(),
+                        drag_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
@@ -1290,7 +1326,7 @@ pub fn show_timeline(
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag.len(),
+                        drag_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
@@ -1342,7 +1378,7 @@ pub fn show_timeline(
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        drag.len(),
+                        drag_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
                         px_per_frame,
@@ -1820,11 +1856,11 @@ pub fn show_timeline(
                             // nell'anteprima durante il trim: quel che si
                             // vedeva è quel che si ottiene.
                             let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
-                            let delta = new_value - t.original_value;
-                            let new_source_value = match t.edge {
-                                TrimEdge::Start => visual.clip.source_in + delta,
-                                TrimEdge::End => visual.clip.source_out + delta,
-                            };
+                            // `new_value` è un frame di *timeline* (il
+                            // bordo trascinato), `TrimClip` vuole un frame
+                            // *sorgente*: la conversione passa dal `rate`
+                            // della clip, non da una differenza diretta.
+                            let new_source_value = visual.clip.source_frame_at(new_value);
                             let mut trims =
                                 vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
                             for &(partner_id, partner_track) in &t.linked_others {
@@ -1833,10 +1869,8 @@ pub fn show_timeline(
                                 else {
                                     continue;
                                 };
-                                let partner_new_source_value = match t.edge {
-                                    TrimEdge::Start => partner.clip.source_in + delta,
-                                    TrimEdge::End => partner.clip.source_out + delta,
-                                };
+                                let partner_new_source_value =
+                                    partner.clip.source_frame_at(new_value);
                                 trims.push((
                                     partner_id,
                                     partner_track,
@@ -2564,7 +2598,7 @@ fn single_trim_range(
             // fine meno 1 frame (deve restare almeno un frame di
             // contenuto), e non prima dell'inizio del sorgente
             // (source_in non può scendere sotto 0).
-            let min_value = lower.max(clip.timeline_start - clip.source_in);
+            let min_value = lower.max(clip.timeline_frame_at(0));
             let max_value = clip.timeline_end() - 1;
             (min_value, max_value.max(min_value))
         }
@@ -2575,7 +2609,7 @@ fn single_trim_range(
             // solo se c'è davvero un bound, per non sommare a
             // `FrameIdx::MAX` e andare in overflow).
             let media_bound = media_duration_frames(project, clip)
-                .map(|max_source_out| clip.timeline_start + (max_source_out - clip.source_in));
+                .map(|max_source_out| clip.timeline_frame_at(max_source_out));
             let max_value = match media_bound {
                 Some(bound) => upper.min(bound),
                 None => upper,
@@ -2761,6 +2795,7 @@ mod tests {
                 effects: vv_core::EffectStack::default(),
                 linked_group: None,
                 audio_stream_index: 0,
+                rate: vv_core::Rational::one(),
             },
             label: String::new(),
             color: egui::Color32::WHITE,
@@ -3326,6 +3361,7 @@ mod tests {
                 effects: EffectStack::default(),
                 linked_group: None,
                 audio_stream_index: 0,
+                rate: vv_core::Rational::one(),
             },
             label: String::new(),
             color: egui::Color32::WHITE,
@@ -3408,6 +3444,32 @@ mod tests {
         let (_, max_value) =
             single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
         assert_eq!(max_value, 25);
+    }
+
+    /// Clip conformata (media a 29,97 su timeline a 30): i limiti di trim
+    /// sono in frame di *timeline*, quindi la durata del sorgente va
+    /// convertita col `rate` — 1000 frame sorgente sono 1001 di timeline.
+    /// Con la conversione 1:1 di prima uscirebbero 1000 e 5000.
+    #[test]
+    fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
+        let (project, media_id) = project_with_media(4000);
+        let mut visuals = vec![media_clip_visual(0, 1, 3000, 2000, 2400, media_id)];
+        visuals[0].clip.rate =
+            vv_core::Rational::conform_rate(vv_core::Rational::new(30, 1), vv_core::Rational::new(30_000, 1001));
+
+        let (min_value, _) =
+            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::Start);
+        assert_eq!(
+            min_value, 998,
+            "2000 frame sorgente prima = 2002 di timeline prima di 3000"
+        );
+
+        let (_, max_value) =
+            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+        assert_eq!(
+            max_value, 5002,
+            "2000 frame sorgente residui = 2002 frame di timeline dopo 3000"
+        );
     }
 
     #[test]
@@ -3512,6 +3574,7 @@ mod tests {
                 effects: vv_core::EffectStack::default(),
                 linked_group: None,
                 audio_stream_index: 0,
+                rate: vv_core::Rational::one(),
             };
             history.do_command(
                 &mut project,
@@ -3626,6 +3689,7 @@ mod tests {
             effects: vv_core::EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: vv_core::Rational::one(),
         };
         history.do_command(
             &mut project,
@@ -3747,6 +3811,7 @@ mod tests {
             effects: vv_core::EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: vv_core::Rational::one(),
         };
         history.do_command(
             &mut project,

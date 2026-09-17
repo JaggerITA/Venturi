@@ -72,6 +72,7 @@ struct Clip {
     effects: EffectStack,
     linked_group: Option<LinkGroupId>, // video + audio dello stesso import
     audio_stream_index: usize,         // quale stream audio del media
+    rate: Rational,                    // frame di Timeline per frame sorgente
 }
 
 struct EffectStack {
@@ -91,6 +92,17 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 - Le trasformazioni si valutano a runtime (`Keyframed::value_at`, CPU) e
   vanno allo shader come uniform: **mai bake-ate nei frame in cache**, così
   editare un parametro non invalida il buffer.
+- Una clip il cui media ha un fps diverso da quello della Timeline viene
+  **conformata**: `Clip::rate` (= fps Timeline / fps media, calcolato
+  all'inserimento e ricalcolato al caricamento di un progetto) è l'unico
+  posto dove i due spazi frame si incontrano. `timeline_len()` e
+  `source_frame_at()`/`timeline_frame_at()` lo applicano, quindi una clip
+  dura in Timeline il suo tempo reale e il video ripete o salta un frame
+  quando serve (a 59,94 su 60: uno duplicato ogni ~17 s) invece di andare
+  fuori sync con l'audio, che suona sempre a velocità reale. `source_in`/
+  `source_out` restano l'unica fonte di verità sulla durata: il rapporto
+  è ancorato al frame sorgente *assoluto*, così dividere una clip in due
+  dà esattamente la copertura di prima.
 
 ## Pipeline di decode + cache
 
@@ -230,6 +242,8 @@ Fatto:
   audiometer.
 - Effetti: crop/zoom/posizione, gain, colore SolidColor; statici o a
   keyframe (Hold/Linear/EaseInOut) dal pannello proprietà.
+- Clip con fps diverso da quello della timeline conformate
+  all'inserimento (`Clip::rate`), in anteprima e in export.
 - Proxy e waveform in background.
 - Export H.264 + AAC in MP4 dell'intervallo in/out della timeline (Ctrl+Shift+E).
 - Progetto su file `.vvproj` in RON (Ctrl+O, Ctrl+S, Ctrl+Shift+S).

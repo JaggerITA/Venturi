@@ -59,6 +59,11 @@ fn black_frame(resolution: (u32, u32)) -> Vec<u8> {
 struct ActiveClipDecoder {
     clip_id: ClipId,
     decoder: vv_media::Decoder,
+    /// Ultimo frame decodificato, tenuto per poterlo restituire di nuovo:
+    /// una clip conformata (`Clip::rate`) chiede lo stesso frame sorgente
+    /// su due frame di timeline consecutivi, e il decoder non sa tornare
+    /// indietro di uno.
+    last: Option<(FrameIdx, Arc<vv_media::FrameYuv420>)>,
 }
 
 impl ActiveClipDecoder {
@@ -70,18 +75,35 @@ impl ActiveClipDecoder {
         let mut decoder = vv_media::Decoder::open(path).map_err(|e| e.to_string())?;
         let secs = target_source_frame as f64 / decoder.fps().as_f64().max(1e-9);
         decoder.seek_to_time(secs).map_err(|e| e.to_string())?;
-        let mut me = Self { clip_id, decoder };
+        let mut me = Self {
+            clip_id,
+            decoder,
+            last: None,
+        };
         me.advance_to(target_source_frame)?;
         Ok(me)
     }
 
     /// Decodifica in avanti fino a raggiungere (o superare) `target`,
-    /// scartando i frame intermedi. `None` a fine stream (capita se
-    /// `source_out` va oltre la fine reale del file).
-    fn advance_to(&mut self, target: FrameIdx) -> Result<Option<vv_media::FrameYuv420>, String> {
+    /// scartando i frame intermedi; un `target` già raggiunto restituisce
+    /// di nuovo l'ultimo frame invece di avanzare. `None` a fine stream
+    /// (capita se `source_out` va oltre la fine reale del file).
+    fn advance_to(
+        &mut self,
+        target: FrameIdx,
+    ) -> Result<Option<Arc<vv_media::FrameYuv420>>, String> {
+        if let Some((idx, frame)) = &self.last
+            && *idx >= target
+        {
+            return Ok(Some(frame.clone()));
+        }
         loop {
             match self.decoder.next_frame().map_err(|e| e.to_string())? {
-                Some((idx, frame)) if idx >= target => return Ok(Some(frame)),
+                Some((idx, frame)) if idx >= target => {
+                    let frame = Arc::new(frame);
+                    self.last = Some((idx, frame.clone()));
+                    return Ok(Some(frame));
+                }
                 Some(_) => continue,
                 None => return Ok(None),
             }
@@ -127,7 +149,7 @@ impl FrameProvider for StreamingFrameProvider {
             .as_mut()
             .expect("appena assegnato sopra se assente")
             .advance_to(source_frame)?;
-        Ok(frame.map(Arc::new))
+        Ok(frame)
     }
 }
 
@@ -333,6 +355,7 @@ mod tests {
             },
             linked_group: None,
             audio_stream_index: 0,
+            rate: vv_core::Rational::one(),
         }
     }
 
@@ -484,6 +507,7 @@ mod tests {
                 effects: EffectStack::default(),
                 linked_group: None,
                 audio_stream_index: 0,
+                rate: vv_core::Rational::one(),
             }],
             muted: false,
         }]);
@@ -653,6 +677,119 @@ mod tests {
             .expect("audio atteso nell'export");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+    }
+
+    /// Il caso del bug, end-to-end: una clip a 23,976 fps accodata su una
+    /// timeline a 25 (creata dal primo media, a 25). Conformata, la
+    /// seconda clip occupa in timeline il suo tempo reale, quindi il file
+    /// esportato dura quanto le due clip insieme e l'audio della seconda
+    /// arriva fino in fondo invece di finire prima del video.
+    #[test]
+    fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
+        let dir = std::env::temp_dir().join("vv-app-export-conform-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mute_25 = dir.join("mute25.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=1"])
+            .args(["-f", "lavfi", "-i", "anullsrc=sample_rate=48000:channel_layout=stereo"])
+            .args(["-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(mute_25.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        // 24000/1001 = 23,976 fps: 48 frame sorgente per 2 s reali.
+        let sine_23976 = dir.join("sine23976.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=24000/1001:duration=2"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(sine_23976.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = crate::VibeVideoApp::default();
+        app.import_media(mute_25);
+        let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
+        assert_eq!(
+            app.project.timelines[timeline_id].fps,
+            vv_core::Rational::new(25, 1)
+        );
+        let first = app.project.media_pool.iter().next().map(|(id, _)| id).unwrap();
+        app.add_media_to_timeline(first);
+
+        app.import_media(sine_23976);
+        let second = app
+            .project
+            .media_pool
+            .iter()
+            .map(|(id, _)| id)
+            .find(|id| *id != first)
+            .expect("secondo media atteso nel pool");
+        let second_start = app.project.timelines[timeline_id].total_frames();
+        app.add_media_to_timeline(second);
+
+        let conformed = app.project.timelines[timeline_id]
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.timeline_start == second_start)
+            .expect("clip conformata attesa");
+        assert_ne!(conformed.rate, vv_core::Rational::one());
+        let total = app.project.timelines[timeline_id].total_frames();
+        // 1 s a 25 fps + 2 s conformati a 25 fps, a meno di un frame di
+        // arrotondamento sulla durata riportata da ffmpeg.
+        assert!((74..=76).contains(&total), "total={total}");
+
+        let output_path = dir.join("out.mp4");
+        let progress = Mutex::new(ExportProgress::default());
+        export_timeline(
+            &app.project,
+            timeline_id,
+            &output_path,
+            0..total,
+            &progress,
+            &AtomicBool::new(false),
+        )
+        .expect("export fallito");
+
+        let mut decoder = vv_media::Decoder::open(&output_path).unwrap();
+        let mut count = 0;
+        while decoder.next_frame().unwrap().is_some() {
+            count += 1;
+        }
+        assert!((total - 1..=total).contains(&count), "count={count}");
+
+        let audio = vv_media::decode_audio_track(&output_path, 0)
+            .unwrap()
+            .expect("audio atteso nell'export");
+        let frames = audio.samples.len() / audio.channels as usize;
+        let secs = frames as f64 / audio.sample_rate as f64;
+        let expected_secs = total as f64 / 25.0;
+        assert!(
+            (secs - expected_secs).abs() < 0.1,
+            "audio {secs}s contro {expected_secs}s di video"
+        );
+
+        // L'audio della seconda clip copre il suo tratto fino alla fine:
+        // se il video fosse mappato 1:1 sui frame sorgente, la timeline
+        // finirebbe prima e la coda del sine sarebbe tagliata.
+        let peak_in = |from_secs: f64, to_secs: f64| {
+            let ch = audio.channels as usize;
+            let from = (from_secs * audio.sample_rate as f64) as usize * ch;
+            let to = ((to_secs * audio.sample_rate as f64) as usize * ch).min(audio.samples.len());
+            audio.samples[from.min(to)..to]
+                .iter()
+                .fold(0.0_f32, |m, s| m.max(s.abs()))
+        };
+        assert!(peak_in(0.1, 0.9) < 0.05, "la prima clip è muta");
+        assert!(peak_in(1.1, 1.9) > 0.1, "la seconda clip suona");
+        assert!(
+            peak_in(expected_secs - 0.2, expected_secs) > 0.1,
+            "il sine deve arrivare fino alla fine della timeline"
+        );
     }
 
     #[test]

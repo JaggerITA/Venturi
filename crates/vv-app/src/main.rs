@@ -1399,6 +1399,7 @@ impl VibeVideoApp {
             effects,
             linked_group: None,
             audio_stream_index: 0,
+            rate: vv_core::Rational::one(),
         };
         self.history.do_command(
             &mut self.project,
@@ -1525,7 +1526,7 @@ impl VibeVideoApp {
         let Some(item) = self.project.media_pool.get(drag.media_id) else {
             return;
         };
-        if drag.len() <= 0 {
+        if drag.source_len() <= 0 {
             return;
         }
         let meta = item.meta.clone();
@@ -1552,6 +1553,10 @@ impl VibeVideoApp {
         target: timeline_ui::MediaDropTarget,
     ) {
         let media_id = drag.media_id;
+        let rate = vv_core::Rational::conform_rate(
+            self.project.timelines[timeline_id].fps,
+            meta.fps,
+        );
         let video_track = if target == timeline_ui::MediaDropTarget::NewVideoTrack {
             let new_index = self.project.timelines[timeline_id].tracks.len();
             self.history.do_command(
@@ -1618,6 +1623,7 @@ impl VibeVideoApp {
             effects: vv_core::EffectStack::default(),
             linked_group: None, // collegate sotto, tutte insieme, dopo l'inserimento
             audio_stream_index: 0,
+            rate,
         };
         self.history.do_command(
             &mut self.project,
@@ -1641,6 +1647,7 @@ impl VibeVideoApp {
                 effects: vv_core::EffectStack::default(),
                 linked_group: None,
                 audio_stream_index: stream_index,
+                rate,
             };
             self.history.do_command(
                 &mut self.project,
@@ -1767,6 +1774,7 @@ impl VibeVideoApp {
                         source: clip.source.clone(),
                         source_in: clip.source_in,
                         source_out: clip.source_out,
+                        rate: clip.rate,
                         effects: clip.effects.clone(),
                         link_tag: None,
                         audio_stream_index: clip.audio_stream_index,
@@ -1800,20 +1808,27 @@ impl VibeVideoApp {
         self.timeline_state.clipboard = collected.into_iter().map(|(_, e)| e).collect();
     }
 
-    /// `(timeline_start, timeline_end, source_in)` di una clip, se esiste.
+    /// `(timeline_start, timeline_end, source_in, rate)` di una clip, se
+    /// esiste: quanto serve a `resolve_overlap` per convertire una
+    /// posizione di timeline in frame sorgente.
     fn clip_bounds(
         &self,
         timeline_id: TimelineId,
         track_index: usize,
         clip_id: ClipId,
-    ) -> Option<(FrameIdx, FrameIdx, FrameIdx)> {
+    ) -> Option<(FrameIdx, FrameIdx, FrameIdx, vv_core::Rational)> {
         let clip = self.project.timelines[timeline_id]
             .tracks
             .get(track_index)?
             .clips
             .iter()
             .find(|c| c.id == clip_id)?;
-        Some((clip.timeline_start, clip.timeline_end(), clip.source_in))
+        Some((
+            clip.timeline_start,
+            clip.timeline_end(),
+            clip.source_in,
+            clip.rate,
+        ))
     }
 
     /// Applica la modifica necessaria a *una* clip esistente che si
@@ -1836,10 +1851,18 @@ impl VibeVideoApp {
         old_start: FrameIdx,
         old_end: FrameIdx,
         source_in: FrameIdx,
+        rate: vv_core::Rational,
         new_start: FrameIdx,
         new_end: FrameIdx,
         commands: &mut Vec<Box<dyn vv_core::Command>>,
     ) -> Option<(ClipId, ClipId)> {
+        // `TrimClip::new_value` è un frame *sorgente*, la posizione di
+        // taglio un frame di *timeline*: la conversione passa dal `rate`
+        // della clip (`Clip::source_frame_at`), non da una differenza
+        // diretta, che con una clip conformata sarebbe un'altra unità.
+        let source_at = |timeline_frame| {
+            vv_core::source_frame_of(rate, old_start, source_in, timeline_frame)
+        };
         if old_start >= new_start && old_end <= new_end {
             commands.push(Box::new(vv_core::LiftDelete::new(
                 timeline_id,
@@ -1862,32 +1885,29 @@ impl VibeVideoApp {
                 track_index,
                 right_id,
                 vv_core::TrimEdge::Start,
-                source_in + (new_end - old_start),
+                source_at(new_end),
             )));
             Some((clip_id, right_id))
         } else if old_start < new_start {
             // La coda sporge oltre `new_start`: accorcia il bordo destro
-            // (fine) fin lì. `TrimClip::new_value` per il bordo `End` è un
-            // `source_out` assoluto, non un frame di timeline — da qui la
-            // conversione via `source_in` (il bordo `Start`, invariato,
-            // resta il riferimento comune tra spazio timeline e sorgente).
+            // (fine) fin lì.
             commands.push(Box::new(vv_core::TrimClip::new(
                 timeline_id,
                 track_index,
                 clip_id,
                 vv_core::TrimEdge::End,
-                source_in + (new_start - old_start),
+                source_at(new_start),
             )));
             None
         } else {
             // La testa sporge prima di `new_end`: accorcia il bordo
-            // sinistro (inizio) fin lì (stessa conversione di cui sopra).
+            // sinistro (inizio) fin lì.
             commands.push(Box::new(vv_core::TrimClip::new(
                 timeline_id,
                 track_index,
                 clip_id,
                 vv_core::TrimEdge::Start,
-                source_in + (new_end - old_start),
+                source_at(new_end),
             )));
             None
         }
@@ -1928,7 +1948,15 @@ impl VibeVideoApp {
             if new_start >= new_end {
                 continue;
             }
-            let overlapping: Vec<(ClipId, FrameIdx, FrameIdx, FrameIdx, Option<vv_core::LinkGroupId>)> =
+            type Overlapping = (
+                ClipId,
+                FrameIdx,
+                FrameIdx,
+                FrameIdx,
+                vv_core::Rational,
+                Option<vv_core::LinkGroupId>,
+            );
+            let overlapping: Vec<Overlapping> =
                 self.project.timelines[timeline_id]
                     .tracks
                     .get(track_index)
@@ -1942,6 +1970,7 @@ impl VibeVideoApp {
                                     c.timeline_start,
                                     c.timeline_end(),
                                     c.source_in,
+                                    c.rate,
                                     c.linked_group,
                                 )
                             })
@@ -1949,7 +1978,7 @@ impl VibeVideoApp {
                     })
                     .unwrap_or_default();
 
-            for (clip_id, old_start, old_end, source_in, group) in overlapping {
+            for (clip_id, old_start, old_end, source_in, rate, group) in overlapping {
                 if !processed.insert((track_index, clip_id)) {
                     continue;
                 }
@@ -1960,6 +1989,7 @@ impl VibeVideoApp {
                     old_start,
                     old_end,
                     source_in,
+                    rate,
                     new_start,
                     new_end,
                     commands,
@@ -1977,7 +2007,7 @@ impl VibeVideoApp {
                     {
                         continue;
                     }
-                    let Some((m_start, m_end, m_source_in)) =
+                    let Some((m_start, m_end, m_source_in, m_rate)) =
                         self.clip_bounds(timeline_id, member_track, member_id)
                     else {
                         continue;
@@ -1989,6 +2019,7 @@ impl VibeVideoApp {
                         m_start,
                         m_end,
                         m_source_in,
+                        m_rate,
                         new_start,
                         new_end,
                         commands,
@@ -2039,7 +2070,7 @@ impl VibeVideoApp {
                 (
                     entry.track_index,
                     playhead + entry.relative_start,
-                    playhead + entry.relative_start + (entry.source_out - entry.source_in),
+                    playhead + entry.relative_start + entry.timeline_len(),
                 )
             })
             .collect();
@@ -2056,6 +2087,7 @@ impl VibeVideoApp {
                 effects: entry.effects.clone(),
                 linked_group: None, // ricollegate sotto, per link_tag
                 audio_stream_index: entry.audio_stream_index,
+                rate: entry.rate,
             };
             new_selection.insert((entry.track_index, new_ids[i]));
             commands.push(Box::new(vv_core::InsertClip {
@@ -2288,12 +2320,7 @@ fn map_source_ranges_to_timeline(
         .filter_map(|&(s_start, s_end)| {
             let start = s_start.max(clip.source_in);
             let end = s_end.min(clip.source_out - 1);
-            (start <= end).then(|| {
-                (
-                    clip.timeline_start + (start - clip.source_in),
-                    clip.timeline_start + (end - clip.source_in),
-                )
-            })
+            (start <= end).then(|| (clip.timeline_frame_at(start), clip.timeline_frame_at(end)))
         })
         .collect()
 }
@@ -2938,8 +2965,8 @@ impl eframe::App for VibeVideoApp {
 
         // Frame a cui vengono lette/scritte le proprietà nel pannello:
         // sempre il playhead della timeline tradotto nello spazio frame
-        // sorgente della clip *selezionata* (source_in + offset locale,
-        // clampato dentro la clip) — indipendente da quale clip stia
+        // sorgente della clip *selezionata* (`source_frame_at` del
+        // playhead clampato dentro la clip) — indipendente da quale clip stia
         // effettivamente mostrando il viewer, così modificare le
         // proprietà di una clip diversa da quella attiva resta coerente
         // con quello che si vede scorrendo la timeline fin lì.
@@ -2961,7 +2988,7 @@ impl eframe::App for VibeVideoApp {
                     .find(|c| c.id == clip_id)?;
                 let local = (self.timeline_state.playhead - clip.timeline_start)
                     .clamp(0, clip.timeline_len().saturating_sub(1));
-                Some(clip.source_in + local)
+                Some(clip.source_frame_at(clip.timeline_start + local))
             })
             .unwrap_or(0);
 
@@ -3946,6 +3973,7 @@ mod tests {
             effects: vv_core::EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: vv_core::Rational::one(),
         };
         app.history.do_command(
             &mut app.project,
@@ -3964,6 +3992,122 @@ mod tests {
     /// della prima. `active_video_clip_at` deve vedere quella in cima dove
     /// c'è, e tornare a quella sotto appena finisce — la stessa
     /// regola che il viewer usa per seguire il playhead.
+    /// Timeline a 30 fps + media a 29,97: la clip inserita porta il
+    /// `rate` di conformazione e dura in timeline il tempo reale del
+    /// media, non i suoi frame contati 1:1.
+    fn app_with_media_at(timeline_fps: vv_core::Rational, media_fps: vv_core::Rational, duration_frames: FrameIdx) -> (VibeVideoApp, MediaId) {
+        let mut app = VibeVideoApp::default();
+        let media_id = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/vv-conform-test.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames,
+                fps: media_fps,
+                width: 320,
+                height: 240,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 1,
+        });
+        let timeline_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: timeline_fps,
+            resolution: (320, 240),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        app.timeline_id = Some(timeline_id);
+        (app, media_id)
+    }
+
+    #[test]
+    fn inserting_a_media_at_another_fps_conforms_it_to_the_timeline() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(30, 1),
+            vv_core::Rational::new(30_000, 1001),
+            3000,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        let meta = app.project.media_pool[media_id].meta.clone();
+
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert_eq!(clip.rate, vv_core::Rational::new(1001, 1000));
+        assert_eq!(clip.source_len(), 3000);
+        assert_eq!(clip.timeline_len(), 3003, "100,1 s a 30 fps");
+        assert_eq!(clip.source_frame_at(clip.timeline_end() - 1), 2999);
+    }
+
+    /// Copia/incolla di una clip conformata: la stessa durata di timeline,
+    /// e il tratto liberato per lei (`make_room_for_ranges`) è quello che
+    /// occuperà davvero.
+    #[test]
+    fn pasting_a_conformed_clip_keeps_its_timeline_duration() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(30, 1),
+            vv_core::Rational::new(30_000, 1001),
+            3000,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        let meta = app.project.media_pool[media_id].meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
+        app.copy_selected_clips();
+        app.timeline_state.playhead = 5000;
+        app.paste_clipboard_at_playhead();
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        let pasted = clips.iter().find(|c| c.timeline_start == 5000).unwrap();
+        assert_eq!(pasted.rate, vv_core::Rational::new(1001, 1000));
+        assert_eq!(pasted.timeline_len(), 3003);
+    }
+
+    /// Overwrite di una clip conformata (incollare sopra la sua coda):
+    /// il taglio deve cadere dove cade davvero sulla timeline, non a
+    /// `source_in + delta` (frame sorgente contati come di timeline).
+    #[test]
+    fn overwriting_the_tail_of_a_conformed_clip_trims_it_at_the_right_spot() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(30, 1),
+            vv_core::Rational::new(30_000, 1001),
+            3000,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        let meta = app.project.media_pool[media_id].meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        app.make_room_for_ranges(timeline_id, &[(0, 2000, 4000)], &mut commands);
+        for command in commands {
+            app.history.do_command(&mut app.project, command);
+        }
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 1);
+        assert_eq!(
+            clips[0].timeline_end(),
+            2000,
+            "accorciata esattamente fino al tratto liberato"
+        );
+        assert_eq!(clips[0].source_out, 1998, "2000 frame di timeline a 29,97");
+    }
+
     #[test]
     fn active_video_clip_at_prefers_the_topmost_video_track() {
         let mut app = VibeVideoApp::default();
@@ -4783,6 +4927,7 @@ mod tests {
             effects: vv_core::EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: vv_core::Rational::one(),
         };
 
         // Dentro al trim: tradotto 1:1 con l'offset timeline_start-source_in.

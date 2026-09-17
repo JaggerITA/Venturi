@@ -649,6 +649,10 @@ struct MediaSegment {
     source_start: FrameIdx,
     source_end: FrameIdx,
     timeline_start: FrameIdx,
+    /// `Clip::rate` della clip da cui viene il segmento: serve a
+    /// `chunk_behind_segments_near_to_far` per tradurre un offset in
+    /// frame sorgente nel corrispondente offset di timeline.
+    rate: vv_core::Rational,
 }
 
 /// Divide `[from_frame, end_frame)` di timeline in segmenti, uno per ogni
@@ -684,6 +688,7 @@ fn collect_media_segments(
                         source_start,
                         source_end,
                         timeline_start: frame,
+                        rate: clip.rate,
                     });
                 }
                 segment_end_timeline
@@ -733,6 +738,7 @@ fn collect_media_segments_behind(
                         source_start,
                         source_end,
                         timeline_start: segment_start_timeline,
+                        rate: clip.rate,
                     });
                 }
                 segment_start_timeline
@@ -761,20 +767,22 @@ fn collect_media_segments_behind(
 /// principio di `Clip::source_frame_at`: un clip non a velocità variabile
 /// ha una corrispondenza 1:1 tra spostamento in spazio sorgente e in
 /// spazio timeline, quindi il bordo sorgente di un blocco e il suo
-/// corrispondente in timeline si spostano della stessa quantità rispetto
-/// al segmento originale).
+/// corrispondente in timeline si spostano della quantità omologa rispetto
+/// al segmento originale, conformato dal `rate` della clip).
 fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
     let mut chunks = Vec::new();
     for segment in segments {
         let mut chunk_end = segment.source_end;
         loop {
             let chunk_start = (chunk_end - BEHIND_CHUNK_FRAMES + 1).max(segment.source_start);
-            let offset = chunk_start - segment.source_start;
+            let offset = segment.rate.scale_round(chunk_start)
+                - segment.rate.scale_round(segment.source_start);
             chunks.push(MediaSegment {
                 media_id: segment.media_id,
                 source_start: chunk_start,
                 source_end: chunk_end,
                 timeline_start: segment.timeline_start + offset,
+                rate: segment.rate,
             });
             if chunk_start == segment.source_start {
                 break;
@@ -1668,6 +1676,7 @@ mod tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         }
     }
 
@@ -1691,6 +1700,7 @@ mod tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         }
     }
 
@@ -1704,6 +1714,7 @@ mod tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         }
     }
 
@@ -1861,6 +1872,7 @@ mod tests {
             source_start: 100,
             source_end: 132, // 33 frame: 2 blocchi da 15 + 1 da 3
             timeline_start: 500,
+            rate: Rational::one(),
         };
 
         let chunks = chunk_behind_segments_near_to_far(&[segment]);
@@ -1890,6 +1902,7 @@ mod tests {
             source_start: 40,
             source_end: 44,
             timeline_start: 40,
+            rate: Rational::one(),
         };
 
         let chunks = chunk_behind_segments_near_to_far(&[segment]);
@@ -1925,6 +1938,7 @@ mod tests {
                 source_start: 118,
                 source_end: 132,
                 timeline_start: 118,
+                rate: Rational::one(),
             },
             // media_b: solo parzialmente coperto, resta.
             MediaSegment {
@@ -1932,6 +1946,7 @@ mod tests {
                 source_start: 95,
                 source_end: 110,
                 timeline_start: 95,
+                rate: Rational::one(),
             },
             // media_a: fuori dall'intervallo in cache, resta.
             MediaSegment {
@@ -1939,6 +1954,7 @@ mod tests {
                 source_start: 50,
                 source_end: 64,
                 timeline_start: 50,
+                rate: Rational::one(),
             },
         ];
 
@@ -3853,6 +3869,7 @@ mod tests {
             source_start: 5,
             source_end: 50,
             timeline_start: 5,
+            rate: Rational::one(),
         };
         let ctx = FillContext {
             project: &project,
@@ -3918,6 +3935,7 @@ mod tests {
             source_start: 80,
             source_end: 90,
             timeline_start: 80,
+            rate: Rational::one(),
         };
         let ctx = FillContext {
             project: &project,
@@ -4000,6 +4018,7 @@ mod tests {
             source_start: 24,
             source_end: 34,
             timeline_start: 24,
+            rate: Rational::one(),
         };
         // Basta per il tratto voluto (11 frame) con ampio margine, ma
         // meno del transito stimato (24 frame): con budget=frame_bytes*20

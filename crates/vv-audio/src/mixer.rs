@@ -71,9 +71,13 @@ impl MixSnapshot {
                 };
                 let clip_fps = item.meta.fps.as_f64().max(1e-9);
                 let buffer_frames = buffer.len() as u64 / ch;
+                // `source_offset` vive nel buffer del *media*, quindi resta
+                // ancorato al suo fps; la durata invece è quella sulla
+                // timeline, che con la conformazione (`Clip::rate`) è già
+                // il tempo reale della clip.
                 let source_offset = seconds_to_frames(clip.source_in as f64 / clip_fps, sample_rate)
                     .min(buffer_frames);
-                let len = seconds_to_frames(clip.timeline_len() as f64 / clip_fps, sample_rate)
+                let len = seconds_to_frames(clip.timeline_len() as f64 / fps, sample_rate)
                     .min(buffer_frames - source_offset);
                 if len == 0 {
                     continue;
@@ -159,6 +163,10 @@ fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
         return db_to_linear(clip.gain_db.default);
     }
     let secs = (block * GAIN_BLOCK_FRAMES) as f64 / sample_rate as f64;
+    // I keyframe del gain vivono in frame *sorgente*, e una clip suona
+    // sempre a velocità reale: i secondi trascorsi dall'inizio della clip
+    // si convertono con l'fps del media, non con quello della timeline —
+    // anche per una clip conformata (`Clip::rate`).
     let source_frame = clip.source_in + (secs * clip.clip_fps).round() as FrameIdx;
     db_to_linear(clip.gain_db.value_at(source_frame))
 }
@@ -499,6 +507,7 @@ mod tests {
             effects: EffectStack::default(),
             linked_group: None,
             audio_stream_index: 0,
+            rate: Rational::one(),
         }
     }
 
@@ -618,6 +627,56 @@ mod tests {
         video.kind = TrackKind::Video;
         let tl = timeline(vec![video]);
         assert!(render(&project, &tl, 0, 20).iter().all(|&s| s == 0.0));
+    }
+
+    /// Il caso del bug: media a 9,99 fps (10000/1001, l'analogo in
+    /// piccolo di 59,94 su 60) su timeline a 10 fps. Conformata, la clip
+    /// dura in timeline quanto dura il suo audio, e il mix a fine clip è
+    /// ancora allineato al campione giusto invece di essere tagliato.
+    #[test]
+    fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
+        const SOURCE_FRAMES: FrameIdx = 1000;
+        const AUDIO_SAMPLES: usize = 10_010; // 1000 frame / 9,99 fps = 100,1 s
+
+        let mut project = Project::default();
+        let media = project.media_pool.insert(MediaItem {
+            path: PathBuf::from("slow.wav"),
+            meta: MediaMeta {
+                duration_frames: SOURCE_FRAMES,
+                fps: Rational::new(10_000, 1001),
+                width: 0,
+                height: 0,
+                has_audio: true,
+                sample_rate: RATE,
+                channels: 1,
+            },
+            content_hash: 7,
+        });
+        let mut clip = clip_at(media, 0, 0, SOURCE_FRAMES);
+        clip.rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
+        assert_eq!(clip.timeline_len(), 1001, "100,1 s a 10 fps");
+        let tl = timeline(vec![audio_track(vec![clip])]);
+
+        let buffer: Arc<Vec<f32>> =
+            Arc::new((0..AUDIO_SAMPLES).map(|i| i as f32 / 100_000.0).collect());
+        let buffer_for = |path: &Path, _stream: usize| {
+            (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
+        };
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, buffer_for);
+        assert_eq!(snap.clips.len(), 1);
+        assert_eq!(
+            snap.clips[0].len, AUDIO_SAMPLES as u64,
+            "tutto l'audio del media entra nella clip, niente di tagliato"
+        );
+
+        // Ultimi 10 campioni della clip: ancora quelli di fine buffer,
+        // nessuno scarto accumulato lungo i 100 s precedenti.
+        let mut out = vec![9.0; 10];
+        mix_range(&snap, AUDIO_SAMPLES as u64 - 10, &mut out);
+        for (i, s) in out.iter().enumerate() {
+            let expected = (AUDIO_SAMPLES - 10 + i) as f32 / 100_000.0;
+            assert!((s - expected).abs() < 1e-6, "campione {i}: {s} != {expected}");
+        }
     }
 
     #[test]

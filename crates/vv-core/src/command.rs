@@ -593,9 +593,13 @@ impl Command for TrimClip {
         self.old = Some((clip.source_in, clip.source_out, clip.timeline_start));
         match self.edge {
             TrimEdge::Start => {
-                let delta = self.new_value - clip.source_in;
+                // La fine sulla timeline resta ferma: il nuovo
+                // `timeline_start` si ricava dalla durata aggiornata, non
+                // dal delta in frame *sorgente* (che con una clip
+                // conformata, `Clip::rate`, è un'altra unità di misura).
+                let end = clip.timeline_end();
                 clip.source_in = self.new_value;
-                clip.timeline_start += delta;
+                clip.timeline_start = end - clip.timeline_len();
             }
             TrimEdge::End => {
                 clip.source_out = self.new_value;
@@ -766,7 +770,9 @@ impl Command for LinkClips {
 /// Divide una clip in due al tempo di timeline `split_at`. La seconda metà
 /// riceve un nuovo `ClipId`. Assume speed=1 nel mappare `split_at` allo
 /// spazio del frame sorgente (coerente finché lo speed ramping non è
-/// implementato, milestone 7).
+/// implementato, milestone 7). Su una clip conformata (`Clip::rate`) il
+/// taglio si arrotonda al bordo del frame sorgente più vicino: le due
+/// metà restano contigue e coprono esattamente l'intervallo di prima.
 #[derive(Debug)]
 pub struct SplitClip {
     pub timeline: TimelineId,
@@ -824,8 +830,10 @@ impl Command for SplitClip {
             return; // fuori dal corpo della clip: niente da dividere
         }
 
-        let offset = self.split_at - clip.timeline_start;
-        let split_source = clip.source_in + offset;
+        let split_source = clip.source_frame_at(self.split_at);
+        if split_source <= clip.source_in || split_source >= clip.source_out {
+            return; // conformata: nessun frame sorgente cade davvero qui
+        }
 
         self.original_source_out = Some(clip.source_out);
         let mut second_half = clip.clone();
@@ -838,7 +846,12 @@ impl Command for SplitClip {
         // ricollega le metà destre tra loro con un `LinkClips` a parte.
         second_half.id = new_id;
         second_half.source_in = split_source;
-        second_half.timeline_start = self.split_at;
+        // La fine della metà sinistra, non `split_at`: con una clip
+        // conformata (`Clip::rate`) il taglio cade sul bordo del frame
+        // sorgente più vicino, che può essere a un frame di distanza —
+        // partire da lì tiene le due metà attaccate e la copertura
+        // complessiva identica all'originale.
+        second_half.timeline_start = clip.timeline_end();
         second_half.linked_group = None;
         self.new_clip_id = Some(new_id);
 
