@@ -157,8 +157,8 @@ fn to_ffmpeg_range(full_range: bool) -> color::Range {
 }
 
 /// Encoder minimale per il proxy: solo video, senza audio (il proxy
-/// serve solo per il video — l'audio in anteprima passa già da
-/// `audio_cache`/`Player`, indipendente dal proxy video), parametri
+/// serve solo per il video — l'audio in anteprima lo suona il mixer dai
+/// sorgenti originali), parametri
 /// x264 mirati a "veloce da generare e da decodificare", non a qualità
 /// d'archivio (`Encoder` in `encode.rs`, usato per l'export, ha
 /// obiettivi opposti — non condiviso apposta).

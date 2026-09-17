@@ -39,7 +39,7 @@ stale per guadagnare fluidità.
 | B2 | Modello dati N-track generico, rendering single-track: `VIDEO_TRACK=0`/`AUDIO_TRACK=1` hardcodati; compositor a una sola texture input, blend `REPLACE`, niente accumulo multi-traccia | `render_ahead.rs:35`, `export.rs:22-23`, `compositor.rs` | "A prescindere dalla timeline" è falso per costruzione: una 2ª track video non viene né bufferizzata né compositata | mio + nota collega |
 | B3 | Compositor con round-trip CPU→GPU→CPU bloccante a ogni frame (upload → render → `copy_texture_to_buffer` → `map_async`+`poll(wait_indefinitely)` → readback → ricarica in egui) | `compositor.rs:277-306` | Tetto di latenza sul thread UI; la GPU è usata come *filtro pixel*, non come *destinazione* | mio |
 | B4 | Conversione YUV→RGB su CPU (`sws_scale`) → frame RGBA8 (4 B/px) invece di YUV420 (~1.5 B/px): ~2.5× meno frame in cache a parità di RAM, e forza il round-trip B3 | `decode.rs:19-24` | Degrada copertura buffer *e* latenza insieme; scelta "provvisoria" che si è fossilizzata | mio |
-| B5 | Audio per-clip (un `AudioPlayer` per clip attiva, scambiato al taglio) invece di mixer continuo; `vv-audio::mixer` ancora scheletro | `player.rs:33` | Sync tra tagli affidato a riuso ad-hoc (`audio_cache`); non si estende a N track audio | mio |
+| B5 | ✅ *Risolto* (AUDIO_MIXER_PLAN.md). Era: audio per-clip (un `AudioPlayer` per clip attiva, scambiato al taglio) invece di mixer continuo | ex `player.rs` | Sync tra tagli affidato a riuso ad-hoc (`audio_cache`); non si estendeva a N track audio | mio |
 
 **Nota di conciliazione.** A1+A2 (collega) e i miei punti sul buffer sono la
 stessa modifica vista da due angoli: un unico pass di sfratto + budget
@@ -244,9 +244,9 @@ Ognuno è indipendente da A e tra loro salvo dove indicato.
   come descritto in ARCHITECTURE.md §Compositing step 6. Rende strutturalmente
   vero "a prescindere dalla timeline". *(mio #2 + nota collega)*
 
-- **B5 — Mixer audio continuo.** Ring buffer che somma le clip attive (invece di
-  uno swap per-clip con riuso ad-hoc). Sync più robusto e si estende a N track
-  audio. Riutilizza `vv-audio::mixer` oggi scheletro. *(mio #6)*
+- **B5 — Mixer audio continuo.** ✅ Fatto (AUDIO_MIXER_PLAN.md): `vv_audio::Mixer`
+  somma tutte le track audio da uno snapshot immutabile ed è il clock del
+  playback; anteprima ed export condividono `mix_range`. *(mio #6)*
 
 Ordine consigliato Part B: **B1 → B2 → (B3 combinato) → B4 → B5**. B1 prima di
 tutto perché è il prerequisito della milestone 7 e a costo contenuto; B2 per il
@@ -283,5 +283,6 @@ win di latenza; B3 agganciato a B2; B4/B5 quando serve davvero il multi-track.
   `render_video_frame` (mappatura duplicata: B1).
 - `crates/vv-render/src/compositor.rs` — `render_frame` round-trip (B2),
   single-input/REPLACE (B4).
-- `crates/vv-app/src/player.rs` — `Player` audio per-clip (B5).
-- `crates/vv-audio/src/mixer.rs` — scheletro da implementare (B5).
+- `crates/vv-app/src/timeline_audio.rs` — clock del playback, snapshot, fast
+  forward (B5).
+- `crates/vv-audio/src/mixer.rs` — `Mixer`, `mix_range`, finestre stretchate (B5).

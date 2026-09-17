@@ -171,14 +171,32 @@ si separano per davvero.
 
 ## Pipeline audio
 
-- Decode (ffmpeg) → resample al sample rate di progetto (`rubato` o
-  `swresample`) → gain (moltiplicazione lineare da dB, keyframeable,
-  interpolata a blocchi) → time-stretch se speed ≠ 1 (filtro `rubberband`
-  via `ffmpeg-next::filter`, sia in preview sia in export) → mix delle
-  track attive → output via `cpal`.
-- Durante il playback l'audio è il clock master (prassi standard per
-  percepire fluidità): il frame video mostrato insegue la posizione audio
-  corrente.
+- Decode (ffmpeg, `vv_media::decode_audio_track`) → resample lineare a
+  48 kHz e conversione ai canali del mix (`vv_audio::mixer::prepare_mix_buffer`)
+  → mix delle track audio non muted con gain keyframeato valutato a blocchi
+  da 800 campioni (`mix_range`) → output `cpal`.
+- Anteprima ed export usano la stessa `mix_range`: l'export mixa a 2 canali,
+  l'anteprima ai canali nativi del device (chiederne altri fa inserire a
+  PipeWire un remix che aggiunge latenza).
+- **Anteprima** (`vv-app::timeline_audio::TimelineAudio`): un solo stream
+  `cpal` aperto all'avvio e mai riaperto (`vv_audio::Mixer`). Il thread UI
+  costruisce uno snapshot immutabile delle clip (`MixSnapshot`, con `Arc` ai
+  buffer già convertiti) a ogni cambio di `History::generation` o all'arrivo
+  di un buffer, e lo pubblica al callback con un `try_lock`; gli snapshot
+  vecchi si liberano sul thread UI. I buffer si decodificano in background
+  per `(path, audio_stream_index)` (`mix_buffers.rs`): finché non sono pronti
+  la clip suona silenzio.
+- **Clock**: la posizione del mixer, in campioni di timeline, è il playhead
+  (`drive_playback`); il video la insegue. Un vuoto è solo silenzio, il
+  clock avanza lo stesso. Senza device audio il clock è a parete.
+- **Fast forward** (2x/4x/8x): finestre da 8s del mix renderizzate e
+  stretchate con `rubberband` (pitch preservato) in background, accodate
+  al mixer senza riaprire lo stream (`StretchedWindow`); la velocità si
+  applica quando la prima finestra è pronta. Lo speed per-clip
+  (`EffectStack::speed`, milestone 7) non è ancora applicato.
+- **Scrub**: frammento di 80ms dal mix alla nuova posizione.
+- L'anteprima di un media dal media pool non suona: mostra solo il primo
+  frame.
 
 ## Undo/redo
 
@@ -201,14 +219,10 @@ svuotato/il redo-stack pulito a ogni nuovo comando. Esempi: `InsertClip`,
   "Pipeline di decode + cache" sopra. Passare a un vero pool resta
   un'estensione futura, se un thread singolo non tenesse il passo su
   contenuti più pesanti.
-- **Audio thread**: callback `cpal`, consuma un ring buffer lock-free
-  riempito da un thread di mixing dedicato. **Stato attuale**: non ancora
-  così — l'audio passa da `vv-app/src/player.rs::Player`, un
-  `AudioPlayer` per clip attiva (aperto/scambiato al taglio, non un
-  output continuo con mixing dedicato); `vv-audio::mixer` resta uno
-  scheletro. L'audio-clock-continuity attuale si appoggia su
-  `VibeVideoApp::audio_cache` (traccia audio già decodificata riusata tra
-  un'apertura e l'altra) per restare economico anche senza un vero mixer.
+- **Audio thread**: callback `cpal` del `Mixer`, mixa direttamente dallo
+  snapshot corrente (niente ring buffer: la somma a blocchi è economica),
+  senza allocazioni né lock bloccanti. Decodifica dei buffer e stretch del
+  fast forward girano su thread a parte — vedi § "Pipeline audio".
 - **Background pool**: la generazione proxy ha il suo thread dedicato
   (`vv-app::proxy_worker`, coda seriale — vedi sopra); waveform resta
   uno scheletro, priorità bassa, non ancora costruito.

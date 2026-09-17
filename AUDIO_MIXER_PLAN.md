@@ -63,7 +63,7 @@ delle track audio della timeline. È il punto **B5** di
 
 ## 3. Passi (uno alla volta, build + test dopo ognuno)
 
-**Stato.** Passi 1, 2, 3 e 4 fatti. Il passo 2 ha anticipato:
+**Stato.** Completato (passi 1–6). Passo 5: l'anteprima dal media pool resta senza audio, è una clip singola e non serve il mixer. Il passo 2 ha anticipato:
 - scrub audio (passo 3) già sul mixer (`TimelineAudio::play_scrub_snippet`);
 - rimozione di `player.rs` e `audio_cache`: l'anteprima dal media pool non
   riproduceva mai (Spazio esce dal browsing), mostrava solo il primo frame, e

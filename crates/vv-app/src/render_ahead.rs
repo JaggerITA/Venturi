@@ -21,10 +21,8 @@
 //!
 //! Stesso stile di `vv_media::playback::DecodeAhead` (thread singolo,
 //! target atomico, canale di comandi) ma generalizzato per camminare la
-//! timeline invece di un solo file. Solo il VIDEO: l'audio resta gestito
-//! da `Player` (clip attiva, scambiata al taglio) — vedi ARCHITECTURE.md
-//! e la nota nel piano di questa modifica sul perché l'audio non è (per
-//! ora) parte di questo worker.
+//! timeline invece di un solo file. Solo il VIDEO: l'audio della timeline
+//! lo suona il mixer (`timeline_audio`).
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;

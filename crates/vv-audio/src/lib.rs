@@ -1,11 +1,9 @@
-//! Decode audio (in vv-media) -> resample -> gain -> time-stretch -> mix ->
-//! output `cpal` (vedi ARCHITECTURE.md § Pipeline audio). L'audio è il
-//! clock master durante il playback.
+//! Mix delle track audio (gain, resample, time-stretch) e output `cpal`
+//! (vedi ARCHITECTURE.md § Pipeline audio). La posizione del mixer è il
+//! clock del playback.
 
 pub mod mixer;
-pub mod output;
 pub mod stretch;
 
 pub use mixer::{MixSnapshot, Mixer, MixerState, StretchedWindow};
-pub use output::AudioPlayer;
 pub use stretch::stretch_samples;

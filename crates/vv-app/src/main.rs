@@ -2074,12 +2074,12 @@ impl VibeVideoApp {
 }
 
 /// Mappa intervalli di frame *sorgente* (spazio nativo del media, quello
-/// di `Player::cached_source_ranges`) in intervalli di frame di
+/// di `RenderAhead::cached_ranges_for`) in intervalli di frame di
 /// *timeline*, per una clip: clampa al suo intervallo di trim
 /// (`source_in..source_out`) e trasla per il suo `timeline_start`. Un
 /// intervallo sorgente che cade fuori dal trim (o lo attraversa solo in
 /// parte) viene scartato o accorciato di conseguenza. Funzione pura per
-/// poterla testare senza un vero `Player`.
+/// poterla testare senza un vero `RenderAhead`.
 fn map_source_ranges_to_timeline(
     clip: &vv_core::Clip,
     source_ranges: &[(FrameIdx, FrameIdx)],
@@ -3289,12 +3289,9 @@ impl eframe::App for VibeVideoApp {
                 });
             // Le clip SolidColor non hanno un media da decodificare: il
             // colore (eventualmente keyframeato) va valutato al frame
-            // *locale alla clip* sul playhead della timeline, l'unico
-            // orologio che ha senso per un generatore (un Player non ha
-            // motivo di esistere per un riempimento uniforme). Nessuna
-            // clip attiva (il playhead è su un vuoto della track video, o
-            // sta attraversandolo) mostra un frame nero
-            // allo stesso modo, invece del placeholder testuale o
+            // *locale alla clip* sul playhead della timeline. Nessuna clip
+            // attiva (vuoto sulla track video) mostra un frame nero allo
+            // stesso modo, invece del placeholder testuale o
             // dell'ultimo frame rimasto — come un vero NLE. Non quando si
             // sta sfogliando un media "grezzo" dal media pool
             // (`browsing_media`): lì `active_clip` è `None` di proposito,
@@ -3705,10 +3702,8 @@ mod tests {
         assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
     }
 
-    /// Esercita il collegamento completo introdotto in milestone 5:
-    /// caricare una clip video apre il player sul suo media
-    /// (`load_video_clip`) e il gain impostato via comando arriva davvero
-    /// all'`AudioPlayer` sottostante, senza panic.
+    /// La clip media sotto al playhead diventa attiva e il gain impostato
+    /// via comando si legge dai suoi effetti.
     #[test]
     fn loading_a_media_clip_sets_active_clip_and_gain() {
         let dir = std::env::temp_dir().join("vv-app-main-test");

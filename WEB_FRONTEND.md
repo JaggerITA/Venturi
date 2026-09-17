@@ -21,8 +21,8 @@ egui:
 | `vv-core` | modello dati (`Project`/`Timeline`/`Clip`), command pattern, `History` | sì, al 100% |
 | `vv-media` | probe/decode ffmpeg, `DecodeAhead` | sì, al 100% |
 | `vv-render` | compositor GPU headless (wgpu), generatori (solid color) | sì, al 100% |
-| `vv-audio` | output audio via cpal | sì per il monitoring locale sul PC (vedi § Audio) |
-| `vv-app` | UI egui/eframe, `Player`, orchestrazione (`main.rs`), disegno timeline (`timeline_ui.rs`) | **solo in parte**: `Player`, `History`, `drive_playback`, `ensure_active_clip_matches_playhead`, `sync_selection_to_playhead` sono Rust puro non legato a egui e si spostano quasi invariati in un nuovo host; il disegno (`timeline_ui.rs`) e i pannelli egui in `main.rs` no, si riscrivono nel client web |
+| `vv-audio` | mixer delle track audio, output via cpal | sì per il monitoring locale sul PC (vedi § Audio) |
+| `vv-app` | UI egui/eframe, `TimelineAudio`, orchestrazione (`main.rs`), disegno timeline (`timeline_ui.rs`) | **solo in parte**: `TimelineAudio`, `History`, `drive_playback`, `ensure_active_clip_matches_playhead`, `sync_selection_to_playhead` sono Rust puro non legato a egui e si spostano quasi invariati in un nuovo host; il disegno (`timeline_ui.rs`) e i pannelli egui in `main.rs` no, si riscrivono nel client web |
 
 Conclusione: non serve un rewrite del backend. Serve un nuovo processo che
 sostituisce il loop di eventi di eframe con un server di rete, più un
@@ -44,14 +44,14 @@ client web che rifà solo la parte di presentazione.
 Nuovo crate, analogo a `vv-app` ma senza UI: tokio + axum (o `tungstenite`
 puro se si vuole restare minimi), possiede `Project` + `History` come
 unica fonte di verità, e sostituisce il loop `App::ui()` di eframe con un
-loop pilotato da messaggi di rete. Tiene in vita `Player`/`drive_playback`
+loop pilotato da messaggi di rete. Tiene in vita `TimelineAudio`/`drive_playback`
 esattamente come oggi (a interval fisso, o meglio ancora guidato da un
 timer dedicato invece che dal ciclo di ridisegno di egui).
 
 Punti da portare via da `vv-app/src/main.rs` pressoché invariati (sono già
 Rust puro, testato con gli unit test esistenti):
-`Player`, `History`, `clip_at`, `linked_partner`,
-`ensure_active_clip_matches_playhead`, `load_video_clip`, `drive_playback`,
+`TimelineAudio`, `History`, `clip_at`, `linked_partner`,
+`ensure_active_clip_matches_playhead`, `drive_playback`,
 `sync_selection_to_playhead`, `split_all_at_playhead`, `delete_selected`,
 `ripple_delete_selected`, `add_media_to_timeline`.
 

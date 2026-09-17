@@ -9,8 +9,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vv_core::{ClipSource, FrameIdx, Keyframed, Project, Timeline, TrackKind};
 
-use crate::output::{db_to_linear, downmix_interleaved};
-
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Granularità control-rate (~60Hz) del gain keyframeato, non sample-accurate.
 pub const GAIN_BLOCK_FRAMES: u64 = 800;
@@ -165,6 +163,63 @@ fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
     db_to_linear(clip.gain_db.value_at(source_frame))
 }
 
+fn db_to_linear(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
+}
+
+/// Converte campioni interleaved da `from` a `to` canali senza semantica di
+/// layout: non un downmix broadcast-accurate, solo simmetrico e
+/// intelligibile.
+/// - `to == 1`: media di tutti i canali.
+/// - `from > to`: canale sorgente `i` mediato sul canale `i % to`; con
+///   l'ordine ffmpeg del 5.1 (L,R,C,LFE,Ls,Rs) raggruppa L,C,Ls e R,LFE,Rs.
+/// - `from < to`: canale destinazione `i` copiato dal sorgente `i % from`.
+fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
+    if from == to || from == 0 || to == 0 {
+        return samples.to_vec();
+    }
+    let from = from as usize;
+    let to = to as usize;
+    let frames = samples.len() / from;
+    let mut out = vec![0.0f32; frames * to];
+
+    if to == 1 {
+        for f in 0..frames {
+            let src = &samples[f * from..f * from + from];
+            out[f] = src.iter().sum::<f32>() / from as f32;
+        }
+        return out;
+    }
+
+    if from > to {
+        let mut sums = vec![0.0f32; to];
+        let mut counts = vec![0u32; to];
+        for f in 0..frames {
+            sums.fill(0.0);
+            counts.fill(0);
+            let src = &samples[f * from..f * from + from];
+            for (i, &s) in src.iter().enumerate() {
+                let bucket = i % to;
+                sums[bucket] += s;
+                counts[bucket] += 1;
+            }
+            let dst = &mut out[f * to..f * to + to];
+            for c in 0..to {
+                dst[c] = if counts[c] > 0 { sums[c] / counts[c] as f32 } else { 0.0 };
+            }
+        }
+    } else {
+        for f in 0..frames {
+            let src = &samples[f * from..f * from + from];
+            let dst = &mut out[f * to..f * to + to];
+            for c in 0..to {
+                dst[c] = src[c % from];
+            }
+        }
+    }
+    out
+}
+
 /// Ricampiona (interpolazione lineare, senza filtro anti-aliasing) e
 /// converte i canali di un buffer interleaved.
 pub fn resample_and_remix(
@@ -280,6 +335,9 @@ impl Mixer {
         let device = host
             .default_output_device()
             .ok_or("nessun device audio di output")?;
+        // Canali nativi del device: chiederne altri fa inserire a PipeWire un
+        // remix che aggiunge latenza in uscita, visibile come audio in
+        // ritardo rispetto a playhead e waveform.
         let channels = device
             .default_output_config()
             .map(|c| c.channels())
@@ -724,6 +782,58 @@ mod tests {
             let s = timeline_frame_to_sample(frame, fps, PROJECT_SAMPLE_RATE);
             assert_eq!(sample_to_timeline_frame(s, fps, PROJECT_SAMPLE_RATE), frame);
         }
+    }
+
+    #[test]
+    fn downmix_interleaved_is_a_noop_when_channel_counts_match() {
+        let samples = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(downmix_interleaved(&samples, 2, 2), samples);
+    }
+
+    #[test]
+    fn downmix_interleaved_averages_all_channels_to_mono() {
+        // Un frame stereo [1.0, 0.0] -> mono deve dare la media, 0.5.
+        let samples = vec![1.0, 0.0, 0.5, 0.5];
+        let mono = downmix_interleaved(&samples, 2, 1);
+        assert_eq!(mono, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn downmix_interleaved_six_to_two_groups_even_and_odd_channels() {
+        // Ordine tipico ffmpeg per il 5.1(side): L,R,C,LFE,Ls,Rs. Con
+        // indice pari -> canale 0 (L,C,Ls) e dispari -> canale 1
+        // (R,LFE,Rs): un frame con L=1.0 e tutti gli altri a 0 deve finire
+        // quasi tutto sul canale 0 (media di 1.0,0.0,0.0 = 1/3), niente
+        // sul canale 1.
+        let l_only = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let stereo = downmix_interleaved(&l_only, 6, 2);
+        assert_eq!(stereo.len(), 2);
+        assert!((stereo[0] - (1.0 / 3.0)).abs() < 1e-6, "left={}", stereo[0]);
+        assert_eq!(stereo[1], 0.0);
+    }
+
+    #[test]
+    fn downmix_interleaved_upmixes_mono_by_duplicating_to_every_channel() {
+        let mono = vec![0.7, -0.3];
+        let stereo = downmix_interleaved(&mono, 1, 2);
+        assert_eq!(stereo, vec![0.7, 0.7, -0.3, -0.3]);
+    }
+
+    #[test]
+    fn downmix_interleaved_preserves_frame_count() {
+        let samples = vec![0.0f32; 6 * 100]; // 100 frame a 6 canali
+        let stereo = downmix_interleaved(&samples, 6, 2);
+        assert_eq!(stereo.len(), 2 * 100);
+    }
+
+    #[test]
+    fn db_to_linear_matches_known_reference_points() {
+        assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
+        // -6dB ~= dimezza l'ampiezza; +6dB ~= raddoppia.
+        assert!((db_to_linear(-6.0) - 0.5012).abs() < 1e-3);
+        assert!((db_to_linear(6.0) - 1.9953).abs() < 1e-3);
+        // -20dB = fattore 0.1 esatto.
+        assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
     }
 
     #[test]
