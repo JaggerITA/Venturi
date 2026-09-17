@@ -39,13 +39,6 @@ use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 /// frame.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 
-/// Un'"unità" da rimuovere con un solo `RippleDeleteAllTracks` in
-/// `ripple_delete_selected`: la clip primaria (track, id), il suo
-/// `timeline_start` (per ordinare le unità da destra a sinistra) e le
-/// clip da rimuovere con lei senza shiftarle (la sua gemella collegata,
-/// se c'è).
-type RippleUnit = ((usize, ClipId), FrameIdx, Vec<(usize, ClipId)>);
-
 /// Dopo quanto (s) una freccia tenuta premuta smette di fare il passo
 /// singolo e inizia a scorrere a `ARROW_HOLD_SPEED`.
 const ARROW_HOLD_DELAY_SECS: f64 = 0.3;
@@ -2264,234 +2257,6 @@ impl VibeVideoApp {
         self.timeline_state.clipboard = collected.into_iter().map(|(_, e)| e).collect();
     }
 
-    /// `(timeline_start, timeline_end, source_in, rate)` di una clip, se
-    /// esiste: quanto serve a `resolve_overlap` per convertire una
-    /// posizione di timeline in frame sorgente.
-    fn clip_bounds(
-        &self,
-        timeline_id: TimelineId,
-        track_index: usize,
-        clip_id: ClipId,
-    ) -> Option<(FrameIdx, FrameIdx, FrameIdx, vv_core::Rational)> {
-        let clip = self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)?
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)?;
-        Some((
-            clip.timeline_start,
-            clip.timeline_end(),
-            clip.source_in,
-            clip.rate,
-        ))
-    }
-
-    /// Applica la modifica necessaria a *una* clip esistente che si
-    /// sovrappone a `[new_start, new_end)`: rimossa se completamente
-    /// coperta, accorciata da un bordo se sporge solo da un lato, divisa
-    /// in due se il nuovo intervallo cade nel suo mezzo (il pezzo
-    /// centrale, quello coperto, sparisce — comportamento "overwrite" di
-    /// un vero NLE). `old_start`/`old_end`/`source_in` sono lo stato
-    /// *attuale* della clip (letto dal chiamante prima di accodare
-    /// comandi, mai da uno stato immaginato). Ritorna `Some((id_sinistra,
-    /// id_destra))` solo nel caso di uno split, per permettere al
-    /// chiamante di ricollegare le due metà alla gemella coinvolta dalla
-    /// stessa operazione (vedi `make_room_for_ranges`). I comandi vengono
-    /// accodati a `commands`, non eseguiti subito.
-    fn resolve_overlap(
-        &mut self,
-        timeline_id: TimelineId,
-        track_index: usize,
-        clip_id: ClipId,
-        old_start: FrameIdx,
-        old_end: FrameIdx,
-        source_in: FrameIdx,
-        rate: vv_core::Rational,
-        new_start: FrameIdx,
-        new_end: FrameIdx,
-        commands: &mut Vec<Box<dyn vv_core::Command>>,
-    ) -> Option<(ClipId, ClipId)> {
-        // `TrimClip::new_value` è un frame *sorgente*, la posizione di
-        // taglio un frame di *timeline*: la conversione passa dal `rate`
-        // della clip (`Clip::source_frame_at`), non da una differenza
-        // diretta, che con una clip conformata sarebbe un'altra unità.
-        let source_at = |timeline_frame| {
-            vv_core::source_frame_of(rate, old_start, source_in, timeline_frame)
-        };
-        if old_start >= new_start && old_end <= new_end {
-            commands.push(Box::new(vv_core::LiftDelete::new(
-                timeline_id,
-                track_index,
-                clip_id,
-            )));
-            None
-        } else if old_start < new_start && old_end > new_end {
-            // Il nuovo intervallo cade nel mezzo: divide la clip in due,
-            // poi accorcia la metà destra dal suo bordo sinistro fino a
-            // `new_end` (la stessa formula usata sotto per `TrimEdge::Start`,
-            // applicata alla clip *originale*: vedi nota lì).
-            let right_id = self.project.alloc_clip_id();
-            commands.push(Box::new(
-                vv_core::SplitClip::new(timeline_id, track_index, clip_id, new_start)
-                    .with_new_clip_id(right_id),
-            ));
-            commands.push(Box::new(vv_core::TrimClip::new(
-                timeline_id,
-                track_index,
-                right_id,
-                vv_core::TrimEdge::Start,
-                source_at(new_end),
-            )));
-            Some((clip_id, right_id))
-        } else if old_start < new_start {
-            // La coda sporge oltre `new_start`: accorcia il bordo destro
-            // (fine) fin lì.
-            commands.push(Box::new(vv_core::TrimClip::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                vv_core::TrimEdge::End,
-                source_at(new_start),
-            )));
-            None
-        } else {
-            // La testa sporge prima di `new_end`: accorcia il bordo
-            // sinistro (inizio) fin lì.
-            commands.push(Box::new(vv_core::TrimClip::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                vv_core::TrimEdge::Start,
-                source_at(new_end),
-            )));
-            None
-        }
-    }
-
-    /// Libera `[start, end)` di ciascuna `(track_index, start, end)` in
-    /// `ranges`, per far posto a nuove clip che stanno per essere inserite
-    /// lì (paste): le clip già presenti che si sovrappongono vengono
-    /// accorciate, divise o rimosse — mai lasciate sovrapposte con la
-    /// nuova clip sopra (bug segnalato: l'anteprima riproduceva la clip
-    /// sottostante invece di quella appena incollata).
-    ///
-    /// Dividere una clip non tocca il `linked_group` della metà sinistra
-    /// (`SplitClip`, vedi doc): resta collegata a chiunque altro condivida
-    /// il gruppo, split o no. La metà *destra* invece è nuova e parte
-    /// scollegata — se altri membri del gruppo sono *anche loro* tra le
-    /// track coinvolte in `ranges` (il caso comune: si incolla sempre
-    /// l'intero gruppo video+audio insieme, vedi `copy_selected_clips`) e
-    /// vengono divisi dallo stesso taglio, le loro metà destre vengono
-    /// ricollegate tra loro subito dopo — stesso principio di
-    /// `split_at_playhead`. Un membro del gruppo fuori da `ranges` (si
-    /// sta incollando solo una parte del gruppo) resta semplicemente
-    /// intoccato, ancora nel gruppo originale.
-    ///
-    /// I comandi vengono accodati a `commands`, non eseguiti subito: il
-    /// chiamante li unisce in un'unica `CompositeCommand` insieme
-    /// all'inserimento vero e proprio, per un solo passo di undo.
-    fn make_room_for_ranges(
-        &mut self,
-        timeline_id: TimelineId,
-        ranges: &[(usize, FrameIdx, FrameIdx)],
-        commands: &mut Vec<Box<dyn vv_core::Command>>,
-    ) {
-        let mut processed: BTreeSet<(usize, ClipId)> = BTreeSet::new();
-        let range_tracks: BTreeSet<usize> = ranges.iter().map(|(t, _, _)| *t).collect();
-
-        for &(track_index, new_start, new_end) in ranges {
-            if new_start >= new_end {
-                continue;
-            }
-            type Overlapping = (
-                ClipId,
-                FrameIdx,
-                FrameIdx,
-                FrameIdx,
-                vv_core::Rational,
-                Option<vv_core::LinkGroupId>,
-            );
-            let overlapping: Vec<Overlapping> =
-                self.project.timelines[timeline_id]
-                    .tracks
-                    .get(track_index)
-                    .map(|t| {
-                        t.clips
-                            .iter()
-                            .filter(|c| c.timeline_start < new_end && c.timeline_end() > new_start)
-                            .map(|c| {
-                                (
-                                    c.id,
-                                    c.timeline_start,
-                                    c.timeline_end(),
-                                    c.source_in,
-                                    c.rate,
-                                    c.linked_group,
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-            for (clip_id, old_start, old_end, source_in, rate, group) in overlapping {
-                if !processed.insert((track_index, clip_id)) {
-                    continue;
-                }
-                let split_halves = self.resolve_overlap(
-                    timeline_id,
-                    track_index,
-                    clip_id,
-                    old_start,
-                    old_end,
-                    source_in,
-                    rate,
-                    new_start,
-                    new_end,
-                    commands,
-                );
-
-                let Some(_group) = group else { continue };
-                let mut new_rights: Vec<(usize, ClipId)> = split_halves
-                    .map(|(_left, right)| (track_index, right))
-                    .into_iter()
-                    .collect();
-
-                for (member_track, member_id) in self.group_members(timeline_id, track_index, clip_id) {
-                    if !range_tracks.contains(&member_track)
-                        || !processed.insert((member_track, member_id))
-                    {
-                        continue;
-                    }
-                    let Some((m_start, m_end, m_source_in, m_rate)) =
-                        self.clip_bounds(timeline_id, member_track, member_id)
-                    else {
-                        continue;
-                    };
-                    let member_split = self.resolve_overlap(
-                        timeline_id,
-                        member_track,
-                        member_id,
-                        m_start,
-                        m_end,
-                        m_source_in,
-                        m_rate,
-                        new_start,
-                        new_end,
-                        commands,
-                    );
-                    if let Some((_, right)) = member_split {
-                        new_rights.push((member_track, right));
-                    }
-                }
-
-                if new_rights.len() >= 2 {
-                    commands.push(Box::new(vv_core::LinkClips::new(timeline_id, new_rights)));
-                }
-            }
-        }
-    }
-
     /// Incolla `timeline_state.clipboard` (Ctrl+C/Ctrl+V) alla posizione
     /// del playhead, preservando la disposizione relativa se erano state
     /// copiate più clip insieme, e ricollegando tra loro le coppie
@@ -2530,7 +2295,7 @@ impl VibeVideoApp {
                 )
             })
             .collect();
-        self.make_room_for_ranges(timeline_id, &ranges, &mut commands);
+        vv_core::make_room_for_ranges(&mut self.project, timeline_id, &ranges, &[], &mut commands);
 
         let mut new_selection = BTreeSet::new();
         for (i, entry) in entries.iter().enumerate() {
@@ -2607,6 +2372,7 @@ impl VibeVideoApp {
             // shiftando tutte le track — stessa meccanica del ripple
             // delete su una clip, ma senza nulla da rimuovere.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
+                let mark = self.history.begin_group();
                 self.history.do_command(
                     &mut self.project,
                     Box::new(vv_core::RippleDeleteGap::new(
@@ -2615,6 +2381,8 @@ impl VibeVideoApp {
                         gap_end - gap_start,
                     )),
                 );
+                self.cut_remaining_overlaps(timeline_id);
+                self.history.end_group(mark);
                 self.move_playhead_to_closed_gap(timeline_id, gap_start);
                 self.timeline_state.clear_selection();
                 self.sync_selection_to_playhead();
@@ -2624,47 +2392,95 @@ impl VibeVideoApp {
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
 
         let mut processed: BTreeSet<(usize, ClipId)> = BTreeSet::new();
-        let mut units: Vec<RippleUnit> = Vec::new();
+        let mut removed: Vec<(usize, ClipId, FrameIdx, FrameIdx)> = Vec::new();
         for &(track_index, clip_id) in &selected {
-            if !processed.insert((track_index, clip_id)) {
-                continue;
-            }
-            let start = self.project.timelines[timeline_id].tracks[track_index]
-                .clips
-                .iter()
-                .find(|c| c.id == clip_id)
-                .map(|c| c.timeline_start)
-                .unwrap_or(0);
-            let mut also_remove = Vec::new();
-            for member in self.group_members(timeline_id, track_index, clip_id) {
-                if processed.insert(member) {
-                    also_remove.push(member);
+            for (member_track, member_id) in std::iter::once((track_index, clip_id))
+                .chain(self.group_members(timeline_id, track_index, clip_id))
+            {
+                if !processed.insert((member_track, member_id)) {
+                    continue;
                 }
+                let Some(clip) = self.project.timelines[timeline_id]
+                    .tracks
+                    .get(member_track)
+                    .and_then(|t| t.clips.iter().find(|c| c.id == member_id))
+                else {
+                    continue;
+                };
+                removed.push((
+                    member_track,
+                    member_id,
+                    clip.timeline_start,
+                    clip.timeline_end(),
+                ));
             }
-            units.push(((track_index, clip_id), start, also_remove));
         }
-        units.sort_by_key(|(_, start, _)| std::cmp::Reverse(*start));
-        let leftmost_removed = units.last().map(|(_, start, _)| *start);
 
-        let commands: Vec<Box<dyn vv_core::Command>> = units
-            .into_iter()
-            .map(|((track_index, clip_id), _, also_remove)| {
-                Box::new(
-                    vv_core::RippleDeleteAllTracks::new(timeline_id, track_index, clip_id)
-                        .with_also_remove(also_remove),
-                ) as Box<dyn vv_core::Command>
+        // I buchi lasciati dalle clip rimosse, uniti quando si
+        // sovrappongono: lo stesso tratto di timeline va chiuso *una volta
+        // sola*, anche se lì c'erano più clip su track diverse (video e
+        // audio non collegati, per esempio) — chiuderlo una volta per clip
+        // farebbe arretrare il resto del doppio, sovrapponendolo a quel che
+        // già c'era.
+        let mut gaps: Vec<(FrameIdx, FrameIdx)> = removed
+            .iter()
+            .map(|&(_, _, start, end)| (start, end))
+            .collect();
+        gaps.sort();
+        let mut merged: Vec<(FrameIdx, FrameIdx)> = Vec::new();
+        for (start, end) in gaps {
+            match merged.last_mut() {
+                Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        let leftmost_removed = merged.first().map(|&(start, _)| start);
+
+        let mut commands: Vec<Box<dyn vv_core::Command>> = removed
+            .iter()
+            .map(|&(track_index, clip_id, _, _)| {
+                Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id))
+                    as Box<dyn vv_core::Command>
             })
             .collect();
+        // Da destra a sinistra: chiudere un buco sposta quel che gli sta
+        // dopo, non quel che gli sta prima, quindi i buchi ancora da
+        // chiudere restano dove li abbiamo misurati.
+        for &(start, end) in merged.iter().rev() {
+            commands.push(Box::new(vv_core::RippleDeleteGap::new(
+                timeline_id,
+                start,
+                end - start,
+            )));
+        }
 
+        let mark = self.history.begin_group();
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
+        self.cut_remaining_overlaps(timeline_id);
+        self.history.end_group(mark);
         if let Some(position) = leftmost_removed {
             self.move_playhead_to_closed_gap(timeline_id, position);
         }
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
+    }
+
+    /// Dopo uno spostamento in blocco, taglia le sovrapposizioni che ne
+    /// fossero rimaste (vedi `vv_core::cut_overlaps`): vince sempre la clip
+    /// che comincia dopo, quella appena arrivata lì.
+    fn cut_remaining_overlaps(&mut self, timeline_id: TimelineId) {
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        vv_core::cut_overlaps(&mut self.project, timeline_id, &mut commands);
+        if commands.is_empty() {
+            return;
+        }
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
     }
 
     /// Dopo un ripple delete la testina va dove ora comincia la clip
@@ -2753,6 +2569,24 @@ impl VibeVideoApp {
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
+
+        // Il taglio può cadere un frame più in là della testina (vedi
+        // `SplitClip`: con una clip conformata non c'è un bordo di frame
+        // sorgente a ogni frame di timeline). La testina va dove il taglio
+        // è finito davvero, così la linea resta sempre sul taglio.
+        if let Some(cut) = new_ids.values().find_map(|new_id| {
+            self.project.timelines[timeline_id]
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == *new_id)
+                .map(|c| c.timeline_start)
+        }) && cut != playhead
+        {
+            self.timeline_state.playhead = cut;
+            self.ensure_active_clip_matches_playhead(true);
+        }
+
         // "Selection follows playhead": seleziona la metà SINISTRA appena
         // tagliata sulla track video attiva (il suo id è invariato, la
         // metà che ha ottenuto un nuovo id è la destra — vedi sopra) *e*
@@ -5506,6 +5340,131 @@ mod tests {
         assert_eq!(clip.source_frame_at(clip.timeline_end() - 1), 2999);
     }
 
+    /// Allungare il bordo di una clip sopra la vicina la sovrascrive: la
+    /// vicina viene tagliata dove arriva il nuovo bordo, non spostata —
+    /// è quel che fa la UI al rilascio del trim (vedi
+    /// `PendingAction::Trim`), qui riprodotto con gli stessi comandi.
+    #[test]
+    fn extending_a_clip_over_its_neighbor_cuts_the_neighbor() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let b = make_timeline_with_clip(&mut app, 0, 10, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        apply_trim_with_overwrite(&mut app, timeline_id, 0, a, vv_core::TrimEdge::End, 15);
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, a);
+        assert_eq!(clips[0].timeline_end(), 15);
+        assert_eq!(clips[1].id, b);
+        assert_eq!(clips[1].timeline_start, 15, "la vicina è tagliata, non spostata");
+        assert_eq!(clips[1].timeline_end(), 20);
+    }
+
+    /// Se l'allungamento copre la vicina per intero, la vicina sparisce.
+    #[test]
+    fn extending_a_clip_over_a_whole_neighbor_removes_it() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        make_timeline_with_clip(&mut app, 0, 10, 10);
+        let c = make_timeline_with_clip(&mut app, 0, 20, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        apply_trim_with_overwrite(&mut app, timeline_id, 0, a, vv_core::TrimEdge::End, 20);
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, a);
+        assert_eq!(clips[0].timeline_end(), 20);
+        assert_eq!(clips[1].id, c, "la clip coperta per intero è sparita");
+        assert_eq!(clips[1].timeline_start, 20, "quella dopo resta dov'è");
+    }
+
+    /// Allungando il bordo *sinistro* all'indietro vale la stessa regola.
+    #[test]
+    fn extending_a_clip_backwards_cuts_the_previous_neighbor() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        // b nasce con source_in 8: ha davvero 8 frame di margine per
+        // risalire sopra la vicina.
+        let b = app.project.alloc_clip_id();
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index: 0,
+                clip: vv_core::Clip {
+                    id: b,
+                    source: vv_core::ClipSource::SolidColor,
+                    source_in: 8,
+                    source_out: 18,
+                    timeline_start: 12,
+                    effects: vv_core::EffectStack::default(),
+                    linked_group: None,
+                    audio_stream_index: 0,
+                    rate: vv_core::Rational::one(),
+                },
+            }),
+        );
+
+        apply_trim_with_overwrite(&mut app, timeline_id, 0, b, vv_core::TrimEdge::Start, 6);
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, a);
+        assert_eq!(clips[0].timeline_end(), 6);
+        assert_eq!(clips[1].id, b);
+        assert_eq!(clips[1].timeline_start, 6);
+    }
+
+    /// Il trim di un bordo con l'overwrite di quel che incontra, come lo
+    /// compone la UI: prima si libera il tratto guadagnato, poi si trimma.
+    fn apply_trim_with_overwrite(
+        app: &mut VibeVideoApp,
+        timeline_id: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        edge: vv_core::TrimEdge,
+        new_value: FrameIdx,
+    ) {
+        let clip = app.project.timelines[timeline_id].tracks[track_index]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .unwrap()
+            .clone();
+        let range = match edge {
+            vv_core::TrimEdge::Start if new_value < clip.timeline_start => {
+                Some((track_index, new_value, clip.timeline_start))
+            }
+            vv_core::TrimEdge::End if new_value > clip.timeline_end() => {
+                Some((track_index, clip.timeline_end(), new_value))
+            }
+            _ => None,
+        };
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        vv_core::make_room_for_ranges(
+            &mut app.project,
+            timeline_id,
+            range.as_slice(),
+            &[(track_index, clip_id)],
+            &mut commands,
+        );
+        commands.push(Box::new(vv_core::TrimClip::new(
+            timeline_id,
+            track_index,
+            clip_id,
+            edge,
+            clip.source_frame_at(new_value),
+        )));
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+    }
+
     /// Copia/incolla di una clip conformata: la stessa durata di timeline,
     /// e il tratto liberato per lei (`make_room_for_ranges`) è quello che
     /// occuperà davvero.
@@ -5556,7 +5515,13 @@ mod tests {
         );
 
         let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-        app.make_room_for_ranges(timeline_id, &[(0, 2000, 4000)], &mut commands);
+        vv_core::make_room_for_ranges(
+            &mut app.project,
+            timeline_id,
+            &[(0, 2000, 4000)],
+            &[],
+            &mut commands,
+        );
         for command in commands {
             app.history.do_command(&mut app.project, command);
         }
@@ -5592,8 +5557,8 @@ mod tests {
         let mut app = VibeVideoApp::default();
         let video_a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
-        let audio_a = make_timeline_with_clip(&mut app, 1, 0, 10);
-        let _audio_b = make_timeline_with_clip(&mut app, 1, 10, 10);
+        let _audio_a = make_timeline_with_clip(&mut app, 1, 0, 10);
+        let audio_b = make_timeline_with_clip(&mut app, 1, 10, 10);
         let timeline_id = app.timeline_id.unwrap();
 
         app.timeline_state.selected = BTreeSet::from([(0, video_b)]);
@@ -5609,10 +5574,11 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[0].id, video_a);
         // La clip audio che partiva allo stesso istante si è spostata a 0
         // anche se sta su un'altra track: comportamento ripple globale.
-        assert_eq!(tl.tracks[1].clips.len(), 2);
-        assert_eq!(tl.tracks[1].clips[0].id, audio_a);
+        // Arrivando lì copre per intero quella che ci stava: vince chi
+        // arriva (vedi `cut_remaining_overlaps`), niente clip accatastate.
+        assert_eq!(tl.tracks[1].clips.len(), 1);
+        assert_eq!(tl.tracks[1].clips[0].id, audio_b);
         assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
-        assert_eq!(tl.tracks[1].clips[1].timeline_start, 0);
     }
 
     #[test]
@@ -5628,6 +5594,103 @@ mod tests {
         app.ripple_delete_selected();
 
         assert!(app.timeline_state.selected.is_empty());
+    }
+
+    /// Spostare una clip sopra un'altra la sovrascrive, come incollarcela
+    /// o allungarci un bordo sopra: è la stessa regola per tutti i modi di
+    /// piazzare una clip (`make_room_for_ranges`).
+    #[test]
+    fn moving_a_clip_onto_another_cuts_the_one_underneath() {
+        let mut app = VibeVideoApp::default();
+        let target = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let moved = make_timeline_with_clip(&mut app, 1, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        vv_core::make_room_for_ranges(
+            &mut app.project,
+            timeline_id,
+            &[(0, 10, 20)],
+            &[(1, moved), (0, moved)],
+            &mut commands,
+        );
+        commands.push(Box::new(vv_core::MoveClips::new(
+            timeline_id,
+            vec![(moved, 1, 0, 10)],
+        )));
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].id, target);
+        assert_eq!(clips[0].timeline_end(), 10, "tagliata dove arriva l'altra");
+        assert_eq!(clips[1].id, moved);
+        assert_eq!(clips[1].timeline_start, 10);
+    }
+
+    /// Due clip *non* collegate che coprono lo stesso tratto su track
+    /// diverse (il caso che nasce dividendo al playhead dopo aver
+    /// sovrascritto solo la parte video): quel tratto va chiuso una volta
+    /// sola, non una per clip — altrimenti il resto arretra del doppio e
+    /// finisce sopra a quel che c'era prima.
+    #[test]
+    fn ripple_delete_of_two_unlinked_clips_on_the_same_range_closes_it_once() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let video_mid = make_timeline_with_clip(&mut app, 0, 10, 10);
+        let video_last = make_timeline_with_clip(&mut app, 0, 20, 10);
+        make_timeline_with_clip(&mut app, 1, 0, 10);
+        let audio_mid = make_timeline_with_clip(&mut app, 1, 10, 10);
+        let audio_last = make_timeline_with_clip(&mut app, 1, 20, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.selected = BTreeSet::from([(0, video_mid), (1, audio_mid)]);
+        app.ripple_delete_selected();
+
+        let tl = &app.project.timelines[timeline_id];
+        for track in 0..2 {
+            assert_eq!(tl.tracks[track].clips.len(), 2);
+            assert_eq!(tl.tracks[track].clips[0].timeline_start, 0);
+            assert_eq!(
+                tl.tracks[track].clips[1].timeline_start, 10,
+                "arretrate di 10, non di 20"
+            );
+        }
+        assert_eq!(tl.tracks[0].clips[1].id, video_last);
+        assert_eq!(tl.tracks[1].clips[1].id, audio_last);
+    }
+
+    /// Se uno spostamento in blocco lascia comunque una sovrapposizione,
+    /// vince chi arriva: la clip sotto viene tagliata dove comincia
+    /// l'altra, non lasciata accatastata.
+    #[test]
+    fn ripple_delete_cuts_a_clip_the_shift_landed_on() {
+        let mut app = VibeVideoApp::default();
+        let video = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let audio_long = make_timeline_with_clip(&mut app, 1, 0, 30);
+        let audio_late = make_timeline_with_clip(&mut app, 1, 30, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        // Togliendo la clip video [0,10) tutto arretra di 10: l'audio
+        // lungo resta dov'è (comincia a 0) e quello dopo gli finisce
+        // sopra, da 20 invece che da 30.
+        app.timeline_state.selected = BTreeSet::from([(0, video)]);
+        app.ripple_delete_selected();
+
+        let tl = &app.project.timelines[timeline_id];
+        assert!(tl.tracks[0].clips.is_empty());
+        assert_eq!(tl.tracks[1].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips[0].id, audio_long);
+        assert_eq!(
+            tl.tracks[1].clips[0].timeline_end(),
+            20,
+            "tagliata dove comincia quella arrivata sopra"
+        );
+        assert_eq!(tl.tracks[1].clips[1].id, audio_late);
+        assert_eq!(tl.tracks[1].clips[1].timeline_start, 20);
     }
 
     /// Dopo un ripple delete la testina si sposta dove è appena arrivata

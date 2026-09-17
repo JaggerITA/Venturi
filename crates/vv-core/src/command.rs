@@ -2,10 +2,12 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem,
-    Project, Rgba, TimelineId, Track, TrackKind, Transform, TransformParam,
+    source_frame_of, Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId,
+    MediaId, MediaItem, Project, Rational, Rgba, TimelineId, Track, TrackKind, Transform,
+    TransformParam,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
@@ -854,7 +856,26 @@ impl Command for SplitClip {
             return; // fuori dal corpo della clip: niente da dividere
         }
 
-        let split_source = clip.source_frame_at(self.split_at);
+        // Il taglio può cadere solo su un bordo di frame *sorgente*: con
+        // una clip conformata (`Clip::rate`) un frame sorgente può coprire
+        // due frame di timeline, e in mezzo non c'è nessun bordo dove
+        // tagliare. Si prende il bordo più vicino a `split_at`, a parità
+        // quello prima — così il frame che si sta guardando è il primo
+        // della metà destra, invece di restare duplicato in coda a quella
+        // sinistra. Chi chiama può leggere da `new_clip_id` dove il taglio
+        // è finito davvero (`split_at_playhead` ci porta la testina).
+        let floor_source = clip.source_frame_at(self.split_at);
+        let split_source = if clip.timeline_frame_at(floor_source) == self.split_at {
+            floor_source
+        } else {
+            let before = self.split_at - clip.timeline_frame_at(floor_source);
+            let after = clip.timeline_frame_at(floor_source + 1) - self.split_at;
+            if after < before {
+                floor_source + 1
+            } else {
+                floor_source
+            }
+        };
         if split_source <= clip.source_in || split_source >= clip.source_out {
             return; // conformata: nessun frame sorgente cade davvero qui
         }
@@ -1473,4 +1494,308 @@ impl Command for RemoveMedia {
             }
         }
     }
+}
+
+/// `(timeline_start, timeline_end, source_in, rate)` di una clip, se
+/// esiste: quanto serve a `resolve_overlap` per convertire una
+/// posizione di timeline in frame sorgente.
+fn clip_bounds(
+    project: &Project,
+    timeline_id: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+) -> Option<(FrameIdx, FrameIdx, FrameIdx, Rational)> {
+    let clip = project.timelines[timeline_id]
+        .tracks
+        .get(track_index)?
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)?;
+    Some((
+        clip.timeline_start,
+        clip.timeline_end(),
+        clip.source_in,
+        clip.rate,
+    ))
+}
+
+/// Applica la modifica necessaria a *una* clip esistente che si
+/// sovrappone a `[new_start, new_end)`: rimossa se completamente
+/// coperta, accorciata da un bordo se sporge solo da un lato, divisa
+/// in due se il nuovo intervallo cade nel suo mezzo (il pezzo
+/// centrale, quello coperto, sparisce — comportamento "overwrite" di
+/// un vero NLE). `old_start`/`old_end`/`source_in` sono lo stato
+/// *attuale* della clip (letto dal chiamante prima di accodare
+/// comandi, mai da uno stato immaginato). Ritorna `Some((id_sinistra,
+/// id_destra))` solo nel caso di uno split, per permettere al
+/// chiamante di ricollegare le due metà alla gemella coinvolta dalla
+/// stessa operazione (vedi `make_room_for_ranges`). I comandi vengono
+/// accodati a `commands`, non eseguiti subito.
+#[allow(clippy::too_many_arguments)]
+fn resolve_overlap(
+    project: &mut Project,
+    timeline_id: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    old_start: FrameIdx,
+    old_end: FrameIdx,
+    source_in: FrameIdx,
+    rate: Rational,
+    new_start: FrameIdx,
+    new_end: FrameIdx,
+    commands: &mut Vec<Box<dyn Command>>,
+) -> Option<(ClipId, ClipId)> {
+    // `TrimClip::new_value` è un frame *sorgente*, la posizione di
+    // taglio un frame di *timeline*: la conversione passa dal `rate`
+    // della clip (`Clip::source_frame_at`), non da una differenza
+    // diretta, che con una clip conformata sarebbe un'altra unità.
+    let source_at = |timeline_frame| {
+        source_frame_of(rate, old_start, source_in, timeline_frame)
+    };
+    if old_start >= new_start && old_end <= new_end {
+        commands.push(Box::new(LiftDelete::new(
+            timeline_id,
+            track_index,
+            clip_id,
+        )));
+        None
+    } else if old_start < new_start && old_end > new_end {
+        // Il nuovo intervallo cade nel mezzo: divide la clip in due,
+        // poi accorcia la metà destra dal suo bordo sinistro fino a
+        // `new_end` (la stessa formula usata sotto per `TrimEdge::Start`,
+        // applicata alla clip *originale*: vedi nota lì).
+        let right_id = project.alloc_clip_id();
+        commands.push(Box::new(
+            SplitClip::new(timeline_id, track_index, clip_id, new_start)
+                .with_new_clip_id(right_id),
+        ));
+        commands.push(Box::new(TrimClip::new(
+            timeline_id,
+            track_index,
+            right_id,
+            TrimEdge::Start,
+            source_at(new_end),
+        )));
+        Some((clip_id, right_id))
+    } else if old_start < new_start {
+        // La coda sporge oltre `new_start`: accorcia il bordo destro
+        // (fine) fin lì.
+        commands.push(Box::new(TrimClip::new(
+            timeline_id,
+            track_index,
+            clip_id,
+            TrimEdge::End,
+            source_at(new_start),
+        )));
+        None
+    } else {
+        // La testa sporge prima di `new_end`: accorcia il bordo
+        // sinistro (inizio) fin lì.
+        commands.push(Box::new(TrimClip::new(
+            timeline_id,
+            track_index,
+            clip_id,
+            TrimEdge::Start,
+            source_at(new_end),
+        )));
+        None
+    }
+}
+
+/// Libera `[start, end)` di ciascuna `(track_index, start, end)` in
+/// `ranges`, per far posto a nuove clip che stanno per essere inserite
+/// lì (paste): le clip già presenti che si sovrappongono vengono
+/// accorciate, divise o rimosse — mai lasciate sovrapposte con la
+/// nuova clip sopra (bug segnalato: l'anteprima riproduceva la clip
+/// sottostante invece di quella appena incollata).
+///
+/// Dividere una clip non tocca il `linked_group` della metà sinistra
+/// (`SplitClip`, vedi doc): resta collegata a chiunque altro condivida
+/// il gruppo, split o no. La metà *destra* invece è nuova e parte
+/// scollegata — se altri membri del gruppo sono *anche loro* tra le
+/// track coinvolte in `ranges` (il caso comune: si incolla sempre
+/// l'intero gruppo video+audio insieme, vedi `copy_selected_clips`) e
+/// vengono divisi dallo stesso taglio, le loro metà destre vengono
+/// ricollegate tra loro subito dopo — stesso principio di
+/// `split_at_playhead`. Un membro del gruppo fuori da `ranges` (si
+/// sta incollando solo una parte del gruppo) resta semplicemente
+/// intoccato, ancora nel gruppo originale.
+///
+/// I comandi vengono accodati a `commands`, non eseguiti subito: il
+/// chiamante li unisce in un'unica `CompositeCommand` insieme
+/// all'inserimento vero e proprio, per un solo passo di undo.
+pub fn make_room_for_ranges(
+    project: &mut Project,
+    timeline_id: TimelineId,
+    ranges: &[(usize, FrameIdx, FrameIdx)],
+    exclude: &[(usize, ClipId)],
+    commands: &mut Vec<Box<dyn Command>>,
+) {
+    let mut processed: BTreeSet<(usize, ClipId)> = exclude.iter().copied().collect();
+    let range_tracks: BTreeSet<usize> = ranges.iter().map(|(t, _, _)| *t).collect();
+
+    for &(track_index, new_start, new_end) in ranges {
+        if new_start >= new_end {
+            continue;
+        }
+        type Overlapping = (
+            ClipId,
+            FrameIdx,
+            FrameIdx,
+            FrameIdx,
+            Rational,
+            Option<LinkGroupId>,
+        );
+        let overlapping: Vec<Overlapping> =
+            project.timelines[timeline_id]
+                .tracks
+                .get(track_index)
+                .map(|t| {
+                    t.clips
+                        .iter()
+                        .filter(|c| c.timeline_start < new_end && c.timeline_end() > new_start)
+                        .map(|c| {
+                            (
+                                c.id,
+                                c.timeline_start,
+                                c.timeline_end(),
+                                c.source_in,
+                                c.rate,
+                                c.linked_group,
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+        for (clip_id, old_start, old_end, source_in, rate, group) in overlapping {
+            if !processed.insert((track_index, clip_id)) {
+                continue;
+            }
+            let split_halves = resolve_overlap(project, 
+                timeline_id,
+                track_index,
+                clip_id,
+                old_start,
+                old_end,
+                source_in,
+                rate,
+                new_start,
+                new_end,
+                commands,
+            );
+
+            let Some(_group) = group else { continue };
+            let mut new_rights: Vec<(usize, ClipId)> = split_halves
+                .map(|(_left, right)| (track_index, right))
+                .into_iter()
+                .collect();
+
+            for (member_track, member_id) in group_members(project, timeline_id, track_index, clip_id) {
+                if !range_tracks.contains(&member_track)
+                    || !processed.insert((member_track, member_id))
+                {
+                    continue;
+                }
+                let Some((m_start, m_end, m_source_in, m_rate)) =
+                    clip_bounds(project, timeline_id, member_track, member_id)
+                else {
+                    continue;
+                };
+                let member_split = resolve_overlap(project, 
+                    timeline_id,
+                    member_track,
+                    member_id,
+                    m_start,
+                    m_end,
+                    m_source_in,
+                    m_rate,
+                    new_start,
+                    new_end,
+                    commands,
+                );
+                if let Some((_, right)) = member_split {
+                    new_rights.push((member_track, right));
+                }
+            }
+
+            if new_rights.len() >= 2 {
+                commands.push(Box::new(LinkClips::new(timeline_id, new_rights)));
+            }
+        }
+    }
+}
+
+
+/// Taglia le sovrapposizioni rimaste su ogni track: dove due clip si
+/// accavallano vince quella che comincia dopo (è quella appena arrivata
+/// lì), e quella sotto viene accorciata fino al suo bordo, o rimossa se ne
+/// resta coperta del tutto. Rete di sicurezza generale dopo le operazioni
+/// che spostano clip in blocco (il ripple delete): una sovrapposizione
+/// lasciata lì si vedrebbe e si *sentirebbe* — entrambe le tracce audio
+/// insieme, il video di quella sotto.
+///
+/// I comandi vengono accodati a `commands`, non eseguiti subito.
+pub fn cut_overlaps(
+    project: &mut Project,
+    timeline_id: TimelineId,
+    commands: &mut Vec<Box<dyn Command>>,
+) {
+    for track_index in 0..project.timelines[timeline_id].tracks.len() {
+        let clips: Vec<(ClipId, FrameIdx, FrameIdx, FrameIdx, Rational)> = project.timelines
+            [timeline_id]
+            .tracks[track_index]
+            .clips
+            .iter()
+            .map(|c| (c.id, c.timeline_start, c.timeline_end(), c.source_in, c.rate))
+            .collect();
+        for (i, &(clip_id, start, end, source_in, rate)) in clips.iter().enumerate() {
+            let Some(&(_, cut_at, _, _, _)) = clips[i + 1..]
+                .iter()
+                .filter(|&&(_, other_start, _, _, _)| other_start > start && other_start < end)
+                .min_by_key(|&&(_, other_start, _, _, _)| other_start)
+            else {
+                // Nessuna clip che comincia dentro questa: o non si
+                // sovrappone a nulla, o è lei quella coperta del tutto.
+                if clips[i + 1..]
+                    .iter()
+                    .any(|&(_, other_start, other_end, _, _)| {
+                        other_start <= start && other_end >= end
+                    })
+                {
+                    commands.push(Box::new(LiftDelete::new(timeline_id, track_index, clip_id)));
+                }
+                continue;
+            };
+            commands.push(Box::new(TrimClip::new(
+                timeline_id,
+                track_index,
+                clip_id,
+                TrimEdge::End,
+                source_frame_of(rate, start, source_in, cut_at),
+            )));
+        }
+    }
+}
+
+/// Gli altri membri del gruppo collegato di una clip, se ne ha uno.
+fn group_members(
+    project: &Project,
+    timeline_id: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+) -> Vec<(usize, ClipId)> {
+    let Some(group) = project.timelines[timeline_id]
+        .tracks
+        .get(track_index)
+        .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+        .and_then(|c| c.linked_group)
+    else {
+        return Vec::new();
+    };
+    project.timelines[timeline_id]
+        .clips_in_group(group)
+        .into_iter()
+        .filter(|&(_, id)| id != clip_id)
+        .collect()
 }

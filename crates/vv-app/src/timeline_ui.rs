@@ -277,8 +277,13 @@ enum PendingAction {
         moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)>,
     },
     /// (clip_id, track_index, edge, new_source_in/new_source_out) per ogni
-    /// clip del gruppo collegato.
-    Trim(Vec<(ClipId, usize, TrimEdge, FrameIdx)>),
+    /// clip del gruppo collegato, più il tratto di timeline che ciascuna
+    /// si è appena presa allungandosi (`(track_index, start, end)`): quel
+    /// che c'era lì viene sovrascritto, come in un vero NLE.
+    Trim {
+        trims: Vec<(ClipId, usize, TrimEdge, FrameIdx)>,
+        overwritten: Vec<(usize, FrameIdx, FrameIdx)>,
+    },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
     /// gruppo nuovo — almeno 2.
@@ -1656,11 +1661,22 @@ pub fn show_timeline(
                 // un bordo: qui cambia anche la *lunghezza* visualizzata, non
                 // solo la posizione, quindi non basta un nuovo `timeline_start`
                 // da solo (vedi il calcolo di `display_start`/`display_len`
-                // più sotto). Nessuno snap ai vicini per il trim (v1): solo il
-                // clamp già calcolato in `combined_trim_range`.
+                // più sotto). Il bordo trascinato si aggancia ai bordi delle
+                // altre clip come il drag di una clip intera, prima del
+                // clamp di `combined_trim_range`.
                 let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
                     let raw = t.original_value as f32 + t.accum_px / px_per_frame;
-                    (raw.round() as FrameIdx).clamp(t.min_value, t.max_value)
+                    let exclude: Vec<ClipId> = std::iter::once(t.clip_id)
+                        .chain(t.linked_others.iter().map(|&(id, _)| id))
+                        .collect();
+                    let snapped = snap_edge(
+                        raw.round() as FrameIdx,
+                        &visuals,
+                        &exclude,
+                        px_per_frame,
+                        snapping_enabled,
+                    );
+                    snapped.clamp(t.min_value, t.max_value)
                 });
 
                 // Impostati quando il drag/trim finisce, durante il loop
@@ -1676,12 +1692,35 @@ pub fn show_timeline(
                 let mut drag_finished = false;
                 let mut trim_finished = false;
 
-                // Clip.
-                for visual in &visuals {
-                    let is_trimming_this = state.trim.as_ref().is_some_and(|t| {
-                        t.clip_id == visual.clip.id
-                            || t.linked_others.contains(&(visual.clip.id, visual.track_index))
-                    });
+                // Clip. Quelle in movimento (trascinate o in trim, con le
+                // loro gemelle) si disegnano per ultime: sono loro a
+                // invadere le altre — e a sovrascriverle al rilascio —
+                // quindi devono passarci sopra, non finirci sotto.
+                let trimmed_keys: Vec<ClipKey> = state
+                    .trim
+                    .as_ref()
+                    .map(|t| {
+                        std::iter::once((t.track_index, t.clip_id))
+                            .chain(t.linked_others.iter().map(|&(id, track)| (track, id)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut moving_keys = trimmed_keys.clone();
+                if let Some(d) = &state.drag {
+                    moving_keys.push((d.track_index, d.clip_id));
+                    moving_keys.extend(d.followers.iter().map(|&(id, track, _)| (track, id)));
+                }
+                let draw_order: Vec<&ClipVisual> = visuals
+                    .iter()
+                    .filter(|v| !moving_keys.contains(&(v.track_index, v.clip.id)))
+                    .chain(
+                        visuals
+                            .iter()
+                            .filter(|v| moving_keys.contains(&(v.track_index, v.clip.id))),
+                    )
+                    .collect();
+                for visual in draw_order {
+                    let is_trimming_this = trimmed_keys.contains(&(visual.track_index, visual.clip.id));
                     let (display_start, display_len) = if is_trimming_this
                         && let (Some(t), Some(new_value)) = (&state.trim, trimmed_primary_new_value)
                     {
@@ -1940,6 +1979,10 @@ pub fn show_timeline(
                             let new_source_value = visual.clip.source_frame_at(new_value);
                             let mut trims =
                                 vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
+                            let mut overwritten =
+                                grown_range(&visual.clip, visual.track_index, t.edge, new_value)
+                                    .into_iter()
+                                    .collect::<Vec<_>>();
                             for &(partner_id, partner_track) in &t.linked_others {
                                 let Some(partner) =
                                     visuals.iter().find(|v| v.clip.id == partner_id)
@@ -1954,8 +1997,14 @@ pub fn show_timeline(
                                     t.edge,
                                     partner_new_source_value,
                                 ));
+                                overwritten.extend(grown_range(
+                                    &partner.clip,
+                                    partner_track,
+                                    t.edge,
+                                    new_value,
+                                ));
                             }
-                            pending = Some(PendingAction::Trim(trims));
+                            pending = Some(PendingAction::Trim { trims, overwritten });
                             trim_finished = true;
                         } else if let Some(d) = &state.drag
                             && d.clip_id == visual.clip.id
@@ -2110,15 +2159,60 @@ pub fn show_timeline(
                         (id, from_track, to_track, start)
                     })
                     .collect();
-                history.do_command(
+                // Dove atterrano se lo prendono: quel che c'era lì viene
+                // accorciato, diviso o rimosso, come per un incolla o per
+                // un bordo allungato sopra la vicina. Le clip che si
+                // stanno spostando restano fuori (`exclude`) — anche alla
+                // loro posizione di partenza, che può cadere dentro la
+                // destinazione di un'altra clip dello stesso gruppo.
+                let ranges: Vec<(usize, FrameIdx, FrameIdx)> = moves
+                    .iter()
+                    .filter_map(|&(id, from_track, to_track, start)| {
+                        let len = project.timelines[timeline_id]
+                            .tracks
+                            .get(from_track)?
+                            .clips
+                            .iter()
+                            .find(|c| c.id == id)?
+                            .timeline_len();
+                        Some((to_track, start, start + len))
+                    })
+                    .collect();
+                let exclude: Vec<(usize, ClipId)> = moves
+                    .iter()
+                    .flat_map(|&(id, from_track, to_track, _)| [(from_track, id), (to_track, id)])
+                    .collect();
+                let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+                vv_core::make_room_for_ranges(
                     project,
-                    Box::new(vv_core::MoveClips::new(timeline_id, moves)),
+                    timeline_id,
+                    &ranges,
+                    &exclude,
+                    &mut commands,
                 );
+                commands.push(Box::new(vv_core::MoveClips::new(timeline_id, moves)));
+                history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
             }
-            PendingAction::Trim(trims) => {
-                let commands: Vec<Box<dyn vv_core::Command>> = trims
-                    .into_iter()
-                    .map(|(clip_id, track_index, edge, new_value)| {
+            PendingAction::Trim { trims, overwritten } => {
+                // Il tratto guadagnato allungando la clip se lo prende lei:
+                // le clip che stavano lì vengono accorciate, divise o
+                // rimosse prima di applicare il trim vero e proprio. Le
+                // clip trimmate stesse restano fuori (`exclude`), o si
+                // taglierebbero da sole.
+                let exclude: Vec<(usize, ClipId)> = trims
+                    .iter()
+                    .map(|&(clip_id, track_index, _, _)| (track_index, clip_id))
+                    .collect();
+                let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+                vv_core::make_room_for_ranges(
+                    project,
+                    timeline_id,
+                    &overwritten,
+                    &exclude,
+                    &mut commands,
+                );
+                commands.extend(trims.into_iter().map(
+                    |(clip_id, track_index, edge, new_value)| {
                         Box::new(vv_core::TrimClip::new(
                             timeline_id,
                             track_index,
@@ -2126,8 +2220,8 @@ pub fn show_timeline(
                             edge,
                             new_value,
                         )) as Box<dyn vv_core::Command>
-                    })
-                    .collect();
+                    },
+                ));
                 history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
             }
             PendingAction::Unlink(track_index, clip_id) => {
@@ -2458,26 +2552,6 @@ fn neighbor_bounds_at(
     (lower_bound, upper_bound)
 }
 
-fn neighbor_bounds(
-    visuals: &[ClipVisual],
-    track_index: usize,
-    moving_id: ClipId,
-) -> (FrameIdx, FrameIdx) {
-    let Some(moving) = visuals
-        .iter()
-        .find(|v| v.track_index == track_index && v.clip.id == moving_id)
-    else {
-        return (0, FrameIdx::MAX);
-    };
-    neighbor_bounds_at(
-        visuals,
-        track_index,
-        &[moving_id],
-        moving.clip.timeline_start,
-        moving.clip.timeline_len(),
-    )
-}
-
 fn max_start_in_slot(lower: FrameIdx, upper: FrameIdx, len: FrameIdx) -> FrameIdx {
     upper.saturating_sub(len).max(lower)
 }
@@ -2669,7 +2743,7 @@ fn combined_trim_range(
         return (0, FrameIdx::MAX, Vec::new());
     };
     let (mut min_value, mut max_value) =
-        single_trim_range(visuals, project, track_index, &visual.clip, edge);
+        single_trim_range(project, &visual.clip, edge);
 
     let Some(group) = visual.clip.linked_group else {
         return (min_value, max_value, Vec::new());
@@ -2684,7 +2758,7 @@ fn combined_trim_range(
         .filter(|v| v.clip.linked_group == Some(group) && v.clip.id != clip_id)
     {
         let (o_min, o_max) =
-            single_trim_range(visuals, project, other.track_index, &other.clip, edge);
+            single_trim_range(project, &other.clip, edge);
         min_value = min_value.max(o_min);
         max_value = max_value.min(o_max);
         linked_others.push((other.clip.id, other.track_index));
@@ -2692,36 +2766,27 @@ fn combined_trim_range(
     (min_value, max_value, linked_others)
 }
 
-fn single_trim_range(
-    visuals: &[ClipVisual],
-    project: &Project,
-    track_index: usize,
-    clip: &Clip,
-    edge: TrimEdge,
-) -> (FrameIdx, FrameIdx) {
-    let (lower, upper) = neighbor_bounds(visuals, track_index, clip.id);
+/// I vicini sulla track non limitano il trim: allungando un bordo oltre
+/// un'altra clip la si sovrascrive (`make_room_for_ranges` al rilascio),
+/// come in un vero NLE. I soli limiti sono il sorgente e il bordo opposto
+/// della clip stessa.
+fn single_trim_range(project: &Project, clip: &Clip, edge: TrimEdge) -> (FrameIdx, FrameIdx) {
     match edge {
         TrimEdge::Start => {
-            // Non oltre il vicino precedente sulla track, non oltre la
-            // fine meno 1 frame (deve restare almeno un frame di
-            // contenuto), e non prima dell'inizio del sorgente
+            // Non oltre la fine meno 1 frame (deve restare almeno un frame
+            // di contenuto) e non prima dell'inizio del sorgente
             // (source_in non può scendere sotto 0).
-            let min_value = lower.max(clip.timeline_frame_at(0));
+            let min_value = clip.timeline_frame_at(0).max(0);
             let max_value = clip.timeline_end() - 1;
             (min_value, max_value.max(min_value))
         }
         TrimEdge::End => {
-            // Non oltre il vicino successivo, non oltre l'inizio più 1
-            // frame, e non oltre la durata reale del sorgente (illimitato
-            // per un generatore SolidColor, che non ne ha una — calcolato
-            // solo se c'è davvero un bound, per non sommare a
-            // `FrameIdx::MAX` e andare in overflow).
-            let media_bound = media_duration_frames(project, clip)
-                .map(|max_source_out| clip.timeline_frame_at(max_source_out));
-            let max_value = match media_bound {
-                Some(bound) => upper.min(bound),
-                None => upper,
-            };
+            // Non oltre l'inizio più 1 frame e non oltre la durata reale
+            // del sorgente (illimitata per un generatore SolidColor, che
+            // non ne ha una).
+            let max_value = media_duration_frames(project, clip)
+                .map(|max_source_out| clip.timeline_frame_at(max_source_out))
+                .unwrap_or(FrameIdx::MAX);
             let min_value = clip.timeline_start + 1;
             (min_value, max_value.max(min_value))
         }
@@ -2738,10 +2803,56 @@ fn media_duration_frames(project: &Project, clip: &Clip) -> Option<FrameIdx> {
     }
 }
 
+/// Il tratto di timeline che una clip si prende allungando `edge` fino a
+/// `new_value`, se si è allungata: `None` se l'ha invece accorciata.
+fn grown_range(
+    clip: &Clip,
+    track_index: usize,
+    edge: TrimEdge,
+    new_value: FrameIdx,
+) -> Option<(usize, FrameIdx, FrameIdx)> {
+    match edge {
+        TrimEdge::Start if new_value < clip.timeline_start => {
+            Some((track_index, new_value, clip.timeline_start))
+        }
+        TrimEdge::End if new_value > clip.timeline_end() => {
+            Some((track_index, clip.timeline_end(), new_value))
+        }
+        _ => None,
+    }
+}
+
 /// Soglia di aggancio della calamita, in pixel schermo (non in frame:
 /// resta la stessa distanza visiva a qualunque livello di zoom, convertita
 /// in frame da `snap_frame` in base a `px_per_frame`).
 const SNAP_THRESHOLD_PX: f32 = 10.0;
+
+/// Come `snap_frame`, ma per il singolo bordo trascinato in un trim: non
+/// c'è una clip da allineare per intero, solo il punto che si sta
+/// spostando, che si aggancia al bordo di clip più vicino entro soglia.
+fn snap_edge(
+    candidate: FrameIdx,
+    visuals: &[ClipVisual],
+    exclude: &[ClipId],
+    px_per_frame: f32,
+    enabled: bool,
+) -> FrameIdx {
+    if !enabled {
+        return candidate;
+    }
+    let threshold = (SNAP_THRESHOLD_PX / px_per_frame).round() as FrameIdx;
+    if threshold <= 0 {
+        return candidate;
+    }
+    visuals
+        .iter()
+        .filter(|v| !exclude.contains(&v.clip.id))
+        .flat_map(|v| [v.clip.timeline_start, v.clip.timeline_end()])
+        .map(|edge| ((candidate - edge).abs(), edge))
+        .filter(|&(delta, _)| delta <= threshold)
+        .min_by_key(|&(delta, _)| delta)
+        .map_or(candidate, |(_, edge)| edge)
+}
 
 /// Se la calamita è attiva, aggancia `candidate_start` (una clip lunga
 /// `len` frame) al bordo più vicino — inizio o fine — di un'altra clip
@@ -3149,7 +3260,10 @@ mod tests {
     #[test]
     fn neighbor_bounds_no_neighbors_is_unbounded() {
         let visuals = vec![visual(0, 1, 10, 5)];
-        assert_eq!(neighbor_bounds(&visuals, 0, ClipId(1)), (0, FrameIdx::MAX));
+        assert_eq!(
+            neighbor_bounds_at(&visuals, 0, &[ClipId(1)], 10, 5),
+            (0, FrameIdx::MAX)
+        );
     }
 
     #[test]
@@ -3160,7 +3274,7 @@ mod tests {
             visual(0, 3, 50, 5),  // inizia a 50
             visual(1, 4, 15, 3),  // altra track: ignorata
         ];
-        assert_eq!(neighbor_bounds(&visuals, 0, ClipId(2)), (10, 50));
+        assert_eq!(neighbor_bounds_at(&visuals, 0, &[ClipId(2)], 20, 30), (10, 50));
     }
 
     #[test]
@@ -3530,18 +3644,18 @@ mod tests {
         );
     }
 
+    /// Il vicino non limita più il trim: allungandosi sopra di lui lo
+    /// sovrascrive (vedi `PendingAction::Trim`), quindi l'unico limite
+    /// resta l'inizio del sorgente.
     #[test]
-    fn single_trim_range_start_is_clamped_by_the_previous_neighbor() {
+    fn single_trim_range_start_is_not_clamped_by_the_previous_neighbor() {
         let project = Project::default();
-        // La clip in trim ha source_in=8 (ampio margine per risalire):
-        // il vero limite è il vicino, non il sorgente.
         let visuals = vec![
             visual(0, 1, 0, 5), // finisce a 5
             media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
         ];
-        let (min_value, _) =
-            single_trim_range(&visuals, &project, 0, &visuals[1].clip, TrimEdge::Start);
-        assert_eq!(min_value, 5);
+        let (min_value, _) = single_trim_range(&project, &visuals[1].clip, TrimEdge::Start);
+        assert_eq!(min_value, 2, "10 - source_in 8, non il bordo del vicino");
     }
 
     #[test]
@@ -3559,7 +3673,7 @@ mod tests {
             vv_core::MediaId::default(),
         )];
         let (min_value, max_value) =
-            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::Start);
+            single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
         assert_eq!(min_value, 7);
         assert_eq!(
             max_value, 26,
@@ -3568,15 +3682,14 @@ mod tests {
     }
 
     #[test]
-    fn single_trim_range_end_is_clamped_by_the_next_neighbor() {
+    fn single_trim_range_end_is_not_clamped_by_the_next_neighbor() {
         let project = Project::default();
         let visuals = vec![
             visual(0, 1, 0, 10),  // in trim: [0,10)
-            visual(0, 2, 15, 10), // vicino successivo inizia a 15
+            visual(0, 2, 15, 10), // vicino successivo: si può sovrascrivere
         ];
-        let (_, max_value) =
-            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
-        assert_eq!(max_value, 15);
+        let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+        assert_eq!(max_value, FrameIdx::MAX);
     }
 
     #[test]
@@ -3586,7 +3699,7 @@ mod tests {
         // estendere la fine oltre timeline_start + (25 - source_in) = 25.
         let visuals = vec![media_clip_visual(0, 1, 0, 0, 20, media_id)];
         let (_, max_value) =
-            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+            single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
         assert_eq!(max_value, 25);
     }
 
@@ -3602,14 +3715,14 @@ mod tests {
             vv_core::Rational::conform_rate(vv_core::Rational::new(30, 1), vv_core::Rational::new(30_000, 1001));
 
         let (min_value, _) =
-            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::Start);
+            single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
         assert_eq!(
             min_value, 998,
             "2000 frame sorgente prima = 2002 di timeline prima di 3000"
         );
 
         let (_, max_value) =
-            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+            single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
         assert_eq!(
             max_value, 5002,
             "2000 frame sorgente residui = 2002 frame di timeline dopo 3000"
@@ -3621,21 +3734,22 @@ mod tests {
         let project = Project::default();
         let visuals = vec![visual(0, 1, 0, 10)];
         let (_, max_value) =
-            single_trim_range(&visuals, &project, 0, &visuals[0].clip, TrimEdge::End);
+            single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
         assert_eq!(max_value, FrameIdx::MAX);
     }
 
     #[test]
     fn combined_trim_range_intersects_both_clips_constraints() {
-        let project = Project::default();
-        // Video [10,30), collegato all'audio [10,30) sulla track 1; un
-        // vicino sulla track audio limita l'estensione della fine a 35.
+        // Video [10,30) generatore (fine illimitata), collegato all'audio
+        // [10,30) sulla track 1, il cui media finisce a 25 frame sorgente:
+        // il limite della gemella vale anche per il video.
+        let (project, media_id) = project_with_media(25);
         let group = Some(vv_core::LinkGroupId(9));
         let mut video = visual(0, 1, 10, 20);
         video.clip.linked_group = group;
-        let mut audio = visual(1, 2, 10, 20);
+        let mut audio = media_clip_visual(1, 2, 10, 0, 20, media_id);
         audio.clip.linked_group = group;
-        let visuals = vec![video, audio, visual(1, 3, 35, 10)];
+        let visuals = vec![video, audio];
 
         let (_, max_value, linked_others) =
             combined_trim_range(&visuals, &project, 0, ClipId(1), TrimEdge::End);
@@ -3644,6 +3758,25 @@ mod tests {
             "vincolo della gemella si applica anche al video"
         );
         assert_eq!(linked_others, vec![(ClipId(2), 1)]);
+    }
+
+    #[test]
+    fn snap_edge_snaps_the_trimmed_edge_to_a_nearby_clip_edge() {
+        // Clip vicina [20,30): il bordo trascinato a 18, entro soglia
+        // (10px / 5px per frame = 2 frame), si aggancia a 20.
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
+        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], 5.0, true), 20);
+    }
+
+    #[test]
+    fn snap_edge_ignores_the_clip_being_trimmed_and_far_edges() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
+        // Il proprio bordo (10) non è un aggancio valido.
+        assert_eq!(snap_edge(11, &visuals, &[ClipId(1)], 5.0, true), 11);
+        // Fuori soglia: nessun aggancio.
+        assert_eq!(snap_edge(15, &visuals, &[ClipId(1)], 5.0, true), 15);
+        // Calamita spenta: nessun aggancio nemmeno entro soglia.
+        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], 5.0, false), 18);
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub use command::{
     KeyframeValue,
     LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     RippleDeleteAllTracks,
-    ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain,
+    cut_overlaps, make_room_for_ranges, ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain,
     SetClipTransformParam, SplitClip,
     TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,
@@ -407,6 +407,44 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].timeline_start, original_start);
         assert_eq!(clips[0].timeline_end(), original_end);
+    }
+
+    /// Con una clip conformata un frame sorgente può coprire due frame di
+    /// timeline: lì in mezzo non c'è nessun bordo dove tagliare, e il
+    /// taglio va sul bordo più vicino — mai più lontano di un frame dal
+    /// punto richiesto, da una parte o dall'altra.
+    #[test]
+    fn split_clip_on_a_conformed_clip_cuts_at_the_nearest_source_boundary() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let mut a = make_clip(&mut project, 0, 3000);
+        a.rate = Rational::conform_rate(Rational::new(30, 1), Rational::new(30_000, 1001));
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+
+        for split_at in 1..3000 {
+            history.do_command(
+                &mut project,
+                Box::new(command::SplitClip::new(timeline, 0, a_id, split_at)),
+            );
+            let clips = &project.timelines[timeline].tracks[0].clips;
+            if clips.len() == 2 {
+                let cut = clips[1].timeline_start;
+                assert!(
+                    (cut - split_at).abs() <= 1,
+                    "taglio a {cut} per una richiesta a {split_at}"
+                );
+            }
+            history.undo(&mut project);
+        }
     }
 
     /// Trim del bordo sinistro di una clip conformata: la fine sulla
