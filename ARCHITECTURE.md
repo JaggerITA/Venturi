@@ -109,8 +109,10 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   in avanti si adatta al GOP osservato. Lookahead e behind sono
   configurabili dal menu Playback > Proxy; a velocità > 1x il lookahead scala.
 - **Anteprima dal media pool** (`browsing_media`): `vv_media::DecodeAhead`
-  su un solo file con una `FrameCache` propria; riproduzione video a
-  orologio di parete (senza audio), seek dalla barra sotto al viewer.
+  su un solo file con una `FrameCache` propria, seek dalla barra sotto al
+  viewer. L'audio passa dallo stesso `TimelineAudio` della timeline
+  (`sync_media`: uno snapshot con tutti gli stream del media), il cui clock
+  fa da testina.
 - **Proxy** (`vv-media/src/proxy.rs`, thread `vv-app::proxy_worker`): per
   ogni media importato, H.264 tutto-intra a 960px di larghezza in
   `$XDG_CACHE_HOME/vibevideo/proxies/`, chiave `content_hash` (fingerprint
@@ -157,8 +159,9 @@ Text overlay (`vv-render/src/text.rs`) non implementato.
   con `Arc` ai buffer già convertiti) a ogni cambio di `History::generation`
   o all'arrivo di un buffer, e lo pubblica al callback con un `try_lock`;
   gli snapshot vecchi si liberano sul thread UI. I buffer si decodificano in
-  background per `(path, audio_stream_index)` (`mix_buffers.rs`): finché
-  non sono pronti la clip suona silenzio.
+  background per `(path, audio_stream_index)` (`mix_buffers.rs`) e
+  pubblicati parziali mentre crescono: suona subito l'inizio della traccia,
+  silenzio solo oltre la parte già decodificata.
 - **Clock**: la posizione del mixer, in campioni di timeline, è il playhead
   (`drive_playback`); il video la insegue. Un vuoto è solo silenzio, il
   clock avanza lo stesso. Senza device audio il clock è a parete.
@@ -168,7 +171,6 @@ Text overlay (`vv-render/src/text.rs`) non implementato.
   quando la prima finestra è pronta.
 - **Scrub**: frammento di 80ms dal mix alla nuova posizione (opzione nel
   menu Timeline).
-- L'anteprima di un media dal media pool non suona.
 
 ## Undo/redo
 

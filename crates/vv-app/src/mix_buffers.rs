@@ -1,50 +1,78 @@
 //! Buffer audio già nel formato del mixer, per `(path, audio_stream_index)`.
-//! Decodifica + resample su un thread dedicato: finché un buffer non è
-//! pronto la clip suona silenzio.
+//! Decodifica + resample su un thread dedicato. Il buffer viene pubblicato
+//! parziale mentre cresce: il mixer suona l'inizio della traccia prima che
+//! la decodifica finisca, oltre la parte pronta c'è silenzio.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 
 type Key = (PathBuf, usize);
-type Ready = (Key, Option<Arc<Vec<f32>>>);
+
+struct Ready {
+    key: Key,
+    buffer: Option<Arc<Vec<f32>>>,
+    done: bool,
+}
+
+/// Secondi di audio dopo cui esce la prima pubblicazione; le successive a
+/// ogni raddoppio, così le copie del buffer costano ~2x la decodifica.
+const FIRST_PUBLISH_SECS: usize = 1;
 
 pub struct MixBufferCache {
-    /// `None` = in decodifica, oppure senza audio a quell'indice.
+    /// `None` = nessun campione ancora, oppure senza audio a quell'indice.
     entries: HashMap<Key, Option<Arc<Vec<f32>>>>,
-    job_tx: Option<mpsc::Sender<Key>>,
+    in_progress: HashSet<Key>,
+    job_tx: Option<mpsc::Sender<(Key, bool)>>,
     ready_rx: mpsc::Receiver<Ready>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl MixBufferCache {
     pub fn spawn(sample_rate: u32, channels: u16) -> Self {
-        let (job_tx, job_rx) = mpsc::channel::<Key>();
+        let (job_tx, job_rx) = mpsc::channel::<(Key, bool)>();
         let (ready_tx, ready_rx) = mpsc::channel::<Ready>();
         let handle = std::thread::spawn(move || {
-            while let Ok((path, stream)) = job_rx.recv() {
-                let buffer = match vv_media::decode_audio_track(&path, stream) {
-                    Ok(Some(audio)) => Some(Arc::new(vv_audio::mixer::prepare_mix_buffer(
-                        &audio.samples,
-                        audio.sample_rate,
-                        audio.channels,
-                        sample_rate,
-                        channels,
-                    ))),
-                    Ok(None) => None,
-                    Err(e) => {
-                        eprintln!("[mix_buffers] decodifica fallita per {}: {e}", path.display());
-                        None
+            let mut queue = VecDeque::new();
+            let mut done = HashSet::new();
+            loop {
+                if queue.is_empty() {
+                    match job_rx.recv() {
+                        Ok(job) => enqueue(&mut queue, job),
+                        Err(_) => break,
                     }
+                }
+                while let Ok(job) = job_rx.try_recv() {
+                    enqueue(&mut queue, job);
+                }
+                let Some(key) = queue.pop_front() else {
+                    continue;
                 };
-                if ready_tx.send(((path, stream), buffer)).is_err() {
+                // Gli altri stream in coda dello stesso file vanno nella
+                // stessa passata: arrivano tutti subito invece che in fila.
+                let mut streams = vec![key.1];
+                queue.retain(|(path, stream)| {
+                    let same_file = *path == key.0;
+                    if same_file && !streams.contains(stream) {
+                        streams.push(*stream);
+                    }
+                    !same_file
+                });
+                // Una richiesta prioritaria duplica una già in coda.
+                streams.retain(|&stream| done.insert((key.0.clone(), stream)));
+                if streams.is_empty() {
+                    continue;
+                }
+                if !decode_progressively(&key.0, &streams, sample_rate, channels, &ready_tx) {
                     break;
                 }
             }
         });
         Self {
             entries: HashMap::new(),
+            in_progress: HashSet::new(),
             job_tx: Some(job_tx),
             ready_rx,
             handle: Some(handle),
@@ -52,26 +80,50 @@ impl MixBufferCache {
     }
 
     /// Non bloccante: se il buffer non c'è ne accoda la decodifica (una
-    /// volta sola per chiave).
+    /// volta sola per chiave). Il buffer restituito può essere parziale.
     pub fn get_or_request(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+        self.request(path, stream, false)
+    }
+
+    /// Come `get_or_request`, ma la decodifica passa davanti a quelle in coda
+    /// (non interrompe quella in corso).
+    pub fn get_or_request_first(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+        self.request(path, stream, true)
+    }
+
+    fn request(&mut self, path: &Path, stream: usize, first: bool) -> Option<Arc<Vec<f32>>> {
         let key = (path.to_path_buf(), stream);
         if let Some(entry) = self.entries.get(&key) {
+            // Già in coda: ripetuta davanti, il worker scarta il duplicato.
+            if first
+                && entry.is_none()
+                && self.in_progress.contains(&key)
+                && let Some(tx) = &self.job_tx
+            {
+                let _ = tx.send((key.clone(), true));
+            }
             return entry.clone();
         }
         if let Some(tx) = &self.job_tx {
-            let _ = tx.send(key.clone());
+            let _ = tx.send((key.clone(), first));
         }
+        self.in_progress.insert(key.clone());
         self.entries.insert(key, None);
         None
     }
 
-    /// Raccoglie i buffer pronti; `true` se ne è arrivato almeno uno (lo
-    /// snapshot del mixer va ricostruito).
+    /// Raccoglie i buffer pronti (anche parziali); `true` se ne è arrivato
+    /// almeno uno (lo snapshot del mixer va ricostruito).
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((key, buffer)) = self.ready_rx.try_recv() {
-            changed |= buffer.is_some();
-            self.entries.insert(key, buffer);
+        while let Ok(ready) = self.ready_rx.try_recv() {
+            if ready.done {
+                self.in_progress.remove(&ready.key);
+            }
+            if ready.buffer.is_some() {
+                changed = true;
+                self.entries.insert(ready.key, ready.buffer);
+            }
         }
         changed
     }
@@ -79,8 +131,79 @@ impl MixBufferCache {
     #[cfg(test)]
     pub fn has_pending(&mut self) -> bool {
         self.poll();
-        self.entries.values().any(Option::is_none)
+        !self.in_progress.is_empty()
     }
+}
+
+fn enqueue(queue: &mut VecDeque<Key>, (key, first): (Key, bool)) {
+    if first {
+        queue.push_front(key);
+    } else {
+        queue.push_back(key);
+    }
+}
+
+/// `false` se il ricevente non c'è più (il worker deve uscire).
+fn decode_progressively(
+    path: &Path,
+    streams: &[usize],
+    sample_rate: u32,
+    channels: u16,
+    ready_tx: &mpsc::Sender<Ready>,
+) -> bool {
+    let key = |slot: usize| (path.to_path_buf(), streams[slot]);
+    let first_publish = FIRST_PUBLISH_SECS * sample_rate as usize * channels as usize;
+    let mut buffers = vec![Vec::new(); streams.len()];
+    let mut next_publish = vec![first_publish; streams.len()];
+    let mut receiver_gone = false;
+    let result = vv_media::decode_audio_streams_streaming(
+        path,
+        streams,
+        Some(sample_rate),
+        |slot, src_channels, chunk| {
+            let buffer = &mut buffers[slot];
+            buffer.extend(vv_audio::mixer::prepare_mix_buffer(
+                chunk,
+                sample_rate,
+                src_channels,
+                sample_rate,
+                channels,
+            ));
+            if buffer.len() < next_publish[slot] {
+                return ControlFlow::Continue(());
+            }
+            next_publish[slot] = buffer.len() * 2;
+            let ready = Ready {
+                key: key(slot),
+                buffer: Some(Arc::new(buffer.clone())),
+                done: false,
+            };
+            if ready_tx.send(ready).is_err() {
+                receiver_gone = true;
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        },
+    );
+    if receiver_gone {
+        return false;
+    }
+    let formats = result.unwrap_or_else(|e| {
+        eprintln!("[mix_buffers] decodifica fallita per {}: {e}", path.display());
+        vec![None; streams.len()]
+    });
+    for (slot, buffer) in buffers.into_iter().enumerate() {
+        let buffer = (formats[slot].is_some() && !buffer.is_empty()).then(|| Arc::new(buffer));
+        let ready = Ready {
+            key: key(slot),
+            buffer,
+            done: true,
+        };
+        if ready_tx.send(ready).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 impl Drop for MixBufferCache {
@@ -97,10 +220,10 @@ impl Drop for MixBufferCache {
 mod tests {
     use super::*;
 
-    fn wait_ready(cache: &mut MixBufferCache) {
+    fn wait_done(cache: &mut MixBufferCache) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !cache.poll() {
-            assert!(std::time::Instant::now() < deadline, "decodifica mai arrivata");
+        while cache.has_pending() {
+            assert!(std::time::Instant::now() < deadline, "decodifica mai finita");
             std::thread::yield_now();
         }
     }
@@ -139,10 +262,7 @@ mod tests {
         let mut cache = MixBufferCache::spawn(48_000, 2);
         assert!(cache.get_or_request(&path, 0).is_none());
         assert!(cache.get_or_request(&path, 1).is_none());
-        wait_ready(&mut cache);
-        if cache.get_or_request(&path, 0).is_none() || cache.get_or_request(&path, 1).is_none() {
-            wait_ready(&mut cache);
-        }
+        wait_done(&mut cache);
 
         let s0 = cache.get_or_request(&path, 0).expect("stream 0 pronto");
         let s1 = cache.get_or_request(&path, 1).expect("stream 1 pronto");
@@ -150,5 +270,109 @@ mod tests {
         assert!((frames(&s0) as i64 - 48_000).abs() < 100, "s0={}", frames(&s0));
         assert!((frames(&s1) as i64 - 24_000).abs() < 100, "s1={}", frames(&s1));
         assert!(cache.get_or_request(&path, 5).is_none(), "stream inesistente");
+    }
+
+    #[test]
+    fn a_long_track_is_published_partially_before_decoding_ends() {
+        let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.wav");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=20"])
+            .arg(path.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut cache = MixBufferCache::spawn(48_000, 2);
+        cache.get_or_request(&path, 0);
+        let mut lengths = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while cache.has_pending() {
+            assert!(std::time::Instant::now() < deadline, "decodifica mai finita");
+            if let Some(buffer) = cache.get_or_request(&path, 0)
+                && lengths.last() != Some(&buffer.len())
+            {
+                lengths.push(buffer.len());
+            }
+            std::thread::yield_now();
+        }
+        let full = cache.get_or_request(&path, 0).unwrap().len();
+        assert_eq!(full, 20 * 48_000 * 2);
+        assert!(
+            lengths.first().is_some_and(|&first| first < full),
+            "attesa almeno una pubblicazione parziale: {lengths:?}"
+        );
+    }
+
+    #[test]
+    fn a_priority_request_jumps_the_queue() {
+        let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = ["queue_a.wav", "queue_b.wav", "queue_c.wav"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                let status = std::process::Command::new("ffmpeg")
+                    .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=30"])
+                    .arg(path.to_str().unwrap())
+                    .status()
+                    .expect("ffmpeg CLI non trovato");
+                assert!(status.success());
+                path
+            })
+            .collect();
+
+        let mut cache = MixBufferCache::spawn(48_000, 2);
+        cache.get_or_request(&paths[0], 0);
+        cache.get_or_request(&paths[1], 0);
+        cache.get_or_request_first(&paths[2], 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "decodifica mai arrivata");
+            cache.poll();
+            if cache.get_or_request(&paths[2], 0).is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            cache.get_or_request(&paths[1], 0).is_none(),
+            "la richiesta prioritaria doveva passare davanti a quella in coda"
+        );
+    }
+
+    #[test]
+    fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
+        let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("three_streams_long.mkv");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=120"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000:duration=120"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=120"])
+            .args(["-map", "0:a", "-map", "1:a", "-map", "2:a", "-c:a", "aac"])
+            .arg(path.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut cache = MixBufferCache::spawn(48_000, 2);
+        for stream in 0..3 {
+            cache.get_or_request_first(&path, stream);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "decodifica mai arrivata");
+            cache.poll();
+            if (0..3).all(|stream| cache.get_or_request(&path, stream).is_some()) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(cache.in_progress.len(), 3, "nessuno stream doveva essere già finito");
+        let full = 120 * 48_000 * 2;
+        assert!((0..3).all(|stream| cache.get_or_request(&path, stream).unwrap().len() < full));
     }
 }

@@ -3,14 +3,15 @@
 //! del mix già stretchate in background. Senza device audio il clock è a
 //! parete e non suona nulla.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use vv_audio::mixer::{
-    MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE, StretchedWindow, mix_range,
+    MixClip, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE, StretchedWindow, mix_range,
     sample_to_timeline_frame, timeline_frame_to_sample,
 };
-use vv_core::{FrameIdx, Project, TimelineId};
+use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
 
 use crate::mix_buffers::MixBufferCache;
 
@@ -54,6 +55,8 @@ pub struct TimelineAudio {
     /// Fine del frammento di scrub e posizione da ripristinare.
     scrub_snippet: Option<(Instant, u64)>,
     synced: Option<(TimelineId, u64)>,
+    /// Media dell'anteprima del media pool attualmente nello snapshot.
+    synced_media: Option<PathBuf>,
     /// Al più uno stretch in volo; un risultato con altro id è superato.
     stretch_request: Option<StretchRequest>,
     next_request_id: u64,
@@ -79,6 +82,7 @@ impl TimelineAudio {
             wall_started_at: None,
             scrub_snippet: None,
             synced: None,
+            synced_media: None,
             stretch_request: None,
             next_request_id: 0,
             stretch_tx,
@@ -98,6 +102,7 @@ impl TimelineAudio {
             return;
         }
         self.synced = Some((timeline_id, generation));
+        self.synced_media = None;
         if self.mixer.is_none() {
             return;
         }
@@ -113,6 +118,39 @@ impl TimelineAudio {
             channels,
             |path, stream| buffers.get_or_request(path, stream),
         ));
+        self.publish();
+    }
+
+    /// Come `sync`, ma per l'anteprima di un media: suona tutti i suoi
+    /// `audio_streams` da inizio file, senza timeline.
+    pub fn sync_media(&mut self, path: &Path, audio_streams: usize, fps: f64) {
+        let buffers_arrived = self.buffers.poll();
+        if !buffers_arrived && self.synced_media.as_deref() == Some(path) {
+            return;
+        }
+        self.synced_media = Some(path.to_path_buf());
+        self.synced = None;
+        if self.mixer.is_none() {
+            return;
+        }
+        let (rate, channels) = (self.mix.sample_rate, self.mix.channels);
+        let clips: Vec<MixClip> = (0..audio_streams)
+            .filter_map(|stream| self.buffers.get_or_request_first(path, stream))
+            .map(|buffer| MixClip {
+                start: 0,
+                len: buffer.len() as u64 / channels.max(1) as u64,
+                source_offset: 0,
+                buffer,
+                gain_db: Keyframed::constant(0.0),
+                source_in: 0,
+                clip_fps: fps,
+            })
+            .collect();
+        self.mix = Arc::new(MixSnapshot {
+            sample_rate: rate,
+            channels,
+            clips,
+        });
         self.publish();
     }
 

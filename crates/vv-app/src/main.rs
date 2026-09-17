@@ -22,6 +22,8 @@ mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
 mod transport;
+
+
 mod waveform_worker;
 
 use eframe::wgpu;
@@ -287,9 +289,7 @@ struct VibeVideoApp {
     browse_playhead: FrameIdx,
     /// In/out dell'anteprima: la porzione trascinata dal viewer sulla timeline.
     browse_marks: transport::MarkRange,
-    /// Riproduzione dell'anteprima a orologio di parete (non c'è audio):
-    /// istante e frame di partenza.
-    browse_clock: Option<(std::time::Instant, FrameIdx)>,
+    browse_audio_streams: usize,
 
     /// Buffer video a livello di timeline: bufferizza N secondi avanti
     /// dal playhead attraversando quante clip servono (vedi doc del
@@ -405,7 +405,7 @@ impl Default for VibeVideoApp {
             browsing_media: None,
             browse_playhead: 0,
             browse_marks: transport::MarkRange::default(),
-            browse_clock: None,
+            browse_audio_streams: 0,
             render_ahead: None,
             render_ahead_generation: 0,
             timeline_audio: None,
@@ -852,11 +852,15 @@ impl VibeVideoApp {
             self.timeline_audio().pause();
         }
         self.reset_playback_speed_to_normal();
+        self.browse_audio_streams = if meta.has_audio {
+            vv_media::audio_streams(&path).map_or(1, |s| s.len().max(1))
+        } else {
+            0
+        };
         self.preview_meta = Some(meta);
         self.preview_error = None;
         self.browse_playhead = 0;
         self.browse_marks = transport::MarkRange::default();
-        self.browse_clock = None;
         match vv_media::DecodeAhead::spawn(path, self.cache_budget_bytes, 60) {
             Ok(decode_ahead) => self.browsing_decode_ahead = Some(decode_ahead),
             Err(e) => self.preview_error = Some(e.to_string()),
@@ -927,16 +931,30 @@ impl VibeVideoApp {
     }
 
     fn sync_timeline_audio(&mut self) {
-        if let (Some(timeline_id), Some(audio)) = (self.timeline_id, &mut self.timeline_audio) {
+        let fps = self.browse_fps();
+        let Some(audio) = &mut self.timeline_audio else {
+            return;
+        };
+        if let Some(media_id) = self.browsing_media {
+            if let Some(item) = self.project.media_pool.get(media_id) {
+                audio.sync_media(&item.path, self.browse_audio_streams, fps);
+            }
+        } else if let Some(timeline_id) = self.timeline_id {
             audio.sync(&self.project, timeline_id, self.history.generation());
         }
     }
 
     fn stop_browsing(&mut self) {
+        if self.browsing_media.is_some() && self.is_timeline_playing() {
+            self.timeline_audio().pause();
+            self.reset_playback_speed_to_normal();
+        }
         self.browsing_media = None;
         self.browsing_decode_ahead = None;
         self.preview_meta = None;
-        self.browse_clock = None;
+        // Il clock è rimasto alla posizione dell'anteprima: forza il seek al
+        // playhead della timeline.
+        self.last_synced_playhead = FrameIdx::MIN;
     }
 
     fn browse_total_frames(&self) -> FrameIdx {
@@ -947,8 +965,12 @@ impl VibeVideoApp {
         self.preview_meta.as_ref().map_or(1.0, |m| m.fps.as_f64().max(1e-9))
     }
 
+    /// Il clock del mixer fa da testina anche per l'anteprima, come per la
+    /// timeline.
     fn toggle_browse_playback(&mut self) {
-        if self.browse_clock.take().is_some() {
+        if self.is_timeline_playing() {
+            self.timeline_audio().pause();
+            self.reset_playback_speed_to_normal();
             return;
         }
         let total = self.browse_total_frames();
@@ -956,16 +978,20 @@ impl VibeVideoApp {
             return;
         }
         if self.browse_playhead >= total - 1 {
-            self.seek_browse(0);
+            self.browse_playhead = 0;
         }
-        self.browse_clock = Some((std::time::Instant::now(), self.browse_playhead));
+        self.seek_browse(self.browse_playhead);
+        self.timeline_audio();
+        self.sync_timeline_audio();
+        self.timeline_audio().play();
     }
 
     fn seek_browse(&mut self, frame: FrameIdx) {
         let frame = frame.clamp(0, (self.browse_total_frames() - 1).max(0));
         self.browse_playhead = frame;
-        if self.browse_clock.is_some() {
-            self.browse_clock = Some((std::time::Instant::now(), frame));
+        let fps = self.browse_fps();
+        if let Some(audio) = &mut self.timeline_audio {
+            audio.seek_frame(frame, fps);
         }
         if let Some(decode_ahead) = &self.browsing_decode_ahead
             && !decode_ahead.cache().contains(frame)
@@ -975,14 +1001,17 @@ impl VibeVideoApp {
     }
 
     fn drive_browse_playback(&mut self) {
-        let Some((started_at, start_frame)) = self.browse_clock else {
+        if self.browsing_media.is_none() || !self.is_timeline_playing() {
             return;
-        };
+        }
+        let fps = self.browse_fps();
         let last = (self.browse_total_frames() - 1).max(0);
-        let frame = start_frame + (started_at.elapsed().as_secs_f64() * self.browse_fps()) as FrameIdx;
+        let frame = self.timeline_audio().position_frame(fps);
         self.browse_playhead = frame.min(last);
         if frame >= last {
-            self.browse_clock = None;
+            self.timeline_audio().pause();
+            self.reset_playback_speed_to_normal();
+            self.timeline_audio().seek_frame(last, fps);
         }
     }
 
@@ -1113,7 +1142,7 @@ impl VibeVideoApp {
     /// accelera 2x -> 4x -> 8x. Solo la barra spaziatrice mette in pausa.
     fn handle_fast_playback_key(&mut self) {
         if self.browsing_media.is_some() {
-            if self.browse_clock.is_none() {
+            if !self.is_timeline_playing() {
                 self.toggle_browse_playback();
             }
             return;
@@ -3597,7 +3626,7 @@ impl eframe::App for VibeVideoApp {
                     total,
                     self.browse_playhead,
                     self.browse_marks.resolve(total),
-                    self.browse_clock.is_some(),
+                    self.is_timeline_playing(),
                 )
             } else {
                 let total = self
@@ -3820,7 +3849,7 @@ impl eframe::App for VibeVideoApp {
             ui.ctx().request_repaint();
         }
 
-        if self.is_timeline_playing() || self.browse_clock.is_some() {
+        if self.is_timeline_playing() {
             ui.ctx().request_repaint();
         }
 
@@ -5375,14 +5404,44 @@ mod tests {
         let (mut app, media_id) = browse_fixture("space.mp4");
         app.toggle_playback();
         assert_eq!(app.browsing_media, Some(media_id));
-        assert!(app.browse_clock.is_some());
+        assert!(app.is_timeline_playing());
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         app.drive_browse_playback();
         assert!(app.browse_playhead > 0, "la testina dell'anteprima doveva avanzare");
 
         app.toggle_playback();
-        assert!(app.browse_clock.is_none());
+        assert!(!app.is_timeline_playing());
+    }
+
+    #[test]
+    fn preview_plays_the_media_audio_and_leaving_it_restores_the_timeline_mix() {
+        let (mut app, _) = browse_fixture("audio.mp4");
+        let fps = app.browse_fps();
+        app.timeline_audio();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.sync_timeline_audio();
+            if !app.timeline_audio().has_pending_buffers() {
+                app.sync_timeline_audio();
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "decodifica audio mai arrivata");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let peak = |app: &VibeVideoApp| {
+            app.timeline_audio
+                .as_ref()
+                .unwrap()
+                .render(10, fps, 5)
+                .iter()
+                .fold(0.0f32, |m, s| m.max(s.abs()))
+        };
+        assert!(peak(&app) > 0.1, "l'anteprima deve suonare");
+
+        app.stop_browsing();
+        app.sync_timeline_audio();
+        assert_eq!(peak(&app), 0.0, "fuori dall'anteprima torna il mix della timeline, qui vuota");
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub mod proxy;
 pub mod thumbnail;
 pub mod waveform;
 
-pub use audio::{AudioBuffer, decode_audio_track};
+pub use audio::{AudioBuffer, decode_audio_track, decode_audio_streams_streaming};
 pub use cache::{FrameCache, SharedFrameCache, WantedRange};
 pub use decode::{ColorMatrix, Decoder, FrameYuv420, decode_first_frame};
 pub use encode::Encoder;
