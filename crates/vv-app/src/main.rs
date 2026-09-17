@@ -2615,6 +2615,7 @@ impl VibeVideoApp {
                         gap_end - gap_start,
                     )),
                 );
+                self.move_playhead_to_closed_gap(timeline_id, gap_start);
                 self.timeline_state.clear_selection();
                 self.sync_selection_to_playhead();
             }
@@ -2643,6 +2644,7 @@ impl VibeVideoApp {
             units.push(((track_index, clip_id), start, also_remove));
         }
         units.sort_by_key(|(_, start, _)| std::cmp::Reverse(*start));
+        let leftmost_removed = units.last().map(|(_, start, _)| *start);
 
         let commands: Vec<Box<dyn vv_core::Command>> = units
             .into_iter()
@@ -2658,8 +2660,27 @@ impl VibeVideoApp {
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
+        if let Some(position) = leftmost_removed {
+            self.move_playhead_to_closed_gap(timeline_id, position);
+        }
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
+    }
+
+    /// Dopo un ripple delete la testina va dove ora comincia la clip
+    /// scivolata indietro a chiudere il buco, cioè `position` (l'inizio di
+    /// quel che è stato tolto). Se lì non è arrivata nessuna clip — si era
+    /// tolto l'ultimo pezzo della timeline — la testina resta dov'è invece
+    /// di finire nel vuoto.
+    fn move_playhead_to_closed_gap(&mut self, timeline_id: vv_core::TimelineId, position: FrameIdx) {
+        let landed = self.project.timelines[timeline_id]
+            .tracks
+            .iter()
+            .any(|t| t.clips.iter().any(|c| c.timeline_start == position));
+        if landed {
+            self.timeline_state.playhead = position;
+            self.ensure_active_clip_matches_playhead(true);
+        }
     }
 
     /// Divide al playhead le clip selezionate che lo coprono o, senza
@@ -5607,6 +5628,60 @@ mod tests {
         app.ripple_delete_selected();
 
         assert!(app.timeline_state.selected.is_empty());
+    }
+
+    /// Dopo un ripple delete la testina si sposta dove è appena arrivata
+    /// la clip che ha chiuso il buco, così il prossimo play riparte dal
+    /// punto di giunzione invece che da dove stava prima.
+    #[test]
+    fn ripple_delete_selected_moves_playhead_to_the_clip_that_slid_back() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let b = make_timeline_with_clip(&mut app, 0, 10, 10);
+        let c = make_timeline_with_clip(&mut app, 0, 20, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.playhead = 25;
+        app.timeline_state.selected = BTreeSet::from([(0, b)]);
+        app.ripple_delete_selected();
+
+        assert_eq!(app.timeline_state.playhead, 10);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips[1].id, c);
+        assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
+    }
+
+    /// Senza nessuna clip che scivoli indietro (si è tolta l'ultima) non
+    /// c'è nessun punto di giunzione: la testina non va spostata nel vuoto.
+    #[test]
+    fn ripple_delete_selected_keeps_the_playhead_when_nothing_slides_back() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let b = make_timeline_with_clip(&mut app, 0, 10, 10);
+
+        app.timeline_state.playhead = 5;
+        app.timeline_state.selected = BTreeSet::from([(0, b)]);
+        app.ripple_delete_selected();
+
+        assert_eq!(app.timeline_state.playhead, 5);
+    }
+
+    /// Stessa regola per il ripple delete di un vuoto selezionato.
+    #[test]
+    fn ripple_delete_of_a_gap_moves_playhead_to_the_closed_gap() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let c = make_timeline_with_clip(&mut app, 0, 20, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.timeline_state.playhead = 0;
+        app.timeline_state.selected_gap = Some((0, 10, 20));
+        app.ripple_delete_selected();
+
+        assert_eq!(app.timeline_state.playhead, 10);
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips[1].id, c);
+        assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
     }
 
     /// Multi-selezione: cancellare due clip non adiacenti insieme (bug
