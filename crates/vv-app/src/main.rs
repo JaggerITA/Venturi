@@ -133,18 +133,17 @@ struct ParamKeyframeState {
     next: Option<FrameIdx>,
 }
 
-/// Scheda del pannello proprietà: i parametri di una clip video o quelli
-/// della sua parte audio.
+/// Scheda del pannello proprietà: i parametri di una clip video, quelli
+/// della sua parte audio, o l'elenco di tutto quel che è selezionato.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PropertiesTab {
     Video,
     Audio,
+    Selection,
 }
 
 #[derive(Debug, Clone)]
 struct ClipPanelInfo {
-    start: FrameIdx,
-    len: FrameIdx,
     is_solid_color: bool,
     /// Risoluzione nativa del media della clip e risoluzione della
     /// timeline: le unità dei parametri in pixel del `Transform` (il crop
@@ -158,6 +157,10 @@ struct ClipPanelInfo {
     gain_constant: bool,
     gain_kf_here: bool,
     gain: f32,
+    /// Keyframe di gain più vicini prima/dopo, in frame sorgente: le frecce
+    /// di navigazione della riga Volume.
+    gain_prev: Option<FrameIdx>,
+    gain_next: Option<FrameIdx>,
     color_constant: bool,
     color_kf_here: bool,
     color: vv_core::Rgba,
@@ -171,6 +174,7 @@ enum PendingEffectChange {
     SetFlip(usize, ClipId, [bool; 2]),
     ResetTransformParams(usize, ClipId, Vec<vv_core::TransformParam>, bool),
     SetGainDefault(usize, ClipId, f32),
+    ResetGain(usize, ClipId),
     SetColorDefault(usize, ClipId, vv_core::Rgba),
     UpsertTransformKeyframe(usize, ClipId, FrameIdx, vv_core::TransformParam, f32),
     UpsertGainKeyframe(usize, ClipId, FrameIdx, f32),
@@ -1625,6 +1629,66 @@ impl VibeVideoApp {
         Some(layers)
     }
 
+    /// La scheda "Selezione": tutto quel che è selezionato, video e audio
+    /// insieme, con i dati che prima stavano in cima al pannello dei
+    /// parametri (track, start, durata, frame corrente).
+    fn show_selection_list(
+        &self,
+        ui: &mut egui::Ui,
+        video_targets: &[PanelTarget],
+        audio_targets: &[PanelTarget],
+    ) {
+        let rows: Vec<(&str, &PanelTarget)> = video_targets
+            .iter()
+            .map(|t| ("Video", t))
+            .chain(audio_targets.iter().map(|t| ("Audio", t)))
+            .collect();
+        ui.label(format!("{} clip selezionate", rows.len()));
+        ui.add_space(4.0);
+        egui::Grid::new("selection_list")
+            .num_columns(6)
+            .striped(true)
+            .spacing(egui::vec2(10.0, 4.0))
+            .show(ui, |ui| {
+                for header in ["Tipo", "Track", "Nome", "Start", "Durata", "Frame"] {
+                    ui.label(egui::RichText::new(header).strong());
+                }
+                ui.end_row();
+                for (kind, target) in rows {
+                    let clip = self.timeline_id.and_then(|tid| {
+                        self.project.timelines[tid]
+                            .tracks
+                            .get(target.track_index)?
+                            .clips
+                            .iter()
+                            .find(|c| c.id == target.clip_id)
+                    });
+                    let (name, len) = match clip {
+                        Some(clip) => (
+                            match &clip.source {
+                                vv_core::ClipSource::Media(id) => self
+                                    .project
+                                    .media_pool
+                                    .get(*id)
+                                    .map(|item| file_label(&item.path))
+                                    .unwrap_or_else(|| "⚠ offline".to_string()),
+                                vv_core::ClipSource::SolidColor => "Solid Color".to_string(),
+                            },
+                            clip.timeline_len(),
+                        ),
+                        None => ("?".to_string(), 0),
+                    };
+                    ui.label(kind);
+                    ui.label(target.track_index.to_string());
+                    ui.label(name);
+                    ui.label(target.timeline_start.to_string());
+                    ui.label(len.to_string());
+                    ui.label(target.source_frame.to_string());
+                    ui.end_row();
+                }
+            });
+    }
+
     /// I valori da mostrare nel pannello proprietà per una clip bersaglio,
     /// valutati al suo `source_frame`.
     fn clip_panel_info(&self, target: PanelTarget) -> Option<ClipPanelInfo> {
@@ -1638,8 +1702,6 @@ impl VibeVideoApp {
             .find(|c| c.id == target.clip_id)?;
         let frame = target.source_frame;
         Some(ClipPanelInfo {
-            start: clip.timeline_start,
-            len: clip.timeline_len(),
             is_solid_color: target.is_solid_color,
             source_size: frame_provider::clip_source_size(&self.project, clip),
             timeline_size,
@@ -1659,6 +1721,21 @@ impl VibeVideoApp {
             gain_constant: clip.effects.gain_db.is_constant(),
             gain_kf_here: clip.effects.gain_db.keyframe_at(frame).is_some(),
             gain: clip.effects.gain_db.value_at(frame),
+            gain_prev: clip
+                .effects
+                .gain_db
+                .keyframes()
+                .iter()
+                .rev()
+                .find(|(f, _, _)| *f < frame)
+                .map(|(f, _, _)| *f),
+            gain_next: clip
+                .effects
+                .gain_db
+                .keyframes()
+                .iter()
+                .find(|(f, _, _)| *f > frame)
+                .map(|(f, _, _)| *f),
             color_constant: clip.effects.color.as_ref().is_none_or(|k| k.is_constant()),
             color_kf_here: clip
                 .effects
@@ -2862,6 +2939,55 @@ fn file_label(path: &std::path::Path) -> String {
 /// Disegnato a mano (non i glifi Unicode "◇"/"◆") perché su alcune
 /// combinazioni piattaforma/driver (es. Asahi Linux) i font bundled di
 /// egui non li renderizzano — appaiono come quadratini vuoti.
+/// Le schede del pannello in stile NLE: etichette affiancate, la sola
+/// attiva sottolineata — non pulsanti.
+fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab) {
+    const TABS: [(PropertiesTab, &str); 3] = [
+        (PropertiesTab::Video, "Video"),
+        (PropertiesTab::Audio, "Audio"),
+        (PropertiesTab::Selection, "Selezione"),
+    ];
+    const TAB_HEIGHT: f32 = 26.0;
+    const UNDERLINE: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (tab, label) in TABS {
+            let active = *current == tab;
+            let galley = ui.painter().layout_no_wrap(
+                label.to_string(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::PLACEHOLDER,
+            );
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(galley.size().x + 24.0, TAB_HEIGHT),
+                egui::Sense::click(),
+            );
+            if response.clicked() {
+                *current = tab;
+            }
+            let color = if active {
+                ui.visuals().strong_text_color()
+            } else if response.hovered() {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let text_pos = egui::pos2(
+                rect.center().x - galley.size().x / 2.0,
+                rect.center().y - galley.size().y / 2.0,
+            );
+            ui.painter().galley(text_pos, galley, color);
+            if active {
+                let y = rect.bottom() - 1.0;
+                ui.painter().line_segment(
+                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                    egui::Stroke::new(2.0, UNDERLINE),
+                );
+            }
+        }
+    });
+}
+
 /// Larghezza della colonna delle etichette nel pannello dei parametri:
 /// tutte allineate a destra, come nell'inspector di un NLE.
 const PARAM_LABEL_WIDTH: f32 = 96.0;
@@ -3013,6 +3139,9 @@ fn slider_field(
     speed: f64,
     decimals: usize,
 ) -> bool {
+    // La riga ha già speso la sua parte per etichetta, keyframe e reset:
+    // quel che resta (meno il campo numerico) va tutto allo slider.
+    ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(80.0, 260.0);
     let slider = ui.add(
         egui::Slider::new(value, range.clone())
             .show_value(false)
@@ -3208,6 +3337,9 @@ fn build_effect_command(
         }
         PendingEffectChange::SetGainDefault(track_index, clip_id, v) => Box::new(
             vv_core::SetClipGain::new(timeline_id, track_index, clip_id, v),
+        ),
+        PendingEffectChange::ResetGain(track_index, clip_id) => Box::new(
+            vv_core::ResetClipGain::new(timeline_id, track_index, clip_id),
         ),
         PendingEffectChange::SetColorDefault(track_index, clip_id, v) => Box::new(
             vv_core::SetClipColor::new(timeline_id, track_index, clip_id, v),
@@ -4174,23 +4306,7 @@ impl eframe::App for VibeVideoApp {
 
                     let selected_count = self.timeline_state.selected.len();
                     if selected_count > 0 {
-                        ui.heading(if selected_count == 1 {
-                            "Clip selezionata".to_string()
-                        } else {
-                            format!("{selected_count} clip selezionate")
-                        });
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.properties_tab,
-                                PropertiesTab::Video,
-                                "Video",
-                            );
-                            ui.selectable_value(
-                                &mut self.properties_tab,
-                                PropertiesTab::Audio,
-                                "Audio",
-                            );
-                        });
+                        properties_tab_bar(ui, &mut self.properties_tab);
                         ui.separator();
 
                         // I valori mostrati sono quelli della prima clip del
@@ -4198,9 +4314,13 @@ impl eframe::App for VibeVideoApp {
                         // scheda (le clip dell'altro tipo di track restano
                         // fuori: un transform su una clip audio non vuol
                         // dire niente).
-                        let targets = match self.properties_tab {
-                            PropertiesTab::Video => &video_targets,
-                            PropertiesTab::Audio => &audio_targets,
+                        if self.properties_tab == PropertiesTab::Selection {
+                            self.show_selection_list(ui, &video_targets, &audio_targets);
+                        } else {
+                        let targets = if self.properties_tab == PropertiesTab::Audio {
+                            &audio_targets
+                        } else {
+                            &video_targets
                         };
                         let primary = targets.first().copied();
                         let info = primary.and_then(|t| self.clip_panel_info(t));
@@ -4208,8 +4328,6 @@ impl eframe::App for VibeVideoApp {
                         match (primary, info) {
                             (Some(primary), Some(info)) => {
                                 let ClipPanelInfo {
-                                    start,
-                                    len,
                                     is_solid_color,
                                     source_size,
                                     timeline_size,
@@ -4217,18 +4335,13 @@ impl eframe::App for VibeVideoApp {
                                     gain_constant,
                                     gain_kf_here,
                                     mut gain,
+                                    gain_prev,
+                                    gain_next,
                                     color_constant,
                                     color_kf_here,
                                     mut color,
                                     ..
                                 } = info.clone();
-                                let track_index = primary.track_index;
-                                let source_frame = primary.source_frame;
-
-                                ui.label(format!("Track: {track_index}"));
-                                ui.label(format!("Start: {start} frame"));
-                                ui.label(format!("Durata: {len} frame"));
-                                ui.label(format!("Frame corrente (source): {source_frame}"));
                                 if targets.len() > 1 {
                                     ui.small(format!(
                                         "Modifiche applicate a tutte le {} clip di questa scheda.",
@@ -4238,6 +4351,9 @@ impl eframe::App for VibeVideoApp {
                                 ui.separator();
 
                                 match self.properties_tab {
+                                    // La scheda Selezione non arriva qui:
+                                    // è servita prima, senza clip primaria.
+                                    PropertiesTab::Selection => {}
                                     PropertiesTab::Video => {
                                         use vv_core::TransformParam as P;
                                         let (frame_w, frame_h) =
@@ -4639,32 +4755,25 @@ impl eframe::App for VibeVideoApp {
                                         }
                                     }
                                     PropertiesTab::Audio => {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Gain audio (dB)");
-                                            if keyframe_button(ui, gain_kf_here).clicked()
-                                            {
-                                                for t in targets {
-                                                    pending_effects.push(if gain_kf_here {
-                                                        PendingEffectChange::RemoveGainKeyframe(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            t.source_frame,
-                                                        )
-                                                    } else {
-                                                        PendingEffectChange::UpsertGainKeyframe(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            t.source_frame,
-                                                            gain,
-                                                        )
-                                                    });
-                                                }
-                                            }
-                                        });
-                                        if ui
-                                            .add(egui::Slider::new(&mut gain, -60.0..=12.0).text("dB"))
-                                            .changed()
-                                        {
+                                        let row = param_row(
+                                            ui,
+                                            "Volume",
+                                            Some(RowKeyframe {
+                                                on_keyframe: gain_kf_here,
+                                                prev: gain_prev,
+                                                next: gain_next,
+                                            }),
+                                            |ui| {
+                                                slider_field(
+                                                    ui,
+                                                    &mut gain,
+                                                    -100.0..=30.0,
+                                                    0.2,
+                                                    1,
+                                                )
+                                            },
+                                        );
+                                        if row.changed {
                                             for t in targets {
                                                 pending_effects.push(if gain_constant {
                                                     PendingEffectChange::SetGainDefault(
@@ -4682,15 +4791,56 @@ impl eframe::App for VibeVideoApp {
                                                 });
                                             }
                                         }
+                                        if row.toggled_keyframe {
+                                            for t in targets {
+                                                pending_effects.push(if gain_kf_here {
+                                                    PendingEffectChange::RemoveGainKeyframe(
+                                                        t.track_index,
+                                                        t.clip_id,
+                                                        t.source_frame,
+                                                    )
+                                                } else {
+                                                    PendingEffectChange::UpsertGainKeyframe(
+                                                        t.track_index,
+                                                        t.clip_id,
+                                                        t.source_frame,
+                                                        gain,
+                                                    )
+                                                });
+                                            }
+                                        }
+                                        if row.reset {
+                                            for t in targets {
+                                                pending_effects.push(PendingEffectChange::ResetGain(
+                                                    t.track_index,
+                                                    t.clip_id,
+                                                ));
+                                            }
+                                        }
+                                        if let Some(source_frame) = row.goto {
+                                            pending_playhead = self
+                                                .timeline_id
+                                                .and_then(|tid| {
+                                                    self.project.timelines[tid]
+                                                        .tracks
+                                                        .get(primary.track_index)?
+                                                        .clips
+                                                        .iter()
+                                                        .find(|c| c.id == primary.clip_id)
+                                                })
+                                                .map(|c| c.timeline_frame_at(source_frame));
+                                        }
                                     }
                                 }
                             }
                             _ => {
-                                ui.small(match self.properties_tab {
-                                    PropertiesTab::Video => "Nessuna clip video selezionata.",
-                                    PropertiesTab::Audio => "Nessuna clip audio selezionata.",
+                                ui.small(if self.properties_tab == PropertiesTab::Audio {
+                                    "Nessuna clip audio selezionata."
+                                } else {
+                                    "Nessuna clip video selezionata."
                                 });
                             }
+                        }
                         }
                     } else if let Some(timeline_id) = self.timeline_id {
                         let tl = &self.project.timelines[timeline_id];

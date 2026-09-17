@@ -7,7 +7,7 @@ pub use command::{
     KeyframeValue,
     LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     RippleDeleteAllTracks,
-    ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain,
+    ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain,
     SetClipTransformParam, SplitClip,
     TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,

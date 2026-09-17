@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use vv_core::{
-    Clip, ClipId, ClipSource, EffectStack, FrameIdx, History, Project, TimelineId, Track,
+    Clip, ClipId, ClipSource, EffectStack, FrameIdx, History, Keyframed, Project, TimelineId, Track,
     TrackKind, TrimEdge,
 };
 
@@ -1771,15 +1771,27 @@ pub fn show_timeline(
                         && let Some(wf) = waveform_cache
                             .get(&(item.content_hash, visual.clip.audio_stream_index))
                     {
+                        // Durante un trim la clip disegnata copre un'altra
+                        // fascia di sorgente: senza rimapparla la forma
+                        // d'onda si stirerebbe invece di essere tagliata.
+                        let (wave_in, wave_out) = if is_trimming_this {
+                            (
+                                visual.clip.source_frame_at(display_start),
+                                visual.clip.source_frame_at(display_start + display_len),
+                            )
+                        } else {
+                            (visual.clip.source_in, visual.clip.source_out)
+                        };
                         draw_clip_waveform(
                             &painter,
                             clip_rect,
                             &wf.peaks,
-                            visual.clip.source_in,
-                            visual.clip.source_out,
+                            wave_in,
+                            wave_out,
                             item.meta.fps.as_f64(),
                             wf.audio_duration_secs,
                             ui.clip_rect(),
+                            &visual.clip.effects.gain_db,
                         );
                     }
 
@@ -2167,13 +2179,27 @@ fn clip_label_and_color(
             } else {
                 egui::Color32::from_rgb(90, 190, 140)
             };
-            (label, color)
+            (label, darken_if_edited(color, clip))
         }
         vv_core::ClipSource::SolidColor => (
             "Solid Color".to_string(),
-            egui::Color32::from_rgb(200, 170, 90),
+            darken_if_edited(egui::Color32::from_rgb(200, 170, 90), clip),
         ),
     }
+}
+
+/// Le clip con qualche effetto modificato rispetto al default si distinguono
+/// a colpo d'occhio nella timeline: stesso colore, tonalità più scura.
+fn darken_if_edited(color: egui::Color32, clip: &Clip) -> egui::Color32 {
+    if clip.effects.is_pristine() {
+        return color;
+    }
+    const F: f32 = 0.62;
+    egui::Color32::from_rgb(
+        (color.r() as f32 * F) as u8,
+        (color.g() as f32 * F) as u8,
+        (color.b() as f32 * F) as u8,
+    )
 }
 
 /// Rettangolo occupato da una clip nel disegno della timeline, in
@@ -2216,6 +2242,7 @@ fn draw_clip_waveform(
     media_fps: f64,
     audio_duration_secs: f64,
     visible_rect: egui::Rect,
+    gain_db: &Keyframed<f32>,
 ) {
     if peaks.is_empty() || audio_duration_secs <= 0.0 || media_fps <= 0.0 {
         return;
@@ -2235,6 +2262,8 @@ fn draw_clip_waveform(
     let center_y = clip_rect.center().y;
     let half_height = clip_rect.height() / 2.0;
     let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 140));
+    let clipped_stroke =
+        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 90, 90, 200));
 
     let width = clip_rect.width();
     let mut x = vis.min.x;
@@ -2247,14 +2276,21 @@ fn draw_clip_waveform(
             audio_duration_secs,
             peaks.len(),
         );
-        let peak = peaks[bin];
-        let h = (half_height * peak).max(0.5);
+        // Il gain vive in frame *sorgente*, come nel mixer: la forma
+        // disegnata è quella che si sentirà davvero, clipping compreso.
+        let source_frame = source_in + (frac * (source_out - source_in) as f64) as FrameIdx;
+        let amplified = peaks[bin] * db_to_linear(gain_db.value_at(source_frame));
+        let h = (half_height * amplified.min(1.0)).max(0.5);
         painter.line_segment(
             [egui::pos2(x, center_y - h), egui::pos2(x, center_y + h)],
-            stroke,
+            if amplified > 1.0 { clipped_stroke } else { stroke },
         );
         x += 1.0;
     }
+}
+
+fn db_to_linear(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
 }
 
 /// Indice del bin per una colonna a `frac` (0..1 della larghezza della

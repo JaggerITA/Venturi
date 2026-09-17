@@ -410,6 +410,15 @@ impl TransformTracks {
         self.params.iter().all(|k| k.is_constant())
     }
 
+    /// `true` se il transform è ancora quello di default, keyframe compresi.
+    pub fn is_pristine(&self) -> bool {
+        let d = Transform::default();
+        self.flip == d.flip
+            && TransformParam::ALL
+                .iter()
+                .all(|p| self.track(*p).is_constant() && self.track(*p).default == p.of(&d))
+    }
+
     pub fn value_at(&self, frame: FrameIdx) -> Transform {
         let v = |p: TransformParam| self.track(p).value_at(frame);
         Transform {
@@ -511,6 +520,20 @@ impl Default for EffectStack {
             text: Vec::new(),
             color: None,
         }
+    }
+}
+
+impl EffectStack {
+    /// `true` se nessuna proprietà è stata toccata rispetto al default: la
+    /// timeline disegna più scure le clip per cui è `false`.
+    pub fn is_pristine(&self) -> bool {
+        self.transform.is_pristine()
+            && self.speed.is_constant()
+            && self.speed.default == 1.0
+            && self.gain_db.is_constant()
+            && self.gain_db.default == 0.0
+            && self.text.is_empty()
+            && self.color.is_none()
     }
 }
 

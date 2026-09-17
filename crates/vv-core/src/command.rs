@@ -1118,6 +1118,48 @@ impl Command for SetClipGain {
     }
 }
 
+/// Riporta il gain di una clip al default (0 dB), keyframe compresi:
+/// il "↺" della riga Volume nel pannello.
+#[derive(Debug)]
+pub struct ResetClipGain {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    previous: Option<Keyframed<f32>>,
+}
+
+impl ResetClipGain {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            previous: None,
+        }
+    }
+}
+
+impl Command for ResetClipGain {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.previous = Some(clip.effects.gain_db.clone());
+        clip.effects.gain_db = Keyframed::constant(0.0);
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(previous) = &self.previous else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.effects.gain_db = previous.clone();
+        }
+    }
+}
+
 /// Imposta il colore *statico* (`effects.color.default`) di una clip
 /// SolidColor. A differenza di transform/gain, `effects.color` parte
 /// `None`: il primo `SetClipColor` lo inizializza. I comandi keyframe
