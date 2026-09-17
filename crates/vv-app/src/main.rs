@@ -913,16 +913,24 @@ impl VibeVideoApp {
     }
 
     /// Se "selection follows playhead" è attivo, allinea la selezione alla
-    /// clip video attiva sotto al playhead corrente (selezione vuota se il
-    /// playhead è su un vuoto): collassa sempre a una singola clip, anche
-    /// se prima della sync la selezione era multipla. No-op se la
-    /// funzionalità è disattivata dalle impostazioni.
+    /// clip video attiva sotto al playhead corrente più le clip collegate
+    /// (selezione vuota se il playhead è su un vuoto), scartando qualunque
+    /// selezione precedente. No-op se la funzionalità è disattivata.
     fn sync_selection_to_playhead(&mut self) {
         if !self.selection_follows_playhead {
             return;
         }
-        let clip = self.active_video_clip_at(self.timeline_state.playhead);
-        self.timeline_state.set_single_selection(clip);
+        let Some((track_index, clip_id)) = self.active_video_clip_at(self.timeline_state.playhead)
+        else {
+            self.timeline_state.set_single_selection(None);
+            return;
+        };
+        let mut selected = BTreeSet::from([(track_index, clip_id)]);
+        if let Some(timeline_id) = self.timeline_id {
+            selected.extend(self.group_members(timeline_id, track_index, clip_id));
+        }
+        self.timeline_state
+            .set_selection(selected, Some((track_index, clip_id)));
     }
 
     /// Carica `clip_id` (su una track video) nel player, posizionandosi al
@@ -3054,7 +3062,7 @@ impl eframe::App for VibeVideoApp {
                         self.timeline_state.zoom_out();
                         ui.close();
                     }
-                    ui.label("Ctrl+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
+                    ui.label("Alt+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
                 });
 
                 ui.menu_button("Playback", |ui| {
@@ -3989,6 +3997,9 @@ fn main() -> eframe::Result<()> {
         "vibevideo",
         options,
         Box::new(move |cc| {
+            // Zoom della timeline con Alt+scroll invece del Ctrl di default.
+            cc.egui_ctx
+                .options_mut(|o| o.input_options.zoom_modifier = egui::Modifiers::ALT);
             let mut app = VibeVideoApp::default();
             // Condivide il device/queue wgpu di egui-wgpu invece del
             // device headless indipendente di `Default`: necessario per

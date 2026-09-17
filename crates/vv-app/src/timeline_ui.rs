@@ -52,7 +52,7 @@ pub struct TimelineState {
     /// `pixels_per_sec` usato nell'ultimo passaggio di disegno della
     /// timeline: il confronto col valore corrente in `show_timeline`
     /// rileva lo zoom avvenuto *in questo frame* (da tastiera/menu — che
-    /// mutano `pixels_per_sec` prima del disegno — o da Ctrl+scroll) e
+    /// mutano `pixels_per_sec` prima del disegno — o da Alt+scroll) e
     /// permette di correggere l'offset di scroll per ancorare lo zoom alla
     /// testina.
     last_rendered_pps: f32,
@@ -219,7 +219,7 @@ impl TimelineState {
 
     /// Zoom orizzontale della timeline (moltiplica `pixels_per_sec` per un
     /// fattore fisso a ogni passo): usato dalla shortcut da tastiera in
-    /// `main.rs`, oltre a Ctrl+scroll/pinch gestito dentro `show_timeline`.
+    /// `main.rs`, oltre a Alt+scroll/pinch gestito dentro `show_timeline`.
     /// Lo zoom è ancorato alla testina: `show_timeline` corregge l'offset
     /// di scroll orizzontale così la testina resta alla stessa posizione a
     /// schermo (non "cresce" dal bordo sinistro visibile).
@@ -433,6 +433,9 @@ fn draw_track_headers(
     row_y: &[f32],
     video_count: usize,
     divider_height: f32,
+    top_margin: f32,
+    slack: f32,
+    track_top_margin: &mut Option<f32>,
     natural_content_height: f32,
     pending: &mut Option<PendingAction>,
     playhead: FrameIdx,
@@ -462,9 +465,10 @@ fn draw_track_headers(
             egui::pos2(origin.x, origin.y + row_y[track_index]),
             egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
         );
+        let number = track_kinds[..=track_index].iter().filter(|k| **k == kind).count();
         let label = match kind {
-            TrackKind::Video => "Video",
-            TrackKind::Audio => "Audio",
+            TrackKind::Video => format!("V{number}"),
+            TrackKind::Audio => format!("A{number}"),
         };
         ui.painter().text(
             row_rect.left_center() + egui::vec2(6.0, 0.0),
@@ -512,17 +516,35 @@ fn draw_track_headers(
         }
     }
 
-    // Linea guida del separatore, alla stessa posizione di quella (ben più
-    // larga e quindi più facile da afferrare) disegnata nell'area
-    // scrollabile — condividono lo stesso stato (`TimelineState::
-    // track_top_margin`), quindi trascinare di là sposta anche questa.
+    // Stesso separatore dell'area scrollabile (stato condiviso in
+    // `track_top_margin`), trascinabile anche da qui.
     if divider_height > 0.0 && video_count < row_order.len() {
         let audio_first_track = row_order[video_count];
-        let divider_top = origin.y + row_y[audio_first_track] - divider_height;
+        let divider_rect = egui::Rect::from_min_size(
+            egui::pos2(origin.x, origin.y + row_y[audio_first_track] - divider_height),
+            egui::vec2(TRACK_HEADER_WIDTH, divider_height),
+        );
+        let divider_resp = ui.interact(
+            divider_rect,
+            ui.id().with("timeline_header_track_split"),
+            egui::Sense::drag(),
+        );
+        let active = divider_resp.hovered() || divider_resp.dragged();
+        if active {
+            ui.ctx()
+                .output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
+        }
+        if divider_resp.dragged() {
+            *track_top_margin =
+                Some((top_margin + divider_resp.drag_delta().y).clamp(0.0, slack));
+        }
         ui.painter().hline(
-            egui::Rangef::new(origin.x, origin.x + TRACK_HEADER_WIDTH),
-            divider_top + divider_height / 2.0,
-            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+            divider_rect.x_range(),
+            divider_rect.center().y,
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_gray(if active { 160 } else { 80 }),
+            ),
         );
     }
 
@@ -748,10 +770,9 @@ pub fn show_timeline(
 ) -> Option<(vv_core::MediaId, FrameIdx, MediaDropTarget)> {
     let mut media_drop = None;
 
-    // Zoom orizzontale (Ctrl+scroll o pinch — stesso gesto usato per lo
-    // zoom "globale" di egui, qui invece cambia solo la scala della
-    // timeline): solo se il puntatore è sopra il pannello, altrimenti
-    // scrollare con Ctrl premuto altrove (es. media pool) zoomerebbe la
+    // Zoom orizzontale (Alt+scroll, vedi `zoom_modifier` in `main`, o
+    // pinch): solo se il puntatore è sopra il pannello, altrimenti
+    // scrollare con Alt premuto altrove (es. media pool) zoomerebbe la
     // timeline per sbaglio. Le scorciatoie da tastiera/menu (zoom_in/
     // zoom_out in main.rs) mutano `pixels_per_sec` ancora prima di qui:
     // il confronto con `last_rendered_pps` sotto le cattura entrambe le
@@ -856,7 +877,7 @@ pub fn show_timeline(
 
             // Zoom ancorato alla testina: se `pixels_per_sec` è cambiato in
             // questo frame (scorciatoie da tastiera/menu — che lo mutano prima
-            // del disegno — o Ctrl+scroll/pinch), correggiamo l'offset di
+            // del disegno — o Alt+scroll/pinch), correggiamo l'offset di
             // scroll orizzontale perché la testina resti alla stessa posizione
             // a schermo (senza di che lo zoom crescerebbe dal bordo sinistro
             // *visibile*, non da dove l'utente sta guardando). L'offset si
@@ -918,6 +939,9 @@ pub fn show_timeline(
             &row_y,
             video_count,
             divider_height,
+            top_margin,
+            slack,
+            &mut state.track_top_margin,
             content_height,
             &mut pending,
             state.playhead,
@@ -968,8 +992,10 @@ pub fn show_timeline(
                     egui::Sense::click_and_drag(),
                 );
                 if let Some(pos) = ruler_resp.interact_pointer_pos() {
-                    let frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    state.playhead = frame;
+                    let raw_frame =
+                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    state.playhead =
+                        snap_frame(raw_frame, 0, &visuals, &[], px_per_frame, snapping_enabled);
                 }
                 if ruler_resp.clicked() {
                     state.clear_selection();
