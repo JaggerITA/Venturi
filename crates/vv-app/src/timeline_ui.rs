@@ -297,7 +297,7 @@ enum TrackDragTarget {
 /// `track_index` reale (la track di partenza se il puntatore non è in
 /// nessuna zona valida, vedi `track_drag_target`); `New` significa che va
 /// creata al rilascio.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectiveTrack {
     Existing(usize),
     New,
@@ -344,6 +344,57 @@ fn track_drag_target(
             None
         }
     }
+}
+
+/// Track target di ogni clip di un gruppo in trascinamento verticale
+/// (primaria in testa, poi un elemento per ogni `followers`, stesso
+/// ordine): la primaria atterra su `primary_target` (già risolto da
+/// `track_drag_target`), i follower si spostano dello stesso numero di
+/// righe — invertito se di tipo diverso dalla primaria, dato che video e
+/// audio numerano le track in direzioni opposte (vedi `track_row_order`) —
+/// sempre dentro alle track esistenti del proprio tipo: mai una nuova
+/// track per un follower.
+fn drag_group_row_targets(
+    primary_id: ClipId,
+    primary_track: usize,
+    primary_target: EffectiveTrack,
+    followers: &[(ClipId, usize, FrameIdx)],
+    track_kinds: &[TrackKind],
+    row_of_track: &[usize],
+    row_order: &[usize],
+    video_count: usize,
+    track_count: usize,
+) -> Vec<(ClipId, EffectiveTrack)> {
+    let primary_kind = track_kinds[primary_track];
+    let primary_original_row = row_of_track[primary_track] as isize;
+    let primary_target_row = match primary_target {
+        EffectiveTrack::Existing(track) => row_of_track[track] as isize,
+        EffectiveTrack::New => match primary_kind {
+            TrackKind::Video => -1,
+            TrackKind::Audio => track_count as isize,
+        },
+    };
+    let delta_row = primary_target_row - primary_original_row;
+
+    let mut targets = vec![(primary_id, primary_target)];
+    for &(follower_id, follower_track, _) in followers {
+        let follower_kind = track_kinds[follower_track];
+        let signed_delta = if follower_kind == primary_kind {
+            delta_row
+        } else {
+            -delta_row
+        };
+        let (lo, hi) = match follower_kind {
+            TrackKind::Video => (0isize, video_count as isize - 1),
+            TrackKind::Audio => (video_count as isize, track_count as isize - 1),
+        };
+        let candidate_row = (row_of_track[follower_track] as isize + signed_delta).clamp(lo, hi);
+        targets.push((
+            follower_id,
+            EffectiveTrack::Existing(row_order[candidate_row as usize]),
+        ));
+    }
+    targets
 }
 
 /// Colonna fissa a sinistra: etichetta e "×" di ogni track, alle stesse
@@ -1334,15 +1385,30 @@ pub fn show_timeline(
                     );
                 }
 
+                // Vedi `drag_group_row_targets`.
+                let drag_group_targets: Option<Vec<(ClipId, EffectiveTrack)>> =
+                    state.drag.as_ref().map(|d| {
+                        drag_group_row_targets(
+                            d.clip_id,
+                            d.track_index,
+                            drag_effective_track.unwrap(),
+                            &d.followers,
+                            &track_kinds,
+                            &row_of_track,
+                            &row_order,
+                            video_count,
+                            track_count,
+                        )
+                    });
+
                 // Posizione (clampata, e agganciata alla calamita se attiva)
                 // della clip primaria in trascinamento, calcolata una sola
-                // volta e riusata sia per lei sia per l'eventuale gemella
-                // collegata — e per l'anteprima in tempo reale durante il drag
-                // (non solo al rilascio), così l'utente vede scattare la clip
-                // mentre trascina. I confini si ricalcolano ogni frame sulla
-                // track candidata corrente (vedi `drag_effective_track`), non
-                // solo all'inizio del drag: cambiano se l'utente sposta la
-                // clip su un'altra track.
+                // volta e riusata per lei e per tutto il gruppo — e per
+                // l'anteprima in tempo reale durante il drag (non solo al
+                // rilascio), così l'utente vede scattare le clip mentre
+                // trascina. I confini si ricalcolano ogni frame sulle track
+                // target correnti (vedi `drag_group_targets`), non solo
+                // all'inizio del drag.
                 let dragged_primary_new_start = state.drag.as_ref().map(|d| {
                     let raw = d.original_start as f32 + d.accum_px / px_per_frame;
                     let raw_rounded = raw.round() as FrameIdx;
@@ -1351,17 +1417,12 @@ pub fn show_timeline(
                         .find(|v| v.clip.id == d.clip_id)
                         .map(|v| v.clip.timeline_len())
                         .unwrap_or(0);
-                    let primary_bound = match drag_effective_track.unwrap() {
-                        EffectiveTrack::Existing(track) if track == d.track_index => {
-                            drag_range(&visuals, track, d.clip_id)
-                        }
-                        EffectiveTrack::Existing(track) => {
-                            drag_range_at(&visuals, track, d.clip_id, raw_rounded, len)
-                        }
-                        EffectiveTrack::New => (0, max_start_in_slot(0, FrameIdx::MAX, len)),
-                    };
-                    let (min_start, max_start) =
-                        combined_drag_bounds(&visuals, primary_bound, &d.followers);
+                    let (min_start, max_start) = group_drag_bounds(
+                        &visuals,
+                        raw_rounded,
+                        drag_group_targets.as_deref().unwrap(),
+                        &d.followers,
+                    );
                     let candidate = raw_rounded.clamp(min_start, max_start);
                     let mut exclude = vec![d.clip_id];
                     exclude.extend(d.followers.iter().map(|(id, _, _)| *id));
@@ -1436,24 +1497,21 @@ pub fn show_timeline(
                     };
 
                     let x = origin.x + display_start as f32 * px_per_frame;
-                    // Durante un drag che cambia track, l'anteprima segue la
-                    // track candidata invece di quella di partenza (vedi
-                    // `drag_effective_track`).
-                    let y = match (&state.drag, drag_effective_track) {
-                        (Some(d), Some(EffectiveTrack::Existing(track)))
-                            if d.clip_id == visual.clip.id =>
-                        {
-                            origin.y + row_y[track]
-                        }
-                        (Some(d), Some(EffectiveTrack::New)) if d.clip_id == visual.clip.id => {
-                            match track_kinds[d.track_index] {
-                                TrackKind::Video => {
-                                    origin.y + RULER_HEIGHT + (top_margin - ROW_HEIGHT).max(0.0)
-                                }
-                                TrackKind::Audio => origin.y + RULER_HEIGHT + top_margin + rows_height,
+                    // Durante un drag che cambia track, l'anteprima di ogni
+                    // clip del gruppo segue il proprio target (vedi
+                    // `drag_group_targets`) invece della track di partenza.
+                    let this_target = drag_group_targets
+                        .as_ref()
+                        .and_then(|targets| targets.iter().find(|(id, _)| *id == visual.clip.id));
+                    let y = match this_target {
+                        Some((_, EffectiveTrack::Existing(track))) => origin.y + row_y[*track],
+                        Some((_, EffectiveTrack::New)) => match track_kinds[visual.track_index] {
+                            TrackKind::Video => {
+                                origin.y + RULER_HEIGHT + (top_margin - ROW_HEIGHT).max(0.0)
                             }
-                        }
-                        _ => origin.y + row_y[visual.track_index],
+                            TrackKind::Audio => origin.y + RULER_HEIGHT + top_margin + rows_height,
+                        },
+                        None => origin.y + row_y[visual.track_index],
                     };
                     let w = (display_len as f32 * px_per_frame).max(2.0);
                     let clip_rect = egui::Rect::from_min_size(
@@ -1680,12 +1738,20 @@ pub fn show_timeline(
                             // nell'anteprima durante il drag: quel che si
                             // vedeva è quel che si ottiene.
                             let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
+                            let targets = drag_group_targets.as_deref().unwrap();
                             let followers: Vec<(ClipId, usize, usize, FrameIdx)> = d
                                 .followers
                                 .iter()
-                                .map(|(id, track, offset)| (*id, *track, *track, new_start + offset))
+                                .zip(&targets[1..])
+                                .map(|((id, from_track, offset), (_, target))| {
+                                    let to_track = match *target {
+                                        EffectiveTrack::Existing(track) => track,
+                                        EffectiveTrack::New => *from_track, // mai creata per un follower
+                                    };
+                                    (*id, *from_track, to_track, new_start + offset)
+                                })
                                 .collect();
-                            pending = Some(match drag_effective_track.unwrap() {
+                            pending = Some(match targets[0].1 {
                                 EffectiveTrack::Existing(to_track) => {
                                     let mut moves =
                                         vec![(d.clip_id, d.track_index, to_track, new_start)];
@@ -2085,7 +2151,7 @@ fn apply_click_selection(
 fn neighbor_bounds_at(
     visuals: &[ClipVisual],
     track_index: usize,
-    moving_id: ClipId,
+    exclude: &[ClipId],
     reference_start: FrameIdx,
     len: FrameIdx,
 ) -> (FrameIdx, FrameIdx) {
@@ -2094,7 +2160,7 @@ fn neighbor_bounds_at(
     let reference_end = reference_start + len;
 
     for v in visuals {
-        if v.track_index != track_index || v.clip.id == moving_id {
+        if v.track_index != track_index || exclude.contains(&v.clip.id) {
             continue;
         }
         if v.clip.timeline_end() <= reference_start {
@@ -2122,7 +2188,7 @@ fn neighbor_bounds(
     neighbor_bounds_at(
         visuals,
         track_index,
-        moving_id,
+        &[moving_id],
         moving.clip.timeline_start,
         moving.clip.timeline_len(),
     )
@@ -2133,16 +2199,17 @@ fn max_start_in_slot(lower: FrameIdx, upper: FrameIdx, len: FrameIdx) -> FrameId
 }
 
 /// Come `drag_range`, ma per una clip lunga `len` valutata a
-/// `reference_start` su `track_index` senza doverci già essere (vedi
-/// `neighbor_bounds_at`).
+/// `reference_start` su `track_index` senza doverci già essere, e
+/// ignorando `exclude` invece del solo `clip_id` (usato per un intero
+/// gruppo in trascinamento, vedi `group_drag_bounds`).
 fn drag_range_at(
     visuals: &[ClipVisual],
     track_index: usize,
-    clip_id: ClipId,
+    exclude: &[ClipId],
     reference_start: FrameIdx,
     len: FrameIdx,
 ) -> (FrameIdx, FrameIdx) {
-    let (lower, upper) = neighbor_bounds_at(visuals, track_index, clip_id, reference_start, len);
+    let (lower, upper) = neighbor_bounds_at(visuals, track_index, exclude, reference_start, len);
     (lower, max_start_in_slot(lower, upper, len))
 }
 
@@ -2159,7 +2226,7 @@ fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (F
     drag_range_at(
         visuals,
         track_index,
-        clip_id,
+        &[clip_id],
         v.clip.timeline_start,
         v.clip.timeline_len(),
     )
@@ -2255,16 +2322,41 @@ fn combined_drag_range(
     (min_start, max_start, followers)
 }
 
-/// Come `combined_drag_range`, ma con il bound della primaria già noto
-/// (i follower non cambiano mai track, il loro offset resta fisso).
-fn combined_drag_bounds(
+/// Come `combined_drag_range`, ma ogni clip del gruppo (primaria in
+/// `targets[0]`, poi un elemento di `targets` per ogni `followers`, stesso
+/// ordine) può atterrare su una track diversa dalla propria — vedi
+/// `EffectiveTrack` e il calcolo dei target in `show_timeline` (spostamento
+/// di gruppo fra track, non solo orizzontale). I vicini considerati per
+/// ciascuna escludono sempre l'intero gruppo, non solo la clip valutata,
+/// altrimenti due clip del gruppo destinate alla stessa track si
+/// bloccherebbero a vicenda.
+fn group_drag_bounds(
     visuals: &[ClipVisual],
-    primary_bound: (FrameIdx, FrameIdx),
+    reference_start: FrameIdx,
+    targets: &[(ClipId, EffectiveTrack)],
     followers: &[(ClipId, usize, FrameIdx)],
 ) -> (FrameIdx, FrameIdx) {
-    let (mut min_start, mut max_start) = primary_bound;
-    for &(other_id, other_track, offset) in followers {
-        let (o_min, o_max) = drag_range(visuals, other_track, other_id);
+    let exclude: Vec<ClipId> = targets.iter().map(|(id, _)| *id).collect();
+    let bound_for = |id: ClipId, target: EffectiveTrack, reference: FrameIdx| -> (FrameIdx, FrameIdx) {
+        let len = visuals
+            .iter()
+            .find(|v| v.clip.id == id)
+            .map(|v| v.clip.timeline_len())
+            .unwrap_or(0);
+        match target {
+            EffectiveTrack::Existing(track) => {
+                drag_range_at(visuals, track, &exclude, reference, len)
+            }
+            EffectiveTrack::New => (0, max_start_in_slot(0, FrameIdx::MAX, len)),
+        }
+    };
+
+    let (primary_id, primary_target) = targets[0];
+    let (mut min_start, mut max_start) = bound_for(primary_id, primary_target, reference_start);
+
+    for (i, &(follower_id, _, offset)) in followers.iter().enumerate() {
+        let (_, follower_target) = targets[i + 1];
+        let (o_min, o_max) = bound_for(follower_id, follower_target, reference_start + offset);
         min_start = min_start.max(o_min - offset);
         max_start = max_start.min(o_max - offset);
     }
@@ -2867,15 +2959,42 @@ mod tests {
         let visuals = vec![visual(0, 1, 0, 10), visual(1, 2, 20, 10)];
         // Clip 1 valutata come se stesse per atterrare sulla track 1: deve
         // rispettare il vicino lì (clip 2), non quelli della sua track reale.
-        assert_eq!(drag_range_at(&visuals, 1, ClipId(1), 5, 10), (0, 10));
+        assert_eq!(drag_range_at(&visuals, 1, &[ClipId(1)], 5, 10), (0, 10));
     }
 
     #[test]
-    fn combined_drag_bounds_intersects_primary_and_followers() {
-        let visuals = vec![visual(1, 2, 0, 10), visual(1, 3, 30, 10)];
+    fn group_drag_bounds_intersects_primary_and_followers_on_their_own_targets() {
+        let visuals = vec![
+            visual(0, 1, 0, 10),
+            visual(1, 2, 0, 10),
+            visual(1, 3, 30, 10),
+        ];
+        let targets = vec![
+            (ClipId(1), EffectiveTrack::Existing(0)),
+            (ClipId(2), EffectiveTrack::Existing(1)),
+        ];
         let followers = vec![(ClipId(2), 1, -5)];
-        let (min_start, max_start) = combined_drag_bounds(&visuals, (0, 100), &followers);
+        let (min_start, max_start) = group_drag_bounds(&visuals, 0, &targets, &followers);
         assert_eq!((min_start, max_start), (5, 25));
+    }
+
+    #[test]
+    fn group_drag_bounds_lets_group_members_land_on_the_same_track_without_blocking_each_other() {
+        // Due clip del gruppo (1 e 2) atterrano entrambe sulla track 1: non
+        // devono bloccarsi a vicenda, solo la clip estranea (9) conta come
+        // vicino.
+        let visuals = vec![
+            visual(0, 1, 0, 10),
+            visual(2, 2, 5, 10),
+            visual(1, 9, 50, 5),
+        ];
+        let targets = vec![
+            (ClipId(1), EffectiveTrack::Existing(1)),
+            (ClipId(2), EffectiveTrack::Existing(1)),
+        ];
+        let followers = vec![(ClipId(2), 2, 5)];
+        let (min_start, max_start) = group_drag_bounds(&visuals, 0, &targets, &followers);
+        assert_eq!((min_start, max_start), (0, 35));
     }
 
     #[test]
@@ -2920,6 +3039,93 @@ mod tests {
         let row_order = [1, 0, 2];
         let target = track_drag_target(200.0, TrackKind::Audio, &row_order, 2, 8.0, 50.0, 0.0, 128.0);
         assert!(target.is_none());
+    }
+
+    #[test]
+    fn drag_group_row_targets_shifts_a_same_kind_follower_by_the_same_amount() {
+        // track_kinds: [Video, Audio, Video, Video] -> row_order [3,2,0,1]
+        // (video decrescente, audio crescente), row_of_track [2,3,1,0].
+        let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video, TrackKind::Video];
+        let row_of_track = [2, 3, 1, 0];
+        let row_order = [3, 2, 0, 1];
+        // Primaria (track 2, riga 1) sale di una riga -> track 3 (riga 0).
+        // Follower video (track 0, riga 2, "sotto" la primaria) deve
+        // scattare nella riga appena lasciata libera dalla primaria (riga
+        // 1 -> track 2), esattamente come C1 segue C2 nell'esempio
+        // dell'utente.
+        let followers = vec![(ClipId(9), 0, 0)];
+        let targets = drag_group_row_targets(
+            ClipId(1),
+            2,
+            EffectiveTrack::Existing(3),
+            &followers,
+            &track_kinds,
+            &row_of_track,
+            &row_order,
+            3,
+            4,
+        );
+        assert_eq!(
+            targets,
+            vec![
+                (ClipId(1), EffectiveTrack::Existing(3)),
+                (ClipId(9), EffectiveTrack::Existing(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn drag_group_row_targets_moves_an_audio_follower_in_the_opposite_row_direction() {
+        // track_kinds: [Video, Audio, Audio, Video] -> row_order [3,0,1,2]
+        // (2 track video, 2 audio), row_of_track [1,2,3,0].
+        let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Audio, TrackKind::Video];
+        let row_of_track = [1, 2, 3, 0];
+        let row_order = [3, 0, 1, 2];
+        // Primaria video (track 0, riga 1) sale di una riga -> track 3
+        // (riga 0). Il follower audio (track 1, riga 2) deve scendere di
+        // una riga (track 1 -> track 2), non salire: video e audio
+        // numerano le track in direzioni opposte.
+        let followers = vec![(ClipId(9), 1, 0)];
+        let targets = drag_group_row_targets(
+            ClipId(1),
+            0,
+            EffectiveTrack::Existing(3),
+            &followers,
+            &track_kinds,
+            &row_of_track,
+            &row_order,
+            2,
+            4,
+        );
+        assert_eq!(
+            targets,
+            vec![
+                (ClipId(1), EffectiveTrack::Existing(3)),
+                (ClipId(9), EffectiveTrack::Existing(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn drag_group_row_targets_clamps_followers_to_existing_tracks_of_their_kind() {
+        let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video, TrackKind::Video];
+        let row_of_track = [2, 3, 1, 0];
+        let row_order = [3, 2, 0, 1];
+        // Unica track audio: il follower audio non ha dove andare, resta
+        // sulla propria track anche se la primaria si sposta.
+        let followers = vec![(ClipId(9), 1, 0)];
+        let targets = drag_group_row_targets(
+            ClipId(1),
+            2,
+            EffectiveTrack::Existing(3),
+            &followers,
+            &track_kinds,
+            &row_of_track,
+            &row_order,
+            3,
+            4,
+        );
+        assert_eq!(targets[1], (ClipId(9), EffectiveTrack::Existing(1)));
     }
 
     fn media_clip_visual(
