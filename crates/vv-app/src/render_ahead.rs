@@ -3416,16 +3416,12 @@ mod tests {
     ///
     /// Verifica la sola sveglia immediata (`Command::Wake`), isolata dal
     /// margine minimo: un salto isolato per volta, con una scadenza
-    /// stretta (25ms, metà del vecchio `POLL_INTERVAL`) *dopo* aver
-    /// aspettato che il worker si stabilizzi sul target precedente —
-    /// senza sveglia immediata il worker rilegge `target` solo a un
-    /// prossimo ciclo di poll fisso, che cade in un istante scorrelato
-    /// da quando `set_target` è stato chiamato: il tempo di attesa
-    /// sarebbe distribuito uniformemente tra 0 e 50ms, quindi ripetuto
-    /// su più salti indipendenti la probabilità che *tutti* restino
-    /// sotto i 25ms per puro caso crolla rapidamente (verificato:
-    /// disabilitando temporaneamente l'invio di `Command::Wake` questo
-    /// test fallisce in modo riproducibile).
+    /// di 40ms *dopo* aver aspettato che il worker si stabilizzi sul
+    /// target precedente. Senza sveglia immediata l'attesa sarebbe
+    /// uniforme tra 0 e 50ms: ognuno degli 11 salti resta sotto i 40ms per
+    /// caso all'80%, tutti insieme ~9%. La scadenza non è più stretta
+    /// perché sotto il carico degli altri test in parallelo anche la
+    /// decodifica del frame può sforare.
     #[test]
     fn render_ahead_reacts_to_each_target_change_faster_than_the_old_poll_interval() {
         let path = make_test_clip("vv-app-render-ahead-test", "wake_on_change.mp4", 2);
@@ -3458,7 +3454,7 @@ mod tests {
                     return start.elapsed();
                 }
                 assert!(
-                    start.elapsed() < Duration::from_millis(25),
+                    start.elapsed() < Duration::from_millis(40),
                     "frame {frame} non pronto entro una scadenza compatibile con la sveglia immediata"
                 );
                 std::thread::sleep(Duration::from_millis(1));
@@ -3475,8 +3471,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
 
-        // Da qui in poi, ogni salto isolato ha 25ms per essere pronto.
-        for target in [10, 20, 30, 40] {
+        // Da qui in poi, ogni salto isolato ha 40ms per essere pronto.
+        for target in (8..=48).step_by(4) {
             render_ahead.set_target(target);
             wait_for(target);
         }

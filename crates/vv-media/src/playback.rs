@@ -57,12 +57,12 @@ pub struct DecodeAhead {
 /// contro rallentamenti di decodifica transitori.
 const MIN_CACHE_FRAMES: usize = 24;
 
-/// Quanti frame da `width*height*4` byte l'uno entrano
+/// Quanti frame YUV420 (`width*height*3/2` byte l'uno) entrano
 /// in `budget_bytes`, con un minimo di `MIN_CACHE_FRAMES`. Funzione pura
 /// (nessuna apertura di file/thread) per poterla testare senza dipendere
 /// da ffmpeg.
 pub fn frame_cache_capacity(budget_bytes: usize, width: u32, height: u32) -> usize {
-    let bytes_per_frame = (width as usize * height as usize * 4).max(1);
+    let bytes_per_frame = (width as usize * height as usize * 3 / 2).max(1);
     (budget_bytes / bytes_per_frame).max(MIN_CACHE_FRAMES)
 }
 
