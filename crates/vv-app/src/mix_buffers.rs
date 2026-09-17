@@ -2,9 +2,6 @@
 //! Decodifica + resample su un thread dedicato: finché un buffer non è
 //! pronto la clip suona silenzio.
 
-// Agganciato al playback nel passo 2 di AUDIO_MIXER_PLAN.md.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -77,6 +74,12 @@ impl MixBufferCache {
             self.entries.insert(key, buffer);
         }
         changed
+    }
+
+    #[cfg(test)]
+    pub fn has_pending(&mut self) -> bool {
+        self.poll();
+        self.entries.values().any(Option::is_none)
     }
 }
 

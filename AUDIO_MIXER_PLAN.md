@@ -63,6 +63,14 @@ delle track audio della timeline. È il punto **B5** di
 
 ## 3. Passi (uno alla volta, build + test dopo ognuno)
 
+**Stato.** Passi 1 e 2 fatti. Il passo 2 ha anticipato:
+- scrub audio (passo 3) già sul mixer (`TimelineAudio::play_scrub_snippet`);
+- rimozione di `player.rs` e `audio_cache`: l'anteprima dal media pool non
+  riproduceva mai (Spazio esce dal browsing), mostrava solo il primo frame, e
+  così resta;
+- fast forward temporaneo: a 2x/4x/8x il clock è a parete e l'audio tace
+  finché il passo 4 non stretcha il mix.
+
 1. **Mixer a 1x, in parallelo al vecchio Player.** Implementare `Mixer` +
    snapshot + cache buffer per `(path, stream)`. Test unitari puri sulla
    funzione di mix (dato snapshot e range di campioni → buffer atteso):
