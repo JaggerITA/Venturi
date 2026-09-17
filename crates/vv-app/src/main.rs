@@ -2455,6 +2455,10 @@ impl VibeVideoApp {
         );
         let anchor = new_selection.iter().next().copied();
         self.timeline_state.set_selection(new_selection, anchor);
+        if let Some(end) = ranges.iter().map(|&(_, _, end)| end).max() {
+            self.timeline_state.playhead = end;
+            self.ensure_active_clip_matches_playhead(true);
+        }
     }
 
     /// Ripple delete: rimuove *tutte* le clip selezionate (e la gemella
@@ -5464,6 +5468,7 @@ mod tests {
             BTreeSet::from([(0, pasted.id)]),
             "la clip incollata diventa la selezione"
         );
+        assert_eq!(app.timeline_state.playhead, 60, "testina in fondo all'incollata");
     }
 
     #[test]
