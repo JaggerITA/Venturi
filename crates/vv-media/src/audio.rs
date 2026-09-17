@@ -6,6 +6,7 @@
 //! streaming a chunk per file molto lunghi è un'ottimizzazione futura, non
 //! necessaria finché il player lavora su una clip alla volta.
 
+use ffmpeg::ChannelLayout;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg::media::Type;
 use ffmpeg::software::resampling::context::Context as Resampler;
@@ -44,7 +45,7 @@ pub fn decode_audio_track(
         .decoder()
         .audio()?;
 
-    let channel_layout = decoder.channel_layout();
+    let channel_layout = decoder_channel_layout(&decoder);
     let sample_rate = decoder.rate();
     let channels = decoder.channels();
 
@@ -69,13 +70,13 @@ pub fn decode_audio_track(
                 }
                 decoder.send_packet(&packet)?;
                 while decoder.receive_frame(&mut decoded).is_ok() {
-                    push_resampled(&mut resampler, &decoded, &mut samples)?;
+                    push_resampled(&mut resampler, &mut decoded, &mut samples)?;
                 }
             }
             Err(ffmpeg::Error::Eof) => {
                 decoder.send_eof()?;
                 while decoder.receive_frame(&mut decoded).is_ok() {
-                    push_resampled(&mut resampler, &decoded, &mut samples)?;
+                    push_resampled(&mut resampler, &mut decoded, &mut samples)?;
                 }
                 break;
             }
@@ -90,13 +91,39 @@ pub fn decode_audio_track(
     }))
 }
 
+/// Layout canali del decoder, con uno di default al posto di uno non
+/// specificato (es. PCM in MKV): swresample altrimenti rifiuta ogni frame
+/// con "Input changed".
+pub(crate) fn decoder_channel_layout(decoder: &ffmpeg::decoder::Audio) -> ChannelLayout {
+    let layout = decoder.channel_layout();
+    if layout.is_empty() {
+        ChannelLayout::default(i32::from(decoder.channels()))
+    } else {
+        layout
+    }
+}
+
+/// `Resampler::run` dopo aver allineato il layout del frame a quello del
+/// resampler (vedi `decoder_channel_layout`).
+pub(crate) fn run_resampler(
+    resampler: &mut Resampler,
+    decoded: &mut ffmpeg::frame::Audio,
+    resampled: &mut ffmpeg::frame::Audio,
+) -> Result<(), crate::MediaError> {
+    if decoded.channel_layout().is_empty() {
+        decoded.set_channel_layout(resampler.input().channel_layout);
+    }
+    resampler.run(decoded, resampled)?;
+    Ok(())
+}
+
 fn push_resampled(
     resampler: &mut Resampler,
-    decoded: &ffmpeg::frame::Audio,
+    decoded: &mut ffmpeg::frame::Audio,
     out: &mut Vec<f32>,
 ) -> Result<(), crate::MediaError> {
     let mut resampled = ffmpeg::frame::Audio::empty();
-    resampler.run(decoded, &mut resampled)?;
+    run_resampler(resampler, decoded, &mut resampled)?;
 
     let byte_len = resampled.samples() * resampled.channels() as usize * 4;
     let bytes = &resampled.data(0)[..byte_len];
@@ -114,6 +141,36 @@ fn push_resampled(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// PCM stereo in MKV ha layout canali "unknown": falliva con
+    /// "Input changed" e il player non avanzava.
+    #[test]
+    fn decode_audio_track_handles_unspecified_channel_layout() {
+        let dir = std::env::temp_dir().join("vv-media-audio-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pcm_unknown_layout.mkv");
+
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s16le",
+                path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let audio = decode_audio_track(&path, 0).unwrap().expect("audio atteso");
+        assert_eq!(audio.channels, 2);
+        assert_eq!(audio.samples.len(), 48_000 * 2);
+    }
 
     #[test]
     fn decode_audio_track_reads_correct_length_and_is_not_silent() {

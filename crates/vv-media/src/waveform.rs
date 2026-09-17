@@ -135,7 +135,7 @@ pub fn generate_waveform(
         .decoder()
         .audio()?;
 
-    let channel_layout = decoder.channel_layout();
+    let channel_layout = crate::audio::decoder_channel_layout(&decoder);
     let sample_rate = decoder.rate();
 
     let mut resampler = Resampler::get(
@@ -184,7 +184,7 @@ pub fn generate_waveform(
                 while decoder.receive_frame(&mut decoded).is_ok() {
                     push_resampled_peaks(
                         &mut resampler,
-                        &decoded,
+                        &mut decoded,
                         &mut peaks,
                         &mut global_sample,
                         samples_per_bin,
@@ -197,7 +197,7 @@ pub fn generate_waveform(
                 while decoder.receive_frame(&mut decoded).is_ok() {
                     push_resampled_peaks(
                         &mut resampler,
-                        &decoded,
+                        &mut decoded,
                         &mut peaks,
                         &mut global_sample,
                         samples_per_bin,
@@ -309,14 +309,14 @@ fn io_err(e: std::io::Error) -> crate::MediaError {
 /// coincidenza: 1 canale = 1 incremento per frame).
 fn push_resampled_peaks(
     resampler: &mut Resampler,
-    decoded: &ffmpeg::frame::Audio,
+    decoded: &mut ffmpeg::frame::Audio,
     peaks: &mut [f32],
     global_sample: &mut usize,
     samples_per_bin: usize,
     num_peaks: usize,
 ) -> Result<(), crate::MediaError> {
     let mut resampled = ffmpeg::frame::Audio::empty();
-    resampler.run(decoded, &mut resampled)?;
+    crate::audio::run_resampler(resampler, decoded, &mut resampled)?;
     let channels = resampled.channels() as usize;
     let byte_len = resampled.samples() * channels * 4;
     let bytes = &resampled.data(0)[..byte_len];
