@@ -252,16 +252,16 @@ struct ClipVisual {
 /// sola selezione non passano di qui: mutano `state` direttamente, dato
 /// che non serve né `project` né `history`.
 enum PendingAction {
-    /// (clip_id, from_track, to_track, new_start) per ogni clip del gruppo
-    /// trascinato — `from_track == to_track` per chi non cambia track.
-    Move(Vec<(ClipId, usize, usize, FrameIdx)>),
-    /// Come `Move`, ma la primaria atterra su una track di `new_track_kind`
-    /// creata al volo (drag oltre l'ultima track del suo tipo, vedi
-    /// `track_drag_target`): `primary` è (clip_id, from_track, new_start).
-    MoveToNewTrack {
-        new_track_kind: TrackKind,
-        primary: (ClipId, usize, FrameIdx),
-        followers: Vec<(ClipId, usize, usize, FrameIdx)>,
+    /// Sposta un intero gruppo di clip trascinato (vedi `show_timeline`,
+    /// `drag_group_row_targets`). `new_video_tracks`/`new_audio_tracks`
+    /// vanno create *prima* di risolvere le eventuali `TrackDestination::New`
+    /// in `moves` (una per clip del gruppo: clip_id, from_track,
+    /// destinazione, new_start) — più di una clip può richiedere una nuova
+    /// track dello stesso tipo, a `depth` diverse (vedi `EffectiveTrack`).
+    Move {
+        new_video_tracks: usize,
+        new_audio_tracks: usize,
+        moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)>,
     },
     /// (clip_id, track_index, edge, new_source_in/new_source_out) per ogni
     /// clip del gruppo collegato.
@@ -295,12 +295,25 @@ enum TrackDragTarget {
 
 /// Track candidata per un drag in corso: `Existing` è sempre risolta a un
 /// `track_index` reale (la track di partenza se il puntatore non è in
-/// nessuna zona valida, vedi `track_drag_target`); `New` significa che va
-/// creata al rilascio.
+/// nessuna zona valida, vedi `track_drag_target`); `New(depth)` significa
+/// che va creata al rilascio, `depth` (1-based) conta quante nuove track
+/// dello stesso tipo servono prima di questa — un follower può aver
+/// bisogno di più di una nuova track se, per mantenere la spaziatura
+/// relativa del gruppo, deve andare oltre quella su cui atterra la
+/// primaria (sempre a `depth` 1, vedi `drag_group_row_targets`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectiveTrack {
     Existing(usize),
-    New,
+    New(usize),
+}
+
+/// Come `EffectiveTrack`, ma con il `TrackKind` portato esplicitamente:
+/// serve a `PendingAction::Move` per sapere quale contatore
+/// (`new_video_tracks`/`new_audio_tracks`) usare per un target `New`.
+#[derive(Clone, Copy)]
+enum TrackDestination {
+    Existing(usize),
+    New(TrackKind, usize),
 }
 
 /// Dove atterrerebbe una clip di tipo `kind` trascinata a `local_y`: su una
@@ -351,9 +364,14 @@ fn track_drag_target(
 /// ordine): la primaria atterra su `primary_target` (già risolto da
 /// `track_drag_target`), i follower si spostano dello stesso numero di
 /// righe — invertito se di tipo diverso dalla primaria, dato che video e
-/// audio numerano le track in direzioni opposte (vedi `track_row_order`) —
-/// sempre dentro alle track esistenti del proprio tipo: mai una nuova
-/// track per un follower.
+/// audio numerano le track in direzioni opposte (vedi `track_row_order`).
+/// Un follower può finire oltre l'ultima track esistente del proprio tipo
+/// (per mantenere la spaziatura relativa del gruppo, se la primaria non
+/// era la più vicina al bordo): in quel caso il target è `New(depth)`
+/// invece di essere bloccato all'ultima track, esattamente come farebbe
+/// da sé trascinato singolarmente fin lì. Nella direzione opposta (dove
+/// non esiste alcuna zona "nuova track", vedi `track_drag_target`) resta
+/// invece bloccato alla track più vicina.
 fn drag_group_row_targets(
     primary_id: ClipId,
     primary_track: usize,
@@ -369,7 +387,7 @@ fn drag_group_row_targets(
     let primary_original_row = row_of_track[primary_track] as isize;
     let primary_target_row = match primary_target {
         EffectiveTrack::Existing(track) => row_of_track[track] as isize,
-        EffectiveTrack::New => match primary_kind {
+        EffectiveTrack::New(_) => match primary_kind {
             TrackKind::Video => -1,
             TrackKind::Audio => track_count as isize,
         },
@@ -384,15 +402,20 @@ fn drag_group_row_targets(
         } else {
             -delta_row
         };
-        let (lo, hi) = match follower_kind {
-            TrackKind::Video => (0isize, video_count as isize - 1),
-            TrackKind::Audio => (video_count as isize, track_count as isize - 1),
+        let candidate_row = row_of_track[follower_track] as isize + signed_delta;
+        let target = match follower_kind {
+            TrackKind::Video if candidate_row < 0 => EffectiveTrack::New((-candidate_row) as usize),
+            TrackKind::Audio if candidate_row > track_count as isize - 1 => {
+                EffectiveTrack::New((candidate_row - (track_count as isize - 1)) as usize)
+            }
+            TrackKind::Video => {
+                EffectiveTrack::Existing(row_order[candidate_row.min(video_count as isize - 1) as usize])
+            }
+            TrackKind::Audio => EffectiveTrack::Existing(
+                row_order[candidate_row.max(video_count as isize) as usize],
+            ),
         };
-        let candidate_row = (row_of_track[follower_track] as isize + signed_delta).clamp(lo, hi);
-        targets.push((
-            follower_id,
-            EffectiveTrack::Existing(row_order[candidate_row as usize]),
-        ));
+        targets.push((follower_id, target));
     }
     targets
 }
@@ -1363,11 +1386,11 @@ pub fn show_timeline(
                     });
                     match target {
                         Some(TrackDragTarget::Track(idx)) => EffectiveTrack::Existing(idx),
-                        Some(TrackDragTarget::NewTrack) => EffectiveTrack::New,
+                        Some(TrackDragTarget::NewTrack) => EffectiveTrack::New(1),
                         None => EffectiveTrack::Existing(d.track_index),
                     }
                 });
-                if let (Some(d), Some(EffectiveTrack::New)) = (&state.drag, drag_effective_track) {
+                if let (Some(d), Some(EffectiveTrack::New(_))) = (&state.drag, drag_effective_track) {
                     let rect = match track_kinds[d.track_index] {
                         TrackKind::Video => above_video_rect,
                         TrackKind::Audio => below_audio_rect,
@@ -1505,11 +1528,19 @@ pub fn show_timeline(
                         .and_then(|targets| targets.iter().find(|(id, _)| *id == visual.clip.id));
                     let y = match this_target {
                         Some((_, EffectiveTrack::Existing(track))) => origin.y + row_y[*track],
-                        Some((_, EffectiveTrack::New)) => match track_kinds[visual.track_index] {
+                        // Ogni "profondità" impila un'altra riga oltre al
+                        // bordo attuale (vedi `EffectiveTrack::New`).
+                        Some((_, EffectiveTrack::New(depth))) => match track_kinds[visual.track_index] {
                             TrackKind::Video => {
-                                origin.y + RULER_HEIGHT + (top_margin - ROW_HEIGHT).max(0.0)
+                                origin.y + RULER_HEIGHT + top_margin - *depth as f32 * ROW_HEIGHT
                             }
-                            TrackKind::Audio => origin.y + RULER_HEIGHT + top_margin + rows_height,
+                            TrackKind::Audio => {
+                                origin.y
+                                    + RULER_HEIGHT
+                                    + top_margin
+                                    + rows_height
+                                    + (*depth - 1) as f32 * ROW_HEIGHT
+                            }
                         },
                         None => origin.y + row_y[visual.track_index],
                     };
@@ -1739,30 +1770,40 @@ pub fn show_timeline(
                             // vedeva è quel che si ottiene.
                             let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
                             let targets = drag_group_targets.as_deref().unwrap();
-                            let followers: Vec<(ClipId, usize, usize, FrameIdx)> = d
-                                .followers
+                            let original_tracks =
+                                std::iter::once(d.track_index).chain(d.followers.iter().map(|(_, t, _)| *t));
+                            let starts = std::iter::once(new_start)
+                                .chain(d.followers.iter().map(|(_, _, offset)| new_start + offset));
+
+                            let mut new_video_tracks = 0usize;
+                            let mut new_audio_tracks = 0usize;
+                            let moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)> = targets
                                 .iter()
-                                .zip(&targets[1..])
-                                .map(|((id, from_track, offset), (_, target))| {
-                                    let to_track = match *target {
-                                        EffectiveTrack::Existing(track) => track,
-                                        EffectiveTrack::New => *from_track, // mai creata per un follower
+                                .zip(original_tracks)
+                                .zip(starts)
+                                .map(|(((id, target), from_track), start)| {
+                                    let dest = match *target {
+                                        EffectiveTrack::Existing(track) => TrackDestination::Existing(track),
+                                        EffectiveTrack::New(depth) => {
+                                            let kind = track_kinds[from_track];
+                                            match kind {
+                                                TrackKind::Video => {
+                                                    new_video_tracks = new_video_tracks.max(depth)
+                                                }
+                                                TrackKind::Audio => {
+                                                    new_audio_tracks = new_audio_tracks.max(depth)
+                                                }
+                                            }
+                                            TrackDestination::New(kind, depth)
+                                        }
                                     };
-                                    (*id, *from_track, to_track, new_start + offset)
+                                    (*id, from_track, dest, start)
                                 })
                                 .collect();
-                            pending = Some(match targets[0].1 {
-                                EffectiveTrack::Existing(to_track) => {
-                                    let mut moves =
-                                        vec![(d.clip_id, d.track_index, to_track, new_start)];
-                                    moves.extend(followers);
-                                    PendingAction::Move(moves)
-                                }
-                                EffectiveTrack::New => PendingAction::MoveToNewTrack {
-                                    new_track_kind: track_kinds[d.track_index],
-                                    primary: (d.clip_id, d.track_index, new_start),
-                                    followers,
-                                },
+                            pending = Some(PendingAction::Move {
+                                new_video_tracks,
+                                new_audio_tracks,
+                                moves,
                             });
                             drag_finished = true;
                         }
@@ -1838,25 +1879,41 @@ pub fn show_timeline(
 
     if let Some(action) = pending {
         match action {
-            PendingAction::Move(moves) => {
-                history.do_command(
-                    project,
-                    Box::new(vv_core::MoveClips::new(timeline_id, moves)),
-                );
-            }
-            PendingAction::MoveToNewTrack {
-                new_track_kind,
-                primary,
-                followers,
+            PendingAction::Move {
+                new_video_tracks,
+                new_audio_tracks,
+                moves,
             } => {
-                let new_track = project.timelines[timeline_id].tracks.len();
-                history.do_command(
-                    project,
-                    Box::new(vv_core::AddTrack::new(timeline_id, new_track_kind)),
-                );
-                let (clip_id, from_track, new_start) = primary;
-                let mut moves = vec![(clip_id, from_track, new_track, new_start)];
-                moves.extend(followers);
+                // Creare in ordine di depth crescente basta: sia per
+                // video sia per audio, la depth-esima creata finisce da
+                // sé alla riga giusta (vedi `EffectiveTrack::New`).
+                let mut video_tracks = Vec::with_capacity(new_video_tracks);
+                for _ in 0..new_video_tracks {
+                    video_tracks.push(project.timelines[timeline_id].tracks.len());
+                    history.do_command(
+                        project,
+                        Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+                    );
+                }
+                let mut audio_tracks = Vec::with_capacity(new_audio_tracks);
+                for _ in 0..new_audio_tracks {
+                    audio_tracks.push(project.timelines[timeline_id].tracks.len());
+                    history.do_command(
+                        project,
+                        Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
+                    );
+                }
+                let moves: Vec<(ClipId, usize, usize, FrameIdx)> = moves
+                    .into_iter()
+                    .map(|(id, from_track, dest, start)| {
+                        let to_track = match dest {
+                            TrackDestination::Existing(track) => track,
+                            TrackDestination::New(TrackKind::Video, depth) => video_tracks[depth - 1],
+                            TrackDestination::New(TrackKind::Audio, depth) => audio_tracks[depth - 1],
+                        };
+                        (id, from_track, to_track, start)
+                    })
+                    .collect();
                 history.do_command(
                     project,
                     Box::new(vv_core::MoveClips::new(timeline_id, moves)),
@@ -2347,7 +2404,7 @@ fn group_drag_bounds(
             EffectiveTrack::Existing(track) => {
                 drag_range_at(visuals, track, &exclude, reference, len)
             }
-            EffectiveTrack::New => (0, max_start_in_slot(0, FrameIdx::MAX, len)),
+            EffectiveTrack::New(_) => (0, max_start_in_slot(0, FrameIdx::MAX, len)),
         }
     };
 
@@ -3107,12 +3164,14 @@ mod tests {
     }
 
     #[test]
-    fn drag_group_row_targets_clamps_followers_to_existing_tracks_of_their_kind() {
+    fn drag_group_row_targets_creates_a_new_track_for_a_follower_that_would_overflow() {
         let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video, TrackKind::Video];
         let row_of_track = [2, 3, 1, 0];
         let row_order = [3, 2, 0, 1];
-        // Unica track audio: il follower audio non ha dove andare, resta
-        // sulla propria track anche se la primaria si sposta.
+        // Unica track audio: il follower audio non ha dove andare fra
+        // quelle esistenti, quindi (bug segnalato) deve chiedere una nuova
+        // track anziché restare bloccato sulla propria — esattamente come
+        // farebbe se fosse lui la clip afferrata.
         let followers = vec![(ClipId(9), 1, 0)];
         let targets = drag_group_row_targets(
             ClipId(1),
@@ -3125,7 +3184,34 @@ mod tests {
             3,
             4,
         );
-        assert_eq!(targets[1], (ClipId(9), EffectiveTrack::Existing(1)));
+        assert_eq!(targets[1], (ClipId(9), EffectiveTrack::New(1)));
+    }
+
+    #[test]
+    fn drag_group_row_targets_can_need_more_than_one_new_track_for_a_follower() {
+        // La primaria non è la più vicina al bordo del proprio gruppo: se
+        // salta direttamente in una nuova track, il follower che era già
+        // al bordo deve "sfondare" di più di una track per mantenere la
+        // spaziatura relativa.
+        let track_kinds = [TrackKind::Video, TrackKind::Video, TrackKind::Video];
+        let row_of_track = [2, 1, 0]; // 3 track video, righe decrescenti
+        let row_order = [2, 1, 0];
+        // Primaria sulla track 0 (riga 2, la più lontana dal bordo) va in
+        // New(1); il follower sulla track 2 (riga 0, già al bordo) segue
+        // con lo stesso delta (-3) -> New(3).
+        let followers = vec![(ClipId(9), 2, 0)];
+        let targets = drag_group_row_targets(
+            ClipId(1),
+            0,
+            EffectiveTrack::New(1),
+            &followers,
+            &track_kinds,
+            &row_of_track,
+            &row_order,
+            3,
+            3,
+        );
+        assert_eq!(targets[1], (ClipId(9), EffectiveTrack::New(3)));
     }
 
     fn media_clip_visual(
