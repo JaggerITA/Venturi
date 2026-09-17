@@ -137,23 +137,36 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 
 ## Compositing GPU (wgpu, per ogni frame di output)
 
-1. La clip video mostrata a un frame è quella della track video più in alto
-   che ne ha una lì (`Timeline::active_video_clip_at`); il frame sorgente
-   viene da `Clip::source_frame_at`, procurato tramite `FrameProvider`
+1. I layer di un frame sono le clip attive su ciascuna track video, dal
+   basso verso l'alto (`Timeline::active_video_clips_at`); il frame sorgente
+   di ognuna viene da `Clip::source_frame_at`, procurato tramite `FrameProvider`
    (`vv-app/src/frame_provider.rs`): dalla cache di `RenderAhead` in
    anteprima, in streaming nell'export.
 2. Upload dei piani YUV, conversione a RGB nello shader
    (`vv-render/src/shaders/transform.wgsl`, matrice BT.601/709/2020 e range
    dal sorgente).
-3. Lo shader applica crop (sample rect) e zoom/posizione.
-4. Anteprima: `Compositor::render_frame_to_texture` resta sulla GPU e la
+3. Lo shader applica crop (sample rect) e zoom/posizione, e inscrive il
+   sorgente nel frame di output mantenendone l'aspect ratio: bande nere
+   (letterbox/pillarbox) invece di deformare, es. una clip 9:16 in una
+   timeline 16:9.
+4. Un pass per layer sulla stessa texture, in alpha-over
+   (`Compositor::render_layers`): le bande del layer sopra escono con alpha
+   0 e lasciano vedere quello sotto. Una clip SolidColor è il clear del
+   pass, non un draw.
+5. Anteprima: compone alla risoluzione del frame decodificato allargata
+   all'aspect della timeline (`vv_render::fit_output_size`), così le bande
+   si vedono già in editing senza upscalare il contenuto;
+   `Compositor::render_layers_to_texture` resta sulla GPU e la
    texture è registrata in `egui-wgpu`, senza readback. Export:
-   `Compositor::render_frame` fa il readback in RGBA per l'encoder.
-5. Clip SolidColor: riempimento generato su CPU (`vv-render/src/generator.rs`).
+   `Compositor::render_layers` compone alla risoluzione della timeline e fa
+   il readback in RGBA per l'encoder.
+6. Senza clip video (vuoto su tutte le track): frame nero — in anteprima
+   generato su CPU (`vv-render/src/generator.rs`), che resta anche per il
+   caso "solo clip SolidColor".
 
-Non c'è ancora opacità per-clip, quindi "la track più in alto vince" equivale
-a un blend over e il compositor riceve un solo frame per chiamata. Con
-un'opacità/blend-mode per-clip servirà un vero accumulo multi-texture.
+Non c'è ancora opacità né blend-mode per-clip: un layer opaco che copre
+tutto il frame occlude quelli sotto, l'alpha in gioco è solo quella delle
+bande di letterbox.
 Text overlay (`vv-render/src/text.rs`) non implementato.
 
 ## Pipeline audio

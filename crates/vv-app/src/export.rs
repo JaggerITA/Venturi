@@ -9,13 +9,14 @@
 //!
 //! Limiti v1, coerenti con lo stato attuale del progetto (ARCHITECTURE.md):
 //! N track video (compositate
-//! bottom->top, la più in alto vince dove ha una clip — nessuna opacità
-//! per-clip ancora, quindi "vince" invece di un vero accumulo alpha, vedi
-//! `Timeline::active_video_clip_at`) e N track audio (sommate,
+//! bottom->top in alpha-over, `Timeline::active_video_clips_at` — nessuna
+//! opacità per-clip ancora, quindi un layer che copre tutto il frame
+//! occlude quelli sotto) e N track audio (sommate,
 //! REFACTOR_PIPELINE.md B4); `EffectStack::speed` non applicato (nessun
 //! time-remap: milestone 7 non ancora fatta).
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,24 +41,10 @@ pub struct ExportProgress {
     pub error: Option<String>,
 }
 
-fn black_frame(resolution: (u32, u32)) -> Vec<u8> {
-    vv_render::solid_color_frame(
-        Rgba {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 1.0,
-        },
-        resolution.0,
-        resolution.1,
-    )
-}
-
 /// Decoder tenuto aperto per la clip video attiva, con seek/riapertura solo
 /// quando la clip cambia (non un decoder nuovo per ogni frame di output:
 /// ogni seek è un flush a keyframe, troppo lento fatto ad ogni frame).
 struct ActiveClipDecoder {
-    clip_id: ClipId,
     decoder: vv_media::Decoder,
     /// Ultimo frame decodificato, tenuto per poterlo restituire di nuovo:
     /// una clip conformata (`Clip::rate`) chiede lo stesso frame sorgente
@@ -67,16 +54,11 @@ struct ActiveClipDecoder {
 }
 
 impl ActiveClipDecoder {
-    fn open_for(
-        clip_id: ClipId,
-        path: &Path,
-        target_source_frame: FrameIdx,
-    ) -> Result<Self, String> {
+    fn open_for(path: &Path, target_source_frame: FrameIdx) -> Result<Self, String> {
         let mut decoder = vv_media::Decoder::open(path).map_err(|e| e.to_string())?;
         let secs = target_source_frame as f64 / decoder.fps().as_f64().max(1e-9);
         decoder.seek_to_time(secs).map_err(|e| e.to_string())?;
         let mut me = Self {
-            clip_id,
             decoder,
             last: None,
         };
@@ -120,7 +102,18 @@ impl ActiveClipDecoder {
 /// (REFACTOR_PIPELINE.md B1, doc di `FrameProvider`).
 #[derive(Default)]
 struct StreamingFrameProvider {
-    active: Option<ActiveClipDecoder>,
+    /// Un decoder per clip, non uno solo: a un dato frame di timeline
+    /// possono essere attive più track video sovrapposte (vedi
+    /// `Timeline::active_video_clips_at`) e tenerne aperto uno solo
+    /// significherebbe riaprire e riseekare tutti gli altri a ogni frame.
+    /// Potato da `retain_clips` appena una clip esce di scena.
+    active: HashMap<ClipId, ActiveClipDecoder>,
+}
+
+impl StreamingFrameProvider {
+    fn retain_clips(&mut self, keep: &[ClipId]) {
+        self.active.retain(|id, _| keep.contains(id));
+    }
 }
 
 impl FrameProvider for StreamingFrameProvider {
@@ -131,7 +124,7 @@ impl FrameProvider for StreamingFrameProvider {
         timeline_frame: FrameIdx,
     ) -> Result<Option<Arc<vv_media::FrameYuv420>>, String> {
         let Some((media_id, source_frame)) = media_source_frame(clip, timeline_frame) else {
-            self.active = None;
+            self.active.remove(&clip.id);
             return Ok(None);
         };
         let path = project
@@ -141,15 +134,11 @@ impl FrameProvider for StreamingFrameProvider {
             .path
             .clone();
 
-        if self.active.as_ref().is_none_or(|a| a.clip_id != clip.id) {
-            self.active = Some(ActiveClipDecoder::open_for(clip.id, &path, source_frame)?);
-        }
-        let frame = self
-            .active
-            .as_mut()
-            .expect("appena assegnato sopra se assente")
-            .advance_to(source_frame)?;
-        Ok(frame)
+        let decoder = match self.active.entry(clip.id) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(ActiveClipDecoder::open_for(&path, source_frame)?),
+        };
+        decoder.advance_to(source_frame)
     }
 }
 
@@ -238,52 +227,62 @@ fn render_video_frame(
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
-    let Some((_, clip)) = timeline.active_video_clip_at(frame) else {
-        provider.active = None;
-        return Ok(black_frame(resolution));
-    };
+    let clips: Vec<&Clip> = timeline
+        .active_video_clips_at(frame)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    provider.retain_clips(&clips.iter().map(|c| c.id).collect::<Vec<_>>());
 
-    match &clip.source {
-        ClipSource::Media(_) => {
-            // Mappatura clip→frame-sorgente condivisa con l'anteprima
-            // via `FrameProvider` (REFACTOR_PIPELINE.md B1) — solo il
-            // transform la ricalcola qui perché serve indipendentemente
-            // da `provider` avere restituito un frame o `None`.
-            let transform = clip.effects.transform.value_at(clip.source_frame_at(frame));
-            Ok(match provider.frame_for(project, clip, frame)? {
-                Some(f) => compositor.render_frame(
-                    &as_render_yuv_frame(&f),
-                    &transform,
-                    resolution.0,
-                    resolution.1,
-                ),
-                // source_out oltre la fine reale del file decodificato:
-                // meglio un frame nero che un panic o il congelamento
-                // dell'ultimo frame valido.
-                None => black_frame(resolution),
-            })
-        }
-        ClipSource::SolidColor => {
-            provider.active = None;
-            let local = frame - clip.timeline_start;
-            let color = clip
-                .effects
-                .color
-                .as_ref()
-                .map(|k| k.value_at(local))
-                .unwrap_or(Rgba {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 1.0,
-                });
-            Ok(vv_render::solid_color_frame(
-                color,
-                resolution.0,
-                resolution.1,
-            ))
+    // I frame decodificati vanno tenuti vivi finché i layer che li
+    // prestano non sono stati composti, quindi due passate: prima il
+    // decode di tutte le clip attive, poi lo stack.
+    let mut decoded = Vec::with_capacity(clips.len());
+    for clip in &clips {
+        match &clip.source {
+            ClipSource::Media(_) => {
+                // Mappatura clip→frame-sorgente condivisa con l'anteprima
+                // via `FrameProvider` (REFACTOR_PIPELINE.md B1) — solo il
+                // transform la ricalcola qui perché serve indipendentemente
+                // da `provider` avere restituito un frame o `None`.
+                let transform = clip.effects.transform.value_at(clip.source_frame_at(frame));
+                // `None` = source_out oltre la fine reale del file: quel
+                // layer semplicemente non c'è (nero se è l'unico), meglio
+                // che un panic o il congelamento dell'ultimo frame valido.
+                decoded.push((provider.frame_for(project, clip, frame)?, Some(transform)));
+            }
+            ClipSource::SolidColor => decoded.push((None, None)),
         }
     }
+
+    let layers: Vec<vv_render::Layer> = clips
+        .iter()
+        .zip(&decoded)
+        .filter_map(|(clip, (frame_yuv, transform))| match (frame_yuv, transform) {
+            (Some(f), Some(transform)) => Some(vv_render::Layer::Video {
+                frame: as_render_yuv_frame(f),
+                transform: *transform,
+            }),
+            (None, Some(_)) => None,
+            _ => {
+                let local = frame - clip.timeline_start;
+                Some(vv_render::Layer::Solid(
+                    clip.effects
+                        .color
+                        .as_ref()
+                        .map(|k| k.value_at(local))
+                        .unwrap_or(Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                ))
+            }
+        })
+        .collect();
+
+    Ok(compositor.render_layers(&layers, resolution.0, resolution.1))
 }
 
 /// Mix di tutte le track audio a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,

@@ -20,7 +20,7 @@ originale sono nella git history.
 | B1 | Mappatura clip→frame sorgente duplicata tra anteprima ed export | `Clip::source_frame_at` + trait `FrameProvider` |
 | B2 | Round-trip CPU→GPU→CPU del compositor a ogni frame di anteprima | `Compositor::render_frame_to_texture` registrato in `egui-wgpu` |
 | B3 | Frame in cache in RGBA convertiti su CPU | Frame YUV420 in cache, conversione nello shader |
-| B4 | Rendering limitato a una track video e una audio fisse | N track video (vince la più in alto) e N track audio (sommate) |
+| B4 | Rendering limitato a una track video e una audio fisse | N track video (compositate bottom->top in alpha-over) e N track audio (sommate) |
 | B5 | Audio per-clip invece di un mixer continuo | `vv_audio::Mixer`: somma tutte le track ed è il clock del playback |
 
 ---

@@ -519,6 +519,22 @@ impl Timeline {
     /// punto" — REFACTOR_PIPELINE.md B4, vedi anche
     /// `vv_render::Compositor` (ancora un solo frame in ingresso: qui è
     /// dove si sceglie *quale*, non nel compositor).
+    /// Tutte le clip video che coprono `frame`, una per track, dal basso
+    /// verso l'alto: l'ordine di compositing (l'ultima è quella in cima).
+    /// Con una clip che non riempie il frame di output — aspect ratio
+    /// diverso da quello della timeline, vedi il letterbox in
+    /// `vv_render` — sotto le sue bande si vedono i layer precedenti.
+    pub fn active_video_clips_at(&self, frame: FrameIdx) -> Vec<(usize, &Clip)> {
+        self.tracks_of_kind(TrackKind::Video)
+            .filter_map(|(i, t)| {
+                t.clips
+                    .iter()
+                    .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+                    .map(|c| (i, c))
+            })
+            .collect()
+    }
+
     pub fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, &Clip)> {
         self.tracks_of_kind(TrackKind::Video)
             .rev()
@@ -836,6 +852,44 @@ mod timeline_tests {
             "tornata scoperta la track top, si rivede la bottom sotto"
         );
         assert!(tl.active_video_clip_at(35).is_none());
+    }
+
+    #[test]
+    fn active_video_clips_at_returns_every_covering_track_bottom_to_top() {
+        let tl = Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(0, 30, 1)],
+                    muted: false,
+                },
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![clip_at(10, 10, 2)],
+                    muted: false,
+                },
+            ],
+        };
+        assert_eq!(
+            tl.active_video_clips_at(15)
+                .iter()
+                .map(|(t, c)| (*t, c.id))
+                .collect::<Vec<_>>(),
+            vec![(0, ClipId(1)), (1, ClipId(2))],
+            "bottom prima, top per ultima: è l'ordine di compositing"
+        );
+        assert_eq!(
+            tl.active_video_clips_at(5)
+                .iter()
+                .map(|(_, c)| c.id)
+                .collect::<Vec<_>>(),
+            vec![ClipId(1)],
+            "qui solo la track bottom ha una clip"
+        );
+        assert!(tl.active_video_clips_at(35).is_empty());
     }
 
     #[test]

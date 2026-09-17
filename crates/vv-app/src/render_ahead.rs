@@ -656,64 +656,29 @@ struct MediaSegment {
 }
 
 /// Divide `[from_frame, end_frame)` di timeline in segmenti, uno per ogni
-/// clip Media attraversata sulla track video *attiva* (la più in alto tra
-/// quelle video che coprono ciascun punto, `Timeline::active_video_clip_at`
-/// — REFACTOR_PIPELINE.md B4: con più track video, quella "in cima" può
-/// cambiare da un tratto all'altro, il loop lo scopre da sé rivalutando
-/// ogni volta che avanza, nessun caso speciale in più): cammina quante clip
-/// servono nella stessa passata, saltando vuoti (nessuna clip attiva,
-/// quindi nessun segmento) e clip SolidColor (nessun decode necessario)
-/// senza bisogno di casi speciali. Funzione pura, testabile senza ffmpeg.
+/// clip Media attraversata su *ciascuna* track video: non solo quella in
+/// cima, perché il compositing (`Timeline::active_video_clips_at`) mostra
+/// anche i layer sotto dove quello sopra non copre il frame intero
+/// (bande di letterbox). Le clip SolidColor non hanno nulla da decodificare
+/// e i vuoti non producono segmenti, senza casi speciali. I segmenti
+/// escono ordinati dal più vicino alla testina al più lontano — e, a pari
+/// posizione, dalla track più in alto in giù (è quella che si vede per
+/// prima): `walk_and_fill` li elabora in quest'ordine, che è l'ordine di
+/// priorità. Funzione pura, testabile senza ffmpeg.
 fn collect_media_segments(
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
 ) -> Vec<MediaSegment> {
-    let mut segments = Vec::new();
-    let mut frame = from_frame;
-    while frame < end_frame {
-        let next_frame = match timeline.active_video_clip_at(frame) {
-            Some((_, clip)) => {
-                let segment_end_timeline = clip.timeline_end().min(end_frame);
-                if let ClipSource::Media(media_id) = &clip.source {
-                    let media_id = *media_id;
-                    // Mappatura clip→frame-sorgente condivisa con l'export
-                    // (`vv_core::Clip::source_frame_at`, vedi doc lì per il
-                    // perché — REFACTOR_PIPELINE.md B1).
-                    let source_start = clip.source_frame_at(frame);
-                    let source_end =
-                        (clip.source_frame_at(segment_end_timeline) - 1).max(source_start);
-                    segments.push(MediaSegment {
-                        media_id,
-                        source_start,
-                        source_end,
-                        timeline_start: frame,
-                        rate: clip.rate,
-                    });
-                }
-                segment_end_timeline
-            }
-            None => timeline
-                .next_video_clip_start_from(frame)
-                .map(|s| s.min(end_frame))
-                .unwrap_or(end_frame),
-        };
-        if next_frame <= frame {
-            break; // sicurezza: non dovrebbe succedere, evita un loop infinito
-        }
-        frame = next_frame;
-    }
-    segments
+    let mut segments = clipped_media_segments(timeline, from_frame, end_frame);
+    segments.sort_by_key(|(track, s)| (s.timeline_start, std::cmp::Reverse(*track)));
+    segments.into_iter().map(|(_, s)| s).collect()
 }
 
-/// Simmetrico a `collect_media_segments`, ma all'indietro: divide
-/// `[start_frame, from_frame)` in segmenti camminando la timeline verso
-/// sinistra invece che verso destra — stessa identica logica (nessun
-/// caso speciale per direzione: clip attiva -> segmento fino al suo
-/// inizio, vuoto -> salta al bordo della clip precedente), solo con
-/// `Timeline::previous_video_clip_end_before` al posto di
-/// `next_video_clip_start_from`. La decodifica vera e propria di questi
-/// segmenti resta comunque in avanti nello spazio *sorgente* (ffmpeg
+/// Simmetrico a `collect_media_segments`, ma per la finestra *dietro* la
+/// testina: stessi segmenti, ordinati dal più vicino alla testina (quindi
+/// dal più avanti nella timeline) al più lontano. La decodifica vera e
+/// propria resta comunque in avanti nello spazio *sorgente* (ffmpeg
 /// decodifica solo in avanti): "all'indietro" qui si riferisce solo a
 /// *dove* cade il segmento nello spazio timeline, non a come viene
 /// prodotto — vedi il loop di fill in `walk_and_fill`, identico per i
@@ -723,35 +688,46 @@ fn collect_media_segments_behind(
     from_frame: FrameIdx,
     start_frame: FrameIdx,
 ) -> Vec<MediaSegment> {
+    let mut segments = clipped_media_segments(timeline, start_frame, from_frame);
+    segments.sort_by_key(|(track, s)| (std::cmp::Reverse(s.timeline_start), std::cmp::Reverse(*track)));
+    segments.into_iter().map(|(_, s)| s).collect()
+}
+
+/// La parte comune delle due funzioni sopra: ogni clip Media di ogni track
+/// video ritagliata su `[from_frame, end_frame)`, con l'indice della sua
+/// track per poterle poi ordinare. Non ordinati.
+fn clipped_media_segments(
+    timeline: &Timeline,
+    from_frame: FrameIdx,
+    end_frame: FrameIdx,
+) -> Vec<(usize, MediaSegment)> {
     let mut segments = Vec::new();
-    let mut frame = from_frame;
-    while frame > start_frame {
-        let next_frame = match timeline.active_video_clip_at(frame - 1) {
-            Some((_, clip)) => {
-                let segment_start_timeline = clip.timeline_start.max(start_frame);
-                if let ClipSource::Media(media_id) = &clip.source {
-                    let media_id = *media_id;
-                    let source_start = clip.source_frame_at(segment_start_timeline);
-                    let source_end = (clip.source_frame_at(frame) - 1).max(source_start);
-                    segments.push(MediaSegment {
-                        media_id,
-                        source_start,
-                        source_end,
-                        timeline_start: segment_start_timeline,
-                        rate: clip.rate,
-                    });
-                }
-                segment_start_timeline
+    for (track_index, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
+        for clip in &track.clips {
+            let ClipSource::Media(media_id) = &clip.source else {
+                continue;
+            };
+            let segment_start = clip.timeline_start.max(from_frame);
+            let segment_end = clip.timeline_end().min(end_frame);
+            if segment_end <= segment_start {
+                continue;
             }
-            None => timeline
-                .previous_video_clip_end_before(frame)
-                .map(|e| e.max(start_frame))
-                .unwrap_or(start_frame),
-        };
-        if next_frame >= frame {
-            break; // sicurezza: non dovrebbe succedere, evita un loop infinito
+            // Mappatura clip→frame-sorgente condivisa con l'export
+            // (`vv_core::Clip::source_frame_at`, vedi doc lì per il
+            // perché — REFACTOR_PIPELINE.md B1).
+            let source_start = clip.source_frame_at(segment_start);
+            let source_end = (clip.source_frame_at(segment_end) - 1).max(source_start);
+            segments.push((
+                track_index,
+                MediaSegment {
+                    media_id: *media_id,
+                    source_start,
+                    source_end,
+                    timeline_start: segment_start,
+                    rate: clip.rate,
+                },
+            ));
         }
-        frame = next_frame;
     }
     segments
 }
@@ -1773,6 +1749,34 @@ mod tests {
         );
         assert_eq!((segments[0].source_start, segments[0].source_end), (0, 9));
         assert_eq!((segments[1].source_start, segments[1].source_end), (0, 9));
+    }
+
+    /// Con più track video il buffer deve coprirle tutte, non solo quella
+    /// in cima: sotto le bande di una clip con aspect diverso da quello
+    /// della timeline si vede il layer sotto, che quindi va decodificato.
+    #[test]
+    fn collect_media_segments_covers_every_video_track_topmost_first() {
+        let (media_a, media_b) = two_media_ids();
+        let tl = timeline_with(vec![
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![media_clip(1, media_a, 0, 50)],
+                muted: false,
+            },
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![media_clip(2, media_b, 0, 50)],
+                muted: false,
+            },
+        ]);
+
+        let segments = collect_media_segments(&tl, 0, 50);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            (segments[0].media_id, segments[1].media_id),
+            (media_b, media_a),
+            "a pari posizione la track in cima ha la priorità"
+        );
     }
 
     #[test]

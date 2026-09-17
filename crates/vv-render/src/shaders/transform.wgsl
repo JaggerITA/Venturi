@@ -10,6 +10,10 @@ struct TransformUniform {
     crop: vec4<f32>,
     // zoom, position.x, position.y, (inutilizzato, per l'allineamento a 16 byte)
     zoom_pos: vec4<f32>,
+    // x/y: fattori di letterbox (>1 sull'asse che resta scoperto): il
+    // frame sorgente viene inscritto nell'output mantenendo il suo
+    // aspect ratio invece di essere deformato, z/w inutilizzati.
+    fit: vec4<f32>,
     // x: matrice colore (0=BT.601, 1=BT.709, 2=BT.2020, vedi
     //    vv_media::ColorMatrix). y: 1.0 se range full (JPEG), 0.0 se
     //    limited (MPEG) — vedi vv_media::FrameYuv420::full_range. z/w
@@ -91,7 +95,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let zoom = max(transform.zoom_pos.x, 0.0001);
     let position = transform.zoom_pos.yz;
 
-    let centered = in.uv - vec2<f32>(0.5, 0.5);
+    let centered = (in.uv - vec2<f32>(0.5, 0.5)) * transform.fit.xy;
+    // Alpha 0, non nero opaco: sulle bande deve vedersi il layer sotto
+    // (il pass è in alpha-over, vedi Compositor::render_layers).
+    if (abs(centered.x) > 0.5 || abs(centered.y) > 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
     let sample_uv = crop_center + (centered / zoom) * crop_size - position;
 
     // Fuori dal crop: clamp sul bordo piuttosto che leggere fuori texture.

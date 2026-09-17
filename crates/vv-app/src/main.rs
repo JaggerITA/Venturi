@@ -1,17 +1,14 @@
 //! Finestra egui: media pool (sinistra), viewer (centro), timeline
 //! multi-traccia (basso), toolbar con play/pause/seek per l'anteprima.
 //!
-//! Il viewer mostra, per ogni frame, la clip Media attiva sulla track
-//! video più in alto tra quelle che ne hanno una in quel punto
-//! (`vv_core::Timeline::active_video_clip_at` — con più track video
-//! sovrapposte, N tracce reali, non solo la track 0 fissa,
-//! REFACTOR_PIPELINE.md B4), con crop/zoom/gain (milestone 5, valori
-//! statici) applicati tramite il compositor GPU di `vv-render`, texture
-//! GPU passata direttamente a egui-wgpu senza round-trip CPU
-//! (REFACTOR_PIPELINE.md B2). Non è ancora un vero accumulo alpha
-//! multi-layer: senza un'opacità per-clip ancora modellata, "compositing
-//! bottom->top" collassa in "la track più in alto che copre quel punto
-//! vince" — vedi doc di `active_video_clip_at`.
+//! Il viewer mostra, per ogni frame, le clip attive su tutte le track
+//! video (`vv_core::Timeline::active_video_clips_at`, REFACTOR_PIPELINE.md
+//! B4) composte dal basso verso l'alto in alpha-over dal compositor GPU di
+//! `vv-render`, con crop/zoom (milestone 5) e le bande di letterbox dove
+//! una clip ha un aspect ratio diverso da quello della timeline: lì si
+//! vede il layer sotto. La texture GPU va direttamente a egui-wgpu senza
+//! round-trip CPU (REFACTOR_PIPELINE.md B2). Non c'è ancora un'opacità
+//! per-clip: un layer opaco che copre tutto il frame occlude quelli sotto.
 
 mod export;
 mod frame_provider;
@@ -150,6 +147,18 @@ enum PendingEffectChange {
 struct DropTracks {
     video: usize,
     extra_audio: Option<usize>,
+}
+
+/// Un layer dello stack di compositing del viewer (vedi
+/// `VibeVideoApp::timeline_video_layers`), pronto da tradurre in
+/// `vv_render::Layer` — che non può essere costruito prima perché presta i
+/// piani del frame decodificato, che qui va tenuto vivo.
+enum PreviewLayer {
+    Video {
+        frame: std::sync::Arc<vv_media::FrameYuv420>,
+        transform: vv_core::Transform,
+    },
+    Solid(vv_core::Rgba),
 }
 
 /// Quale rappresentazione di texture del viewer è quella corrente — vedi
@@ -1468,6 +1477,98 @@ impl VibeVideoApp {
         );
     }
 
+    /// Compone `layers` e mostra il risultato nel viewer. Zero-copy
+    /// (REFACTOR_PIPELINE.md B2): la texture di output resta sulla GPU,
+    /// registrata/aggiornata direttamente nel renderer di egui-wgpu —
+    /// nessun readback CPU né re-upload via `egui::ColorImage`. Richiede
+    /// il device condiviso con egui-wgpu (`egui_render_state`, sempre
+    /// presente nell'app reale — vedi `main()`; `None` solo nei test che
+    /// costruiscono `VibeVideoApp` con `Default` senza una finestra, dove
+    /// semplicemente non c'è nulla da mostrare per questo frame).
+    fn show_composited(&mut self, layers: &[vv_render::Layer], out_w: u32, out_h: u32) {
+        let Some(render_state) = self.egui_render_state.clone() else {
+            return;
+        };
+        let texture = self.compositor.render_layers_to_texture(layers, out_w, out_h);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = render_state.renderer.write();
+        match self.video_texture_id {
+            Some(id) => renderer.update_egui_texture_from_wgpu_texture(
+                &render_state.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            ),
+            None => {
+                self.video_texture_id = Some(renderer.register_native_texture(
+                    &render_state.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                ));
+            }
+        }
+        drop(renderer);
+        self.video_display_size = Some(egui::vec2(out_w as f32, out_h as f32));
+        self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
+    }
+
+    /// I layer video da comporre nel viewer al playhead, dal basso verso
+    /// l'alto (`Timeline::active_video_clips_at`). `None` = il frame
+    /// della clip *in cima* non è ancora bufferizzato: si tiene quello già
+    /// mostrato invece di sfarfallare. Un layer sotto non ancora pronto
+    /// viene invece saltato, il resto dello stack si vede lo stesso.
+    fn timeline_video_layers(&mut self) -> Option<Vec<PreviewLayer>> {
+        let timeline_id = self.timeline_id?;
+        let playhead = self.timeline_state.playhead;
+        let clips: Vec<vv_core::Clip> = self.project.timelines[timeline_id]
+            .active_video_clips_at(playhead)
+            .into_iter()
+            .map(|(_, c)| c.clone())
+            .collect();
+        let topmost = clips.len().saturating_sub(1);
+
+        let mut layers = Vec::with_capacity(clips.len());
+        for (i, clip) in clips.iter().enumerate() {
+            match &clip.source {
+                vv_core::ClipSource::SolidColor => {
+                    let local_frame = (playhead - clip.timeline_start).max(0);
+                    layers.push(PreviewLayer::Solid(
+                        clip.effects
+                            .color
+                            .as_ref()
+                            .map(|k| k.value_at(local_frame))
+                            .unwrap_or(vv_core::Rgba {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                    ));
+                }
+                vv_core::ClipSource::Media(_) => {
+                    // Stessa interfaccia dell'export per procurare il frame
+                    // (`FrameProvider`, REFACTOR_PIPELINE.md B1) — qui backed
+                    // dalla cache di `render_ahead`, non bloccante. Il clamp
+                    // preserva il comportamento precedente per il breve istante
+                    // in cui il playhead può essere appena uscito dalla clip.
+                    let timeline_frame = playhead.max(clip.timeline_start);
+                    let transform = clip.effects.transform.value_at(clip.source_frame_at(timeline_frame));
+                    let frame = self
+                        .render_ahead
+                        .as_mut()?
+                        .frame_for(&self.project, clip, timeline_frame)
+                        .ok()?;
+                    match frame {
+                        Some(frame) => layers.push(PreviewLayer::Video { frame, transform }),
+                        None if i == topmost => return None,
+                        None => {}
+                    }
+                }
+            }
+        }
+        Some(layers)
+    }
+
     fn active_clip_effects(&self) -> Option<&vv_core::EffectStack> {
         let (track_index, clip_id) = self.active_clip?;
         let timeline_id = self.timeline_id?;
@@ -1480,44 +1581,16 @@ impl VibeVideoApp {
             .map(|c| &c.effects)
     }
 
-    /// Il frame video grezzo (YUV420, non ancora composito) da mostrare nel
-    /// viewer in questo momento, con la posizione (frame *sorgente*, per
-    /// valutare il transform keyframeato) a cui corrisponde — `None` se
-    /// non c'è ancora nulla di pronto. Due sorgenti possibili, mai
-    /// entrambe insieme (`browsing_media` le distingue):
-    /// `browsing_decode_ahead` durante un'anteprima "grezza" dal media
-    /// pool, o `render_ahead` (il buffer a livello di timeline) per la
-    /// clip Media attiva sulla timeline.
-    fn current_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameYuv420>, FrameIdx)> {
-        if self.browsing_media.is_some() {
-            let decode_ahead = self.browsing_decode_ahead.as_ref()?;
-            let idx = self.browse_playhead;
-            decode_ahead.set_target(idx);
-            decode_ahead.cache().get(idx).map(|f| (f, idx))
-        } else {
-            let (track_index, clip_id) = self.active_clip?;
-            let timeline_id = self.timeline_id?;
-            let clip = self.project.timelines[timeline_id]
-                .tracks
-                .get(track_index)?
-                .clips
-                .iter()
-                .find(|c| c.id == clip_id)?
-                .clone();
-            // Stessa interfaccia dell'export per procurare il frame
-            // (`FrameProvider`, REFACTOR_PIPELINE.md B1) — qui backed
-            // dalla cache di `render_ahead`, non bloccante. Il clamp
-            // preserva il comportamento precedente per il breve istante
-            // in cui `active_clip` può restare un frame indietro
-            // rispetto al playhead appena aggiornato.
-            let timeline_frame = self.timeline_state.playhead.max(clip.timeline_start);
-            let source_frame = clip.source_frame_at(timeline_frame);
-            self.render_ahead
-                .as_mut()?
-                .frame_for(&self.project, &clip, timeline_frame)
-                .ok()?
-                .map(|f| (f, source_frame))
-        }
+    /// Il frame grezzo (YUV420) dell'anteprima "grezza" di un media del
+    /// pool (`browsing_media`/`browsing_decode_ahead`), con l'indice a cui
+    /// corrisponde — `None` se non è ancora bufferizzato. Il viewer della
+    /// timeline non passa di qui: ha uno stack di layer, non un frame solo
+    /// (`timeline_video_layers`).
+    fn browsing_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameYuv420>, FrameIdx)> {
+        let decode_ahead = self.browsing_decode_ahead.as_ref()?;
+        let idx = self.browse_playhead;
+        decode_ahead.set_target(idx);
+        decode_ahead.cache().get(idx).map(|f| (f, idx))
     }
 
     /// Le altre clip del gruppo collegato (`Clip::linked_group`) di una
@@ -4105,123 +4178,100 @@ impl eframe::App for VibeVideoApp {
                 .show(ui, |ui| {
                     transport_action = transport::show_transport(ui, total, playhead, marks, playing);
                 });
-            // Le clip SolidColor non hanno un media da decodificare: il
-            // colore (eventualmente keyframeato) va valutato al frame
-            // *locale alla clip* sul playhead della timeline. Nessuna clip
-            // attiva (vuoto sulla track video) mostra un frame nero allo
-            // stesso modo, invece del placeholder testuale o
-            // dell'ultimo frame rimasto — come un vero NLE. Non quando si
-            // sta sfogliando un media "grezzo" dal media pool
-            // (`browsing_media`): lì `active_clip` è `None` di proposito,
-            // ma `browsing_decode_ahead`/`frame_texture` mostrano davvero
-            // quell'anteprima.
-            let solid_color_frame_info = self.timeline_id.and_then(|timeline_id| {
-                let tl = &self.project.timelines[timeline_id];
-                match self.active_clip {
-                    Some((track_index, clip_id)) => {
-                        let clip = tl
-                            .tracks
-                            .get(track_index)?
-                            .clips
-                            .iter()
-                            .find(|c| c.id == clip_id)?;
-                        match &clip.source {
-                            vv_core::ClipSource::SolidColor => {
-                                let local_frame =
-                                    (self.timeline_state.playhead - clip.timeline_start).max(0);
-                                let rgba = clip
-                                    .effects
-                                    .color
-                                    .as_ref()
-                                    .map(|k| k.value_at(local_frame))
-                                    .unwrap_or(vv_core::Rgba {
-                                        r: 0.0,
-                                        g: 0.0,
-                                        b: 0.0,
-                                        a: 1.0,
-                                    });
-                                Some((tl.resolution, rgba))
-                            }
-                            vv_core::ClipSource::Media(_) => None,
-                        }
-                    }
-                    None if self.browsing_media.is_none() => Some((
-                        tl.resolution,
-                        vv_core::Rgba {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        },
-                    )),
-                    None => None,
-                }
-            });
-
             let media_offline = self.active_clip_media_offline();
+            // Sfogliando un media "grezzo" dal media pool non c'è nessuna
+            // timeline da comporre: un layer solo, il suo frame com'è.
+            let layers = if media_offline || self.browsing_media.is_some() {
+                None
+            } else {
+                self.timeline_video_layers()
+            };
+
             if media_offline {
                 self.last_viewer_frame_kind = Some(ViewerFrameKind::Offline);
-            } else if let Some(((w, h), rgba)) = solid_color_frame_info {
-                // Immagine sintetica generata su CPU (nessun frame
-                // decodificato da comporre): niente da guadagnare a
-                // tenerla sulla GPU, resta sul path gestito da egui.
-                let data = vv_render::solid_color_frame(rgba, w, h);
-                let image =
-                    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &data);
-                match &mut self.frame_texture {
-                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.frame_texture = Some(ui.ctx().load_texture(
-                            "current-frame",
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
-                }
-                self.last_viewer_frame_kind = Some(ViewerFrameKind::SolidColor);
-            } else if let Some((frame, source_frame)) = self.current_video_frame() {
-                // Zero-copy (REFACTOR_PIPELINE.md B2): la texture di
-                // output resta sulla GPU, registrata/aggiornata
-                // direttamente nel renderer di egui-wgpu — nessun
-                // readback CPU né re-upload via `egui::ColorImage` come
-                // nel path sopra. Richiede il device condiviso con
-                // egui-wgpu (`egui_render_state`, sempre presente
-                // nell'app reale — vedi `main()`; `None` solo nei test
-                // che costruiscono `VibeVideoApp` con `Default` senza una
-                // finestra, dove semplicemente non c'è nulla da mostrare
-                // per questo frame).
-                if let Some(render_state) = self.egui_render_state.clone() {
+            } else if self.browsing_media.is_some() {
+                if let Some((frame, source_frame)) = self.browsing_video_frame() {
                     let transform = self
                         .active_clip_effects()
                         .map(|e| e.transform.value_at(source_frame))
                         .unwrap_or_default();
-                    let texture = self.compositor.render_frame_to_texture(
-                        &frame_provider::as_render_yuv_frame(&frame),
-                        &transform,
-                        frame.width,
-                        frame.height,
-                    );
-                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    let mut renderer = render_state.renderer.write();
-                    match self.video_texture_id {
-                        Some(id) => renderer.update_egui_texture_from_wgpu_texture(
-                            &render_state.device,
-                            &view,
-                            wgpu::FilterMode::Linear,
-                            id,
-                        ),
-                        None => {
-                            self.video_texture_id = Some(renderer.register_native_texture(
-                                &render_state.device,
-                                &view,
-                                wgpu::FilterMode::Linear,
-                            ));
-                        }
+                    let layer = vv_render::Layer::Video {
+                        frame: frame_provider::as_render_yuv_frame(&frame),
+                        transform,
+                    };
+                    self.show_composited(&[layer], frame.width, frame.height);
+                }
+            } else if let Some(layers) = layers {
+                let video_size = layers
+                    .iter()
+                    .filter_map(|l| match l {
+                        PreviewLayer::Video { frame, .. } => Some((frame.width, frame.height)),
+                        PreviewLayer::Solid(_) => None,
+                    })
+                    .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
+
+                match video_size {
+                    Some(size) => {
+                        // Compositing alla risoluzione del frame decodificato
+                        // (proxy compreso) allargata all'aspect della
+                        // timeline: le bande si vedono già in editing senza
+                        // upscalare il contenuto.
+                        let (out_w, out_h) = match self.timeline_id {
+                            Some(id) => vv_render::fit_output_size(
+                                size,
+                                self.project.timelines[id].resolution,
+                            ),
+                            None => size,
+                        };
+                        let render_layers: Vec<vv_render::Layer> = layers
+                            .iter()
+                            .map(|l| match l {
+                                PreviewLayer::Video { frame, transform } => {
+                                    vv_render::Layer::Video {
+                                        frame: frame_provider::as_render_yuv_frame(frame),
+                                        transform: *transform,
+                                    }
+                                }
+                                PreviewLayer::Solid(rgba) => vv_render::Layer::Solid(*rgba),
+                            })
+                            .collect();
+                        self.show_composited(&render_layers, out_w, out_h);
                     }
-                    drop(renderer);
-                    self.video_display_size =
-                        Some(egui::vec2(frame.width as f32, frame.height as f32));
-                    self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
+                    // Nessun frame decodificato da comporre (solo clip
+                    // SolidColor, o un vuoto sulla track video — che come in
+                    // un vero NLE mostra nero, non l'ultimo frame rimasto):
+                    // immagine sintetica su CPU, niente da guadagnare a
+                    // tenerla sulla GPU.
+                    None => {
+                        let rgba = match layers.last() {
+                            Some(PreviewLayer::Solid(rgba)) => *rgba,
+                            _ => vv_core::Rgba {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            },
+                        };
+                        let (w, h) = self
+                            .timeline_id
+                            .map_or((16, 9), |id| self.project.timelines[id].resolution);
+                        let data = vv_render::solid_color_frame(rgba, w, h);
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            &data,
+                        );
+                        match &mut self.frame_texture {
+                            Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                            None => {
+                                self.frame_texture = Some(ui.ctx().load_texture(
+                                    "current-frame",
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
+                        }
+                        self.last_viewer_frame_kind = Some(ViewerFrameKind::SolidColor);
+                    }
                 }
             }
 

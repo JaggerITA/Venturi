@@ -3,13 +3,17 @@
 //! — la conversione a RGB avviene qui, nello shader, non più su CPU in
 //! vv-media), crop + zoom via shader wgpu.
 //!
-//! Due modi di ottenere il risultato, che condividono lo stesso pass
-//! (`render_to_texture`, privato):
-//! - [`Compositor::render_frame`] fa un round-trip CPU→GPU→CPU (upload,
+//! Lo stack di track video viene composto in alpha-over, un pass per
+//! layer ([`Compositor::render_layers`]/[`Layer`]): dove il layer sopra
+//! non copre il frame di output — aspect ratio diverso da quello della
+//! timeline, vedi `fit_factors` — si vede quello sotto.
+//!
+//! Due modi di ottenere il risultato, che condividono gli stessi pass:
+//! - [`Compositor::render_layers`] fa un round-trip CPU→GPU→CPU (upload,
 //!   render, readback) — usato dall'export, che ha bisogno di byte RGBA
 //!   densi da passare all'encoder (`vv_media::Encoder::write_video_frame`),
 //!   non di una texture GPU.
-//! - [`Compositor::render_frame_to_texture`] resta sulla GPU, nessun
+//! - [`Compositor::render_layers_to_texture`] resta sulla GPU, nessun
 //!   readback: usato dall'anteprima (`vv-app::main`), che registra la
 //!   texture direttamente in `egui-wgpu` (`Renderer::register_native_texture`
 //!   / `update_egui_texture_from_wgpu_texture`) ed evita sia il readback
@@ -27,6 +31,12 @@ use vv_core::Transform;
 use wgpu::util::DeviceExt;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const BLACK: wgpu::Color = wgpu::Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
 /// Formato dei tre piani di input (Y/U/V): un solo canale 8 bit, letto
 /// come `.r` nello shader.
 const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
@@ -77,19 +87,44 @@ pub struct YuvFrame<'a> {
     pub full_range: bool,
 }
 
+impl<'a> YuvFrame<'a> {
+    fn borrowed(&self) -> YuvFrame<'a> {
+        YuvFrame { ..*self }
+    }
+}
+
+/// Un livello dello stack di compositing, dal basso verso l'alto (vedi
+/// [`Compositor::render_layers`]): una track video con una clip Media
+/// (`Video`) o con una clip generatore a colore pieno (`Solid`, che
+/// copre il frame intero e quindi occlude tutto ciò che sta sotto).
+pub enum Layer<'a> {
+    Video {
+        frame: YuvFrame<'a>,
+        transform: Transform,
+    },
+    Solid(vv_core::Rgba),
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct TransformUniform {
     crop: [f32; 4],
     zoom_pos: [f32; 4],
+    fit: [f32; 4],
     color: [f32; 4],
 }
 
 impl TransformUniform {
-    fn new(t: &Transform, matrix: ColorMatrix, full_range: bool) -> Self {
+    fn new(
+        t: &Transform,
+        matrix: ColorMatrix,
+        full_range: bool,
+        fit: [f32; 2],
+    ) -> Self {
         Self {
             crop: t.crop,
             zoom_pos: [t.zoom, t.position[0], t.position[1], 0.0],
+            fit: [fit[0], fit[1], 0.0, 0.0],
             color: [
                 matrix.shader_id(),
                 if full_range { 1.0 } else { 0.0 },
@@ -173,7 +208,11 @@ impl Compositor {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: OUTPUT_FORMAT,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    // Alpha blending, non REPLACE: le zone scoperte di un
+                    // layer (letterbox, vedi `fit_factors`) escono dallo
+                    // shader con alpha 0 e devono lasciar vedere il layer
+                    // sotto, non coprirlo di nero.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -237,7 +276,23 @@ impl Compositor {
         output_w: u32,
         output_h: u32,
     ) -> Vec<u8> {
-        let output_texture = self.render_to_texture(frame, transform, output_w, output_h);
+        self.render_layers(
+            &[Layer::Video {
+                frame: frame.borrowed(),
+                transform: *transform,
+            }],
+            output_w,
+            output_h,
+        )
+    }
+
+    /// Come [`Compositor::render_frame`] ma per uno stack di layer
+    /// (track video dal basso verso l'alto): ogni layer viene composto
+    /// sopra il precedente in alpha-over, così le zone scoperte di quello
+    /// in cima (bande di letterbox, vedi `fit_factors`) mostrano quello
+    /// sotto invece del nero.
+    pub fn render_layers(&self, layers: &[Layer], output_w: u32, output_h: u32) -> Vec<u8> {
+        let output_texture = self.render_layers_to_texture(layers, output_w, output_h);
 
         // wgpu richiede che ogni riga del buffer di destinazione sia
         // allineata a COPY_BYTES_PER_ROW_ALIGNMENT: il buffer può quindi
@@ -307,7 +362,7 @@ impl Compositor {
     /// utilizzabile da `egui_wgpu::Renderer::register_native_texture` /
     /// `update_egui_texture_from_wgpu_texture`, dato che il `Compositor`
     /// condivide il device con `egui-wgpu` — vedi doc di modulo). La
-    /// chiamata a `self.queue.submit` dentro `render_to_texture` è
+    /// chiamata a `self.queue.submit` dentro `render_layers_to_texture` è
     /// sufficiente: non serve attendere il completamento, il pass che
     /// campiona questa texture (quello di egui) verrà sottomesso *dopo*
     /// sulla stessa coda, quindi la GPU la esegue comunque in ordine.
@@ -318,21 +373,77 @@ impl Compositor {
         output_w: u32,
         output_h: u32,
     ) -> wgpu::Texture {
-        self.render_to_texture(frame, transform, output_w, output_h)
+        self.render_layers_to_texture(
+            &[Layer::Video {
+                frame: frame.borrowed(),
+                transform: *transform,
+            }],
+            output_w,
+            output_h,
+        )
     }
 
-    /// Il pass condiviso da `render_frame` e `render_frame_to_texture`:
-    /// upload dei tre piani in ingresso, crop/zoom + conversione YUV→RGB
-    /// via shader, draw nella texture di output — tutto ciò che precede
-    /// la scelta "leggi indietro su CPU o lascia sulla GPU", che sta ai
-    /// due metodi pubblici sopra.
-    fn render_to_texture(
+    /// Versione multi-layer di [`Compositor::render_frame_to_texture`]
+    /// (vedi [`Compositor::render_layers`]).
+    pub fn render_layers_to_texture(
+        &self,
+        layers: &[Layer],
+        output_w: u32,
+        output_h: u32,
+    ) -> wgpu::Texture {
+        let output_texture = self.output_texture(output_w, output_h);
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vv-render transform encoder"),
+            });
+
+        // Nessun layer: resta il solo clear, cioè un frame nero.
+        if layers.is_empty() {
+            self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(BLACK), None);
+        }
+        for (i, layer) in layers.iter().enumerate() {
+            match layer {
+                // Un colore pieno copre tutto il frame: è il clear del
+                // pass, nessun draw (e nessun layer sotto sopravvive,
+                // giustamente — è opaco).
+                Layer::Solid(color) => {
+                    let clear = wgpu::Color {
+                        r: color.r.clamp(0.0, 1.0) as f64,
+                        g: color.g.clamp(0.0, 1.0) as f64,
+                        b: color.b.clamp(0.0, 1.0) as f64,
+                        a: color.a.clamp(0.0, 1.0) as f64,
+                    };
+                    self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
+                }
+                Layer::Video { frame, transform } => {
+                    let load = if i == 0 {
+                        wgpu::LoadOp::Clear(BLACK)
+                    } else {
+                        wgpu::LoadOp::Load
+                    };
+                    let bind_group = self.layer_bind_group(frame, transform, output_w, output_h);
+                    self.pass(&mut encoder, &output_view, load, Some(&bind_group));
+                }
+            }
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+        output_texture
+    }
+
+    /// Upload dei tre piani del layer e bind group pronto per il pass:
+    /// crop/zoom, letterbox e conversione YUV→RGB stanno tutti nello
+    /// shader, qui si preparano solo i suoi input.
+    fn layer_bind_group(
         &self,
         frame: &YuvFrame,
         transform: &Transform,
         output_w: u32,
         output_h: u32,
-    ) -> wgpu::Texture {
+    ) -> wgpu::BindGroup {
         let plane_texture = |label: &str, data: &[u8], w: u32, h: u32| {
             self.device.create_texture_with_data(
                 &self.queue,
@@ -371,7 +482,15 @@ impl Compositor {
         let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let uniform = TransformUniform::new(transform, frame.matrix, frame.full_range);
+        let uniform = TransformUniform::new(
+            transform,
+            frame.matrix,
+            frame.full_range,
+            fit_factors(
+                cropped_size(frame, transform),
+                (output_w as f32, output_h as f32),
+            ),
+        );
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -380,7 +499,7 @@ impl Compositor {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vv-render transform bind group"),
             layout: &self.bind_group_layout,
             entries: &[
@@ -405,9 +524,11 @@ impl Compositor {
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
-        });
+        })
+    }
 
-        let output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+    fn output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vv-render output frame"),
             size: wgpu::Extent3d {
                 width: output_w,
@@ -428,38 +549,76 @@ impl Compositor {
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
-        });
-        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        })
+    }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("vv-render transform encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vv-render transform pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+    /// Un pass sulla texture di output: `bind_group` assente = solo il
+    /// `load` (clear di un colore pieno o di nero), nessun draw.
+    fn pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        output_view: &wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+        bind_group: Option<&wgpu::BindGroup>,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vv-render transform pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if let Some(bind_group) = bind_group {
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+}
 
-        self.queue.submit(Some(encoder.finish()));
-        output_texture
+/// Dimensioni della porzione di sorgente effettivamente mostrata: è
+/// quella, non il frame intero, a determinare l'aspect ratio da
+/// preservare quando il crop non è simmetrico.
+fn cropped_size(frame: &YuvFrame, t: &Transform) -> (f32, f32) {
+    (
+        frame.width as f32 * (t.crop[2] - t.crop[0]).abs().max(f32::EPSILON),
+        frame.height as f32 * (t.crop[3] - t.crop[1]).abs().max(f32::EPSILON),
+    )
+}
+
+/// Fattori di letterbox/pillarbox passati allo shader: >1 sull'asse che
+/// resta scoperto (bande nere), 1 sull'altro.
+fn fit_factors(source: (f32, f32), output: (f32, f32)) -> [f32; 2] {
+    let source_aspect = source.0 / source.1;
+    let output_aspect = output.0 / output.1;
+    if source_aspect > output_aspect {
+        [1.0, source_aspect / output_aspect]
+    } else {
+        [output_aspect / source_aspect, 1.0]
+    }
+}
+
+/// Dimensioni di output con l'aspect ratio di `aspect` che contengono
+/// `source` alla sua risoluzione nativa: il contenuto non viene né
+/// scalato né deformato, si aggiungono solo le bande. Usata
+/// dall'anteprima, che compone alla risoluzione del frame decodificato
+/// (proxy compreso) e non a quella della timeline.
+pub fn fit_output_size(source: (u32, u32), aspect: (u32, u32)) -> (u32, u32) {
+    let (sw, sh) = (source.0.max(1) as f64, source.1.max(1) as f64);
+    let (aw, ah) = (aspect.0.max(1) as f64, aspect.1.max(1) as f64);
+    if sw / sh > aw / ah {
+        (source.0.max(1), ((sw * ah / aw).round() as u32).max(1))
+    } else {
+        (((sh * aw / ah).round() as u32).max(1), source.1.max(1))
     }
 }
 
@@ -693,6 +852,107 @@ mod tests {
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, 16, 16);
 
         assert_close_rgba(center_pixel(&out, 16, 16), [220, 220, 220, 255]);
+    }
+
+    #[test]
+    fn taller_source_in_wider_output_gets_black_side_bars() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 32, 16);
+
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 32 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        // 8:16 in 32:16 -> contenuto largo 8 px, centrato: colonne 12..20.
+        assert_eq!(pixel(0, 8), [0, 0, 0, 255]);
+        assert_eq!(pixel(31, 8), [0, 0, 0, 255]);
+        assert_close_rgba(pixel(16, 8), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn matching_aspect_ratio_leaves_no_bars() {
+        let compositor = Compositor::new_headless();
+        let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), 16, 32);
+
+        for corner in [0usize, 15, 16 * 31, 16 * 32 - 1] {
+            let i = corner * 4;
+            assert_close_rgba(
+                [out[i], out[i + 1], out[i + 2], out[i + 3]],
+                [255, 255, 255, 255],
+            );
+        }
+    }
+
+    /// Il caso segnalato dall'utente: clip 9:16 in cima a una 16:9 in una
+    /// timeline 16:9 — sulle bande laterali si deve vedere la clip sotto,
+    /// non il nero.
+    #[test]
+    fn side_bars_of_the_top_layer_show_the_layer_below() {
+        let compositor = Compositor::new_headless();
+        // Bianco sotto (16:8 come l'output), nero sopra (8:16, stretto).
+        let below = solid_frame(32, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+        let above = solid_frame(8, 16, 16, 128, 128, ColorMatrix::Bt709, false);
+        let out = compositor.render_layers(
+            &[
+                Layer::Video {
+                    frame: below.as_yuv_frame(),
+                    transform: Transform::default(),
+                },
+                Layer::Video {
+                    frame: above.as_yuv_frame(),
+                    transform: Transform::default(),
+                },
+            ],
+            32,
+            16,
+        );
+
+        let pixel = |x: usize, y: usize| {
+            let i = (y * 32 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        assert_close_rgba(pixel(1, 8), [255, 255, 255, 255]);
+        assert_close_rgba(pixel(30, 8), [255, 255, 255, 255]);
+        assert_close_rgba(pixel(16, 8), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_solid_layer_covers_everything_below_it() {
+        let compositor = Compositor::new_headless();
+        let below = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
+        let out = compositor.render_layers(
+            &[
+                Layer::Video {
+                    frame: below.as_yuv_frame(),
+                    transform: Transform::default(),
+                },
+                Layer::Solid(vv_core::Rgba {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+            ],
+            16,
+            16,
+        );
+        assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn no_layers_renders_a_black_frame() {
+        let compositor = Compositor::new_headless();
+        let out = compositor.render_layers(&[], 4, 4);
+        assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn fit_output_size_wraps_the_source_in_the_requested_aspect() {
+        assert_eq!(fit_output_size((540, 960), (1920, 1080)), (1707, 960));
+        assert_eq!(fit_output_size((1920, 1080), (1080, 1920)), (1920, 3413));
+        assert_eq!(fit_output_size((1280, 720), (1920, 1080)), (1280, 720));
     }
 
     #[test]
