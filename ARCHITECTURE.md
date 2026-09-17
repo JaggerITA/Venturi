@@ -269,8 +269,11 @@ Fatto:
 - Effetti: zoom X/Y (con link), posizione, rotazione, anchor point, flip,
   crop dei quattro lati con sfumatura (verso l'interno o l'esterno), tutto
   in pixel, gain, colore SolidColor; statici o a
-  keyframe (Hold/Linear/EaseInOut) dal pannello proprietà, organizzato in
-  sezioni Transform e Cropping con reset per singolo parametro.
+  keyframe (Hold/Linear/EaseInOut) dal pannello proprietà, diviso nelle
+  schede Video (sezioni Transform e Cropping, con reset per singolo
+  parametro) e Audio (gain). I valori mostrati sono quelli della prima clip
+  selezionata su quel tipo di track; ogni modifica va a tutte le altre come
+  un solo comando (`CompositeCommand`, quindi un solo undo).
 - Clip con fps diverso da quello della timeline conformate
   all'inserimento (`Clip::rate`), in anteprima e in export.
 - Proxy e waveform in background.
