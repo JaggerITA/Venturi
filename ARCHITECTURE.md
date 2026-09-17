@@ -109,7 +109,8 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   in avanti si adatta al GOP osservato. Lookahead e behind sono
   configurabili dal menu Playback > Proxy; a velocità > 1x il lookahead scala.
 - **Anteprima dal media pool** (`browsing_media`): `vv_media::DecodeAhead`
-  su un solo file con una `FrameCache` propria; mostra il primo frame.
+  su un solo file con una `FrameCache` propria; riproduzione video a
+  orologio di parete (senza audio), seek dalla barra sotto al viewer.
 - **Proxy** (`vv-media/src/proxy.rs`, thread `vv-app::proxy_worker`): per
   ogni media importato, H.264 tutto-intra a 960px di larghezza in
   `$XDG_CACHE_HOME/vibevideo/proxies/`, chiave `content_hash` (fingerprint
@@ -218,20 +219,23 @@ Fatto:
   normal delete (Del/Backspace), ripple delete (tasto "<"), copia/incolla,
   collega/scollega, multi-selezione (click, ctrl, shift, rettangolo),
   "selection follows playhead", calamita, zoom (Ctrl+/Ctrl-).
+- Barra di riproduzione sotto al viewer (`vv-app/src/transport.rs`):
+  testina, marker in/out (tasti I/O), play/pausa. Sull'anteprima del media
+  pool in/out delimitano la porzione trascinata dal viewer sulla timeline;
+  sulla timeline delimitano l'export (non salvati nel progetto).
 - Playback: Spazio play/pausa, "a" fast forward, frecce frame per frame
   (tenute premute scorrono a 0.5x), audio di tutte le track, scrub audio,
   audiometer.
 - Effetti: crop/zoom/posizione, gain, colore SolidColor; statici o a
   keyframe (Hold/Linear/EaseInOut) dal pannello proprietà.
 - Proxy e waveform in background.
-- Export H.264 + AAC in MP4 dell'intera timeline (Ctrl+Shift+E).
+- Export H.264 + AAC in MP4 dell'intervallo in/out della timeline (Ctrl+Shift+E).
 - Progetto su file `.vvproj` in RON (Ctrl+O, Ctrl+S, Ctrl+Shift+S).
 
 Non ancora:
 - Speed change per-clip (`EffectStack::speed`) e time-remap.
 - Text overlay.
 - Opacità/blend per-clip.
-- Export di un intervallo in/out.
 
 ## Setup ambiente
 

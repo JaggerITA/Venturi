@@ -8,7 +8,7 @@
 //! non sul `Project` live della UI.
 //!
 //! Limiti v1, coerenti con lo stato attuale del progetto (ARCHITECTURE.md):
-//! tutta la timeline, nessuna selezione in/out; N track video (compositate
+//! N track video (compositate
 //! bottom->top, la più in alto vince dove ha una clip — nessuna opacità
 //! per-clip ancora, quindi "vince" invece di un vero accumulo alpha, vedi
 //! `Timeline::active_video_clip_at`) e N track audio (sommate,
@@ -131,7 +131,7 @@ impl FrameProvider for StreamingFrameProvider {
     }
 }
 
-/// Cammina l'intera timeline (frame `0..total_frames`) e produce
+/// Cammina i frame `range` della timeline (l'intervallo in/out) e produce
 /// `output_path`. Bloccante: il chiamante (`main.rs`) lo gira su un thread
 /// dedicato. `project` è uno snapshot clonato al momento del click, non
 /// condiviso con la UI — modificare il progetto durante l'export non lo
@@ -140,6 +140,7 @@ pub fn export_timeline(
     project: &Project,
     timeline_id: TimelineId,
     output_path: &Path,
+    range: std::ops::Range<FrameIdx>,
     progress: &Mutex<ExportProgress>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
@@ -148,7 +149,8 @@ pub fn export_timeline(
         .get(timeline_id)
         .ok_or_else(|| "timeline non trovata".to_string())?;
 
-    let total_frames = timeline.total_frames();
+    let range = range.start.max(0)..range.end.min(timeline.total_frames());
+    let total_frames = (range.end - range.start).max(0);
     progress.lock().unwrap().total_frames = total_frames;
     if total_frames <= 0 {
         progress.lock().unwrap().done = true;
@@ -174,7 +176,7 @@ pub fn export_timeline(
     let compositor = vv_render::Compositor::new_headless();
 
     let mut provider = StreamingFrameProvider::default();
-    for frame in 0..total_frames {
+    for frame in range.clone() {
         if cancel.load(Ordering::Relaxed) {
             return Err("annullato".to_string());
         }
@@ -191,11 +193,11 @@ pub fn export_timeline(
             .write_video_frame(&rgba)
             .map_err(|e| e.to_string())?;
 
-        progress.lock().unwrap().current_frame = frame + 1;
+        progress.lock().unwrap().current_frame = frame - range.start + 1;
     }
 
     if has_audio_track {
-        let mixed = mix_audio_track(project, timeline, total_frames)?;
+        let mixed = mix_audio_track(project, timeline, range)?;
         encoder
             .write_audio_samples(&mixed)
             .map_err(|e| e.to_string())?;
@@ -263,11 +265,11 @@ fn render_video_frame(
 }
 
 /// Mix di tutte le track audio a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
-/// lungo `total_frames` di timeline: stessa `mix_range` dell'anteprima.
+/// sui frame `range` di timeline: stessa `mix_range` dell'anteprima.
 fn mix_audio_track(
     project: &Project,
     timeline: &Timeline,
-    total_frames: FrameIdx,
+    range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, String> {
     let mut buffers: HashMap<(PathBuf, usize), Option<Arc<Vec<f32>>>> = HashMap::new();
     for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
@@ -305,9 +307,11 @@ fn mix_audio_track(
         |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned().flatten(),
     );
     let fps = timeline.fps.as_f64();
-    let total_out_frames = timeline_frame_to_sample(total_frames, fps, PROJECT_SAMPLE_RATE);
-    let mut mixed = vec![0.0_f32; total_out_frames as usize * PROJECT_CHANNELS as usize];
-    mix_range(&snapshot, 0, &mut mixed);
+    let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
+    let end_sample = timeline_frame_to_sample(range.end, fps, PROJECT_SAMPLE_RATE);
+    let mut mixed =
+        vec![0.0_f32; (end_sample - start_sample) as usize * PROJECT_CHANNELS as usize];
+    mix_range(&snapshot, start_sample, &mut mixed);
     Ok(mixed)
 }
 
@@ -551,7 +555,7 @@ mod tests {
                 muted: false,
             },
         ]);
-        let mixed = mix_audio_track(&project, &tl, 25).unwrap();
+        let mixed = mix_audio_track(&project, &tl, 0..25).unwrap();
         assert_eq!(
             mixed.len(),
             (PROJECT_SAMPLE_RATE as usize) * PROJECT_CHANNELS as usize
@@ -624,7 +628,8 @@ mod tests {
         let output_path = dir.join("out.mp4");
         let progress = Mutex::new(ExportProgress::default());
         let cancel = AtomicBool::new(false);
-        export_timeline(&app.project, timeline_id, &output_path, &progress, &cancel)
+        let total = app.project.timelines[timeline_id].total_frames();
+        export_timeline(&app.project, timeline_id, &output_path, 0..total, &progress, &cancel)
             .expect("export fallito");
 
         assert!(progress.lock().unwrap().done);
@@ -648,5 +653,45 @@ mod tests {
             .expect("audio atteso nell'export");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+    }
+
+    #[test]
+    fn export_timeline_writes_only_the_in_out_range() {
+        let dir = std::env::temp_dir().join("vv-app-export-range-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("source.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=1"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(source_path.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = crate::VibeVideoApp::default();
+        app.import_media(source_path);
+        let media_id = app.project.media_pool.iter().next().map(|(id, _)| id).unwrap();
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+
+        let output_path = dir.join("out.mp4");
+        let progress = Mutex::new(ExportProgress::default());
+        export_timeline(
+            &app.project,
+            timeline_id,
+            &output_path,
+            5..15,
+            &progress,
+            &AtomicBool::new(false),
+        )
+        .expect("export fallito");
+        assert_eq!(progress.lock().unwrap().total_frames, 10);
+
+        let mut decoder = vv_media::Decoder::open(&output_path).unwrap();
+        let mut count = 0;
+        while decoder.next_frame().unwrap().is_some() {
+            count += 1;
+        }
+        assert!((9..=10).contains(&count), "count={count}");
     }
 }

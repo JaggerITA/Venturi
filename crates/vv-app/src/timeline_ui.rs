@@ -78,6 +78,8 @@ pub struct TimelineState {
     /// Margine sopra al gruppo Video se l'utente ha trascinato il
     /// separatore (vedi `GROUP_DIVIDER_HEIGHT`); `None` = centrato di default.
     track_top_margin: Option<f32>,
+    /// In/out della timeline: porzione esportata.
+    pub export_marks: crate::transport::MarkRange,
 }
 
 /// Una clip copiata: né l'id né il `timeline_start` assoluto sopravvivono
@@ -185,6 +187,7 @@ impl Default for TimelineState {
             clipboard: Vec::new(),
             trim: None,
             track_top_margin: None,
+            export_marks: crate::transport::MarkRange::default(),
         }
     }
 }
@@ -713,6 +716,29 @@ fn draw_ruler_ticks(
     }
 }
 
+/// Payload del drag&drop di un media verso la timeline: dal media pool
+/// (tutto il media) o dal viewer (la porzione tra i marker in/out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaDrag {
+    pub media_id: vv_core::MediaId,
+    pub source_in: FrameIdx,
+    pub source_out: FrameIdx,
+}
+
+impl MediaDrag {
+    pub fn whole(media_id: vv_core::MediaId, meta: &vv_core::MediaMeta) -> Self {
+        Self {
+            media_id,
+            source_in: 0,
+            source_out: meta.duration_frames,
+        }
+    }
+
+    pub fn len(&self) -> FrameIdx {
+        self.source_out - self.source_in
+    }
+}
+
 /// Dove piazzare un media rilasciato dal media pool. `Default`: track di
 /// sempre (vedi `insert_media_clip`). `NewVideoTrack`/`NewAudioTrack`:
 /// rilasciato nella fascia vuota sopra al gruppo Video o sotto al gruppo
@@ -766,7 +792,7 @@ pub fn show_timeline(
     // sempre restare visibile, quindi la vista "volta pagina" per
     // seguirla quando esce dall'area visibile (vedi sotto).
     playback_active: bool,
-) -> Option<(vv_core::MediaId, FrameIdx, MediaDropTarget)> {
+) -> Option<(MediaDrag, FrameIdx, MediaDropTarget)> {
     let mut media_drop = None;
 
     // Zoom orizzontale (Alt+scroll, vedi `zoom_modifier` in `main`, o
@@ -1051,6 +1077,29 @@ pub fn show_timeline(
                     painter.rect_filled(strip_rect, 0.0, buffered_color);
                 }
 
+                if !state.export_marks.is_full(max_end_frames) {
+                    let (mark_in, mark_out) = state.export_marks.resolve(max_end_frames);
+                    let band = egui::Rect::from_min_max(
+                        egui::pos2(origin.x + mark_in as f32 * px_per_frame, origin.y),
+                        egui::pos2(
+                            origin.x + mark_out as f32 * px_per_frame,
+                            origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT,
+                        ),
+                    );
+                    painter.rect_filled(
+                        band,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+                    );
+                    for x in [band.left(), band.right()] {
+                        painter.vline(
+                            x,
+                            band.y_range(),
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(185)),
+                        );
+                    }
+                }
+
                 // Sfondo delle track (alternato per leggibilità), e sopra,
                 // un'unica regione interagibile per tutta l'area sotto al
                 // righello: cattura click/drag partiti da uno spazio vuoto
@@ -1140,15 +1189,15 @@ pub fn show_timeline(
                 // legato a chi ha "vinto" l'interazione, non a questo drop).
                 // Nei margini il drop spetta alle zone "nuova track" sotto.
                 if pointer_over_tracks
-                    && let Some(media_id) = marquee_resp.dnd_hover_payload::<vv_core::MediaId>()
+                    && let Some(drag) = marquee_resp.dnd_hover_payload::<MediaDrag>()
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-                    && let Some(item) = project.media_pool.get(*media_id)
+                    && let Some(item) = project.media_pool.get(drag.media_id)
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     let frame = snap_frame(
                         raw_frame,
-                        item.meta.duration_frames,
+                        drag.len(),
                         &visuals,
                         &[],
                         px_per_frame,
@@ -1166,7 +1215,7 @@ pub fn show_timeline(
                             origin.y + row_y.first().copied().unwrap_or(RULER_HEIGHT),
                         ),
                         egui::vec2(
-                            item.meta.duration_frames as f32 * px_per_frame,
+                            drag.len() as f32 * px_per_frame,
                             ghost_height,
                         ),
                     );
@@ -1183,26 +1232,21 @@ pub fn show_timeline(
                     );
                 }
                 if pointer_over_tracks
-                    && let Some(media_id) = marquee_resp.dnd_release_payload::<vv_core::MediaId>()
+                    && let Some(drag) = marquee_resp.dnd_release_payload::<MediaDrag>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let len = project
-                        .media_pool
-                        .get(*media_id)
-                        .map(|item| item.meta.duration_frames)
-                        .unwrap_or(0);
                     let frame = snap_frame(
                         raw_frame,
-                        len,
+                        drag.len(),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*media_id, frame, MediaDropTarget::Default));
+                    media_drop = Some((*drag, frame, MediaDropTarget::Default));
                 }
 
                 // Zone "aggiungi una nuova track": margini sopra/sotto ai
@@ -1217,7 +1261,7 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if above_video_resp
-                    .dnd_hover_payload::<vv_core::MediaId>()
+                    .dnd_hover_payload::<MediaDrag>()
                     .is_some()
                 {
                     painter.rect_filled(
@@ -1239,26 +1283,21 @@ pub fn show_timeline(
                         egui::Color32::from_rgb(200, 255, 200),
                     );
                 }
-                if let Some(media_id) = above_video_resp.dnd_release_payload::<vv_core::MediaId>()
+                if let Some(drag) = above_video_resp.dnd_release_payload::<MediaDrag>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let len = project
-                        .media_pool
-                        .get(*media_id)
-                        .map(|item| item.meta.duration_frames)
-                        .unwrap_or(0);
                     let frame = snap_frame(
                         raw_frame,
-                        len,
+                        drag.len(),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*media_id, frame, MediaDropTarget::NewVideoTrack));
+                    media_drop = Some((*drag, frame, MediaDropTarget::NewVideoTrack));
                 }
 
                 let below_audio_rect = egui::Rect::from_min_size(
@@ -1274,7 +1313,7 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if below_audio_resp
-                    .dnd_hover_payload::<vv_core::MediaId>()
+                    .dnd_hover_payload::<MediaDrag>()
                     .is_some()
                 {
                     painter.rect_filled(
@@ -1296,26 +1335,21 @@ pub fn show_timeline(
                         egui::Color32::from_rgb(200, 255, 200),
                     );
                 }
-                if let Some(media_id) = below_audio_resp.dnd_release_payload::<vv_core::MediaId>()
+                if let Some(drag) = below_audio_resp.dnd_release_payload::<MediaDrag>()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let len = project
-                        .media_pool
-                        .get(*media_id)
-                        .map(|item| item.meta.duration_frames)
-                        .unwrap_or(0);
                     let frame = snap_frame(
                         raw_frame,
-                        len,
+                        drag.len(),
                         &visuals,
                         &[],
                         px_per_frame,
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some((*media_id, frame, MediaDropTarget::NewAudioTrack));
+                    media_drop = Some((*drag, frame, MediaDropTarget::NewAudioTrack));
                 }
 
                 if marquee_resp.drag_started() {

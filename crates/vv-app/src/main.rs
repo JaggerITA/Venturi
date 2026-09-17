@@ -21,6 +21,7 @@ mod render_ahead;
 mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
+mod transport;
 mod waveform_worker;
 
 use eframe::wgpu;
@@ -283,6 +284,12 @@ struct VibeVideoApp {
     /// applica a un'anteprima "grezza"). Si esce da questa modalità
     /// interagendo con la timeline (selezione o playhead).
     browsing_media: Option<MediaId>,
+    browse_playhead: FrameIdx,
+    /// In/out dell'anteprima: la porzione trascinata dal viewer sulla timeline.
+    browse_marks: transport::MarkRange,
+    /// Riproduzione dell'anteprima a orologio di parete (non c'è audio):
+    /// istante e frame di partenza.
+    browse_clock: Option<(std::time::Instant, FrameIdx)>,
 
     /// Buffer video a livello di timeline: bufferizza N secondi avanti
     /// dal playhead attraversando quante clip servono (vedi doc del
@@ -396,6 +403,9 @@ impl Default for VibeVideoApp {
             compositor: vv_render::Compositor::new_headless(),
             last_synced_playhead: 0,
             browsing_media: None,
+            browse_playhead: 0,
+            browse_marks: transport::MarkRange::default(),
+            browse_clock: None,
             render_ahead: None,
             render_ahead_generation: 0,
             timeline_audio: None,
@@ -668,6 +678,8 @@ impl VibeVideoApp {
             return;
         };
 
+        let total = self.project.timelines[timeline_id].total_frames();
+        let (mark_in, mark_out) = self.timeline_state.export_marks.resolve(total);
         let project = self.project.clone();
         let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
@@ -679,6 +691,7 @@ impl VibeVideoApp {
                 &project,
                 timeline_id,
                 &output_path,
+                mark_in..mark_out,
                 &thread_progress,
                 &thread_cancel,
             );
@@ -841,6 +854,9 @@ impl VibeVideoApp {
         self.reset_playback_speed_to_normal();
         self.preview_meta = Some(meta);
         self.preview_error = None;
+        self.browse_playhead = 0;
+        self.browse_marks = transport::MarkRange::default();
+        self.browse_clock = None;
         match vv_media::DecodeAhead::spawn(path, self.cache_budget_bytes, 60) {
             Ok(decode_ahead) => self.browsing_decode_ahead = Some(decode_ahead),
             Err(e) => self.preview_error = Some(e.to_string()),
@@ -920,6 +936,73 @@ impl VibeVideoApp {
         self.browsing_media = None;
         self.browsing_decode_ahead = None;
         self.preview_meta = None;
+        self.browse_clock = None;
+    }
+
+    fn browse_total_frames(&self) -> FrameIdx {
+        self.preview_meta.as_ref().map_or(0, |m| m.duration_frames)
+    }
+
+    fn browse_fps(&self) -> f64 {
+        self.preview_meta.as_ref().map_or(1.0, |m| m.fps.as_f64().max(1e-9))
+    }
+
+    fn toggle_browse_playback(&mut self) {
+        if self.browse_clock.take().is_some() {
+            return;
+        }
+        let total = self.browse_total_frames();
+        if total <= 0 {
+            return;
+        }
+        if self.browse_playhead >= total - 1 {
+            self.seek_browse(0);
+        }
+        self.browse_clock = Some((std::time::Instant::now(), self.browse_playhead));
+    }
+
+    fn seek_browse(&mut self, frame: FrameIdx) {
+        let frame = frame.clamp(0, (self.browse_total_frames() - 1).max(0));
+        self.browse_playhead = frame;
+        if self.browse_clock.is_some() {
+            self.browse_clock = Some((std::time::Instant::now(), frame));
+        }
+        if let Some(decode_ahead) = &self.browsing_decode_ahead
+            && !decode_ahead.cache().contains(frame)
+        {
+            decode_ahead.seek(frame, frame as f64 / self.browse_fps());
+        }
+    }
+
+    fn drive_browse_playback(&mut self) {
+        let Some((started_at, start_frame)) = self.browse_clock else {
+            return;
+        };
+        let last = (self.browse_total_frames() - 1).max(0);
+        let frame = start_frame + (started_at.elapsed().as_secs_f64() * self.browse_fps()) as FrameIdx;
+        self.browse_playhead = frame.min(last);
+        if frame >= last {
+            self.browse_clock = None;
+        }
+    }
+
+    /// Tasti I/O: sull'anteprima se attiva, altrimenti sulla timeline.
+    fn mark_at_playhead(&mut self, is_in: bool) {
+        let (marks, frame, total) = if self.browsing_media.is_some() {
+            let total = self.browse_total_frames();
+            (&mut self.browse_marks, self.browse_playhead, total)
+        } else if let Some(timeline_id) = self.timeline_id {
+            let total = self.project.timelines[timeline_id].total_frames();
+            let state = &mut self.timeline_state;
+            (&mut state.export_marks, state.playhead, total)
+        } else {
+            return;
+        };
+        if is_in {
+            marks.set_in(frame, total);
+        } else {
+            marks.set_out(frame, total);
+        }
     }
 
     /// Frecce sinistra/destra: un frame indietro/avanti, tenendo premuto
@@ -975,7 +1058,10 @@ impl VibeVideoApp {
     /// vuoti inclusi (suonano silenzio), fermo solo oltre la fine del
     /// contenuto.
     fn toggle_playback(&mut self) {
-        self.stop_browsing();
+        if self.browsing_media.is_some() {
+            self.toggle_browse_playback();
+            return;
+        }
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
@@ -1026,6 +1112,12 @@ impl VibeVideoApp {
     /// Tasto "a": da fermo come la barra spaziatrice (1x), in riproduzione
     /// accelera 2x -> 4x -> 8x. Solo la barra spaziatrice mette in pausa.
     fn handle_fast_playback_key(&mut self) {
+        if self.browsing_media.is_some() {
+            if self.browse_clock.is_none() {
+                self.toggle_browse_playback();
+            }
+            return;
+        }
         if !self.is_timeline_playing() {
             self.toggle_playback();
             return;
@@ -1312,7 +1404,7 @@ impl VibeVideoApp {
     fn current_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameYuv420>, FrameIdx)> {
         if self.browsing_media.is_some() {
             let decode_ahead = self.browsing_decode_ahead.as_ref()?;
-            let idx = 0;
+            let idx = self.browse_playhead;
             decode_ahead.set_target(idx);
             decode_ahead.cache().get(idx).map(|f| (f, idx))
         } else {
@@ -1370,6 +1462,7 @@ impl VibeVideoApp {
     /// eventuali altri chiamanti che non hanno una posizione esplicita).
     /// Per il drag&drop con posizionamento preciso vedi
     /// `add_media_to_timeline_at`.
+    #[cfg(test)]
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
@@ -1385,7 +1478,7 @@ impl VibeVideoApp {
         let video_start = track_end(&self.project, timeline_id, video_track);
         self.insert_media_clip(
             timeline_id,
-            media_id,
+            timeline_ui::MediaDrag::whole(media_id, &meta),
             &meta,
             video_start,
             timeline_ui::MediaDropTarget::Default,
@@ -1396,16 +1489,19 @@ impl VibeVideoApp {
     /// e `target` dal drag&drop sulla timeline, vedi `MediaDropTarget`).
     fn add_media_to_timeline_at(
         &mut self,
-        media_id: MediaId,
+        drag: timeline_ui::MediaDrag,
         start: FrameIdx,
         target: timeline_ui::MediaDropTarget,
     ) {
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.project.media_pool.get(drag.media_id) else {
             return;
         };
+        if drag.len() <= 0 {
+            return;
+        }
         let meta = item.meta.clone();
         let timeline_id = self.ensure_timeline_for(&meta);
-        self.insert_media_clip(timeline_id, media_id, &meta, start, target);
+        self.insert_media_clip(timeline_id, drag, &meta, start, target);
     }
 
     /// Inserisce la clip video (e una clip audio per stream, vedi
@@ -1421,11 +1517,12 @@ impl VibeVideoApp {
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
-        media_id: MediaId,
+        drag: timeline_ui::MediaDrag,
         meta: &vv_core::MediaMeta,
         start: FrameIdx,
         target: timeline_ui::MediaDropTarget,
     ) {
+        let media_id = drag.media_id;
         let video_track = if target == timeline_ui::MediaDropTarget::NewVideoTrack {
             let new_index = self.project.timelines[timeline_id].tracks.len();
             self.history.do_command(
@@ -1486,8 +1583,8 @@ impl VibeVideoApp {
         let video_clip = vv_core::Clip {
             id: video_clip_id,
             source: vv_core::ClipSource::Media(media_id),
-            source_in: 0,
-            source_out: meta.duration_frames,
+            source_in: drag.source_in,
+            source_out: drag.source_out,
             timeline_start: start,
             effects: vv_core::EffectStack::default(),
             linked_group: None, // collegate sotto, tutte insieme, dopo l'inserimento
@@ -1509,8 +1606,8 @@ impl VibeVideoApp {
             let audio_clip = vv_core::Clip {
                 id: clip_id,
                 source: vv_core::ClipSource::Media(media_id),
-                source_in: 0,
-                source_out: meta.duration_frames,
+                source_in: drag.source_in,
+                source_out: drag.source_out,
                 timeline_start: start,
                 effects: vv_core::EffectStack::default(),
                 linked_group: None,
@@ -2208,6 +2305,22 @@ fn proxy_progress_ring(ui: &mut egui::Ui, fraction: Option<f32>) -> egui::Respon
     response
 }
 
+/// Etichetta che segue il cursore mentre si trascina un media.
+fn show_drag_ghost(ui: &egui::Ui, id: egui::Id, label: &str) {
+    let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    egui::Area::new(id.with("drag_ghost"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + egui::vec2(12.0, 12.0))
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(label);
+            });
+        });
+}
+
 fn file_label(path: &std::path::Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -2483,6 +2596,14 @@ impl eframe::App for VibeVideoApp {
             if i.key_pressed(egui::Key::Space) {
                 self.toggle_playback();
             }
+            if !i.modifiers.command {
+                if i.key_pressed(egui::Key::I) {
+                    self.mark_at_playhead(true);
+                }
+                if i.key_pressed(egui::Key::O) {
+                    self.mark_at_playhead(false);
+                }
+            }
             // "a": come la barra spaziatrice, ma se già in riproduzione
             // accelera invece di mettere in pausa (1x -> 2x -> 4x -> 8x) —
             // vedi doc di `handle_fast_playback_key`.
@@ -2567,7 +2688,7 @@ impl eframe::App for VibeVideoApp {
                     ui.separator();
                     if ui
                         .add_enabled(!export_disabled, egui::Button::new("Esporta... (Ctrl+Shift+E)"))
-                        .on_hover_text("Esporta l'intera timeline in un file MP4 (H.264 + AAC)")
+                        .on_hover_text("Esporta la timeline tra in e out (tasti I/O) in un file MP4 (H.264 + AAC)")
                         .clicked()
                     {
                         self.start_export();
@@ -2765,13 +2886,11 @@ impl eframe::App for VibeVideoApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Nessun pulsante play/pause: Spazio è implicito in ogni
-                // editor video, un pulsante dedicato è ridondante (la
-                // shortcut resta comunque attiva, vedi il blocco
-                // `ui.input` più sopra).
                 if let Some(meta) = &self.preview_meta {
-                    let duration = meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9);
-                    ui.label(format!("0.00s / {duration:.2}s"));
+                    let fps = meta.fps.as_f64().max(1e-9);
+                    let pos = self.browse_playhead as f64 / fps;
+                    let duration = meta.duration_frames as f64 / fps;
+                    ui.label(format!("{pos:.2}s / {duration:.2}s"));
                 } else if let Some(timeline_id) = self.timeline_id {
                     let timeline = &self.project.timelines[timeline_id];
                     let fps = timeline.fps.as_f64().max(1e-9);
@@ -2826,8 +2945,9 @@ impl eframe::App for VibeVideoApp {
         // posizione: qui basta un semplice drop-ovunque che la crei al volo
         // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
         // media a frame 0.
-        let mut media_drop: Option<(MediaId, FrameIdx, timeline_ui::MediaDropTarget)> = None;
-        let mut dropped_on_empty_timeline: Option<MediaId> = None;
+        let mut media_drop: Option<(timeline_ui::MediaDrag, FrameIdx, timeline_ui::MediaDropTarget)> =
+            None;
+        let mut dropped_on_empty_timeline: Option<timeline_ui::MediaDrag> = None;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
             .resizable(true)
@@ -2893,16 +3013,16 @@ impl eframe::App for VibeVideoApp {
                     let drop_id = ui.id().with("timeline_drop_zone_empty");
                     let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
                     dropped_on_empty_timeline = drop_resp
-                        .dnd_release_payload::<MediaId>()
+                        .dnd_release_payload::<timeline_ui::MediaDrag>()
                         .map(|arc| *arc);
                     ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
                 }
             });
-        if let Some(media_id) = dropped_on_empty_timeline {
-            self.add_media_to_timeline(media_id);
+        if let Some(drag) = dropped_on_empty_timeline {
+            self.add_media_to_timeline_at(drag, 0, timeline_ui::MediaDropTarget::Default);
         }
-        if let Some((media_id, start, target)) = media_drop {
-            self.add_media_to_timeline_at(media_id, start, target);
+        if let Some((drag, start, target)) = media_drop {
+            self.add_media_to_timeline_at(drag, start, target);
         }
 
         // L'utente ha trascinato/cliccato il playhead in questo frame?
@@ -2945,6 +3065,7 @@ impl eframe::App for VibeVideoApp {
                 self.sync_selection_to_playhead();
             }
         }
+        self.drive_browse_playback();
         // Fuori dall'`if` sopra: il buffer a livello di timeline deve
         // restare caldo anche mentre si sta sfogliando un'anteprima
         // "grezza" dal media pool (`browsing_media`), non solo durante la
@@ -3093,7 +3214,7 @@ impl eframe::App for VibeVideoApp {
                                 .on_hover_text(
                                     "Doppio click: anteprima · trascina sulla timeline per aggiungere",
                                 );
-                            resp.dnd_set_drag_payload(id);
+                            resp.dnd_set_drag_payload(timeline_ui::MediaDrag::whole(id, &meta));
                             if resp.double_clicked() {
                                 preview_action = Some(id);
                             }
@@ -3101,22 +3222,8 @@ impl eframe::App for VibeVideoApp {
                             // trascinamento: senza, non c'era alcun feedback
                             // visivo che il drag fosse partito (l'elemento
                             // del media pool resta al suo posto, invariato).
-                            if resp.dragged()
-                                && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-                            {
-                                egui::Area::new(interact_id.with("drag_ghost"))
-                                    .order(egui::Order::Tooltip)
-                                    .fixed_pos(pos + egui::vec2(12.0, 12.0))
-                                    .interactable(false)
-                                    .show(ui.ctx(), |ui| {
-                                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                            // Niente icona "🎬" davanti: stesso
-                                            // motivo del label play/pause più
-                                            // sopra (Unicode astral-plane non
-                                            // renderizzato su alcune piattaforme).
-                                            ui.label(&label);
-                                        });
-                                    });
+                            if resp.dragged() {
+                                show_drag_ghost(ui, interact_id, &label);
                             }
                         }
                     });
@@ -3464,6 +3571,8 @@ impl eframe::App for VibeVideoApp {
             self.history.do_command(&mut self.project, cmd);
         }
 
+        let mut transport_action = transport::TransportResponse::default();
+        let mut viewer_rect = None;
         egui::CentralPanel::default().show(ui, |ui| {
             // Barra di toggle subito sotto il player, alla DaVinci Resolve
             // (la barra con gli strumenti sta sotto il viewer, larga
@@ -3481,6 +3590,30 @@ impl eframe::App for VibeVideoApp {
                         magnet_toggle(ui, &mut self.snapping_enabled)
                             .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
                     });
+                });
+            let (total, playhead, marks, playing) = if self.browsing_media.is_some() {
+                let total = self.browse_total_frames();
+                (
+                    total,
+                    self.browse_playhead,
+                    self.browse_marks.resolve(total),
+                    self.browse_clock.is_some(),
+                )
+            } else {
+                let total = self
+                    .timeline_id
+                    .map_or(0, |id| self.project.timelines[id].total_frames());
+                (
+                    total,
+                    self.timeline_state.playhead,
+                    self.timeline_state.export_marks.resolve(total),
+                    self.is_timeline_playing(),
+                )
+            };
+            egui::Panel::bottom("transport")
+                .resizable(false)
+                .show(ui, |ui| {
+                    transport_action = transport::show_transport(ui, total, playhead, marks, playing);
                 });
             // Le clip SolidColor non hanno un media da decodificare: il
             // colore (eventualmente keyframeato) va valutato al frame
@@ -3606,11 +3739,16 @@ impl eframe::App for VibeVideoApp {
                         let tex_size = texture.size_vec2();
                         let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
                         let display_size = tex_size * scale.max(0.0);
-                        ui.centered_and_justified(|ui| {
-                            ui.add(
-                                egui::Image::from_texture(texture).fit_to_exact_size(display_size),
-                            );
-                        });
+                        viewer_rect = Some(
+                            ui.centered_and_justified(|ui| {
+                                ui.add(
+                                    egui::Image::from_texture(texture)
+                                        .fit_to_exact_size(display_size),
+                                )
+                            })
+                            .inner
+                            .rect,
+                        );
                     }
                 }
                 Some(ViewerFrameKind::Video) => {
@@ -3620,12 +3758,16 @@ impl eframe::App for VibeVideoApp {
                         let available = ui.available_size();
                         let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
                         let display_size = tex_size * scale.max(0.0);
-                        ui.centered_and_justified(|ui| {
-                            ui.add(
-                                egui::Image::new(egui::load::SizedTexture::new(id, tex_size))
-                                    .fit_to_exact_size(display_size),
-                            );
-                        });
+                        viewer_rect = Some(
+                            ui.centered_and_justified(|ui| {
+                                ui.add(
+                                    egui::Image::new(egui::load::SizedTexture::new(id, tex_size))
+                                        .fit_to_exact_size(display_size),
+                                )
+                            })
+                            .inner
+                            .rect,
+                        );
                     }
                 }
                 None => {
@@ -3642,10 +3784,43 @@ impl eframe::App for VibeVideoApp {
                     }
                 }
             }
+
+            if let (Some(media_id), Some(rect)) = (self.browsing_media, viewer_rect) {
+                let (source_in, source_out) =
+                    self.browse_marks.resolve(self.browse_total_frames());
+                let drag_id = ui.id().with("viewer_media_drag");
+                let resp = ui
+                    .interact(rect, drag_id, egui::Sense::drag())
+                    .on_hover_text("Trascina sulla timeline per aggiungere la porzione tra in e out");
+                resp.dnd_set_drag_payload(timeline_ui::MediaDrag {
+                    media_id,
+                    source_in,
+                    source_out,
+                });
+                if resp.dragged()
+                    && let Some(item) = self.project.media_pool.get(media_id)
+                {
+                    show_drag_ghost(ui, drag_id, &file_label(&item.path));
+                }
+            }
         });
 
-        if self.is_timeline_playing()
-        {
+        if transport_action.toggle_play {
+            self.toggle_playback();
+        }
+        if let Some(frame) = transport_action.seek {
+            if self.browsing_media.is_some() {
+                self.seek_browse(frame);
+            } else {
+                self.timeline_state.playhead = frame;
+                self.ensure_active_clip_matches_playhead(true);
+                self.sync_selection_to_playhead();
+                self.play_scrub_audio();
+            }
+            ui.ctx().request_repaint();
+        }
+
+        if self.is_timeline_playing() || self.browse_clock.is_some() {
             ui.ctx().request_repaint();
         }
 
@@ -5176,6 +5351,78 @@ mod tests {
         }
     }
 
+    fn browse_fixture(name: &str) -> (VibeVideoApp, MediaId) {
+        let dir = std::env::temp_dir().join("vv-app-browse-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=2"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(path.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        let mut app = VibeVideoApp::default();
+        let media_id = app.add_media_to_pool(path).unwrap();
+        app.preview_media(media_id);
+        app.browsing_media = Some(media_id);
+        (app, media_id)
+    }
+
+    #[test]
+    fn space_plays_the_media_pool_preview_instead_of_leaving_it() {
+        let (mut app, media_id) = browse_fixture("space.mp4");
+        app.toggle_playback();
+        assert_eq!(app.browsing_media, Some(media_id));
+        assert!(app.browse_clock.is_some());
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drive_browse_playback();
+        assert!(app.browse_playhead > 0, "la testina dell'anteprima doveva avanzare");
+
+        app.toggle_playback();
+        assert!(app.browse_clock.is_none());
+    }
+
+    #[test]
+    fn in_out_marks_on_the_preview_trim_the_clip_dropped_on_the_timeline() {
+        let (mut app, media_id) = browse_fixture("marks.mp4");
+        app.seek_browse(10);
+        app.mark_at_playhead(true);
+        app.seek_browse(29);
+        app.mark_at_playhead(false);
+        let (source_in, source_out) = app.browse_marks.resolve(app.browse_total_frames());
+        assert_eq!((source_in, source_out), (10, 30));
+
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag {
+                media_id,
+                source_in,
+                source_out,
+            },
+            5,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let timeline = &app.project.timelines[app.timeline_id.unwrap()];
+        let clips: Vec<_> = timeline.tracks.iter().flat_map(|t| &t.clips).collect();
+        assert_eq!(clips.len(), 2, "video + audio");
+        for clip in clips {
+            assert_eq!((clip.source_in, clip.source_out, clip.timeline_start), (10, 30, 5));
+        }
+    }
+
+    #[test]
+    fn in_out_keys_on_the_timeline_set_the_export_range() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 100);
+        app.timeline_state.playhead = 20;
+        app.mark_at_playhead(true);
+        app.timeline_state.playhead = 59;
+        app.mark_at_playhead(false);
+        assert_eq!(app.timeline_state.export_marks.resolve(100), (20, 60));
+    }
+
     /// Test end-to-end del bug segnalato ("il buffer si ferma sempre al
     /// bordo della clip successiva"): a differenza del vecchio sistema
     /// per-clip, `render_ahead` deve bufferizzare *oltre* la fine della
@@ -5215,8 +5462,11 @@ mod tests {
         let media_b = media_ids.next().unwrap();
         drop(media_ids);
 
-        app.add_media_to_timeline_at(media_a, 0, timeline_ui::MediaDropTarget::Default); // [0,50)
-        app.add_media_to_timeline_at(media_b, 50, timeline_ui::MediaDropTarget::Default); // [50,75), adiacente
+        let whole = |app: &VibeVideoApp, id| {
+            timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        };
+        app.add_media_to_timeline_at(whole(&app, media_a), 0, timeline_ui::MediaDropTarget::Default); // [0,50)
+        app.add_media_to_timeline_at(whole(&app, media_b), 50, timeline_ui::MediaDropTarget::Default); // [50,75), adiacente
         let timeline_id = app.timeline_id.unwrap();
         let clip_b = app.project.timelines[timeline_id].tracks[0].clips[1].clone();
 
