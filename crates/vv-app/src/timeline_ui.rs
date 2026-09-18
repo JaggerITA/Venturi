@@ -130,6 +130,9 @@ struct DragState {
     /// distanza fissa `quella.timeline_start - primaria.timeline_start`
     /// catturata all'inizio del drag.
     followers: Vec<(ClipId, usize, FrameIdx)>,
+    /// Drag iniziato con ALT: al rilascio si inseriscono delle copie, gli
+    /// originali restano dove sono.
+    duplicate: bool,
 }
 
 /// Trim di un bordo, tenuto separato da `DragState` (mossa vera e propria)
@@ -146,17 +149,15 @@ struct TrimState {
     original_value: FrameIdx,
     accum_px: f32,
     /// Range valido per il *nuovo* valore di `original_value`, già
-    /// combinato con quello della gemella collegata se presente (vedi
+    /// combinato con quello di tutti i `followers` (vedi
     /// `combined_trim_range`).
     min_value: FrameIdx,
     max_value: FrameIdx,
-    /// (clip_id, track_index) di ogni altra clip del gruppo collegato: lo
-    /// stesso bordo viene trimmato anche lì con lo stesso identico
-    /// `new_value` — le clip collegate condividono lo stesso spazio
-    /// numerico `source_in`/`source_out`/`timeline_start` per costruzione
-    /// (vedi `insert_media_clip` in `main.rs`), quindi non serve un offset
-    /// come per `DragState::followers`.
-    linked_others: Vec<(ClipId, usize)>,
+    /// (clip_id, track_index, offset) delle altre clip trimmate insieme
+    /// (selezione o gruppo collegato, come per `DragState::followers`): lo
+    /// stesso bordo si sposta dello stesso delta, `offset` è la distanza
+    /// fra il loro bordo e quello della primaria.
+    followers: Vec<(ClipId, usize, FrameIdx)>,
 }
 
 /// Distanza (in pixel schermo) dal bordo di una clip entro cui un drag
@@ -265,6 +266,7 @@ enum PendingAction {
         new_video_tracks: usize,
         new_audio_tracks: usize,
         moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)>,
+        duplicate: bool,
     },
     /// (clip_id, track_index, edge, nuova posizione del bordo) per ogni
     /// clip del gruppo collegato, più il tratto di timeline che ciascuna
@@ -1134,7 +1136,7 @@ pub fn show_timeline(
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
                     state.playhead =
-                        snap_frame(raw_frame, 0, &visuals, &[], px_per_frame, snapping_enabled);
+                        snap_frame(raw_frame, 0, &visuals, &[], &[], px_per_frame, snapping_enabled);
                 }
 
                 // Marker temporali (tipici di un NLE: tacche maggiori con
@@ -1292,6 +1294,7 @@ pub fn show_timeline(
                         drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
+                        &[state.playhead],
                         px_per_frame,
                         snapping_enabled,
                     )
@@ -1340,6 +1343,7 @@ pub fn show_timeline(
                         drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
+                        &[state.playhead],
                         px_per_frame,
                         snapping_enabled,
                     )
@@ -1391,6 +1395,7 @@ pub fn show_timeline(
                         drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
+                        &[state.playhead],
                         px_per_frame,
                         snapping_enabled,
                     )
@@ -1443,6 +1448,7 @@ pub fn show_timeline(
                         drag_set_timeline_len(project, timeline_fps, &drag),
                         &visuals,
                         &[],
+                        &[state.playhead],
                         px_per_frame,
                         snapping_enabled,
                     )
@@ -1643,6 +1649,7 @@ pub fn show_timeline(
                         len,
                         &visuals,
                         &exclude,
+                        &[state.playhead],
                         px_per_frame,
                         snapping_enabled,
                     )
@@ -1659,12 +1666,13 @@ pub fn show_timeline(
                 let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
                     let raw = t.original_value as f32 + t.accum_px / px_per_frame;
                     let exclude: Vec<ClipId> = std::iter::once(t.clip_id)
-                        .chain(t.linked_others.iter().map(|&(id, _)| id))
+                        .chain(t.followers.iter().map(|&(id, _, _)| id))
                         .collect();
                     let snapped = snap_edge(
                         raw.round() as FrameIdx,
                         &visuals,
                         &exclude,
+                        &[state.playhead],
                         px_per_frame,
                         snapping_enabled,
                     );
@@ -1693,7 +1701,7 @@ pub fn show_timeline(
                     .as_ref()
                     .map(|t| {
                         std::iter::once((t.track_index, t.clip_id))
-                            .chain(t.linked_others.iter().map(|&(id, track)| (track, id)))
+                            .chain(t.followers.iter().map(|&(id, track, _)| (track, id)))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1711,11 +1719,50 @@ pub fn show_timeline(
                             .filter(|v| moving_keys.contains(&(v.track_index, v.clip.id))),
                     )
                     .collect();
+                // Duplicando, gli originali restano visibili al loro posto.
+                if state.drag.as_ref().is_some_and(|d| d.duplicate) {
+                    for visual in visuals
+                        .iter()
+                        .filter(|v| moving_keys.contains(&(v.track_index, v.clip.id)))
+                    {
+                        let clip_rect = egui::Rect::from_min_size(
+                            egui::pos2(
+                                origin.x + visual.clip.timeline_start as f32 * px_per_frame,
+                                origin.y + row_y[visual.track_index] + 2.0,
+                            ),
+                            egui::vec2(
+                                (visual.clip.timeline_len as f32 * px_per_frame).max(2.0),
+                                ROW_HEIGHT - 4.0,
+                            ),
+                        );
+                        painter.rect_filled(clip_rect, 4.0, visual.color);
+                        painter.rect_stroke(
+                            clip_rect,
+                            4.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(15)),
+                            egui::StrokeKind::Inside,
+                        );
+                        painter.text(
+                            clip_rect.left_top() + egui::vec2(4.0, 2.0),
+                            egui::Align2::LEFT_TOP,
+                            &visual.label,
+                            egui::FontId::proportional(12.0),
+                            egui::Color32::BLACK,
+                        );
+                    }
+                }
                 for visual in draw_order {
                     let is_trimming_this = trimmed_keys.contains(&(visual.track_index, visual.clip.id));
                     let (display_start, display_len) = if is_trimming_this
-                        && let (Some(t), Some(new_value)) = (&state.trim, trimmed_primary_new_value)
+                        && let (Some(t), Some(primary_value)) = (&state.trim, trimmed_primary_new_value)
                     {
+                        let new_value = primary_value
+                            + t.followers
+                                .iter()
+                                .find(|&&(id, track, _)| {
+                                    id == visual.clip.id && track == visual.track_index
+                                })
+                                .map_or(0, |&(_, _, offset)| offset);
                         match t.edge {
                             TrimEdge::Start => {
                                 (new_value, (visual.clip.timeline_end() - new_value).max(1))
@@ -1896,12 +1943,14 @@ pub fn show_timeline(
                         let press_pos = ui.input(|i| i.pointer.press_origin());
                         match press_pos.and_then(edge_at) {
                             Some(edge) => {
-                                let (min_value, max_value, linked_others) = combined_trim_range(
-                                    &visuals,
-                                    project,
-                                    visual.track_index,
-                                    visual.clip.id,
-                                    edge,
+                                let key = (visual.track_index, visual.clip.id);
+                                let others: Vec<ClipKey> =
+                                    drag_group_for(&state.selected, &visuals, key)
+                                        .into_iter()
+                                        .filter(|k| *k != key)
+                                        .collect();
+                                let (min_value, max_value, followers) = combined_trim_range(
+                                    &visuals, project, key, &others, edge,
                                 );
                                 let original_value = match edge {
                                     TrimEdge::Start => visual.clip.timeline_start,
@@ -1915,7 +1964,7 @@ pub fn show_timeline(
                                     accum_px: 0.0,
                                     min_value,
                                     max_value: max_value.max(min_value),
-                                    linked_others,
+                                    followers,
                                 });
                             }
                             None => {
@@ -1941,6 +1990,7 @@ pub fn show_timeline(
                                     original_start: visual.clip.timeline_start,
                                     accum_px: 0.0,
                                     followers,
+                                    duplicate: ui.input(|i| i.modifiers.alt),
                                 });
                             }
                         }
@@ -1967,18 +2017,19 @@ pub fn show_timeline(
                                 grown_range(&visual.clip, visual.track_index, t.edge, new_value)
                                     .into_iter()
                                     .collect::<Vec<_>>();
-                            for &(partner_id, partner_track) in &t.linked_others {
-                                let Some(partner) =
-                                    visuals.iter().find(|v| v.clip.id == partner_id)
-                                else {
+                            for &(other_id, other_track, offset) in &t.followers {
+                                let Some(other) = visuals.iter().find(|v| {
+                                    v.clip.id == other_id && v.track_index == other_track
+                                }) else {
                                     continue;
                                 };
-                                trims.push((partner_id, partner_track, t.edge, new_value));
+                                let other_value = new_value + offset;
+                                trims.push((other_id, other_track, t.edge, other_value));
                                 overwritten.extend(grown_range(
-                                    &partner.clip,
-                                    partner_track,
+                                    &other.clip,
+                                    other_track,
                                     t.edge,
-                                    new_value,
+                                    other_value,
                                 ));
                             }
                             pending = Some(PendingAction::Trim { trims, overwritten });
@@ -2026,6 +2077,7 @@ pub fn show_timeline(
                                 new_video_tracks,
                                 new_audio_tracks,
                                 moves,
+                                duplicate: d.duplicate,
                             });
                             drag_finished = true;
                         }
@@ -2105,6 +2157,7 @@ pub fn show_timeline(
                 new_video_tracks,
                 new_audio_tracks,
                 moves,
+                duplicate,
             } => {
                 // Creare in ordine di depth crescente basta: sia per
                 // video sia per audio, la depth-esima creata finisce da
@@ -2136,6 +2189,10 @@ pub fn show_timeline(
                         (id, from_track, to_track, start)
                     })
                     .collect();
+                if duplicate {
+                    duplicate_clips(project, history, state, timeline_id, &moves);
+                    return media_drop;
+                }
                 // Dove atterrano se lo prendono: quel che c'era lì viene
                 // accorciato, diviso o rimosso, come per un incolla o per
                 // un bordo allungato sopra la vicina. Le clip che si
@@ -2228,6 +2285,72 @@ pub fn show_timeline(
     }
 
     media_drop
+}
+
+/// Inserisce una copia di ogni clip di `moves` (clip_id, from_track,
+/// to_track, start) alla sua destinazione, con le stesse regole di
+/// sovrascrittura di uno spostamento. Le copie di clip collegate fra loro
+/// formano un gruppo nuovo, e diventano la selezione.
+fn duplicate_clips(
+    project: &mut Project,
+    history: &mut History,
+    state: &mut TimelineState,
+    timeline_id: TimelineId,
+    moves: &[(ClipId, usize, usize, FrameIdx)],
+) {
+    let copies: Vec<(usize, Clip, Option<vv_core::LinkGroupId>)> = moves
+        .iter()
+        .filter_map(|&(id, from_track, to_track, start)| {
+            let original = project.timelines[timeline_id]
+                .tracks
+                .get(from_track)?
+                .clips
+                .iter()
+                .find(|c| c.id == id)?;
+            let mut clip = original.clone();
+            clip.timeline_start = start;
+            clip.linked_group = None;
+            Some((to_track, clip, original.linked_group))
+        })
+        .collect();
+    let copies: Vec<_> = copies
+        .into_iter()
+        .map(|(track, mut clip, group)| {
+            clip.id = project.alloc_clip_id();
+            (track, clip, group)
+        })
+        .collect();
+
+    let ranges: Vec<(usize, FrameIdx, FrameIdx)> = copies
+        .iter()
+        .map(|(track, clip, _)| (*track, clip.timeline_start, clip.timeline_end()))
+        .collect();
+    let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+    vv_core::make_room_for_ranges(project, timeline_id, &ranges, &[], &mut commands);
+
+    let mut by_group: Vec<(vv_core::LinkGroupId, Vec<ClipKey>)> = Vec::new();
+    let mut new_selection = BTreeSet::new();
+    for (track, clip, group) in copies {
+        new_selection.insert((track, clip.id));
+        if let Some(group) = group {
+            match by_group.iter_mut().find(|(g, _)| *g == group) {
+                Some((_, members)) => members.push((track, clip.id)),
+                None => by_group.push((group, vec![(track, clip.id)])),
+            }
+        }
+        commands.push(Box::new(vv_core::InsertClip {
+            timeline: timeline_id,
+            track_index: track,
+            clip,
+        }));
+    }
+    for (_, targets) in by_group.into_iter().filter(|(_, t)| t.len() >= 2) {
+        commands.push(Box::new(vv_core::LinkClips::new(timeline_id, targets)));
+    }
+    history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
+
+    let anchor = new_selection.iter().next().copied();
+    state.set_selection(new_selection, anchor);
 }
 
 /// `offline`: il media della clip non è più nel media pool (cancellato da
@@ -2698,46 +2821,64 @@ fn group_drag_bounds(
 }
 
 /// Range valido (in frame timeline) per il nuovo valore della coordinata
-/// trimmata (`timeline_start` per `Start`, `timeline_end()` per `End`),
-/// combinato con quello di ogni altra clip del gruppo collegato — stesso
-/// principio di `combined_drag_range`, ma per il trim: qui il vincolo è
-/// dato sia dal vicino sulla stessa track sia dal bordo del *sorgente*
-/// (non si può trimmare oltre l'inizio/la fine reale del media). Ritorna
-/// anche (clip_id, track_index) di ogni altro membro, pronti per
-/// `TrimState::linked_others`.
+/// trimmata della primaria (`timeline_start` per `Start`, `timeline_end()`
+/// per `End`), combinato con quello di ogni clip in `others` tradotto nello
+/// spazio della primaria — stesso principio di `combined_drag_range`.
+/// Ritorna anche (clip_id, track_index, offset) di ognuna, pronti per
+/// `TrimState::followers`.
 fn combined_trim_range(
     visuals: &[ClipVisual],
     project: &Project,
-    track_index: usize,
-    clip_id: ClipId,
+    primary: ClipKey,
+    others: &[ClipKey],
     edge: TrimEdge,
-) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize)>) {
-    let Some(visual) = visuals
-        .iter()
-        .find(|v| v.track_index == track_index && v.clip.id == clip_id)
-    else {
+) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize, FrameIdx)>) {
+    let find = |(track, id): ClipKey| {
+        visuals
+            .iter()
+            .find(|v| v.track_index == track && v.clip.id == id)
+    };
+    let Some(primary_visual) = find(primary) else {
         return (0, FrameIdx::MAX, Vec::new());
     };
-    let (mut min_value, mut max_value) =
-        single_trim_range(project, &visual.clip, edge);
-
-    let Some(group) = visual.clip.linked_group else {
-        return (min_value, max_value, Vec::new());
+    let edge_value = |clip: &Clip| match edge {
+        TrimEdge::Start => clip.timeline_start,
+        TrimEdge::End => clip.timeline_end(),
     };
-    // `new_value` è una posizione di timeline, la stessa per tutte le clip
-    // collegate: il range valido è l'intersezione di tutte.
-    let mut linked_others = Vec::new();
-    for other in visuals
-        .iter()
-        .filter(|v| v.clip.linked_group == Some(group) && v.clip.id != clip_id)
-    {
-        let (o_min, o_max) =
-            single_trim_range(project, &other.clip, edge);
-        min_value = min_value.max(o_min);
-        max_value = max_value.min(o_max);
-        linked_others.push((other.clip.id, other.track_index));
+    let primary_value = edge_value(&primary_visual.clip);
+    let trimmed: Vec<&ClipVisual> = std::iter::once(primary_visual)
+        .chain(others.iter().filter_map(|&k| find(k)))
+        .collect();
+
+    let mut min_value = FrameIdx::MIN;
+    let mut max_value = FrameIdx::MAX;
+    let mut followers = Vec::new();
+    for v in &trimmed {
+        let offset = edge_value(&v.clip) - primary_value;
+        let (mut o_min, mut o_max) = single_trim_range(project, &v.clip, edge);
+        // Due clip trimmate insieme sulla stessa track non devono
+        // allungarsi l'una sopra l'altra.
+        for w in trimmed
+            .iter()
+            .filter(|w| w.track_index == v.track_index && w.clip.id != v.clip.id)
+        {
+            match edge {
+                TrimEdge::End if w.clip.timeline_start >= v.clip.timeline_end() => {
+                    o_max = o_max.min(w.clip.timeline_start);
+                }
+                TrimEdge::Start if w.clip.timeline_end() <= v.clip.timeline_start => {
+                    o_min = o_min.max(w.clip.timeline_end());
+                }
+                _ => {}
+            }
+        }
+        min_value = min_value.max(o_min.saturating_sub(offset));
+        max_value = max_value.min(o_max.saturating_sub(offset));
+        if v.clip.id != primary_visual.clip.id || v.track_index != primary_visual.track_index {
+            followers.push((v.clip.id, v.track_index, offset));
+        }
     }
-    (min_value, max_value, linked_others)
+    (min_value, max_value, followers)
 }
 
 /// I vicini sulla track non limitano il trim: allungando un bordo oltre
@@ -2801,6 +2942,19 @@ fn grown_range(
 /// in frame da `snap_frame` in base a `px_per_frame`).
 const SNAP_THRESHOLD_PX: f32 = 10.0;
 
+/// Bordi delle clip non escluse più `extra_targets` (la testina).
+fn snap_targets<'a>(
+    visuals: &'a [ClipVisual],
+    exclude: &'a [ClipId],
+    extra_targets: &'a [FrameIdx],
+) -> impl Iterator<Item = FrameIdx> + 'a {
+    visuals
+        .iter()
+        .filter(|v| !exclude.contains(&v.clip.id))
+        .flat_map(|v| [v.clip.timeline_start, v.clip.timeline_end()])
+        .chain(extra_targets.iter().copied())
+}
+
 /// Come `snap_frame`, ma per il singolo bordo trascinato in un trim: non
 /// c'è una clip da allineare per intero, solo il punto che si sta
 /// spostando, che si aggancia al bordo di clip più vicino entro soglia.
@@ -2808,6 +2962,7 @@ fn snap_edge(
     candidate: FrameIdx,
     visuals: &[ClipVisual],
     exclude: &[ClipId],
+    extra_targets: &[FrameIdx],
     px_per_frame: f32,
     enabled: bool,
 ) -> FrameIdx {
@@ -2818,10 +2973,7 @@ fn snap_edge(
     if threshold <= 0 {
         return candidate;
     }
-    visuals
-        .iter()
-        .filter(|v| !exclude.contains(&v.clip.id))
-        .flat_map(|v| [v.clip.timeline_start, v.clip.timeline_end()])
+    snap_targets(visuals, exclude, extra_targets)
         .map(|edge| ((candidate - edge).abs(), edge))
         .filter(|&(delta, _)| delta <= threshold)
         .min_by_key(|&(delta, _)| delta)
@@ -2841,6 +2993,7 @@ fn snap_frame(
     len: FrameIdx,
     visuals: &[ClipVisual],
     exclude: &[ClipId],
+    extra_targets: &[FrameIdx],
     px_per_frame: f32,
     enabled: bool,
 ) -> FrameIdx {
@@ -2854,21 +3007,16 @@ fn snap_frame(
     let candidate_end = candidate_start + len;
 
     let mut best: Option<(FrameIdx, FrameIdx)> = None; // (|scarto|, nuovo candidate_start)
-    for v in visuals {
-        if exclude.contains(&v.clip.id) {
-            continue;
-        }
-        for edge in [v.clip.timeline_start, v.clip.timeline_end()] {
-            // (punto della clip trascinata da confrontare col bordo, nuovo
-            // candidate_start se questo è l'aggancio scelto)
-            for (point, new_start) in [(candidate_start, edge), (candidate_end, edge - len)] {
-                let delta = (point - edge).abs();
-                if delta > threshold {
-                    continue;
-                }
-                if best.is_none_or(|(best_delta, _)| delta < best_delta) {
-                    best = Some((delta, new_start));
-                }
+    for edge in snap_targets(visuals, exclude, extra_targets) {
+        // (punto della clip trascinata da confrontare col bordo, nuovo
+        // candidate_start se questo è l'aggancio scelto)
+        for (point, new_start) in [(candidate_start, edge), (candidate_end, edge - len)] {
+            let delta = (point - edge).abs();
+            if delta > threshold {
+                continue;
+            }
+            if best.is_none_or(|(best_delta, _)| delta < best_delta) {
+                best = Some((delta, new_start));
             }
         }
     }
@@ -3730,13 +3878,59 @@ mod tests {
         audio.clip.linked_group = group;
         let visuals = vec![video, audio];
 
-        let (_, max_value, linked_others) =
-            combined_trim_range(&visuals, &project, 0, ClipId(1), TrimEdge::End);
+        let (_, max_value, followers) = combined_trim_range(
+            &visuals,
+            &project,
+            (0, ClipId(1)),
+            &[(1, ClipId(2))],
+            TrimEdge::End,
+        );
         assert_eq!(
             max_value, 35,
             "vincolo della gemella si applica anche al video"
         );
-        assert_eq!(linked_others, vec![(ClipId(2), 1)]);
+        assert_eq!(followers, vec![(ClipId(2), 1, 0)]);
+    }
+
+    #[test]
+    fn combined_trim_range_shifts_each_selected_clip_by_its_offset() {
+        // Fine della primaria a 10, dell'altra (track 1) a 25: stesso
+        // delta per entrambe, e l'altra non può scendere sotto 21.
+        let project = Project::default();
+        let visuals = vec![visual(0, 1, 0, 10), visual(1, 2, 20, 5)];
+        let (min_value, max_value, followers) = combined_trim_range(
+            &visuals,
+            &project,
+            (0, ClipId(1)),
+            &[(1, ClipId(2))],
+            TrimEdge::End,
+        );
+        assert_eq!(followers, vec![(ClipId(2), 1, 15)]);
+        assert_eq!(min_value, 6, "21 - 15");
+        assert_eq!(max_value, FrameIdx::MAX - 15);
+    }
+
+    #[test]
+    fn combined_trim_range_stops_before_another_trimmed_clip_on_the_same_track() {
+        let project = Project::default();
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 5)];
+        let (_, max_value, _) = combined_trim_range(
+            &visuals,
+            &project,
+            (0, ClipId(1)),
+            &[(0, ClipId(2))],
+            TrimEdge::End,
+        );
+        assert_eq!(max_value, 20);
+    }
+
+    /// Bug segnalato: con la calamita il bordo si fermava un frame prima
+    /// o dopo la testina, che non era un punto di aggancio.
+    #[test]
+    fn snap_edge_snaps_to_the_playhead() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
+        assert_eq!(snap_edge(14, &visuals, &[ClipId(1)], &[15], 5.0, true), 15);
+        assert_eq!(snap_frame(4, 10, &visuals, &[ClipId(1)], &[15], 5.0, true), 5);
     }
 
     #[test]
@@ -3744,18 +3938,18 @@ mod tests {
         // Clip vicina [20,30): il bordo trascinato a 18, entro soglia
         // (10px / 5px per frame = 2 frame), si aggancia a 20.
         let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
-        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], 5.0, true), 20);
+        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], &[], 5.0, true), 20);
     }
 
     #[test]
     fn snap_edge_ignores_the_clip_being_trimmed_and_far_edges() {
         let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
         // Il proprio bordo (10) non è un aggancio valido.
-        assert_eq!(snap_edge(11, &visuals, &[ClipId(1)], 5.0, true), 11);
+        assert_eq!(snap_edge(11, &visuals, &[ClipId(1)], &[], 5.0, true), 11);
         // Fuori soglia: nessun aggancio.
-        assert_eq!(snap_edge(15, &visuals, &[ClipId(1)], 5.0, true), 15);
+        assert_eq!(snap_edge(15, &visuals, &[ClipId(1)], &[], 5.0, true), 15);
         // Calamita spenta: nessun aggancio nemmeno entro soglia.
-        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], 5.0, false), 18);
+        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], &[], 5.0, false), 18);
     }
 
     #[test]
@@ -3764,7 +3958,7 @@ mod tests {
         // 12 (entro soglia) deve agganciarsi esattamente lì.
         let visuals = vec![visual(0, 1, 0, 10)];
         let px_per_frame = 5.0; // soglia 10px / 5px_per_frame = 2 frame
-        let snapped = snap_frame(12, 20, &visuals, &[], px_per_frame, true);
+        let snapped = snap_frame(12, 20, &visuals, &[], &[], px_per_frame, true);
         assert_eq!(snapped, 10);
     }
 
@@ -3773,7 +3967,7 @@ mod tests {
         // Clip esistente [50,60): la clip trascinata (lunga 20) deve
         // agganciare la propria *fine* a 50, cioè candidate_start=30.
         let visuals = vec![visual(0, 1, 50, 10)];
-        let snapped = snap_frame(32, 20, &visuals, &[], 5.0, true);
+        let snapped = snap_frame(32, 20, &visuals, &[], &[], 5.0, true);
         assert_eq!(snapped, 30);
     }
 
@@ -3782,14 +3976,14 @@ mod tests {
         let visuals = vec![visual(0, 1, 0, 10)];
         // 20 frame di distanza dal bordo (10): a px_per_frame=5.0 la soglia
         // è di soli 2 frame, quindi resta invariato.
-        let snapped = snap_frame(30, 5, &visuals, &[], 5.0, true);
+        let snapped = snap_frame(30, 5, &visuals, &[], &[], 5.0, true);
         assert_eq!(snapped, 30);
     }
 
     #[test]
     fn snap_frame_disabled_is_a_no_op() {
         let visuals = vec![visual(0, 1, 0, 10)];
-        let snapped = snap_frame(12, 20, &visuals, &[], 5.0, false);
+        let snapped = snap_frame(12, 20, &visuals, &[], &[], 5.0, false);
         assert_eq!(snapped, 12);
     }
 
@@ -3798,8 +3992,74 @@ mod tests {
         // La clip 1 sarebbe un aggancio valido, ma è esclusa (è la clip
         // stessa che si sta trascinando, o la sua gemella collegata).
         let visuals = vec![visual(0, 1, 0, 10)];
-        let snapped = snap_frame(12, 20, &visuals, &[ClipId(1)], 5.0, true);
+        let snapped = snap_frame(12, 20, &visuals, &[ClipId(1)], &[], 5.0, true);
         assert_eq!(snapped, 12);
+    }
+
+    #[test]
+    fn duplicate_clips_keeps_the_originals_relinks_the_copies_and_cuts_what_they_cover() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![
+                vv_core::Track::new(TrackKind::Video),
+                vv_core::Track::new(TrackKind::Audio),
+            ],
+        });
+        let mut history = History::default();
+        let solid = |id, start, len| {
+            Clip::from_source_range(
+                id,
+                vv_core::ClipSource::SolidColor,
+                0,
+                len,
+                start,
+                vv_core::Rational::one(),
+            )
+        };
+        // Video [0,20) collegato all'audio [0,20); più avanti sul video
+        // un'altra clip [30,60) che la copia coprirà in parte.
+        let (v, a, other) = (project.alloc_clip_id(), project.alloc_clip_id(), project.alloc_clip_id());
+        for (track_index, clip) in [(0, solid(v, 0, 20)), (1, solid(a, 0, 20)), (0, solid(other, 30, 30))] {
+            history.do_command(
+                &mut project,
+                Box::new(vv_core::InsertClip { timeline: timeline_id, track_index, clip }),
+            );
+        }
+        history.do_command(
+            &mut project,
+            Box::new(vv_core::LinkClips::new(timeline_id, vec![(0, v), (1, a)])),
+        );
+
+        let mut state = TimelineState::default();
+        duplicate_clips(
+            &mut project,
+            &mut history,
+            &mut state,
+            timeline_id,
+            &[(v, 0, 0, 25), (a, 1, 1, 25)],
+        );
+
+        let tl = &project.timelines[timeline_id];
+        let spans = |track: usize| -> Vec<(FrameIdx, FrameIdx)> {
+            tl.tracks[track].clips.iter().map(|c| (c.timeline_start, c.timeline_end())).collect()
+        };
+        assert_eq!(spans(0), vec![(0, 20), (25, 45), (45, 60)], "l'altra clip viene tagliata");
+        assert_eq!(spans(1), vec![(0, 20), (25, 45)]);
+        let copy_v = &tl.tracks[0].clips[1];
+        let copy_a = &tl.tracks[1].clips[1];
+        assert!(copy_v.linked_group.is_some());
+        assert_eq!(copy_v.linked_group, copy_a.linked_group);
+        assert_ne!(copy_v.linked_group, tl.tracks[0].clips[0].linked_group);
+        assert_eq!(
+            state.selected,
+            BTreeSet::from([(0, copy_v.id), (1, copy_a.id)])
+        );
+
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2, "un solo passo di undo");
     }
 
     /// Esegue `show_timeline` per davvero dentro un `egui::Context`
