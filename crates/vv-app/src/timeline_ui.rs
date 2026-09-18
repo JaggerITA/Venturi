@@ -566,6 +566,33 @@ fn track_drag_target(
     }
 }
 
+/// Dove atterra un drop dal media pool o dal pannello Effects quando il
+/// puntatore è sopra una track *esistente* (le zone "nuova track" nei
+/// margini sono gestite a parte dal chiamante): se quel che si sta
+/// trascinando ha video e la track lì sotto è video, atterra esattamente
+/// lì — altrimenti la track di sempre (`Default`, risolta da
+/// `VibeVideoApp::resolve_drop_tracks`). Stesso criterio per un
+/// generatore (SolidColor/Text, sempre video) e per un media dal pool
+/// con video (inclusa un'immagine): prima li si trattava diversamente,
+/// e solo un generatore rispettava la track sotto al puntatore (bug
+/// segnalato: un media/immagine trascinato ignorava sempre la track
+/// sotto al puntatore, atterrando sempre sulla prima libera). `None` se
+/// la track è bloccata.
+fn media_pool_drop_target(
+    track: usize,
+    has_video: bool,
+    track_kind: TrackKind,
+    locked: bool,
+) -> Option<MediaDropTarget> {
+    if locked {
+        None
+    } else if has_video && track_kind == TrackKind::Video {
+        Some(MediaDropTarget::Track(track))
+    } else {
+        Some(MediaDropTarget::Default)
+    }
+}
+
 /// Track target di ogni clip di un gruppo in trascinamento verticale
 /// (primaria in testa, poi un elemento per ogni `followers`, stesso
 /// ordine): la primaria atterra su `primary_target` (già risolto da
@@ -1308,7 +1335,9 @@ pub enum MediaDropTarget {
     Default,
     NewVideoTrack,
     NewAudioTrack,
-    /// Track video esistente sotto al puntatore (drop di un effetto).
+    /// Track video esistente sotto al puntatore (drop di un effetto o di
+    /// un media con video, quando il puntatore è su una track video già
+    /// presente).
     Track(usize),
 }
 
@@ -1758,21 +1787,23 @@ pub fn show_timeline(
                 // direttamente per lo stesso motivo (`interact_pointer_pos()` è
                 // legato a chi ha "vinto" l'interazione, non a questo drop).
                 // Nei margini il drop spetta alle zone "nuova track" sotto.
-                // Un effetto va sulla track video sotto al puntatore, un
-                // media sulle track di sempre (vedi `insert_media_clip`).
-                // `None`: il puntatore è su una track bloccata.
-                let drop_target = |drag: &TimelineDrag, pos: egui::Pos2| match drag {
-                    TimelineDrag::Generator(_) => {
-                        let track = track_at_y(pos.y - origin.y);
-                        if track_locked(track) {
-                            None
-                        } else if track_kinds[track] == TrackKind::Video {
-                            Some(MediaDropTarget::Track(track))
-                        } else {
-                            Some(MediaDropTarget::Default)
-                        }
-                    }
-                    TimelineDrag::Media(_) => Some(MediaDropTarget::Default),
+                // Un effetto o un media con video vanno sulla track video
+                // sotto al puntatore, se ce n'è una lì (altrimenti sulla
+                // track di sempre, vedi `insert_media_clip`) — stesso
+                // criterio per entrambi, non solo per gli effetti (bug
+                // segnalato: un media/immagine trascinato ignorava la
+                // track sotto al puntatore e finiva sempre sulla prima
+                // libera). `None`: il puntatore è su una track bloccata.
+                let drop_target = |drag: &TimelineDrag, pos: egui::Pos2| {
+                    let track = track_at_y(pos.y - origin.y);
+                    let has_video = match drag {
+                        TimelineDrag::Generator(_) => true,
+                        TimelineDrag::Media(set) => set
+                            .items
+                            .iter()
+                            .any(|d| project.media_pool[d.media_id].meta.has_video),
+                    };
+                    media_pool_drop_target(track, has_video, track_kinds[track], track_locked(track))
                 };
                 // Layer sopra alle clip, dipinte più avanti.
                 let ghost_painter = painter.clone().with_layer_id(egui::LayerId::new(
@@ -4343,6 +4374,38 @@ mod tests {
         let row_order = [1, 0, 2];
         let target = track_drag_target(170.0, TrackKind::Video, &row_order, &test_layout(50.0));
         assert!(target.is_none());
+    }
+
+    /// Un effetto (sempre video) o un media con video sopra una track
+    /// video libera atterrano esattamente lì, non sulla prima libera —
+    /// lo stesso identico criterio, indipendentemente da quale dei due
+    /// si stia trascinando.
+    #[test]
+    fn media_pool_drop_target_lands_on_the_hovered_video_track_for_a_generator_or_a_video_media() {
+        for has_video in [true, false] {
+            let target = media_pool_drop_target(2, has_video, TrackKind::Video, false);
+            if has_video {
+                assert_eq!(target, Some(MediaDropTarget::Track(2)));
+            } else {
+                // Un media senza video (audio-only) su una track video
+                // non forza quella track: ricade sulla risoluzione di
+                // sempre, come già succedeva.
+                assert_eq!(target, Some(MediaDropTarget::Default));
+            }
+        }
+    }
+
+    #[test]
+    fn media_pool_drop_target_over_an_audio_track_falls_back_to_default() {
+        assert_eq!(
+            media_pool_drop_target(0, true, TrackKind::Audio, false),
+            Some(MediaDropTarget::Default)
+        );
+    }
+
+    #[test]
+    fn media_pool_drop_target_over_a_locked_track_refuses_the_drop() {
+        assert_eq!(media_pool_drop_target(2, true, TrackKind::Video, true), None);
     }
 
     #[test]
