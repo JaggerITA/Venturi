@@ -486,6 +486,9 @@ struct VibeVideoApp {
     /// toolbar accanto ai pulsanti — separato da `import_warnings` (quelli sono
     /// per l'import media, contesto diverso).
     project_error: Option<String>,
+    /// Esito dell'ultimo relink dal menu contestuale del media pool,
+    /// mostrato in una finestrella a parte (vedi `show_relink_message`).
+    relink_message: Option<String>,
 
     /// Audiometer (toggle in Visualizza): una fascia stretta a destra
     /// della timeline con il livello dell'audio in uscita. Attivo di
@@ -576,6 +579,7 @@ impl Default for VibeVideoApp {
             pending_project_switch: None,
             quit_confirmed: false,
             project_error: None,
+            relink_message: None,
             audiometer_enabled: true,
             show_media_pool: true,
             show_effects: false,
@@ -1082,6 +1086,24 @@ impl VibeVideoApp {
             });
         if close {
             self.import_warnings.clear();
+        }
+    }
+
+    fn show_relink_message(&mut self, ui: &mut egui::Ui) {
+        let Some(message) = &self.relink_message else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new("Relink media")
+            .collapsible(false)
+            .default_width(360.0)
+            .show(ui.ctx(), |ui| {
+                ui.label(message.as_str());
+                ui.separator();
+                close = ui.button("Chiudi").clicked();
+            });
+        if close {
+            self.relink_message = None;
         }
     }
 
@@ -1983,6 +2005,25 @@ impl VibeVideoApp {
                         let modifiers = ui.input(|i| i.modifiers);
                         self.media_pool_state.click(id, modifiers, &order);
                     }
+                    // Tasto destro fuori dalla selezione la sostituisce
+                    // con lui, come il drag qui sotto: il menu contestuale
+                    // agisce sempre su una selezione sensata, non su
+                    // quella precedente lasciata da un altro elemento.
+                    if resp.secondary_clicked() && !self.media_pool_state.selected.contains(&id) {
+                        self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
+                    }
+                    resp.context_menu(|ui| {
+                        let count = self.media_pool_state.selected.len().max(1);
+                        let label = if count > 1 {
+                            format!("Relink {count} clip selezionate...")
+                        } else {
+                            "Relink clip...".to_string()
+                        };
+                        if ui.button(label).clicked() {
+                            self.relink_media_dialog();
+                            ui.close();
+                        }
+                    });
                     // Trascinare un elemento fuori dalla selezione la
                     // sostituisce con lui (come in timeline, vedi
                     // `timeline_ui::drag_group_for`).
@@ -2933,6 +2974,12 @@ impl VibeVideoApp {
         self.select_clips(|_| true);
     }
 
+    /// Ctrl+A col media pool a fuoco: seleziona tutti i media del pool.
+    fn select_all_media(&mut self) {
+        let ids: Vec<MediaId> = self.project.media_pool.keys().collect();
+        self.media_pool_state.set_marquee_selection(ids);
+    }
+
     /// Alt+Y: seleziona dalla testina in avanti — la clip sotto alla
     /// testina è inclusa, quelle che finiscono prima restano fuori.
     fn select_clips_from_playhead(&mut self) {
@@ -3017,6 +3064,76 @@ impl VibeVideoApp {
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
         self.media_pool_state.clear();
+    }
+
+    /// Voce "Relink clip selezionate..." nel menu contestuale del media
+    /// pool: chiede una cartella base e delega a `relink_media` —
+    /// separata per poterla testare senza un file dialog vero (vedi i
+    /// test in fondo al file).
+    fn relink_media_dialog(&mut self) {
+        if self.media_pool_state.selected.is_empty() {
+            return;
+        }
+        let Some(base_dir) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        self.relink_media(&base_dir);
+    }
+
+    /// Ricollega a un file trovato sotto `base_dir` (per nome,
+    /// ricorsivamente) ogni media selezionato nel pool il cui percorso
+    /// salvato non esiste più — tipicamente dopo aver riaperto lo stesso
+    /// progetto da un'altra postazione con percorsi diversi. I media già
+    /// raggiungibili al loro percorso, anche se selezionati, restano
+    /// intoccati.
+    fn relink_media(&mut self, base_dir: &Path) {
+        let targets: Vec<MediaId> = self.media_pool_state.selected.iter().copied().collect();
+        let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        let mut relinked_ids: Vec<MediaId> = Vec::new();
+        let mut missing = 0usize;
+        for media_id in targets {
+            let Some(item) = self.project.media_pool.get(media_id) else {
+                continue;
+            };
+            if item.path.exists() {
+                continue;
+            }
+            let Some(file_name) = item.path.file_name() else {
+                continue;
+            };
+            let found = index
+                .get_or_insert_with(|| index_media_by_filename(base_dir))
+                .get(file_name)
+                .cloned();
+            let Some(found) = found else {
+                missing += 1;
+                continue;
+            };
+            let content_hash = vv_media::content_fingerprint(&found).unwrap_or(0);
+            commands.push(Box::new(vv_core::SetMediaPath::new(media_id, found, content_hash))
+                as Box<dyn vv_core::Command>);
+            relinked_ids.push(media_id);
+        }
+        self.relink_message = Some(if commands.is_empty() {
+            "Nessun media ricollegato: nessun file corrispondente trovato nella cartella scelta."
+                .to_string()
+        } else if missing == 0 {
+            format!("Ricollegati {} media.", commands.len())
+        } else {
+            format!("Ricollegati {} media, {missing} non trovati.", commands.len())
+        });
+        if commands.is_empty() {
+            return;
+        }
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+        self.unsaved_media = true;
+        for media_id in relinked_ids {
+            self.enqueue_media_background_jobs(media_id);
+        }
     }
 
     /// La clip attiva punta a un media non piu' nel media pool.
@@ -3742,6 +3859,35 @@ fn file_label(path: &std::path::Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+/// Indicizza per nome file tutti i file sotto `base_dir` (ricorsivo), per
+/// `relink_media`. A parità di nome vince il primo trovato in
+/// ordine di visita (breadth-first: le cartelle meno annidate hanno la
+/// precedenza su eventuali doppioni più in fondo all'albero). Le
+/// directory illeggibili (permessi, link rotti) vengono saltate in
+/// silenzio: è una ricerca "best effort", non deve interrompere il
+/// relink per una singola cartella problematica.
+fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
+    let mut index = HashMap::new();
+    let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
+    while let Some(dir) = dirs.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                dirs.push_back(path);
+            } else if file_type.is_file() {
+                index.entry(entry.file_name()).or_insert(path);
+            }
+        }
+    }
+    index
 }
 
 /// Bottone diamante per il toggle keyframe di un parametro, allo stile
@@ -4799,7 +4945,13 @@ impl eframe::App for VibeVideoApp {
                 self.handle_fast_playback_key();
             }
             if pressed(Action::SelectAll) {
-                self.select_all_clips();
+                // Stessa regola del Canc: il pannello con l'ultimo
+                // click decide cosa seleziona Ctrl+A.
+                if self.media_pool_state.focused {
+                    self.select_all_media();
+                } else {
+                    self.select_all_clips();
+                }
             }
             if pressed(Action::SelectFromPlayhead) {
                 self.select_clips_from_playhead();
@@ -5128,6 +5280,7 @@ impl eframe::App for VibeVideoApp {
         self.show_settings_dialog(ui.ctx());
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
+        self.show_relink_message(ui);
         self.show_unsaved_changes_dialog(ui);
 
         // Frame a cui vengono lette/scritte le proprietà nel pannello:
@@ -6590,6 +6743,172 @@ mod tests {
             !app.active_clip_media_offline(),
             "l'undo deve riagganciare la clip al media reinserito"
         );
+    }
+
+    #[test]
+    fn select_all_media_selects_every_media_in_the_pool() {
+        let (mut app, media_a) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            50,
+        );
+        let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/vv-b.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 30,
+                fps: vv_core::Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 2,
+        });
+
+        app.select_all_media();
+
+        assert_eq!(app.media_pool_state.selected, BTreeSet::from([media_a, media_b]));
+    }
+
+    /// Simula il cambio di postazione: il media punta a un percorso che
+    /// non esiste più, ma sotto una nuova cartella base c'è un file con
+    /// lo stesso nome, in una sottocartella qualsiasi.
+    #[test]
+    fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
+        let dir = std::env::temp_dir().join(format!("vv-app-relink-test-{}", std::process::id()));
+        let nested = dir.join("progetto").join("clip");
+        std::fs::create_dir_all(&nested).unwrap();
+        let found_path = nested.join("intervista.mp4");
+        std::fs::write(&found_path, b"contenuto video").unwrap();
+        let already_ok_path = dir.join("gia-raggiungibile.mp4");
+        std::fs::write(&already_ok_path, b"altro contenuto").unwrap();
+
+        let mut app = VibeVideoApp::default();
+        let meta = vv_core::MediaMeta {
+            duration_frames: 10,
+            fps: vv_core::Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+        };
+        let offline = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/questo/percorso/non/esiste/piu/intervista.mp4".into(),
+            meta: meta.clone(),
+            content_hash: 1,
+        });
+        let unresolvable = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/altro/percorso/inesistente/fantasma.mp4".into(),
+            meta: meta.clone(),
+            content_hash: 3,
+        });
+        let already_ok = app.project.media_pool.insert(vv_core::MediaItem {
+            path: already_ok_path.clone(),
+            meta,
+            content_hash: 2,
+        });
+        app.media_pool_state.selected = BTreeSet::from([offline, unresolvable, already_ok]);
+
+        app.relink_media(&dir);
+
+        assert_eq!(app.project.media_pool[offline].path, found_path);
+        assert_ne!(
+            app.project.media_pool[offline].content_hash, 1,
+            "l'hash va ricalcolato sul nuovo percorso"
+        );
+        assert_eq!(
+            app.project.media_pool[unresolvable].path,
+            PathBuf::from("/altro/percorso/inesistente/fantasma.mp4"),
+            "senza un file corrispondente il percorso resta quello vecchio"
+        );
+        assert_eq!(
+            app.project.media_pool[already_ok].path, already_ok_path,
+            "un media già raggiungibile al suo percorso non va toccato"
+        );
+        assert_eq!(app.project.media_pool[already_ok].content_hash, 2);
+        assert_eq!(
+            app.relink_message,
+            Some("Ricollegati 1 media, 1 non trovati.".to_string())
+        );
+
+        app.history.undo(&mut app.project);
+        assert_eq!(
+            app.project.media_pool[offline].path,
+            PathBuf::from("/questo/percorso/non/esiste/piu/intervista.mp4"),
+            "l'undo deve riportare il percorso a quello di prima del relink"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Il menu contestuale agisce solo sulla selezione, mai sull'intero
+    /// pool: un media non selezionato resta intoccato anche se
+    /// ricollegabile.
+    #[test]
+    fn relink_media_with_a_selection_only_touches_the_selected_media() {
+        let dir = std::env::temp_dir().join(format!("vv-app-relink-selection-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let found_path = dir.join("a.mp4");
+        std::fs::write(&found_path, b"a").unwrap();
+        let other_found_path = dir.join("b.mp4");
+        std::fs::write(&other_found_path, b"b").unwrap();
+
+        let mut app = VibeVideoApp::default();
+        let meta = vv_core::MediaMeta {
+            duration_frames: 10,
+            fps: vv_core::Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+        };
+        let selected = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/mancante/a.mp4".into(),
+            meta: meta.clone(),
+            content_hash: 1,
+        });
+        let not_selected = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/mancante/b.mp4".into(),
+            meta,
+            content_hash: 2,
+        });
+        app.media_pool_state.selected = BTreeSet::from([selected]);
+
+        app.relink_media(&dir);
+
+        assert_eq!(app.project.media_pool[selected].path, found_path);
+        assert_eq!(
+            app.project.media_pool[not_selected].path,
+            PathBuf::from("/mancante/b.mp4"),
+            "senza essere selezionato non viene ricollegato anche se trovabile"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Solo `relink_media_dialog` (l'ingresso dal menu contestuale) salta
+    /// il file dialog senza selezione: `relink_media` di per sé opera
+    /// sempre sulla selezione data, vuota compresa (nessun target, quindi
+    /// nessun comando e nessun messaggio).
+    #[test]
+    fn relink_media_dialog_is_a_no_op_without_a_selection() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            10,
+        );
+        let original_path = app.project.media_pool[media_id].path.clone();
+
+        app.relink_media_dialog();
+
+        assert_eq!(app.project.media_pool[media_id].path, original_path);
+        assert!(app.relink_message.is_none());
     }
 
     #[test]

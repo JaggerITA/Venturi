@@ -8,6 +8,7 @@ use crate::model::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
@@ -1629,6 +1630,50 @@ impl Command for RemoveMedia {
                     }
                 }
             }
+        }
+    }
+}
+
+/// "Relink": punta un media del pool a un nuovo percorso su disco (es.
+/// dopo aver ritrovato il file sotto un'altra cartella base). Il
+/// chiamante ricalcola anche `content_hash` per il nuovo percorso: le
+/// clip in timeline restano quelle, solo la sorgente su disco cambia.
+#[derive(Debug)]
+pub struct SetMediaPath {
+    media: MediaId,
+    new_path: PathBuf,
+    new_content_hash: u64,
+    old: RefCell<Option<(PathBuf, u64)>>,
+}
+
+impl SetMediaPath {
+    pub fn new(media: MediaId, new_path: PathBuf, new_content_hash: u64) -> Self {
+        Self {
+            media,
+            new_path,
+            new_content_hash,
+            old: RefCell::new(None),
+        }
+    }
+}
+
+impl Command for SetMediaPath {
+    fn apply(&mut self, project: &mut Project) {
+        let Some(item) = project.media_pool.get_mut(self.media) else {
+            return;
+        };
+        *self.old.borrow_mut() = Some((item.path.clone(), item.content_hash));
+        item.path = self.new_path.clone();
+        item.content_hash = self.new_content_hash;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some((path, hash)) = self.old.borrow_mut().take() else {
+            return;
+        };
+        if let Some(item) = project.media_pool.get_mut(self.media) {
+            item.path = path;
+            item.content_hash = hash;
         }
     }
 }

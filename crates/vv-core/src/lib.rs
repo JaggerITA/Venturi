@@ -9,7 +9,7 @@ pub use command::{
     LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     RippleDeleteAllTracks,
     cut_overlaps, make_room_for_ranges, ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain, SetClipTitle,
-    SetClipTransformParam, SetClipsDisabled, SetTrackFlag, SplitClip, TrackFlag,
+    SetClipTransformParam, SetClipsDisabled, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag,
     TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,
 };
@@ -95,6 +95,29 @@ mod tests {
 
         history.redo(&mut project);
         assert!(project.media_pool.is_empty());
+    }
+
+    #[test]
+    fn set_media_path_relinks_and_undo_restores_the_old_path() {
+        let (mut project, _timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let media = insert_media(&mut project);
+        let old_path = project.media_pool[media].path.clone();
+
+        history.do_command(
+            &mut project,
+            Box::new(command::SetMediaPath::new(
+                media,
+                "/altra/postazione/clip.mp4".into(),
+                42,
+            )),
+        );
+        assert_eq!(project.media_pool[media].path, std::path::PathBuf::from("/altra/postazione/clip.mp4"));
+        assert_eq!(project.media_pool[media].content_hash, 42);
+
+        history.undo(&mut project);
+        assert_eq!(project.media_pool[media].path, old_path);
+        assert_eq!(project.media_pool[media].content_hash, 7);
     }
 
     #[test]
