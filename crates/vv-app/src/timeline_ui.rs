@@ -792,6 +792,58 @@ impl MediaDragSet {
     }
 }
 
+/// Effetti del pannello Effects: generano una clip senza media sorgente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Generator {
+    SolidColor,
+}
+
+impl Generator {
+    pub const ALL: [Generator; 1] = [Generator::SolidColor];
+
+    const DEFAULT_SECS: f64 = 5.0;
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Generator::SolidColor => "Solid Color",
+        }
+    }
+
+    pub fn default_len(self, timeline_fps: vv_core::Rational) -> FrameIdx {
+        (timeline_fps.as_f64() * Self::DEFAULT_SECS).round() as FrameIdx
+    }
+}
+
+/// Cosa si sta trascinando verso la timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineDrag {
+    Media(MediaDragSet),
+    Generator(Generator),
+}
+
+impl TimelineDrag {
+    pub fn hovered(resp: &egui::Response) -> Option<Self> {
+        resp.dnd_hover_payload::<MediaDragSet>()
+            .map(|set| Self::Media((*set).clone()))
+            .or_else(|| resp.dnd_hover_payload::<Generator>().map(|g| Self::Generator(*g)))
+    }
+
+    pub fn released(resp: &egui::Response) -> Option<Self> {
+        // `take_payload` scarta il payload anche se il tipo non combacia:
+        // va scelto il tipo giusto prima di prenderlo.
+        if egui::DragAndDrop::has_payload_of_type::<Generator>(&resp.ctx) {
+            resp.dnd_release_payload::<Generator>().map(|g| Self::Generator(*g))
+        } else {
+            resp.dnd_release_payload::<MediaDragSet>()
+                .map(|set| Self::Media((*set).clone()))
+        }
+    }
+
+    fn is_media(&self) -> bool {
+        matches!(self, Self::Media(_))
+    }
+}
+
 /// Quanto occupa sulla timeline il media trascinato: la sua durata in
 /// frame sorgente conformata all'fps della timeline (vedi `Clip::rate`).
 /// `1/1` se il media non è (più) nel pool.
@@ -812,12 +864,16 @@ fn drag_timeline_len(
 fn drag_set_timeline_len(
     project: &Project,
     timeline_fps: vv_core::Rational,
-    set: &MediaDragSet,
+    drag: &TimelineDrag,
 ) -> FrameIdx {
-    set.items
-        .iter()
-        .map(|d| drag_timeline_len(project, timeline_fps, d))
-        .sum()
+    match drag {
+        TimelineDrag::Media(set) => set
+            .items
+            .iter()
+            .map(|d| drag_timeline_len(project, timeline_fps, d))
+            .sum(),
+        TimelineDrag::Generator(g) => g.default_len(timeline_fps),
+    }
 }
 
 /// Un segmento del ghost di drop: offset dall'inizio del drop, lunghezza e
@@ -834,8 +890,19 @@ struct DragSegment {
 fn drag_set_segments(
     project: &Project,
     timeline_fps: vv_core::Rational,
-    set: &MediaDragSet,
+    drag: &TimelineDrag,
 ) -> Vec<DragSegment> {
+    let set = match drag {
+        TimelineDrag::Media(set) => set,
+        TimelineDrag::Generator(g) => {
+            return vec![DragSegment {
+                offset: 0,
+                len: g.default_len(timeline_fps),
+                has_video: true,
+                has_audio: false,
+            }];
+        }
+    };
     let mut offset = 0;
     set.items
         .iter()
@@ -863,10 +930,13 @@ pub enum MediaDropTarget {
     Default,
     NewVideoTrack,
     NewAudioTrack,
+    /// Track video esistente sotto al puntatore (drop di un effetto).
+    Track(usize),
 }
 
-/// `Some((media, frame, target))` se in questo frame sono stati rilasciati
-/// uno o più elementi trascinati dal media pool; il chiamante se ne occupa.
+/// `Some((drag, frame, target))` se in questo frame è stato rilasciato
+/// qualcosa trascinato dal media pool o dal pannello Effects; il chiamante
+/// se ne occupa.
 pub fn show_timeline(
     ui: &mut egui::Ui,
     project: &mut Project,
@@ -907,7 +977,7 @@ pub fn show_timeline(
     // sempre restare visibile, quindi la vista "volta pagina" per
     // seguirla quando esce dall'area visibile (vedi sotto).
     playback_active: bool,
-) -> Option<(MediaDragSet, FrameIdx, MediaDropTarget)> {
+) -> Option<(TimelineDrag, FrameIdx, MediaDropTarget)> {
     let mut media_drop = None;
 
     // Zoom orizzontale (Alt+scroll, vedi `zoom_modifier` in `main`, o
@@ -1005,6 +1075,18 @@ pub fn show_timeline(
             RULER_HEIGHT + top_margin + row as f32 * ROW_HEIGHT + extra
         })
         .collect();
+    // Inverso di `row_y`: `y` locale -> riga -> `track_index`.
+    let track_at_y = |local_y: f32| -> usize {
+        let y_in_rows = (local_y - RULER_HEIGHT - top_margin).max(0.0);
+        let video_rows_height = video_count as f32 * ROW_HEIGHT;
+        let row = if y_in_rows < video_rows_height {
+            (y_in_rows / ROW_HEIGHT).floor() as usize
+        } else {
+            let after_divider = (y_in_rows - video_rows_height - divider_height).max(0.0);
+            video_count + (after_divider / ROW_HEIGHT).floor() as usize
+        };
+        row_order[row.min(track_count.saturating_sub(1))]
+    };
 
     let mut pending: Option<PendingAction> = None;
 
@@ -1305,10 +1387,28 @@ pub fn show_timeline(
                 // direttamente per lo stesso motivo (`interact_pointer_pos()` è
                 // legato a chi ha "vinto" l'interazione, non a questo drop).
                 // Nei margini il drop spetta alle zone "nuova track" sotto.
+                // Un effetto va sulla track video sotto al puntatore, un
+                // media sulle track di sempre (vedi `insert_media_clip`).
+                let drop_target = |drag: &TimelineDrag, pos: egui::Pos2| match drag {
+                    TimelineDrag::Generator(_) => {
+                        let track = track_at_y(pos.y - origin.y);
+                        if track_kinds[track] == TrackKind::Video {
+                            MediaDropTarget::Track(track)
+                        } else {
+                            MediaDropTarget::Default
+                        }
+                    }
+                    TimelineDrag::Media(_) => MediaDropTarget::Default,
+                };
+                // Layer sopra alle clip, dipinte più avanti.
+                let ghost_painter = painter.clone().with_layer_id(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    ui.id().with("timeline_drop_ghost"),
+                ));
                 if pointer_over_tracks
-                    && let Some(drag) = marquee_resp.dnd_hover_payload::<MediaDragSet>()
+                    && let Some(drag) = TimelineDrag::hovered(&marquee_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-                    && drag.items.iter().any(|d| project.media_pool.contains_key(d.media_id))
+                    && !drag_set_segments(project, timeline_fps, &drag).is_empty()
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
@@ -1326,8 +1426,11 @@ pub fn show_timeline(
                     let first_row = |kind| {
                         track_kinds.iter().position(|k| *k == kind).map(|t| origin.y + row_y[t])
                     };
-                    let (video_y, audio_y) =
-                        (first_row(TrackKind::Video), first_row(TrackKind::Audio));
+                    let video_y = match drop_target(&drag, pos) {
+                        MediaDropTarget::Track(track) => Some(origin.y + row_y[track]),
+                        _ => first_row(TrackKind::Video),
+                    };
+                    let audio_y = first_row(TrackKind::Audio);
                     for seg in drag_set_segments(project, timeline_fps, &drag) {
                         let x = origin.x + (frame + seg.offset) as f32 * px_per_frame;
                         let rows = [(seg.has_video, video_y), (seg.has_audio, audio_y)];
@@ -1341,12 +1444,12 @@ pub fn show_timeline(
                             // successivo: senza, i bordi combaciano e le clip
                             // accodate sembrano un blocco unico.
                             .shrink2(egui::vec2(1.0, 0.0));
-                            painter.rect_filled(
+                            ghost_painter.rect_filled(
                                 rect,
                                 4.0,
                                 egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
                             );
-                            painter.rect_stroke(
+                            ghost_painter.rect_stroke(
                                 rect,
                                 4.0,
                                 egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
@@ -1356,7 +1459,7 @@ pub fn show_timeline(
                     }
                 }
                 if pointer_over_tracks
-                    && let Some(drag) = marquee_resp.dnd_release_payload::<MediaDragSet>()
+                    && let Some(drag) = TimelineDrag::released(&marquee_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
@@ -1371,7 +1474,8 @@ pub fn show_timeline(
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some(((*drag).clone(), frame, MediaDropTarget::Default));
+                    let target = drop_target(&drag, pos);
+                    media_drop = Some((drag, frame, target));
                 }
 
                 // Zone "aggiungi una nuova track": margini sopra/sotto ai
@@ -1385,10 +1489,7 @@ pub fn show_timeline(
                     ui.id().with("timeline_new_video_track_zone"),
                     egui::Sense::hover(),
                 );
-                if above_video_resp
-                    .dnd_hover_payload::<MediaDragSet>()
-                    .is_some()
-                {
+                if TimelineDrag::hovered(&above_video_resp).is_some() {
                     painter.rect_filled(
                         above_video_rect,
                         4.0,
@@ -1408,7 +1509,7 @@ pub fn show_timeline(
                         egui::Color32::from_rgb(200, 255, 200),
                     );
                 }
-                if let Some(drag) = above_video_resp.dnd_release_payload::<MediaDragSet>()
+                if let Some(drag) = TimelineDrag::released(&above_video_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
@@ -1423,7 +1524,7 @@ pub fn show_timeline(
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some(((*drag).clone(), frame, MediaDropTarget::NewVideoTrack));
+                    media_drop = Some((drag, frame, MediaDropTarget::NewVideoTrack));
                 }
 
                 let below_audio_rect = egui::Rect::from_min_size(
@@ -1438,10 +1539,7 @@ pub fn show_timeline(
                     ui.id().with("timeline_new_audio_track_zone"),
                     egui::Sense::hover(),
                 );
-                if below_audio_resp
-                    .dnd_hover_payload::<MediaDragSet>()
-                    .is_some()
-                {
+                if TimelineDrag::hovered(&below_audio_resp).is_some_and(|d| d.is_media()) {
                     painter.rect_filled(
                         below_audio_rect,
                         4.0,
@@ -1461,7 +1559,8 @@ pub fn show_timeline(
                         egui::Color32::from_rgb(200, 255, 200),
                     );
                 }
-                if let Some(drag) = below_audio_resp.dnd_release_payload::<MediaDragSet>()
+                if let Some(drag) = TimelineDrag::released(&below_audio_resp)
+                    && drag.is_media()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
                     let raw_frame =
@@ -1476,7 +1575,7 @@ pub fn show_timeline(
                         snapping_enabled,
                     )
                     .max(0);
-                    media_drop = Some(((*drag).clone(), frame, MediaDropTarget::NewAudioTrack));
+                    media_drop = Some((drag, frame, MediaDropTarget::NewAudioTrack));
                 }
 
                 if marquee_resp.drag_started() {
@@ -1517,17 +1616,7 @@ pub fn show_timeline(
                         // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
                         let local = to_local(pos);
                         let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
-                        // Inverso di `row_y`: `y` locale -> riga -> `track_index`.
-                        let y_in_rows = (local.y - RULER_HEIGHT - top_margin).max(0.0);
-                        let video_rows_height = video_count as f32 * ROW_HEIGHT;
-                        let row = if y_in_rows < video_rows_height {
-                            (y_in_rows / ROW_HEIGHT).floor() as usize
-                        } else {
-                            let after_divider = (y_in_rows - video_rows_height - divider_height).max(0.0);
-                            video_count + (after_divider / ROW_HEIGHT).floor() as usize
-                        };
-                        let row = row.min(track_count.saturating_sub(1));
-                        let track_index = row_order[row];
+                        let track_index = track_at_y(local.y);
                         match gap_at(&visuals, track_index, frame) {
                             Some((gap_start, gap_end)) => {
                                 state.selected.clear();
@@ -3934,7 +4023,7 @@ mod tests {
                 MediaDrag::whole(b, &project.media_pool[b].meta),
             ],
         };
-        let segments = drag_set_segments(&project, fps, &set);
+        let segments = drag_set_segments(&project, fps, &TimelineDrag::Media(set));
         assert_eq!(
             segments
                 .iter()

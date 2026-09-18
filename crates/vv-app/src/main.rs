@@ -445,6 +445,9 @@ struct VibeVideoApp {
     /// della timeline con il livello dell'audio in uscita. Attivo di
     /// default, come nella maggior parte degli NLE.
     audiometer_enabled: bool,
+    /// Sezioni visibili nella colonna di sinistra (toggle in toolbar).
+    show_media_pool: bool,
+    show_effects: bool,
     /// Valori (sinistra, destra) mostrati dal meter stereo, con un
     /// decadimento applicato qui (non nel callback audio): il picco letto
     /// da `TimelineAudio::peak_linear_stereo` è istantaneo, senza smorzamento
@@ -516,6 +519,8 @@ impl Default for VibeVideoApp {
             quit_confirmed: false,
             project_error: None,
             audiometer_enabled: true,
+            show_media_pool: true,
+            show_effects: false,
             audiometer_level: (0.0, 0.0),
         }
     }
@@ -1680,19 +1685,351 @@ impl VibeVideoApp {
         scaled.min(max_secs)
     }
 
-    /// Crea una clip generatore SolidColor da 5s e la accoda in fondo alla
-    /// prima track video. Il colore iniziale è grigio medio, modificabile
-    /// subito dal pannello proprietà una volta selezionata.
-    fn add_solid_color_clip(&mut self) {
+    /// Contenuto della sezione Media pool nella colonna di sinistra.
+    fn show_media_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
+        if let Some(worker) = &self.proxy_worker {
+            let progress = worker.progress();
+            let paused = worker.is_paused();
+            if progress.finished < progress.total {
+                ui.horizontal(|ui| {
+                    let label = if paused { "Riprendi" } else { "Pausa" };
+                    if ui
+                        .small_button(label)
+                        .on_hover_text("Generazione proxy in background")
+                        .clicked()
+                    {
+                        worker.set_paused(!paused);
+                    }
+                    ui.add(
+                        egui::ProgressBar::new(progress.fraction)
+                            .text(format!("Proxy {}/{}", progress.finished, progress.total)),
+                    );
+                });
+                if !paused {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        media_pool_header(ui, &mut self.media_pool_state);
+        // auto_shrink([false, false]): senza, la ScrollArea (e
+        // quindi il pannello stesso) si restringe alla larghezza
+        // del contenuto invece di riempire quella assegnata dal
+        // Panel — stessa causa del bug "il resize del pannello
+        // torna indietro al rilascio", vedi il commento identico
+        // in timeline_ui::show_timeline.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let items: Vec<(MediaId, String, vv_core::MediaMeta, u64)> = self
+                    .project
+                    .media_pool
+                    .iter()
+                    .map(|(id, item)| {
+                        (id, file_label(&item.path), item.meta.clone(), item.content_hash)
+                    })
+                    .collect();
+                let mut items = items;
+                media_pool::sort_items(
+                    &mut items,
+                    self.media_pool_state.sort,
+                    |(_, label, ..)| label.as_str(),
+                    |(_, _, meta, _)| {
+                        meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9)
+                    },
+                );
+                let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
+                let drags: Vec<timeline_ui::MediaDrag> = items
+                    .iter()
+                    .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
+                    .collect();
+                // Sfondo interagibile per il rettangolo di selezione,
+                // richiesto *prima* degli elementi: nell'hit-test di
+                // egui vince l'ultimo, quindi cliccare un elemento non
+                // fa partire il rettangolo (stesso schema del marquee
+                // in `timeline_ui::show_timeline`).
+                let bg = ui.interact(
+                    ui.available_rect_before_wrap(),
+                    ui.id().with("media_pool_bg"),
+                    egui::Sense::click_and_drag(),
+                );
+                let mut item_rects: Vec<(MediaId, egui::Rect)> = Vec::new();
+                for (id, label, meta, content_hash) in items {
+                    let proxy_state = self
+                        .proxy_worker
+                        .as_ref()
+                        .and_then(|w| w.state(content_hash));
+                    let thumbnail = self.thumbnails.get(&content_hash).cloned().flatten();
+                    let group_resp = ui
+                        .group(|ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let thumb_size = egui::vec2(64.0, 36.0);
+                                match &thumbnail {
+                                    Some(texture) => {
+                                        let tex_size = texture.size_vec2();
+                                        let scale = (thumb_size.x / tex_size.x)
+                                            .min(thumb_size.y / tex_size.y);
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            thumb_size,
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
+                                        egui::Image::new(texture)
+                                            .fit_to_exact_size(tex_size * scale)
+                                            .paint_at(
+                                                ui,
+                                                egui::Rect::from_center_size(
+                                                    rect.center(),
+                                                    tex_size * scale,
+                                                ),
+                                            );
+                                    }
+                                    None => {
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            thumb_size,
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            2.0,
+                                            ui.visuals().extreme_bg_color,
+                                        );
+                                        if !meta.has_video {
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "🔊",
+                                                egui::FontId::proportional(18.0),
+                                                ui.visuals().weak_text_color(),
+                                            );
+                                        }
+                                    }
+                                }
+                                ui.vertical(|ui| {
+                                    ui.label(&label);
+                                    ui.small(if meta.has_video {
+                                        format!(
+                                            "{}x{} · {:.2}fps · {}",
+                                            meta.width,
+                                            meta.height,
+                                            meta.fps.as_f64(),
+                                            if meta.has_audio { "audio" } else { "muto" }
+                                        )
+                                    } else {
+                                        format!(
+                                            "solo audio · {} Hz · {} ch",
+                                            meta.sample_rate, meta.channels
+                                        )
+                                    });
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add_sized(
+                                            egui::vec2(DURATION_COL_W, ui.available_height()),
+                                            egui::Label::new(
+                                                egui::RichText::new(format_duration(
+                                                    meta.duration_frames,
+                                                    meta.fps.as_f64(),
+                                                ))
+                                                .monospace(),
+                                            ),
+                                        );
+                                        match proxy_state {
+                                        Some(proxy_worker::ProxyState::Generating(f)) => {
+                                            proxy_progress_ring(ui, Some(f))
+                                                .on_hover_text(format!("Generazione proxy {:.0}%", f * 100.0));
+                                        }
+                                        Some(proxy_worker::ProxyState::Queued) => {
+                                            proxy_progress_ring(ui, None)
+                                                .on_hover_text("Proxy in coda");
+                                        }
+                                        Some(proxy_worker::ProxyState::Failed) => {
+                                            ui.colored_label(egui::Color32::RED, "!")
+                                                .on_hover_text("Proxy non generato");
+                                        }
+                                        _ => {}
+                                        }
+                                    },
+                                );
+                            });
+                        })
+                        .response;
+                    if proxy_state == Some(proxy_worker::ProxyState::Ready) {
+                        let rect = group_resp.rect.shrink(1.0);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
+                            1.0,
+                            timeline_ui::PROXY_COLOR,
+                        );
+                    }
+                    // Doppio click: anteprima nel player (sostituisce
+                    // il vecchio pulsante "Anteprima"). Trascinamento:
+                    // droppato sulla timeline aggiunge il media
+                    // (sostituisce il vecchio pulsante "Aggiungi"),
+                    // vedi `dnd_release_payload` in show_timeline.
+                    let interact_id = ui.id().with("media_pool_item").with(id);
+                    let resp = ui
+                        .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
+                        .on_hover_text(
+                            "Click: seleziona (ctrl/shift per più elementi) · doppio click: anteprima · trascina sulla timeline per aggiungere",
+                        );
+                    item_rects.push((id, group_resp.rect));
+                    if self.media_pool_state.selected.contains(&id) {
+                        ui.painter().rect_stroke(
+                            group_resp.rect,
+                            4.0,
+                            egui::Stroke::new(2.0, egui::Color32::WHITE),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.painter().rect_filled(
+                            group_resp.rect,
+                            4.0,
+                            egui::Color32::from_white_alpha(18),
+                        );
+                    }
+                    if resp.clicked() {
+                        let modifiers = ui.input(|i| i.modifiers);
+                        self.media_pool_state.click(id, modifiers, &order);
+                    }
+                    // Trascinare un elemento fuori dalla selezione la
+                    // sostituisce con lui (come in timeline, vedi
+                    // `timeline_ui::drag_group_for`).
+                    if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
+                        self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
+                    }
+                    // Trascinare un elemento della selezione trascina
+                    // l'intera selezione, nell'ordine del pannello: la
+                    // timeline le accoda una dopo l'altra.
+                    let payload = if self.media_pool_state.selected.len() > 1
+                        && self.media_pool_state.selected.contains(&id)
+                    {
+                        timeline_ui::MediaDragSet {
+                            items: drags
+                                .iter()
+                                .filter(|d| {
+                                    self.media_pool_state.selected.contains(&d.media_id)
+                                })
+                                .copied()
+                                .collect(),
+                        }
+                    } else {
+                        timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
+                            id, &meta,
+                        ))
+                    };
+                    let dragged_count = payload.items.len();
+                    resp.dnd_set_drag_payload(payload);
+                    if resp.double_clicked() {
+                        *preview_action = Some(id);
+                    }
+                    // "Ghost" che segue il cursore durante il
+                    // trascinamento: senza, non c'era alcun feedback
+                    // visivo che il drag fosse partito (l'elemento
+                    // del media pool resta al suo posto, invariato).
+                    if resp.dragged() {
+                        let ghost = if dragged_count > 1 {
+                            format!("{dragged_count} elementi")
+                        } else {
+                            label.clone()
+                        };
+                        show_drag_ghost(ui, interact_id, &ghost);
+                    }
+                }
+
+                if bg.drag_started() {
+                    if let Some(pos) = bg.interact_pointer_pos() {
+                        self.media_pool_state.marquee = Some((pos, pos));
+                    }
+                } else if bg.dragged() {
+                    if let (Some((_, end)), Some(pos)) =
+                        (&mut self.media_pool_state.marquee, bg.interact_pointer_pos())
+                    {
+                        *end = pos;
+                    }
+                } else if bg.drag_stopped() {
+                    if let Some((start, end)) = self.media_pool_state.marquee.take() {
+                        let rect = egui::Rect::from_two_pos(start, end);
+                        let hits = item_rects
+                            .iter()
+                            .filter(|(_, r)| r.intersects(rect))
+                            .map(|(id, _)| *id);
+                        self.media_pool_state.set_marquee_selection(hits);
+                    }
+                } else if bg.clicked() {
+                    self.media_pool_state.clear();
+                }
+                if let Some((start, end)) = self.media_pool_state.marquee {
+                    let rect = egui::Rect::from_two_pos(start, end);
+                    ui.painter().rect_filled(
+                        rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            });
+    }
+
+    /// Sezione Effects: effetti da trascinare sulla timeline.
+    fn show_effects_list(ui: &mut egui::Ui) {
+        effects_section_header(ui, "Generators");
+        egui::ScrollArea::vertical()
+            .id_salt("effects_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for generator in timeline_ui::Generator::ALL {
+                    effect_item(ui, generator);
+                }
+            });
+    }
+
+    /// Drop di un effetto dal pannello Effects: la clip generatore va sulla
+    /// track video indicata da `target`, a `start`.
+    fn add_generator_to_timeline_at(
+        &mut self,
+        generator: timeline_ui::Generator,
+        start: FrameIdx,
+        target: timeline_ui::MediaDropTarget,
+    ) {
         let timeline_id = self.ensure_timeline();
-        let fps = self.project.timelines[timeline_id].fps.as_f64();
-        let default_len = (fps * 5.0).round() as FrameIdx;
-        let Some(video_track) =
-            self.project.timelines[timeline_id].first_track_index(TrackKind::Video)
-        else {
-            return; // nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`
-        };
-        let video_start = track_end(&self.project, timeline_id, video_track);
+        let group = self.history.begin_group();
+        if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, false) {
+            match generator {
+                timeline_ui::Generator::SolidColor => {
+                    self.insert_solid_color_clip(timeline_id, tracks.video, start)
+                }
+            }
+        }
+        self.history.end_group(group);
+    }
+
+    fn add_drop_to_timeline_at(
+        &mut self,
+        drag: &timeline_ui::TimelineDrag,
+        start: FrameIdx,
+        target: timeline_ui::MediaDropTarget,
+    ) {
+        match drag {
+            timeline_ui::TimelineDrag::Media(set) => {
+                self.add_media_set_to_timeline_at(set, start, target)
+            }
+            timeline_ui::TimelineDrag::Generator(g) => {
+                self.add_generator_to_timeline_at(*g, start, target)
+            }
+        }
+    }
+
+    /// Il colore iniziale è grigio medio, modificabile subito dal pannello
+    /// proprietà una volta selezionata.
+    fn insert_solid_color_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
+        let default_len =
+            timeline_ui::Generator::SolidColor.default_len(self.project.timelines[timeline_id].fps);
 
         let effects = vv_core::EffectStack {
             color: Some(vv_core::Keyframed::constant(vv_core::Rgba {
@@ -1709,17 +2046,32 @@ impl VibeVideoApp {
             vv_core::ClipSource::SolidColor,
             0,
             default_len,
-            video_start,
+            start,
             vv_core::Rational::one(),
         );
         clip.effects = effects;
+        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip)]);
+    }
+
+    /// Come un vero NLE, le clip già presenti sotto a quelle nuove vengono
+    /// accorciate, divise o rimosse invece di restare sovrapposte.
+    fn insert_clips_overwriting(&mut self, timeline_id: TimelineId, clips: Vec<(usize, vv_core::Clip)>) {
+        let ranges: Vec<(usize, FrameIdx, FrameIdx)> = clips
+            .iter()
+            .map(|(track, clip)| (*track, clip.timeline_start, clip.timeline_end()))
+            .collect();
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        vv_core::make_room_for_ranges(&mut self.project, timeline_id, &ranges, &[], &mut commands);
+        for (track_index, clip) in clips {
+            commands.push(Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index,
+                clip,
+            }));
+        }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::InsertClip {
-                timeline: timeline_id,
-                track_index: video_track,
-                clip,
-            }),
+            Box::new(vv_core::CompositeCommand::new(commands)),
         );
     }
 
@@ -2105,16 +2457,18 @@ impl VibeVideoApp {
         target: timeline_ui::MediaDropTarget,
         any_audio: bool,
     ) -> Option<DropTracks> {
-        let video = if target == timeline_ui::MediaDropTarget::NewVideoTrack {
-            let new_index = self.project.timelines[timeline_id].tracks.len();
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
-            );
-            new_index
-        } else {
+        let video = match target {
+            timeline_ui::MediaDropTarget::NewVideoTrack => {
+                let new_index = self.project.timelines[timeline_id].tracks.len();
+                self.history.do_command(
+                    &mut self.project,
+                    Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+                );
+                new_index
+            }
+            timeline_ui::MediaDropTarget::Track(track) => track,
             // Nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`.
-            self.project.timelines[timeline_id].first_track_index(TrackKind::Video)?
+            _ => self.project.timelines[timeline_id].first_track_index(TrackKind::Video)?,
         };
         let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
             let new_index = self.project.timelines[timeline_id].tracks.len();
@@ -2197,26 +2551,17 @@ impl VibeVideoApp {
             .map(|_| self.project.alloc_clip_id())
             .collect();
 
-        let mut group_targets: Vec<(usize, ClipId)> = Vec::new();
+        let mut new_clips: Vec<(usize, vv_core::Clip)> = Vec::new();
         if meta.has_video {
-            let video_clip_id = self.project.alloc_clip_id();
             let video_clip = vv_core::Clip::from_source_range(
-                video_clip_id,
+                self.project.alloc_clip_id(),
                 vv_core::ClipSource::Media(media_id),
                 drag.source_in,
                 drag.source_out,
                 start,
                 rate,
             );
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::InsertClip {
-                    timeline: timeline_id,
-                    track_index: video_track,
-                    clip: video_clip,
-                }),
-            );
-            group_targets.push((video_track, video_clip_id));
+            new_clips.push((video_track, video_clip));
         }
         for (stream_index, (&track_index, &clip_id)) in
             audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
@@ -2230,16 +2575,11 @@ impl VibeVideoApp {
                 rate,
             );
             audio_clip.audio_stream_index = stream_index;
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::InsertClip {
-                    timeline: timeline_id,
-                    track_index,
-                    clip: audio_clip,
-                }),
-            );
-            group_targets.push((track_index, clip_id));
+            new_clips.push((track_index, audio_clip));
         }
+        let group_targets: Vec<(usize, ClipId)> =
+            new_clips.iter().map(|(track, clip)| (*track, clip.id)).collect();
+        self.insert_clips_overwriting(timeline_id, new_clips);
 
         if group_targets.len() >= 2 {
             self.history.do_command(
@@ -2842,6 +3182,7 @@ fn map_source_ranges_to_timeline(
         .collect()
 }
 
+#[cfg(test)]
 fn track_end(project: &vv_core::Project, timeline_id: TimelineId, track_index: usize) -> FrameIdx {
     project.timelines[timeline_id]
         .tracks
@@ -2892,6 +3233,55 @@ fn show_drag_ghost(ui: &egui::Ui, id: egui::Id, label: &str) {
                 ui.label(label);
             });
         });
+}
+
+fn effects_section_header(ui: &mut egui::Ui, title: &str) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.inactive.weak_bg_fill);
+    ui.painter().text(
+        rect.left_center() + egui::vec2(6.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(13.0),
+        ui.visuals().strong_text_color(),
+    );
+}
+
+/// Voce del pannello Effects: miniatura a sinistra e nome, trascinabile
+/// sulla timeline.
+fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let id = ui.id().with(("effect_item", generator.label()));
+    let resp = ui
+        .interact(rect, id, egui::Sense::click_and_drag())
+        .on_hover_text("Trascina sulla timeline per aggiungere");
+    let visuals = ui.visuals();
+    let (bg, stroke) = if resp.hovered() || resp.dragged() {
+        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+    } else {
+        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, bg);
+    let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
+    match generator {
+        timeline_ui::Generator::SolidColor => {
+            painter.rect_filled(thumb, 2.0, egui::Color32::from_rgb(106, 176, 204));
+        }
+    }
+    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    painter.text(
+        egui::pos2(thumb.right() + 14.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        generator.label(),
+        egui::FontId::proportional(13.0),
+        visuals.text_color(),
+    );
+    resp.dnd_set_drag_payload(generator);
+    if resp.dragged() {
+        show_drag_ghost(ui, id, generator.label());
+    }
 }
 
 /// Larghezza della colonna "Durata": la stessa nell'intestazione e nelle
@@ -3747,13 +4137,6 @@ impl eframe::App for VibeVideoApp {
                     }
                 });
 
-                ui.menu_button("Clip", |ui| {
-                    if ui.button("Nuovo Solid Color").clicked() {
-                        self.add_solid_color_clip();
-                        ui.close();
-                    }
-                });
-
                 ui.menu_button("Timeline", |ui| {
                     // Checkbox: restano aperti al click, a differenza dei
                     // pulsanti-azione altrove nei menu.
@@ -3876,18 +4259,8 @@ impl eframe::App for VibeVideoApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if let Some(meta) = &self.preview_meta {
-                    let fps = meta.fps.as_f64().max(1e-9);
-                    let pos = self.browse_playhead as f64 / fps;
-                    let duration = meta.duration_frames as f64 / fps;
-                    ui.label(format!("{pos:.2}s / {duration:.2}s"));
-                } else if let Some(timeline_id) = self.timeline_id {
-                    let timeline = &self.project.timelines[timeline_id];
-                    let fps = timeline.fps.as_f64().max(1e-9);
-                    let pos = self.timeline_state.playhead as f64 / fps;
-                    let duration = timeline.total_frames() as f64 / fps;
-                    ui.label(format!("{pos:.2}s / {duration:.2}s"));
-                }
+                ui.toggle_value(&mut self.show_media_pool, "Media pool");
+                ui.toggle_value(&mut self.show_effects, "Effects");
                 if let Some(err) = &self.project_error {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, err);
@@ -3941,6 +4314,37 @@ impl eframe::App for VibeVideoApp {
             targets.sort_by_key(|t| (t.track_index, t.timeline_start));
         }
 
+        let mut preview_action = None;
+        if self.show_media_pool || self.show_effects {
+            egui::Panel::left("left_column")
+                .default_size(260.0)
+                .show(ui, |ui| {
+                    if self.show_media_pool {
+                        let pool = if self.show_effects {
+                            egui::Panel::top("media_pool")
+                                .exact_size(ui.available_height() / 2.0)
+                                .resizable(false)
+                                .show(ui, |ui| self.show_media_pool(ui, &mut preview_action))
+                                .response
+                        } else {
+                            ui.scope(|ui| self.show_media_pool(ui, &mut preview_action)).response
+                        };
+                        // Chi ha ricevuto l'ultimo click decide a chi va Canc/Backspace.
+                        if let Some(pos) = ui.ctx().input(|i| {
+                            i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()
+                        }) {
+                            self.media_pool_state.focused = pool.rect.contains(pos);
+                        }
+                    }
+                    if self.show_effects {
+                        Self::show_effects_list(ui);
+                    }
+                });
+        }
+        if !self.show_media_pool {
+            self.media_pool_state.focused = false;
+        }
+
         let selected_before_timeline_ui = self.timeline_state.selected.clone();
         let playhead_before_timeline_ui = self.timeline_state.playhead;
         // Se esiste già una timeline, la posizione esatta del rilascio (e
@@ -3951,12 +4355,12 @@ impl eframe::App for VibeVideoApp {
         // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
         // media a frame 0.
         let mut media_drop: Option<(
-            timeline_ui::MediaDragSet,
+            timeline_ui::TimelineDrag,
             FrameIdx,
             timeline_ui::MediaDropTarget,
         )> =
             None;
-        let mut dropped_on_empty_timeline: Option<timeline_ui::MediaDragSet> = None;
+        let mut dropped_on_empty_timeline: Option<timeline_ui::TimelineDrag> = None;
         egui::Panel::bottom("timeline")
             .default_size(240.0)
             .resizable(true)
@@ -4021,17 +4425,15 @@ impl eframe::App for VibeVideoApp {
                     let drop_rect = ui.available_rect_before_wrap();
                     let drop_id = ui.id().with("timeline_drop_zone_empty");
                     let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
-                    dropped_on_empty_timeline = drop_resp
-                        .dnd_release_payload::<timeline_ui::MediaDragSet>()
-                        .map(|arc| (*arc).clone());
+                    dropped_on_empty_timeline = timeline_ui::TimelineDrag::released(&drop_resp);
                     ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
                 }
             });
         if let Some(drag) = dropped_on_empty_timeline {
-            self.add_media_set_to_timeline_at(&drag, 0, timeline_ui::MediaDropTarget::Default);
+            self.add_drop_to_timeline_at(&drag, 0, timeline_ui::MediaDropTarget::Default);
         }
         if let Some((drag, start, target)) = media_drop {
-            self.add_media_set_to_timeline_at(&drag, start, target);
+            self.add_drop_to_timeline_at(&drag, start, target);
         }
 
         // L'utente ha trascinato/cliccato il playhead in questo frame?
@@ -4081,309 +4483,10 @@ impl eframe::App for VibeVideoApp {
         // riproduzione sulla timeline.
         self.sync_render_ahead();
 
-        let mut preview_action = None;
         let mut pending_effects: Vec<PendingEffectChange> = Vec::new();
         // Le frecce di navigazione tra keyframe del pannello spostano la
         // testina: applicato dopo il disegno, come le modifiche agli effetti.
         let mut pending_playhead: Option<FrameIdx> = None;
-        let pool_panel = egui::Panel::left("media_pool")
-            .default_size(260.0)
-            .show(ui, |ui| {
-                if let Some(worker) = &self.proxy_worker {
-                    let progress = worker.progress();
-                    let paused = worker.is_paused();
-                    if progress.finished < progress.total {
-                        ui.horizontal(|ui| {
-                            let label = if paused { "Riprendi" } else { "Pausa" };
-                            if ui
-                                .small_button(label)
-                                .on_hover_text("Generazione proxy in background")
-                                .clicked()
-                            {
-                                worker.set_paused(!paused);
-                            }
-                            ui.add(
-                                egui::ProgressBar::new(progress.fraction)
-                                    .text(format!("Proxy {}/{}", progress.finished, progress.total)),
-                            );
-                        });
-                        if !paused {
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                        }
-                    }
-                }
-                media_pool_header(ui, &mut self.media_pool_state);
-                // auto_shrink([false, false]): senza, la ScrollArea (e
-                // quindi il pannello stesso) si restringe alla larghezza
-                // del contenuto invece di riempire quella assegnata dal
-                // Panel — stessa causa del bug "il resize del pannello
-                // torna indietro al rilascio", vedi il commento identico
-                // in timeline_ui::show_timeline.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let items: Vec<(MediaId, String, vv_core::MediaMeta, u64)> = self
-                            .project
-                            .media_pool
-                            .iter()
-                            .map(|(id, item)| {
-                                (id, file_label(&item.path), item.meta.clone(), item.content_hash)
-                            })
-                            .collect();
-                        let mut items = items;
-                        media_pool::sort_items(
-                            &mut items,
-                            self.media_pool_state.sort,
-                            |(_, label, ..)| label.as_str(),
-                            |(_, _, meta, _)| {
-                                meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9)
-                            },
-                        );
-                        let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
-                        let drags: Vec<timeline_ui::MediaDrag> = items
-                            .iter()
-                            .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
-                            .collect();
-                        // Sfondo interagibile per il rettangolo di selezione,
-                        // richiesto *prima* degli elementi: nell'hit-test di
-                        // egui vince l'ultimo, quindi cliccare un elemento non
-                        // fa partire il rettangolo (stesso schema del marquee
-                        // in `timeline_ui::show_timeline`).
-                        let bg = ui.interact(
-                            ui.available_rect_before_wrap(),
-                            ui.id().with("media_pool_bg"),
-                            egui::Sense::click_and_drag(),
-                        );
-                        let mut item_rects: Vec<(MediaId, egui::Rect)> = Vec::new();
-                        for (id, label, meta, content_hash) in items {
-                            let proxy_state = self
-                                .proxy_worker
-                                .as_ref()
-                                .and_then(|w| w.state(content_hash));
-                            let thumbnail = self.thumbnails.get(&content_hash).cloned().flatten();
-                            let group_resp = ui
-                                .group(|ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        let thumb_size = egui::vec2(64.0, 36.0);
-                                        match &thumbnail {
-                                            Some(texture) => {
-                                                let tex_size = texture.size_vec2();
-                                                let scale = (thumb_size.x / tex_size.x)
-                                                    .min(thumb_size.y / tex_size.y);
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    thumb_size,
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
-                                                egui::Image::new(texture)
-                                                    .fit_to_exact_size(tex_size * scale)
-                                                    .paint_at(
-                                                        ui,
-                                                        egui::Rect::from_center_size(
-                                                            rect.center(),
-                                                            tex_size * scale,
-                                                        ),
-                                                    );
-                                            }
-                                            None => {
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    thumb_size,
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(
-                                                    rect,
-                                                    2.0,
-                                                    ui.visuals().extreme_bg_color,
-                                                );
-                                                if !meta.has_video {
-                                                    ui.painter().text(
-                                                        rect.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "🔊",
-                                                        egui::FontId::proportional(18.0),
-                                                        ui.visuals().weak_text_color(),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        ui.vertical(|ui| {
-                                            ui.label(&label);
-                                            ui.small(if meta.has_video {
-                                                format!(
-                                                    "{}x{} · {:.2}fps · {}",
-                                                    meta.width,
-                                                    meta.height,
-                                                    meta.fps.as_f64(),
-                                                    if meta.has_audio { "audio" } else { "muto" }
-                                                )
-                                            } else {
-                                                format!(
-                                                    "solo audio · {} Hz · {} ch",
-                                                    meta.sample_rate, meta.channels
-                                                )
-                                            });
-                                        });
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.add_sized(
-                                                    egui::vec2(DURATION_COL_W, ui.available_height()),
-                                                    egui::Label::new(
-                                                        egui::RichText::new(format_duration(
-                                                            meta.duration_frames,
-                                                            meta.fps.as_f64(),
-                                                        ))
-                                                        .monospace(),
-                                                    ),
-                                                );
-                                                match proxy_state {
-                                                Some(proxy_worker::ProxyState::Generating(f)) => {
-                                                    proxy_progress_ring(ui, Some(f))
-                                                        .on_hover_text(format!("Generazione proxy {:.0}%", f * 100.0));
-                                                }
-                                                Some(proxy_worker::ProxyState::Queued) => {
-                                                    proxy_progress_ring(ui, None)
-                                                        .on_hover_text("Proxy in coda");
-                                                }
-                                                Some(proxy_worker::ProxyState::Failed) => {
-                                                    ui.colored_label(egui::Color32::RED, "!")
-                                                        .on_hover_text("Proxy non generato");
-                                                }
-                                                _ => {}
-                                                }
-                                            },
-                                        );
-                                    });
-                                })
-                                .response;
-                            if proxy_state == Some(proxy_worker::ProxyState::Ready) {
-                                let rect = group_resp.rect.shrink(1.0);
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-                                    1.0,
-                                    timeline_ui::PROXY_COLOR,
-                                );
-                            }
-                            // Doppio click: anteprima nel player (sostituisce
-                            // il vecchio pulsante "Anteprima"). Trascinamento:
-                            // droppato sulla timeline aggiunge il media
-                            // (sostituisce il vecchio pulsante "Aggiungi"),
-                            // vedi `dnd_release_payload` in show_timeline.
-                            let interact_id = ui.id().with("media_pool_item").with(id);
-                            let resp = ui
-                                .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
-                                .on_hover_text(
-                                    "Click: seleziona (ctrl/shift per più elementi) · doppio click: anteprima · trascina sulla timeline per aggiungere",
-                                );
-                            item_rects.push((id, group_resp.rect));
-                            if self.media_pool_state.selected.contains(&id) {
-                                ui.painter().rect_stroke(
-                                    group_resp.rect,
-                                    4.0,
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
-                                    egui::StrokeKind::Inside,
-                                );
-                                ui.painter().rect_filled(
-                                    group_resp.rect,
-                                    4.0,
-                                    egui::Color32::from_white_alpha(18),
-                                );
-                            }
-                            if resp.clicked() {
-                                let modifiers = ui.input(|i| i.modifiers);
-                                self.media_pool_state.click(id, modifiers, &order);
-                            }
-                            // Trascinare un elemento fuori dalla selezione la
-                            // sostituisce con lui (come in timeline, vedi
-                            // `timeline_ui::drag_group_for`).
-                            if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
-                                self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
-                            }
-                            // Trascinare un elemento della selezione trascina
-                            // l'intera selezione, nell'ordine del pannello: la
-                            // timeline le accoda una dopo l'altra.
-                            let payload = if self.media_pool_state.selected.len() > 1
-                                && self.media_pool_state.selected.contains(&id)
-                            {
-                                timeline_ui::MediaDragSet {
-                                    items: drags
-                                        .iter()
-                                        .filter(|d| {
-                                            self.media_pool_state.selected.contains(&d.media_id)
-                                        })
-                                        .copied()
-                                        .collect(),
-                                }
-                            } else {
-                                timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
-                                    id, &meta,
-                                ))
-                            };
-                            let dragged_count = payload.items.len();
-                            resp.dnd_set_drag_payload(payload);
-                            if resp.double_clicked() {
-                                preview_action = Some(id);
-                            }
-                            // "Ghost" che segue il cursore durante il
-                            // trascinamento: senza, non c'era alcun feedback
-                            // visivo che il drag fosse partito (l'elemento
-                            // del media pool resta al suo posto, invariato).
-                            if resp.dragged() {
-                                let ghost = if dragged_count > 1 {
-                                    format!("{dragged_count} elementi")
-                                } else {
-                                    label.clone()
-                                };
-                                show_drag_ghost(ui, interact_id, &ghost);
-                            }
-                        }
-
-                        if bg.drag_started() {
-                            if let Some(pos) = bg.interact_pointer_pos() {
-                                self.media_pool_state.marquee = Some((pos, pos));
-                            }
-                        } else if bg.dragged() {
-                            if let (Some((_, end)), Some(pos)) =
-                                (&mut self.media_pool_state.marquee, bg.interact_pointer_pos())
-                            {
-                                *end = pos;
-                            }
-                        } else if bg.drag_stopped() {
-                            if let Some((start, end)) = self.media_pool_state.marquee.take() {
-                                let rect = egui::Rect::from_two_pos(start, end);
-                                let hits = item_rects
-                                    .iter()
-                                    .filter(|(_, r)| r.intersects(rect))
-                                    .map(|(id, _)| *id);
-                                self.media_pool_state.set_marquee_selection(hits);
-                            }
-                        } else if bg.clicked() {
-                            self.media_pool_state.clear();
-                        }
-                        if let Some((start, end)) = self.media_pool_state.marquee {
-                            let rect = egui::Rect::from_two_pos(start, end);
-                            ui.painter().rect_filled(
-                                rect,
-                                0.0,
-                                egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
-                            );
-                            ui.painter().rect_stroke(
-                                rect,
-                                0.0,
-                                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                    });
-            });
-        // Chi ha ricevuto l'ultimo click decide a chi va Canc/Backspace.
-        if let Some(pos) = ui
-            .ctx()
-            .input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
-        {
-            self.media_pool_state.focused = pool_panel.response.rect.contains(pos);
-        }
 
         if self.properties_panel_open {
             egui::Panel::right("properties")
@@ -6361,11 +6464,15 @@ mod tests {
     }
 
     #[test]
-    fn add_solid_color_clip_creates_timeline_and_initialized_color() {
+    fn dropping_solid_color_creates_timeline_and_initialized_color() {
         let mut app = VibeVideoApp::default();
         assert!(app.timeline_id.is_none());
 
-        app.add_solid_color_clip();
+        app.add_generator_to_timeline_at(
+            timeline_ui::Generator::SolidColor,
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
 
         let timeline_id = app.timeline_id.expect("doveva crearsi una timeline");
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
@@ -6375,9 +6482,60 @@ mod tests {
     }
 
     #[test]
+    fn dropping_solid_color_on_new_video_track_places_it_at_the_drop_frame() {
+        let mut app = VibeVideoApp::default();
+        let timeline_id = app.ensure_timeline();
+        let tracks_before = app.project.timelines[timeline_id].tracks.len();
+
+        app.add_generator_to_timeline_at(
+            timeline_ui::Generator::SolidColor,
+            50,
+            timeline_ui::MediaDropTarget::NewVideoTrack,
+        );
+
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks.len(), tracks_before + 1);
+        let clip = &tl.tracks[tracks_before].clips[0];
+        assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
+        assert_eq!(clip.timeline_start, 50);
+        // Track nuova e clip: un solo Ctrl+Z.
+        app.history.undo(&mut app.project);
+        assert_eq!(app.project.timelines[timeline_id].tracks.len(), tracks_before);
+    }
+
+    #[test]
+    fn dropping_solid_color_on_a_track_overwrites_what_is_under_it() {
+        let mut app = VibeVideoApp::default();
+        let timeline_id = app.ensure_timeline();
+        let drop = |app: &mut VibeVideoApp, start| {
+            app.add_generator_to_timeline_at(
+                timeline_ui::Generator::SolidColor,
+                start,
+                timeline_ui::MediaDropTarget::Track(0),
+            )
+        };
+        drop(&mut app, 0); // [0, 125)
+        drop(&mut app, 50); // [50, 175): taglia la coda della prima
+
+        let spans: Vec<(FrameIdx, FrameIdx)> = app.project.timelines[timeline_id].tracks[0]
+            .clips
+            .iter()
+            .map(|c| (c.timeline_start, c.timeline_end()))
+            .collect();
+        assert_eq!(spans, vec![(0, 50), (50, 175)]);
+
+        app.history.undo(&mut app.project);
+        assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].timeline_end(), 125);
+    }
+
+    #[test]
     fn solid_color_clip_under_the_playhead_becomes_the_active_clip() {
         let mut app = VibeVideoApp::default();
-        app.add_solid_color_clip();
+        app.add_generator_to_timeline_at(
+            timeline_ui::Generator::SolidColor,
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
         let timeline_id = app.timeline_id.unwrap();
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
@@ -6389,7 +6547,11 @@ mod tests {
     #[test]
     fn build_effect_command_color_upsert_and_remove_round_trip() {
         let mut app = VibeVideoApp::default();
-        app.add_solid_color_clip();
+        app.add_generator_to_timeline_at(
+            timeline_ui::Generator::SolidColor,
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
         let timeline_id = app.timeline_id.unwrap();
         let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
 
