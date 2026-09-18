@@ -36,6 +36,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 /// Default di `VibeVideoApp::cache_budget_bytes`: ~151 frame (~6s) di
@@ -213,7 +214,11 @@ enum PendingEffectChange {
 /// audio creata al volo, che ha la precedenza sulle esistenti.
 #[derive(Debug, Clone, Copy)]
 struct DropTracks {
-    video: usize,
+    /// `None` se il set rilasciato non ha nessun media video: niente
+    /// track video va risolta né creata per un drop di solo audio (bug
+    /// segnalato: trascinare un audio-only creava comunque una track
+    /// video vuota).
+    video: Option<usize>,
     extra_audio: Option<usize>,
 }
 
@@ -489,6 +494,12 @@ struct VibeVideoApp {
     /// Esito dell'ultimo relink dal menu contestuale del media pool,
     /// mostrato in una finestrella a parte (vedi `show_relink_message`).
     relink_message: Option<String>,
+    /// File dialog nativo aperto in un thread a parte, in attesa del
+    /// risultato (vedi `spawn_file_dialog`) — mai bloccante sul thread
+    /// dell'event loop: farlo su GNOME/Wayland fa credere al compositor
+    /// che l'app sia bloccata (bug segnalato: dialog "Applicazione non
+    /// risponde" ogni volta che si importa un media).
+    pending_dialog: Option<PendingDialog>,
 
     /// Audiometer (toggle in Visualizza): una fascia stretta a destra
     /// della timeline con il livello dell'audio in uscita. Attivo di
@@ -580,6 +591,7 @@ impl Default for VibeVideoApp {
             quit_confirmed: false,
             project_error: None,
             relink_message: None,
+            pending_dialog: None,
             audiometer_enabled: true,
             show_media_pool: true,
             show_effects: false,
@@ -603,6 +615,30 @@ enum UnsavedChoice {
     Save,
     Discard,
     Cancel,
+}
+
+/// Cosa fare del risultato di un `rfd::FileDialog` aperto in background
+/// (vedi `VibeVideoApp::spawn_file_dialog`/`spawn_files_dialog`), una
+/// volta arrivato. `RelinkMedia` porta con sé la selezione del media pool
+/// congelata al momento dell'apertura del dialog, non riletta da
+/// `media_pool_state` al ritorno: potrebbe essere cambiata nel frattempo.
+enum DialogKind {
+    ImportMedia,
+    SaveProjectAs,
+    ExportOtio(TimelineId),
+    ImportOtio,
+    OpenProject,
+    RelinkMedia(Vec<MediaId>),
+}
+
+enum DialogOutcome {
+    File(Option<PathBuf>),
+    Files(Option<Vec<PathBuf>>),
+}
+
+struct PendingDialog {
+    kind: DialogKind,
+    rx: mpsc::Receiver<DialogOutcome>,
 }
 
 impl VibeVideoApp {
@@ -640,7 +676,7 @@ impl VibeVideoApp {
                 if meta.has_video {
                     self.ensure_timeline_for(&meta);
                 } else {
-                    self.ensure_timeline();
+                    self.ensure_timeline_audio_only();
                 }
                 // Fingerprint economico (path+dimensione+mtime, non i
                 // byte del file: vedi doc di `content_fingerprint`),
@@ -721,11 +757,103 @@ impl VibeVideoApp {
         }
     }
 
+    /// Apre in background il file dialog nativo per una scelta di file
+    /// multipla (`pick_files`) — mai sul thread dell'event loop, vedi
+    /// `pending_dialog`. Un dialog già aperto ne blocca un altro: ha
+    /// senso solo uno alla volta.
+    fn spawn_files_dialog(
+        &mut self,
+        kind: DialogKind,
+        build: impl FnOnce(rfd::FileDialog) -> Option<Vec<PathBuf>> + Send + 'static,
+    ) {
+        if self.pending_dialog.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(DialogOutcome::Files(build(rfd::FileDialog::new())));
+        });
+        self.pending_dialog = Some(PendingDialog { kind, rx });
+    }
+
+    /// Come `spawn_files_dialog`, per una scelta singola (file, cartella
+    /// o percorso di salvataggio).
+    fn spawn_file_dialog(
+        &mut self,
+        kind: DialogKind,
+        build: impl FnOnce(rfd::FileDialog) -> Option<PathBuf> + Send + 'static,
+    ) {
+        if self.pending_dialog.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(DialogOutcome::File(build(rfd::FileDialog::new())));
+        });
+        self.pending_dialog = Some(PendingDialog { kind, rx });
+    }
+
+    /// Controllato a ogni frame (vedi `ui()`): applica il risultato del
+    /// dialog pendente non appena il thread che lo tiene aperto risponde,
+    /// annullato compreso (nessun ramo per `None`: i gestori sotto sono
+    /// gli stessi già in uso prima di questo file dialog asincrono).
+    fn poll_pending_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.pending_dialog else {
+            return;
+        };
+        let Ok(outcome) = pending.rx.try_recv() else {
+            // Ancora in attesa: senza un nuovo evento (mouse, tastiera)
+            // egui non ridisegnerebbe, quindi il risultato arriverebbe
+            // solo al prossimo input dell'utente.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        let Some(PendingDialog { kind, .. }) = self.pending_dialog.take() else {
+            return;
+        };
+        match (kind, outcome) {
+            (DialogKind::ImportMedia, DialogOutcome::Files(Some(paths))) => {
+                self.import_media_files(paths);
+            }
+            (DialogKind::SaveProjectAs, DialogOutcome::File(Some(path))) => {
+                self.save_project_to(&path);
+            }
+            (DialogKind::ExportOtio(timeline_id), DialogOutcome::File(Some(path))) => {
+                self.export_otio_to(timeline_id, &path);
+            }
+            (DialogKind::ImportOtio, DialogOutcome::File(Some(path))) => {
+                self.import_otio_from(&path);
+            }
+            (DialogKind::OpenProject, DialogOutcome::File(Some(path))) => {
+                self.load_project_from(path);
+            }
+            (DialogKind::RelinkMedia(targets), DialogOutcome::File(Some(base_dir))) => {
+                self.relink_media(&base_dir, &targets);
+            }
+            _ => {} // dialog annullato dall'utente
+        }
+    }
+
+    /// File trascinati dal file manager e rilasciati sulla finestra:
+    /// stesso percorso di import del file dialog/Ctrl+I. Non c'è ancora
+    /// nessun altro punto di rilascio OS (es. una posizione precisa sulla
+    /// timeline), quindi qualunque drop nella finestra vale come "importa
+    /// nel media pool" — niente da disambiguare in base a dove cade il
+    /// puntatore.
+    fn poll_dropped_files(&mut self, ctx: &egui::Context) {
+        let paths: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
+        });
+        if !paths.is_empty() {
+            self.import_media_files(paths);
+        }
+    }
+
     // Apre il file dialog e importa i file scelti (usato dal pulsante
     // toolbar e dalla shortcut Ctrl+I).
     fn import_media_dialog(&mut self) {
-        if let Some(paths) = rfd::FileDialog::new()
-            .add_filter(
+        self.spawn_files_dialog(DialogKind::ImportMedia, |dlg| {
+            dlg.add_filter(
                 "media",
                 &[
                     "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg", "opus",
@@ -734,9 +862,7 @@ impl VibeVideoApp {
             .add_filter("video", &["mp4", "mov", "mkv", "avi"])
             .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
             .pick_files()
-        {
-            self.import_media_files(paths);
-        }
+        });
     }
 
     /// Salva nel file corrente (`current_project_path`), o come "salva con
@@ -752,13 +878,11 @@ impl VibeVideoApp {
     /// già un file corrente (usato dal pulsante "Salva con nome..." e da
     /// Ctrl+Shift+S).
     fn save_project_as(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name("progetto.vvproj")
-            .add_filter("progetto vibevideo", &["vvproj"])
-            .save_file()
-        {
-            self.save_project_to(&path);
-        }
+        self.spawn_file_dialog(DialogKind::SaveProjectAs, |dlg| {
+            dlg.set_file_name("progetto.vvproj")
+                .add_filter("progetto vibevideo", &["vvproj"])
+                .save_file()
+        });
     }
 
     fn save_project_to(&mut self, path: &Path) {
@@ -776,13 +900,12 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(format!("{}.otio", self.project.timelines[timeline_id].name))
-            .add_filter("OpenTimelineIO", &["otio"])
-            .save_file()
-        {
-            self.export_otio_to(timeline_id, &path);
-        }
+        let file_name = format!("{}.otio", self.project.timelines[timeline_id].name);
+        self.spawn_file_dialog(DialogKind::ExportOtio(timeline_id), move |dlg| {
+            dlg.set_file_name(file_name)
+                .add_filter("OpenTimelineIO", &["otio"])
+                .save_file()
+        });
     }
 
     fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
@@ -883,12 +1006,9 @@ impl VibeVideoApp {
     }
 
     fn import_otio_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("OpenTimelineIO", &["otio"])
-            .pick_file()
-        {
-            self.import_otio_from(&path);
-        }
+        self.spawn_file_dialog(DialogKind::ImportOtio, |dlg| {
+            dlg.add_filter("OpenTimelineIO", &["otio"]).pick_file()
+        });
     }
 
     /// Come "Apri progetto", ma da un `.otio`: Ctrl+S chiederà dove
@@ -909,12 +1029,9 @@ impl VibeVideoApp {
     }
 
     fn open_project_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("progetto vibevideo", &["vvproj"])
-            .pick_file()
-        {
-            self.load_project_from(path);
-        }
+        self.spawn_file_dialog(DialogKind::OpenProject, |dlg| {
+            dlg.add_filter("progetto vibevideo", &["vvproj"]).pick_file()
+        });
     }
 
     /// Sostituisce il progetto corrente con quello caricato da `path`:
@@ -1700,34 +1817,48 @@ impl VibeVideoApp {
     }
 
     fn ensure_timeline(&mut self) -> TimelineId {
-        if let Some(id) = self.timeline_id {
-            return id;
-        }
-        let id = self.project.timelines.insert(vv_core::Timeline {
-            name: "Timeline 1".into(),
-            fps: vv_core::Rational::new(25, 1),
-            resolution: (1920, 1080),
-            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
-        });
-        self.timeline_id = Some(id);
-        self.spawn_render_ahead_if_needed(id);
-        id
+        self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), true)
     }
 
     /// Come `ensure_timeline`, ma se la timeline va creata al volo (import,
     /// o trascinamento di un media dal media pool sull'area timeline)
     /// eredita framerate e risoluzione da `meta` invece dei default fissi
     /// di `ensure_timeline` (che non ha un media da cui derivarli, es. per
-    /// Solid Color).
+    /// Solid Color). Solo per un media con video: per uno solo audio vedi
+    /// `ensure_timeline_audio_only`.
     fn ensure_timeline_for(&mut self, meta: &vv_core::MediaMeta) -> TimelineId {
+        self.ensure_timeline_with(meta.fps, (meta.width, meta.height), true)
+    }
+
+    /// Come `ensure_timeline`, ma senza track video: un media solo audio
+    /// non ha una risoluzione da cui derivarne una (a differenza di
+    /// `ensure_timeline_for`), e non deve comunque trovarsi una track
+    /// video vuota solo perché la timeline è stata creata da un drop
+    /// audio (bug segnalato: "trascinare un audio-only crea una traccia
+    /// video fittizia").
+    fn ensure_timeline_audio_only(&mut self) -> TimelineId {
+        self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), false)
+    }
+
+    fn ensure_timeline_with(
+        &mut self,
+        fps: vv_core::Rational,
+        resolution: (u32, u32),
+        include_video_track: bool,
+    ) -> TimelineId {
         if let Some(id) = self.timeline_id {
             return id;
         }
+        let mut tracks = Vec::new();
+        if include_video_track {
+            tracks.push(Track::new(TrackKind::Video));
+        }
+        tracks.push(Track::new(TrackKind::Audio));
         let id = self.project.timelines.insert(vv_core::Timeline {
             name: "Timeline 1".into(),
-            fps: meta.fps,
-            resolution: (meta.width, meta.height),
-            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+            fps,
+            resolution,
+            tracks,
         });
         self.timeline_id = Some(id);
         self.spawn_render_ahead_if_needed(id);
@@ -2131,13 +2262,16 @@ impl VibeVideoApp {
     ) {
         let timeline_id = self.ensure_timeline();
         let group = self.history.begin_group();
-        if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, false) {
+        if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, true, false) {
+            // Un generatore ha sempre video: `resolve_drop_tracks` con
+            // `any_video: true` risolve sempre `Some`.
+            let video_track = tracks.video.expect("generatore: track video sempre risolta");
             match generator {
                 timeline_ui::Generator::SolidColor => {
-                    self.insert_solid_color_clip(timeline_id, tracks.video, start)
+                    self.insert_solid_color_clip(timeline_id, video_track, start)
                 }
                 timeline_ui::Generator::Text => {
-                    self.insert_text_clip(timeline_id, tracks.video, start)
+                    self.insert_text_clip(timeline_id, video_track, start)
                 }
             }
         }
@@ -2543,7 +2677,7 @@ impl VibeVideoApp {
             &meta,
             video_start,
             DropTracks {
-                video: video_track,
+                video: Some(video_track),
                 extra_audio: None,
             },
         );
@@ -2585,15 +2719,24 @@ impl VibeVideoApp {
                 Some((*d, item.meta.clone()))
             })
             .collect();
-        let Some((_, first_meta)) = drops.first() else {
+        if drops.is_empty() {
             return;
-        };
-        let timeline_id = self.ensure_timeline_for(first_meta);
+        }
+        let any_video = drops.iter().any(|(_, meta)| meta.has_video);
         let any_audio = drops.iter().any(|(_, meta)| meta.has_audio);
+        // fps/risoluzione dal primo media *video* del set, non da
+        // `drops[0]` a prescindere: un drop di solo audio non ha nessuna
+        // risoluzione sensata da cui derivarli (vedi
+        // `ensure_timeline_audio_only`), e in un set misto un audio in
+        // testa non deve dettare la risoluzione della timeline.
+        let timeline_id = match drops.iter().find(|(_, meta)| meta.has_video) {
+            Some((_, video_meta)) => self.ensure_timeline_for(video_meta),
+            None => self.ensure_timeline_audio_only(),
+        };
         // Un drop solo = un solo Ctrl+Z, anche se dentro sono N clip (una
         // per stream audio di ogni media) più le track create al volo.
         let group = self.history.begin_group();
-        let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_audio) else {
+        let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_video, any_audio) else {
             self.history.end_group(group);
             return;
         };
@@ -2614,27 +2757,14 @@ impl VibeVideoApp {
         &mut self,
         timeline_id: TimelineId,
         target: timeline_ui::MediaDropTarget,
+        any_video: bool,
         any_audio: bool,
     ) -> Option<DropTracks> {
-        let video = match target {
-            timeline_ui::MediaDropTarget::NewVideoTrack => {
-                let new_index = self.project.timelines[timeline_id].tracks.len();
-                self.history.do_command(
-                    &mut self.project,
-                    Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
-                );
-                new_index
-            }
-            timeline_ui::MediaDropTarget::Track(track) => {
-                if self.project.timelines[timeline_id].is_locked(track) {
-                    return None;
-                }
-                track
-            }
-            _ => match self.project.timelines[timeline_id].first_unlocked_track_index(TrackKind::Video) {
-                Some(track) => track,
-                // Nessuna track video libera: se ne crea una.
-                None => {
+        let video = if !any_video {
+            None
+        } else {
+            Some(match target {
+                timeline_ui::MediaDropTarget::NewVideoTrack => {
                     let new_index = self.project.timelines[timeline_id].tracks.len();
                     self.history.do_command(
                         &mut self.project,
@@ -2642,7 +2772,25 @@ impl VibeVideoApp {
                     );
                     new_index
                 }
-            },
+                timeline_ui::MediaDropTarget::Track(track) => {
+                    if self.project.timelines[timeline_id].is_locked(track) {
+                        return None;
+                    }
+                    track
+                }
+                _ => match self.project.timelines[timeline_id].first_unlocked_track_index(TrackKind::Video) {
+                    Some(track) => track,
+                    // Nessuna track video libera: se ne crea una.
+                    None => {
+                        let new_index = self.project.timelines[timeline_id].tracks.len();
+                        self.history.do_command(
+                            &mut self.project,
+                            Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+                        );
+                        new_index
+                    }
+                },
+            })
         };
         let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
             let new_index = self.project.timelines[timeline_id].tracks.len();
@@ -2683,8 +2831,6 @@ impl VibeVideoApp {
             self.project.timelines[timeline_id].fps,
             meta.fps,
         );
-        let video_track = tracks.video;
-
         let has_audio_tracks = self.project.timelines[timeline_id]
             .first_track_index(TrackKind::Audio)
             .is_some();
@@ -2739,7 +2885,10 @@ impl VibeVideoApp {
                 start,
                 rate,
             );
-            new_clips.push((video_track, video_clip));
+            // `tracks.video` è `Some` di sicuro: `resolve_drop_tracks` lo
+            // risolve solo se almeno un media del drop ha video, e questo
+            // è uno di quelli.
+            new_clips.push((tracks.video.expect("drop con video ma nessuna track risolta"), video_clip));
         }
         for (stream_index, (&track_index, &clip_id)) in
             audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
@@ -3069,30 +3218,29 @@ impl VibeVideoApp {
     /// Voce "Relink clip selezionate..." nel menu contestuale del media
     /// pool: chiede una cartella base e delega a `relink_media` —
     /// separata per poterla testare senza un file dialog vero (vedi i
-    /// test in fondo al file).
+    /// test in fondo al file). La selezione va congelata *ora*: il
+    /// dialog gira in background (vedi `spawn_file_dialog`) e potrebbe
+    /// tornare dopo che l'utente ha cambiato selezione nel pool.
     fn relink_media_dialog(&mut self) {
         if self.media_pool_state.selected.is_empty() {
             return;
         }
-        let Some(base_dir) = rfd::FileDialog::new().pick_folder() else {
-            return;
-        };
-        self.relink_media(&base_dir);
+        let targets: Vec<MediaId> = self.media_pool_state.selected.iter().copied().collect();
+        self.spawn_file_dialog(DialogKind::RelinkMedia(targets), |dlg| dlg.pick_folder());
     }
 
     /// Ricollega a un file trovato sotto `base_dir` (per nome,
-    /// ricorsivamente) ogni media selezionato nel pool il cui percorso
-    /// salvato non esiste più — tipicamente dopo aver riaperto lo stesso
-    /// progetto da un'altra postazione con percorsi diversi. I media già
-    /// raggiungibili al loro percorso, anche se selezionati, restano
+    /// ricorsivamente) ogni media di `targets` il cui percorso salvato
+    /// non esiste più — tipicamente dopo aver riaperto lo stesso progetto
+    /// da un'altra postazione con percorsi diversi. I media già
+    /// raggiungibili al loro percorso, anche se in `targets`, restano
     /// intoccati.
-    fn relink_media(&mut self, base_dir: &Path) {
-        let targets: Vec<MediaId> = self.media_pool_state.selected.iter().copied().collect();
+    fn relink_media(&mut self, base_dir: &Path, targets: &[MediaId]) {
         let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
         let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
         let mut relinked_ids: Vec<MediaId> = Vec::new();
         let mut missing = 0usize;
-        for media_id in targets {
+        for &media_id in targets {
             let Some(item) = self.project.media_pool.get(media_id) else {
                 continue;
             };
@@ -4860,6 +5008,8 @@ impl eframe::App for VibeVideoApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_close_request(&ui.ctx().clone());
+        self.poll_pending_dialog(&ui.ctx().clone());
+        self.poll_dropped_files(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
         if self.thumbnail_worker.as_ref().is_some_and(|w| w.has_pending()) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -5346,6 +5496,24 @@ impl eframe::App for VibeVideoApp {
                             i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()
                         }) {
                             self.media_pool_state.focused = pool.rect.contains(pos);
+                        }
+                        // Feedback visivo mentre si trascina un file dal
+                        // file manager sopra la finestra (vedi
+                        // `poll_dropped_files`): tutta la finestra è un
+                        // bersaglio valido, ma il pannello che lo importa
+                        // davvero è questo.
+                        if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
+                            ui.ctx()
+                                .layer_painter(egui::LayerId::new(
+                                    egui::Order::Foreground,
+                                    egui::Id::new("media_pool_drop_highlight"),
+                                ))
+                                .rect_stroke(
+                                    pool.rect,
+                                    4.0,
+                                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                    egui::StrokeKind::Inside,
+                                );
                         }
                     }
                     if self.show_effects {
@@ -6811,9 +6979,7 @@ mod tests {
             meta,
             content_hash: 2,
         });
-        app.media_pool_state.selected = BTreeSet::from([offline, unresolvable, already_ok]);
-
-        app.relink_media(&dir);
+        app.relink_media(&dir, &[offline, unresolvable, already_ok]);
 
         assert_eq!(app.project.media_pool[offline].path, found_path);
         assert_ne!(
@@ -6845,9 +7011,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Il menu contestuale agisce solo sulla selezione, mai sull'intero
-    /// pool: un media non selezionato resta intoccato anche se
-    /// ricollegabile.
+    /// `relink_media` tocca solo i `targets` passati esplicitamente, mai
+    /// il resto del pool — anche se ricollegabile.
     #[test]
     fn relink_media_with_a_selection_only_touches_the_selected_media() {
         let dir = std::env::temp_dir().join(format!("vv-app-relink-selection-test-{}", std::process::id()));
@@ -6878,9 +7043,7 @@ mod tests {
             meta,
             content_hash: 2,
         });
-        app.media_pool_state.selected = BTreeSet::from([selected]);
-
-        app.relink_media(&dir);
+        app.relink_media(&dir, &[selected]);
 
         assert_eq!(app.project.media_pool[selected].path, found_path);
         assert_eq!(
@@ -9202,6 +9365,40 @@ mod tests {
         }
     }
 
+    /// Controparte minima di `egui::DroppedFile` per simulare un
+    /// trascinamento dal file manager senza un vero backend
+    /// windowing — solo `path()` serve a `poll_dropped_files`.
+    #[derive(Debug)]
+    struct TestDroppedFile(PathBuf);
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("non serve in questo test".into())
+        }
+    }
+
+    /// Drag & drop dal file manager: un file rilasciato sulla finestra
+    /// (`i.raw.dropped_files`) si importa nel media pool esattamente come
+    /// dal file dialog.
+    #[test]
+    fn dropping_a_file_from_the_file_manager_imports_it_into_the_pool() {
+        let path = make_wav("dropped.wav");
+        let mut app = VibeVideoApp::default();
+
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.dropped_files = vec![std::sync::Arc::new(TestDroppedFile(path.clone()))];
+        let mut output = ctx.run_ui(input, |ui| app.poll_dropped_files(ui.ctx()));
+        output.textures_delta.clear();
+
+        assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
+        assert_eq!(app.project.media_pool.len(), 1);
+        let item = app.project.media_pool.values().next().unwrap();
+        assert_eq!(item.path, path);
+    }
+
     /// L'export mette in pausa la generazione dei proxy (che altrimenti
     /// gli contende CPU e ffmpeg, tenendolo fermo) e la riprende alla
     /// fine — ma non riprende una pausa scelta dall'utente.
@@ -9632,9 +9829,16 @@ mod tests {
         assert!(app.thumbnails.is_empty());
 
         let timeline_id = app.timeline_id.unwrap();
-        let timeline = &mut app.project.timelines[timeline_id];
+        let timeline = &app.project.timelines[timeline_id];
         assert_eq!(timeline.resolution, (1920, 1080), "timeline di default");
-        timeline.tracks.retain(|t| t.kind == TrackKind::Video);
+        assert!(
+            timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
+            "un import solo audio non deve creare nessuna track video, nemmeno vuota"
+        );
+        {
+            let timeline = &mut app.project.timelines[timeline_id];
+            timeline.tracks.clear();
+        }
 
         let meta = item.meta.clone();
         app.add_media_to_timeline_at(
@@ -9643,13 +9847,53 @@ mod tests {
             timeline_ui::MediaDropTarget::Default,
         );
         let timeline = &app.project.timelines[timeline_id];
-        assert!(timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio || t.clips.is_empty()));
+        assert!(
+            timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
+            "il drop non deve aver creato nessuna track video"
+        );
         let (_, audio) = timeline.tracks_of_kind(TrackKind::Audio).next().expect("track creata");
         assert_eq!(audio.clips.len(), 1);
         let clip = &audio.clips[0];
         assert_eq!(clip.timeline_start, 10);
         assert_eq!(clip.linked_group, None);
         assert_eq!(clip.timeline_len, 50, "2 s a 25 fps");
+    }
+
+    /// Regressione: trascinare un media solo audio sulla timeline non
+    /// deve mai creare (né riusare da vuota) una track video — nemmeno
+    /// la prima volta, quando è anche lui a far nascere la timeline.
+    #[test]
+    fn dropping_audio_only_media_creates_no_video_track() {
+        let mut app = VibeVideoApp::default();
+        let media_id = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "/tmp/vv-audio-only.wav".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 50,
+                fps: vv_media::AUDIO_ONLY_FPS,
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            content_hash: 1,
+        });
+        let meta = app.project.media_pool[media_id].meta.clone();
+
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+
+        let timeline_id = app.timeline_id.expect("il drop crea la timeline al volo");
+        let timeline = &app.project.timelines[timeline_id];
+        assert!(
+            timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
+            "niente track video per un drop di solo audio su un progetto vuoto: {:?}",
+            timeline.tracks.iter().map(|t| t.kind).collect::<Vec<_>>()
+        );
     }
 
     fn close_request_commands(app: &mut VibeVideoApp) -> Vec<egui::ViewportCommand> {
