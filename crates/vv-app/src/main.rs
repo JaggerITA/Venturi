@@ -376,6 +376,9 @@ struct VibeVideoApp {
     /// dal media pool.
     active_clip: Option<(usize, ClipId)>,
     compositor: vv_render::Compositor,
+    /// Aperto alla prima modifica fatta a puntatore premuto, chiuso al
+    /// rilascio: un trascinamento è un solo passo di undo.
+    edit_drag_group: Option<vv_core::GroupMark>,
 
     /// Ultimo `timeline_state.playhead` già gestito da
     /// `ensure_active_clip_matches_playhead`: distingue il playhead mosso
@@ -530,6 +533,7 @@ impl Default for VibeVideoApp {
             behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
+            edit_drag_group: None,
             last_synced_playhead: 0,
             browsing_media: None,
             browse_playhead: 0,
@@ -2676,6 +2680,29 @@ impl VibeVideoApp {
                 &mut self.project,
                 Box::new(vv_core::LinkClips::new(timeline_id, group_targets)),
             );
+        }
+    }
+
+    fn apply_effect_changes(&mut self, changes: Vec<PendingEffectChange>, pointer_down: bool) {
+        if let Some(timeline_id) = self.timeline_id
+            && !changes.is_empty()
+        {
+            if pointer_down && self.edit_drag_group.is_none() {
+                self.edit_drag_group = Some(self.history.begin_group());
+            }
+            let mut commands: Vec<Box<dyn vv_core::Command>> = changes
+                .into_iter()
+                .map(|change| build_effect_command(timeline_id, change))
+                .collect();
+            let cmd = if commands.len() == 1 {
+                commands.remove(0)
+            } else {
+                Box::new(vv_core::CompositeCommand::new(commands))
+            };
+            self.history.do_command(&mut self.project, cmd);
+        }
+        if !pointer_down && let Some(mark) = self.edit_drag_group.take() {
+            self.history.end_group(mark);
         }
     }
 
@@ -5712,20 +5739,8 @@ impl eframe::App for VibeVideoApp {
         // Una modifica dal pannello può toccare più clip (selezione
         // multipla): un solo comando composito, così l'undo le riporta
         // indietro tutte insieme.
-        if let Some(timeline_id) = self.timeline_id
-            && !pending_effects.is_empty()
-        {
-            let mut commands: Vec<Box<dyn vv_core::Command>> = pending_effects
-                .into_iter()
-                .map(|change| build_effect_command(timeline_id, change))
-                .collect();
-            let cmd = if commands.len() == 1 {
-                commands.remove(0)
-            } else {
-                Box::new(vv_core::CompositeCommand::new(commands))
-            };
-            self.history.do_command(&mut self.project, cmd);
-        }
+        let pointer_down = ui.input(|i| i.pointer.any_down());
+        self.apply_effect_changes(pending_effects, pointer_down);
 
         let mut transport_action = transport::TransportResponse::default();
         let mut viewer_rect = None;
@@ -7003,6 +7018,42 @@ mod tests {
                 .all(|c| c.effects.transform.value_at(0).position == [0.0, 0.0]),
             "un solo undo le riporta indietro tutte"
         );
+    }
+
+    #[test]
+    fn dragging_a_value_is_a_single_undo_step() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+        let set_x = |v| {
+            vec![PendingEffectChange::SetTransformParamDefault(
+                0,
+                clip_id,
+                vv_core::TransformParam::PositionX,
+                v,
+            )]
+        };
+        let x = |app: &VibeVideoApp| {
+            app.project.timelines[timeline_id].tracks[0].clips[0]
+                .effects
+                .transform
+                .value_at(0)
+                .position[0]
+        };
+
+        for v in [1.0, 2.0, 3.0] {
+            app.apply_effect_changes(set_x(v), true);
+        }
+        app.apply_effect_changes(set_x(4.0), false);
+        assert_eq!(x(&app), 4.0);
+
+        app.history.undo(&mut app.project);
+        assert_eq!(x(&app), 0.0, "un solo undo per tutto il trascinamento");
+
+        app.history.redo(&mut app.project);
+        app.apply_effect_changes(set_x(9.0), false);
+        app.history.undo(&mut app.project);
+        assert_eq!(x(&app), 4.0, "senza trascinamento ogni modifica è a sé");
     }
 
     #[test]
