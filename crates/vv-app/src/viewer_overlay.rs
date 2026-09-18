@@ -6,14 +6,19 @@
 
 use vv_core::Transform;
 
-const HANDLE_SIZE: f32 = 8.0;
-const ANCHOR_RADIUS: f32 = 7.0;
+const HANDLE_RADIUS: f32 = 4.5;
+const ANCHOR_RADIUS: f32 = 6.5;
+/// Distanza a schermo del pomello di rotazione dal pivot.
+const ROTATION_ARM: f32 = 100.0;
+/// Passo della rotazione con Shift premuto.
+const ROTATION_SNAP: f32 = 15.0;
 const MIN_ZOOM: f32 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Handle {
     Move,
     Anchor,
+    Rotate,
     /// Segno degli assi scalati: (±1, ±1) un angolo, (±1, 0)/(0, ±1) un lato.
     Scale(f32, f32),
 }
@@ -22,6 +27,9 @@ pub struct OverlayDrag {
     handle: Handle,
     start_pointer: egui::Pos2,
     start: Transform,
+    last_pointer: egui::Pos2,
+    /// Gradi girati finora col pomello di rotazione.
+    turned: f32,
 }
 
 /// Dove sta la clip nel frame, senza transform: il sorgente inscritto
@@ -83,6 +91,7 @@ fn drag_transform(
 ) -> Transform {
     let mut t = *start;
     match handle {
+        Handle::Rotate => {}
         Handle::Move => {
             t.position = [start.position[0] + delta[0], start.position[1] + delta[1]];
         }
@@ -136,28 +145,40 @@ fn drag_transform(
     t
 }
 
-/// Disegna gli handle sopra `rect` (il viewer, che mostra l'intero frame
-/// di timeline) e gestisce il trascinamento. Restituisce il transform
+/// Angolo orario (gradi) che porta `from` su `to`, vettori dal pivot con Y
+/// in alto, nell'intervallo (-180, 180].
+fn clockwise_turn(from: [f32; 2], to: [f32; 2]) -> f32 {
+    let d = (from[1].atan2(from[0]) - to[1].atan2(to[0])).to_degrees();
+    (d + 180.0).rem_euclid(360.0) - 180.0
+}
+
+/// Disegna gli handle sopra `frame_rect` (dove il viewer mostra il frame
+/// di timeline) e gestisce il trascinamento, che si può cominciare in tutta
+/// `area`: gli handle possono uscire dal frame. Restituisce il transform
 /// nuovo se l'utente l'ha cambiato in questo frame.
 pub fn show(
     ui: &egui::Ui,
-    rect: egui::Rect,
+    frame_rect: egui::Rect,
+    area: egui::Rect,
     timeline_size: (u32, u32),
     source_size: (u32, u32),
     transform: &Transform,
     drag: &mut Option<OverlayDrag>,
 ) -> Option<Transform> {
-    let scale = rect.width() / timeline_size.0.max(1) as f32;
-    let to_screen = |p: [f32; 2]| rect.center() + egui::vec2(p[0] * scale, -p[1] * scale);
+    let scale = frame_rect.width() / timeline_size.0.max(1) as f32;
+    let to_screen =
+        |p: [f32; 2]| frame_rect.center() + egui::vec2(p[0] * scale, -p[1] * scale);
     let clip_box = ClipBox::new(timeline_size, source_size, transform.crop);
 
-    let screen_of = |t: &Transform, sx, sy| to_screen(clip_to_frame(t, clip_box.point(sx, sy)));
-    let anchor_screen = to_screen([
+    let screen_of = |sx, sy| to_screen(clip_to_frame(transform, clip_box.point(sx, sy)));
+    let pivot = to_screen([
         transform.position[0] + transform.anchor[0],
         transform.position[1] + transform.anchor[1],
     ]);
+    let (sn, cs) = transform.rotation.to_radians().sin_cos();
+    let knob = pivot + egui::vec2(sn, -cs) * ROTATION_ARM;
     let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
-        .map(|(sx, sy)| screen_of(transform, sx, sy));
+        .map(|(sx, sy)| screen_of(sx, sy));
     let scale_handles: Vec<(Handle, egui::Pos2)> = [
         (-1.0, 1.0),
         (1.0, 1.0),
@@ -169,23 +190,24 @@ pub fn show(
         (-1.0, 0.0),
     ]
     .into_iter()
-    .map(|(sx, sy)| (Handle::Scale(sx, sy), screen_of(transform, sx, sy)))
+    .map(|(sx, sy)| (Handle::Scale(sx, sy), screen_of(sx, sy)))
     .collect();
 
+    let grab = HANDLE_RADIUS + 4.0;
     let handle_at = |pos: egui::Pos2| {
-        if pos.distance(anchor_screen) <= ANCHOR_RADIUS + 3.0 {
+        if pos.distance(pivot) <= ANCHOR_RADIUS + 4.0 {
             return Some(Handle::Anchor);
         }
-        if let Some((handle, _)) = scale_handles
-            .iter()
-            .find(|(_, p)| (pos - *p).abs().max_elem() <= HANDLE_SIZE)
-        {
+        if pos.distance(knob) <= grab {
+            return Some(Handle::Rotate);
+        }
+        if let Some((handle, _)) = scale_handles.iter().find(|(_, p)| pos.distance(*p) <= grab) {
             return Some(*handle);
         }
         point_in_convex(pos, &corners).then_some(Handle::Move)
     };
 
-    let resp = ui.interact(rect, ui.id().with("viewer_transform_overlay"), egui::Sense::drag());
+    let resp = ui.interact(area, ui.id().with("viewer_transform_overlay"), egui::Sense::drag());
     let mut changed = None;
     if resp.drag_started()
         && let Some(press) = ui.input(|i| i.pointer.press_origin())
@@ -194,21 +216,31 @@ pub fn show(
             handle,
             start_pointer: press,
             start: *transform,
+            last_pointer: press,
+            turned: 0.0,
         });
     }
-    if let Some(d) = drag.as_ref()
+    if let Some(d) = drag.as_mut()
         && resp.dragged()
         && let Some(pos) = resp.interact_pointer_pos()
     {
-        let delta = pos - d.start_pointer;
-        let free = ui.input(|i| i.modifiers.shift);
-        let new = drag_transform(
-            &d.start,
-            &clip_box,
-            d.handle,
-            [delta.x / scale, -delta.y / scale],
-            free,
-        );
+        let shift = ui.input(|i| i.modifiers.shift);
+        let new = if d.handle == Handle::Rotate {
+            // Accumulato frame per frame: si può girare oltre mezzo giro.
+            let from = d.last_pointer - pivot;
+            let to = pos - pivot;
+            d.turned += clockwise_turn([from.x, -from.y], [to.x, -to.y]);
+            d.last_pointer = pos;
+            let mut t = d.start;
+            t.rotation = d.start.rotation + d.turned;
+            if shift {
+                t.rotation = (t.rotation / ROTATION_SNAP).round() * ROTATION_SNAP;
+            }
+            t
+        } else {
+            let delta = pos - d.start_pointer;
+            drag_transform(&d.start, &clip_box, d.handle, [delta.x / scale, -delta.y / scale], shift)
+        };
         changed = Some(new);
     }
     if resp.drag_stopped() {
@@ -224,6 +256,8 @@ pub fn show(
             o.cursor_icon = match handle {
                 Handle::Move => egui::CursorIcon::Move,
                 Handle::Anchor => egui::CursorIcon::Crosshair,
+                Handle::Rotate if drag.is_some() => egui::CursorIcon::Grabbing,
+                Handle::Rotate => egui::CursorIcon::Grab,
                 Handle::Scale(0.0, _) => egui::CursorIcon::ResizeVertical,
                 Handle::Scale(_, 0.0) => egui::CursorIcon::ResizeHorizontal,
                 Handle::Scale(sx, sy) if sx * sy > 0.0 => egui::CursorIcon::ResizeNeSw,
@@ -232,27 +266,21 @@ pub fn show(
         });
     }
 
-    let painter = ui.painter().with_clip_rect(rect.expand(HANDLE_SIZE));
-    let line = egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 235, 235));
-    let shadow = egui::Stroke::new(3.0, egui::Color32::from_black_alpha(140));
+    let painter = ui.painter().with_clip_rect(area);
+    let accent = egui::Color32::from_rgb(70, 130, 240);
+    let line = egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 232, 245));
     let mut outline = corners.to_vec();
     outline.push(corners[0]);
-    painter.add(egui::Shape::line(outline.clone(), shadow));
     painter.add(egui::Shape::line(outline, line));
+    painter.line_segment([pivot, knob], line);
+    let dot = |center: egui::Pos2, radius: f32| {
+        painter.circle(center, radius, egui::Color32::WHITE, egui::Stroke::new(1.5, accent));
+    };
     for (_, p) in &scale_handles {
-        let r = egui::Rect::from_center_size(*p, egui::vec2(HANDLE_SIZE, HANDLE_SIZE));
-        painter.rect_filled(r, 1.0, egui::Color32::WHITE);
-        painter.rect_stroke(r, 1.0, egui::Stroke::new(1.0, egui::Color32::BLACK), egui::StrokeKind::Outside);
+        dot(*p, HANDLE_RADIUS);
     }
-    let anchor_color = egui::Color32::from_rgb(255, 200, 60);
-    painter.circle_stroke(anchor_screen, ANCHOR_RADIUS, shadow);
-    painter.circle_stroke(anchor_screen, ANCHOR_RADIUS, egui::Stroke::new(1.5, anchor_color));
-    for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
-        painter.line_segment(
-            [anchor_screen - d * (ANCHOR_RADIUS + 4.0), anchor_screen + d * (ANCHOR_RADIUS + 4.0)],
-            egui::Stroke::new(1.5, anchor_color),
-        );
-    }
+    dot(knob, HANDLE_RADIUS);
+    dot(pivot, ANCHOR_RADIUS);
 
     changed
 }
@@ -338,6 +366,12 @@ mod tests {
         let t = drag_transform(&start, &b, Handle::Scale(1.0, 1.0), [960.0, 540.0], false);
         assert_close(t.zoom, [2.0, 2.0]);
         assert_close(clip_to_frame(&t, b.point(1.0, 1.0)), [1920.0, 1080.0]);
+    }
+
+    #[test]
+    fn clockwise_turn_is_positive_clockwise_and_wraps() {
+        assert!((clockwise_turn([0.0, 1.0], [1.0, 0.0]) - 90.0).abs() < 1e-3);
+        assert!((clockwise_turn([-1.0, 0.01], [-1.0, -0.01]) + 1.146).abs() < 1e-2);
     }
 
     #[test]

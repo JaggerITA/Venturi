@@ -2695,6 +2695,7 @@ impl VibeVideoApp {
         &mut self,
         ui: &egui::Ui,
         rect: egui::Rect,
+        area: egui::Rect,
         video_targets: &[PanelTarget],
         pending: &mut Vec<PendingEffectChange>,
     ) {
@@ -2723,6 +2724,7 @@ impl VibeVideoApp {
         let Some(new) = viewer_overlay::show(
             ui,
             rect,
+            area,
             info.timeline_size,
             info.source_size,
             &info.transform,
@@ -5821,6 +5823,9 @@ impl eframe::App for VibeVideoApp {
 
         let mut transport_action = transport::TransportResponse::default();
         let mut viewer_rect = None;
+        // Tutto il riquadro del player, bande comprese: gli handle vicini al
+        // bordo del frame devono restare afferrabili anche fuori.
+        let mut viewer_area = None;
         let mut overlay_effects: Vec<PendingEffectChange> = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
             // Barra di toggle subito sotto il player, alla DaVinci Resolve
@@ -5988,16 +5993,18 @@ impl eframe::App for VibeVideoApp {
                         let tex_size = texture.size_vec2();
                         let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
                         let display_size = tex_size * scale.max(0.0);
-                        viewer_rect = Some(
-                            ui.centered_and_justified(|ui| {
+                        let area = ui
+                            .centered_and_justified(|ui| {
                                 ui.add(
                                     egui::Image::from_texture(texture)
                                         .fit_to_exact_size(display_size),
                                 )
                             })
                             .inner
-                            .rect,
-                        );
+                            .rect;
+                        viewer_area = Some(area);
+                        viewer_rect =
+                            Some(egui::Rect::from_center_size(area.center(), display_size));
                     }
                 }
                 Some(ViewerFrameKind::Video) => {
@@ -6007,16 +6014,18 @@ impl eframe::App for VibeVideoApp {
                         let available = ui.available_size();
                         let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
                         let display_size = tex_size * scale.max(0.0);
-                        viewer_rect = Some(
-                            ui.centered_and_justified(|ui| {
+                        let area = ui
+                            .centered_and_justified(|ui| {
                                 ui.add(
                                     egui::Image::new(egui::load::SizedTexture::new(id, tex_size))
                                         .fit_to_exact_size(display_size),
                                 )
                             })
                             .inner
-                            .rect,
-                        );
+                            .rect;
+                        viewer_area = Some(area);
+                        viewer_rect =
+                            Some(egui::Rect::from_center_size(area.center(), display_size));
                     }
                 }
                 Some(ViewerFrameKind::Offline) => {
@@ -6050,8 +6059,8 @@ impl eframe::App for VibeVideoApp {
                 }
             }
 
-            if let Some(rect) = viewer_rect {
-                self.show_viewer_overlay(ui, rect, &video_targets, &mut overlay_effects);
+            if let (Some(rect), Some(area)) = (viewer_rect, viewer_area) {
+                self.show_viewer_overlay(ui, rect, area, &video_targets, &mut overlay_effects);
             }
 
             if let (Some(media_id), Some(rect)) = (self.browsing_media, viewer_rect) {
