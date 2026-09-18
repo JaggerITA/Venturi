@@ -1350,6 +1350,38 @@ mod tests {
         assert!(pixels.iter().any(|px| px == &[255, 0, 0, 255]), "nessun pixel del testo");
     }
 
+    #[test]
+    fn a_text_shadow_darkens_the_layer_below() {
+        let compositor = Compositor::new_headless();
+        let title = vv_core::TitleParams {
+            content: "II".into(),
+            size: 60.0,
+            shadow: vv_core::TitleShadow {
+                enabled: true,
+                offset: [10.0, -10.0],
+                blur: 0.0,
+                opacity: 100.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = compositor.render_layers(
+            &[
+                Layer::Solid {
+                    color: RED,
+                    transform: Transform::default(),
+                },
+                Layer::Text {
+                    title: &title,
+                    transform: Transform::default(),
+                },
+            ],
+            OutputFrame::exact(160, 90),
+        );
+        let pixels = out.as_chunks::<4>().0;
+        assert!(pixels.iter().any(|px| px == &[0, 0, 0, 255]), "nessun pixel d'ombra");
+    }
+
     const RED: vv_core::Rgba = vv_core::Rgba {
         r: 1.0,
         g: 0.0,

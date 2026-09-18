@@ -349,10 +349,10 @@ fn shifted(mask: &TextMask, dx: i32, dy: i32) -> TextMask {
     }
 }
 
-/// Tre box blur separabili: un'approssimazione economica di una gaussiana
-/// con sigma circa `radius / 2`.
+/// Tre box blur separabili, un'approssimazione economica di una gaussiana:
+/// l'alone si estende di circa `radius` pixel.
 fn blur(mask: &mut TextMask, radius: f32) {
-    let box_radius = (radius / 2.0).round() as usize;
+    let box_radius = (radius / 3.0).round() as usize;
     if box_radius == 0 {
         return;
     }

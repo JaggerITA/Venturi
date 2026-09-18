@@ -592,8 +592,8 @@ impl Default for TitleShadow {
                 b: 0.0,
                 a: 1.0,
             },
-            offset: [4.0, -4.0],
-            blur: 10.0,
+            offset: [8.0, -8.0],
+            blur: 6.0,
             opacity: 75.0,
         }
     }
