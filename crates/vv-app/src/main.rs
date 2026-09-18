@@ -20,6 +20,7 @@ mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
 mod transport;
+mod viewer_overlay;
 
 
 mod waveform_worker;
@@ -444,6 +445,9 @@ struct VibeVideoApp {
     /// sui bordi delle clip vicine entro una piccola soglia in pixel — vedi
     /// `timeline_ui::snap_frame`.
     snapping_enabled: bool,
+    /// Handle di transform sopra il viewer (pulsante sotto al viewer).
+    show_transform_overlay: bool,
+    overlay_drag: Option<viewer_overlay::OverlayDrag>,
 
     /// Zoom X e Y del pannello Transform tenuti insieme (il lucchetto tra i
     /// due campi): preferenza della UI, non del progetto.
@@ -548,6 +552,8 @@ impl Default for VibeVideoApp {
             arrow_hold: None,
             properties_panel_open: true,
             snapping_enabled: true,
+            show_transform_overlay: true,
+            overlay_drag: None,
             zoom_link: true,
             properties_tab: PropertiesTab::Video,
             video_subtab: VideoSubTab::Title,
@@ -2683,6 +2689,54 @@ impl VibeVideoApp {
         }
     }
 
+    /// Handle di transform della prima clip video selezionata, se è sotto
+    /// alla testina e il viewer mostra la timeline ferma.
+    fn show_viewer_overlay(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        video_targets: &[PanelTarget],
+        pending: &mut Vec<PendingEffectChange>,
+    ) {
+        let visible = self.show_transform_overlay
+            && self.browsing_media.is_none()
+            && !self.is_timeline_playing()
+            && matches!(
+                self.last_viewer_frame_kind,
+                Some(ViewerFrameKind::Video | ViewerFrameKind::SolidColor)
+            );
+        let Some((timeline_id, target)) = self.timeline_id.zip(video_targets.first().copied())
+        else {
+            self.overlay_drag = None;
+            return;
+        };
+        let playhead = self.timeline_state.playhead;
+        let under_playhead = self.project.timelines[timeline_id]
+            .tracks
+            .get(target.track_index)
+            .and_then(|t| t.clips.iter().find(|c| c.id == target.clip_id))
+            .is_some_and(|c| playhead >= c.timeline_start && playhead < c.timeline_end());
+        let Some(info) = self.clip_panel_info(target).filter(|_| visible && under_playhead) else {
+            self.overlay_drag = None;
+            return;
+        };
+        let Some(new) = viewer_overlay::show(
+            ui,
+            rect,
+            info.timeline_size,
+            info.source_size,
+            &info.transform,
+            &mut self.overlay_drag,
+        ) else {
+            return;
+        };
+        let changed: Vec<vv_core::TransformParam> = vv_core::TransformParam::ALL
+            .into_iter()
+            .filter(|p| p.of(&new) != p.of(&info.transform))
+            .collect();
+        push_param_changes(pending, video_targets, &changed, &new, &info);
+    }
+
     fn apply_effect_changes(&mut self, changes: Vec<PendingEffectChange>, pointer_down: bool) {
         if let Some(timeline_id) = self.timeline_id
             && !changes.is_empty()
@@ -4350,6 +4404,29 @@ fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     response
 }
 
+/// Riquadro con quattro handle agli angoli e il pivot al centro.
+fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *enabled = !*enabled;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, *enabled);
+        let painter = ui.painter();
+        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        let color = visuals.fg_stroke.color;
+        let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 11.0));
+        painter.rect_stroke(frame, 0.0, egui::Stroke::new(1.2, color), egui::StrokeKind::Middle);
+        for corner in [frame.left_top(), frame.right_top(), frame.left_bottom(), frame.right_bottom()] {
+            painter.rect_filled(egui::Rect::from_center_size(corner, egui::vec2(4.0, 4.0)), 0.0, color);
+        }
+        painter.circle_stroke(frame.center(), 2.0, egui::Stroke::new(1.2, color));
+    }
+    response
+}
+
 /// Traduce un'azione differita del pannello proprietà nel comando
 /// `vv-core` corrispondente. Funzione libera (non un metodo) apposta:
 /// testabile senza passare da un `egui::Context`.
@@ -5744,6 +5821,7 @@ impl eframe::App for VibeVideoApp {
 
         let mut transport_action = transport::TransportResponse::default();
         let mut viewer_rect = None;
+        let mut overlay_effects: Vec<PendingEffectChange> = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
             // Barra di toggle subito sotto il player, alla DaVinci Resolve
             // (la barra con gli strumenti sta sotto il viewer, larga
@@ -5760,6 +5838,8 @@ impl eframe::App for VibeVideoApp {
                     ui.horizontal(|ui| {
                         magnet_toggle(ui, &mut self.snapping_enabled)
                             .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
+                        transform_overlay_toggle(ui, &mut self.show_transform_overlay)
+                            .on_hover_text("Handle di posizione, scala e anchor point sul viewer");
                     });
                 });
             let (total, playhead, marks, playing) = if self.browsing_media.is_some() {
@@ -5970,6 +6050,10 @@ impl eframe::App for VibeVideoApp {
                 }
             }
 
+            if let Some(rect) = viewer_rect {
+                self.show_viewer_overlay(ui, rect, &video_targets, &mut overlay_effects);
+            }
+
             if let (Some(media_id), Some(rect)) = (self.browsing_media, viewer_rect) {
                 let (source_in, source_out) =
                     self.browse_marks.resolve(self.browse_total_frames());
@@ -5991,6 +6075,9 @@ impl eframe::App for VibeVideoApp {
                 }
             }
         });
+
+        let pointer_down = ui.input(|i| i.pointer.any_down());
+        self.apply_effect_changes(overlay_effects, pointer_down);
 
         if transport_action.toggle_play {
             self.toggle_playback();
