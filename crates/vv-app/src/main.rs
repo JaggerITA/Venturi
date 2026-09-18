@@ -668,6 +668,25 @@ impl VibeVideoApp {
         }
     }
 
+    fn export_otio_dialog(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{}.otio", self.project.timelines[timeline_id].name))
+            .add_filter("OpenTimelineIO", &["otio"])
+            .save_file()
+        {
+            self.export_otio_to(timeline_id, &path);
+        }
+    }
+
+    fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
+        self.project_error = vv_core::export_otio(&self.project, timeline_id, path)
+            .err()
+            .map(|e| format!("Esportazione OTIO fallita: {e}"));
+    }
+
     fn open_project_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("progetto vibevideo", &["vvproj"])
@@ -3426,6 +3445,14 @@ impl eframe::App for VibeVideoApp {
                         .clicked()
                     {
                         self.start_export();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(self.timeline_id.is_some(), egui::Button::new("Esporta OTIO..."))
+                        .on_hover_text("Esporta la timeline in OpenTimelineIO, per aprirla in un altro editor")
+                        .clicked()
+                    {
+                        self.export_otio_dialog();
                         ui.close();
                     }
                 });
@@ -7473,6 +7500,23 @@ mod tests {
             app.project.timelines[timeline_id].tracks[0].clips[0].id,
             clip_id
         );
+    }
+
+    #[test]
+    fn export_otio_to_writes_the_file_and_reports_failures() {
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+        let dir = std::env::temp_dir().join("vv-app-otio-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("timeline.otio");
+
+        app.export_otio_to(timeline_id, &path);
+        assert!(app.project_error.is_none());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"Timeline.1\""));
+
+        app.export_otio_to(timeline_id, &dir.join("nope/timeline.otio"));
+        assert!(app.project_error.is_some());
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il

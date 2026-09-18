@@ -1,5 +1,6 @@
 pub mod command;
 pub mod model;
+pub mod otio;
 pub mod persistence;
 
 pub use command::{
@@ -13,6 +14,7 @@ pub use command::{
     UnlinkClip, UpsertKeyframe,
 };
 pub use model::*;
+pub use otio::{OtioError, export_otio};
 pub use persistence::{PersistenceError, load_project, save_project};
 
 #[cfg(test)]
