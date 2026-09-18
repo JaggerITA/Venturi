@@ -2391,6 +2391,15 @@ impl VibeVideoApp {
                         ui.ctx().copy_text("vibevideo:clip".to_owned());
                     }
                 }
+                // Ctrl+X in un campo di testo taglia il testo, non le clip.
+                egui::Event::Cut if !ui.ctx().egui_wants_keyboard_input() => {
+                    if self.timeline_state.selected.is_empty() {
+                        continue;
+                    }
+                    self.copy_selected_clips();
+                    ui.ctx().copy_text("vibevideo:clip".to_owned());
+                    self.delete_selected();
+                }
                 egui::Event::Paste(_) => self.paste_clipboard_at_playhead(),
                 _ => {}
             }
@@ -3594,7 +3603,10 @@ impl eframe::App for VibeVideoApp {
             // qui (vedi sopra), solo raccolti: `handle_clipboard_events`
             // per il bug più subdolo trovato dopo.
             for event in &i.events {
-                if matches!(event, egui::Event::Copy | egui::Event::Paste(_)) {
+                if matches!(
+                    event,
+                    egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
+                ) {
                     clipboard_events.push(event.clone());
                 }
             }
@@ -3687,6 +3699,16 @@ impl eframe::App for VibeVideoApp {
                         // `handle_clipboard_events`: serve perché Ctrl+V da
                         // tastiera dipende da quella, non dalla nostra.
                         self.handle_clipboard_events(ui, &[egui::Event::Copy]);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.timeline_state.selected.is_empty(),
+                            egui::Button::new("Taglia (Ctrl+X)"),
+                        )
+                        .clicked()
+                    {
+                        self.handle_clipboard_events(ui, &[egui::Event::Cut]);
                         ui.close();
                     }
                     if ui
@@ -7099,6 +7121,23 @@ mod tests {
             copied_something_non_empty,
             "doveva scrivere qualcosa di non vuoto nella clipboard di sistema"
         );
+    }
+
+    #[test]
+    fn cut_copies_the_selected_clips_and_removes_them() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_clipboard_events(ui, &[egui::Event::Cut]);
+        });
+        output.textures_delta.clear();
+
+        assert_eq!(app.timeline_state.clipboard.len(), 1);
+        let timeline_id = app.timeline_id.unwrap();
+        assert!(app.project.timelines[timeline_id].tracks[0].clips.is_empty());
     }
 
     /// Senza nulla di selezionato, `copy_selected_clips` è un no-op: non

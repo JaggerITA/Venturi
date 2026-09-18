@@ -153,17 +153,40 @@ struct TrimState {
     /// `combined_trim_range`).
     min_value: FrameIdx,
     max_value: FrameIdx,
-    /// (clip_id, track_index, offset) delle altre clip trimmate insieme
-    /// (selezione o gruppo collegato, come per `DragState::followers`): lo
-    /// stesso bordo si sposta dello stesso delta, `offset` è la distanza
-    /// fra il loro bordo e quello della primaria.
-    followers: Vec<(ClipId, usize, FrameIdx)>,
+    /// (clip_id, track_index, offset, bordo) delle altre clip trimmate
+    /// insieme (selezione o gruppo collegato, come per
+    /// `DragState::followers`; nel roll anche la vicina, col bordo
+    /// opposto): ogni bordo si sposta dello stesso delta, `offset` è la
+    /// distanza fra il loro bordo e quello della primaria.
+    followers: Vec<(ClipId, usize, FrameIdx, TrimEdge)>,
+    /// Roll edit fra due clip adiacenti (solo per il cursore).
+    roll: bool,
+}
+
+/// Cosa fa un drag partito vicino al bordo di una clip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EdgeZone {
+    Trim(TrimEdge),
+    /// Sul punto di contatto con la clip adiacente `neighbor`: `edge` è il
+    /// bordo di questa clip, la vicina si muove con quello opposto.
+    Roll { edge: TrimEdge, neighbor: ClipKey },
+}
+
+impl EdgeZone {
+    fn edge(self) -> TrimEdge {
+        match self {
+            EdgeZone::Trim(edge) | EdgeZone::Roll { edge, .. } => edge,
+        }
+    }
 }
 
 /// Distanza (in pixel schermo) dal bordo di una clip entro cui un drag
 /// parte come trim invece che come spostamento; ridotta per le clip molto
 /// strette, altrimenti l'intera clip sarebbe "solo bordi".
 const TRIM_HANDLE_PX: f32 = 8.0;
+/// Semi-larghezza della zona di roll attorno al punto di contatto fra due
+/// clip adiacenti; la zona di trim comincia subito dopo, verso l'interno.
+const ROLL_HANDLE_PX: f32 = 4.0;
 
 /// Limiti di zoom orizzontale della timeline (`pixels_per_sec`).
 /// Estremo minimo di zoom: abbastanza basso da poter vedere per intero
@@ -1666,7 +1689,7 @@ pub fn show_timeline(
                 let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
                     let raw = t.original_value as f32 + t.accum_px / px_per_frame;
                     let exclude: Vec<ClipId> = std::iter::once(t.clip_id)
-                        .chain(t.followers.iter().map(|&(id, _, _)| id))
+                        .chain(t.followers.iter().map(|&(id, _, _, _)| id))
                         .collect();
                     let snapped = snap_edge(
                         raw.round() as FrameIdx,
@@ -1691,6 +1714,7 @@ pub fn show_timeline(
                 // segnalato).
                 let mut drag_finished = false;
                 let mut trim_finished = false;
+                let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
 
                 // Clip. Quelle in movimento (trascinate o in trim, con le
                 // loro gemelle) si disegnano per ultime: sono loro a
@@ -1701,7 +1725,7 @@ pub fn show_timeline(
                     .as_ref()
                     .map(|t| {
                         std::iter::once((t.track_index, t.clip_id))
-                            .chain(t.followers.iter().map(|&(id, track, _)| (track, id)))
+                            .chain(t.followers.iter().map(|&(id, track, _, _)| (track, id)))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1756,14 +1780,15 @@ pub fn show_timeline(
                     let (display_start, display_len) = if is_trimming_this
                         && let (Some(t), Some(primary_value)) = (&state.trim, trimmed_primary_new_value)
                     {
-                        let new_value = primary_value
-                            + t.followers
-                                .iter()
-                                .find(|&&(id, track, _)| {
-                                    id == visual.clip.id && track == visual.track_index
-                                })
-                                .map_or(0, |&(_, _, offset)| offset);
-                        match t.edge {
+                        let (offset, edge) = t
+                            .followers
+                            .iter()
+                            .find(|&&(id, track, _, _)| {
+                                id == visual.clip.id && track == visual.track_index
+                            })
+                            .map_or((0, t.edge), |&(_, _, offset, edge)| (offset, edge));
+                        let new_value = primary_value + offset;
+                        match edge {
                             TrimEdge::Start => {
                                 (new_value, (visual.clip.timeline_end() - new_value).max(1))
                             }
@@ -1903,28 +1928,35 @@ pub fn show_timeline(
                         painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
                     }
 
-                    // Zona di trascinamento riservata al trim, ai due bordi
-                    // della clip: ridotta per le clip molto strette, altrimenti
+                    // Zone ridotte per le clip molto strette, altrimenti
                     // l'intera clip sarebbe "solo bordi" e non si potrebbe più
                     // spostare (Move) col drag normale dal centro.
-                    let handle_px = TRIM_HANDLE_PX.min(clip_rect.width() / 3.0);
-                    let edge_at = |pos: egui::Pos2| -> Option<TrimEdge> {
-                        let local_x = pos.x - clip_rect.left();
-                        if local_x < handle_px {
-                            Some(TrimEdge::Start)
-                        } else if clip_rect.width() - local_x < handle_px {
-                            Some(TrimEdge::End)
-                        } else {
-                            None
-                        }
+                    let adjacent = |at: FrameIdx, edge: TrimEdge| {
+                        visuals
+                            .iter()
+                            .find(|v| {
+                                v.track_index == visual.track_index
+                                    && v.clip.id != visual.clip.id
+                                    && match edge {
+                                        TrimEdge::Start => v.clip.timeline_end() == at,
+                                        TrimEdge::End => v.clip.timeline_start == at,
+                                    }
+                            })
+                            .map(|v| (v.track_index, v.clip.id))
                     };
+                    let zones = edge_zones(
+                        clip_rect.width(),
+                        adjacent(visual.clip.timeline_start, TrimEdge::Start),
+                        adjacent(visual.clip.timeline_end(), TrimEdge::End),
+                    );
+                    let edge_at = |pos: egui::Pos2| zones.at(pos.x - clip_rect.left());
                     if resp.hovered()
                         && state.drag.is_none()
                         && state.trim.is_none()
                         && let Some(pos) = resp.hover_pos()
-                        && edge_at(pos).is_some()
+                        && let Some(zone) = edge_at(pos)
                     {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        edge_cursor = Some((pos, EdgeCursor::from_zone(zone)));
                     }
 
                     if resp.drag_started() {
@@ -1942,15 +1974,38 @@ pub fn show_timeline(
                         // `interact_pointer_pos()`.
                         let press_pos = ui.input(|i| i.pointer.press_origin());
                         match press_pos.and_then(edge_at) {
-                            Some(edge) => {
+                            Some(zone) => {
+                                let edge = zone.edge();
                                 let key = (visual.track_index, visual.clip.id);
-                                let others: Vec<ClipKey> =
-                                    drag_group_for(&state.selected, &visuals, key)
-                                        .into_iter()
-                                        .filter(|k| *k != key)
-                                        .collect();
+                                let others: Vec<(ClipKey, TrimEdge)> = match zone {
+                                    EdgeZone::Trim(_) => {
+                                        drag_group_for(&state.selected, &visuals, key)
+                                            .into_iter()
+                                            .filter(|k| *k != key)
+                                            .map(|k| (k, edge))
+                                            .collect()
+                                    }
+                                    // Solo le due clip a contatto, ognuna col
+                                    // suo gruppo collegato.
+                                    EdgeZone::Roll { neighbor, .. } => {
+                                        let opposite = match edge {
+                                            TrimEdge::Start => TrimEdge::End,
+                                            TrimEdge::End => TrimEdge::Start,
+                                        };
+                                        expand_to_linked_groups(&visuals, [key])
+                                            .into_iter()
+                                            .filter(|k| *k != key)
+                                            .map(|k| (k, edge))
+                                            .chain(
+                                                expand_to_linked_groups(&visuals, [neighbor])
+                                                    .into_iter()
+                                                    .map(|k| (k, opposite)),
+                                            )
+                                            .collect()
+                                    }
+                                };
                                 let (min_value, max_value, followers) = combined_trim_range(
-                                    &visuals, project, key, &others, edge,
+                                    &visuals, project, key, edge, &others,
                                 );
                                 let original_value = match edge {
                                     TrimEdge::Start => visual.clip.timeline_start,
@@ -1965,6 +2020,7 @@ pub fn show_timeline(
                                     min_value,
                                     max_value: max_value.max(min_value),
                                     followers,
+                                    roll: matches!(zone, EdgeZone::Roll { .. }),
                                 });
                             }
                             None => {
@@ -2017,18 +2073,18 @@ pub fn show_timeline(
                                 grown_range(&visual.clip, visual.track_index, t.edge, new_value)
                                     .into_iter()
                                     .collect::<Vec<_>>();
-                            for &(other_id, other_track, offset) in &t.followers {
+                            for &(other_id, other_track, offset, edge) in &t.followers {
                                 let Some(other) = visuals.iter().find(|v| {
                                     v.clip.id == other_id && v.track_index == other_track
                                 }) else {
                                     continue;
                                 };
                                 let other_value = new_value + offset;
-                                trims.push((other_id, other_track, t.edge, other_value));
+                                trims.push((other_id, other_track, edge, other_value));
                                 overwritten.extend(grown_range(
                                     &other.clip,
                                     other_track,
-                                    t.edge,
+                                    edge,
                                     other_value,
                                 ));
                             }
@@ -2122,6 +2178,19 @@ pub fn show_timeline(
                 }
                 if trim_finished {
                     state.trim = None;
+                }
+                if let Some(t) = &state.trim
+                    && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                {
+                    let cursor = match (t.roll, t.edge) {
+                        (true, _) => EdgeCursor::Roll,
+                        (false, TrimEdge::Start) => EdgeCursor::TrimStart,
+                        (false, TrimEdge::End) => EdgeCursor::TrimEnd,
+                    };
+                    edge_cursor = Some((pos, cursor));
+                }
+                if let Some((pos, cursor)) = edge_cursor {
+                    paint_edge_cursor(ui.ctx(), pos, cursor);
                 }
 
                 // Playhead: linea verticale su tutta l'altezza, più una
@@ -2820,19 +2889,18 @@ fn group_drag_bounds(
     (min_start, max_start.max(min_start))
 }
 
-/// Range valido (in frame timeline) per il nuovo valore della coordinata
-/// trimmata della primaria (`timeline_start` per `Start`, `timeline_end()`
-/// per `End`), combinato con quello di ogni clip in `others` tradotto nello
-/// spazio della primaria — stesso principio di `combined_drag_range`.
-/// Ritorna anche (clip_id, track_index, offset) di ognuna, pronti per
-/// `TrimState::followers`.
+/// Range valido (in frame timeline) per il nuovo valore del bordo `edge`
+/// della primaria, combinato con quello di ogni clip in `others` (col
+/// proprio bordo) tradotto nello spazio della primaria — stesso principio
+/// di `combined_drag_range`. Ritorna anche (clip_id, track_index, offset,
+/// bordo) di ognuna, pronti per `TrimState::followers`.
 fn combined_trim_range(
     visuals: &[ClipVisual],
     project: &Project,
     primary: ClipKey,
-    others: &[ClipKey],
     edge: TrimEdge,
-) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize, FrameIdx)>) {
+    others: &[(ClipKey, TrimEdge)],
+) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize, FrameIdx, TrimEdge)>) {
     let find = |(track, id): ClipKey| {
         visuals
             .iter()
@@ -2841,28 +2909,28 @@ fn combined_trim_range(
     let Some(primary_visual) = find(primary) else {
         return (0, FrameIdx::MAX, Vec::new());
     };
-    let edge_value = |clip: &Clip| match edge {
+    let edge_value = |clip: &Clip, edge: TrimEdge| match edge {
         TrimEdge::Start => clip.timeline_start,
         TrimEdge::End => clip.timeline_end(),
     };
-    let primary_value = edge_value(&primary_visual.clip);
-    let trimmed: Vec<&ClipVisual> = std::iter::once(primary_visual)
-        .chain(others.iter().filter_map(|&k| find(k)))
+    let primary_value = edge_value(&primary_visual.clip, edge);
+    let trimmed: Vec<(&ClipVisual, TrimEdge)> = std::iter::once((primary_visual, edge))
+        .chain(others.iter().filter_map(|&(k, e)| find(k).map(|v| (v, e))))
         .collect();
 
     let mut min_value = FrameIdx::MIN;
     let mut max_value = FrameIdx::MAX;
     let mut followers = Vec::new();
-    for v in &trimmed {
-        let offset = edge_value(&v.clip) - primary_value;
-        let (mut o_min, mut o_max) = single_trim_range(project, &v.clip, edge);
+    for &(v, v_edge) in &trimmed {
+        let offset = edge_value(&v.clip, v_edge) - primary_value;
+        let (mut o_min, mut o_max) = single_trim_range(project, &v.clip, v_edge);
         // Due clip trimmate insieme sulla stessa track non devono
-        // allungarsi l'una sopra l'altra.
-        for w in trimmed
-            .iter()
-            .filter(|w| w.track_index == v.track_index && w.clip.id != v.clip.id)
-        {
-            match edge {
+        // allungarsi l'una sopra l'altra; nel roll invece il bordo della
+        // vicina si sposta con questo.
+        for &(w, w_edge) in trimmed.iter().filter(|(w, w_edge)| {
+            w.track_index == v.track_index && w.clip.id != v.clip.id && *w_edge == v_edge
+        }) {
+            match w_edge {
                 TrimEdge::End if w.clip.timeline_start >= v.clip.timeline_end() => {
                     o_max = o_max.min(w.clip.timeline_start);
                 }
@@ -2875,10 +2943,124 @@ fn combined_trim_range(
         min_value = min_value.max(o_min.saturating_sub(offset));
         max_value = max_value.min(o_max.saturating_sub(offset));
         if v.clip.id != primary_visual.clip.id || v.track_index != primary_visual.track_index {
-            followers.push((v.clip.id, v.track_index, offset));
+            followers.push((v.clip.id, v.track_index, offset, v_edge));
         }
     }
     (min_value, max_value, followers)
+}
+
+/// Zone sensibili ai bordi di una clip larga `width` pixel, dato chi le sta
+/// a contatto a sinistra (`start_neighbor`) e a destra (`end_neighbor`).
+struct EdgeZones {
+    width: f32,
+    roll_px: f32,
+    trim_px: f32,
+    start_neighbor: Option<ClipKey>,
+    end_neighbor: Option<ClipKey>,
+}
+
+fn edge_zones(
+    width: f32,
+    start_neighbor: Option<ClipKey>,
+    end_neighbor: Option<ClipKey>,
+) -> EdgeZones {
+    EdgeZones {
+        width,
+        roll_px: ROLL_HANDLE_PX.min(width / 6.0),
+        trim_px: TRIM_HANDLE_PX.min(width / 3.0),
+        start_neighbor,
+        end_neighbor,
+    }
+}
+
+impl EdgeZones {
+    /// `local_x`: distanza dal bordo sinistro della clip.
+    fn at(&self, local_x: f32) -> Option<EdgeZone> {
+        let sides = [
+            (local_x, TrimEdge::Start, self.start_neighbor),
+            (self.width - local_x, TrimEdge::End, self.end_neighbor),
+        ];
+        for (distance, edge, neighbor) in sides {
+            match neighbor {
+                Some(neighbor) if distance < self.roll_px => {
+                    return Some(EdgeZone::Roll { edge, neighbor });
+                }
+                Some(_) if distance < self.roll_px + self.trim_px => {
+                    return Some(EdgeZone::Trim(edge));
+                }
+                None if distance < self.trim_px => return Some(EdgeZone::Trim(edge)),
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EdgeCursor {
+    TrimStart,
+    TrimEnd,
+    Roll,
+}
+
+impl EdgeCursor {
+    fn from_zone(zone: EdgeZone) -> Self {
+        match zone {
+            EdgeZone::Roll { .. } => EdgeCursor::Roll,
+            EdgeZone::Trim(TrimEdge::Start) => EdgeCursor::TrimStart,
+            EdgeZone::Trim(TrimEdge::End) => EdgeCursor::TrimEnd,
+        }
+    }
+}
+
+/// egui non ha cursori personalizzati: si nasconde quello di sistema e si
+/// disegna questo al suo posto. Parentesi "[" / "]" come i bordi di una
+/// clip, con le frecce del trascinamento.
+fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
+    ctx.set_cursor_icon(egui::CursorIcon::None);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("timeline_edge_cursor"),
+    ));
+    const HALF_H: f32 = 8.0;
+    const TICK: f32 = 4.0;
+    let bracket = |x: f32, towards: f32| {
+        vec![
+            egui::pos2(x + towards * TICK, pos.y - HALF_H),
+            egui::pos2(x, pos.y - HALF_H),
+            egui::pos2(x, pos.y + HALF_H),
+            egui::pos2(x + towards * TICK, pos.y + HALF_H),
+        ]
+    };
+    // (tip x, direzione)
+    let arrow = |tip: f32, dir: f32| {
+        vec![
+            egui::pos2(tip, pos.y),
+            egui::pos2(tip - dir * 5.0, pos.y - 4.5),
+            egui::pos2(tip - dir * 5.0, pos.y + 4.5),
+        ]
+    };
+    let (brackets, arrows) = match cursor {
+        EdgeCursor::TrimEnd => (vec![bracket(pos.x, -1.0)], vec![arrow(pos.x - 11.0, -1.0), arrow(pos.x + 8.0, 1.0)]),
+        EdgeCursor::TrimStart => (vec![bracket(pos.x, 1.0)], vec![arrow(pos.x - 8.0, -1.0), arrow(pos.x + 11.0, 1.0)]),
+        EdgeCursor::Roll => (
+            vec![bracket(pos.x - 2.0, -1.0), bracket(pos.x + 2.0, 1.0)],
+            vec![arrow(pos.x - 10.0, -1.0), arrow(pos.x + 10.0, 1.0)],
+        ),
+    };
+    for points in &brackets {
+        painter.line(points.clone(), egui::Stroke::new(4.0, egui::Color32::BLACK));
+    }
+    for points in brackets {
+        painter.line(points, egui::Stroke::new(2.0, egui::Color32::WHITE));
+    }
+    for points in arrows {
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            egui::Color32::WHITE,
+            egui::Stroke::new(1.0, egui::Color32::BLACK),
+        ));
+    }
 }
 
 /// I vicini sulla track non limitano il trim: allungando un bordo oltre
@@ -3882,14 +4064,14 @@ mod tests {
             &visuals,
             &project,
             (0, ClipId(1)),
-            &[(1, ClipId(2))],
             TrimEdge::End,
+            &[((1, ClipId(2)), TrimEdge::End)],
         );
         assert_eq!(
             max_value, 35,
             "vincolo della gemella si applica anche al video"
         );
-        assert_eq!(followers, vec![(ClipId(2), 1, 0)]);
+        assert_eq!(followers, vec![(ClipId(2), 1, 0, TrimEdge::End)]);
     }
 
     #[test]
@@ -3902,10 +4084,10 @@ mod tests {
             &visuals,
             &project,
             (0, ClipId(1)),
-            &[(1, ClipId(2))],
             TrimEdge::End,
+            &[((1, ClipId(2)), TrimEdge::End)],
         );
-        assert_eq!(followers, vec![(ClipId(2), 1, 15)]);
+        assert_eq!(followers, vec![(ClipId(2), 1, 15, TrimEdge::End)]);
         assert_eq!(min_value, 6, "21 - 15");
         assert_eq!(max_value, FrameIdx::MAX - 15);
     }
@@ -3918,10 +4100,50 @@ mod tests {
             &visuals,
             &project,
             (0, ClipId(1)),
-            &[(0, ClipId(2))],
             TrimEdge::End,
+            &[((0, ClipId(2)), TrimEdge::End)],
         );
         assert_eq!(max_value, 20);
+    }
+
+    #[test]
+    fn combined_trim_range_rolls_between_two_adjacent_clips() {
+        // [0,10) e [10,25) a contatto, la seconda con 5 frame di sorgente
+        // prima del suo inizio: il punto di contatto va da 5 a 24 (la
+        // seconda resta lunga almeno 1).
+        let project = Project::default();
+        let mut second = visual(0, 2, 10, 15);
+        second.clip = Clip::from_source_range(
+            ClipId(2),
+            vv_core::ClipSource::SolidColor,
+            5,
+            20,
+            10,
+            vv_core::Rational::one(),
+        );
+        let visuals = vec![visual(0, 1, 0, 10), second];
+        let (min_value, max_value, followers) = combined_trim_range(
+            &visuals,
+            &project,
+            (0, ClipId(2)),
+            TrimEdge::Start,
+            &[((0, ClipId(1)), TrimEdge::End)],
+        );
+        assert_eq!((min_value, max_value), (5, 24));
+        assert_eq!(followers, vec![(ClipId(1), 0, 0, TrimEdge::End)]);
+    }
+
+    #[test]
+    fn edge_zones_roll_at_the_contact_point_and_trim_just_inside() {
+        let neighbor = Some((0, ClipId(9)));
+        let zones = edge_zones(100.0, None, neighbor);
+        assert_eq!(zones.at(2.0), Some(EdgeZone::Trim(TrimEdge::Start)));
+        assert_eq!(zones.at(50.0), None);
+        assert_eq!(zones.at(90.0), Some(EdgeZone::Trim(TrimEdge::End)));
+        assert_eq!(
+            zones.at(98.0),
+            Some(EdgeZone::Roll { edge: TrimEdge::End, neighbor: (0, ClipId(9)) })
+        );
     }
 
     /// Bug segnalato: con la calamita il bordo si fermava un frame prima
