@@ -2,7 +2,7 @@ FINESTRA DI PREVIEW:
 [x] Quando Premo CTRL+f, il player deve andare a schermo intero. nella vista a schermo intero, compare un overlay in basso (solo al passaggio col mouse) con la barra di riproduzione (interagibile) e il tasto play/pausa - si esce con ESC.
 
 SHORTCUTS:
-[ ] Attualmente sono fissate. Devono essere configurabili dall'utente:
+[x] Attualmente sono fissate. Devono essere configurabili dall'utente:
 - Aggiungi un menu File -> Impostazioni che apre un dialog diviso in sezioni. la prima è "Scorciatoie da tastiera". Elenca tutte quelle presenti e permette all'utente di modificarle.
 - Salviamo le impostazioni utente (relative al programma) in ~/.config/vibevideo
 

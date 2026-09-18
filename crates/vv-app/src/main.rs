@@ -17,6 +17,8 @@ mod media_pool;
 mod mix_buffers;
 mod proxy_worker;
 mod render_ahead;
+mod settings;
+mod settings_dialog;
 mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
@@ -28,6 +30,7 @@ mod waveform_worker;
 
 use eframe::wgpu;
 use frame_provider::FrameProvider;
+use settings::Action;
 use timeline_audio::TimelineAudio;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -502,6 +505,10 @@ struct VibeVideoApp {
     /// dolcemente.
     audiometer_level: (f32, f32),
     viewer_fullscreen: bool,
+    settings: settings::Settings,
+    /// `None` nei test: le impostazioni non vengono mai scritte su disco.
+    settings_path: Option<PathBuf>,
+    settings_dialog: Option<settings_dialog::SettingsDialog>,
 }
 
 /// Stato UI di un export in corso: progresso/cancellazione condivisi col
@@ -577,6 +584,9 @@ impl Default for VibeVideoApp {
             show_effects: false,
             audiometer_level: (0.0, 0.0),
             viewer_fullscreen: false,
+            settings: settings::Settings::default(),
+            settings_path: None,
+            settings_dialog: None,
         }
     }
 }
@@ -2724,6 +2734,22 @@ impl VibeVideoApp {
 
     /// Handle di transform della prima clip video selezionata, se è sotto
     /// alla testina e il viewer mostra la timeline ferma.
+    fn show_settings_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.settings_dialog else {
+            return;
+        };
+        let response = dialog.show(ctx, &mut self.settings.keymap);
+        if !response.open {
+            self.settings_dialog = None;
+        }
+        if response.keymap_changed
+            && let Some(path) = &self.settings_path
+            && let Err(e) = self.settings.save(path)
+        {
+            self.project_error = Some(format!("Impossibile salvare le impostazioni: {e}"));
+        }
+    }
+
     /// `(total, playhead, (in, out), playing)` della barra di riproduzione.
     fn transport_state(&self) -> (FrameIdx, FrameIdx, (FrameIdx, FrameIdx), bool) {
         let playing = self.is_timeline_playing();
@@ -4698,20 +4724,23 @@ impl eframe::App for VibeVideoApp {
             self.timeline_state
                 .drop_locked(&self.project.timelines[timeline_id]);
         }
+        let capturing_shortcut = self.settings_dialog.as_ref().is_some_and(|d| d.is_capturing());
+        let keymap = self.settings.keymap.clone();
         ui.input(|i| {
             arrow_input.1 = i.time;
-            if typing {
+            if typing || capturing_shortcut {
                 return;
             }
+            let pressed = |action| keymap.pressed(action, i);
             arrow_input.0 = match (
-                i.key_down(egui::Key::ArrowLeft),
-                i.key_down(egui::Key::ArrowRight),
+                keymap.down(Action::StepBackward, i),
+                keymap.down(Action::StepForward, i),
             ) {
                 (true, false) => Some(-1),
                 (false, true) => Some(1),
                 _ => None,
             };
-            if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
+            if pressed(Action::Delete) {
                 // Il pannello che ha ricevuto l'ultimo click decide chi
                 // cancella: media pool o timeline.
                 if self.media_pool_state.focused {
@@ -4720,102 +4749,71 @@ impl eframe::App for VibeVideoApp {
                     self.delete_selected();
                 }
             }
-            // Tasto fisico "<" (il 102° tasto ISO, tra Shift sinistro e Z
-            // sui layout europei/italiani — `IntlBackslash` in egui,
-            // assente sui layout US ANSI): dedicato al ripple delete,
-            // prima era Shift+Delete/Backspace.
-            if i.key_pressed(egui::Key::IntlBackslash) {
+            if pressed(Action::RippleDelete) {
                 self.ripple_delete_selected();
             }
-            if i.key_pressed(egui::Key::T) && !i.modifiers.command {
+            if pressed(Action::Split) {
                 self.split_at_playhead();
             }
-            if i.key_pressed(egui::Key::D) && !i.modifiers.command && !i.modifiers.alt {
+            if pressed(Action::ToggleDisabled) {
                 self.toggle_disabled_selected();
             }
-            if i.modifiers.command && i.key_pressed(egui::Key::Z) {
-                if i.modifiers.shift {
-                    self.history.redo(&mut self.project);
-                } else {
-                    self.history.undo(&mut self.project);
-                }
+            if pressed(Action::Undo) {
+                self.history.undo(&mut self.project);
             }
-            if i.key_pressed(egui::Key::Space) {
+            if pressed(Action::Redo) {
+                self.history.redo(&mut self.project);
+            }
+            if pressed(Action::TogglePlayback) {
                 self.toggle_playback();
             }
-            if !i.modifiers.command {
-                if i.key_pressed(egui::Key::I) {
-                    self.mark_at_playhead(true);
-                }
-                if i.key_pressed(egui::Key::O) {
-                    self.mark_at_playhead(false);
-                }
+            if pressed(Action::MarkIn) {
+                self.mark_at_playhead(true);
             }
-            // "a": come la barra spaziatrice, ma se già in riproduzione
-            // accelera invece di mettere in pausa (1x -> 2x -> 4x -> 8x) —
-            // vedi doc di `handle_fast_playback_key`.
-            if i.key_pressed(egui::Key::A) && !i.modifiers.command && !i.modifiers.alt {
+            if pressed(Action::MarkOut) {
+                self.mark_at_playhead(false);
+            }
+            if pressed(Action::FastPlayback) {
                 self.handle_fast_playback_key();
             }
-            // Ctrl+A: seleziona tutte le clip; Alt+Y: solo quelle dalla
-            // testina in avanti.
-            if i.modifiers.command && i.key_pressed(egui::Key::A) {
+            if pressed(Action::SelectAll) {
                 self.select_all_clips();
             }
-            if i.modifiers.alt && i.key_pressed(egui::Key::Y) {
+            if pressed(Action::SelectFromPlayhead) {
                 self.select_clips_from_playhead();
             }
-            // Ctrl+I (Cmd+I su macOS): import media, come il pulsante toolbar.
-            if i.modifiers.command && i.key_pressed(egui::Key::I) {
+            if pressed(Action::ImportMedia) {
                 self.import_media_dialog();
             }
-            // Ctrl+S: salva (nel file corrente, o "salva con nome" se il
-            // progetto non è ancora stato salvato). Ctrl+Shift+S: sempre
-            // "salva con nome", anche se il progetto ha già un file.
-            if i.modifiers.command && i.key_pressed(egui::Key::S) {
-                if i.modifiers.shift {
-                    self.save_project_as();
-                } else {
-                    self.save_project();
-                }
+            if pressed(Action::SaveProject) {
+                self.save_project();
             }
-            // Ctrl+O: apri un progetto.
-            if i.modifiers.command && i.key_pressed(egui::Key::O) {
+            if pressed(Action::SaveProjectAs) {
+                self.save_project_as();
+            }
+            if pressed(Action::OpenProject) {
                 self.request_project_switch(ProjectSwitch::Open);
             }
-            // Ctrl+Shift+E: esporta, come il pulsante in File.
-            if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E) {
+            if pressed(Action::Export) {
                 self.start_export();
             }
-            // Ctrl+C / Ctrl+V: copia/incolla clip sulla timeline. Non
-            // `key_pressed(Key::C/V)`: l'integrazione (eframe/winit)
-            // intercetta Ctrl+C/Ctrl+V a monte e li consegna come eventi
-            // semantici `Copy`/`Paste`, non come normali pressioni di
-            // tasto — con `key_pressed` la scorciatoia risultava
-            // silenziosamente inattiva (il pulsante in menu, che chiama
-            // gli stessi metodi, funzionava comunque). Gestiti fuori da
-            // qui (vedi sopra), solo raccolti: `handle_clipboard_events`
-            // per il bug più subdolo trovato dopo.
-            for event in &i.events {
-                if matches!(
-                    event,
-                    egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
-                ) {
-                    clipboard_events.push(event.clone());
+            // Solo raccolti: gestiti fuori da qui, vedi sopra.
+            for (action, event) in [
+                (Action::Copy, egui::Event::Copy),
+                (Action::Cut, egui::Event::Cut),
+                (Action::Paste, egui::Event::Paste(String::new())),
+            ] {
+                if pressed(action) {
+                    clipboard_events.push(event);
                 }
             }
-            // Ctrl+"+"/Ctrl+"-" (anche Ctrl+"=", stesso tasto di "+" non
-            // shiftato sulla maggior parte delle tastiere): zoom della
-            // timeline.
-            if i.modifiers.command
-                && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
-            {
+            if pressed(Action::ZoomIn) {
                 self.timeline_state.zoom_in();
             }
-            if i.modifiers.command && i.key_pressed(egui::Key::Minus) {
+            if pressed(Action::ZoomOut) {
                 self.timeline_state.zoom_out();
             }
-            if i.modifiers.command && i.key_pressed(egui::Key::F) {
+            if pressed(Action::FullscreenViewer) {
                 set_fullscreen = Some(!self.viewer_fullscreen);
             }
             if self.viewer_fullscreen && i.key_pressed(egui::Key::Escape) {
@@ -4839,20 +4837,20 @@ impl eframe::App for VibeVideoApp {
                     || self.export_dialog.is_some();
 
                 ui.menu_button("File", |ui| {
-                    if ui.button("Apri progetto... (Ctrl+O)").clicked() {
+                    if ui.button(keymap.menu_label("Apri progetto...", Action::OpenProject)).clicked() {
                         self.request_project_switch(ProjectSwitch::Open);
                         ui.close();
                     }
-                    if ui.button("Salva (Ctrl+S)").clicked() {
+                    if ui.button(keymap.menu_label("Salva", Action::SaveProject)).clicked() {
                         self.save_project();
                         ui.close();
                     }
-                    if ui.button("Salva con nome... (Ctrl+Shift+S)").clicked() {
+                    if ui.button(keymap.menu_label("Salva con nome...", Action::SaveProjectAs)).clicked() {
                         self.save_project_as();
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Importa media... (Ctrl+I)").clicked() {
+                    if ui.button(keymap.menu_label("Importa media...", Action::ImportMedia)).clicked() {
                         self.import_media_dialog();
                         ui.close();
                     }
@@ -4866,7 +4864,7 @@ impl eframe::App for VibeVideoApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(!export_disabled, egui::Button::new("Esporta... (Ctrl+Shift+E)"))
+                        .add_enabled(!export_disabled, egui::Button::new(keymap.menu_label("Esporta...", Action::Export)))
                         .on_hover_text("Esporta la timeline tra in e out (tasti I/O) in un file MP4 (H.264 + AAC)")
                         .clicked()
                     {
@@ -4881,14 +4879,19 @@ impl eframe::App for VibeVideoApp {
                         self.export_otio_dialog();
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("Impostazioni...").clicked() {
+                        self.settings_dialog = Some(settings_dialog::SettingsDialog::new());
+                        ui.close();
+                    }
                 });
 
                 ui.menu_button("Modifica", |ui| {
-                    if ui.button("Undo (Ctrl+Z)").clicked() {
+                    if ui.button(keymap.menu_label("Undo", Action::Undo)).clicked() {
                         self.history.undo(&mut self.project);
                         ui.close();
                     }
-                    if ui.button("Redo (Ctrl+Shift+Z)").clicked() {
+                    if ui.button(keymap.menu_label("Redo", Action::Redo)).clicked() {
                         self.history.redo(&mut self.project);
                         ui.close();
                     }
@@ -4896,7 +4899,7 @@ impl eframe::App for VibeVideoApp {
                     if ui
                         .add_enabled(
                             !self.timeline_state.selected.is_empty(),
-                            egui::Button::new("Copia (Ctrl+C)"),
+                            egui::Button::new(keymap.menu_label("Copia", Action::Copy)),
                         )
                         .clicked()
                     {
@@ -4911,7 +4914,7 @@ impl eframe::App for VibeVideoApp {
                     if ui
                         .add_enabled(
                             !self.timeline_state.selected.is_empty(),
-                            egui::Button::new("Taglia (Ctrl+X)"),
+                            egui::Button::new(keymap.menu_label("Taglia", Action::Cut)),
                         )
                         .clicked()
                     {
@@ -4921,7 +4924,7 @@ impl eframe::App for VibeVideoApp {
                     if ui
                         .add_enabled(
                             !self.timeline_state.clipboard.is_empty(),
-                            egui::Button::new("Incolla (Ctrl+V)"),
+                            egui::Button::new(keymap.menu_label("Incolla", Action::Paste)),
                         )
                         .on_hover_text("Incolla alla posizione del playhead")
                         .clicked()
@@ -4930,12 +4933,12 @@ impl eframe::App for VibeVideoApp {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Elimina (Del)").clicked() {
+                    if ui.button(keymap.menu_label("Elimina", Action::Delete)).clicked() {
                         self.delete_selected();
                         ui.close();
                     }
                     if ui
-                        .button("Ripple delete (<)")
+                        .button(keymap.menu_label("Ripple delete", Action::RippleDelete))
                         .on_hover_text(
                             "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
                         )
@@ -4945,7 +4948,7 @@ impl eframe::App for VibeVideoApp {
                         ui.close();
                     }
                     if ui
-                        .button("Dividi (T)")
+                        .button(keymap.menu_label("Dividi", Action::Split))
                         .on_hover_text("Taglia al playhead le clip selezionate, o tutte se non c'è selezione")
                         .clicked()
                     {
@@ -4967,11 +4970,11 @@ impl eframe::App for VibeVideoApp {
                     ui.checkbox(&mut self.scrub_audio, "Audio durante lo scrub")
                         .on_hover_text("Suona un breve frammento audio a ogni spostamento manuale del playhead");
                     ui.separator();
-                    if ui.button("Zoom avanti (Ctrl++)").clicked() {
+                    if ui.button(keymap.menu_label("Zoom avanti", Action::ZoomIn)).clicked() {
                         self.timeline_state.zoom_in();
                         ui.close();
                     }
-                    if ui.button("Zoom indietro (Ctrl+-)").clicked() {
+                    if ui.button(keymap.menu_label("Zoom indietro", Action::ZoomOut)).clicked() {
                         self.timeline_state.zoom_out();
                         ui.close();
                     }
@@ -5071,7 +5074,7 @@ impl eframe::App for VibeVideoApp {
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
                         );
                     ui.separator();
-                    if ui.button("Player a schermo intero (Ctrl+F)").clicked() {
+                    if ui.button(keymap.menu_label("Player a schermo intero", Action::FullscreenViewer)).clicked() {
                         set_fullscreen = Some(true);
                         ui.close();
                     }
@@ -5096,6 +5099,7 @@ impl eframe::App for VibeVideoApp {
         });
 
         self.show_export_dialog(ui);
+        self.show_settings_dialog(ui.ctx());
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
         self.show_unsaved_changes_dialog(ui);
@@ -6275,6 +6279,10 @@ fn main() -> eframe::Result<()> {
             cc.egui_ctx
                 .options_mut(|o| o.input_options.zoom_modifier = egui::Modifiers::ALT);
             let mut app = VibeVideoApp::default();
+            app.settings_path = settings::Settings::default_path();
+            if let Some(path) = &app.settings_path {
+                app.settings = settings::Settings::load(path);
+            }
             // Aperto subito: aprire lo stream audio blocca per centinaia di ms.
             app.timeline_audio = Some(TimelineAudio::new());
             // Condivide il device/queue wgpu di egui-wgpu invece del
