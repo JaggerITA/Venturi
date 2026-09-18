@@ -1,6 +1,10 @@
-UNDO STACK: 
-- durante il trascinamento di uno slider o trascinamento del campo numerico dal pannello delle proprietà, ogni incremento/decremento viene inserito nello stack undo. se faccio un incremento di 10 punti, mi trovo a dover premere CTRL+z numerose volte per tornare indietro. Dovrebbe invece essere inserito un solo evento al rilascio del mouse. 
-
 FINESTRA DI PREVIEW:
-- implementare gli handle per posizione, scala e punto di ancoraggio per la clip selezionata direttamente in overlay sul riquadro video, così non è necessario modificare questi parametri dal pannello delle proprietà. Questo overlay con gli handle dovrebbe essere attivabile e disattivabile con un pulsante sotto al riquadro video.
-- Quando Premo CTRL+f, il player deve andare a schermo intero. nella vista a schermo intero, compare un overlay in basso (solo al passaggio col mouse) con la barra di riproduzione (interagibile) e il tasto play/pausa - si esce con ESC.
+[ ] Quando Premo CTRL+f, il player deve andare a schermo intero. nella vista a schermo intero, compare un overlay in basso (solo al passaggio col mouse) con la barra di riproduzione (interagibile) e il tasto play/pausa - si esce con ESC.
+
+SHORTCUTS:
+[ ] Attualmente sono fissate. Devono essere configurabili dall'utente:
+- Aggiungi un menu File -> Impostazioni che apre un dialog diviso in sezioni. la prima è "Scorciatoie da tastiera". Elenca tutte quelle presenti e permette all'utente di modificarle.
+- Salviamo le impostazioni utente (relative al programma) in ~/.config/vibevideo
+
+PANNELLO inspector (quello sulla destra, con le proprietà e i parametri, keyframe, ecc):
+[ ] Leggera modifica alla logica di applicazione degli attributi su clip multiple: attualmente, selezionando più clip, vengono applicati i parametri impostati nel pannello a tutte le clip. La granularità però deve essere sul singolo parametro toccato. ES: se muovo soltanto "posizione Y", tutte le clip selezionate devono mantenere gli attuali valori e solo "posizione Y" deve essere impostata su tutte le clip selezionate. NON anche posizione X e/o altre.
