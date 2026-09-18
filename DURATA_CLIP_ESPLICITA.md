@@ -1,30 +1,27 @@
 # Durata di timeline esplicita nella `Clip` — valutazione e piano
 
-Documento di discussione, **non** una decisione presa. Nasce dal bug "lo
-split cade un frame prima/dopo la testina" su clip conformate: il
-palliativo è in `master`, la soluzione vera è un cambio di modello che
-qui viene valutato e pianificato.
+Documento di discussione. Nasce dal bug "lo split cade un frame
+prima/dopo la testina" su clip conformate: il palliativo è in `master`
+(`fd130bb`), la soluzione vera è un cambio di rappresentazione della
+`Clip`, valutato e pianificato qui.
 
-Stato: da discutere. Nessuna riga di codice scritta in questa direzione.
+Stato: approvato nella direzione, da implementare. Nessuna riga di codice
+scritta.
 
 ## Il problema
 
-`Clip` non memorizza quanto dura sulla timeline: la ricava.
+`Clip` descrive il proprio intervallo in frame **sorgente** e ne ricava la
+durata di timeline:
 
 ```rust
 // vv-core/src/model.rs
 pub fn timeline_len(&self) -> FrameIdx {
     self.scaled(self.source_out) - self.scaled(self.source_in)
 }
-pub fn timeline_end(&self) -> FrameIdx {
-    self.timeline_start + self.timeline_len()
-}
 ```
 
-dove `scaled` è `rate.scale_round(...)` e `rate` è `fps timeline / fps
-media` (`Rational::conform_rate`). Con un media a 29,97 su una timeline a
-30 il rapporto è `1001/1000`: `scale_round` avanza a scatti di 1 o 2, e
-ogni ~1000 frame ne salta uno. In concreto, per `rate = 1001/1000`:
+`scaled` è `rate.scale_round(...)`, con `rate = fps timeline / fps media`.
+Con un media a 29,97 su timeline a 30 (`rate = 1001/1000`):
 
 | frame sorgente | `scale_round` |
 |---|---|
@@ -32,209 +29,300 @@ ogni ~1000 frame ne salta uno. In concreto, per `rate = 1001/1000`:
 | 499 | 499 |
 | 500 | **501** |
 
-Il frame sorgente 499 copre i frame di timeline 499 **e** 500. Al frame
-500 non comincia nessun frame sorgente, quindi **non esiste nessuna
-coppia `(source_in, source_out)` che produca una clip lunga esattamente
-500**: la durata è quantizzata sui bordi dei frame sorgente.
+Il frame sorgente 499 copre i frame di timeline 499 **e** 500. Una clip
+può cominciare o finire solo su un bordo di frame sorgente, quindi:
 
-Conseguenza diretta: `SplitClip` non può tagliare a 500. Può tagliare a
-499 o a 501, mai in mezzo. Lo stesso vale per il bordo di un trim e per
-ogni altra posizione che l'utente sceglie in frame di *timeline*.
+- **Split e trim** non possono cadere a 500: solo a 499 o 501.
+- **L'audio** eredita la stessa quantizzazione: `mixer.rs` calcola
+  l'offset nel buffer come `source_in / fps_media`, quindi la metà destra
+  di uno split riparte dall'inizio di un frame sorgente e non dal punto
+  esatto (~17 ms di salto a 29,97/30).
 
-Il vincolo è deliberato, ed è scritto nel modello:
+Con `rate = 6/5` (25 su 30) il problema tocca 1 posizione su 6.
 
-> `rate`: […] Un rapporto invece di una durata memorizzata perché
-> `source_in`/`source_out` devono restare l'unica fonte di verità: un trim
-> non può far divergere i due valori.
+La radice: `source_in` è un indice di frame sorgente, e non può
+rappresentare una clip che inizia *a metà* di un frame sorgente.
 
-## Cosa c'è oggi in `master` (il palliativo)
+## Perché non basta aggiungere `timeline_len`
 
-Commit `fd130bb`:
+La prima versione di questo documento proponeva di tenere `source_in`,
+`source_out` e aggiungere `timeline_len`. Ha due difetti.
 
-1. `SplitClip` sceglie il bordo di frame sorgente **più vicino** a
-   `split_at` (a parità, quello prima: così il frame che si sta guardando
-   diventa il primo della metà destra invece di restare duplicato in coda
-   alla sinistra).
-2. `split_at_playhead` **sposta la testina sul taglio davvero eseguito**,
-   così la linea rossa e il taglio coincidono sempre: l'utente vede la
-   testina scattare di un frame, invece di vedere il taglio dove la linea
-   non è.
+**1. Perde la fase.** `source_frame_at` ancora la mappatura a
+`scale_round(source_in)`, cioè assume che la clip inizi su un bordo di
+frame sorgente:
 
-Non è una correzione: è rendere onesto un limite. L'errore resta ≤ 1
-frame e si manifesta in ~1 posizione su 1000 con media 29,97 su timeline
-30 — ma su `rate = 6/5` (media 25 su timeline 30) sarebbe 1 posizione su
-6, molto più visibile.
+```rust
+rate.unscale_round(t - timeline_start + rate.scale_round(source_in))
+```
 
-## La modifica proposta
+Split a 500 con la metà destra `source_in = 499`, `timeline_start = 500`:
 
-Memorizzare la durata di timeline nella `Clip` invece di derivarla:
+| t | originale | metà destra |
+|---|---|---|
+| 500 | 499 | 499 |
+| 501 | 500 | **499** |
+| 502 | 501 | **500** |
+
+L'intera metà destra resta indietro di un frame sorgente. Il taglio
+sarebbe esatto, il contenuto no — e un test che controlla solo i bordi non
+se ne accorge.
+
+**2. Stato ridondante.** Tre valori (`source_in`, `source_out`,
+`timeline_len`) che devono restare coerenti, più la fase che manca: ogni
+comando presente e futuro deve aggiornarli tutti. È esattamente ciò che il
+commento su `Clip::rate` voleva evitare.
+
+## Lo standard di mercato
+
+Nessuno memorizza in + out + durata. Lo schema comune è **punto di
+ingresso + durata, in unità di tempo, non in frame del media**:
+
+- **OpenTimelineIO**: `source_range = TimeRange(start_time, duration)`,
+  entrambi `RationalTime(value, rate)`; il punto di uscita è derivato.
+- **FCPXML**: `offset` / `start` / `duration` in secondi razionali.
+- **Premiere**: tick (254016000000 al secondo).
+
+## La rappresentazione proposta
 
 ```rust
 pub struct Clip {
-    pub source_in: FrameIdx,
-    pub source_out: FrameIdx,
     pub timeline_start: FrameIdx,
-    pub timeline_len: FrameIdx, // <-- nuovo, non più derivato
+    /// Inizio della clip nel media, in frame di *timeline* contati dal
+    /// frame sorgente 0 (lo spazio di `Rational::scale_round`).
+    pub source_offset: FrameIdx,
+    pub timeline_len: FrameIdx,
     pub rate: Rational,
     // ...
 }
 ```
 
-`source_in`/`source_out` continuano a dire *quale* materiale si vede,
-`timeline_len` dice *per quanto* lo si vede. I due valori possono
-divergere di una frazione di frame, ed è esattamente ciò che serve per
-tagliare a 500.
+`source_in` e `source_out` spariscono come campi e diventano metodi
+derivati. Tutto è espresso nell'unità della timeline, l'unica in cui
+l'utente sceglie posizioni.
 
-`source_frame_at` (timeline → sorgente) **non cambia**: resta basata su
-`rate`. Cambia solo il fatto che l'ultimo frame sorgente della clip può
-essere mostrato per un frame di timeline invece che per due.
+| | formula |
+|---|---|
+| `source_frame_at(t)` | `rate.unscale_round(t - timeline_start + source_offset)` |
+| `source_in()` | `rate.unscale_round(source_offset)` |
+| `source_out()` (esclusivo) | `rate.unscale_round(source_offset + timeline_len - 1) + 1` |
+| `timeline_end()` | `timeline_start + timeline_len` |
+| `source_len()` | `source_out() - source_in()` |
+| secondi nel media (audio) | `source_offset / fps_timeline` |
 
-## Impatto sulle prestazioni
+Per una clip non conformata (`rate = 1/1`) `source_offset == source_in` e
+nulla cambia.
 
-**Trascurabile, e semmai positivo.**
+### Operazioni
 
-- `timeline_len()` oggi costa due moltiplicazioni/divisioni `i128`
-  (`scale_round` due volte). Diventerebbe una lettura di campo.
-- È chiamata da ~26 punti, quasi tutti nel disegno della timeline e nei
-  test di sovrapposizione (`neighbor_bounds_at`, `clips_intersecting_rect`,
-  `active_clip_at`, il loop di disegno delle clip): più volte per clip per
-  frame di UI. Sono comunque poche centinaia di operazioni intere per
-  frame, contro decode e compositing video: **non misurabile in nessuna
-  delle due direzioni**.
-- Nessun impatto sui percorsi caldi veri (`render_ahead`, `export`,
-  `mixer`): usano `source_frame_at`, che non cambia.
-- Memoria: 8 byte per clip. Irrilevante.
+Tutte aritmetica intera in un solo spazio, senza arrotondamenti:
 
-**La performance non è il criterio di decisione.** Il costo vero è la
-manutenzione dell'invariante: `timeline_len` diventa stato che può
-disallinearsi da `source_in`/`source_out`/`rate`, mentre oggi
-l'incoerenza è impossibile per costruzione.
+- **Split a `s`**: sinistra `timeline_len = s - start`; destra
+  `timeline_start = s`, `source_offset = offset + (s - start)`,
+  `timeline_len = vecchia_len - (s - start)`. Le due metà condividono il
+  frame sorgente a cavallo del taglio, mostrato per una parte del suo
+  tempo a sinistra e per il resto a destra.
+- **Trim fine a `e`**: `timeline_len = e - start`.
+- **Trim inizio a `b`**: `delta = b - start`; `timeline_start += delta`,
+  `source_offset += delta`, `timeline_len -= delta`.
+- **Spostamento**: cambia solo `timeline_start`.
 
-## Rischi
+### Invarianti
 
-| Rischio | Dove | Mitigazione |
-|---|---|---|
-| Comando che dimentica di aggiornare `timeline_len` → clip lunga o corta a caso | `TrimClip`, `SplitClip` | i due punti sono in `command.rs:611-647` e `846-920`, il resto crea clip nuove; un test di invariante li copre |
-| Undo che ripristina il sorgente ma non la durata | `TrimClip::undo`, `SplitClip::undo` | `old`/`original_source_out` diventano tuple che includono la durata |
-| Progetti salvati prima del campo | `persistence.rs` | `#[serde(default)]` + ricalcolo al caricamento, esattamente come già fatto per `rate` con `refresh_clip_rates` |
-| Cambio di `rate` a progetto caricato (`refresh_clip_rates`) che non tocca la durata | `model.rs:845` | decidere esplicitamente: la durata salvata vince, oppure viene ricalcolata |
-| Ultimo frame sorgente mostrato per un frame invece di due | `render_ahead`, `export`, `frame_provider` | già clampano, ma va verificato con un export di confronto |
-| Durata e sorgente che divergono all'infinito dopo molti trim | ovunque | i trim scrivono *entrambi* i valori dalla stessa posizione di timeline, non incrementalmente |
+Nessuno stato ridondante: non c'è niente che possa disallinearsi. Restano
+solo vincoli di dominio:
+
+- `timeline_len >= 1`
+- `source_offset >= 0`
+- `source_offset + timeline_len <= rate.scale_round(duration_frames)` per
+  un media (nessun limite per `SolidColor`)
+
+### Cambio di unità
+
+`source_offset` e `timeline_len` sono in frame di timeline, quindi
+dipendono dal suo fps e dall'fps del media. Serve **un** punto di
+conversione, `Clip::retime(timeline_fps_vecchio, timeline_fps_nuovo,
+media_fps)`, che passa per i secondi (`valore / fps_vecchio * fps_nuovo`,
+arrotondato) e ricalcola `rate`. Lo usano:
+
+- **incolla** su una timeline a fps diverso da quella di origine
+  (`main.rs`, incolla da `ClipboardEntry`): va convertito anche
+  `relative_start`. Oggi `rate` viene copiato così com'è, ed è già un bug
+  su timeline a fps diverso;
+- `refresh_clip_rates`, se l'fps del media cambia sotto i piedi (probe
+  diversa, media ricollegato): si tengono `timeline_start` e
+  `timeline_len` (l'intenzione di montaggio), si converte `source_offset`
+  per secondi e si clampa alla durata del media;
+- import OTIO (sotto).
+
+Non è una ricodifica: il video non viene toccato, cambiano solo i numeri
+della clip.
+
+## Compatibilità con OTIO
+
+L'import/export OTIO è tra le prossime feature: questa rappresentazione è
+già la sua, quindi la mappatura è diretta.
+
+- **Export**: `source_range.start_time = RationalTime(source_offset,
+  fps_timeline)`, `duration = RationalTime(timeline_len, fps_timeline)`.
+  Esatto, `RationalTime` accetta qualunque rate. `available_range` viene
+  dal media (`duration_frames`, fps del media).
+- **Import**: `start_time` e `duration` arrivano in un rate qualunque
+  (spesso quello del media). Si portano in frame di timeline:
+  - `start_time` intero nel rate del media → `rate.scale_round(value)`,
+    identico a quanto fa oggi l'import di una clip;
+  - altrimenti `round(secondi * fps_timeline)`.
+
+  L'import quantizza al frame di timeline, come fanno tutti gli editor.
+- **Conform**: OTIO non ha il concetto: un media a 29,97 su timeline a 30
+  si riproduce a velocità reale, esattamente come il nostro `rate`. Niente
+  da tradurre.
+- **Fuori da questo documento, ma da tenere a mente**: le track OTIO sono
+  sequenziali (`Gap` espliciti), le nostre posizionali (`timeline_start`):
+  l'export deve generare i `Gap`, l'import accumularli. La speed futura
+  corrisponde a `LinearTimeWarp` / `TimeEffect`.
+
+## Impatto
+
+**Prestazioni**: trascurabili in entrambe le direzioni. `timeline_len()`
+diventa una lettura di campo; `source_in()`/`source_out()` costano una
+`unscale_round` (divisione `i128`) invece di una lettura, ma sono chiamati
+poche volte per clip per frame di UI. I percorsi caldi (`render_ahead`,
+`export`, `mixer`) usano `source_frame_at`, che costa quanto oggi.
+
+**Complessità**: il modello diventa più semplice (niente ridondanza,
+niente scelta del bordo più vicino, niente testina da riposizionare). Il
+costo è il refactor: ~89 usi di `source_out` e altrettanti di `source_in`,
+quasi tutti meccanici (campo → metodo).
+
+**Manutenzione**: un solo spazio di lavoro per i comandi di montaggio e
+un solo punto di conversione di unità. Da ricordare: un nuovo comando che
+crea o copia clip deve copiare `source_offset`/`timeline_len`, non
+ricalcolarli da un intervallo sorgente.
+
+**Formato di salvataggio**: cambia senza migrazione. Non esistono progetti
+salvati da preservare; `#[serde(default)]` sui campi nuovi non serve.
+
+**Comportamento**: la clip più corta passa da 1 frame sorgente a 1 frame
+di timeline. Con un media molto più lento della timeline, una clip può
+mostrare un frame sorgente per un solo frame di timeline. È corretto, ma
+cambia rispetto a oggi.
 
 ## Piano di implementazione
 
-Sei passi, ognuno compilabile e testabile da solo.
+Ogni passo compila e passa i test da solo.
 
-### 1. Campo e costruzione (`vv-core/src/model.rs`)
+### 1. Metodi al posto dei campi, a comportamento invariato
 
-- Aggiungere `timeline_len: FrameIdx` a `Clip`, con `#[serde(default)]`.
-- `timeline_len()` diventa un getter del campo; `timeline_end()` resta
-  `timeline_start + timeline_len`.
-- Aggiungere `Clip::conformed_len(source_in, source_out, rate)` (l'attuale
-  formula derivata) come *unico* punto che calcola una durata da un
-  intervallo sorgente: lo usano tutti i costruttori di clip.
-- `source_len()` resta com'è.
+- Aggiungere `Clip::source_in()` / `source_out()` che per ora leggono i
+  campi, e migrare tutti i lettori (vv-core, vv-app, vv-audio, vv-render)
+  ai metodi. Le scritture restano sui campi.
+- Aggiungere il costruttore unico `Clip::from_source_range(source,
+  source_in, source_out, timeline_start, rate, ...)`: tutti i punti che
+  creano una clip nuova da un media (import, drop dal media pool, test
+  helper) passano da qui.
 
-Alla fine di questo passo il campo esiste ma vale sempre quanto la
-formula: nessun comportamento cambia.
+Refactor meccanico: nessun test cambia.
 
-### 2. Caricamento dei progetti (`vv-core/src/persistence.rs`)
+### 2. Cambio di rappresentazione (`vv-core/src/model.rs`)
 
-- `load_project` chiama già `refresh_clip_rates`; aggiungere accanto un
-  `refresh_clip_lengths` che riempie `timeline_len` **solo se è 0** (il
-  default serde), calcolandolo con `conformed_len`.
-- Decidere e documentare cosa fa `refresh_clip_rates` quando l'fps del
-  media cambia sotto i piedi: oggi ricalcola `rate` e quindi la durata
-  cambia da sola. Con la durata memorizzata bisogna scegliere se la clip
-  mantiene la durata (e slitta il contenuto) o la ricalcola. **Proposta:
-  ricalcolarla**, perché è un caso di "riallineamento al media reale", non
-  un'intenzione di montaggio.
+- Sostituire i campi `source_in`/`source_out` con `source_offset` e
+  `timeline_len`; i metodi del passo 1 diventano le formule della tabella.
+- `from_source_range` calcola `source_offset = scale_round(source_in)`,
+  `timeline_len = scale_round(source_out) - scale_round(source_in)`:
+  stesso risultato di oggi per ogni clip creata da un intervallo sorgente.
+- Rimuovere `source_frame_of` libera: `resolve_overlap` e
+  `make_room_for_ranges` non hanno più bisogno di convertire.
+- Aggiungere `Clip::retime` e usarlo in `refresh_clip_rates`.
+- Aggiornare il commento su `Clip::rate`: la fonte di verità ora è
+  `source_offset` + `timeline_len`.
 
-### 3. Trim (`vv-core/src/command.rs`, `TrimClip`)
+### 3. Comandi (`vv-core/src/command.rs`)
 
-È il punto centrale. `TrimClip::new_value` è un frame *sorgente*; il
-chiamante (`timeline_ui`) parte però da un frame di *timeline* e lo
-converte con `source_frame_at`, perdendo lì la precisione.
+- **`TrimClip`**: `new_value` diventa la posizione di **timeline** del
+  bordo. Formule della sezione "Operazioni". `old` diventa
+  `(timeline_start, source_offset, timeline_len)`.
+- **`SplitClip`**: formule della sezione "Operazioni". Via la scelta del
+  bordo più vicino e i suoi commenti; `original_source_out` diventa
+  `original_len`. La metà destra parte da `split_at`, non da
+  `clip.timeline_end()`.
+- **`resolve_overlap` / `make_room_for_ranges`**: passano posizioni di
+  timeline a `TrimClip`/`SplitClip`; spariscono le `source_at(...)`.
 
-- Portare `TrimClip` a ricevere **anche** la posizione di timeline del
-  bordo (`new_timeline_value`), o a riceverla al posto del frame sorgente
-  e derivarsi il sorgente da sé.
-- `TrimEdge::End`: `source_out = source_frame_at(bordo)`,
-  `timeline_len = bordo - timeline_start`.
-- `TrimEdge::Start`: la fine resta ferma → `source_in = source_frame_at(bordo)`,
-  `timeline_start = bordo`, `timeline_len = vecchia fine - bordo`.
-- `old` diventa `(source_in, source_out, timeline_start, timeline_len)`.
+### 4. UI (`vv-app`)
 
-Da qui il bordo di un trim cade esattamente dove l'utente lo lascia, e
-sparisce anche il clamp "almeno 1 frame" espresso in frame sorgente.
+- `split_at_playhead` (`main.rs`): togliere lo spostamento della testina
+  sul taglio eseguito.
+- `timeline_ui::single_trim_range`: i limiti sono gli invarianti di
+  dominio, in frame di timeline (`timeline_start - source_offset` per
+  l'inizio, `scale_round(duration_frames)` per la fine); il chiamante
+  passa la posizione di timeline a `TrimClip`, senza convertirla.
+- `ClipboardEntry`: `source_offset` + `timeline_len` al posto di
+  `source_in`/`source_out`; all'incolla, `retime` se l'fps della timeline
+  di destinazione differisce (anche `relative_start`).
+- `map_source_ranges_to_timeline` (`main.rs`): usa `source_in()` /
+  `source_out()`; verificare che `source_out() - 1` resti l'ultimo frame
+  sorgente mostrato.
 
-### 4. Split (`vv-core/src/command.rs`, `SplitClip`)
+### 5. Audio (`vv-audio/src/mixer.rs`)
 
-- Metà sinistra: `source_out = source_frame_at(split_at)` (il frame che
-  *copre* `split_at`, cioè il `floor`), `timeline_len = split_at - timeline_start`.
-- Metà destra: `source_in` = lo stesso frame sorgente (è quello che si
-  vede a `split_at`), `timeline_start = split_at`,
-  `timeline_len = vecchia fine - split_at`.
-- Rimuovere la scelta del bordo più vicino e il commento che la spiega:
-  non serve più.
-- `undo` ripristina `source_out` **e** `timeline_len` della sinistra.
+- `source_offset` del buffer da `clip.source_offset / fps_timeline`
+  invece che da `source_in / fps_media`: l'audio segue il taglio al
+  campione, non al frame sorgente.
+- Gain keyframeato (`block_gain_linear`): i keyframe restano in frame
+  sorgente, ma la base diventa il secondo esatto nel media
+  (`source_offset / fps_timeline + secs`, poi `* fps_media`, floor) invece
+  di `source_in + round(secs * fps_media)`, così coincide con il frame
+  video mostrato anche dopo uno split a metà frame sorgente.
 
-Nota: le due metà condividono un frame sorgente (quello a cavallo del
-taglio). È corretto — è lo stesso frame, mostrato per una parte del suo
-tempo a sinistra e per il resto a destra.
+### 6. Test
 
-### 5. Testina e UI (`vv-app`)
+- **Contenuto dopo split** (il test che scopre il bug di fase): per
+  `rate` ∈ {`1/1`, `1001/1000`, `6/5`, `5/6`} e **ogni** `split_at` nel
+  corpo della clip, per **ogni** `t` della clip originale,
+  `source_frame_at(t)` della metà che contiene `t` è uguale a quello
+  dell'originale. Sostituisce
+  `split_clip_on_a_conformed_clip_cuts_at_the_nearest_source_boundary`
+  (`vv-core/src/lib.rs`).
+- **Split esatto**: la metà destra comincia a `split_at`, la sinistra
+  finisce lì.
+- **Trim esatto**: stesso schema del test di contenuto, per i due bordi.
+- **Undo**: split + undo e trim + undo tornano alla clip identica.
+- **Invarianti**: dopo ogni comando, `timeline_len >= 1` e i limiti del
+  media rispettati.
+- **`retime`**: 30 → 25 → 30 torna ai valori di partenza entro un frame;
+  l'incolla su timeline a fps diverso conserva la durata in secondi.
+- **Audio**: l'offset nel buffer della metà destra coincide con il
+  campione che l'originale suonava a `split_at`.
 
-- `split_at_playhead`: togliere lo spostamento della testina sul taglio
-  (`main.rs`, blocco "Il taglio può cadere un frame più in là"): non ci
-  sarà più niente da compensare.
-- `timeline_ui::single_trim_range`: i limiti restano quelli di oggi
-  (sorgente e bordo opposto), ma il minimo "almeno 1 frame di contenuto"
-  si esprime ora in frame di timeline.
-- `make_room_for_ranges`/`resolve_overlap` (`command.rs`): usano
-  `TrimClip` e `SplitClip` con posizioni di *timeline* — vanno adeguati
-  alla firma nuova, e diventano più semplici (spariscono le conversioni
-  `source_at(...)`).
-
-### 6. Verifica
-
-Test nuovi:
-
-- **Invariante**: dopo un trim/split qualsiasi, `timeline_end()` della
-  metà sinistra `==` `timeline_start` della destra (già coperto), e
-  `timeline_len > 0` per ogni clip.
-- **Split esatto**: su clip conformata `rate = 1001/1000` e `rate = 6/5`,
-  per *ogni* `split_at` nel corpo della clip, la metà destra comincia
-  esattamente a `split_at`. È il test che oggi fallisce e che tollera ±1
-  (`vv-core/src/lib.rs`, `split_clip_on_a_conformed_clip_cuts_at_the_nearest_source_boundary`):
-  va stretto a uguaglianza e rinominato.
-- **Trim esatto**: stesso schema per i due bordi.
-- **Copertura**: split + undo riporta alla durata originale; split di una
-  clip conformata copre esattamente l'originale (test già esistente).
-- **Round-trip**: salva/carica un progetto con clip conformate e durate
-  non derivabili, e verifica che le durate sopravvivano.
-
-Verifica manuale: un export di un tratto con clip conformate prima e dopo
-la modifica, confrontando durata totale e punti di taglio.
+Verifica manuale: export di un tratto con clip conformate e split, prima e
+dopo, confrontando durata totale e punti di taglio (video e audio).
 
 ## Alternative scartate
 
-- **Lasciare tutto com'è.** Accettabile per media 29,97 su timeline 30
-  (1 posizione su 1000), fastidioso per 25 su 30 (1 su 6). È lo stato
-  attuale di `master`.
-- **Agganciare la testina ai bordi di frame sorgente.** La linea non
-  potrebbe mai fermarsi dove non si può tagliare, quindi taglio e linea
-  coinciderebbero sempre. Ma il passo della testina diventerebbe
-  irregolare e dipendente dalla clip sotto di essa — peggio, con più clip
-  a rate diversi sotto track diverse non esiste un unico passo giusto.
-- **Timeline sempre all'fps del media.** Elimina il problema alla radice
-  ma rinuncia al montaggio multi-sorgente, che è il punto dell'editor.
+- **Lasciare tutto com'è.** Accettabile a 29,97/30, fastidioso a 25/30.
+  È lo stato attuale di `master`.
+- **Aggiungere `timeline_len` accanto a `source_in`/`source_out`.** Perde
+  la fase e introduce stato ridondante (vedi sopra).
+- **Tempo in tick o secondi razionali (stile Premiere/FCPXML).** Più
+  generale, ma ogni posizione che l'utente sceglie è comunque un frame di
+  timeline: i frame di timeline bastano e restano interi. Da riconsiderare
+  solo se una timeline dovrà poter cambiare fps a progetto avviato.
+- **Agganciare la testina ai bordi di frame sorgente.** Passo irregolare e
+  dipendente dalla clip; con più track a rate diversi non esiste un passo
+  giusto.
+- **Timeline sempre all'fps del media.** Rinuncia al montaggio
+  multi-sorgente.
 
 ## Domande aperte
 
-1. La durata memorizzata sopravvive a un cambio di fps del media
-   (`refresh_clip_rates`), o viene ricalcolata? (proposta: ricalcolata)
-2. `timeline_len` pubblico e scrivibile, o privato con setter che
-   impediscano lo zero/negativo?
-3. Vale la pena estendere lo stesso trattamento alla *speed* keyframeata
-   (`effects.speed`), che oggi non entra nel calcolo della durata?
+1. **Campi pubblici o privati?** Proposta: pubblici per ora (i test usano
+   struct literal), con `from_source_range` come unico costruttore da
+   media e un `debug_assert` degli invarianti nei `Command::apply`.
+2. **`rate` resta memorizzato?** È derivabile da fps della timeline e del
+   media: memorizzarlo è una cache. Tenerlo semplifica `source_frame_at`
+   (nessun accesso al media pool); ricalcolarlo lo toglie dalle cose che
+   `retime` deve aggiornare. Proposta: tenerlo.
+3. **Speed keyframeata** (`effects.speed`): fuori da questo lavoro. La
+   rappresentazione è quella giusta per affrontarla dopo (durata esplicita,
+   posizione sorgente = offset + ∫speed), come in OTIO.
