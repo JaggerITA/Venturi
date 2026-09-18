@@ -165,8 +165,9 @@ pub fn generate_waveform(
         }
     };
 
-    let total_samples = (audio_duration_secs * sample_rate as f64) as usize;
-    let samples_per_bin = (total_samples / num_peaks).max(1);
+    // Frazionario: il disegno colloca il bin `i` a `i * durata / num_peaks`,
+    // e un troncamento qui accumulerebbe ritardo lungo tutto il file.
+    let samples_per_bin = (audio_duration_secs * sample_rate as f64 / num_peaks as f64).max(1.0);
 
     let mut peaks = vec![0.0_f32; num_peaks];
     let mut global_sample = 0usize;
@@ -253,7 +254,9 @@ const PEAKS_MAGIC: &[u8; 4] = b"vbwf";
 // v3: la durata audio è riscalata dal time_base della stream (v2 la
 // divideva per AV_TIME_BASE, sbagliando di ~sample_rate volte e
 // comprimendo i picchi nei primi bin — waveform desincronizzata).
-const PEAKS_VERSION: u32 = 3;
+// v4: bin di `total_samples / num_peaks` campioni *frazionari* (v3 li
+// troncava all'intero: la waveform scivolava in ritardo lungo il file).
+const PEAKS_VERSION: u32 = 4;
 
 fn write_peaks_file(path: &Path, peaks: &[f32], audio_duration_secs: f64) -> Result<(), crate::MediaError> {
     let mut bytes = Vec::with_capacity(20 + peaks.len() * 4);
@@ -312,7 +315,7 @@ fn push_resampled_peaks(
     decoded: &mut ffmpeg::frame::Audio,
     peaks: &mut [f32],
     global_sample: &mut usize,
-    samples_per_bin: usize,
+    samples_per_bin: f64,
     num_peaks: usize,
 ) -> Result<(), crate::MediaError> {
     let mut resampled = ffmpeg::frame::Audio::empty();
@@ -324,7 +327,7 @@ fn push_resampled_peaks(
     // dà i 4 byte di ogni campione f32 senza copie; raggruppati poi a
     // `channels` alla volta (un frame interleaved L,R,L,R,...).
     for frame in bytes.as_chunks::<4>().0.chunks_exact(channels.max(1)) {
-        let bin = (*global_sample / samples_per_bin).min(num_peaks - 1);
+        let bin = ((*global_sample as f64 / samples_per_bin) as usize).min(num_peaks - 1);
         for chunk in frame {
             let value = f32::from_ne_bytes(*chunk);
             let abs = value.abs();
@@ -503,6 +506,39 @@ mod tests {
     /// dei canali stereo — bbb_sunflower con traccia AC-3 5.1): verifica
     /// che il fix `chunks_exact(channels)` regga anche channels > 2, non
     /// solo il caso a 2 canali già coperto.
+    /// Con un numero di campioni per bin non intero (il caso normale: i
+    /// bin vengono dalla durata del video) la posizione dei picchi non
+    /// deve scivolare lungo il file.
+    #[test]
+    fn peaks_stay_aligned_when_samples_per_bin_is_fractional() {
+        let dir = std::env::temp_dir().join("vv-media-waveform-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tono_a_8s.wav");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi"])
+            .args(["-i", "aevalsrc=exprs='if(lt(t,8),0,sin(2*PI*440*t))':s=48000:d=10"])
+            .arg(&path)
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let content_hash = 0xF4AC7;
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
+        // 480000 campioni / 250000 bin = 1,92 campioni per bin.
+        let num_peaks = 250_000;
+        let wf = generate_waveform(&path, content_hash, 0, num_peaks)
+            .expect("generazione waveform fallita")
+            .expect("audio atteso");
+        let first_loud_bin = wf.peaks.iter().position(|&p| p > 0.3).expect("tono atteso");
+        let expected = num_peaks * 8 / 10;
+        assert!(
+            // Il seno parte da 0: supera la soglia qualche campione dopo.
+            first_loud_bin.abs_diff(expected) <= 5,
+            "tono al bin {first_loud_bin}, atteso {expected} (8 s su 10)"
+        );
+        let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
+    }
+
     #[test]
     fn six_channel_audio_peaks_are_not_compressed_into_the_first_half_of_bins() {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
