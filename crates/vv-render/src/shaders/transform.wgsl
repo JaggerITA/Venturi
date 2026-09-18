@@ -24,8 +24,10 @@ struct TransformUniform {
     //    vv_media::ColorMatrix). y: 1.0 se range full (JPEG), 0.0 se
     //    limited (MPEG) — vedi vv_media::FrameYuv420::full_range.
     //    z: aspect ratio dell'output (w/h), serve a far ruotare senza
-    //    deformare. w inutilizzato, per l'allineamento a 16 byte.
+    //    deformare. w: 1.0 se il layer è un colore pieno (`solid`).
     color: vec4<f32>,
+    // RGBA del layer a colore pieno, al posto dei piani Y/U/V.
+    solid: vec4<f32>,
 };
 
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
@@ -165,5 +167,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let matrix_id = i32(transform.color.x);
     let full_range = transform.color.y > 0.5;
     let rgb = yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range);
+    if (transform.color.w > 0.5) {
+        return vec4<f32>(transform.solid.rgb, alpha * transform.solid.a);
+    }
     return vec4<f32>(rgb, alpha);
 }

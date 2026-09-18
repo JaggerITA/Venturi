@@ -37,6 +37,17 @@ const BLACK: wgpu::Color = wgpu::Color {
     b: 0.0,
     a: 1.0,
 };
+const SOLID_PLACEHOLDER: YuvFrame<'static> = YuvFrame {
+    y: &[0],
+    width: 1,
+    height: 1,
+    u: &[128],
+    v: &[128],
+    chroma_width: 1,
+    chroma_height: 1,
+    matrix: ColorMatrix::Bt601,
+    full_range: true,
+};
 /// Formato dei tre piani di input (Y/U/V): un solo canale 8 bit, letto
 /// come `.r` nello shader.
 const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
@@ -95,8 +106,8 @@ impl<'a> YuvFrame<'a> {
 
 /// Un livello dello stack di compositing, dal basso verso l'alto (vedi
 /// [`Compositor::render_layers`]): una track video con una clip Media
-/// (`Video`) o con una clip generatore a colore pieno (`Solid`, che
-/// copre il frame intero e quindi occlude tutto ciò che sta sotto).
+/// (`Video`) o con una clip generatore a colore pieno (`Solid`, trattata
+/// come un sorgente grande quanto la timeline: stesso transform/crop).
 pub enum Layer<'a> {
     Video {
         frame: YuvFrame<'a>,
@@ -106,7 +117,10 @@ pub enum Layer<'a> {
         /// proxy a risoluzione ridotta.
         source_size: (u32, u32),
     },
-    Solid(vv_core::Rgba),
+    Solid {
+        color: vv_core::Rgba,
+        transform: Transform,
+    },
 }
 
 /// Il frame di output di una composizione: la risoluzione in pixel della
@@ -150,6 +164,7 @@ struct TransformUniform {
     fit_rot: [f32; 4],
     anchor_flip: [f32; 4],
     color: [f32; 4],
+    solid: [f32; 4],
 }
 
 impl TransformUniform {
@@ -160,6 +175,7 @@ impl TransformUniform {
         fit: [f32; 2],
         output: OutputFrame,
         source_size: (u32, u32),
+        solid: Option<vv_core::Rgba>,
     ) -> Self {
         // Il `Transform` è in pixel — di timeline per posizione e anchor,
         // del media per il crop; lo shader lavora in coordinate
@@ -203,8 +219,16 @@ impl TransformUniform {
                 matrix.shader_id(),
                 if full_range { 1.0 } else { 0.0 },
                 output.width as f32 / output.height.max(1) as f32,
-                0.0,
+                if solid.is_some() { 1.0 } else { 0.0 },
             ],
+            solid: solid.map_or([0.0; 4], |c| {
+                [
+                    c.r.clamp(0.0, 1.0),
+                    c.g.clamp(0.0, 1.0),
+                    c.b.clamp(0.0, 1.0),
+                    c.a.clamp(0.0, 1.0),
+                ]
+            }),
         }
     }
 }
@@ -477,34 +501,35 @@ impl Compositor {
             self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(BLACK), None);
         }
         for (i, layer) in layers.iter().enumerate() {
-            match layer {
-                // Un colore pieno copre tutto il frame: è il clear del
-                // pass, nessun draw (e nessun layer sotto sopravvive,
-                // giustamente — è opaco).
-                Layer::Solid(color) => {
-                    let clear = wgpu::Color {
-                        r: color.r.clamp(0.0, 1.0) as f64,
-                        g: color.g.clamp(0.0, 1.0) as f64,
-                        b: color.b.clamp(0.0, 1.0) as f64,
-                        a: color.a.clamp(0.0, 1.0) as f64,
-                    };
-                    self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
-                }
+            let load = if i == 0 {
+                wgpu::LoadOp::Clear(BLACK)
+            } else {
+                wgpu::LoadOp::Load
+            };
+            let bind_group = match layer {
                 Layer::Video {
                     frame,
                     transform,
                     source_size,
-                } => {
-                    let load = if i == 0 {
-                        wgpu::LoadOp::Clear(BLACK)
-                    } else {
-                        wgpu::LoadOp::Load
-                    };
-                    let bind_group =
-                        self.layer_bind_group(frame, transform, output, *source_size);
-                    self.pass(&mut encoder, &output_view, load, Some(&bind_group));
-                }
-            }
+                } => self.layer_bind_group(
+                    frame,
+                    transform,
+                    output,
+                    *source_size,
+                    (frame.width, frame.height),
+                    None,
+                ),
+                // Il colore arriva dall'uniform: i piani sono solo segnaposto.
+                Layer::Solid { color, transform } => self.layer_bind_group(
+                    &SOLID_PLACEHOLDER,
+                    transform,
+                    output,
+                    output.timeline_size,
+                    output.timeline_size,
+                    Some(*color),
+                ),
+            };
+            self.pass(&mut encoder, &output_view, load, Some(&bind_group));
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -520,6 +545,8 @@ impl Compositor {
         transform: &Transform,
         output: OutputFrame,
         source_size: (u32, u32),
+        fit_size: (u32, u32),
+        solid: Option<vv_core::Rgba>,
     ) -> wgpu::BindGroup {
         let plane_texture = |label: &str, data: &[u8], w: u32, h: u32| {
             self.device.create_texture_with_data(
@@ -564,11 +591,12 @@ impl Compositor {
             frame.matrix,
             frame.full_range,
             fit_factors(
-                (frame.width as f32, frame.height as f32),
+                (fit_size.0.max(1) as f32, fit_size.1.max(1) as f32),
                 (output.width as f32, output.height as f32),
             ),
             output,
             source_size,
+            solid,
         );
         let uniform_buffer = self
             .device
@@ -1240,16 +1268,43 @@ mod tests {
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
                 },
-                Layer::Solid(vv_core::Rgba {
-                    r: 1.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 1.0,
-                }),
+                Layer::Solid {
+                    color: RED,
+                    transform: Transform::default(),
+                },
             ],
             OutputFrame::exact(16, 16),
         );
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
+    }
+
+    const RED: vv_core::Rgba = vv_core::Rgba {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+
+    #[test]
+    fn a_solid_layer_is_cropped_and_moved_like_a_video_layer() {
+        let compositor = Compositor::new_headless();
+        // Crop in pixel di timeline: metà destra tagliata, poi spostata
+        // di un quarto a destra.
+        let out = compositor.render_layers(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform {
+                    crop: [0.0, 0.0, 8.0, 0.0],
+                    position: [4.0, 0.0],
+                    ..Transform::default()
+                },
+            }],
+            OutputFrame::scaled(8, 4, (16, 8)),
+        );
+        let px = |x: usize, y: usize| &out[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
+        assert_eq!(px(1, 2), &[0, 0, 0, 255], "a sinistra resta scoperto");
+        assert_eq!(px(3, 2), &[255, 0, 0, 255]);
+        assert_eq!(px(6, 2), &[0, 0, 0, 255], "oltre il crop");
     }
 
     #[test]

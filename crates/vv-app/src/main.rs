@@ -197,7 +197,10 @@ enum PreviewLayer {
         /// Risoluzione nativa del media (non del proxy): le unità del crop.
         source_size: (u32, u32),
     },
-    Solid(vv_core::Rgba),
+    Solid {
+        color: vv_core::Rgba,
+        transform: vv_core::Transform,
+    },
 }
 
 /// Quale rappresentazione di texture del viewer è quella corrente — vedi
@@ -222,7 +225,7 @@ struct VibeVideoApp {
 
     preview_meta: Option<vv_core::MediaMeta>,
     preview_error: Option<String>,
-    /// Texture per il frame di colore solido (clip SolidColor, o vuoto):
+    /// Texture per il frame nero di un vuoto sulla track video:
     /// gestita da egui (`ctx.load_texture`/`TextureHandle::set`) — non fa
     /// parte del round-trip GPU eliminato dal path video sotto, è
     /// un'immagine sintetica generata su CPU, niente da guadagnare a
@@ -1764,6 +1767,7 @@ impl VibeVideoApp {
     fn timeline_video_layers(&mut self) -> Option<Vec<PreviewLayer>> {
         let timeline_id = self.timeline_id?;
         let playhead = self.timeline_state.playhead;
+        let timeline_size = self.project.timelines[timeline_id].resolution;
         let clips: Vec<vv_core::Clip> = self.project.timelines[timeline_id]
             .active_video_clips_at(playhead)
             .into_iter()
@@ -1776,8 +1780,10 @@ impl VibeVideoApp {
             match &clip.source {
                 vv_core::ClipSource::SolidColor => {
                     let local_frame = (playhead - clip.timeline_start).max(0);
-                    layers.push(PreviewLayer::Solid(
-                        clip.effects
+                    let timeline_frame = playhead.max(clip.timeline_start);
+                    layers.push(PreviewLayer::Solid {
+                        color: clip
+                            .effects
                             .color
                             .as_ref()
                             .map(|k| k.value_at(local_frame))
@@ -1787,7 +1793,11 @@ impl VibeVideoApp {
                                 b: 0.0,
                                 a: 1.0,
                             }),
-                    ));
+                        transform: clip
+                            .effects
+                            .transform
+                            .value_at(clip.source_frame_at(timeline_frame)),
+                    });
                 }
                 vv_core::ClipSource::Media(_) => {
                     // Stessa interfaccia dell'export per procurare il frame
@@ -1806,7 +1816,11 @@ impl VibeVideoApp {
                         Some(frame) => layers.push(PreviewLayer::Video {
                             frame,
                             transform,
-                            source_size: frame_provider::clip_source_size(&self.project, clip),
+                            source_size: frame_provider::clip_source_size(
+                                &self.project,
+                                clip,
+                                timeline_size,
+                            ),
                         }),
                         None if i == topmost => return None,
                         None => {}
@@ -1891,7 +1905,7 @@ impl VibeVideoApp {
         let frame = target.source_frame;
         Some(ClipPanelInfo {
             is_solid_color: target.is_solid_color,
-            source_size: frame_provider::clip_source_size(&self.project, clip),
+            source_size: frame_provider::clip_source_size(&self.project, clip, timeline_size),
             timeline_size,
             params: vv_core::TransformParam::ALL
                 .iter()
@@ -5045,19 +5059,23 @@ impl eframe::App for VibeVideoApp {
                     .iter()
                     .filter_map(|l| match l {
                         PreviewLayer::Video { frame, .. } => Some((frame.width, frame.height)),
-                        PreviewLayer::Solid(_) => None,
+                        PreviewLayer::Solid { .. } => None,
                     })
                     .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
+                let timeline_size = self
+                    .timeline_id
+                    .map(|id| self.project.timelines[id].resolution);
+                // Con sole clip SolidColor si compone alla risoluzione
+                // della timeline.
+                let composite_size = video_size.or(timeline_size.filter(|_| !layers.is_empty()));
 
-                match video_size {
+                match composite_size {
                     Some(size) => {
                         // Compositing alla risoluzione del frame decodificato
                         // (proxy compreso) allargata all'aspect della
                         // timeline: le bande si vedono già in editing senza
                         // upscalare il contenuto.
-                        let timeline_size = self
-                            .timeline_id
-                            .map_or(size, |id| self.project.timelines[id].resolution);
+                        let timeline_size = timeline_size.unwrap_or(size);
                         let (out_w, out_h) = vv_render::fit_output_size(size, timeline_size);
                         let render_layers: Vec<vv_render::Layer> = layers
                             .iter()
@@ -5071,7 +5089,12 @@ impl eframe::App for VibeVideoApp {
                                     transform: *transform,
                                     source_size: *source_size,
                                 },
-                                PreviewLayer::Solid(rgba) => vv_render::Layer::Solid(*rgba),
+                                PreviewLayer::Solid { color, transform } => {
+                                    vv_render::Layer::Solid {
+                                        color: *color,
+                                        transform: *transform,
+                                    }
+                                }
                             })
                             .collect();
                         self.show_composited(
@@ -5079,20 +5102,14 @@ impl eframe::App for VibeVideoApp {
                             vv_render::OutputFrame::scaled(out_w, out_h, timeline_size),
                         );
                     }
-                    // Nessun frame decodificato da comporre (solo clip
-                    // SolidColor, o un vuoto sulla track video — che come in
-                    // un vero NLE mostra nero, non l'ultimo frame rimasto):
-                    // immagine sintetica su CPU, niente da guadagnare a
-                    // tenerla sulla GPU.
+                    // Vuoto sulla track video: come in un vero NLE si vede
+                    // nero, non l'ultimo frame rimasto.
                     None => {
-                        let rgba = match layers.last() {
-                            Some(PreviewLayer::Solid(rgba)) => *rgba,
-                            _ => vv_core::Rgba {
-                                r: 0.0,
-                                g: 0.0,
-                                b: 0.0,
-                                a: 1.0,
-                            },
+                        let rgba = vv_core::Rgba {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
                         };
                         let (w, h) = self
                             .timeline_id

@@ -253,7 +253,7 @@ fn render_video_frame(
                 // che un panic o il congelamento dell'ultimo frame valido.
                 decoded.push((
                     provider.frame_for(project, clip, frame)?,
-                    Some((transform, clip_source_size(project, clip))),
+                    Some((transform, clip_source_size(project, clip, resolution))),
                 ));
             }
             ClipSource::SolidColor => decoded.push((None, None)),
@@ -272,8 +272,9 @@ fn render_video_frame(
             (None, Some(_)) => None,
             _ => {
                 let local = frame - clip.timeline_start;
-                Some(vv_render::Layer::Solid(
-                    clip.effects
+                Some(vv_render::Layer::Solid {
+                    color: clip
+                        .effects
                         .color
                         .as_ref()
                         .map(|k| k.value_at(local))
@@ -283,7 +284,8 @@ fn render_video_frame(
                             b: 0.0,
                             a: 1.0,
                         }),
-                ))
+                    transform: clip.effects.transform.value_at(clip.source_frame_at(frame)),
+                })
             }
         })
         .collect();
@@ -471,6 +473,29 @@ mod tests {
                 .iter()
                 .all(|px| px == &[255, 0, 0, 255])
         );
+    }
+
+    #[test]
+    fn render_video_frame_applies_the_transform_to_a_solid_color_clip() {
+        let project = Project::default();
+        let mut clip = solid_color_clip(1, 0, 5, red());
+        // Crop in pixel di timeline (4x2): via la metà destra.
+        clip.effects.transform = vv_core::TransformTracks::constant(vv_core::Transform {
+            crop: [0.0, 0.0, 2.0, 0.0],
+            ..Default::default()
+        });
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![clip],
+            muted: false,
+        }]);
+        let compositor = vv_render::Compositor::new_headless();
+        let mut active = StreamingFrameProvider::default();
+        let frame =
+            render_video_frame(&project, &tl, &compositor, &mut active, 0, (4, 2)).unwrap();
+        let px = frame.as_chunks::<4>().0;
+        assert_eq!(px[0], [255, 0, 0, 255]);
+        assert_eq!(px[3], [0, 0, 0, 255]);
     }
 
     /// `FrameProvider::frame_for` (REFACTOR_PIPELINE.md B1, doc lì): un

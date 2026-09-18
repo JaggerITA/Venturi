@@ -1,9 +1,6 @@
-//! Clip "generatore", cioè senza un frame sorgente decodificato: per ora
-//! solo `SolidColor` (milestone 6). Un riempimento uniforme non ha nulla
-//! da campionare, quindi qui si genera il buffer RGBA direttamente su CPU
-//! invece di passare dal compositor GPU — più semplice e altrettanto
-//! corretto per un colore piatto (il crop/zoom di un colore piatto è un
-//! no-op visivo).
+//! Buffer RGBA di colore pieno generato su CPU: usato dal viewer quando
+//! non c'è nessun layer da comporre. Le clip `SolidColor` passano invece
+//! dal compositor (`Layer::Solid`), per avere transform e crop.
 
 use vv_core::Rgba;
 
