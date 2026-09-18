@@ -121,6 +121,21 @@ pub enum Layer<'a> {
         color: vv_core::Rgba,
         transform: Transform,
     },
+    /// Titolo: rasterizzato alla risoluzione di output (vedi `text`), poi
+    /// trattato come un `Solid` grande quanto la timeline.
+    Text {
+        title: &'a vv_core::TitleParams,
+        transform: Transform,
+    },
+}
+
+/// Cosa colora un layer: i piani Y/U/V, un colore pieno, o un colore
+/// pieno con la copertura presa dal piano Y.
+#[derive(Clone, Copy)]
+enum Fill {
+    Video,
+    Solid(vv_core::Rgba),
+    Mask(vv_core::Rgba),
 }
 
 /// Il frame di output di una composizione: la risoluzione in pixel della
@@ -175,8 +190,13 @@ impl TransformUniform {
         fit: [f32; 2],
         output: OutputFrame,
         source_size: (u32, u32),
-        solid: Option<vv_core::Rgba>,
+        fill: Fill,
     ) -> Self {
+        let (mode, solid) = match fill {
+            Fill::Video => (0.0, None),
+            Fill::Solid(c) => (1.0, Some(c)),
+            Fill::Mask(c) => (2.0, Some(c)),
+        };
         // Il `Transform` è in pixel — di timeline per posizione e anchor,
         // del media per il crop; lo shader lavora in coordinate
         // normalizzate.
@@ -219,7 +239,7 @@ impl TransformUniform {
                 matrix.shader_id(),
                 if full_range { 1.0 } else { 0.0 },
                 output.width as f32 / output.height.max(1) as f32,
-                if solid.is_some() { 1.0 } else { 0.0 },
+                mode,
             ],
             solid: solid.map_or([0.0; 4], |c| {
                 [
@@ -517,7 +537,7 @@ impl Compositor {
                     output,
                     *source_size,
                     (frame.width, frame.height),
-                    None,
+                    Fill::Video,
                 ),
                 // Il colore arriva dall'uniform: i piani sono solo segnaposto.
                 Layer::Solid { color, transform } => self.layer_bind_group(
@@ -526,8 +546,29 @@ impl Compositor {
                     output,
                     output.timeline_size,
                     output.timeline_size,
-                    Some(*color),
+                    Fill::Solid(*color),
                 ),
+                Layer::Text { title, transform } => {
+                    let mask = crate::text::render_title(
+                        title,
+                        output.timeline_size,
+                        (output.width, output.height),
+                    );
+                    let frame = YuvFrame {
+                        y: &mask.data,
+                        width: mask.width,
+                        height: mask.height,
+                        ..SOLID_PLACEHOLDER
+                    };
+                    self.layer_bind_group(
+                        &frame,
+                        transform,
+                        output,
+                        output.timeline_size,
+                        output.timeline_size,
+                        Fill::Mask(title.color),
+                    )
+                }
             };
             self.pass(&mut encoder, &output_view, load, Some(&bind_group));
         }
@@ -546,7 +587,7 @@ impl Compositor {
         output: OutputFrame,
         source_size: (u32, u32),
         fit_size: (u32, u32),
-        solid: Option<vv_core::Rgba>,
+        fill: Fill,
     ) -> wgpu::BindGroup {
         let plane_texture = |label: &str, data: &[u8], w: u32, h: u32| {
             self.device.create_texture_with_data(
@@ -596,7 +637,7 @@ impl Compositor {
             ),
             output,
             source_size,
-            solid,
+            fill,
         );
         let uniform_buffer = self
             .device
@@ -1276,6 +1317,27 @@ mod tests {
             OutputFrame::exact(16, 16),
         );
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn a_text_layer_paints_its_color_only_where_the_glyphs_are() {
+        let compositor = Compositor::new_headless();
+        let title = vv_core::TitleParams {
+            content: "II".into(),
+            color: RED,
+            size: 60.0,
+            ..Default::default()
+        };
+        let out = compositor.render_layers(
+            &[Layer::Text {
+                title: &title,
+                transform: Transform::default(),
+            }],
+            OutputFrame::exact(160, 90),
+        );
+        let pixels = out.as_chunks::<4>().0;
+        assert_eq!(pixels[0], [0, 0, 0, 255], "fuori dal testo resta il nero");
+        assert!(pixels.iter().any(|px| px == &[255, 0, 0, 255]), "nessun pixel del testo");
     }
 
     const RED: vv_core::Rgba = vv_core::Rgba {

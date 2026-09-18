@@ -490,7 +490,7 @@ impl TransformTracks {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rgba {
     pub r: f32,
     pub g: f32,
@@ -509,19 +509,118 @@ impl Lerp for Rgba {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TextOverlay {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HAnchor {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VAnchor {
+    Top,
+    Middle,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FontCase {
+    Mixed,
+    Upper,
+    Lower,
+    Title,
+}
+
+/// Parametri di una clip `ClipSource::Text`. Le misure sono in pixel di
+/// timeline, come quelle del `Transform`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TitleParams {
     pub content: String,
-    pub font_size: f32,
+    /// Vuota = sans-serif di sistema.
+    pub font_family: String,
+    /// 100-900, come in CSS.
+    pub font_weight: u16,
+    pub italic: bool,
     pub color: Rgba,
-    pub transform: Keyframed<Transform>,
-    pub opacity: Keyframed<f32>,
+    pub size: f32,
+    /// Spaziatura fra le lettere, in millesimi di em.
+    pub tracking: f32,
+    /// Spazio extra fra le righe, in pixel.
+    pub line_spacing: f32,
+    pub underline: bool,
+    pub strikethrough: bool,
+    pub case: FontCase,
+    pub align: TextAlign,
+    /// Quale punto del blocco di testo cade su `position`.
+    pub anchor: (HAnchor, VAnchor),
+    /// Dal centro del frame, Y verso l'alto.
+    pub position: [f32; 2],
+}
+
+impl Default for TitleParams {
+    fn default() -> Self {
+        Self {
+            content: "Basic Title".into(),
+            font_family: String::new(),
+            font_weight: 400,
+            italic: false,
+            color: Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            size: 96.0,
+            tracking: 0.0,
+            line_spacing: 0.0,
+            underline: false,
+            strikethrough: false,
+            case: FontCase::Mixed,
+            align: TextAlign::Center,
+            anchor: (HAnchor::Center, VAnchor::Middle),
+            position: [0.0, 0.0],
+        }
+    }
+}
+
+impl TitleParams {
+    /// Il testo da disegnare, con `case` già applicato.
+    pub fn display_text(&self) -> String {
+        match self.case {
+            FontCase::Mixed => self.content.clone(),
+            FontCase::Upper => self.content.to_uppercase(),
+            FontCase::Lower => self.content.to_lowercase(),
+            FontCase::Title => {
+                let mut out = String::with_capacity(self.content.len());
+                let mut word_start = true;
+                for c in self.content.chars() {
+                    if word_start {
+                        out.extend(c.to_uppercase());
+                    } else {
+                        out.extend(c.to_lowercase());
+                    }
+                    word_start = c.is_whitespace();
+                }
+                out
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClipSource {
     Media(MediaId),
     SolidColor,
+    /// Parametri in `EffectStack::title`.
+    Text,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,8 +628,9 @@ pub struct EffectStack {
     pub transform: TransformTracks,
     pub speed: Keyframed<f32>,
     pub gain_db: Keyframed<f32>,
-    pub text: Vec<TextOverlay>,
     pub color: Option<Keyframed<Rgba>>,
+    #[serde(default)]
+    pub title: Option<TitleParams>,
 }
 
 impl Default for EffectStack {
@@ -539,22 +639,22 @@ impl Default for EffectStack {
             transform: TransformTracks::default(),
             speed: Keyframed::constant(1.0),
             gain_db: Keyframed::constant(0.0),
-            text: Vec::new(),
             color: None,
+            title: None,
         }
     }
 }
 
 impl EffectStack {
     /// `true` se nessuna proprietà è stata toccata rispetto al default: la
-    /// timeline disegna più scure le clip per cui è `false`.
+    /// timeline disegna più scure le clip per cui è `false`. Il titolo non
+    /// conta: è il contenuto della clip, non un effetto.
     pub fn is_pristine(&self) -> bool {
         self.transform.is_pristine()
             && self.speed.is_constant()
             && self.speed.default == 1.0
             && self.gain_db.is_constant()
             && self.gain_db.default == 0.0
-            && self.text.is_empty()
             && self.color.is_none()
     }
 }

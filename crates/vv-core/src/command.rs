@@ -3,7 +3,7 @@
 
 use crate::model::{
     Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId,
-    MediaId, MediaItem, Project, Rgba, TimelineId, Track, TrackKind, Transform,
+    MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
     TransformParam,
 };
 use std::cell::{Cell, RefCell};
@@ -1206,6 +1206,48 @@ impl Command for SetClipColor {
                 }
             }
             None => clip.effects.color = None,
+        }
+    }
+}
+
+/// Sostituisce i parametri di una clip di testo.
+#[derive(Debug)]
+pub struct SetClipTitle {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub new_value: TitleParams,
+    old_value: Option<Option<TitleParams>>,
+}
+
+impl SetClipTitle {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, new_value: TitleParams) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            new_value,
+            old_value: None,
+        }
+    }
+}
+
+impl Command for SetClipTitle {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+            return;
+        };
+        self.old_value = Some(clip.effects.title.replace(self.new_value.clone()));
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old) = &self.old_value else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.effects.title = old.clone();
         }
     }
 }

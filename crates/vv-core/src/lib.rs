@@ -8,7 +8,7 @@ pub use command::{
     KeyframeValue,
     LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     RippleDeleteAllTracks,
-    cut_overlaps, make_room_for_ranges, ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain,
+    cut_overlaps, make_room_for_ranges, ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain, SetClipTitle,
     SetClipTransformParam, SplitClip,
     TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,

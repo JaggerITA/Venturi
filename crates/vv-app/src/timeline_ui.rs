@@ -796,16 +796,18 @@ impl MediaDragSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Generator {
     SolidColor,
+    Text,
 }
 
 impl Generator {
-    pub const ALL: [Generator; 1] = [Generator::SolidColor];
+    pub const ALL: [Generator; 2] = [Generator::SolidColor, Generator::Text];
 
     const DEFAULT_SECS: f64 = 5.0;
 
     pub fn label(self) -> &'static str {
         match self {
             Generator::SolidColor => "Solid Color",
+            Generator::Text => "Text",
         }
     }
 
@@ -2537,6 +2539,15 @@ fn clip_label_and_color(
             "Solid Color".to_string(),
             darken_if_edited(egui::Color32::from_rgb(200, 170, 90), clip),
         ),
+        vv_core::ClipSource::Text => (
+            clip.effects
+                .title
+                .as_ref()
+                .and_then(|t| t.content.lines().next())
+                .unwrap_or("Text")
+                .to_string(),
+            darken_if_edited(egui::Color32::from_rgb(170, 110, 200), clip),
+        ),
     }
 }
 
@@ -3185,7 +3196,7 @@ fn media_duration_frames(project: &Project, clip: &Clip) -> Option<FrameIdx> {
             .media_pool
             .get(*media_id)
             .map(|item| item.meta.duration_frames),
-        ClipSource::SolidColor => None,
+        ClipSource::SolidColor | ClipSource::Text => None,
     }
 }
 

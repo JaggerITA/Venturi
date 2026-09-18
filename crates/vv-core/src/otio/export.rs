@@ -129,6 +129,21 @@ fn clip_to_otio(project: &Project, clip: &Clip, fps: Rational) -> Value {
                 }),
             )
         }
+        ClipSource::Text => {
+            let content = clip.effects.title.as_ref().map(|t| t.content.clone());
+            (
+                content.clone().unwrap_or_default(),
+                json!({
+                    "OTIO_SCHEMA": "GeneratorReference.1",
+                    "name": "",
+                    "generator_kind": "Text",
+                    "parameters": { "text": content },
+                    "available_range": null,
+                    "available_image_bounds": null,
+                    "metadata": {},
+                }),
+            )
+        }
     };
 
     json!({

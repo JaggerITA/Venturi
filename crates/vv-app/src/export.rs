@@ -256,7 +256,7 @@ fn render_video_frame(
                     Some((transform, clip_source_size(project, clip, resolution))),
                 ));
             }
-            ClipSource::SolidColor => decoded.push((None, None)),
+            ClipSource::SolidColor | ClipSource::Text => decoded.push((None, None)),
         }
     }
 
@@ -270,6 +270,10 @@ fn render_video_frame(
                 source_size: *source_size,
             }),
             (None, Some(_)) => None,
+            _ if matches!(clip.source, ClipSource::Text) => Some(vv_render::Layer::Text {
+                title: clip.effects.title.as_ref()?,
+                transform: clip.effects.transform.value_at(clip.source_frame_at(frame)),
+            }),
             _ => {
                 let local = frame - clip.timeline_start;
                 Some(vv_render::Layer::Solid {

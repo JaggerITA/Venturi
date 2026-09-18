@@ -127,4 +127,17 @@ mod tests {
 
         assert!(load_project(&path).is_err());
     }
+
+    #[test]
+    fn title_params_survive_save_and_load() {
+        let title = TitleParams {
+            content: "Riga 1\nRiga 2".into(),
+            anchor: (HAnchor::Left, VAnchor::Bottom),
+            case: FontCase::Upper,
+            ..Default::default()
+        };
+        let text = ron::to_string(&title).unwrap();
+        let back: TitleParams = ron::from_str(&text).unwrap();
+        assert_eq!(back, title);
+    }
 }

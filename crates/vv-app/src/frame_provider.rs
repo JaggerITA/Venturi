@@ -62,7 +62,7 @@ pub fn clip_source_size(project: &Project, clip: &Clip, timeline_size: (u32, u32
             .get(*id)
             .map(|m| (m.meta.width, m.meta.height))
             .unwrap_or((1, 1)),
-        ClipSource::SolidColor => timeline_size,
+        ClipSource::SolidColor | ClipSource::Text => timeline_size,
     }
 }
 

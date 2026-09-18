@@ -113,6 +113,7 @@ struct PanelTarget {
     source_frame: FrameIdx,
     timeline_start: FrameIdx,
     is_solid_color: bool,
+    is_text: bool,
 }
 
 /// Lo stato dei keyframe di un parametro, per il suo diamante nel
@@ -133,6 +134,32 @@ enum PropertiesTab {
     Video,
     Audio,
     Selection,
+}
+
+/// Sotto-scheda della scheda Video per le clip di testo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoSubTab {
+    Title,
+    Settings,
+}
+
+/// Font di sistema per il pannello Title, letti la prima volta che servono.
+#[derive(Default)]
+struct FontCatalog {
+    families: Option<Vec<String>>,
+    faces: HashMap<String, Vec<vv_render::text::FontFace>>,
+}
+
+impl FontCatalog {
+    fn families(&mut self) -> &[String] {
+        self.families.get_or_insert_with(vv_render::text::font_families)
+    }
+
+    fn faces(&mut self, family: &str) -> &[vv_render::text::FontFace] {
+        self.faces
+            .entry(family.to_owned())
+            .or_insert_with(|| vv_render::text::font_faces(family))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +184,7 @@ struct ClipPanelInfo {
     color_constant: bool,
     color_kf_here: bool,
     color: vv_core::Rgba,
+    title: Option<vv_core::TitleParams>,
 }
 
 /// Azione differita sugli effetti di una clip, raccolta durante il disegno
@@ -175,6 +203,7 @@ enum PendingEffectChange {
     RemoveTransformKeyframe(usize, ClipId, FrameIdx, vv_core::TransformParam),
     RemoveGainKeyframe(usize, ClipId, FrameIdx),
     RemoveColorKeyframe(usize, ClipId, FrameIdx),
+    SetTitle(usize, ClipId, vv_core::TitleParams),
 }
 
 /// Dove atterrano le clip di un drop dal media pool, risolto una volta per
@@ -199,6 +228,10 @@ enum PreviewLayer {
     },
     Solid {
         color: vv_core::Rgba,
+        transform: vv_core::Transform,
+    },
+    Text {
+        title: vv_core::TitleParams,
         transform: vv_core::Transform,
     },
 }
@@ -415,6 +448,8 @@ struct VibeVideoApp {
 
     /// Scheda aperta nel pannello proprietà.
     properties_tab: PropertiesTab,
+    video_subtab: VideoSubTab,
+    fonts: FontCatalog,
 
     /// Export in corso (milestone 9), se c'è: `None` quando nessun export
     /// è attivo. Il thread lavora su uno snapshot di `Project` clonato al
@@ -511,6 +546,8 @@ impl Default for VibeVideoApp {
             snapping_enabled: true,
             zoom_link: true,
             properties_tab: PropertiesTab::Video,
+            video_subtab: VideoSubTab::Title,
+            fonts: FontCatalog::default(),
             export: None,
             current_project_path: None,
             saved_generation: 0,
@@ -2004,6 +2041,9 @@ impl VibeVideoApp {
                 timeline_ui::Generator::SolidColor => {
                     self.insert_solid_color_clip(timeline_id, tracks.video, start)
                 }
+                timeline_ui::Generator::Text => {
+                    self.insert_text_clip(timeline_id, tracks.video, start)
+                }
             }
         }
         self.history.end_group(group);
@@ -2050,6 +2090,20 @@ impl VibeVideoApp {
             vv_core::Rational::one(),
         );
         clip.effects = effects;
+        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip)]);
+    }
+
+    fn insert_text_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
+        let len = timeline_ui::Generator::Text.default_len(self.project.timelines[timeline_id].fps);
+        let mut clip = vv_core::Clip::from_source_range(
+            self.project.alloc_clip_id(),
+            vv_core::ClipSource::Text,
+            0,
+            len,
+            start,
+            vv_core::Rational::one(),
+        );
+        clip.effects.title = Some(vv_core::TitleParams::default());
         self.insert_clips_overwriting(timeline_id, vec![(track_index, clip)]);
     }
 
@@ -2151,6 +2205,17 @@ impl VibeVideoApp {
                             .value_at(clip.source_frame_at(timeline_frame)),
                     });
                 }
+                vv_core::ClipSource::Text => {
+                    let Some(title) = &clip.effects.title else { continue };
+                    let timeline_frame = playhead.max(clip.timeline_start);
+                    layers.push(PreviewLayer::Text {
+                        title: title.clone(),
+                        transform: clip
+                            .effects
+                            .transform
+                            .value_at(clip.source_frame_at(timeline_frame)),
+                    });
+                }
                 vv_core::ClipSource::Media(_) => {
                     // Stessa interfaccia dell'export per procurare il frame
                     // (`FrameProvider`, REFACTOR_PIPELINE.md B1) — qui backed
@@ -2227,6 +2292,7 @@ impl VibeVideoApp {
                                     .map(|item| file_label(&item.path))
                                     .unwrap_or_else(|| "⚠ offline".to_string()),
                                 vv_core::ClipSource::SolidColor => "Solid Color".to_string(),
+                                vv_core::ClipSource::Text => "Text".to_string(),
                             },
                             clip.timeline_len,
                         ),
@@ -2308,6 +2374,7 @@ impl VibeVideoApp {
                     b: 0.6,
                     a: 1.0,
                 }),
+            title: clip.effects.title.clone(),
         })
     }
 
@@ -2694,7 +2761,7 @@ impl VibeVideoApp {
             .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
             .is_some_and(|c| match &c.source {
                 vv_core::ClipSource::Media(id) => !self.project.media_pool.contains_key(*id),
-                vv_core::ClipSource::SolidColor => false,
+                vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => false,
             })
     }
 
@@ -2854,7 +2921,7 @@ impl VibeVideoApp {
                                 vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
                             })
                         }
-                        vv_core::ClipSource::SolidColor => clip.rate,
+                        vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => clip.rate,
                     };
                     clip.retime(entry.timeline_fps, timeline_fps, rate);
                 }
@@ -3269,6 +3336,16 @@ fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) {
         timeline_ui::Generator::SolidColor => {
             painter.rect_filled(thumb, 2.0, egui::Color32::from_rgb(106, 176, 204));
         }
+        timeline_ui::Generator::Text => {
+            painter.rect_filled(thumb, 2.0, egui::Color32::BLACK);
+            painter.text(
+                thumb.center(),
+                egui::Align2::CENTER_CENTER,
+                "Title",
+                egui::FontId::proportional(11.0),
+                egui::Color32::WHITE,
+            );
+        }
     }
     painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
     painter.text(
@@ -3437,6 +3514,300 @@ fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab) {
             }
         }
     });
+}
+
+/// Title/Settings della scheda Video di una clip di testo: due metà a
+/// tutta larghezza.
+fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
+    ui.columns(2, |cols| {
+        for (col, (tab, label)) in cols
+            .iter_mut()
+            .zip([(VideoSubTab::Title, "Title"), (VideoSubTab::Settings, "Settings")])
+        {
+            let button = egui::Button::selectable(*current == tab, label)
+                .min_size(egui::vec2(col.available_width(), 22.0));
+            if col.add(button).clicked() {
+                *current = tab;
+            }
+        }
+    });
+}
+
+/// Pulsante di allineamento del testo: righe disegnate come l'icona
+/// classica, più corte dove il testo non arriva al margine.
+fn text_align_button(ui: &mut egui::Ui, selected: bool, align: vv_core::TextAlign) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 20.0), egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, selected);
+    let painter = ui.painter();
+    if selected || response.hovered() {
+        painter.rect_filled(rect, 3.0, visuals.weak_bg_fill);
+    }
+    let area = rect.shrink2(egui::vec2(6.0, 5.0));
+    for (i, full) in [true, false, true, false].into_iter().enumerate() {
+        let y = area.top() + i as f32 * area.height() / 3.0;
+        let w = if full || align == vv_core::TextAlign::Justify {
+            area.width()
+        } else {
+            area.width() * 0.6
+        };
+        let x0 = match align {
+            vv_core::TextAlign::Left | vv_core::TextAlign::Justify => area.left(),
+            vv_core::TextAlign::Center => area.center().x - w / 2.0,
+            vv_core::TextAlign::Right => area.right() - w,
+        };
+        painter.line_segment(
+            [egui::pos2(x0, y), egui::pos2(x0 + w, y)],
+            egui::Stroke::new(1.5, visuals.fg_stroke.color),
+        );
+    }
+    response
+}
+
+/// Scheda Title: modifica `title` in place, `true` se è cambiato qualcosa.
+fn title_editor(
+    ui: &mut egui::Ui,
+    title: &mut vv_core::TitleParams,
+    timeline_size: (u32, u32),
+    fonts: &mut FontCatalog,
+) -> bool {
+    use vv_core::{FontCase, HAnchor, TextAlign, VAnchor};
+    let defaults = vv_core::TitleParams::default();
+    let before = title.clone();
+    let (frame_w, frame_h) = (timeline_size.0 as f32, timeline_size.1 as f32);
+
+    ui.label(egui::RichText::new("Testo").strong());
+    ui.add(
+        egui::TextEdit::multiline(&mut title.content)
+            .desired_rows(4)
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(4.0);
+
+    let row = param_row(ui, "Font", None, |ui| {
+        let shown = if title.font_family.is_empty() {
+            "Sans-serif"
+        } else {
+            title.font_family.as_str()
+        };
+        let mut changed = false;
+        egui::ComboBox::from_id_salt("title_font_family")
+            .selected_text(shown)
+            .width(ui.available_width())
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut title.font_family, String::new(), "Sans-serif")
+                    .changed();
+                for family in fonts.families() {
+                    changed |= ui
+                        .selectable_value(&mut title.font_family, family.clone(), family)
+                        .changed();
+                }
+            });
+        changed
+    });
+    if row.reset {
+        title.font_family = defaults.font_family.clone();
+    }
+
+    let row = param_row(ui, "Stile", None, |ui| {
+        let mut faces = fonts.faces(&title.font_family).to_vec();
+        if faces.is_empty() {
+            faces = [(400, false), (700, false), (400, true), (700, true)]
+                .into_iter()
+                .map(|(weight, italic)| vv_render::text::FontFace {
+                    weight,
+                    italic,
+                    name: vv_render::text::face_name(weight, italic),
+                })
+                .collect();
+        }
+        let mut changed = false;
+        egui::ComboBox::from_id_salt("title_font_face")
+            .selected_text(vv_render::text::face_name(title.font_weight, title.italic))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for face in &faces {
+                    let selected = face.weight == title.font_weight && face.italic == title.italic;
+                    if ui.selectable_label(selected, &face.name).clicked() {
+                        title.font_weight = face.weight;
+                        title.italic = face.italic;
+                        changed = true;
+                    }
+                }
+            });
+        changed
+    });
+    if row.reset {
+        title.font_weight = defaults.font_weight;
+        title.italic = defaults.italic;
+    }
+
+    let row = param_row(ui, "Colore", None, |ui| {
+        let c = title.color;
+        let mut rgba = [c.r, c.g, c.b, c.a];
+        let changed = ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed();
+        title.color = vv_core::Rgba {
+            r: rgba[0],
+            g: rgba[1],
+            b: rgba[2],
+            a: rgba[3],
+        };
+        changed
+    });
+    if row.reset {
+        title.color = defaults.color;
+    }
+
+    for (label, value, default, range, speed) in [
+        ("Dimensione", &mut title.size, defaults.size, 1.0..=1000.0, 1.0),
+        ("Tracking", &mut title.tracking, defaults.tracking, -300.0..=1000.0, 1.0),
+        ("Interlinea", &mut title.line_spacing, defaults.line_spacing, -200.0..=500.0, 1.0),
+    ] {
+        let row = param_row(ui, label, None, |ui| slider_field(ui, value, range, speed, 0));
+        if row.reset {
+            *value = default;
+        }
+    }
+
+    let row = param_row(ui, "Decorazioni", None, |ui| {
+        let u = ui
+            .selectable_label(title.underline, egui::RichText::new("U").underline())
+            .on_hover_text("Sottolineato")
+            .clicked();
+        let s = ui
+            .selectable_label(title.strikethrough, egui::RichText::new("S").strikethrough())
+            .on_hover_text("Barrato")
+            .clicked();
+        title.underline ^= u;
+        title.strikethrough ^= s;
+        u || s
+    });
+    if row.reset {
+        title.underline = defaults.underline;
+        title.strikethrough = defaults.strikethrough;
+    }
+
+    let row = param_row(ui, "Maiuscole", None, |ui| {
+        let label = |case| match case {
+            FontCase::Mixed => "Come scritto",
+            FontCase::Upper => "MAIUSCOLO",
+            FontCase::Lower => "minuscolo",
+            FontCase::Title => "Iniziali Maiuscole",
+        };
+        let mut changed = false;
+        egui::ComboBox::from_id_salt("title_font_case")
+            .selected_text(label(title.case))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for case in [FontCase::Mixed, FontCase::Upper, FontCase::Lower, FontCase::Title] {
+                    changed |= ui.selectable_value(&mut title.case, case, label(case)).changed();
+                }
+            });
+        changed
+    });
+    if row.reset {
+        title.case = defaults.case;
+    }
+
+    let row = param_row(ui, "Allineamento", None, |ui| {
+        let mut changed = false;
+        for (align, hint) in [
+            (TextAlign::Left, "A sinistra"),
+            (TextAlign::Center, "Al centro"),
+            (TextAlign::Right, "A destra"),
+            (TextAlign::Justify, "Giustificato"),
+        ] {
+            if text_align_button(ui, title.align == align, align).on_hover_text(hint).clicked() {
+                title.align = align;
+                changed = true;
+            }
+        }
+        changed
+    });
+    if row.reset {
+        title.align = defaults.align;
+    }
+
+    let row = param_row(ui, "Ancoraggio", None, |ui| {
+        let mut changed = false;
+        for (anchor, text, hint) in [
+            (HAnchor::Left, "⇤", "Il punto di posizione è il bordo sinistro"),
+            (HAnchor::Center, "↔", "Il punto di posizione è il centro"),
+            (HAnchor::Right, "⇥", "Il punto di posizione è il bordo destro"),
+        ] {
+            if ui.selectable_label(title.anchor.0 == anchor, text).on_hover_text(hint).clicked() {
+                title.anchor.0 = anchor;
+                changed = true;
+            }
+        }
+        ui.separator();
+        for (anchor, text, hint) in [
+            (VAnchor::Top, "⤒", "Il punto di posizione è il bordo alto"),
+            (VAnchor::Middle, "↕", "Il punto di posizione è il centro"),
+            (VAnchor::Bottom, "⤓", "Il punto di posizione è il bordo basso"),
+        ] {
+            if ui.selectable_label(title.anchor.1 == anchor, text).on_hover_text(hint).clicked() {
+                title.anchor.1 = anchor;
+                changed = true;
+            }
+        }
+        changed
+    });
+    if row.reset {
+        title.anchor = defaults.anchor;
+    }
+
+    // Mostrata dall'angolo in basso a sinistra, come nel riferimento
+    // (960x540 = centro di un frame 1080p); salvata dal centro.
+    let row = param_row(ui, "Posizione", None, |ui| {
+        let mut x = title.position[0] + frame_w / 2.0;
+        let mut y = title.position[1] + frame_h / 2.0;
+        let changed = axis_field(ui, "X", &mut x, 1.0, 1, -frame_w..=frame_w * 2.0)
+            | axis_field(ui, "Y", &mut y, 1.0, 1, -frame_h..=frame_h * 2.0);
+        title.position = [x - frame_w / 2.0, y - frame_h / 2.0];
+        changed
+    });
+    if row.reset {
+        title.position = defaults.position;
+    }
+
+    *title != before
+}
+
+/// Porta su `target` solo i campi che l'utente ha cambiato (`before` ->
+/// `after`, letti dalla clip primaria): con più titoli selezionati, cambiare
+/// il colore non deve sovrascrivere il testo degli altri.
+fn apply_title_edit(
+    target: &vv_core::TitleParams,
+    before: &vv_core::TitleParams,
+    after: &vv_core::TitleParams,
+) -> vv_core::TitleParams {
+    let mut out = target.clone();
+    macro_rules! copy_changed {
+        ($($field:ident),*) => {
+            $(if before.$field != after.$field {
+                out.$field = after.$field.clone();
+            })*
+        };
+    }
+    copy_changed!(
+        content,
+        font_family,
+        font_weight,
+        italic,
+        color,
+        size,
+        tracking,
+        line_spacing,
+        underline,
+        strikethrough,
+        case,
+        align,
+        anchor,
+        position
+    );
+    out
 }
 
 /// Larghezza della colonna delle etichette nel pannello dei parametri:
@@ -3795,6 +4166,9 @@ fn build_effect_command(
         PendingEffectChange::SetColorDefault(track_index, clip_id, v) => Box::new(
             vv_core::SetClipColor::new(timeline_id, track_index, clip_id, v),
         ),
+        PendingEffectChange::SetTitle(track_index, clip_id, v) => Box::new(
+            vv_core::SetClipTitle::new(timeline_id, track_index, clip_id, v),
+        ),
         PendingEffectChange::UpsertTransformKeyframe(track_index, clip_id, frame, param, v) => {
             Box::new(vv_core::UpsertKeyframe::new(
                 timeline_id,
@@ -3900,7 +4274,14 @@ impl eframe::App for VibeVideoApp {
         // RwLock write... Deadlock?").
         let mut clipboard_events: Vec<egui::Event> = Vec::new();
         let mut arrow_input = (None, 0.0);
+        // I tasti scritti in un campo di testo (es. il titolo) non sono
+        // scorciatoie: "T" taglierebbe le clip, Backspace le cancellerebbe.
+        let typing = ui.ctx().egui_wants_keyboard_input();
         ui.input(|i| {
+            arrow_input.1 = i.time;
+            if typing {
+                return;
+            }
             arrow_input.0 = match (
                 i.key_down(egui::Key::ArrowLeft),
                 i.key_down(egui::Key::ArrowRight),
@@ -3909,7 +4290,6 @@ impl eframe::App for VibeVideoApp {
                 (false, true) => Some(1),
                 _ => None,
             };
-            arrow_input.1 = i.time;
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 // Il pannello che ha ricevuto l'ultimo click decide chi
                 // cancella: media pool o timeline.
@@ -4303,6 +4683,7 @@ impl eframe::App for VibeVideoApp {
                     source_frame: clip.source_frame_at(clip.timeline_start + local),
                     timeline_start: clip.timeline_start,
                     is_solid_color: matches!(clip.source, vv_core::ClipSource::SolidColor),
+                    is_text: matches!(clip.source, vv_core::ClipSource::Text),
                 };
                 match track.kind {
                     vv_core::TrackKind::Video => video_targets.push(target),
@@ -4559,10 +4940,39 @@ impl eframe::App for VibeVideoApp {
                                 }
                                 ui.separator();
 
+                                let is_text = self.properties_tab == PropertiesTab::Video
+                                    && info.title.is_some();
+                                if is_text {
+                                    video_subtab_bar(ui, &mut self.video_subtab);
+                                    ui.add_space(4.0);
+                                }
                                 match self.properties_tab {
                                     // La scheda Selezione non arriva qui:
                                     // è servita prima, senza clip primaria.
                                     PropertiesTab::Selection => {}
+                                    PropertiesTab::Video
+                                        if is_text && self.video_subtab == VideoSubTab::Title =>
+                                    {
+                                        let before = info.title.clone().unwrap_or_default();
+                                        let mut title = before.clone();
+                                        if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
+                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                            for t in targets.iter().filter(|t| t.is_text) {
+                                                let Some(current) = tl
+                                                    .and_then(|tl| tl.tracks.get(t.track_index))
+                                                    .and_then(|tr| tr.clips.iter().find(|c| c.id == t.clip_id))
+                                                    .and_then(|c| c.effects.title.as_ref())
+                                                else {
+                                                    continue;
+                                                };
+                                                pending_effects.push(PendingEffectChange::SetTitle(
+                                                    t.track_index,
+                                                    t.clip_id,
+                                                    apply_title_edit(current, &before, &title),
+                                                ));
+                                            }
+                                        }
+                                    }
                                     PropertiesTab::Video => {
                                         use vv_core::TransformParam as P;
                                         let (frame_w, frame_h) =
@@ -5184,7 +5594,7 @@ impl eframe::App for VibeVideoApp {
                     .iter()
                     .filter_map(|l| match l {
                         PreviewLayer::Video { frame, .. } => Some((frame.width, frame.height)),
-                        PreviewLayer::Solid { .. } => None,
+                        PreviewLayer::Solid { .. } | PreviewLayer::Text { .. } => None,
                     })
                     .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
                 let timeline_size = self
@@ -5217,6 +5627,12 @@ impl eframe::App for VibeVideoApp {
                                 PreviewLayer::Solid { color, transform } => {
                                     vv_render::Layer::Solid {
                                         color: *color,
+                                        transform: *transform,
+                                    }
+                                }
+                                PreviewLayer::Text { title, transform } => {
+                                    vv_render::Layer::Text {
+                                        title,
                                         transform: *transform,
                                     }
                                 }
@@ -5394,6 +5810,7 @@ fn main() -> eframe::Result<()> {
     // Argomento opzionale: path di un video da importare subito all'avvio
     // (comodo per debug/smoke test, oltre che per l'uso da riga di comando).
     let startup_path = std::env::args().nth(1).map(PathBuf::from);
+    std::thread::spawn(vv_render::text::warm_up);
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -6526,6 +6943,37 @@ mod tests {
 
         app.history.undo(&mut app.project);
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].timeline_end(), 125);
+    }
+
+    #[test]
+    fn dropping_text_creates_a_text_clip_with_default_title() {
+        let mut app = VibeVideoApp::default();
+        app.add_generator_to_timeline_at(
+            timeline_ui::Generator::Text,
+            10,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+        assert!(matches!(clip.source, vv_core::ClipSource::Text));
+        assert_eq!(clip.timeline_start, 10);
+        assert_eq!(clip.effects.title, Some(vv_core::TitleParams::default()));
+    }
+
+    #[test]
+    fn title_edit_only_carries_the_changed_fields_to_other_clips() {
+        let before = vv_core::TitleParams::default();
+        let after = vv_core::TitleParams {
+            size: 40.0,
+            ..before.clone()
+        };
+        let other = vv_core::TitleParams {
+            content: "Altro".into(),
+            ..before.clone()
+        };
+        let merged = apply_title_edit(&other, &before, &after);
+        assert_eq!(merged.content, "Altro");
+        assert_eq!(merged.size, 40.0);
     }
 
     #[test]

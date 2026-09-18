@@ -5,8 +5,7 @@
 //! `Compositor::new` può condividere il device wgpu di `eframe`/`egui-wgpu`
 //! per un path di rendering zero-copy (B2), oppure usare un device
 //! indipendente (`Compositor::new_headless`, per l'export e i test).
-//! Generatore SolidColor (`generator`). Overlay testo (`text`) non ancora
-//! implementato.
+//! Generatore SolidColor (`generator`), rasterizzazione dei titoli (`text`).
 
 pub mod compositor;
 pub mod generator;

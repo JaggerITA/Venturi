@@ -247,6 +247,18 @@ impl Importer<'_> {
                 }
                 (ClipSource::SolidColor, Rational::one(), 0, None)
             }
+            "GeneratorReference" if reference["generator_kind"] == "Text" => {
+                if effects.title.is_none() {
+                    effects.title = Some(crate::model::TitleParams {
+                        content: reference["parameters"]["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        ..Default::default()
+                    });
+                }
+                (ClipSource::Text, Rational::one(), 0, None)
+            }
             other => {
                 self.warn(format!("clip \"{name}\": riferimento {other} non supportato, ignorata"));
                 return (duration, None);
@@ -378,7 +390,7 @@ impl Importer<'_> {
                 ClipSource::Media(id) => {
                     self.project.media_pool.get(id).map(|m| (m.meta.width, m.meta.height))
                 }
-                ClipSource::SolidColor => None,
+                ClipSource::SolidColor | ClipSource::Text => None,
             })
     }
 
