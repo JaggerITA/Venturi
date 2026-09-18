@@ -95,19 +95,10 @@ fn drag_transform(
         Handle::Move => {
             t.position = [start.position[0] + delta[0], start.position[1] + delta[1]];
         }
-        // L'immagine resta ferma: si sposta solo il pivot (compensando la
-        // posizione), che segue il puntatore.
+        // Come dal pannello: cambia solo l'anchor, e il pivot a schermo
+        // (`position + anchor`) segue il puntatore.
         Handle::Anchor => {
-            let local = rotate_cw(delta, -start.rotation);
-            let da = [
-                local[0] / start.zoom[0].abs().max(MIN_ZOOM),
-                local[1] / start.zoom[1].abs().max(MIN_ZOOM),
-            ];
-            t.anchor = [start.anchor[0] + da[0], start.anchor[1] + da[1]];
-            t.position = [
-                start.position[0] - da[0] + delta[0],
-                start.position[1] - da[1] + delta[1],
-            ];
+            t.anchor = [start.anchor[0] + delta[0], start.anchor[1] + delta[1]];
         }
         Handle::Scale(sx, sy) => {
             let h = clip_box.point(sx, sy);
@@ -341,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_the_anchor_keeps_the_image_still() {
+    fn moving_the_anchor_changes_only_the_anchor() {
         let start = Transform {
             zoom: [2.0, 1.5],
             rotation: 30.0,
@@ -350,9 +341,8 @@ mod tests {
         };
         let b = ClipBox::new(TIMELINE, TIMELINE, [0.0; 4]);
         let t = drag_transform(&start, &b, Handle::Anchor, [120.0, 80.0], false);
-        for p in [[-960.0, 540.0], [300.0, -200.0]] {
-            assert_close(clip_to_frame(&t, p), clip_to_frame(&start, p));
-        }
+        assert_close(t.position, start.position);
+        assert_close(t.anchor, [120.0, 80.0]);
         assert_close(
             [t.position[0] + t.anchor[0], t.position[1] + t.anchor[1]],
             [170.0, 60.0],
