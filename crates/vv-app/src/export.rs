@@ -348,23 +348,19 @@ fn mix_audio_track(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vv_core::{Clip, EffectStack, Keyframed, Track, TrackKind};
+    use vv_core::{Clip, Keyframed, Track, TrackKind};
 
     fn solid_color_clip(id: u64, start: FrameIdx, len: FrameIdx, color: Rgba) -> Clip {
-        Clip {
-            id: ClipId(id),
-            source: ClipSource::SolidColor,
-            source_in: 0,
-            source_out: len,
-            timeline_start: start,
-            effects: EffectStack {
-                color: Some(Keyframed::constant(color)),
-                ..EffectStack::default()
-            },
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: vv_core::Rational::one(),
-        }
+        let mut clip = Clip::from_source_range(
+            ClipId(id),
+            ClipSource::SolidColor,
+            0,
+            len,
+            start,
+            vv_core::Rational::one(),
+        );
+        clip.effects.color = Some(Keyframed::constant(color));
+        clip
     }
 
     fn timeline_with(tracks: Vec<Track>) -> Timeline {
@@ -506,17 +502,14 @@ mod tests {
         let project = Project::default();
         let tl = timeline_with(vec![Track {
             kind: TrackKind::Video,
-            clips: vec![Clip {
-                id: ClipId(1),
-                source: ClipSource::Media(missing_media_id),
-                source_in: 0,
-                source_out: 10,
-                timeline_start: 0,
-                effects: EffectStack::default(),
-                linked_group: None,
-                audio_stream_index: 0,
-                rate: vv_core::Rational::one(),
-            }],
+            clips: vec![Clip::from_source_range(
+                ClipId(1),
+                ClipSource::Media(missing_media_id),
+                0,
+                10,
+                0,
+                vv_core::Rational::one(),
+            )],
             muted: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();

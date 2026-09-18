@@ -67,17 +67,16 @@ mod tests {
         let clip_id = project.alloc_clip_id();
         let mut effects = EffectStack::default();
         effects.gain_db.upsert(10, -6.0, Interpolation::Linear);
-        project.timelines[timeline_id].tracks[0].clips.push(Clip {
-            id: clip_id,
-            source: ClipSource::Media(media_id),
-            source_in: 0,
-            source_out: 50,
-            timeline_start: 0,
-            effects,
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        });
+        let mut clip = Clip::from_source_range(
+            clip_id,
+            ClipSource::Media(media_id),
+            0,
+            50,
+            0,
+            Rational::one(),
+        );
+        clip.effects = effects;
+        project.timelines[timeline_id].tracks[0].clips.push(clip);
 
         let dir = std::env::temp_dir().join("vv-core-persistence-test");
         std::fs::create_dir_all(&dir).unwrap();

@@ -1504,17 +1504,15 @@ impl VibeVideoApp {
             ..Default::default()
         };
 
-        let clip = vv_core::Clip {
-            id: self.project.alloc_clip_id(),
-            source: vv_core::ClipSource::SolidColor,
-            source_in: 0,
-            source_out: default_len,
-            timeline_start: video_start,
-            effects,
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: vv_core::Rational::one(),
-        };
+        let mut clip = vv_core::Clip::from_source_range(
+            self.project.alloc_clip_id(),
+            vv_core::ClipSource::SolidColor,
+            0,
+            default_len,
+            video_start,
+            vv_core::Rational::one(),
+        );
+        clip.effects = effects;
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::InsertClip {
@@ -1985,17 +1983,14 @@ impl VibeVideoApp {
             .map(|_| self.project.alloc_clip_id())
             .collect();
 
-        let video_clip = vv_core::Clip {
-            id: video_clip_id,
-            source: vv_core::ClipSource::Media(media_id),
-            source_in: drag.source_in,
-            source_out: drag.source_out,
-            timeline_start: start,
-            effects: vv_core::EffectStack::default(),
-            linked_group: None, // collegate sotto, tutte insieme, dopo l'inserimento
-            audio_stream_index: 0,
+        let video_clip = vv_core::Clip::from_source_range(
+            video_clip_id,
+            vv_core::ClipSource::Media(media_id),
+            drag.source_in,
+            drag.source_out,
+            start,
             rate,
-        };
+        );
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::InsertClip {
@@ -2009,17 +2004,15 @@ impl VibeVideoApp {
         for (stream_index, (&track_index, &clip_id)) in
             audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
         {
-            let audio_clip = vv_core::Clip {
-                id: clip_id,
-                source: vv_core::ClipSource::Media(media_id),
-                source_in: drag.source_in,
-                source_out: drag.source_out,
-                timeline_start: start,
-                effects: vv_core::EffectStack::default(),
-                linked_group: None,
-                audio_stream_index: stream_index,
+            let mut audio_clip = vv_core::Clip::from_source_range(
+                clip_id,
+                vv_core::ClipSource::Media(media_id),
+                drag.source_in,
+                drag.source_out,
+                start,
                 rate,
-            };
+            );
+            audio_clip.audio_stream_index = stream_index;
             self.history.do_command(
                 &mut self.project,
                 Box::new(vv_core::InsertClip {
@@ -2220,13 +2213,8 @@ impl VibeVideoApp {
                     timeline_ui::ClipboardEntry {
                         track_index,
                         relative_start: clip.timeline_start,
-                        source: clip.source.clone(),
-                        source_in: clip.source_in,
-                        source_out: clip.source_out,
-                        rate: clip.rate,
-                        effects: clip.effects.clone(),
+                        clip: clip.clone(),
                         link_tag: None,
-                        audio_stream_index: clip.audio_stream_index,
                     },
                 ))
             })
@@ -2291,7 +2279,7 @@ impl VibeVideoApp {
                 (
                     entry.track_index,
                     playhead + entry.relative_start,
-                    playhead + entry.relative_start + entry.timeline_len(),
+                    playhead + entry.relative_start + entry.clip.timeline_len(),
                 )
             })
             .collect();
@@ -2299,17 +2287,10 @@ impl VibeVideoApp {
 
         let mut new_selection = BTreeSet::new();
         for (i, entry) in entries.iter().enumerate() {
-            let clip = vv_core::Clip {
-                id: new_ids[i],
-                source: entry.source.clone(),
-                source_in: entry.source_in,
-                source_out: entry.source_out,
-                timeline_start: playhead + entry.relative_start,
-                effects: entry.effects.clone(),
-                linked_group: None, // ricollegate sotto, per link_tag
-                audio_stream_index: entry.audio_stream_index,
-                rate: entry.rate,
-            };
+            let mut clip = entry.clip.clone();
+            clip.id = new_ids[i];
+            clip.timeline_start = playhead + entry.relative_start;
+            clip.linked_group = None; // ricollegate sotto, per link_tag
             new_selection.insert((entry.track_index, new_ids[i]));
             commands.push(Box::new(vv_core::InsertClip {
                 timeline: timeline_id,
@@ -2629,8 +2610,8 @@ fn map_source_ranges_to_timeline(
     source_ranges
         .iter()
         .filter_map(|&(s_start, s_end)| {
-            let start = s_start.max(clip.source_in);
-            let end = s_end.min(clip.source_out - 1);
+            let start = s_start.max(clip.source_in());
+            let end = s_end.min(clip.source_out() - 1);
             (start <= end).then(|| (clip.timeline_frame_at(start), clip.timeline_frame_at(end)))
         })
         .collect()
@@ -5086,17 +5067,14 @@ mod tests {
             app.timeline_id = Some(id);
         }
         let clip_id = app.project.alloc_clip_id();
-        let clip = vv_core::Clip {
-            id: clip_id,
-            source: vv_core::ClipSource::SolidColor,
-            source_in: 0,
-            source_out: len,
-            timeline_start: start,
-            effects: vv_core::EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: vv_core::Rational::one(),
-        };
+        let clip = vv_core::Clip::from_source_range(
+            clip_id,
+            vv_core::ClipSource::SolidColor,
+            0,
+            len,
+            start,
+            vv_core::Rational::one(),
+        );
         app.history.do_command(
             &mut app.project,
             Box::new(vv_core::InsertClip {
@@ -5395,17 +5373,14 @@ mod tests {
             Box::new(vv_core::InsertClip {
                 timeline: timeline_id,
                 track_index: 0,
-                clip: vv_core::Clip {
-                    id: b,
-                    source: vv_core::ClipSource::SolidColor,
-                    source_in: 8,
-                    source_out: 18,
-                    timeline_start: 12,
-                    effects: vv_core::EffectStack::default(),
-                    linked_group: None,
-                    audio_stream_index: 0,
-                    rate: vv_core::Rational::one(),
-                },
+                clip: vv_core::Clip::from_source_range(
+                    b,
+                    vv_core::ClipSource::SolidColor,
+                    8,
+                    18,
+                    12,
+                    vv_core::Rational::one(),
+                ),
             }),
         );
 
@@ -5533,7 +5508,7 @@ mod tests {
             2000,
             "accorciata esattamente fino al tratto liberato"
         );
-        assert_eq!(clips[0].source_out, 1998, "2000 frame di timeline a 29,97");
+        assert_eq!(clips[0].source_out(), 1998, "2000 frame di timeline a 29,97");
     }
 
     #[test]
@@ -6606,17 +6581,14 @@ mod tests {
     fn map_source_ranges_to_timeline_translates_and_clamps_to_the_trim() {
         // Clip: source_in=100, source_out=150 (trim di 50 frame), piazzata
         // a timeline_start=20.
-        let clip = vv_core::Clip {
-            id: ClipId(0),
-            source: vv_core::ClipSource::SolidColor,
-            source_in: 100,
-            source_out: 150,
-            timeline_start: 20,
-            effects: vv_core::EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: vv_core::Rational::one(),
-        };
+        let clip = vv_core::Clip::from_source_range(
+            ClipId(0),
+            vv_core::ClipSource::SolidColor,
+            100,
+            150,
+            20,
+            vv_core::Rational::one(),
+        );
 
         // Dentro al trim: tradotto 1:1 con l'offset timeline_start-source_in.
         assert_eq!(
@@ -7322,7 +7294,7 @@ mod tests {
         let clips: Vec<_> = timeline.tracks.iter().flat_map(|t| &t.clips).collect();
         assert_eq!(clips.len(), 2, "video + audio");
         for clip in clips {
-            assert_eq!((clip.source_in, clip.source_out, clip.timeline_start), (10, 30, 5));
+            assert_eq!((clip.source_in(), clip.source_out(), clip.timeline_start), (10, 30, 5));
         }
     }
 

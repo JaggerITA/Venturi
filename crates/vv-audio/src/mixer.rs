@@ -75,7 +75,7 @@ impl MixSnapshot {
                 // ancorato al suo fps; la durata invece è quella sulla
                 // timeline, che con la conformazione (`Clip::rate`) è già
                 // il tempo reale della clip.
-                let source_offset = seconds_to_frames(clip.source_in as f64 / clip_fps, sample_rate)
+                let source_offset = seconds_to_frames(clip.source_in() as f64 / clip_fps, sample_rate)
                     .min(buffer_frames);
                 let len = seconds_to_frames(clip.timeline_len() as f64 / fps, sample_rate)
                     .min(buffer_frames - source_offset);
@@ -88,7 +88,7 @@ impl MixSnapshot {
                     source_offset,
                     buffer,
                     gain_db: clip.effects.gain_db.clone(),
-                    source_in: clip.source_in,
+                    source_in: clip.source_in(),
                     clip_fps,
                 });
             }
@@ -492,23 +492,20 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use vv_core::{
-        Clip, ClipId, EffectStack, Interpolation, MediaItem, MediaMeta, Rational, Track,
+        Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track,
     };
 
     const RATE: u32 = 100;
 
     fn clip_at(media: vv_core::MediaId, start: FrameIdx, source_in: FrameIdx, len: FrameIdx) -> Clip {
-        Clip {
-            id: ClipId(0),
-            source: ClipSource::Media(media),
+        Clip::from_source_range(
+            ClipId(0),
+            ClipSource::Media(media),
             source_in,
-            source_out: source_in + len,
-            timeline_start: start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        }
+            source_in + len,
+            start,
+            Rational::one(),
+        )
     }
 
     /// Progetto a 10 fps con due media (`a.wav`, `b.wav`): a `RATE` = 100

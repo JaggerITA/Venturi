@@ -31,17 +31,14 @@ mod tests {
     }
 
     fn make_clip(project: &mut Project, start: FrameIdx, len: FrameIdx) -> Clip {
-        Clip {
-            id: project.alloc_clip_id(),
-            source: ClipSource::SolidColor,
-            source_in: 0,
-            source_out: len,
-            timeline_start: start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        }
+        Clip::from_source_range(
+            project.alloc_clip_id(),
+            ClipSource::SolidColor,
+            0,
+            len,
+            start,
+            Rational::one(),
+        )
     }
 
     fn insert_media(project: &mut Project) -> MediaId {

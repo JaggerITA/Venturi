@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use vv_core::{
-    Clip, ClipId, ClipSource, EffectStack, FrameIdx, History, Keyframed, Project, TimelineId, Track,
+    Clip, ClipId, ClipSource, FrameIdx, History, Keyframed, Project, TimelineId, Track,
     TrackKind, TrimEdge,
 };
 
@@ -92,28 +92,15 @@ pub struct TimelineState {
 pub struct ClipboardEntry {
     pub track_index: usize,
     pub relative_start: FrameIdx,
-    pub source: ClipSource,
-    pub source_in: FrameIdx,
-    pub source_out: FrameIdx,
-    /// Vedi `Clip::rate`: serve a sapere quanto occuperà in timeline la
-    /// clip incollata (`timeline_len`).
-    pub rate: vv_core::Rational,
-    pub effects: EffectStack,
+    /// La clip com'era alla copia; id, posizione e gruppo si riassegnano
+    /// all'incolla.
+    pub clip: Clip,
     /// Tag locale all'operazione di copia (non un vero `LinkGroupId`, che
     /// va riallocato al paste): entry con lo stesso tag `Some(_)` erano nel
     /// gruppo collegato al momento della copia — permette di ricollegare
     /// le nuove clip incollate tra loro, dato che i `ClipId`/`LinkGroupId`
     /// originali non si riportano al paste.
     pub link_tag: Option<u64>,
-    /// Vedi `Clip::audio_stream_index`.
-    pub audio_stream_index: usize,
-}
-
-impl ClipboardEntry {
-    /// Durata che occuperà in timeline una volta incollata.
-    pub fn timeline_len(&self) -> FrameIdx {
-        self.rate.scale_round(self.source_out) - self.rate.scale_round(self.source_in)
-    }
 }
 
 struct MarqueeDrag {
@@ -1819,7 +1806,7 @@ pub fn show_timeline(
                                 visual.clip.source_frame_at(display_start + display_len),
                             )
                         } else {
-                            (visual.clip.source_in, visual.clip.source_out)
+                            (visual.clip.source_in(), visual.clip.source_out())
                         };
                         draw_clip_waveform(
                             &painter,
@@ -3008,17 +2995,14 @@ mod tests {
     fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual {
         ClipVisual {
             track_index,
-            clip: Clip {
-                id: ClipId(id),
-                source: vv_core::ClipSource::SolidColor,
-                source_in: 0,
-                source_out: len,
-                timeline_start: start,
-                effects: vv_core::EffectStack::default(),
-                linked_group: None,
-                audio_stream_index: 0,
-                rate: vv_core::Rational::one(),
-            },
+            clip: Clip::from_source_range(
+                ClipId(id),
+                vv_core::ClipSource::SolidColor,
+                0,
+                len,
+                start,
+                vv_core::Rational::one(),
+            ),
             label: String::new(),
             color: egui::Color32::WHITE,
         }
@@ -3577,17 +3561,14 @@ mod tests {
     ) -> ClipVisual {
         ClipVisual {
             track_index,
-            clip: Clip {
-                id: ClipId(id),
-                source: ClipSource::Media(media_id),
+            clip: Clip::from_source_range(
+                ClipId(id),
+                ClipSource::Media(media_id),
                 source_in,
                 source_out,
-                timeline_start: start,
-                effects: EffectStack::default(),
-                linked_group: None,
-                audio_stream_index: 0,
-                rate: vv_core::Rational::one(),
-            },
+                start,
+                vv_core::Rational::one(),
+            ),
             label: String::new(),
             color: egui::Color32::WHITE,
         }
@@ -3842,17 +3823,14 @@ mod tests {
         let mut history = History::default();
 
         for (track_index, start, len) in [(0usize, 0i64, 50i64), (0, 50, 30), (1, 0, 50)] {
-            let clip = Clip {
-                id: project.alloc_clip_id(),
-                source: vv_core::ClipSource::SolidColor,
-                source_in: 0,
-                source_out: len,
-                timeline_start: start,
-                effects: vv_core::EffectStack::default(),
-                linked_group: None,
-                audio_stream_index: 0,
-                rate: vv_core::Rational::one(),
-            };
+            let clip = Clip::from_source_range(
+                project.alloc_clip_id(),
+                vv_core::ClipSource::SolidColor,
+                0,
+                len,
+                start,
+                vv_core::Rational::one(),
+            );
             history.do_command(
                 &mut project,
                 Box::new(vv_core::InsertClip {
@@ -3957,17 +3935,14 @@ mod tests {
         // Clip lunga abbastanza da rendere la timeline scrollabile (contenuto
         // più largo del viewport): senza, l'offset verrebbe clampato a 0 e il
         // test non direbbe nulla.
-        let clip = Clip {
-            id: project.alloc_clip_id(),
-            source: vv_core::ClipSource::SolidColor,
-            source_in: 0,
-            source_out: 2500, // 100s a 25fps
-            timeline_start: 0,
-            effects: vv_core::EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: vv_core::Rational::one(),
-        };
+        let clip = Clip::from_source_range(
+            project.alloc_clip_id(),
+            vv_core::ClipSource::SolidColor,
+            0,
+            2500, // 100s a 25fps
+            0,
+            vv_core::Rational::one(),
+        );
         history.do_command(
             &mut project,
             Box::new(vv_core::InsertClip {
@@ -4079,17 +4054,14 @@ mod tests {
             tracks: vec![vv_core::Track::new(TrackKind::Video)],
         });
         let mut history = History::default();
-        let clip = Clip {
-            id: project.alloc_clip_id(),
-            source: vv_core::ClipSource::SolidColor,
-            source_in: 0,
-            source_out: 10,
-            timeline_start: 0,
-            effects: vv_core::EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: vv_core::Rational::one(),
-        };
+        let clip = Clip::from_source_range(
+            project.alloc_clip_id(),
+            vv_core::ClipSource::SolidColor,
+            0,
+            10,
+            0,
+            vv_core::Rational::one(),
+        );
         history.do_command(
             &mut project,
             Box::new(vv_core::InsertClip {

@@ -1532,7 +1532,7 @@ fn fill_segments(
 mod tests {
     use super::*;
     use std::process::Command as OsCommand;
-    use vv_core::{Clip, ClipId, EffectStack, MediaItem, MediaMeta, Rational, Track, TrackKind};
+    use vv_core::{Clip, ClipId, MediaItem, MediaMeta, Rational, Track, TrackKind};
 
     fn make_test_clip(dir_name: &str, file_name: &str, duration_secs: u32) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(dir_name);
@@ -1643,17 +1643,14 @@ mod tests {
     }
 
     fn media_clip(id: u64, media_id: MediaId, start: FrameIdx, len: FrameIdx) -> Clip {
-        Clip {
-            id: ClipId(id),
-            source: ClipSource::Media(media_id),
-            source_in: 0,
-            source_out: len,
-            timeline_start: start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        }
+        Clip::from_source_range(
+            ClipId(id),
+            ClipSource::Media(media_id),
+            0,
+            len,
+            start,
+            Rational::one(),
+        )
     }
 
     /// Come `media_clip`, ma con un `source_in` esplicito — serve a
@@ -1667,31 +1664,18 @@ mod tests {
         source_in: FrameIdx,
         len: FrameIdx,
     ) -> Clip {
-        Clip {
-            id: ClipId(id),
-            source: ClipSource::Media(media_id),
+        Clip::from_source_range(
+            ClipId(id),
+            ClipSource::Media(media_id),
             source_in,
-            source_out: source_in + len,
+            source_in + len,
             timeline_start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        }
+            Rational::one(),
+        )
     }
 
     fn solid_clip(id: u64, start: FrameIdx, len: FrameIdx) -> Clip {
-        Clip {
-            id: ClipId(id),
-            source: ClipSource::SolidColor,
-            source_in: 0,
-            source_out: len,
-            timeline_start: start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        }
+        Clip::from_source_range(ClipId(id), ClipSource::SolidColor, 0, len, start, Rational::one())
     }
 
     fn timeline_with(tracks: Vec<Track>) -> Timeline {

@@ -542,8 +542,8 @@ pub struct Clip {
     pub id: ClipId,
     pub source: ClipSource,
     /// In/out nello spazio del frame sorgente (fps nativo del media).
-    pub source_in: FrameIdx,
-    pub source_out: FrameIdx,
+    pub(crate) source_in: FrameIdx,
+    pub(crate) source_out: FrameIdx,
     /// Posizione nello spazio della Timeline che contiene questa clip.
     pub timeline_start: FrameIdx,
     pub effects: EffectStack,
@@ -593,6 +593,38 @@ impl Clip {
     /// sovrapposizioni (vedi `SplitClip`).
     fn scaled(&self, source_frame: FrameIdx) -> FrameIdx {
         self.rate.scale_round(source_frame)
+    }
+
+    /// Clip che mostra `source_in..source_out` del sorgente a partire da
+    /// `timeline_start`, senza effetti né collegamenti.
+    pub fn from_source_range(
+        id: ClipId,
+        source: ClipSource,
+        source_in: FrameIdx,
+        source_out: FrameIdx,
+        timeline_start: FrameIdx,
+        rate: Rational,
+    ) -> Self {
+        Self {
+            id,
+            source,
+            source_in,
+            source_out,
+            timeline_start,
+            effects: EffectStack::default(),
+            linked_group: None,
+            audio_stream_index: 0,
+            rate,
+        }
+    }
+
+    pub fn source_in(&self) -> FrameIdx {
+        self.source_in
+    }
+
+    /// Esclusivo.
+    pub fn source_out(&self) -> FrameIdx {
+        self.source_out
     }
 
     /// Durata in frame *sorgente*, per i conti che vivono in quello
@@ -1035,17 +1067,14 @@ mod timeline_tests {
     use super::*;
 
     fn clip_at(timeline_start: FrameIdx, len: FrameIdx, id: u64) -> Clip {
-        Clip {
-            id: ClipId(id),
-            source: ClipSource::SolidColor,
-            source_in: 0,
-            source_out: len,
+        Clip::from_source_range(
+            ClipId(id),
+            ClipSource::SolidColor,
+            0,
+            len,
             timeline_start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        }
+            Rational::one(),
+        )
     }
 
     #[test]
@@ -1265,17 +1294,14 @@ mod timeline_tests {
 
     #[test]
     fn source_frame_at_maps_a_trimmed_clip_correctly() {
-        let clip = Clip {
-            id: ClipId(1),
-            source: ClipSource::SolidColor,
-            source_in: 200,
-            source_out: 300,
-            timeline_start: 60,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
-            rate: Rational::one(),
-        };
+        let clip = Clip::from_source_range(
+            ClipId(1),
+            ClipSource::SolidColor,
+            200,
+            300,
+            60,
+            Rational::one(),
+        );
         assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");
         assert_eq!(clip.source_frame_at(75), 215);
     }
@@ -1323,17 +1349,14 @@ mod timeline_tests {
         source_out: FrameIdx,
         timeline_start: FrameIdx,
     ) -> Clip {
-        Clip {
-            id: ClipId(1),
-            source: ClipSource::SolidColor,
+        Clip::from_source_range(
+            ClipId(1),
+            ClipSource::SolidColor,
             source_in,
             source_out,
             timeline_start,
-            effects: EffectStack::default(),
-            linked_group: None,
-            audio_stream_index: 0,
             rate,
-        }
+        )
     }
 
     /// 59,94 fps su una timeline a 60: la clip dura in timeline quanto
