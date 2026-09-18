@@ -216,7 +216,9 @@ struct VibeVideoApp {
     timeline_id: Option<TimelineId>,
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
-    import_error: Option<String>,
+    /// Media o elementi non importati, mostrati in una finestra a parte
+    /// finché l'utente non la chiude.
+    import_warnings: Vec<String>,
 
     preview_meta: Option<vv_core::MediaMeta>,
     preview_error: Option<String>,
@@ -421,7 +423,7 @@ struct VibeVideoApp {
     /// comporta come "Salva con nome...".
     current_project_path: Option<PathBuf>,
     /// Ultimo errore di salvataggio/apertura progetto, mostrato in
-    /// toolbar accanto ai pulsanti — separato da `import_error` (quello è
+    /// toolbar accanto ai pulsanti — separato da `import_warnings` (quelli sono
     /// per l'import media, contesto diverso).
     project_error: Option<String>,
 
@@ -455,7 +457,7 @@ impl Default for VibeVideoApp {
             timeline_id: None,
             timeline_state: timeline_ui::TimelineState::default(),
             media_pool_state: media_pool::MediaPoolState::default(),
-            import_error: None,
+            import_warnings: Vec::new(),
             preview_meta: None,
             preview_error: None,
             frame_texture: None,
@@ -505,10 +507,10 @@ impl VibeVideoApp {
     fn import_media(&mut self, path: PathBuf) {
         match self.add_media_to_pool(path) {
             Ok(media_id) => {
-                self.import_error = None;
+                self.import_warnings.clear();
                 self.preview_media(media_id);
             }
-            Err(e) => self.import_error = Some(e),
+            Err(e) => self.import_warnings = vec![e],
         }
     }
 
@@ -524,7 +526,7 @@ impl VibeVideoApp {
                 Err(e) => errors.push(format!("{label}: {e}")),
             }
         }
-        self.import_error = (!errors.is_empty()).then(|| errors.join("\n"));
+        self.import_warnings = errors;
         if let Some(media_id) = last_imported {
             self.preview_media(media_id);
         }
@@ -703,7 +705,7 @@ impl VibeVideoApp {
 
     /// Come "Apri progetto", ma da un `.otio`: Ctrl+S chiederà dove
     /// salvare invece di sovrascrivere il file importato. Quel che non è
-    /// stato importato finisce in `import_error`.
+    /// stato importato finisce in `import_warnings`.
     fn import_otio_from(&mut self, path: &Path) {
         let imported = vv_core::import_otio(path, |media_path| {
             let meta = vv_media::probe(media_path).map_err(|e| e.to_string())?;
@@ -725,8 +727,7 @@ impl VibeVideoApp {
                 for (media_path, content_hash, has_audio, num_peaks) in media {
                     self.enqueue_waveforms(&media_path, content_hash, has_audio, num_peaks);
                 }
-                self.import_error =
-                    (!imported.warnings.is_empty()).then(|| imported.warnings.join("\n"));
+                self.import_warnings = imported.warnings;
             }
             Err(e) => self.project_error = Some(format!("Importazione OTIO fallita: {e}")),
         }
@@ -760,7 +761,7 @@ impl VibeVideoApp {
         self.project = project;
         self.history = vv_core::History::default();
         self.timeline_state = timeline_ui::TimelineState::default();
-        self.import_error = None;
+        self.import_warnings.clear();
         self.preview_meta = None;
         self.preview_error = None;
         self.frame_texture = None;
@@ -865,6 +866,28 @@ impl VibeVideoApp {
     /// (letta da `ExportUiState::progress`, condiviso col thread di
     /// export), "Annulla" finché non è finito, "Chiudi" quando lo è
     /// (successo o errore, mostrato). No-op se nessun export è in corso.
+    fn show_import_warnings(&mut self, ui: &mut egui::Ui) {
+        if self.import_warnings.is_empty() {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new(format!("Avvisi di importazione ({})", self.import_warnings.len()))
+            .collapsible(true)
+            .default_width(480.0)
+            .show(ui.ctx(), |ui| {
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for warning in &self.import_warnings {
+                        ui.label(warning);
+                    }
+                });
+                ui.separator();
+                close = ui.button("Chiudi").clicked();
+            });
+        if close {
+            self.import_warnings.clear();
+        }
+    }
+
     fn show_export_progress(&mut self, ui: &mut egui::Ui) {
         let Some(state) = &self.export else {
             return;
@@ -3724,6 +3747,7 @@ impl eframe::App for VibeVideoApp {
         });
 
         self.show_export_progress(ui);
+        self.show_import_warnings(ui);
 
         // Frame a cui vengono lette/scritte le proprietà nel pannello:
         // sempre il playhead della timeline tradotto nello spazio frame
@@ -3915,9 +3939,6 @@ impl eframe::App for VibeVideoApp {
         let pool_panel = egui::Panel::left("media_pool")
             .default_size(260.0)
             .show(ui, |ui| {
-                if let Some(err) = &self.import_error {
-                    ui.colored_label(egui::Color32::RED, err);
-                }
                 if let Some(worker) = &self.proxy_worker {
                     let progress = worker.progress();
                     let paused = worker.is_paused();
@@ -7295,8 +7316,9 @@ mod tests {
         app.import_media_files(with_bad);
 
         assert_eq!(app.project.media_pool.len(), 2);
-        let err = app.import_error.as_deref().expect("errore del file mancante atteso");
-        assert!(err.contains("inesistente.mp4"), "{err}");
+        let warnings = &app.import_warnings;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("inesistente.mp4"), "{warnings:?}");
         let worker = app.proxy_worker.as_ref().unwrap();
         assert_eq!(worker.progress().total, 2);
         for item in app.project.media_pool.values() {
@@ -7626,8 +7648,8 @@ mod tests {
         assert_eq!(clips.len(), 1);
         let clip = &clips[0];
         assert_eq!((clip.timeline_start, clip.timeline_len, clip.source_in()), (0, 20, 5));
-        let err = app.import_error.as_deref().expect("avviso per il media mancante");
-        assert!(err.contains("sparito.mp4"), "{err}");
+        let warnings = &app.import_warnings;
+        assert!(warnings.iter().any(|w| w.contains("sparito.mp4")), "{warnings:?}");
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il

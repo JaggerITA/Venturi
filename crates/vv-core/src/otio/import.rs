@@ -6,11 +6,11 @@
 
 use super::OtioError;
 use crate::model::{
-    Clip, ClipSource, EffectStack, FrameIdx, Keyframed, LinkGroupId, MediaId, MediaItem,
-    MediaMeta, Project, Rational, Rgba, Timeline, Track, TrackKind,
+    Clip, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
+    MediaItem, MediaMeta, Project, Rational, Rgba, Timeline, Track, TrackKind,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Metadati di un media e il suo `content_hash`, o un errore leggibile.
@@ -46,11 +46,15 @@ pub fn project_from_otio(
         project: Project::default(),
         warnings: Vec::new(),
         media: HashMap::new(),
+        ignored_effects: BTreeMap::new(),
         base_dir,
         probe,
     };
     for timeline in timelines {
         importer.timeline(timeline);
+    }
+    for (effect, clips) in std::mem::take(&mut importer.ignored_effects) {
+        importer.warn(format!("effetto \"{effect}\" ignorato su {clips} clip"));
     }
     Ok(OtioImport {
         project: importer.project,
@@ -62,8 +66,19 @@ struct Importer<'a> {
     project: Project,
     warnings: Vec<String>,
     media: HashMap<PathBuf, Option<MediaId>>,
+    /// Nome dell'effetto → quante clip lo avevano: un avviso per effetto,
+    /// non uno per clip.
+    ignored_effects: BTreeMap<String, usize>,
     base_dir: &'a Path,
     probe: &'a mut dyn FnMut(&Path) -> ProbeResult,
+}
+
+/// Spazio dei numeri di gruppo collegato nel file: i nostri e quelli di
+/// Resolve non vanno mescolati.
+#[derive(PartialEq, Eq, Hash)]
+enum GroupKey {
+    VibeVideo(u64),
+    Resolve(u64),
 }
 
 /// Una clip letta da un file non nostro, candidata al collegamento
@@ -82,7 +97,7 @@ impl Importer<'_> {
             .or_else(|| first_item_rate(otio).map(Rational::from_fps))
             .unwrap_or(Rational::new(30, 1));
 
-        let mut groups: HashMap<u64, LinkGroupId> = HashMap::new();
+        let mut groups: HashMap<GroupKey, LinkGroupId> = HashMap::new();
         let mut foreign = Vec::new();
         let mut tracks = Vec::new();
         for otio_track in children(&otio["tracks"]) {
@@ -160,7 +175,7 @@ impl Importer<'_> {
         fps: Rational,
         timeline_start: FrameIdx,
         cursor: f64,
-        groups: &mut HashMap<u64, LinkGroupId>,
+        groups: &mut HashMap<GroupKey, LinkGroupId>,
     ) -> (f64, Option<(Clip, bool)>) {
         let name = item["name"].as_str().unwrap_or("");
         let reference = match item.get("media_references") {
@@ -185,17 +200,12 @@ impl Importer<'_> {
             self.warn(format!("clip \"{name}\" più corta di un frame: ignorata"));
             return (duration, None);
         }
-        let effect_names: Vec<&str> = children_of(item, "effects")
-            .map(|e| e["effect_name"].as_str().unwrap_or_else(|| schema(e)))
-            .collect();
-        if !effect_names.is_empty() {
-            self.warn(format!("clip \"{name}\": effetti ignorati ({})", effect_names.join(", ")));
-        }
-
         let vibevideo = &item["metadata"]["vibevideo"];
         let mut effects = serde_json::from_value::<EffectStack>(vibevideo["effects"].clone())
             .unwrap_or_default();
-        let (source, rate, source_offset) = match schema(reference) {
+        // Secondi nel media all'inizio della clip e fps del media, per
+        // tradurre i keyframe degli effetti di altri editor.
+        let (source, rate, source_offset, media_start) = match schema(reference) {
             "ExternalReference" => {
                 let url = reference["target_url"].as_str().unwrap_or("");
                 let Some(media_id) = self.media(url) else {
@@ -212,7 +222,7 @@ impl Importer<'_> {
                 } else {
                     to_frames(secs, fps)
                 };
-                (ClipSource::Media(media_id), rate, offset.max(0))
+                (ClipSource::Media(media_id), rate, offset.max(0), Some((secs, media_fps)))
             }
             "GeneratorReference" if reference["generator_kind"] == "SolidColor" => {
                 if effects.color.is_none() {
@@ -227,7 +237,7 @@ impl Importer<'_> {
                         a: color[3],
                     }));
                 }
-                (ClipSource::SolidColor, Rational::one(), 0)
+                (ClipSource::SolidColor, Rational::one(), 0, None)
             }
             other => {
                 self.warn(format!("clip \"{name}\": riferimento {other} non supportato, ignorata"));
@@ -235,9 +245,24 @@ impl Importer<'_> {
             }
         };
 
-        let linked_group = vibevideo["linked_group"]
+        let resolve = &item["metadata"]["Resolve_OTIO"];
+        let keyframe_rate =
+            item["source_range"]["start_time"]["rate"].as_f64().unwrap_or(fps.as_f64());
+        for effect in children_of(item, "effects") {
+            self.effect(effect, &mut effects, media_start, keyframe_rate);
+        }
+
+        let group_key = vibevideo["linked_group"]
             .as_u64()
-            .map(|g| *groups.entry(g).or_insert_with(|| self.project.alloc_link_group_id()));
+            .map(GroupKey::VibeVideo)
+            .or_else(|| resolve["Link Group ID"].as_u64().map(GroupKey::Resolve));
+        let is_foreign = group_key.is_none();
+        let linked_group = group_key
+            .map(|key| *groups.entry(key).or_insert_with(|| self.project.alloc_link_group_id()));
+        let audio_stream_index = vibevideo["audio_stream_index"]
+            .as_u64()
+            .or_else(|| resolve_source_track(resolve))
+            .unwrap_or(0) as usize;
         let clip = Clip {
             id: self.project.alloc_clip_id(),
             source,
@@ -246,10 +271,46 @@ impl Importer<'_> {
             timeline_len,
             effects,
             linked_group,
-            audio_stream_index: vibevideo["audio_stream_index"].as_u64().unwrap_or(0) as usize,
+            audio_stream_index,
             rate,
         };
-        (duration, Some((clip, vibevideo.is_null())))
+        (duration, Some((clip, is_foreign)))
+    }
+
+    /// Porta in `effects` quel che si sa tradurre di un effetto OTIO; il
+    /// resto va in `ignored_effects`, tranne gli effetti spenti o ai valori
+    /// di default (Resolve li esporta tutti, per ogni clip).
+    /// `media_start` sono i secondi nel media all'inizio della clip e l'fps
+    /// del media; `rate` è quello dei keyframe di Resolve, in frame
+    /// dall'inizio della clip.
+    fn effect(
+        &mut self,
+        effect: &Value,
+        effects: &mut EffectStack,
+        media_start: Option<(f64, Rational)>,
+        rate: f64,
+    ) {
+        let resolve = &effect["metadata"]["Resolve_OTIO"];
+        if resolve.is_null() {
+            let name = effect["effect_name"].as_str().unwrap_or_else(|| schema(effect));
+            *self.ignored_effects.entry(name.to_owned()).or_default() += 1;
+            return;
+        }
+        if resolve["Enabled"] == false {
+            return;
+        }
+        let name = resolve["Effect Name"].as_str().unwrap_or("Resolve Effect");
+        let mut untranslated = false;
+        for parameter in children_of(resolve, "Parameters") {
+            if name == "Fairlight Clip Volume and Fades" && parameter["Parameter ID"] == "volume" {
+                resolve_volume(parameter, effects, media_start, rate);
+            } else if !is_default_parameter(parameter) {
+                untranslated = true;
+            }
+        }
+        if untranslated {
+            *self.ignored_effects.entry(name.to_owned()).or_default() += 1;
+        }
     }
 
     /// Il media al `target_url`, sondato una volta sola per file.
@@ -316,6 +377,46 @@ impl Importer<'_> {
     fn warn(&mut self, warning: String) {
         self.warnings.push(warning);
     }
+}
+
+fn is_default_parameter(parameter: &Value) -> bool {
+    let no_keyframes = parameter["Key Frames"].as_object().is_none_or(|k| k.is_empty());
+    no_keyframes && parameter["Parameter Value"] == parameter["Default Parameter Value"]
+}
+
+/// Il volume di Resolve è in dB, come `gain_db`; i keyframe diventano
+/// keyframe lineari sul frame sorgente corrispondente.
+fn resolve_volume(
+    parameter: &Value,
+    effects: &mut EffectStack,
+    media_start: Option<(f64, Rational)>,
+    rate: f64,
+) {
+    if let Some(db) = parameter["Parameter Value"].as_f64() {
+        effects.gain_db.default = db as f32;
+    }
+    let (Some(keyframes), Some((start_secs, media_fps))) =
+        (parameter["Key Frames"].as_object(), media_start)
+    else {
+        return;
+    };
+    for (frame, keyframe) in keyframes {
+        let (Ok(frame), Some(db)) = (frame.parse::<f64>(), keyframe["Value"].as_f64()) else {
+            continue;
+        };
+        let source_frame = ((start_secs + frame / rate) * media_fps.as_f64()).round();
+        effects
+            .gain_db
+            .upsert(source_frame as FrameIdx, db as f32, Interpolation::Linear);
+    }
+}
+
+/// Lo stream audio del media da cui Resolve prende i canali della clip,
+/// se vengono tutti dallo stesso.
+fn resolve_source_track(resolve: &Value) -> Option<u64> {
+    let mut tracks = children_of(resolve, "Channels").map(|c| c["Source Track ID"].as_u64());
+    let first = tracks.next()??;
+    tracks.all(|t| t == Some(first)).then_some(first)
 }
 
 fn collect_timelines<'v>(value: &'v Value, out: &mut Vec<&'v Value>) {
@@ -403,7 +504,7 @@ fn url_to_path(url: &str, base_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipId, Interpolation};
+    use crate::model::ClipId;
     use crate::otio::timeline_to_otio;
     use serde_json::json;
 
@@ -604,6 +705,94 @@ mod tests {
         assert!(video[0].linked_group.is_some());
         assert_eq!(audio.clips[0].linked_group, video[0].linked_group);
         assert_eq!(video[1].linked_group, None);
+    }
+
+    fn resolve_effect(name: &str, enabled: bool, parameters: Value) -> Value {
+        json!({
+            "OTIO_SCHEMA": "Effect.1",
+            "effect_name": "Resolve Effect",
+            "metadata": { "Resolve_OTIO": {
+                "Effect Name": name,
+                "Enabled": enabled,
+                "Parameters": parameters,
+            }},
+        })
+    }
+
+    fn volume(value: f64, keyframes: Value) -> Value {
+        json!([{
+            "Parameter ID": "volume",
+            "Default Parameter Value": 0.0,
+            "Parameter Value": value,
+            "Key Frames": keyframes,
+        }])
+    }
+
+    /// Resolve esporta tutto lo stack di effetti di ogni clip: il volume
+    /// diventa gain, spenti e default spariscono, il resto è riassunto in
+    /// un avviso per effetto. Gruppi e stream audio vengono dai suoi
+    /// metadati.
+    #[test]
+    fn resolve_effects_links_and_channels_are_translated() {
+        let resolve_clip = |start: f64, effects: Value, link: u64, source_track: u64| {
+            let mut clip = clip_1("c", B_ROLL, 86_400.0 + start, 24.0, true);
+            clip["effects"] = effects;
+            clip["metadata"] = json!({ "Resolve_OTIO": {
+                "Link Group ID": link,
+                "Channels": [
+                    { "Source Channel ID": 0, "Source Track ID": source_track },
+                    { "Source Channel ID": 1, "Source Track ID": source_track },
+                ],
+            }});
+            clip
+        };
+        let zoom = json!([{
+            "Parameter ID": "zoom",
+            "Default Parameter Value": 1.0,
+            "Parameter Value": 1.5,
+        }]);
+        let track = |kind: &str, children: Vec<Value>| {
+            json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": children })
+        };
+        let otio = json!({
+            "OTIO_SCHEMA": "Timeline.1",
+            "global_start_time": rt(0.0, 24.0),
+            "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+                track("Video", vec![
+                    resolve_clip(0.0, json!([
+                        resolve_effect("Transform", true, json!([])),
+                        resolve_effect("Dynamic Zoom", false, zoom.clone()),
+                        resolve_effect("Zoom", true, zoom.clone()),
+                    ]), 5, 0),
+                    resolve_clip(24.0, json!([resolve_effect("Zoom", true, zoom)]), 6, 0),
+                ]),
+                track("Audio", vec![
+                    resolve_clip(0.0, json!([
+                        resolve_effect("Fairlight Clip Volume and Fades", true, volume(3.5, json!({}))),
+                    ]), 5, 1),
+                    resolve_clip(24.0, json!([resolve_effect(
+                        "Fairlight Clip Volume and Fades",
+                        true,
+                        volume(0.0, json!({ "0": { "Value": -6.0 }, "12": { "Value": 0.0 } })),
+                    )]), 6, 1),
+                ]),
+            ]},
+        });
+        let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+
+        assert_eq!(imported.warnings, ["effetto \"Zoom\" ignorato su 2 clip"]);
+        let (_, tl) = imported.project.timelines.iter().next().unwrap();
+        let (video, audio) = (&tl.tracks[0].clips, &tl.tracks[1].clips);
+        assert_eq!(audio[0].effects.gain_db.value_at(0), 3.5);
+        let gain = &audio[1].effects.gain_db;
+        assert_eq!(gain.value_at(24), -6.0, "keyframe sul primo frame sorgente della clip");
+        assert_eq!(gain.value_at(36), 0.0);
+        assert_eq!(gain.value_at(30), -3.0);
+        assert_eq!(audio[0].audio_stream_index, 1);
+        assert_eq!(video[0].linked_group, audio[0].linked_group);
+        assert_eq!(video[1].linked_group, audio[1].linked_group);
+        assert_ne!(video[0].linked_group, video[1].linked_group);
     }
 
     #[test]
