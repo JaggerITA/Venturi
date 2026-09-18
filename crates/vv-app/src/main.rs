@@ -4331,7 +4331,9 @@ fn target_effects<'a>(
 /// quelli diversi da `before`, così le altre clip selezionate tengono i
 /// propri valori per tutto il resto. Per ogni clip il nuovo valore va nel
 /// default se lì quel parametro non è animato, altrimenti in un keyframe al
-/// suo frame (scrivere il default non si vedrebbe nemmeno).
+/// suo frame (scrivere il default non si vedrebbe nemmeno). La posizione
+/// si sposta dello stesso incremento su ogni clip, per muovere un gruppo
+/// tenendo le distanze tra le clip.
 fn push_param_changes(
     pending: &mut Vec<PendingEffectChange>,
     tl: Option<&vv_core::Timeline>,
@@ -4349,7 +4351,13 @@ fn push_param_changes(
             continue;
         };
         for &&param in &changed {
-            let value = param.of(transform);
+            let value = match param {
+                vv_core::TransformParam::PositionX | vv_core::TransformParam::PositionY => {
+                    effects.transform.track(param).value_at(t.source_frame) + param.of(transform)
+                        - param.of(before)
+                }
+                _ => param.of(transform),
+            };
             pending.push(if effects.transform.track(param).is_constant() {
                 PendingEffectChange::SetTransformParamDefault(t.track_index, t.clip_id, param, value)
             } else {
@@ -7322,7 +7330,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_one_param_on_several_clips_keeps_their_other_values() {
+    fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_position_by_delta() {
         use vv_core::TransformParam as P;
         let mut app = VibeVideoApp::default();
         let first = make_timeline_with_clip(&mut app, 0, 0, 20);
@@ -7368,8 +7376,26 @@ mod tests {
 
         let clips = &app.project.timelines[timeline_id].tracks[0].clips;
         assert_eq!(clips[0].effects.transform.value_at(0).position, [0.0, 80.0]);
-        assert_eq!(clips[1].effects.transform.value_at(0).position, [50.0, 80.0]);
+        assert_eq!(clips[1].effects.transform.value_at(0).position, [50.0, 85.0]);
         assert_eq!(clips[1].effects.transform.value_at(10).position, [50.0, 5.0]);
+
+        // Spostata di nuovo con coordinate diverse: stesso incremento a tutte.
+        let before = clips[0].effects.transform.value_at(0);
+        let mut after = before;
+        after.position[0] += 10.0;
+        let mut pending = Vec::new();
+        push_param_changes(
+            &mut pending,
+            Some(&app.project.timelines[timeline_id]),
+            &targets,
+            &[P::PositionX, P::PositionY],
+            &after,
+            &before,
+        );
+        app.apply_effect_changes(pending, false);
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips[0].effects.transform.value_at(0).position, [10.0, 80.0]);
+        assert_eq!(clips[1].effects.transform.value_at(0).position, [60.0, 85.0]);
     }
 
     #[test]
