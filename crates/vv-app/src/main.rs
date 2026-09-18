@@ -671,7 +671,12 @@ impl VibeVideoApp {
     }
 
     fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
-        match vv_media::probe(&path) {
+        let probed = if is_image_path(&path) {
+            vv_media::probe_image(&path)
+        } else {
+            vv_media::probe(&path)
+        };
+        match probed {
             Ok(meta) => {
                 if meta.has_video {
                     self.ensure_timeline_for(&meta);
@@ -711,7 +716,12 @@ impl VibeVideoApp {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
-        if item.meta.has_video {
+        // Un'immagine ferma non guadagna nulla da un proxy (non c'è un
+        // transcode più leggero di "la stessa unica immagine"), e la sua
+        // `duration_frames` è il sentinel enorme di `IMAGE_DURATION_FRAMES`
+        // — passarlo al proxy worker sprecherebbe lavoro su un numero di
+        // frame che non esiste davvero.
+        if item.meta.has_video && !item.meta.is_image() {
             let frames = item.meta.duration_frames.max(0) as u64;
             self.proxy_worker
                 .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
@@ -857,10 +867,12 @@ impl VibeVideoApp {
                 "media",
                 &[
                     "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg", "opus",
+                    "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
                 ],
             )
             .add_filter("video", &["mp4", "mov", "mkv", "avi"])
             .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
+            .add_filter("immagini", IMAGE_EXTENSIONS)
             .pick_files()
         });
     }
@@ -2051,7 +2063,9 @@ impl VibeVideoApp {
                                 }
                                 ui.vertical(|ui| {
                                     ui.label(&label);
-                                    ui.small(if meta.has_video {
+                                    ui.small(if meta.is_image() {
+                                        format!("immagine · {}x{}", meta.width, meta.height)
+                                    } else if meta.has_video {
                                         format!(
                                             "{}x{} · {:.2}fps · {}",
                                             meta.width,
@@ -2069,14 +2083,19 @@ impl VibeVideoApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        // Un'immagine non ha una durata reale (vedi
+                                        // `IMAGE_DURATION_FRAMES`): mostrarla in
+                                        // MM:SS come un video sarebbe un numero
+                                        // enorme e privo di senso.
+                                        let duration_label = if meta.is_image() {
+                                            "—".to_string()
+                                        } else {
+                                            format_duration(meta.duration_frames, meta.fps.as_f64())
+                                        };
                                         ui.add_sized(
                                             egui::vec2(DURATION_COL_W, ui.available_height()),
                                             egui::Label::new(
-                                                egui::RichText::new(format_duration(
-                                                    meta.duration_frames,
-                                                    meta.fps.as_f64(),
-                                                ))
-                                                .monospace(),
+                                                egui::RichText::new(duration_label).monospace(),
                                             ),
                                         );
                                         match proxy_state {
@@ -4007,6 +4026,18 @@ fn file_label(path: &std::path::Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+/// Estensioni immagine riconosciute all'import: decidere "è un'immagine"
+/// dall'estensione, non da un probe ambiguo (un container video/audio
+/// può avere zero frame validi per mille motivi, un file .png no) — vedi
+/// `vv_media::probe_image`/`vv_core::MediaMeta::is_image`.
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
+
+fn is_image_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTENSIONS.iter().any(|img| img.eq_ignore_ascii_case(ext)))
 }
 
 /// Indicizza per nome file tutti i file sotto `base_dir` (ricorsivo), per
@@ -9857,6 +9888,58 @@ mod tests {
         assert_eq!(clip.timeline_start, 10);
         assert_eq!(clip.linked_group, None);
         assert_eq!(clip.timeline_len, 50, "2 s a 25 fps");
+    }
+
+    fn make_png(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("vv-app-image-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "color=c=blue:size=640x360:rate=1:duration=1"])
+            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        path
+    }
+
+    /// Un'immagine entra nel pool come media video senza audio, senza
+    /// proxy, con `duration_frames` il sentinel di
+    /// `vv_core::IMAGE_DURATION_FRAMES` — e trascinata "intera" sulla
+    /// timeline produce una clip da 5s di default (accorciabile/
+    /// allungabile come una clip qualunque), non una lunga quanto il
+    /// sentinel.
+    #[test]
+    fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
+        let path = make_png("still.png");
+        let mut app = VibeVideoApp::default();
+        app.import_media_files(vec![path.clone()]);
+        assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
+
+        let (media_id, item) = app.project.media_pool.iter().next().unwrap();
+        assert!(item.meta.is_image());
+        assert!(item.meta.has_video);
+        assert!(!item.meta.has_audio);
+        assert_eq!((item.meta.width, item.meta.height), (640, 360));
+        assert_eq!(item.meta.duration_frames, vv_core::IMAGE_DURATION_FRAMES);
+        assert!(app.proxy_worker.is_none(), "niente proxy per un'immagine");
+
+        let timeline_id = app.timeline_id.expect("un'immagine crea la timeline come un video");
+        let meta = item.meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let timeline = &app.project.timelines[timeline_id];
+        let (_, video) = timeline.tracks_of_kind(TrackKind::Video).next().expect("track creata");
+        assert_eq!(video.clips.len(), 1);
+        let clip = &video.clips[0];
+        assert_eq!(clip.timeline_len, 5 * 25, "5 s di default a 25 fps");
+        assert!(
+            timeline.tracks.iter().all(|t| t.kind == TrackKind::Video || t.clips.is_empty()),
+            "un'immagine non ha audio: nessuna clip audio deve comparire"
+        );
     }
 
     /// Regressione: trascinare un media solo audio sulla timeline non

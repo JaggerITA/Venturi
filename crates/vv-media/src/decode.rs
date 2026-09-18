@@ -41,6 +41,7 @@ pub enum ColorMatrix {
 /// (stride == larghezza del piano, niente padding — vedi
 /// `yuv420_from_decoded`), con i metadati colore necessari per
 /// convertirlo in RGB correttamente (REFACTOR_PIPELINE.md B3).
+#[derive(Clone)]
 pub struct FrameYuv420 {
     pub width: u32,
     pub height: u32,
@@ -108,6 +109,21 @@ pub struct Decoder {
     /// un nuovo pacchetto, così un seek non "perde" il frame su cui ha
     /// già pagato il costo di decodifica per il controllo.
     pending: Option<(FrameIdx, FrameYuv420)>,
+    /// `Some` solo per un decoder aperto con `open_image`: l'unico frame
+    /// dell'immagine, decodificato una volta lì. Un'immagine non ha "il
+    /// prossimo frame" da inseguire in avanti come un video — è sempre
+    /// la stessa, per qualunque `source_frame` richiesto — quindi
+    /// `seek_to_time`/`next_frame` lo restituiscono sempre invece di
+    /// arrivare a un vero EOF dopo il primo frame (che per il resto del
+    /// motore di decodifica, tarato sul comportamento di un video reale,
+    /// sarebbe indistinguibile da un errore).
+    still_image: Option<FrameYuv420>,
+    /// Indice sintetico per `next_frame` chiamato senza un
+    /// `seek_to_time` precedente (`pending` vuoto) su un'immagine: non
+    /// descrive una vera posizione (che per un'immagine non esiste), ma
+    /// deve comunque crescere ad ogni chiamata per restare coerente con
+    /// le assunzioni del chiamante su un decode sequenziale in avanti.
+    synthetic_idx: FrameIdx,
 }
 
 impl Decoder {
@@ -162,7 +178,30 @@ impl Decoder {
             fps,
             eof_sent: false,
             pending: None,
+            still_image: None,
+            synthetic_idx: 0,
         })
+    }
+
+    /// Come `open`, ma per un'immagine ferma: decodifica subito il suo
+    /// unico frame e lo tiene in `still_image` — vedi la sua doc su
+    /// perché `seek_to_time`/`next_frame` lo restituiscono sempre da qui
+    /// in poi invece di comportarsi come per un video vero.
+    pub fn open_image(path: &Path) -> Result<Self, crate::MediaError> {
+        let mut decoder = Self::open(path)?;
+        // Non quello che il demuxer immagine segnala (spesso 25 fittizi o
+        // 1/1, a seconda del formato): dev'essere lo stesso
+        // `IMAGE_FPS` che `probe_image` mette in `MediaMeta.fps`, o
+        // `seek_to_time`/`fps()` interpreterebbero i secondi in unità
+        // diverse da quelle con cui il resto dell'app (trim, `MediaDrag`)
+        // ragiona sui frame sorgente di questo media.
+        decoder.fps = crate::probe::IMAGE_FPS;
+        let frame = decoder
+            .decode_next_frame()?
+            .map(|(_, f)| f)
+            .ok_or_else(|| crate::MediaError::NoStream(path.display().to_string()))?;
+        decoder.still_image = Some(frame);
+        Ok(decoder)
     }
 
     pub fn width(&self) -> u32 {
@@ -201,6 +240,16 @@ impl Decoder {
     /// conoscere in anticipo la vera posizione del keyframe precedente.
     pub fn seek_to_time(&mut self, secs: f64) -> Result<(), crate::MediaError> {
         let target_idx = (secs.max(0.0) * self.fps.as_f64()).round() as FrameIdx;
+        if let Some(frame) = &self.still_image {
+            // Nessun vero seek da fare: l'unico frame atterra esattamente
+            // sul target richiesto, sempre — vedi doc di `still_image`.
+            // `synthetic_idx` riparte da qui, non da zero: un `next_frame`
+            // sequenziale successivo deve continuare ad avanzare da dove
+            // questo seek è "atterrato", non tornare indietro.
+            self.pending = Some((target_idx, frame.clone()));
+            self.synthetic_idx = target_idx + 1;
+            return Ok(());
+        }
         let mut ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
         // Un secondo in unità AV_TIME_BASE: passo iniziale del backoff,
         // raddoppiato ad ogni tentativo — arriva a coprire un GOP di
@@ -233,6 +282,14 @@ impl Decoder {
     pub fn next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
         if let Some(landed) = self.pending.take() {
             return Ok(Some(landed));
+        }
+        if let Some(frame) = &self.still_image {
+            // Chiamato senza un seek prima (`pending` vuoto): "avanza" di
+            // un frame sintetico, sempre la stessa immagine — vedi doc di
+            // `still_image`/`synthetic_idx`.
+            let idx = self.synthetic_idx;
+            self.synthetic_idx += 1;
+            return Ok(Some((idx, frame.clone())));
         }
         self.decode_next_frame()
     }
@@ -531,6 +588,54 @@ mod tests {
             distinct.len() > 5,
             "i pixel decodificati sembrano degeneri: {distinct:?}"
         );
+    }
+
+    fn make_test_image(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("vv-media-decode-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=1:duration=1"])
+            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        path
+    }
+
+    #[test]
+    fn open_image_decodes_correct_dimensions_and_pixels() {
+        let path = make_test_image("still.png");
+        let decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+        assert_eq!(decoder.width(), 320);
+        assert_eq!(decoder.height(), 240);
+    }
+
+    /// Un'immagine non ha "il prossimo frame": qualunque `source_frame`
+    /// richiesto (via `seek_to_time`) o una chiamata sequenziale a
+    /// `next_frame` senza seek deve restituire sempre lo stesso
+    /// contenuto, mai `None` come farebbe un vero video dopo l'unico
+    /// frame disponibile.
+    #[test]
+    fn open_image_returns_the_same_frame_for_any_requested_position() {
+        let path = make_test_image("still_repeat.png");
+        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+
+        decoder.seek_to_time(0.0).unwrap();
+        let (idx0, frame0) = decoder.next_frame().unwrap().expect("frame atteso");
+        assert_eq!(idx0, 0);
+
+        decoder.seek_to_time(120.0).unwrap();
+        let (idx_far, frame_far) = decoder.next_frame().unwrap().expect("frame atteso anche lontano nel tempo");
+        assert_eq!(idx_far, (120.0 * crate::probe::IMAGE_FPS.as_f64()).round() as FrameIdx);
+        assert_eq!(frame_far.y, frame0.y, "stesso identico frame, qualunque posizione");
+
+        // Senza un seek in mezzo, next_frame continua a restituire
+        // qualcosa (mai None) invece di comportarsi come un vero EOF.
+        let (idx_next, frame_next) = decoder.next_frame().unwrap().expect("mai EOF per un'immagine");
+        assert!(idx_next > idx_far);
+        assert_eq!(frame_next.y, frame0.y);
     }
 
     #[test]

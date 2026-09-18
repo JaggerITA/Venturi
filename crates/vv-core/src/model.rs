@@ -127,6 +127,17 @@ fn gcd(a: i64, b: i64) -> i64 {
 /// Timeline che lo contiene). I due spazi non vanno mai confusi.
 pub type FrameIdx = i64;
 
+/// `duration_frames` di un'immagine ferma: enormemente più lungo di
+/// qualunque editing reale (a `vv_media::IMAGE_FPS` sono ~463 giorni),
+/// così un'immagine si accorcia/allunga a piacimento come un video
+/// qualunque senza mai sbattere contro un tetto di durata del sorgente —
+/// senza introdurre un campo "è un'immagine" a parte in `MediaMeta` (che
+/// avrebbe richiesto toccare ogni sito che costruisce un `MediaMeta`,
+/// nei test compresi). Il valore *non è mai* la durata reale (un file
+/// video così lungo non esiste), quindi `MediaMeta::is_image` può
+/// riconoscerlo con sicurezza pratica.
+pub const IMAGE_DURATION_FRAMES: FrameIdx = 1_000_000_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMeta {
     pub duration_frames: FrameIdx,
@@ -139,6 +150,15 @@ pub struct MediaMeta {
     pub has_audio: bool,
     pub sample_rate: u32,
     pub channels: u16,
+}
+
+impl MediaMeta {
+    /// Un'immagine ferma importata nel pool: ha video ma non audio, e
+    /// `duration_frames` è il sentinel `IMAGE_DURATION_FRAMES` (vedi la
+    /// sua doc sul perché non serve un campo dedicato).
+    pub fn is_image(&self) -> bool {
+        self.has_video && !self.has_audio && self.duration_frames == IMAGE_DURATION_FRAMES
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -18,6 +18,13 @@ pub(crate) fn ensure_init() {
 /// frame sorgente.
 pub const AUDIO_ONLY_FPS: Rational = Rational::new(30, 1);
 
+/// Fps nominale di un'immagine ferma: come `AUDIO_ONLY_FPS`, non ha un
+/// framerate proprio ma serve comunque un'unità per contare
+/// `source_in`/`source_out` — un valore qualunque va bene, l'importante
+/// è restare coerenti con se stessi ovunque lo si usi per quel media
+/// (vedi `probe_image`, `MediaDrag::whole`).
+pub const IMAGE_FPS: Rational = Rational::new(25, 1);
+
 pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
@@ -60,6 +67,33 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         has_audio,
         sample_rate,
         channels,
+    })
+}
+
+/// Come `probe`, ma per un'immagine ferma (jpg/png/bmp/webp/tiff...):
+/// niente durata reale da leggere (un'immagine non ne ha una), quindi
+/// `duration_frames` è il sentinel `vv_core::IMAGE_DURATION_FRAMES` —
+/// enorme apposta, vedi la sua doc su perché sostituisce un campo
+/// "è un'immagine" a parte in `MediaMeta`.
+pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
+    ensure_init();
+    let input = ffmpeg::format::input(&path)?;
+    let video = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .ok_or_else(|| crate::MediaError::NoStream(path.display().to_string()))?;
+    let decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())?
+        .decoder()
+        .video()?;
+    Ok(MediaMeta {
+        duration_frames: vv_core::IMAGE_DURATION_FRAMES,
+        fps: IMAGE_FPS,
+        width: decoder.width(),
+        height: decoder.height(),
+        has_video: true,
+        has_audio: false,
+        sample_rate: 0,
+        channels: 0,
     })
 }
 
@@ -203,6 +237,27 @@ mod tests {
         assert_eq!(meta.fps, AUDIO_ONLY_FPS);
         assert_eq!(meta.sample_rate, 44_100);
         assert_eq!(meta.duration_frames, 60, "2 s a fps nominale");
+    }
+
+    #[test]
+    fn probe_image_reads_dimensions_and_reports_the_image_sentinel() {
+        let dir = std::env::temp_dir().join("vv-media-probe-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("still.png");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=1:duration=1"])
+            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let meta = probe_image(&path).expect("probe_image fallito");
+        assert_eq!((meta.width, meta.height), (640, 360));
+        assert_eq!(meta.fps, IMAGE_FPS);
+        assert!(meta.has_video);
+        assert!(!meta.has_audio);
+        assert_eq!(meta.duration_frames, vv_core::IMAGE_DURATION_FRAMES);
+        assert!(meta.is_image());
     }
 
     #[test]

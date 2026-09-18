@@ -90,4 +90,27 @@ mod tests {
         let center = &thumb.rgba[(27 * 96 + 48) * 4..][..3];
         assert!(center[0] > 200 && center[1] < 60 && center[2] < 60, "{center:?}");
     }
+
+    /// Un'immagine ferma passa `duration_frames`/`fps` sentinel (vedi
+    /// `vv_core::IMAGE_DURATION_FRAMES`) come `duration_secs` — enorme,
+    /// ma `generate_thumbnail` limita comunque il target del seek a
+    /// `<= 1.0`, quindi funziona senza bisogno di `Decoder::open_image`.
+    #[test]
+    fn generate_thumbnail_works_on_a_still_image_despite_the_sentinel_duration() {
+        let dir = std::env::temp_dir().join("vv-media-thumbnail-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("red.png");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "color=c=red:size=640x360:rate=1:duration=1"])
+            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let sentinel_secs = vv_core::IMAGE_DURATION_FRAMES as f64 / crate::probe::IMAGE_FPS.as_f64();
+        let thumb = generate_thumbnail(&path, sentinel_secs, 96).unwrap();
+        assert_eq!((thumb.width, thumb.height), (96, 54));
+        let center = &thumb.rgba[(27 * 96 + 48) * 4..][..3];
+        assert!(center[0] > 200 && center[1] < 60 && center[2] < 60, "{center:?}");
+    }
 }

@@ -1119,11 +1119,24 @@ pub struct MediaDrag {
 }
 
 impl MediaDrag {
+    /// Durata di default di un'immagine trascinata "intera" dal pool:
+    /// `meta.duration_frames` per un'immagine è il sentinel enorme di
+    /// `IMAGE_DURATION_FRAMES` (vedi la sua doc), non una durata reale da
+    /// cui partire — 5s è la stessa scelta di `Generator::DEFAULT_SECS`
+    /// per Solid Color/Text, accorciabile/allungabile a piacimento come
+    /// una clip qualunque una volta in timeline.
+    const DEFAULT_IMAGE_SECS: f64 = 5.0;
+
     pub fn whole(media_id: vv_core::MediaId, meta: &vv_core::MediaMeta) -> Self {
+        let source_out = if meta.is_image() {
+            (meta.fps.as_f64() * Self::DEFAULT_IMAGE_SECS).round() as FrameIdx
+        } else {
+            meta.duration_frames
+        };
         Self {
             media_id,
             source_in: 0,
-            source_out: meta.duration_frames,
+            source_out,
         }
     }
 

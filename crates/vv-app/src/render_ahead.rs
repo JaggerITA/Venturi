@@ -893,6 +893,7 @@ fn position_decoder(
     segment_start: FrameIdx,
     went_backward: bool,
     is_all_intra: bool,
+    is_image: bool,
 ) -> Positioned {
     // Un proxy appena diventato disponibile (o il toggle "usa proxy"
     // cambiato) fa risolvere un path diverso per lo stesso media: il
@@ -956,7 +957,13 @@ fn position_decoder(
     // Nessun decoder aperto per questo media: qui l'apertura reale è
     // inevitabile (prima volta, o media diverso da quello aperto finora).
     let debug_start = debug_enabled().then(std::time::Instant::now);
-    let Ok(mut decoder) = Decoder::open(path) else {
+    // Un'immagine ferma va aperta con `open_image` (un solo frame,
+    // restituito per qualunque posizione richiesta — vedi la sua doc):
+    // un vero `Decoder::open` su di lei si comporterebbe come un video a
+    // un frame solo, andando in EOF non appena la timeline chiede una
+    // posizione oltre la primissima.
+    let opened = if is_image { Decoder::open_image(path) } else { Decoder::open(path) };
+    let Ok(mut decoder) = opened else {
         return Positioned::Failed;
     };
     let secs = segment_start as f64 / decoder.fps().as_f64().max(1e-9);
@@ -1304,6 +1311,7 @@ fn fill_segments(
             segment.source_start,
             ctx.went_backward,
             is_proxy,
+            item.meta.is_image(),
         ) == Positioned::Failed
         {
             continue;
@@ -1558,6 +1566,84 @@ mod tests {
             .expect("ffmpeg CLI non trovato");
         assert!(status.success());
         path
+    }
+
+    fn make_test_image(dir_name: &str, file_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file_name);
+        let status = OsCommand::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "color=c=green:size=320x240:rate=1:duration=1"])
+            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        path
+    }
+
+    /// Regressione end-to-end per il supporto immagini
+    /// (`Decoder::open_image`, `position_decoder`): un'immagine ferma
+    /// stirata su una clip di 2.4s a 25fps chiede frame sorgente fino a
+    /// ~60 — ben oltre l'unico frame reale che un'immagine ha. Prima del
+    /// supporto dedicato, un vero `Decoder::open` sarebbe andato in EOF
+    /// su qualunque posizione oltre la prima, lasciando la cache scoperta
+    /// per il resto della clip.
+    #[test]
+    fn walk_and_fill_decodes_a_stretched_image_clip_past_its_only_real_frame() {
+        let path = make_test_image("vv-app-render-ahead-image-test", "still.png");
+        let mut project = Project::default();
+        let media_a = project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: vv_core::IMAGE_DURATION_FRAMES,
+                fps: vv_media::IMAGE_FPS,
+                width: 320,
+                height: 240,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+            },
+            content_hash: 0,
+        });
+        // 60 frame (2.4s a 25fps): dentro a `DEFAULT_LOOKAHEAD_SECS`
+        // (3s), altrimenti l'ultimo frame resterebbe fuori dalla finestra
+        // per un motivo indipendente da questo test (il lookahead, non il
+        // supporto immagini).
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_a, 0, 60)],
+            muted: false,
+            solo: false,
+            locked: false,
+        }]));
+
+        let caches = SharedFrameCache::new();
+        let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
+        let generous_budget = 320 * 240 * 4 * 200;
+        let outcome = walk_and_fill(
+            &project,
+            timeline_id,
+            &caches,
+            &mut open,
+            &mut open_behind,
+            0,
+            generous_budget,
+            false,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+            &AtomicI64::new(0),
+        );
+
+        assert!(!outcome.interrupted);
+        for frame in [0, 1, 30, 59] {
+            assert!(
+                caches.get(media_a, frame).is_some(),
+                "frame sorgente {frame} dell'immagine non è stato decodificato"
+            );
+        }
     }
 
     /// Come `make_test_clip`, ma con un GOP corto ed esplicito: senza
@@ -2258,12 +2344,12 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Opened
         );
 
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 1000, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 1000, false, false, false),
             Positioned::Seeked,
             "un seek reale su un media già aperto deve riusare il decoder, non riaprirlo"
         );
@@ -2285,7 +2371,7 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path_a, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path_a, 0, false, false, false),
             Positioned::Opened
         );
 
@@ -2295,7 +2381,7 @@ mod tests {
         // restituirebbe `Reused` — riusando un decoder che punta al file
         // sbagliato.
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path_b, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path_b, 0, false, false, false),
             Positioned::Opened,
             "il path è cambiato: deve riaprire sul nuovo, non riusare il decoder del vecchio"
         );
@@ -2320,7 +2406,7 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Opened
         );
         // Decodifica e mette in cache qualche frame, come farebbe
@@ -2365,7 +2451,7 @@ mod tests {
         caches.reconcile(0, &window, usize::MAX);
 
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Seeked,
             "un buco lasciato da uno sfratto dietro a next_frame deve forzare un seek reale, \
              non un Reused che lo lascia scoperto per sempre"
@@ -2387,7 +2473,7 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Opened
         );
 
@@ -2414,7 +2500,7 @@ mod tests {
         // del decoder — lo stato normale durante il playback in avanti —
         // non deve riaprire/riazzerare il decoder.
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 0, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Reused
         );
         assert_eq!(
@@ -3160,11 +3246,11 @@ mod tests {
         // Ciclo 1: due segmenti dello stesso media nella stessa finestra
         // (come ai due lati di un taglio), source_start 10 e poi 25.
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 10, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
             Positioned::Opened
         );
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 25, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 25, false, false, false),
             Positioned::Reused,
             "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
         );
@@ -3174,12 +3260,12 @@ mod tests {
         // deve sembrare "tornato indietro" solo perché l'ultima chiamata
         // vista nel ciclo precedente era per il segmento successivo (25).
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 10, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
             Positioned::Reused,
             "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
         );
         assert_eq!(
-            position_decoder(&caches, &mut open, media_a, &path, 25, false, false),
+            position_decoder(&caches, &mut open, media_a, &path, 25, false, false, false),
             Positioned::Reused
         );
     }

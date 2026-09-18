@@ -106,8 +106,17 @@ struct ActiveClipDecoder {
 }
 
 impl ActiveClipDecoder {
-    fn open_for(path: &Path, target_source_frame: FrameIdx) -> Result<Self, String> {
-        let mut decoder = vv_media::Decoder::open(path).map_err(|e| e.to_string())?;
+    fn open_for(path: &Path, target_source_frame: FrameIdx, is_image: bool) -> Result<Self, String> {
+        // Un'immagine ferma va aperta con `open_image` (vedi la sua doc):
+        // un vero `Decoder::open` si comporterebbe come un video a un
+        // frame solo, andando in EOF (quindi `advance_to` restituirebbe
+        // `None`, un frame nero) oltre la primissima posizione chiesta.
+        let mut decoder = if is_image {
+            vv_media::Decoder::open_image(path)
+        } else {
+            vv_media::Decoder::open(path)
+        }
+        .map_err(|e| e.to_string())?;
         let secs = target_source_frame as f64 / decoder.fps().as_f64().max(1e-9);
         decoder.seek_to_time(secs).map_err(|e| e.to_string())?;
         let mut me = Self {
@@ -179,16 +188,16 @@ impl FrameProvider for StreamingFrameProvider {
             self.active.remove(&clip.id);
             return Ok(None);
         };
-        let path = project
+        let item = project
             .media_pool
             .get(media_id)
-            .ok_or_else(|| "media non trovato nel pool".to_string())?
-            .path
-            .clone();
+            .ok_or_else(|| "media non trovato nel pool".to_string())?;
+        let path = item.path.clone();
+        let is_image = item.meta.is_image();
 
         let decoder = match self.active.entry(clip.id) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(ActiveClipDecoder::open_for(&path, source_frame)?),
+            Entry::Vacant(e) => e.insert(ActiveClipDecoder::open_for(&path, source_frame, is_image)?),
         };
         decoder.advance_to(source_frame)
     }
@@ -903,6 +912,60 @@ mod tests {
             .expect("audio atteso nell'export");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+    }
+
+    /// Regressione end-to-end per l'export di un'immagine (vedi
+    /// `ActiveClipDecoder::open_for`): la clip di default (5s = 125
+    /// frame a 25fps) copre ben oltre l'unico frame reale che
+    /// un'immagine ha — prima del supporto dedicato l'export sarebbe
+    /// andato in errore (o si sarebbe fermato) appena superata la prima
+    /// posizione richiesta.
+    #[test]
+    fn export_timeline_covers_a_stretched_image_clip_past_its_only_real_frame() {
+        let dir = std::env::temp_dir().join("vv-app-export-image-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("still.png");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "color=c=yellow:size=64x48:rate=1:duration=1"])
+            .args(["-frames:v", "1", "-update", "1", source_path.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = crate::VibeVideoApp::default();
+        app.import_media(source_path);
+        let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
+        let media_id = app
+            .project
+            .media_pool
+            .iter()
+            .next()
+            .map(|(id, _)| id)
+            .expect("media importato atteso nel pool");
+        assert!(app.project.media_pool[media_id].meta.is_image());
+        app.add_media_to_timeline(media_id);
+
+        let output_path = dir.join("out.mp4");
+        let progress = Mutex::new(ExportProgress::default());
+        let cancel = AtomicBool::new(false);
+        let total = app.project.timelines[timeline_id].total_frames();
+        assert_eq!(total, 5 * 25, "5 s di default a 25 fps");
+        let settings = ExportSettings::new(output_path.clone());
+        export_timeline(&app.project, timeline_id, &settings, 0..total, &progress, &cancel)
+            .expect("export fallito");
+
+        assert!(progress.lock().unwrap().done);
+
+        let mut decoder = vv_media::Decoder::open(&output_path).unwrap();
+        let mut count = 0;
+        while let Some((_, frame)) = decoder.next_frame().unwrap() {
+            // Gialla su tutto il fotogramma, in tutto l'export: se
+            // l'immagine "finisse" a metà, qui comparirebbe nero (o un
+            // errore avrebbe già interrotto l'export sopra).
+            assert!(frame.y[0] > 150, "atteso ancora il frame dell'immagine, non nero");
+            count += 1;
+        }
+        assert!((total - 1..=total).contains(&count), "count={count}");
     }
 
     /// Il caso del bug, end-to-end: una clip a 23,976 fps accodata su una
