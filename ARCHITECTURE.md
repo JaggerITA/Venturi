@@ -284,9 +284,14 @@ Fatto:
 - Proxy e waveform in background.
 - Export H.264 + AAC in MP4 dell'intervallo in/out della timeline (Ctrl+Shift+E).
 - Progetto su file `.vvproj` in RON (Ctrl+O, Ctrl+S, Ctrl+Shift+S).
-- Export della timeline in OpenTimelineIO (`vv-core/src/otio.rs`, File →
-  Esporta OTIO): `source_range` all'fps della timeline, i buchi come `Gap`,
+- OpenTimelineIO (`vv-core/src/otio/`, File → Esporta/Importa OTIO).
+  Export: `source_range` all'fps della timeline, i buchi come `Gap`,
   effetti, gruppi collegati e stream audio in `metadata.vibevideo`.
+  Import: apre il file come progetto nuovo quantizzando i tempi al frame
+  della timeline; un file nostro torna identico, da altri editor si
+  ricollegano video e audio dello stesso tratto, e quel che non si sa
+  rappresentare (transizioni, effetti, riferimenti non a file) viene
+  segnalato.
 
 Non ancora:
 - Speed change per-clip (`EffectStack::speed`) e time-remap.

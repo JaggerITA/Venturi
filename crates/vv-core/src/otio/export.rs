@@ -1,22 +1,13 @@
-//! Esportazione di una timeline in OpenTimelineIO (`.otio`, JSON).
-//!
 //! `source_range` è espresso all'fps della timeline, come `source_offset`/
 //! `timeline_len` (vedi `Clip`): esatto anche per le clip conformate, dove
 //! nell'fps del media l'inizio cadrebbe a metà frame. Quel che OTIO non sa
 //! rappresentare (effetti, gruppi collegati, stream audio) finisce in
 //! `metadata.vibevideo`.
 
+use super::OtioError;
 use crate::model::{Clip, ClipSource, FrameIdx, Project, Rational, TimelineId, Track, TrackKind};
 use serde_json::{Value, json};
 use std::path::Path;
-
-#[derive(Debug, thiserror::Error)]
-pub enum OtioError {
-    #[error("errore di I/O: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("errore JSON: {0}")]
-    Json(#[from] serde_json::Error),
-}
 
 pub fn export_otio(project: &Project, timeline: TimelineId, path: &Path) -> Result<(), OtioError> {
     let contents = serde_json::to_string_pretty(&timeline_to_otio(project, timeline))?;

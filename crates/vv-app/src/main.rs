@@ -549,15 +549,6 @@ impl VibeVideoApp {
                 let has_audio = meta.has_audio;
                 let num_peaks =
                     vv_media::recommended_num_peaks(meta.duration_frames as f64 / meta.fps.as_f64());
-                // Un media può avere più stream audio (vedi doc di
-                // `Clip::audio_stream_index`): una waveform per ciascuno,
-                // non solo per il primo. Se il (ri)probe fallisce, ricade
-                // su un solo stream — comportamento di prima.
-                let num_audio_streams = if has_audio {
-                    vv_media::audio_streams(&path).map(|s| s.len().max(1)).unwrap_or(1)
-                } else {
-                    0
-                };
                 let media_id = self.project.media_pool.insert(vv_core::MediaItem {
                     path: path.clone(),
                     meta,
@@ -569,19 +560,33 @@ impl VibeVideoApp {
                 // quando/se l'utente lo riattiva, invece di aspettare la
                 // prima volta che serve davvero.
                 self.enqueue_media_background_jobs(media_id);
-                // Waveform solo per i media con audio: la timeline la
-                // disegna solo sulle clip audio, e un media senza audio
-                // non ne avrebbe mai una da disegnare (il worker
-                // restituirebbe `None` comunque, ma non serve nemmeno
-                // aprire il file).
-                for stream_index in 0..num_audio_streams {
-                    self.waveform_worker
-                        .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
-                        .enqueue(path.clone(), content_hash, stream_index, num_peaks);
-                }
+                self.enqueue_waveforms(&path, content_hash, has_audio, num_peaks);
                 Ok(media_id)
             }
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Waveform solo per i media con audio: la timeline la disegna solo
+    /// sulle clip audio, e un media senza audio non ne avrebbe mai una da
+    /// disegnare. Un media può avere più stream audio (vedi doc di
+    /// `Clip::audio_stream_index`): una waveform per ciascuno. Se il
+    /// (ri)probe fallisce, ricade su un solo stream.
+    fn enqueue_waveforms(
+        &mut self,
+        path: &Path,
+        content_hash: u64,
+        has_audio: bool,
+        num_peaks: usize,
+    ) {
+        if !has_audio {
+            return;
+        }
+        let num_audio_streams = vv_media::audio_streams(path).map(|s| s.len().max(1)).unwrap_or(1);
+        for stream_index in 0..num_audio_streams {
+            self.waveform_worker
+                .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
+                .enqueue(path.to_path_buf(), content_hash, stream_index, num_peaks);
         }
     }
 
@@ -687,6 +692,46 @@ impl VibeVideoApp {
             .map(|e| format!("Esportazione OTIO fallita: {e}"));
     }
 
+    fn import_otio_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("OpenTimelineIO", &["otio"])
+            .pick_file()
+        {
+            self.import_otio_from(&path);
+        }
+    }
+
+    /// Come "Apri progetto", ma da un `.otio`: Ctrl+S chiederà dove
+    /// salvare invece di sovrascrivere il file importato. Quel che non è
+    /// stato importato finisce in `import_error`.
+    fn import_otio_from(&mut self, path: &Path) {
+        let imported = vv_core::import_otio(path, |media_path| {
+            let meta = vv_media::probe(media_path).map_err(|e| e.to_string())?;
+            Ok((meta, vv_media::content_fingerprint(media_path).unwrap_or(0)))
+        });
+        match imported {
+            Ok(imported) => {
+                self.replace_project(imported.project, None);
+                let media: Vec<(PathBuf, u64, bool, usize)> = self
+                    .project
+                    .media_pool
+                    .values()
+                    .map(|item| {
+                        let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
+                        let num_peaks = vv_media::recommended_num_peaks(secs);
+                        (item.path.clone(), item.content_hash, item.meta.has_audio, num_peaks)
+                    })
+                    .collect();
+                for (media_path, content_hash, has_audio, num_peaks) in media {
+                    self.enqueue_waveforms(&media_path, content_hash, has_audio, num_peaks);
+                }
+                self.import_error =
+                    (!imported.warnings.is_empty()).then(|| imported.warnings.join("\n"));
+            }
+            Err(e) => self.project_error = Some(format!("Importazione OTIO fallita: {e}")),
+        }
+    }
+
     fn open_project_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("progetto vibevideo", &["vvproj"])
@@ -703,48 +748,52 @@ impl VibeVideoApp {
     /// norma unica, con l'UI attuale) timeline del progetto caricato.
     fn load_project_from(&mut self, path: PathBuf) {
         match vv_core::load_project(&path) {
-            Ok(project) => {
-                self.timeline_id = project.timelines.keys().next();
-                self.project = project;
-                self.history = vv_core::History::default();
-                self.timeline_state = timeline_ui::TimelineState::default();
-                self.import_error = None;
-                self.preview_meta = None;
-                self.preview_error = None;
-                self.frame_texture = None;
-                self.last_viewer_frame_kind = None;
-                self.browsing_decode_ahead = None;
-                self.active_clip = None;
-                self.last_synced_playhead = 0;
-                self.browsing_media = None;
-                if let Some(audio) = &mut self.timeline_audio {
-                    audio.pause();
-                    audio.invalidate();
-                }
-                self.reset_playback_speed_to_normal();
-                if let Some(fps) = self.timeline_id.map(|id| self.project.timelines[id].fps.as_f64()) {
-                    self.timeline_audio().seek_frame(0, fps);
-                }
-                self.current_project_path = Some(path);
-                self.project_error = None;
-                // Il progetto è stato sostituito senza passare da
-                // `history.do_command` (che è stata appena azzerata):
-                // `sync_render_ahead` non se ne accorgerebbe da sola
-                // confrontando la generazione, quindi lo si notifica
-                // esplicitamente qui.
-                if let Some(timeline_id) = self.timeline_id {
-                    self.spawn_render_ahead_if_needed(timeline_id);
-                    if let Some(render_ahead) = &self.render_ahead {
-                        render_ahead.update_project(&self.project, timeline_id);
-                    }
-                }
-                self.render_ahead_generation = self.history.generation();
-                let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
-                for media_id in media_ids {
-                    self.enqueue_media_background_jobs(media_id);
-                }
-            }
+            Ok(project) => self.replace_project(project, Some(path)),
             Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
+        }
+    }
+
+    /// `path` è il file su cui salverà Ctrl+S: `None` per un progetto che
+    /// non viene da un `.vvproj` (import OTIO).
+    fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
+        self.timeline_id = project.timelines.keys().next();
+        self.project = project;
+        self.history = vv_core::History::default();
+        self.timeline_state = timeline_ui::TimelineState::default();
+        self.import_error = None;
+        self.preview_meta = None;
+        self.preview_error = None;
+        self.frame_texture = None;
+        self.last_viewer_frame_kind = None;
+        self.browsing_decode_ahead = None;
+        self.active_clip = None;
+        self.last_synced_playhead = 0;
+        self.browsing_media = None;
+        if let Some(audio) = &mut self.timeline_audio {
+            audio.pause();
+            audio.invalidate();
+        }
+        self.reset_playback_speed_to_normal();
+        if let Some(fps) = self.timeline_id.map(|id| self.project.timelines[id].fps.as_f64()) {
+            self.timeline_audio().seek_frame(0, fps);
+        }
+        self.current_project_path = path;
+        self.project_error = None;
+        // Il progetto è stato sostituito senza passare da
+        // `history.do_command` (che è stata appena azzerata):
+        // `sync_render_ahead` non se ne accorgerebbe da sola
+        // confrontando la generazione, quindi lo si notifica
+        // esplicitamente qui.
+        if let Some(timeline_id) = self.timeline_id {
+            self.spawn_render_ahead_if_needed(timeline_id);
+            if let Some(render_ahead) = &self.render_ahead {
+                render_ahead.update_project(&self.project, timeline_id);
+            }
+        }
+        self.render_ahead_generation = self.history.generation();
+        let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
+        for media_id in media_ids {
+            self.enqueue_media_background_jobs(media_id);
         }
     }
 
@@ -3436,6 +3485,14 @@ impl eframe::App for VibeVideoApp {
                     ui.separator();
                     if ui.button("Importa media... (Ctrl+I)").clicked() {
                         self.import_media_dialog();
+                        ui.close();
+                    }
+                    if ui
+                        .button("Importa OTIO...")
+                        .on_hover_text("Apre una timeline OpenTimelineIO come nuovo progetto")
+                        .clicked()
+                    {
+                        self.import_otio_dialog();
                         ui.close();
                     }
                     ui.separator();
@@ -7517,6 +7574,60 @@ mod tests {
 
         app.export_otio_to(timeline_id, &dir.join("nope/timeline.otio"));
         assert!(app.project_error.is_some());
+    }
+
+    #[test]
+    fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
+        let dir = std::env::temp_dir().join("vv-app-otio-import-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=2"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", media.to_str().unwrap()])
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        let range = |start: f64, duration: f64| {
+            serde_json::json!({
+                "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": start, "rate": 25.0 },
+                "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": duration, "rate": 25.0 },
+            })
+        };
+        let clip = |url: &str| {
+            serde_json::json!({
+                "OTIO_SCHEMA": "Clip.1",
+                "name": url,
+                "source_range": range(5.0, 20.0),
+                "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": url },
+            })
+        };
+        let otio = serde_json::json!({
+            "OTIO_SCHEMA": "Timeline.1",
+            "name": "Importata",
+            "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "kind": "Video",
+                "children": [clip("clip.mp4"), clip("sparito.mp4")],
+            }]},
+        });
+        let otio_path = dir.join("timeline.otio");
+        std::fs::write(&otio_path, otio.to_string()).unwrap();
+
+        let mut app = VibeVideoApp::default();
+        app.current_project_path = Some(dir.join("vecchio.vvproj"));
+        app.import_otio_from(&otio_path);
+
+        assert!(app.project_error.is_none(), "{:?}", app.project_error);
+        assert_eq!(app.current_project_path, None);
+        let timeline = &app.project.timelines[app.timeline_id.unwrap()];
+        assert_eq!(timeline.name, "Importata");
+        let clips = &timeline.tracks[0].clips;
+        assert_eq!(clips.len(), 1);
+        let clip = &clips[0];
+        assert_eq!((clip.timeline_start, clip.timeline_len, clip.source_in()), (0, 20, 5));
+        let err = app.import_error.as_deref().expect("avviso per il media mancante");
+        assert!(err.contains("sparito.mp4"), "{err}");
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il

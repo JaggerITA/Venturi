@@ -41,6 +41,25 @@ impl Rational {
         Self { num: 1, den: 1 }
     }
 
+    /// Da un fps in virgola mobile (come in OTIO): riconosce gli fps NTSC
+    /// (`n * 1000/1001`), altrimenti approssima al millesimo.
+    pub fn from_fps(fps: f64) -> Self {
+        if !(fps.is_finite() && fps > 0.0) {
+            return Self::new(30, 1);
+        }
+        let whole = fps.round();
+        if (fps - whole).abs() < 1e-3 {
+            return Self::new(whole as i32, 1);
+        }
+        let ntsc = (fps * 1.001).round();
+        if (fps - ntsc * 1000.0 / 1001.0).abs() < 1e-3 {
+            return Self::new(ntsc as i32 * 1000, 1001);
+        }
+        let num = (fps * 1000.0).round() as i64;
+        let g = gcd(num, 1000);
+        Self::new((num / g) as i32, (1000 / g) as i32)
+    }
+
     pub fn as_f64(self) -> f64 {
         self.num as f64 / self.den as f64
     }

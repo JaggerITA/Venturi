@@ -12,3 +12,6 @@ vv-audio = { version = "0.1.0", path = "../vv-audio" }
 vv-core = { version = "0.1.0", path = "../vv-core" }
 vv-media = { version = "0.1.0", path = "../vv-media" }
 vv-render = { version = "0.1.0", path = "../vv-render" }
+
+[dev-dependencies]
+serde_json = "1.0.151"

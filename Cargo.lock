@@ -3180,6 +3180,7 @@ dependencies = [
  "egui",
  "env_logger",
  "rfd",
+ "serde_json",
  "vv-audio",
  "vv-core",
  "vv-media",
