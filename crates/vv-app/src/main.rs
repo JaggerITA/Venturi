@@ -422,6 +422,13 @@ struct VibeVideoApp {
     /// almeno una volta: "Salva" scrive lì direttamente, altrimenti si
     /// comporta come "Salva con nome...".
     current_project_path: Option<PathBuf>,
+    /// `history.generation()` all'ultimo salvataggio o apertura.
+    saved_generation: u64,
+    /// Media importati dopo l'ultimo salvataggio: il media pool cambia
+    /// senza passare dalla history.
+    unsaved_media: bool,
+    /// Apertura o import in attesa della risposta a "salvare le modifiche?".
+    pending_project_switch: Option<ProjectSwitch>,
     /// Ultimo errore di salvataggio/apertura progetto, mostrato in
     /// toolbar accanto ai pulsanti — separato da `import_warnings` (quelli sono
     /// per l'import media, contesto diverso).
@@ -496,11 +503,26 @@ impl Default for VibeVideoApp {
             properties_tab: PropertiesTab::Video,
             export: None,
             current_project_path: None,
+            saved_generation: 0,
+            unsaved_media: false,
+            pending_project_switch: None,
             project_error: None,
             audiometer_enabled: true,
             audiometer_level: (0.0, 0.0),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectSwitch {
+    Open,
+    ImportOtio,
+}
+
+enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
 }
 
 impl VibeVideoApp {
@@ -556,6 +578,7 @@ impl VibeVideoApp {
                     meta,
                     content_hash,
                 });
+                self.unsaved_media = true;
                 // Sempre accodato, a prescindere da `proxy_enabled`: il
                 // toggle controlla solo se l'anteprima *usa* il proxy
                 // già pronto, non se viene generato — così è già lì
@@ -670,6 +693,7 @@ impl VibeVideoApp {
             Ok(()) => {
                 self.current_project_path = Some(path.to_path_buf());
                 self.project_error = None;
+                self.mark_saved();
             }
             Err(e) => self.project_error = Some(format!("Salvataggio fallito: {e}")),
         }
@@ -692,6 +716,77 @@ impl VibeVideoApp {
         self.project_error = vv_core::export_otio(&self.project, timeline_id, path)
             .err()
             .map(|e| format!("Esportazione OTIO fallita: {e}"));
+    }
+
+    fn mark_saved(&mut self) {
+        self.saved_generation = self.history.generation();
+        self.unsaved_media = false;
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.unsaved_media || self.history.generation() != self.saved_generation
+    }
+
+    /// Apre o importa un progetto, chiedendo prima se salvare le modifiche.
+    fn request_project_switch(&mut self, switch: ProjectSwitch) {
+        if self.has_unsaved_changes() {
+            self.pending_project_switch = Some(switch);
+        } else {
+            self.run_project_switch(switch);
+        }
+    }
+
+    fn run_project_switch(&mut self, switch: ProjectSwitch) {
+        match switch {
+            ProjectSwitch::Open => self.open_project_dialog(),
+            ProjectSwitch::ImportOtio => self.import_otio_dialog(),
+        }
+    }
+
+    fn show_unsaved_changes_dialog(&mut self, ui: &mut egui::Ui) {
+        if self.pending_project_switch.is_none() {
+            return;
+        }
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ui.ctx(), |ui| {
+            ui.heading("Salvare le modifiche?");
+            ui.label("Il progetto corrente ha modifiche non salvate.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Salva").clicked() {
+                    choice = Some(UnsavedChoice::Save);
+                }
+                if ui.button("Non salvare").clicked() {
+                    choice = Some(UnsavedChoice::Discard);
+                }
+                if ui.button("Annulla").clicked() {
+                    choice = Some(UnsavedChoice::Cancel);
+                }
+            });
+        });
+        if choice.is_none() && modal.should_close() {
+            choice = Some(UnsavedChoice::Cancel);
+        }
+        if let Some(choice) = choice {
+            self.resolve_unsaved_changes(choice);
+        }
+    }
+
+    fn resolve_unsaved_changes(&mut self, choice: UnsavedChoice) {
+        let Some(switch) = self.pending_project_switch.take() else {
+            return;
+        };
+        match choice {
+            UnsavedChoice::Save => {
+                self.save_project();
+                // Salvataggio annullato o fallito: meglio non perdere nulla.
+                if !self.has_unsaved_changes() {
+                    self.run_project_switch(switch);
+                }
+            }
+            UnsavedChoice::Discard => self.run_project_switch(switch),
+            UnsavedChoice::Cancel => {}
+        }
     }
 
     fn import_otio_dialog(&mut self) {
@@ -780,6 +875,7 @@ impl VibeVideoApp {
         }
         self.current_project_path = path;
         self.project_error = None;
+        self.mark_saved();
         // Il progetto è stato sostituito senza passare da
         // `history.do_command` (che è stata appena azzerata):
         // `sync_render_ahead` non se ne accorgerebbe da sola
@@ -3451,7 +3547,7 @@ impl eframe::App for VibeVideoApp {
             }
             // Ctrl+O: apri un progetto.
             if i.modifiers.command && i.key_pressed(egui::Key::O) {
-                self.open_project_dialog();
+                self.request_project_switch(ProjectSwitch::Open);
             }
             // Ctrl+Shift+E: esporta, come il pulsante in File.
             if i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::E) {
@@ -3494,7 +3590,7 @@ impl eframe::App for VibeVideoApp {
 
                 ui.menu_button("File", |ui| {
                     if ui.button("Apri progetto... (Ctrl+O)").clicked() {
-                        self.open_project_dialog();
+                        self.request_project_switch(ProjectSwitch::Open);
                         ui.close();
                     }
                     if ui.button("Salva (Ctrl+S)").clicked() {
@@ -3515,7 +3611,7 @@ impl eframe::App for VibeVideoApp {
                         .on_hover_text("Apre una timeline OpenTimelineIO come nuovo progetto")
                         .clicked()
                     {
-                        self.import_otio_dialog();
+                        self.request_project_switch(ProjectSwitch::ImportOtio);
                         ui.close();
                     }
                     ui.separator();
@@ -3748,6 +3844,7 @@ impl eframe::App for VibeVideoApp {
 
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
+        self.show_unsaved_changes_dialog(ui);
 
         // Frame a cui vengono lette/scritte le proprietà nel pannello:
         // sempre il playhead della timeline tradotto nello spazio frame
@@ -7650,6 +7747,43 @@ mod tests {
         assert_eq!((clip.timeline_start, clip.timeline_len, clip.source_in()), (0, 20, 5));
         let warnings = &app.import_warnings;
         assert!(warnings.iter().any(|w| w.contains("sparito.mp4")), "{warnings:?}");
+    }
+
+    #[test]
+    fn unsaved_changes_follow_edits_and_saves() {
+        let mut app = VibeVideoApp::default();
+        assert!(!app.has_unsaved_changes(), "progetto vuoto");
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        assert!(app.has_unsaved_changes());
+
+        let dir = std::env::temp_dir().join("vv-app-unsaved-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        app.save_project_to(&dir.join("p.vvproj"));
+        assert!(!app.has_unsaved_changes());
+
+        app.unsaved_media = true;
+        assert!(app.has_unsaved_changes(), "media importato dopo il salvataggio");
+    }
+
+    /// Con modifiche non salvate l'apertura aspetta la risposta; "Annulla"
+    /// e un salvataggio fallito lasciano il progetto com'è.
+    #[test]
+    fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure() {
+        let mut app = VibeVideoApp::default();
+        let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
+        let timeline_id = app.timeline_id.unwrap();
+
+        app.request_project_switch(ProjectSwitch::ImportOtio);
+        assert_eq!(app.pending_project_switch, Some(ProjectSwitch::ImportOtio));
+        app.resolve_unsaved_changes(UnsavedChoice::Cancel);
+        assert_eq!(app.pending_project_switch, None);
+
+        app.current_project_path = Some(std::env::temp_dir().join("vv-app-nope/dir/p.vvproj"));
+        app.request_project_switch(ProjectSwitch::Open);
+        app.resolve_unsaved_changes(UnsavedChoice::Save);
+        assert!(app.project_error.is_some(), "salvataggio fallito");
+        assert!(app.has_unsaved_changes());
+        assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].id, clip_id);
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il
