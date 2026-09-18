@@ -126,7 +126,8 @@ impl Importer<'_> {
                     }
                     "Gap" => item_duration(item),
                     "Clip" => {
-                        let (duration, clip) = self.clip(item, fps, start, cursor, &mut groups);
+                        let (duration, clip) =
+                            self.clip(item, kind, fps, start, cursor, &mut groups);
                         if let Some((clip, is_foreign)) = clip {
                             if is_foreign {
                                 foreign.push(ForeignClip {
@@ -169,9 +170,11 @@ impl Importer<'_> {
 
     /// Durata occupata sulla track (anche se la clip non viene importata)
     /// e la clip, con `true` se non viene da VibeVideo.
+    #[allow(clippy::too_many_arguments)]
     fn clip(
         &mut self,
         item: &Value,
+        kind: TrackKind,
         fps: Rational,
         timeline_start: FrameIdx,
         cursor: f64,
@@ -211,7 +214,12 @@ impl Importer<'_> {
                 let Some(media_id) = self.media(url) else {
                     return (duration, None);
                 };
-                let media_fps = self.project.media_pool[media_id].meta.fps;
+                let meta = &self.project.media_pool[media_id].meta;
+                if kind == TrackKind::Video && !meta.has_video {
+                    self.warn(format!("clip \"{name}\": solo audio su una track video, ignorata"));
+                    return (duration, None);
+                }
+                let media_fps = meta.fps;
                 let rate = Rational::conform_rate(fps, media_fps);
                 let available_start =
                     time_range(&reference["available_range"]).map_or(0.0, |(start, _)| start);
@@ -769,7 +777,11 @@ mod tests {
                 ]),
                 track("Audio", vec![
                     resolve_clip(0.0, json!([
-                        resolve_effect("Fairlight Clip Volume and Fades", true, volume(3.5, json!({}))),
+                        resolve_effect(
+                            "Fairlight Clip Volume and Fades",
+                            true,
+                            volume(3.5, json!({})),
+                        ),
                     ]), 5, 1),
                     resolve_clip(24.0, json!([resolve_effect(
                         "Fairlight Clip Volume and Fades",
@@ -794,6 +806,88 @@ mod tests {
         assert_eq!(video[0].linked_group, audio[0].linked_group);
         assert_eq!(video[1].linked_group, audio[1].linked_group);
         assert_ne!(video[0].linked_group, video[1].linked_group);
+    }
+
+    fn audio_only_meta() -> MediaMeta {
+        MediaMeta {
+            duration_frames: 300,
+            fps: Rational::new(30, 1),
+            width: 0,
+            height: 0,
+            has_video: false,
+            has_audio: true,
+            sample_rate: 48_000,
+            channels: 2,
+        }
+    }
+
+    /// Un media solo audio torna identico da un export nostro, si legge a
+    /// qualunque rate da un altro editor e su una track video viene
+    /// scartato con un avviso.
+    #[test]
+    fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
+        let mut project = Project::default();
+        let media = project.media_pool.insert(MediaItem {
+            path: "/tmp/voce.wav".into(),
+            meta: audio_only_meta(),
+            content_hash: 42,
+        });
+        let fps = Rational::new(25, 1);
+        let timeline_id = project.timelines.insert(Timeline {
+            name: "Voce".into(),
+            fps,
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        let rate = Rational::conform_rate(fps, Rational::new(30, 1));
+        project.timelines[timeline_id].tracks[1].clips.push(Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(media),
+            30,
+            270,
+            10,
+            rate,
+        ));
+        let mut split = crate::SplitClip::new(timeline_id, 1, ClipId(1), 77);
+        crate::Command::apply(&mut split, &mut project);
+
+        let otio = timeline_to_otio(&project, timeline_id);
+        let mut probe = probe_from(vec![("/tmp/voce.wav", audio_only_meta())]);
+        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        let (_, back) = imported.project.timelines.iter().next().unwrap();
+        let spans = |t: &Timeline| t.tracks[1].clips.iter().map(span).collect::<Vec<_>>();
+        assert_eq!(spans(back), spans(&project.timelines[timeline_id]));
+
+        let wav_clip = |start_samples: f64| {
+            json!({
+                "OTIO_SCHEMA": "Clip.2",
+                "name": "voce",
+                "source_range": range(start_samples, 48_000.0, 48_000.0),
+                "media_references": { "DEFAULT_MEDIA": {
+                    "OTIO_SCHEMA": "ExternalReference.1",
+                    "target_url": "file:///tmp/voce.wav",
+                }},
+                "active_media_reference_key": "DEFAULT_MEDIA",
+            })
+        };
+        let track = |kind: &str| {
+            json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": [wav_clip(24_000.0)] })
+        };
+        let foreign = json!({
+            "OTIO_SCHEMA": "Timeline.1",
+            "global_start_time": rt(0.0, 25.0),
+            "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [track("Video"), track("Audio")] },
+        });
+        let imported = project_from_otio(&foreign, Path::new("/"), &mut probe).unwrap();
+        assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+        assert!(imported.warnings[0].contains("solo audio"));
+        let (_, tl) = imported.project.timelines.iter().next().unwrap();
+        assert!(tl.tracks[0].clips.is_empty());
+        let clip = &tl.tracks[1].clips[0];
+        assert_eq!((clip.timeline_len, clip.source_offset), (25, 13), "1 s da 0,5 s, a 25 fps");
+        assert_eq!(clip.rate, rate);
+        assert_eq!(tl.resolution, (1920, 1080));
     }
 
     #[test]
