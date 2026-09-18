@@ -131,8 +131,11 @@ pub type FrameIdx = i64;
 pub struct MediaMeta {
     pub duration_frames: FrameIdx,
     pub fps: Rational,
+    /// `width`/`height` a zero e `fps` nominale se `false`: un media solo
+    /// audio va solo su track audio.
     pub width: u32,
     pub height: u32,
+    pub has_video: bool,
     pub has_audio: bool,
     pub sample_rate: u32,
     pub channels: u16,
@@ -1475,6 +1478,7 @@ mod timeline_tests {
                 fps: Rational::new(60000, 1001),
                 width: 1920,
                 height: 1080,
+                has_video: true,
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,

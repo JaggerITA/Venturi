@@ -796,12 +796,13 @@ fn drag_set_timeline_len(
 }
 
 /// Un segmento del ghost di drop: offset dall'inizio del drop, lunghezza e
-/// se il media porta anche audio. I media vengono accodati uno dopo l'altro
+/// quali stream porta il media. I media vengono accodati uno dopo l'altro
 /// (vedi `insert_media_clip`), quindi il ghost li mostra separati e non come
 /// un unico blocco lungo quanto la somma.
 struct DragSegment {
     offset: FrameIdx,
     len: FrameIdx,
+    has_video: bool,
     has_audio: bool,
 }
 
@@ -819,6 +820,7 @@ fn drag_set_segments(
             let seg = DragSegment {
                 offset,
                 len,
+                has_video: project.media_pool[d.media_id].meta.has_video,
                 has_audio: project.media_pool[d.media_id].meta.has_audio,
             };
             offset += len;
@@ -1297,34 +1299,37 @@ pub fn show_timeline(
                         snapping_enabled,
                     )
                     .max(0);
-                    let ghost_top =
-                        origin.y + row_y.first().copied().unwrap_or(RULER_HEIGHT);
+                    // Le track dove `insert_media_clip` mette video e audio.
+                    let first_row = |kind| {
+                        track_kinds.iter().position(|k| *k == kind).map(|t| origin.y + row_y[t])
+                    };
+                    let (video_y, audio_y) =
+                        (first_row(TrackKind::Video), first_row(TrackKind::Audio));
                     for seg in drag_set_segments(project, timeline_fps, &drag) {
-                        let height = if seg.has_audio {
-                            2.0 * ROW_HEIGHT
-                        } else {
-                            ROW_HEIGHT
-                        };
                         let x = origin.x + (frame + seg.offset) as f32 * px_per_frame;
-                        let rect = egui::Rect::from_min_size(
-                            egui::pos2(x, ghost_top),
-                            egui::vec2(seg.len as f32 * px_per_frame, height),
-                        )
-                        // Un filo di margine fra un segmento e il successivo:
-                        // senza, i bordi combaciano e le clip accodate
-                        // sembrano un blocco unico.
-                        .shrink2(egui::vec2(1.0, 0.0));
-                        painter.rect_filled(
-                            rect,
-                            4.0,
-                            egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
-                        );
-                        painter.rect_stroke(
-                            rect,
-                            4.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
-                            egui::StrokeKind::Inside,
-                        );
+                        let rows = [(seg.has_video, video_y), (seg.has_audio, audio_y)];
+                        for (_, y) in rows.into_iter().filter(|(present, _)| *present) {
+                            let Some(y) = y else { continue };
+                            let rect = egui::Rect::from_min_size(
+                                egui::pos2(x, y),
+                                egui::vec2(seg.len as f32 * px_per_frame, ROW_HEIGHT),
+                            )
+                            // Un filo di margine fra un segmento e il
+                            // successivo: senza, i bordi combaciano e le clip
+                            // accodate sembrano un blocco unico.
+                            .shrink2(egui::vec2(1.0, 0.0));
+                            painter.rect_filled(
+                                rect,
+                                4.0,
+                                egui::Color32::from_rgba_unmultiplied(120, 220, 120, 90),
+                            );
+                            painter.rect_stroke(
+                                rect,
+                                4.0,
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                     }
                 }
                 if pointer_over_tracks
@@ -3568,6 +3573,7 @@ mod tests {
                 fps: vv_core::Rational::new(25, 1),
                 width: 100,
                 height: 100,
+                has_video: true,
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
@@ -3587,6 +3593,7 @@ mod tests {
                 fps: vv_core::Rational::new(25, 1),
                 width: 100,
                 height: 100,
+                has_video: true,
                 has_audio: true,
                 sample_rate: 48000,
                 channels: 2,

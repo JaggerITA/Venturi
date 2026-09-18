@@ -492,6 +492,7 @@ mod tests {
                     fps: vv_core::Rational::new(25, 1),
                     width: 0,
                     height: 0,
+                    has_video: true,
                     has_audio: false,
                     sample_rate: 0,
                     channels: 0,

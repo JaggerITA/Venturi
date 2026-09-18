@@ -282,6 +282,8 @@ Fatto:
 - Clip con fps diverso da quello della timeline conformate
   all'inserimento (`Clip::rate`), in anteprima e in export.
 - Proxy e waveform in background.
+- Media solo audio (wav, mp3, flac…): fps nominale `AUDIO_ONLY_FPS`, niente
+  proxy né miniatura, in timeline solo clip audio.
 - Export H.264 + AAC in MP4 dell'intervallo in/out della timeline (Ctrl+Shift+E).
 - Progetto su file `.vvproj` in RON (Ctrl+O, Ctrl+S, Ctrl+Shift+S).
 - OpenTimelineIO (`vv-core/src/otio/`, File → Esporta/Importa OTIO).

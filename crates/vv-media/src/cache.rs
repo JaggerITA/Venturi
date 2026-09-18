@@ -387,6 +387,7 @@ mod tests {
                 fps: Rational::new(25, 1),
                 width: w,
                 height: h,
+                has_video: true,
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,

@@ -13,29 +13,29 @@ pub(crate) fn ensure_init() {
     });
 }
 
+/// Fps nominale di un media solo audio: non ha frame propri, ma
+/// `source_in`/`source_out` e i keyframe del gain si contano comunque in
+/// frame sorgente.
+pub const AUDIO_ONLY_FPS: Rational = Rational::new(30, 1);
+
 pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
 
-    let video = input
-        .streams()
-        .best(ffmpeg::media::Type::Video)
-        .ok_or_else(|| crate::MediaError::NoStream(path.display().to_string()))?;
+    let video = match input.streams().best(ffmpeg::media::Type::Video) {
+        Some(video) => {
+            let rate = video.rate();
+            let fps = Rational::new(rate.numerator(), rate.denominator());
+            let decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())?
+                .decoder()
+                .video()?;
+            Some((fps, decoder.width(), decoder.height()))
+        }
+        None => None,
+    };
 
-    let rate = video.rate();
-    let fps = Rational::new(rate.numerator(), rate.denominator());
-
-    let video_decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())?
-        .decoder()
-        .video()?;
-    let width = video_decoder.width();
-    let height = video_decoder.height();
-
-    let duration_secs = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
-    let duration_frames = (duration_secs * fps.as_f64()).round() as i64;
-
-    let audio_stream = input.streams().best(ffmpeg::media::Type::Audio);
-    let (has_audio, sample_rate, channels) = match audio_stream {
+    let audio = input.streams().best(ffmpeg::media::Type::Audio);
+    let (has_audio, sample_rate, channels) = match audio {
         Some(audio) => {
             let audio_decoder =
                 ffmpeg::codec::context::Context::from_parameters(audio.parameters())?
@@ -45,12 +45,18 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         }
         None => (false, 0, 0),
     };
+    if video.is_none() && !has_audio {
+        return Err(crate::MediaError::NoStream(path.display().to_string()));
+    }
 
+    let (fps, width, height) = video.unwrap_or((AUDIO_ONLY_FPS, 0, 0));
+    let duration_secs = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
     Ok(MediaMeta {
-        duration_frames,
+        duration_frames: (duration_secs * fps.as_f64()).round() as i64,
         fps,
         width,
         height,
+        has_video: video.is_some(),
         has_audio,
         sample_rate,
         channels,
@@ -176,6 +182,36 @@ mod tests {
         assert_eq!(meta.sample_rate, 48000);
         // ~2s a 25fps: tollera qualche frame di arrotondamento sul container.
         assert!((meta.duration_frames - 50).abs() <= 2);
+    }
+
+    #[test]
+    fn probe_accepts_an_audio_only_file() {
+        let dir = std::env::temp_dir().join("vv-media-probe-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tono.wav");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2"])
+            .arg(&path)
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let meta = probe(&path).expect("probe fallito");
+        assert!(!meta.has_video);
+        assert!(meta.has_audio);
+        assert_eq!((meta.width, meta.height), (0, 0));
+        assert_eq!(meta.fps, AUDIO_ONLY_FPS);
+        assert_eq!(meta.sample_rate, 44_100);
+        assert_eq!(meta.duration_frames, 60, "2 s a fps nominale");
+    }
+
+    #[test]
+    fn probe_rejects_a_file_without_audio_or_video() {
+        let dir = std::env::temp_dir().join("vv-media-probe-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sottotitoli.srt");
+        std::fs::write(&path, "1\n00:00:00,000 --> 00:00:01,000\nciao\n").unwrap();
+        assert!(probe(&path).is_err());
     }
 
     #[test]

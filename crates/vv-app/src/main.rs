@@ -557,7 +557,11 @@ impl VibeVideoApp {
     fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
         match vv_media::probe(&path) {
             Ok(meta) => {
-                self.ensure_timeline_for(&meta);
+                if meta.has_video {
+                    self.ensure_timeline_for(&meta);
+                } else {
+                    self.ensure_timeline();
+                }
                 // Fingerprint economico (path+dimensione+mtime, non i
                 // byte del file: vedi doc di `content_fingerprint`),
                 // chiave dei proxy e di qualunque altra cache derivata
@@ -591,10 +595,13 @@ impl VibeVideoApp {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
-        self.proxy_worker
-            .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
-            .enqueue(item.path.clone(), item.content_hash, item.meta.duration_frames.max(0) as u64);
-        if !self.thumbnails.contains_key(&item.content_hash) {
+        if item.meta.has_video {
+            let frames = item.meta.duration_frames.max(0) as u64;
+            self.proxy_worker
+                .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
+                .enqueue(item.path.clone(), item.content_hash, frames);
+        }
+        if item.meta.has_video && !self.thumbnails.contains_key(&item.content_hash) {
             self.thumbnails.insert(item.content_hash, None);
             self.thumbnail_worker
                 .get_or_insert_with(thumbnail_worker::ThumbnailWorker::spawn)
@@ -608,9 +615,10 @@ impl VibeVideoApp {
         // sulle clip audio.
         if item.meta.has_audio {
             let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
+            let num_peaks = vv_media::recommended_num_peaks(secs);
             self.waveform_worker
                 .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
-                .enqueue(item.path.clone(), item.content_hash, vv_media::recommended_num_peaks(secs));
+                .enqueue(item.path.clone(), item.content_hash, num_peaks);
         }
     }
 
@@ -637,7 +645,14 @@ impl VibeVideoApp {
     // toolbar e dalla shortcut Ctrl+I).
     fn import_media_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
+            .add_filter(
+                "media",
+                &[
+                    "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg", "opus",
+                ],
+            )
             .add_filter("video", &["mp4", "mov", "mkv", "avi"])
+            .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
             .pick_files()
         {
             self.import_media_files(paths);
@@ -1123,10 +1138,14 @@ impl VibeVideoApp {
         } else {
             0
         };
+        let has_video = meta.has_video;
         self.preview_meta = Some(meta);
         self.preview_error = None;
         self.browse_playhead = 0;
         self.browse_marks = transport::MarkRange::default();
+        if !has_video {
+            return;
+        }
         match vv_media::DecodeAhead::spawn(path, self.cache_budget_bytes, 60) {
             Ok(decode_ahead) => self.browsing_decode_ahead = Some(decode_ahead),
             Err(e) => self.preview_error = Some(e.to_string()),
@@ -2097,7 +2116,6 @@ impl VibeVideoApp {
             meta.fps,
         );
         let video_track = tracks.video;
-        let video_clip_id = self.project.alloc_clip_id();
 
         let mut audio_track_indices: Vec<usize> = self.project.timelines[timeline_id]
             .tracks_of_kind(TrackKind::Audio)
@@ -2111,7 +2129,11 @@ impl VibeVideoApp {
             audio_track_indices.insert(0, extra);
         }
 
-        let num_audio_streams = if meta.has_audio && !audio_track_indices.is_empty() {
+        // Senza track audio l'audio di un video si scarta, ma un media solo
+        // audio se ne crea una.
+        let num_audio_streams = if meta.has_audio
+            && (!audio_track_indices.is_empty() || !meta.has_video)
+        {
             self.project
                 .media_pool
                 .get(media_id)
@@ -2135,24 +2157,27 @@ impl VibeVideoApp {
             .map(|_| self.project.alloc_clip_id())
             .collect();
 
-        let video_clip = vv_core::Clip::from_source_range(
-            video_clip_id,
-            vv_core::ClipSource::Media(media_id),
-            drag.source_in,
-            drag.source_out,
-            start,
-            rate,
-        );
-        self.history.do_command(
-            &mut self.project,
-            Box::new(vv_core::InsertClip {
-                timeline: timeline_id,
-                track_index: video_track,
-                clip: video_clip,
-            }),
-        );
-
-        let mut group_targets: Vec<(usize, ClipId)> = vec![(video_track, video_clip_id)];
+        let mut group_targets: Vec<(usize, ClipId)> = Vec::new();
+        if meta.has_video {
+            let video_clip_id = self.project.alloc_clip_id();
+            let video_clip = vv_core::Clip::from_source_range(
+                video_clip_id,
+                vv_core::ClipSource::Media(media_id),
+                drag.source_in,
+                drag.source_out,
+                start,
+                rate,
+            );
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::InsertClip {
+                    timeline: timeline_id,
+                    track_index: video_track,
+                    clip: video_clip,
+                }),
+            );
+            group_targets.push((video_track, video_clip_id));
+        }
         for (stream_index, (&track_index, &clip_id)) in
             audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
         {
@@ -4108,17 +4133,33 @@ impl eframe::App for VibeVideoApp {
                                                     2.0,
                                                     ui.visuals().extreme_bg_color,
                                                 );
+                                                if !meta.has_video {
+                                                    ui.painter().text(
+                                                        rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "🔊",
+                                                        egui::FontId::proportional(18.0),
+                                                        ui.visuals().weak_text_color(),
+                                                    );
+                                                }
                                             }
                                         }
                                         ui.vertical(|ui| {
                                             ui.label(&label);
-                                            ui.small(format!(
-                                                "{}x{} · {:.2}fps · {}",
-                                                meta.width,
-                                                meta.height,
-                                                meta.fps.as_f64(),
-                                                if meta.has_audio { "audio" } else { "muto" }
-                                            ));
+                                            ui.small(if meta.has_video {
+                                                format!(
+                                                    "{}x{} · {:.2}fps · {}",
+                                                    meta.width,
+                                                    meta.height,
+                                                    meta.fps.as_f64(),
+                                                    if meta.has_audio { "audio" } else { "muto" }
+                                                )
+                                            } else {
+                                                format!(
+                                                    "solo audio · {} Hz · {} ch",
+                                                    meta.sample_rate, meta.channels
+                                                )
+                                            });
                                         });
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
@@ -4955,7 +4996,9 @@ impl eframe::App for VibeVideoApp {
             if media_offline {
                 self.last_viewer_frame_kind = Some(ViewerFrameKind::Offline);
             } else if self.browsing_media.is_some() {
-                if let Some((frame, source_frame)) = self.browsing_video_frame() {
+                if self.preview_meta.as_ref().is_some_and(|m| !m.has_video) {
+                    self.last_viewer_frame_kind = None;
+                } else if let Some((frame, source_frame)) = self.browsing_video_frame() {
                     let transform = self
                         .active_clip_effects()
                         .map(|e| e.transform.value_at(source_frame))
@@ -5097,13 +5140,21 @@ impl eframe::App for VibeVideoApp {
                     if let Some(err) = &self.preview_error {
                         ui.colored_label(egui::Color32::RED, format!("Errore player: {err}"));
                     } else {
-                        ui.centered_and_justified(|ui| {
-                            ui.label(if self.browsing_media.is_some() || self.active_clip.is_some() {
+                        let audio_only = self.browsing_media.is_some()
+                            && self.preview_meta.as_ref().is_some_and(|m| !m.has_video);
+                        let label = ui.centered_and_justified(|ui| {
+                            ui.label(if audio_only {
+                                "🔊  Solo audio"
+                            } else if self.browsing_media.is_some() || self.active_clip.is_some() {
                                 "Decodifica in corso..."
                             } else {
                                 "Importa un media, aggiungilo alla timeline e premi Spazio."
-                            });
+                            })
                         });
+                        // Si trascina in timeline anche senza immagine.
+                        if audio_only {
+                            viewer_rect = Some(label.inner.rect);
+                        }
                     }
                 }
             }
@@ -5270,6 +5321,7 @@ mod tests {
                 fps: media_fps,
                 width: 320,
                 height: 240,
+                has_video: true,
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
@@ -5300,6 +5352,7 @@ mod tests {
                 fps: vv_core::Rational::new(25, 1),
                 width: 320,
                 height: 240,
+                has_video: true,
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
@@ -5345,6 +5398,7 @@ mod tests {
                 fps: vv_core::Rational::new(25, 1),
                 width: 320,
                 height: 240,
+                has_video: true,
                 has_audio: true,
                 sample_rate: 48000,
                 channels: 2,
@@ -5394,6 +5448,7 @@ mod tests {
                 fps: vv_core::Rational::new(25, 1),
                 width: 320,
                 height: 240,
+                has_video: true,
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
@@ -7790,6 +7845,53 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = std::fs::remove_file(vv_media::waveform::waveform_path_for(content_hash, 0));
+    }
+
+    fn make_wav(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("vv-app-audio-only-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
+            .arg(&path)
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+        path
+    }
+
+    /// Un media solo audio entra nel pool senza proxy né miniatura, e in
+    /// timeline diventa solo una clip audio (creando la track se manca).
+    #[test]
+    fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
+        let path = make_wav("tono.wav");
+        let mut app = VibeVideoApp::default();
+        app.import_media_files(vec![path]);
+        assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
+        let (media_id, item) = app.project.media_pool.iter().next().unwrap();
+        assert!(!item.meta.has_video);
+        assert!(app.proxy_worker.is_none(), "niente proxy per un media solo audio");
+        assert!(app.thumbnails.is_empty());
+
+        let timeline_id = app.timeline_id.unwrap();
+        let timeline = &mut app.project.timelines[timeline_id];
+        assert_eq!(timeline.resolution, (1920, 1080), "timeline di default");
+        timeline.tracks.retain(|t| t.kind == TrackKind::Video);
+
+        let meta = item.meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            10,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let timeline = &app.project.timelines[timeline_id];
+        assert!(timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio || t.clips.is_empty()));
+        let (_, audio) = timeline.tracks_of_kind(TrackKind::Audio).next().expect("track creata");
+        assert_eq!(audio.clips.len(), 1);
+        let clip = &audio.clips[0];
+        assert_eq!(clip.timeline_start, 10);
+        assert_eq!(clip.linked_group, None);
+        assert_eq!(clip.timeline_len, 50, "2 s a 25 fps");
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il

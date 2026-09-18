@@ -514,6 +514,7 @@ mod tests {
             fps,
             width: 1280,
             height: 720,
+            has_video: true,
             has_audio: true,
             sample_rate: 48_000,
             channels: 2,
