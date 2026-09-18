@@ -1,0 +1,431 @@
+//! Finestra delle impostazioni di export, mostrata prima di avviarlo.
+
+use std::path::{Path, PathBuf};
+
+use vv_core::{FrameIdx, Rational};
+use vv_media::{AudioCodec, VideoCodec};
+
+use crate::export::ExportSettings;
+
+/// Dati della timeline che la finestra mostra ma non modifica.
+pub struct TimelineInfo {
+    pub resolution: (u32, u32),
+    pub fps: Rational,
+    pub total_frames: FrameIdx,
+    /// Intervallo in/out, `None` se copre tutta la timeline.
+    pub marks: Option<(FrameIdx, FrameIdx)>,
+    pub has_audio: bool,
+}
+
+pub enum ExportDialogAction {
+    None,
+    Cancel,
+    Export {
+        settings: ExportSettings,
+        range: std::ops::Range<FrameIdx>,
+    },
+}
+
+pub struct ExportDialog {
+    settings: ExportSettings,
+    path_text: String,
+    whole_timeline: bool,
+    /// Tenute da parte mentre "Includi audio" è spento, per ritrovarle.
+    audio_settings: vv_media::AudioSettings,
+}
+
+impl ExportDialog {
+    pub fn new(settings: ExportSettings) -> Self {
+        Self {
+            path_text: settings.output_path.display().to_string(),
+            audio_settings: settings.audio.clone().unwrap_or_default(),
+            settings,
+            whole_timeline: false,
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, info: &TimelineInfo) -> ExportDialogAction {
+        let mut action = ExportDialogAction::None;
+        let mut open = true;
+        egui::Window::new("Esporta")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                self.destination_section(ui);
+                ui.separator();
+                self.range_section(ui, info);
+                ui.separator();
+                self.video_section(ui, info);
+                ui.separator();
+                self.audio_section(ui, info);
+                ui.separator();
+                action = self.buttons(ui, info);
+            });
+        if !open {
+            action = ExportDialogAction::Cancel;
+        }
+        action
+    }
+
+    fn destination_section(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Destinazione");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.path_text).desired_width(340.0));
+            if ui.button("Sfoglia...").clicked() {
+                let current = PathBuf::from(&self.path_text);
+                let mut dialog = rfd::FileDialog::new().add_filter("mp4", &["mp4"]);
+                if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(name) = current.file_name() {
+                    dialog = dialog.set_file_name(name.to_string_lossy());
+                }
+                if let Some(path) = dialog.save_file() {
+                    self.path_text = path.display().to_string();
+                }
+            }
+        });
+        match validate_path(&self.path_text) {
+            Ok(path) if path.exists() => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Il file esiste già e verrà sovrascritto.",
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                ui.colored_label(egui::Color32::RED, e);
+            }
+        }
+    }
+
+    fn range_section(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) {
+        ui.strong("Intervallo");
+        let fps = info.fps.as_f64();
+        match info.marks {
+            Some((mark_in, mark_out)) => {
+                ui.radio_value(
+                    &mut self.whole_timeline,
+                    false,
+                    format!(
+                        "In/Out: {} – {} ({})",
+                        format_duration(mark_in, fps),
+                        format_duration(mark_out, fps),
+                        format_duration(mark_out - mark_in, fps)
+                    ),
+                );
+                ui.radio_value(
+                    &mut self.whole_timeline,
+                    true,
+                    format!(
+                        "Tutta la timeline ({})",
+                        format_duration(info.total_frames, fps)
+                    ),
+                );
+            }
+            None => {
+                ui.label(format!(
+                    "Tutta la timeline ({})",
+                    format_duration(info.total_frames, fps)
+                ));
+            }
+        }
+    }
+
+    fn video_section(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) {
+        ui.strong("Video");
+        let video = &mut self.settings.video;
+        egui::Grid::new("export_video_grid")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Encoder");
+                let before = video.codec;
+                egui::ComboBox::from_id_salt("export_video_codec")
+                    .selected_text(video_codec_label(video.codec))
+                    .show_ui(ui, |ui| {
+                        for codec in VideoCodec::ALL {
+                            ui.add_enabled_ui(codec.is_available(), |ui| {
+                                ui.selectable_value(
+                                    &mut video.codec,
+                                    codec,
+                                    video_codec_label(codec),
+                                )
+                                .on_disabled_hover_text("Non disponibile su questo sistema");
+                            });
+                        }
+                    });
+                if video.codec != before {
+                    video.preset = video.codec.default_preset().into();
+                }
+                ui.end_row();
+
+                ui.label("Preset");
+                egui::ComboBox::from_id_salt("export_video_preset")
+                    .selected_text(&video.preset)
+                    .show_ui(ui, |ui| {
+                        for preset in video.codec.presets() {
+                            ui.selectable_value(&mut video.preset, preset.to_string(), *preset);
+                        }
+                    })
+                    .response
+                    .on_hover_text("Più veloce = file più grande a parità di qualità");
+                ui.end_row();
+
+                ui.label(match video.codec {
+                    VideoCodec::X264 => "Qualità (CRF)",
+                    VideoCodec::Nvenc => "Qualità (CQ)",
+                });
+                ui.add(egui::Slider::new(&mut video.quality, 0..=51))
+                    .on_hover_text("Più basso = qualità più alta e file più grande");
+                ui.end_row();
+
+                ui.label("Risoluzione");
+                let scale = &mut self.settings.scale_percent;
+                let size_label = |percent: u32| {
+                    let mut probe = ExportSettings::new(PathBuf::new());
+                    probe.scale_percent = percent;
+                    let (w, h) = probe.output_size(info.resolution);
+                    format!("{w}×{h} ({percent}%)")
+                };
+                egui::ComboBox::from_id_salt("export_scale")
+                    .selected_text(size_label(*scale))
+                    .show_ui(ui, |ui| {
+                        for percent in ExportSettings::SCALE_CHOICES {
+                            ui.selectable_value(scale, percent, size_label(percent));
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Frame rate");
+                ui.label(format!("{:.3} fps (timeline)", info.fps.as_f64()));
+                ui.end_row();
+            });
+    }
+
+    fn audio_section(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) {
+        ui.strong("Audio");
+        if !info.has_audio {
+            ui.label("Nessuna clip audio nella timeline.");
+            return;
+        }
+        let mut include = self.settings.audio.is_some();
+        ui.checkbox(&mut include, "Includi audio");
+        if !include {
+            if let Some(audio) = self.settings.audio.take() {
+                self.audio_settings = audio;
+            }
+            return;
+        }
+        let audio = self
+            .settings
+            .audio
+            .get_or_insert_with(|| self.audio_settings.clone());
+        egui::Grid::new("export_audio_grid")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Encoder");
+                egui::ComboBox::from_id_salt("export_audio_codec")
+                    .selected_text(audio_codec_label(audio.codec))
+                    .show_ui(ui, |ui| {
+                        for codec in AudioCodec::ALL {
+                            ui.add_enabled_ui(codec.is_available(), |ui| {
+                                ui.selectable_value(
+                                    &mut audio.codec,
+                                    codec,
+                                    audio_codec_label(codec),
+                                )
+                                .on_disabled_hover_text(
+                                    "Non disponibile in questa build di ffmpeg",
+                                );
+                            });
+                        }
+                    });
+                ui.end_row();
+
+                if audio.codec == AudioCodec::Aac {
+                    ui.label("Preset");
+                    egui::ComboBox::from_id_salt("export_audio_coder")
+                        .selected_text(aac_coder_label(audio.fast_coder))
+                        .show_ui(ui, |ui| {
+                            for fast in [false, true] {
+                                ui.selectable_value(
+                                    &mut audio.fast_coder,
+                                    fast,
+                                    aac_coder_label(fast),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                }
+
+                ui.label("Bitrate");
+                egui::ComboBox::from_id_salt("export_audio_bitrate")
+                    .selected_text(format!("{} kbps", audio.bitrate_kbps))
+                    .show_ui(ui, |ui| {
+                        for kbps in [96, 128, 160, 192, 256, 320] {
+                            ui.selectable_value(
+                                &mut audio.bitrate_kbps,
+                                kbps,
+                                format!("{kbps} kbps"),
+                            );
+                        }
+                    });
+                ui.end_row();
+            });
+    }
+
+    fn export_range(&self, info: &TimelineInfo) -> std::ops::Range<FrameIdx> {
+        match info.marks {
+            Some((mark_in, mark_out)) if !self.whole_timeline => mark_in..mark_out,
+            _ => 0..info.total_frames,
+        }
+    }
+
+    fn buttons(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) -> ExportDialogAction {
+        let path = validate_path(&self.path_text);
+        let mut action = ExportDialogAction::None;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(path.is_ok(), egui::Button::new("Esporta")).clicked()
+                && let Ok(path) = path
+            {
+                let mut settings = self.settings.clone();
+                settings.output_path = path;
+                action = ExportDialogAction::Export {
+                    settings,
+                    range: self.export_range(info),
+                };
+            }
+            if ui.button("Annulla").clicked() {
+                action = ExportDialogAction::Cancel;
+            }
+        });
+        action
+    }
+}
+
+/// Percorso di output valido, con estensione `.mp4` aggiunta se manca.
+fn validate_path(text: &str) -> Result<PathBuf, &'static str> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Scegli un file di destinazione.");
+    }
+    let mut path = PathBuf::from(text);
+    if path.file_name().is_none() {
+        return Err("Manca il nome del file.");
+    }
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+    {
+        path.as_mut_os_string().push(".mp4");
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if parent.is_some_and(|p| !p.is_dir()) {
+        return Err("La cartella di destinazione non esiste.");
+    }
+    Ok(path)
+}
+
+/// Percorso proposto al primo export: accanto al progetto, col suo nome.
+pub fn default_output_path(project_path: Option<&Path>) -> PathBuf {
+    match project_path {
+        Some(project) => project.with_extension("mp4"),
+        None => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join("export.mp4"),
+    }
+}
+
+fn video_codec_label(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::X264 => "H.264 – x264 (CPU)",
+        VideoCodec::Nvenc => "H.264 – NVENC (GPU NVIDIA)",
+    }
+}
+
+fn audio_codec_label(codec: AudioCodec) -> &'static str {
+    match codec {
+        AudioCodec::Aac => "AAC – ffmpeg",
+        AudioCodec::FdkAac => "AAC – Fraunhofer FDK (più veloce)",
+    }
+}
+
+fn aac_coder_label(fast: bool) -> &'static str {
+    if fast { "Più veloce" } else { "Qualità" }
+}
+
+fn format_duration(frames: FrameIdx, fps: f64) -> String {
+    let secs = (frames as f64 / fps.max(1e-9)).round() as i64;
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_path_appends_mp4_and_rejects_missing_dirs() {
+        let dir = std::env::temp_dir();
+        let expected = dir.join("video.mp4");
+        assert_eq!(validate_path(dir.join("video").to_str().unwrap()), Ok(expected.clone()));
+        assert_eq!(validate_path(expected.to_str().unwrap()), Ok(expected));
+        assert!(validate_path("").is_err());
+        assert!(validate_path("/non/esiste/davvero/video.mp4").is_err());
+    }
+
+    #[test]
+    fn export_uses_in_out_marks_unless_whole_timeline_is_chosen() {
+        let info = TimelineInfo {
+            resolution: (1920, 1080),
+            fps: Rational::new(25, 1),
+            total_frames: 100,
+            marks: Some((20, 60)),
+            has_audio: true,
+        };
+        let path = std::env::temp_dir().join("out.mp4");
+        let mut dialog = ExportDialog::new(ExportSettings::new(path));
+        assert_eq!(dialog.export_range(&info), 20..60);
+        dialog.whole_timeline = true;
+        assert_eq!(dialog.export_range(&info), 0..100);
+    }
+
+    #[test]
+    fn output_size_is_even_and_exact_at_full_scale() {
+        let mut settings = ExportSettings::new(PathBuf::new());
+        assert_eq!(settings.output_size((1920, 1080)), (1920, 1080));
+        settings.scale_percent = 75;
+        assert_eq!(settings.output_size((1920, 1080)), (1440, 810));
+        settings.scale_percent = 25;
+        assert_eq!(settings.output_size((1366, 768)), (340, 192));
+    }
+
+    #[test]
+    fn dialog_renders_without_starting_an_export_on_its_own() {
+        let info = TimelineInfo {
+            resolution: (1920, 1080),
+            fps: Rational::new(60, 1),
+            total_frames: 28_800,
+            marks: Some((600, 1200)),
+            has_audio: true,
+        };
+        let mut dialog = ExportDialog::new(ExportSettings::new(std::env::temp_dir().join("x.mp4")));
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let mut action = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                action = Some(dialog.show(ui.ctx(), &info));
+            });
+            assert!(matches!(action, Some(ExportDialogAction::None)));
+        }
+    }
+}

@@ -36,6 +36,55 @@ use crate::frame_provider::{
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportSettings {
+    pub output_path: PathBuf,
+    /// Percentuale della risoluzione della timeline.
+    pub scale_percent: u32,
+    pub video: vv_media::VideoSettings,
+    /// `None` = export senza audio.
+    pub audio: Option<vv_media::AudioSettings>,
+}
+
+impl ExportSettings {
+    pub const SCALE_CHOICES: [u32; 4] = [100, 75, 50, 25];
+
+    pub fn new(output_path: PathBuf) -> Self {
+        Self {
+            output_path,
+            scale_percent: 100,
+            video: vv_media::VideoSettings::default(),
+            audio: Some(vv_media::AudioSettings::default()),
+        }
+    }
+
+    /// Come `new`, ma con gli encoder più veloci disponibili su questa
+    /// macchina (NVENC, FDK). `new` resta deterministico per i test.
+    pub fn preferred(output_path: PathBuf) -> Self {
+        let mut settings = Self::new(output_path);
+        if vv_media::VideoCodec::Nvenc.is_available() {
+            settings.video.codec = vv_media::VideoCodec::Nvenc;
+            settings.video.preset = settings.video.codec.default_preset().into();
+        }
+        if vv_media::AudioCodec::FdkAac.is_available()
+            && let Some(audio) = &mut settings.audio
+        {
+            audio.codec = vv_media::AudioCodec::FdkAac;
+        }
+        settings
+    }
+
+    /// Ridotta a dimensioni pari (richiesto dal 4:2:0 degli encoder);
+    /// al 100% resta esattamente quella della timeline.
+    pub fn output_size(&self, timeline_size: (u32, u32)) -> (u32, u32) {
+        if self.scale_percent >= 100 {
+            return timeline_size;
+        }
+        let scale = |v: u32| ((v * self.scale_percent / 100) & !1).max(2);
+        (scale(timeline_size.0), scale(timeline_size.1))
+    }
+}
+
 #[derive(Default)]
 pub struct ExportProgress {
     pub current_frame: FrameIdx,
@@ -153,7 +202,7 @@ impl FrameProvider for StreamingFrameProvider {
 pub fn export_timeline(
     project: &Project,
     timeline_id: TimelineId,
-    output_path: &Path,
+    settings: &ExportSettings,
     range: std::ops::Range<FrameIdx>,
     progress: &Mutex<ExportProgress>,
     cancel: &AtomicBool,
@@ -171,16 +220,21 @@ pub fn export_timeline(
         return Ok(());
     }
 
-    let has_audio_track = timeline
-        .tracks_of_kind(TrackKind::Audio)
-        .any(|(_, t)| !t.clips.is_empty());
+    let audio_settings = settings.audio.as_ref().filter(|_| {
+        timeline
+            .tracks_of_kind(TrackKind::Audio)
+            .any(|(_, t)| !t.clips.is_empty())
+    });
+    let has_audio_track = audio_settings.is_some();
 
+    let (out_w, out_h) = settings.output_size(timeline.resolution);
     let mut encoder = vv_media::Encoder::new(
-        output_path,
-        timeline.resolution.0,
-        timeline.resolution.1,
+        &settings.output_path,
+        out_w,
+        out_h,
         timeline.fps,
-        has_audio_track.then_some((PROJECT_SAMPLE_RATE, PROJECT_CHANNELS)),
+        &settings.video,
+        audio_settings.map(|a| (PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, a)),
     )
     .map_err(|e| e.to_string())?;
 
@@ -191,6 +245,7 @@ pub fn export_timeline(
     let (composed_tx, composed_rx) =
         std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(RENDER_AHEAD_FRAMES);
     let resolution = timeline.resolution;
+    let output = vv_render::OutputFrame::scaled(out_w, out_h, resolution);
     std::thread::scope(|scope| {
         let mut audio_mix = has_audio_track.then(|| {
             let range = range.clone();
@@ -221,7 +276,7 @@ pub fn export_timeline(
             let compositor = vv_render::Compositor::new_headless();
             for (frame, decoded) in compose_range.zip(decoded_rx) {
                 let composed = decoded.map(|decoded| {
-                    compose_video_frame(timeline, &compositor, frame, &decoded, resolution)
+                    compose_video_frame(timeline, &compositor, frame, &decoded, output)
                 });
                 let failed = composed.is_err();
                 if composed_tx.send(composed).is_err() || failed {
@@ -291,7 +346,8 @@ fn render_video_frame(
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
     let decoded = decode_video_frame(project, timeline, provider, frame, resolution)?;
-    Ok(compose_video_frame(timeline, compositor, frame, &decoded, resolution))
+    let output = vv_render::OutputFrame::exact(resolution.0, resolution.1);
+    Ok(compose_video_frame(timeline, compositor, frame, &decoded, output))
 }
 
 fn decode_video_frame(
@@ -332,7 +388,7 @@ fn compose_video_frame(
     compositor: &vv_render::Compositor,
     frame: FrameIdx,
     decoded: &DecodedLayers,
-    resolution: (u32, u32),
+    output: vv_render::OutputFrame,
 ) -> Vec<u8> {
     let clips = active_clips(timeline, frame);
     let layers: Vec<vv_render::Layer> = clips
@@ -369,10 +425,7 @@ fn compose_video_frame(
         })
         .collect();
 
-    compositor.render_layers_i420(
-        &layers,
-        vv_render::OutputFrame::exact(resolution.0, resolution.1),
-    )
+    compositor.render_layers_i420(&layers, output)
 }
 
 fn join_audio_mix(
@@ -825,7 +878,8 @@ mod tests {
         let progress = Mutex::new(ExportProgress::default());
         let cancel = AtomicBool::new(false);
         let total = app.project.timelines[timeline_id].total_frames();
-        export_timeline(&app.project, timeline_id, &output_path, 0..total, &progress, &cancel)
+        let settings = ExportSettings::new(output_path.clone());
+        export_timeline(&app.project, timeline_id, &settings, 0..total, &progress, &cancel)
             .expect("export fallito");
 
         assert!(progress.lock().unwrap().done);
@@ -920,7 +974,7 @@ mod tests {
         export_timeline(
             &app.project,
             timeline_id,
-            &output_path,
+            &ExportSettings::new(output_path.clone()),
             0..total,
             &progress,
             &AtomicBool::new(false),
@@ -965,6 +1019,56 @@ mod tests {
     }
 
     #[test]
+    fn preferred_settings_pick_the_faster_encoders_only_when_available() {
+        let settings = ExportSettings::preferred(PathBuf::from("out.mp4"));
+        let nvenc = vv_media::VideoCodec::Nvenc.is_available();
+        assert_eq!(settings.video.codec == vv_media::VideoCodec::Nvenc, nvenc);
+        assert_eq!(settings.video.preset, settings.video.codec.default_preset());
+        let fdk = vv_media::AudioCodec::FdkAac.is_available();
+        let audio = settings.audio.expect("audio incluso di default");
+        assert_eq!(audio.codec == vv_media::AudioCodec::FdkAac, fdk);
+    }
+
+    #[test]
+    fn export_timeline_scales_the_output_and_can_drop_the_audio() {
+        let dir = std::env::temp_dir().join("vv-app-export-scale-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("source.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=1"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(source_path.to_str().unwrap())
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        let mut app = crate::VibeVideoApp::default();
+        app.import_media(source_path);
+        let media_id = app.project.media_pool.iter().next().map(|(id, _)| id).unwrap();
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+        let total = app.project.timelines[timeline_id].total_frames();
+
+        let mut settings = ExportSettings::new(dir.join("out.mp4"));
+        settings.scale_percent = 50;
+        settings.audio = None;
+        export_timeline(
+            &app.project,
+            timeline_id,
+            &settings,
+            0..total,
+            &Mutex::new(ExportProgress::default()),
+            &AtomicBool::new(false),
+        )
+        .expect("export fallito");
+
+        let meta = vv_media::probe(&settings.output_path).unwrap();
+        assert_eq!((meta.width, meta.height), (32, 24));
+        assert!(!meta.has_audio);
+    }
+
+    #[test]
     fn export_timeline_writes_only_the_in_out_range() {
         let dir = std::env::temp_dir().join("vv-app-export-range-test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -988,7 +1092,7 @@ mod tests {
         export_timeline(
             &app.project,
             timeline_id,
-            &output_path,
+            &ExportSettings::new(output_path.clone()),
             5..15,
             &progress,
             &AtomicBool::new(false),

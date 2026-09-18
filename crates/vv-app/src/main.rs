@@ -11,6 +11,7 @@
 //! per-clip: un layer opaco che copre tutto il frame occlude quelli sotto.
 
 mod export;
+mod export_dialog;
 mod frame_provider;
 mod media_pool;
 mod mix_buffers;
@@ -462,6 +463,9 @@ struct VibeVideoApp {
     /// è attivo. Il thread lavora su uno snapshot di `Project` clonato al
     /// click di "Esporta", non sul progetto live — vedi `export.rs`.
     export: Option<ExportUiState>,
+    export_dialog: Option<export_dialog::ExportDialog>,
+    /// Riproposte al prossimo export della sessione.
+    last_export_settings: Option<export::ExportSettings>,
 
     /// File del progetto corrente (milestone 10), se già salvato/aperto
     /// almeno una volta: "Salva" scrive lì direttamente, altrimenti si
@@ -559,6 +563,8 @@ impl Default for VibeVideoApp {
             video_subtab: VideoSubTab::Title,
             fonts: FontCatalog::default(),
             export: None,
+            export_dialog: None,
+            last_export_settings: None,
             current_project_path: None,
             saved_generation: 0,
             unsaved_media: false,
@@ -955,36 +961,61 @@ impl VibeVideoApp {
         }
     }
 
-    /// Apre il dialog di salvataggio e, se l'utente conferma, avvia
-    /// l'export su un thread dedicato: clona `self.project` (l'export
+    /// Apre la finestra delle impostazioni: l'export parte solo da lì
+    /// (`run_export`).
+    fn start_export(&mut self) {
+        // Il pulsante è disabilitato durante un export, ma Ctrl+Shift+E no.
+        if self.timeline_id.is_none() || self.export.is_some() || self.export_dialog.is_some() {
+            return;
+        }
+        let settings = self.last_export_settings.clone().unwrap_or_else(|| {
+            export::ExportSettings::preferred(export_dialog::default_output_path(
+                self.current_project_path.as_deref(),
+            ))
+        });
+        self.export_dialog = Some(export_dialog::ExportDialog::new(settings));
+    }
+
+    fn show_export_dialog(&mut self, ui: &mut egui::Ui) {
+        let (Some(dialog), Some(timeline_id)) = (&mut self.export_dialog, self.timeline_id) else {
+            return;
+        };
+        let timeline = &self.project.timelines[timeline_id];
+        let total_frames = timeline.total_frames();
+        let marks = &self.timeline_state.export_marks;
+        let info = export_dialog::TimelineInfo {
+            resolution: timeline.resolution,
+            fps: timeline.fps,
+            total_frames,
+            marks: (!marks.is_full(total_frames)).then(|| marks.resolve(total_frames)),
+            has_audio: timeline
+                .tracks_of_kind(TrackKind::Audio)
+                .any(|(_, t)| !t.clips.is_empty()),
+        };
+        match dialog.show(ui.ctx(), &info) {
+            export_dialog::ExportDialogAction::None => {}
+            export_dialog::ExportDialogAction::Cancel => self.export_dialog = None,
+            export_dialog::ExportDialogAction::Export { settings, range } => {
+                self.export_dialog = None;
+                self.last_export_settings = Some(settings.clone());
+                self.run_export(timeline_id, settings, range);
+            }
+        }
+    }
+
+    /// Avvia l'export su un thread dedicato: clona `self.project` (l'export
     /// lavora su questo snapshot, non sul progetto live — continuare a
     /// editare durante l'export non lo tocca) e gira
     /// `export::export_timeline` in background, aggiornando `self.export`
-    /// con progresso/cancellazione condivisi (vedi il pannello di
-    /// progresso in `update`).
-    fn start_export(&mut self) {
-        let Some(timeline_id) = self.timeline_id else {
-            return;
-        };
-        // Guardia contro un secondo export avviato mentre il primo è
-        // ancora in corso: il pulsante in toolbar è già disabilitato in
-        // quel caso (`add_enabled`), ma la shortcut Ctrl+Shift+E la
-        // bypasserebbe senza questo controllo qui.
-        if self.export.is_some() {
-            return;
-        }
-        let Some(output_path) = rfd::FileDialog::new()
-            .set_file_name("export.mp4")
-            .add_filter("mp4", &["mp4"])
-            .save_file()
-        else {
-            return;
-        };
-
+    /// con progresso/cancellazione condivisi.
+    fn run_export(
+        &mut self,
+        timeline_id: TimelineId,
+        settings: export::ExportSettings,
+        range: std::ops::Range<FrameIdx>,
+    ) {
         self.pause_proxies_for_export();
 
-        let total = self.project.timelines[timeline_id].total_frames();
-        let (mark_in, mark_out) = self.timeline_state.export_marks.resolve(total);
         let project = self.project.clone();
         let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
@@ -995,8 +1026,8 @@ impl VibeVideoApp {
             let result = export::export_timeline(
                 &project,
                 timeline_id,
-                &output_path,
-                mark_in..mark_out,
+                &settings,
+                range,
                 &thread_progress,
                 &thread_cancel,
             );
@@ -4707,7 +4738,9 @@ impl eframe::App for VibeVideoApp {
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                let export_disabled = self.timeline_id.is_none() || self.export.is_some();
+                let export_disabled = self.timeline_id.is_none()
+                    || self.export.is_some()
+                    || self.export_dialog.is_some();
 
                 ui.menu_button("File", |ui| {
                     if ui.button("Apri progetto... (Ctrl+O)").clicked() {
@@ -4956,6 +4989,7 @@ impl eframe::App for VibeVideoApp {
             });
         });
 
+        self.show_export_dialog(ui);
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
         self.show_unsaved_changes_dialog(ui);
@@ -6133,6 +6167,8 @@ fn main() -> eframe::Result<()> {
     // (comodo per debug/smoke test, oltre che per l'uso da riga di comando).
     let startup_path = std::env::args().nth(1).map(PathBuf::from);
     std::thread::spawn(vv_render::text::warm_up);
+    // La prima verifica di NVENC inizializza CUDA: meglio non nella UI.
+    std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,

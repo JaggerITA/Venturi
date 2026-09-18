@@ -1,4 +1,4 @@
-//! Encoding + muxing verso file (H.264 + AAC in MP4), via `ffmpeg-next` —
+//! Encoding + muxing verso file (H.264 via x264 o NVENC + AAC in MP4), via `ffmpeg-next` —
 //! simmetrico a `decode.rs` ma nella direzione opposta: chi chiama fornisce
 //! frame I420 già compositati (BT.709 range limitato, convertiti su GPU dal
 //! compositor) e campioni PCM già mixati (vedi la pipeline di export in
@@ -16,6 +16,135 @@ use ffmpeg::software::resampling::context::Context as Resampler;
 use ffmpeg::{ChannelLayout, Dictionary};
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
+use std::sync::OnceLock;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoCodec {
+    X264,
+    Nvenc,
+}
+
+impl VideoCodec {
+    pub const ALL: [Self; 2] = [Self::X264, Self::Nvenc];
+
+    fn ffmpeg_name(self) -> &'static str {
+        match self {
+            Self::X264 => "libx264",
+            Self::Nvenc => "h264_nvenc",
+        }
+    }
+
+    /// Dal più veloce al più lento.
+    pub fn presets(self) -> &'static [&'static str] {
+        match self {
+            Self::X264 => &[
+                "ultrafast",
+                "superfast",
+                "veryfast",
+                "faster",
+                "fast",
+                "medium",
+                "slow",
+                "slower",
+                "veryslow",
+            ],
+            Self::Nvenc => &["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+        }
+    }
+
+    pub fn default_preset(self) -> &'static str {
+        match self {
+            // A parità di CRF qualità simile a "medium", ~3× più veloce e
+            // file ~2× più grande.
+            Self::X264 => "superfast",
+            Self::Nvenc => "p5",
+        }
+    }
+
+    /// Prova ad aprire davvero l'encoder (risultato in cache): NVENC è
+    /// compilato in molte build di ffmpeg anche dove non c'è una GPU
+    /// NVIDIA, e la prima apertura può costare un secondo.
+    pub fn is_available(self) -> bool {
+        static CACHE: [OnceLock<bool>; 2] = [OnceLock::new(), OnceLock::new()];
+        *CACHE[self as usize].get_or_init(|| {
+            crate::probe::ensure_init();
+            let Some(codec) = encoder::find_by_name(self.ffmpeg_name()) else {
+                return false;
+            };
+            let Ok(mut ctx) = codec::context::Context::new_with_codec(codec)
+                .encoder()
+                .video()
+            else {
+                return false;
+            };
+            ctx.set_width(256);
+            ctx.set_height(256);
+            ctx.set_format(Pixel::YUV420P);
+            ctx.set_time_base(ffmpeg::Rational::new(1, 25));
+            ctx.open().is_ok()
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoSettings {
+    pub codec: VideoCodec,
+    /// Uno di `codec.presets()`.
+    pub preset: String,
+    /// CRF per x264, CQ per NVENC: più basso = qualità più alta.
+    pub quality: u8,
+}
+
+impl Default for VideoSettings {
+    fn default() -> Self {
+        Self {
+            codec: VideoCodec::X264,
+            preset: VideoCodec::X264.default_preset().into(),
+            quality: 20,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioCodec {
+    Aac,
+    FdkAac,
+}
+
+impl AudioCodec {
+    pub const ALL: [Self; 2] = [Self::Aac, Self::FdkAac];
+
+    fn ffmpeg_name(self) -> &'static str {
+        match self {
+            Self::Aac => "aac",
+            Self::FdkAac => "libfdk_aac",
+        }
+    }
+
+    pub fn is_available(self) -> bool {
+        crate::probe::ensure_init();
+        encoder::find_by_name(self.ffmpeg_name()).is_some()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioSettings {
+    pub codec: AudioCodec,
+    pub bitrate_kbps: u32,
+    /// Solo per `AudioCodec::Aac`: coder "fast" invece di "twoloop", molto
+    /// più rapido in stereo a qualità un po' inferiore.
+    pub fast_coder: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            codec: AudioCodec::Aac,
+            bitrate_kbps: 128,
+            fast_coder: false,
+        }
+    }
+}
 
 struct VideoState {
     encoder: encoder::Video,
@@ -62,23 +191,27 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// `audio`: `Some((sample_rate, channels))` se il progetto ha una
-    /// traccia audio da esportare, `None` per un export solo video.
+    /// `audio`: `Some((sample_rate, channels, impostazioni))` se il progetto
+    /// ha una traccia audio da esportare, `None` per un export solo video.
     pub fn new(
         path: &Path,
         width: u32,
         height: u32,
         fps: vv_core::Rational,
-        audio: Option<(u32, u16)>,
+        video: &VideoSettings,
+        audio: Option<(u32, u16, &AudioSettings)>,
     ) -> Result<Self, crate::MediaError> {
         crate::probe::ensure_init();
 
         let mut octx = format::output(path)?;
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        // --- video: H.264 (libx264) ---
-        let video_codec = encoder::find(codec::Id::H264)
-            .ok_or_else(|| crate::MediaError::NoStream("encoder H264 non disponibile".into()))?;
+        let video_codec = encoder::find_by_name(video.codec.ffmpeg_name()).ok_or_else(|| {
+            crate::MediaError::NoStream(format!(
+                "encoder {} non disponibile",
+                video.codec.ffmpeg_name()
+            ))
+        })?;
         let video_ost = octx.add_stream(video_codec)?;
         let video_stream_index = video_ost.index();
 
@@ -102,19 +235,33 @@ impl Encoder {
         if global_header {
             video_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
         }
-        let mut x264_opts = Dictionary::new();
-        x264_opts.set("preset", "medium");
-        x264_opts.set("crf", "20");
-        let video_encoder = video_ctx.open_with(x264_opts)?;
+        let mut video_opts = Dictionary::new();
+        video_opts.set("preset", &video.preset);
+        let quality = video.quality.to_string();
+        match video.codec {
+            VideoCodec::X264 => video_opts.set("crf", &quality),
+            VideoCodec::Nvenc => {
+                // Senza bit_rate a 0 NVENC ignora `cq` e resta sul bitrate
+                // di default del contesto.
+                video_ctx.set_bit_rate(0);
+                video_opts.set("rc", "vbr");
+                video_opts.set("cq", &quality);
+            }
+        }
+        let video_encoder = video_ctx.open_with(video_opts)?;
         let mut video_ost = video_ost;
         video_ost.set_parameters(&video_encoder);
 
         // --- audio: AAC (opzionale) ---
         let audio_state = match audio {
-            Some((sample_rate, channels)) => {
-                let audio_codec = encoder::find(codec::Id::AAC).ok_or_else(|| {
-                    crate::MediaError::NoStream("encoder AAC non disponibile".into())
-                })?;
+            Some((sample_rate, channels, settings)) => {
+                let audio_codec =
+                    encoder::find_by_name(settings.codec.ffmpeg_name()).ok_or_else(|| {
+                        crate::MediaError::NoStream(format!(
+                            "encoder {} non disponibile",
+                            settings.codec.ffmpeg_name()
+                        ))
+                    })?;
                 let audio_ost = octx.add_stream(audio_codec)?;
                 let audio_stream_index = audio_ost.index();
 
@@ -128,6 +275,7 @@ impl Encoder {
                     .encoder()
                     .audio()?;
                 audio_ctx.set_rate(sample_rate as i32);
+                audio_ctx.set_bit_rate(settings.bitrate_kbps as usize * 1000);
                 audio_ctx.set_channel_layout(input_layout);
                 audio_ctx.set_format(
                     audio_codec
@@ -145,7 +293,12 @@ impl Encoder {
                 if global_header {
                     audio_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
                 }
-                let audio_encoder = audio_ctx.open_as(audio_codec)?;
+                let mut audio_opts = Dictionary::new();
+                if settings.codec == AudioCodec::Aac {
+                    let coder = if settings.fast_coder { "fast" } else { "twoloop" };
+                    audio_opts.set("aac_coder", coder);
+                }
+                let audio_encoder = audio_ctx.open_as_with(audio_codec, audio_opts)?;
                 let mut audio_ost = audio_ost;
                 audio_ost.set_parameters(&audio_encoder);
 
@@ -367,7 +520,8 @@ mod tests {
         let path = dir.join("video_only.mp4");
 
         let fps = vv_core::Rational::new(25, 1);
-        let mut encoder = Encoder::new(&path, 16, 16, fps, None).unwrap();
+        let mut encoder =
+            Encoder::new(&path, 16, 16, fps, &VideoSettings::default(), None).unwrap();
         // Rosso in BT.709 range limitato.
         let red = solid_i420(16, 16, [63, 102, 240]);
         for _ in 0..25 {
@@ -399,7 +553,15 @@ mod tests {
         let path = dir.join("video_audio.mp4");
 
         let fps = vv_core::Rational::new(25, 1);
-        let mut encoder = Encoder::new(&path, 16, 16, fps, Some((48000, 2))).unwrap();
+        let mut encoder = Encoder::new(
+            &path,
+            16,
+            16,
+            fps,
+            &VideoSettings::default(),
+            Some((48000, 2, &AudioSettings::default())),
+        )
+        .unwrap();
         let black = solid_i420(16, 16, [16, 128, 128]);
         for _ in 0..25 {
             encoder.write_video_frame(&black).unwrap();
@@ -423,5 +585,53 @@ mod tests {
             .expect("audio atteso");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+    }
+
+    /// Ogni combinazione di encoder disponibile su questa macchina deve
+    /// produrre un file con entrambi gli stream.
+    #[test]
+    fn encodes_with_every_available_codec_and_preset_choice() {
+        let dir = std::env::temp_dir().join("vv-media-encode-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fps = vv_core::Rational::new(25, 1);
+        let frame = solid_i420(256, 256, [63, 102, 240]);
+        let samples = vec![0.1_f32; 48000 * 2];
+        let audio_choices = [
+            AudioSettings::default(),
+            AudioSettings {
+                fast_coder: true,
+                bitrate_kbps: 192,
+                ..AudioSettings::default()
+            },
+            AudioSettings {
+                codec: AudioCodec::FdkAac,
+                ..AudioSettings::default()
+            },
+        ];
+        for codec in VideoCodec::ALL.into_iter().filter(|c| c.is_available()) {
+            for (i, audio) in audio_choices
+                .iter()
+                .filter(|a| a.codec.is_available())
+                .enumerate()
+            {
+                let path = dir.join(format!("{codec:?}-{i}.mp4"));
+                let video = VideoSettings {
+                    codec,
+                    preset: codec.presets()[0].into(),
+                    quality: 30,
+                };
+                let mut encoder =
+                    Encoder::new(&path, 256, 256, fps, &video, Some((48000, 2, audio))).unwrap();
+                for _ in 0..10 {
+                    encoder.write_video_frame(&frame).unwrap();
+                }
+                encoder.write_audio_samples(&samples).unwrap();
+                encoder.finish().unwrap();
+
+                let meta = crate::probe::probe(&path).unwrap();
+                assert_eq!((meta.width, meta.height), (256, 256), "{codec:?} {audio:?}");
+                assert!(meta.has_audio, "{codec:?} {audio:?}");
+            }
+        }
     }
 }

@@ -18,7 +18,7 @@ pub mod waveform;
 pub use audio::{AudioBuffer, decode_audio_track, decode_audio_streams_streaming};
 pub use cache::{FrameCache, SharedFrameCache, WantedRange};
 pub use decode::{ColorMatrix, Decoder, FrameYuv420, decode_first_frame};
-pub use encode::Encoder;
+pub use encode::{AudioCodec, AudioSettings, Encoder, VideoCodec, VideoSettings};
 pub use playback::{DecodeAhead, frame_cache_capacity};
 pub use thumbnail::{Thumbnail, generate_thumbnail};
 pub use probe::{AUDIO_ONLY_FPS, AudioStreamInfo, audio_streams, content_fingerprint, probe};

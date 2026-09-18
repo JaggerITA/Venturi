@@ -19,7 +19,7 @@ sono in [REFACTOR_PIPELINE.md](REFACTOR_PIPELINE.md).
 | UI | egui + eframe | immediate-mode, puro Rust, condivide il device wgpu col compositor |
 | GPU | wgpu su Vulkan (Honeykrisp) | conformante 1.3/1.4 su M1/M2, stack unico per UI e compositing |
 | Decode video | FFmpeg software (ffmpeg-next / libavcodec) | il decoder HW V4L2/AVD è ancora instabile con multi-reference frame (praticamente ogni file x264 reale) |
-| Encode/export | FFmpeg software (libx264 via ffmpeg-next) | nessun encoder HW affidabile su Asahi oggi |
+| Encode/export | FFmpeg via ffmpeg-next: NVENC se si apre davvero, altrimenti libx264 | nessun encoder HW affidabile su Asahi oggi |
 | Time-stretch audio | filtro `rubberband` di libavfilter (ffmpeg di sistema è già compilato con `--enable-librubberband`) | pitch preservato, zero binding extra da scrivere |
 | Persistenza progetto | RON, leggibile | debuggabile, diffabile con git |
 | Undo/redo | command pattern (comandi invertibili) | history leggera, illimitata, coerente con architettura a dati |
@@ -286,7 +286,12 @@ Fatto:
 - Proxy e waveform in background.
 - Media solo audio (wav, mp3, flac…): fps nominale `AUDIO_ONLY_FPS`, niente
   proxy né miniatura, in timeline solo clip audio.
-- Export H.264 + AAC in MP4 dell'intervallo in/out della timeline (Ctrl+Shift+E).
+- Export H.264 + AAC in MP4 (Ctrl+Shift+E) da una finestra di impostazioni:
+  destinazione, intervallo in/out o tutta la timeline, encoder video
+  (x264/NVENC) con preset e qualità, risoluzione ridotta, encoder audio
+  (AAC nativo/FDK) con preset e bitrate. Default: NVENC e FDK se
+  disponibili, altrimenti x264 `superfast` CRF 20 e AAC nativo. Le ultime
+  impostazioni restano per la sessione.
 - Progetto su file `.vvproj` in RON (Ctrl+O, Ctrl+S, Ctrl+Shift+S).
 - OpenTimelineIO (`vv-core/src/otio/`, File → Esporta/Importa OTIO).
   Export: `source_range` all'fps della timeline, i buchi come `Gap`,
