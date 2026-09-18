@@ -66,9 +66,9 @@ struct Track {
 struct Clip {
     id: ClipId,
     source: ClipSource,               // Media(MediaId) | SolidColor
-    source_in: FrameIdx,              // in frame sorgente (fps del media)
-    source_out: FrameIdx,
+    source_offset: FrameIdx,          // inizio nel media, in frame di Timeline
     timeline_start: FrameIdx,         // in frame di Timeline
+    timeline_len: FrameIdx,           // in frame di Timeline
     effects: EffectStack,
     linked_group: Option<LinkGroupId>, // video + audio dello stesso import
     audio_stream_index: usize,         // quale stream audio del media
@@ -95,14 +95,16 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 - Una clip il cui media ha un fps diverso da quello della Timeline viene
   **conformata**: `Clip::rate` (= fps Timeline / fps media, calcolato
   all'inserimento e ricalcolato al caricamento di un progetto) è l'unico
-  posto dove i due spazi frame si incontrano. `timeline_len()` e
-  `source_frame_at()`/`timeline_frame_at()` lo applicano, quindi una clip
-  dura in Timeline il suo tempo reale e il video ripete o salta un frame
-  quando serve (a 59,94 su 60: uno duplicato ogni ~17 s) invece di andare
-  fuori sync con l'audio, che suona sempre a velocità reale. `source_in`/
-  `source_out` restano l'unica fonte di verità sulla durata: il rapporto
-  è ancorato al frame sorgente *assoluto*, così dividere una clip in due
-  dà esattamente la copertura di prima.
+  posto dove i due spazi frame si incontrano. `source_frame_at()`/
+  `timeline_frame_at()` lo applicano, quindi una clip dura in Timeline il
+  suo tempo reale e il video ripete o salta un frame quando serve (a 59,94
+  su 60: uno duplicato ogni ~17 s) invece di andare fuori sync con
+  l'audio, che suona sempre a velocità reale.
+- L'intervallo di una clip è `source_offset` + `timeline_len`, entrambi in
+  frame di Timeline (come `source_range` di OTIO); `source_in()`/
+  `source_out()` ne sono derivati. Split e trim cadono esattamente sulla
+  posizione scelta anche a metà di un frame sorgente, senza perdere la
+  fase del contenuto (vedi `DURATA_CLIP_ESPLICITA.md`).
 
 ## Pipeline di decode + cache
 

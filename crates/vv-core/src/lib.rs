@@ -254,7 +254,7 @@ mod tests {
             }),
         );
 
-        // Trimma il bordo sinistro: source_in passa da 0 a 5.
+        // Trimma il bordo sinistro da 10 a 15: source_in passa da 0 a 5.
         history.do_command(
             &mut project,
             Box::new(command::TrimClip::new(
@@ -262,12 +262,12 @@ mod tests {
                 0,
                 a_id,
                 TrimEdge::Start,
-                5,
+                15,
             )),
         );
 
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.source_in, 5);
+        assert_eq!(clip.source_in(), 5);
         assert_eq!(clip.timeline_start, 15, "si sposta della stessa quantità");
         assert_eq!(
             clip.timeline_end(),
@@ -277,7 +277,7 @@ mod tests {
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.source_in(), 0);
         assert_eq!(clip.timeline_start, 10);
     }
 
@@ -299,11 +299,11 @@ mod tests {
 
         history.do_command(
             &mut project,
-            Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::End, 15)),
+            Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::End, 25)),
         );
 
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.source_out, 15);
+        assert_eq!(clip.source_out(), 15);
         assert_eq!(
             clip.timeline_start, 10,
             "l'inizio sulla timeline resta fermo"
@@ -312,7 +312,7 @@ mod tests {
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.source_out, 20);
+        assert_eq!(clip.source_out(), 20);
         assert_eq!(clip.timeline_end(), 30);
     }
 
@@ -342,120 +342,151 @@ mod tests {
         let first = &tl.tracks[0].clips[0];
         let second = &tl.tracks[0].clips[1];
         assert_eq!(first.timeline_start, 0);
-        assert_eq!(first.source_out, 8);
+        assert_eq!(first.source_out(), 8);
         assert_eq!(second.timeline_start, 8);
-        assert_eq!(second.source_in, 8);
-        assert_eq!(second.source_out, 20);
+        assert_eq!(second.source_in(), 8);
+        assert_eq!(second.source_out(), 20);
         assert_ne!(first.id, second.id);
 
         history.undo(&mut project);
         let tl = &project.timelines[timeline];
         assert_eq!(tl.tracks[0].clips.len(), 1);
-        assert_eq!(tl.tracks[0].clips[0].source_out, 20);
+        assert_eq!(tl.tracks[0].clips[0].source_out(), 20);
     }
 
-    /// Clip a 59,94 fps su timeline a 60: le due metà devono restare
-    /// attaccate e coprire esattamente l'intervallo di prima, anche se il
-    /// taglio si arrotonda al bordo del frame sorgente più vicino.
-    #[test]
-    fn split_clip_on_a_conformed_clip_covers_the_original_exactly() {
-        let (mut project, timeline) = make_project_with_two_tracks();
-        let mut history = History::default();
+    const RATES: [Rational; 4] = [
+        Rational::new(1, 1),
+        Rational::new(1001, 1000),
+        Rational::new(6, 5),
+        Rational::new(5, 6),
+    ];
 
-        let mut a = make_clip(&mut project, 100, 6000);
-        a.rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
-        let a_id = a.id;
-        let (original_start, original_end) = (a.timeline_start, a.timeline_end());
-        let original_source = (a.source_in, a.source_out);
-        history.do_command(
-            &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 0,
-                clip: a,
-            }),
-        );
-
-        let split_at = original_start + 2500;
-        history.do_command(
-            &mut project,
-            Box::new(command::SplitClip::new(timeline, 0, a_id, split_at)),
-        );
-
-        let clips = &project.timelines[timeline].tracks[0].clips;
-        assert_eq!(clips.len(), 2);
-        let (first, second) = (&clips[0], &clips[1]);
-        assert_eq!(first.timeline_start, original_start);
-        assert_eq!(
-            second.timeline_start,
-            first.timeline_end(),
-            "né buchi né sovrapposizioni tra le due metà"
-        );
-        assert_eq!(second.timeline_end(), original_end, "stessa copertura");
-        assert_eq!((first.source_in, second.source_out), original_source);
-        assert_eq!(first.source_out, second.source_in);
-        assert!(
-            (second.timeline_start - split_at).abs() <= 1,
-            "taglio entro un frame da quello richiesto"
-        );
-
-        history.undo(&mut project);
-        let clips = &project.timelines[timeline].tracks[0].clips;
-        assert_eq!(clips.len(), 1);
-        assert_eq!(clips[0].timeline_start, original_start);
-        assert_eq!(clips[0].timeline_end(), original_end);
+    fn span(clip: &Clip) -> (FrameIdx, FrameIdx, FrameIdx) {
+        (clip.timeline_start, clip.source_offset, clip.timeline_len)
     }
 
-    /// Con una clip conformata un frame sorgente può coprire due frame di
-    /// timeline: lì in mezzo non c'è nessun bordo dove tagliare, e il
-    /// taglio va sul bordo più vicino — mai più lontano di un frame dal
-    /// punto richiesto, da una parte o dall'altra.
+    /// Anche su una clip conformata il taglio cade esattamente dove
+    /// richiesto, e ogni frame di timeline mostra lo stesso frame sorgente
+    /// di prima: la metà destra non perde la fase.
     #[test]
-    fn split_clip_on_a_conformed_clip_cuts_at_the_nearest_source_boundary() {
-        let (mut project, timeline) = make_project_with_two_tracks();
-        let mut history = History::default();
-
-        let mut a = make_clip(&mut project, 0, 3000);
-        a.rate = Rational::conform_rate(Rational::new(30, 1), Rational::new(30_000, 1001));
-        let a_id = a.id;
-        history.do_command(
-            &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 0,
-                clip: a,
-            }),
-        );
-
-        for split_at in 1..3000 {
+    fn split_clip_cuts_exactly_and_preserves_every_frame_at_any_rate() {
+        for rate in RATES {
+            let (mut project, timeline) = make_project_with_two_tracks();
+            let mut history = History::default();
+            let a = Clip::from_source_range(
+                project.alloc_clip_id(),
+                ClipSource::SolidColor,
+                17,
+                317,
+                40,
+                rate,
+            );
+            let original = a.clone();
             history.do_command(
                 &mut project,
-                Box::new(command::SplitClip::new(timeline, 0, a_id, split_at)),
+                Box::new(command::InsertClip {
+                    timeline,
+                    track_index: 0,
+                    clip: a,
+                }),
             );
-            let clips = &project.timelines[timeline].tracks[0].clips;
-            if clips.len() == 2 {
-                let cut = clips[1].timeline_start;
-                assert!(
-                    (cut - split_at).abs() <= 1,
-                    "taglio a {cut} per una richiesta a {split_at}"
+
+            for split_at in original.timeline_start + 1..original.timeline_end() {
+                history.do_command(
+                    &mut project,
+                    Box::new(command::SplitClip::new(timeline, 0, original.id, split_at)),
                 );
+                let clips = &project.timelines[timeline].tracks[0].clips;
+                assert_eq!(clips.len(), 2);
+                assert_eq!(clips[0].timeline_end(), split_at);
+                assert_eq!(clips[1].timeline_start, split_at);
+                assert_eq!(clips[1].timeline_end(), original.timeline_end());
+                for t in original.timeline_start..original.timeline_end() {
+                    let half = if t < split_at { &clips[0] } else { &clips[1] };
+                    assert_eq!(
+                        half.source_frame_at(t),
+                        original.source_frame_at(t),
+                        "rate {rate:?}, split a {split_at}, t {t}"
+                    );
+                }
+
+                history.undo(&mut project);
+                let clips = &project.timelines[timeline].tracks[0].clips;
+                assert_eq!(clips.len(), 1);
+                assert_eq!(span(&clips[0]), span(&original));
             }
-            history.undo(&mut project);
         }
     }
 
-    /// Trim del bordo sinistro di una clip conformata: la fine sulla
-    /// timeline non si muove, e `timeline_start` segue la *durata* nuova
-    /// (non il delta in frame sorgente, un'altra unità di misura).
+    /// Stesso principio dello split per i due bordi di un trim.
+    #[test]
+    fn trim_cuts_exactly_and_preserves_every_remaining_frame_at_any_rate() {
+        for rate in RATES {
+            for edge in [TrimEdge::Start, TrimEdge::End] {
+                let (mut project, timeline) = make_project_with_two_tracks();
+                let mut history = History::default();
+                let a = Clip::from_source_range(
+                    project.alloc_clip_id(),
+                    ClipSource::SolidColor,
+                    17,
+                    317,
+                    40,
+                    rate,
+                );
+                let original = a.clone();
+                history.do_command(
+                    &mut project,
+                    Box::new(command::InsertClip {
+                        timeline,
+                        track_index: 0,
+                        clip: a,
+                    }),
+                );
+
+                for edge_at in original.timeline_start + 1..original.timeline_end() {
+                    history.do_command(
+                        &mut project,
+                        Box::new(command::TrimClip::new(timeline, 0, original.id, edge, edge_at)),
+                    );
+                    let clip = &project.timelines[timeline].tracks[0].clips[0];
+                    let expected = match edge {
+                        TrimEdge::Start => (edge_at, original.timeline_end()),
+                        TrimEdge::End => (original.timeline_start, edge_at),
+                    };
+                    assert_eq!((clip.timeline_start, clip.timeline_end()), expected);
+                    for t in clip.timeline_start..clip.timeline_end() {
+                        assert_eq!(
+                            clip.source_frame_at(t),
+                            original.source_frame_at(t),
+                            "rate {rate:?}, {edge:?} a {edge_at}, t {t}"
+                        );
+                    }
+
+                    history.undo(&mut project);
+                    let clip = &project.timelines[timeline].tracks[0].clips[0];
+                    assert_eq!(span(clip), span(&original));
+                }
+            }
+        }
+    }
+
     #[test]
     fn trim_start_on_a_conformed_clip_keeps_the_timeline_end_fixed() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
 
-        let mut a = make_clip(&mut project, 1000, 6000);
-        a.rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        let rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
+        let a = Clip::from_source_range(
+            project.alloc_clip_id(),
+            ClipSource::SolidColor,
+            0,
+            6000,
+            1000,
+            rate,
+        );
         let a_id = a.id;
         let original_end = a.timeline_end();
+        let new_start = a.timeline_frame_at(3000);
         history.do_command(
             &mut project,
             Box::new(command::InsertClip {
@@ -467,17 +498,17 @@ mod tests {
 
         history.do_command(
             &mut project,
-            Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::Start, 3000)),
+            Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::Start, new_start)),
         );
 
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!(clip.source_in, 3000);
+        assert_eq!(clip.source_in(), 3000);
         assert_eq!(clip.timeline_end(), original_end);
-        assert_eq!(clip.timeline_len(), 3003, "3000 frame a 59,94 su 60 fps");
+        assert_eq!(clip.timeline_len, 3003, "3000 frame a 59,94 su 60 fps");
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert_eq!((clip.source_in, clip.timeline_start), (0, 1000));
+        assert_eq!((clip.source_in(), clip.timeline_start), (0, 1000));
     }
 
     #[test]

@@ -22,7 +22,6 @@ pub struct MixClip {
     /// Interleaved a `sample_rate`/`channels` dello snapshot.
     pub buffer: Arc<Vec<f32>>,
     pub gain_db: Keyframed<f32>,
-    pub source_in: FrameIdx,
     pub clip_fps: f64,
 }
 
@@ -71,13 +70,10 @@ impl MixSnapshot {
                 };
                 let clip_fps = item.meta.fps.as_f64().max(1e-9);
                 let buffer_frames = buffer.len() as u64 / ch;
-                // `source_offset` vive nel buffer del *media*, quindi resta
-                // ancorato al suo fps; la durata invece è quella sulla
-                // timeline, che con la conformazione (`Clip::rate`) è già
-                // il tempo reale della clip.
-                let source_offset = seconds_to_frames(clip.source_in() as f64 / clip_fps, sample_rate)
-                    .min(buffer_frames);
-                let len = seconds_to_frames(clip.timeline_len() as f64 / fps, sample_rate)
+                let source_offset =
+                    seconds_to_frames(clip.media_secs_at(clip.timeline_start, fps), sample_rate)
+                        .min(buffer_frames);
+                let len = seconds_to_frames(clip.timeline_len as f64 / fps, sample_rate)
                     .min(buffer_frames - source_offset);
                 if len == 0 {
                     continue;
@@ -88,7 +84,6 @@ impl MixSnapshot {
                     source_offset,
                     buffer,
                     gain_db: clip.effects.gain_db.clone(),
-                    source_in: clip.source_in(),
                     clip_fps,
                 });
             }
@@ -162,12 +157,10 @@ fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
     if clip.gain_db.is_constant() {
         return db_to_linear(clip.gain_db.default);
     }
-    let secs = (block * GAIN_BLOCK_FRAMES) as f64 / sample_rate as f64;
-    // I keyframe del gain vivono in frame *sorgente*, e una clip suona
-    // sempre a velocità reale: i secondi trascorsi dall'inizio della clip
-    // si convertono con l'fps del media, non con quello della timeline —
-    // anche per una clip conformata (`Clip::rate`).
-    let source_frame = clip.source_in + (secs * clip.clip_fps).round() as FrameIdx;
+    // I keyframe del gain vivono in frame *sorgente*: il frame che copre
+    // questo istante del media.
+    let media_secs = (clip.source_offset + block * GAIN_BLOCK_FRAMES) as f64 / sample_rate as f64;
+    let source_frame = (media_secs * clip.clip_fps).floor() as FrameIdx;
     db_to_linear(clip.gain_db.value_at(source_frame))
 }
 
@@ -649,9 +642,10 @@ mod tests {
             },
             content_hash: 7,
         });
-        let mut clip = clip_at(media, 0, 0, SOURCE_FRAMES);
-        clip.rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
-        assert_eq!(clip.timeline_len(), 1001, "100,1 s a 10 fps");
+        let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
+        let clip =
+            Clip::from_source_range(ClipId(0), ClipSource::Media(media), 0, SOURCE_FRAMES, 0, rate);
+        assert_eq!(clip.timeline_len, 1001, "100,1 s a 10 fps");
         let tl = timeline(vec![audio_track(vec![clip])]);
 
         let buffer: Arc<Vec<f32>> =
@@ -674,6 +668,49 @@ mod tests {
             let expected = (AUDIO_SAMPLES - 10 + i) as f32 / 100_000.0;
             assert!((s - expected).abs() < 1e-6, "campione {i}: {s} != {expected}");
         }
+    }
+
+    /// Uno split a metà di un frame sorgente non sposta l'audio: la metà
+    /// destra riparte dal campione che l'originale suonava in quel punto.
+    #[test]
+    fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
+        let mut project = Project::default();
+        let media = project.media_pool.insert(MediaItem {
+            path: PathBuf::from("slow.wav"),
+            meta: MediaMeta {
+                duration_frames: 1000,
+                fps: Rational::new(10_000, 1001),
+                width: 0,
+                height: 0,
+                has_audio: true,
+                sample_rate: RATE,
+                channels: 1,
+            },
+            content_hash: 7,
+        });
+        let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
+        let clip = Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 1000, 0, rate);
+        assert_eq!(clip.source_frame_at(500), clip.source_frame_at(499), "500 è a metà frame");
+        let timeline_id = project.timelines.insert(timeline(vec![audio_track(vec![clip])]));
+
+        let buffer: Arc<Vec<f32>> = Arc::new((0..10_010).map(|i| i as f32 / 100_000.0).collect());
+        let buffer_for = |path: &Path, _stream: usize| {
+            (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
+        };
+        let mix_all = |project: &Project| {
+            let timeline = &project.timelines[timeline_id];
+            let snap = MixSnapshot::from_timeline(project, timeline, RATE, 1, buffer_for);
+            let mut out = vec![0.0; 10_010];
+            mix_range(&snap, 0, &mut out);
+            out
+        };
+        let before = mix_all(&project);
+
+        let mut split = vv_core::SplitClip::new(timeline_id, 0, ClipId(1), 500);
+        vv_core::Command::apply(&mut split, &mut project);
+        assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2);
+
+        assert_eq!(mix_all(&project), before);
     }
 
     #[test]

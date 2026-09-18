@@ -1,12 +1,10 @@
 # Durata di timeline esplicita nella `Clip` — valutazione e piano
 
-Documento di discussione. Nasce dal bug "lo split cade un frame
-prima/dopo la testina" su clip conformate: il palliativo è in `master`
-(`fd130bb`), la soluzione vera è un cambio di rappresentazione della
-`Clip`, valutato e pianificato qui.
+Nasce dal bug "lo split cade un frame prima/dopo la testina" su clip
+conformate. Il palliativo (`fd130bb`: bordo più vicino + testina sul
+taglio) è stato sostituito dal cambio di rappresentazione descritto qui.
 
-Stato: approvato nella direzione, da implementare. Nessuna riga di codice
-scritta.
+Stato: implementato. Scostamenti dal piano in fondo al documento.
 
 ## Il problema
 
@@ -150,9 +148,8 @@ arrotondato) e ricalcola `rate`. Lo usano:
   `relative_start`. Oggi `rate` viene copiato così com'è, ed è già un bug
   su timeline a fps diverso;
 - `refresh_clip_rates`, se l'fps del media cambia sotto i piedi (probe
-  diversa, media ricollegato): si tengono `timeline_start` e
-  `timeline_len` (l'intenzione di montaggio), si converte `source_offset`
-  per secondi e si clampa alla durata del media;
+  diversa, media ricollegato): cambia solo `rate`. `source_offset` e
+  `timeline_len` sono in frame di timeline, cioè secondi, e restano validi;
 - import OTIO (sotto).
 
 Non è una ricodifica: il video non viene toccato, cambiano solo i numeri
@@ -326,3 +323,19 @@ dopo, confrontando durata totale e punti di taglio (video e audio).
 3. **Speed keyframeata** (`effects.speed`): fuori da questo lavoro. La
    rappresentazione è quella giusta per affrontarla dopo (durata esplicita,
    posizione sorgente = offset + ∫speed), come in OTIO.
+
+## Scostamenti dall'implementazione
+
+- `refresh_clip_rates` non converte niente (vedi "Cambio di unità"):
+  basta aggiornare `rate`.
+- `Clip::retime(from, to, rate)` riceve il `rate` già calcolato dal
+  chiamante, che conosce il media.
+- `ClipboardEntry` tiene la `Clip` intera più l'fps della timeline di
+  origine, invece di copiarne i campi.
+- Nel mixer l'offset nel buffer viene da `Clip::media_secs_at`, e il gain
+  keyframeato ricava il frame sorgente dallo stesso offset in campioni.
+- Il prefetch (`render_ahead`) prende come ultimo frame sorgente di un
+  segmento `source_frame_at(fine - 1)`: con una fine a metà frame
+  sorgente, `source_frame_at(fine) - 1` ne perdeva uno.
+- Nessun costruttore privato: i campi restano pubblici, con un
+  `debug_assert` degli invarianti in `TrimClip::apply`.

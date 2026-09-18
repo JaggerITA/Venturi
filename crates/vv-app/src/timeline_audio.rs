@@ -142,7 +142,6 @@ impl TimelineAudio {
                 source_offset: 0,
                 buffer,
                 gain_db: Keyframed::constant(0.0),
-                source_in: 0,
                 clip_fps: fps,
             })
             .collect();

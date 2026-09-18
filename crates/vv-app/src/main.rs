@@ -1665,7 +1665,7 @@ impl VibeVideoApp {
                                     .unwrap_or_else(|| "⚠ offline".to_string()),
                                 vv_core::ClipSource::SolidColor => "Solid Color".to_string(),
                             },
-                            clip.timeline_len(),
+                            clip.timeline_len,
                         ),
                         None => ("?".to_string(), 0),
                     };
@@ -2214,6 +2214,7 @@ impl VibeVideoApp {
                         track_index,
                         relative_start: clip.timeline_start,
                         clip: clip.clone(),
+                        timeline_fps: tl.fps,
                         link_tag: None,
                     },
                 ))
@@ -2271,26 +2272,41 @@ impl VibeVideoApp {
             .map(|_| self.project.alloc_clip_id())
             .collect();
 
-        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        let timeline_fps = self.project.timelines[timeline_id].fps;
+        let clips: Vec<vv_core::Clip> = entries
+            .iter()
+            .zip(&new_ids)
+            .map(|(entry, &id)| {
+                let mut clip = entry.clip.clone();
+                clip.id = id;
+                clip.timeline_start = entry.relative_start;
+                clip.linked_group = None; // ricollegate sotto, per link_tag
+                if entry.timeline_fps != timeline_fps {
+                    let rate = match &clip.source {
+                        vv_core::ClipSource::Media(media_id) => {
+                            self.project.media_pool.get(*media_id).map_or(clip.rate, |item| {
+                                vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
+                            })
+                        }
+                        vv_core::ClipSource::SolidColor => clip.rate,
+                    };
+                    clip.retime(entry.timeline_fps, timeline_fps, rate);
+                }
+                clip.timeline_start += playhead;
+                clip
+            })
+            .collect();
 
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
         let ranges: Vec<(usize, FrameIdx, FrameIdx)> = entries
             .iter()
-            .map(|entry| {
-                (
-                    entry.track_index,
-                    playhead + entry.relative_start,
-                    playhead + entry.relative_start + entry.clip.timeline_len(),
-                )
-            })
+            .zip(&clips)
+            .map(|(entry, clip)| (entry.track_index, clip.timeline_start, clip.timeline_end()))
             .collect();
         vv_core::make_room_for_ranges(&mut self.project, timeline_id, &ranges, &[], &mut commands);
 
         let mut new_selection = BTreeSet::new();
-        for (i, entry) in entries.iter().enumerate() {
-            let mut clip = entry.clip.clone();
-            clip.id = new_ids[i];
-            clip.timeline_start = playhead + entry.relative_start;
-            clip.linked_group = None; // ricollegate sotto, per link_tag
+        for (i, (entry, clip)) in entries.iter().zip(clips).enumerate() {
             new_selection.insert((entry.track_index, new_ids[i]));
             commands.push(Box::new(vv_core::InsertClip {
                 timeline: timeline_id,
@@ -2550,23 +2566,6 @@ impl VibeVideoApp {
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
-
-        // Il taglio può cadere un frame più in là della testina (vedi
-        // `SplitClip`: con una clip conformata non c'è un bordo di frame
-        // sorgente a ogni frame di timeline). La testina va dove il taglio
-        // è finito davvero, così la linea resta sempre sul taglio.
-        if let Some(cut) = new_ids.values().find_map(|new_id| {
-            self.project.timelines[timeline_id]
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == *new_id)
-                .map(|c| c.timeline_start)
-        }) && cut != playhead
-        {
-            self.timeline_state.playhead = cut;
-            self.ensure_active_clip_matches_playhead(true);
-        }
 
         // "Selection follows playhead": seleziona la metà SINISTRA appena
         // tagliata sulla track video attiva (il suo id è invariato, la
@@ -3666,7 +3665,7 @@ impl eframe::App for VibeVideoApp {
                     continue;
                 };
                 let local = (self.timeline_state.playhead - clip.timeline_start)
-                    .clamp(0, clip.timeline_len().saturating_sub(1));
+                    .clamp(0, clip.timeline_len.saturating_sub(1));
                 let target = PanelTarget {
                     track_index,
                     clip_id,
@@ -5153,12 +5152,12 @@ mod tests {
         let clips = &app.project.timelines[timeline_id].tracks[0].clips;
         assert_eq!(clips.len(), 2);
         assert_eq!(clips[0].timeline_start, 100);
-        assert_eq!(clips[0].timeline_len(), 50);
+        assert_eq!(clips[0].timeline_len, 50);
         assert_eq!(
             clips[1].timeline_start, 150,
             "il secondo media parte dove finisce il primo"
         );
-        assert_eq!(clips[1].timeline_len(), 30);
+        assert_eq!(clips[1].timeline_len, 30);
         assert!(matches!(clips[0].source, vv_core::ClipSource::Media(id) if id == media_a));
         assert!(matches!(clips[1].source, vv_core::ClipSource::Media(id) if id == media_b));
     }
@@ -5314,7 +5313,7 @@ mod tests {
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert_eq!(clip.rate, vv_core::Rational::new(1001, 1000));
         assert_eq!(clip.source_len(), 3000);
-        assert_eq!(clip.timeline_len(), 3003, "100,1 s a 30 fps");
+        assert_eq!(clip.timeline_len, 3003, "100,1 s a 30 fps");
         assert_eq!(clip.source_frame_at(clip.timeline_end() - 1), 2999);
     }
 
@@ -5432,7 +5431,7 @@ mod tests {
             track_index,
             clip_id,
             edge,
-            clip.source_frame_at(new_value),
+            new_value,
         )));
         app.history.do_command(
             &mut app.project,
@@ -5468,7 +5467,44 @@ mod tests {
         assert_eq!(clips.len(), 2);
         let pasted = clips.iter().find(|c| c.timeline_start == 5000).unwrap();
         assert_eq!(pasted.rate, vv_core::Rational::new(1001, 1000));
-        assert_eq!(pasted.timeline_len(), 3003);
+        assert_eq!(pasted.timeline_len, 3003);
+    }
+
+    /// Incollare su una timeline a un altro fps conserva i secondi, e la
+    /// clip si conforma al nuovo fps.
+    #[test]
+    fn pasting_into_a_timeline_at_another_fps_keeps_the_duration_in_seconds() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(30, 1),
+            vv_core::Rational::new(30, 1),
+            300,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        let meta = app.project.media_pool[media_id].meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+        app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
+        app.copy_selected_clips();
+
+        let other = app.project.timelines.insert(vv_core::Timeline {
+            name: "T25".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (320, 240),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        app.timeline_id = Some(other);
+        app.timeline_state.playhead = 50;
+        app.paste_clipboard_at_playhead();
+
+        let pasted = &app.project.timelines[other].tracks[0].clips[0];
+        assert_eq!(pasted.timeline_start, 50);
+        assert_eq!(pasted.timeline_len, 250, "10 secondi a 25 fps");
+        assert_eq!(pasted.rate, vv_core::Rational::new(5, 6));
+        assert_eq!((pasted.source_in(), pasted.source_out()), (0, 300));
     }
 
     /// Overwrite di una clip conformata (incollare sopra la sua coda):
@@ -6047,7 +6083,7 @@ mod tests {
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
         assert!(clip.effects.color.is_some());
-        assert_eq!(clip.timeline_len(), 125); // 5s a 25fps di default
+        assert_eq!(clip.timeline_len, 125); // 5s a 25fps di default
     }
 
     #[test]
@@ -6683,7 +6719,7 @@ mod tests {
         let pasted = &tl.tracks[0].clips[1];
         assert_ne!(pasted.id, original_id, "un id nuovo, non lo stesso");
         assert_eq!(pasted.timeline_start, 50, "incollata al playhead");
-        assert_eq!(pasted.timeline_len(), 10);
+        assert_eq!(pasted.timeline_len, 10);
         assert_eq!(
             app.timeline_state.selected,
             BTreeSet::from([(0, pasted.id)]),

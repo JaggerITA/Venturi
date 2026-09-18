@@ -716,7 +716,7 @@ fn clipped_media_segments(
             // (`vv_core::Clip::source_frame_at`, vedi doc lì per il
             // perché — REFACTOR_PIPELINE.md B1).
             let source_start = clip.source_frame_at(segment_start);
-            let source_end = (clip.source_frame_at(segment_end) - 1).max(source_start);
+            let source_end = clip.source_frame_at(segment_end - 1);
             segments.push((
                 track_index,
                 MediaSegment {

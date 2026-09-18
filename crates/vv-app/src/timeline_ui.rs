@@ -95,6 +95,9 @@ pub struct ClipboardEntry {
     /// La clip com'era alla copia; id, posizione e gruppo si riassegnano
     /// all'incolla.
     pub clip: Clip,
+    /// Fps della timeline di origine, in cui sono espressi `clip` e
+    /// `relative_start`.
+    pub timeline_fps: vv_core::Rational,
     /// Tag locale all'operazione di copia (non un vero `LinkGroupId`, che
     /// va riallocato al paste): entry con lo stesso tag `Some(_)` erano nel
     /// gruppo collegato al momento della copia — permette di ricollegare
@@ -263,7 +266,7 @@ enum PendingAction {
         new_audio_tracks: usize,
         moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)>,
     },
-    /// (clip_id, track_index, edge, new_source_in/new_source_out) per ogni
+    /// (clip_id, track_index, edge, nuova posizione del bordo) per ogni
     /// clip del gruppo collegato, più il tratto di timeline che ciascuna
     /// si è appena presa allungandosi (`(track_index, start, end)`): quel
     /// che c'era lì viene sovrascritto, come in un vero NLE.
@@ -1622,7 +1625,7 @@ pub fn show_timeline(
                     let len = visuals
                         .iter()
                         .find(|v| v.clip.id == d.clip_id)
-                        .map(|v| v.clip.timeline_len())
+                        .map(|v| v.clip.timeline_len)
                         .unwrap_or(0);
                     let (min_start, max_start) = group_drag_bounds(
                         &visuals,
@@ -1734,7 +1737,7 @@ pub fn show_timeline(
                             },
                             _ => visual.clip.timeline_start,
                         };
-                        (start, visual.clip.timeline_len())
+                        (start, visual.clip.timeline_len)
                     };
 
                     let x = origin.x + display_start as f32 * px_per_frame;
@@ -1800,20 +1803,18 @@ pub fn show_timeline(
                         // Durante un trim la clip disegnata copre un'altra
                         // fascia di sorgente: senza rimapparla la forma
                         // d'onda si stirerebbe invece di essere tagliata.
-                        let (wave_in, wave_out) = if is_trimming_this {
-                            (
-                                visual.clip.source_frame_at(display_start),
-                                visual.clip.source_frame_at(display_start + display_len),
-                            )
+                        let (wave_start, wave_end) = if is_trimming_this {
+                            (display_start, display_start + display_len)
                         } else {
-                            (visual.clip.source_in(), visual.clip.source_out())
+                            (visual.clip.timeline_start, visual.clip.timeline_end())
                         };
+                        let fps = timeline_fps.as_f64();
                         draw_clip_waveform(
                             &painter,
                             clip_rect,
                             &wf.peaks,
-                            wave_in,
-                            wave_out,
+                            visual.clip.media_secs_at(wave_start, fps),
+                            visual.clip.media_secs_at(wave_end, fps),
                             item.meta.fps.as_f64(),
                             wf.audio_duration_secs,
                             ui.clip_rect(),
@@ -1959,13 +1960,7 @@ pub fn show_timeline(
                             // nell'anteprima durante il trim: quel che si
                             // vedeva è quel che si ottiene.
                             let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
-                            // `new_value` è un frame di *timeline* (il
-                            // bordo trascinato), `TrimClip` vuole un frame
-                            // *sorgente*: la conversione passa dal `rate`
-                            // della clip, non da una differenza diretta.
-                            let new_source_value = visual.clip.source_frame_at(new_value);
-                            let mut trims =
-                                vec![(t.clip_id, t.track_index, t.edge, new_source_value)];
+                            let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_value)];
                             let mut overwritten =
                                 grown_range(&visual.clip, visual.track_index, t.edge, new_value)
                                     .into_iter()
@@ -1976,14 +1971,7 @@ pub fn show_timeline(
                                 else {
                                     continue;
                                 };
-                                let partner_new_source_value =
-                                    partner.clip.source_frame_at(new_value);
-                                trims.push((
-                                    partner_id,
-                                    partner_track,
-                                    t.edge,
-                                    partner_new_source_value,
-                                ));
+                                trims.push((partner_id, partner_track, t.edge, new_value));
                                 overwritten.extend(grown_range(
                                     &partner.clip,
                                     partner_track,
@@ -2161,7 +2149,7 @@ pub fn show_timeline(
                             .clips
                             .iter()
                             .find(|c| c.id == id)?
-                            .timeline_len();
+                            .timeline_len;
                         Some((to_track, start, start + len))
                     })
                     .collect();
@@ -2292,7 +2280,7 @@ fn darken_if_edited(color: egui::Color32, clip: &Clip) -> egui::Color32 {
 fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32, row_y: &[f32]) -> egui::Rect {
     let x = visual.clip.timeline_start as f32 * px_per_frame;
     let y = row_y[visual.track_index];
-    let w = (visual.clip.timeline_len() as f32 * px_per_frame).max(2.0);
+    let w = (visual.clip.timeline_len as f32 * px_per_frame).max(2.0);
     egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0))
 }
 
@@ -2300,8 +2288,8 @@ fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32, row_y: &[f32]) -> egu
 /// colonna pixel della porzione *visibile* della clip, una linea verticale
 /// centrata sull'altezza della clip, con altezza proporzionale al picco nel
 /// bin corrispondente a quella colonna. `peaks` sono i picchi di *tutto* il
-/// media (normalizzati in [0,1]); `source_in`/`source_out` (nello spazio
-/// frame nativo del media, `media_fps`) selezionano la sotto-fascia
+/// media (normalizzati in [0,1]); `clip_start_secs`/`clip_end_secs`
+/// (secondi nel media) selezionano la sotto-fascia
 /// temporale della clip, mappata sull'asse temporale dell'audio
 /// (`audio_duration_secs`) — la stessa base temporale usata per
 /// dimensionare i bin in `vv_media::waveform::generate_waveform`, così la
@@ -2318,8 +2306,8 @@ fn draw_clip_waveform(
     painter: &egui::Painter,
     clip_rect: egui::Rect,
     peaks: &[f32],
-    source_in: FrameIdx,
-    source_out: FrameIdx,
+    clip_start_secs: f64,
+    clip_end_secs: f64,
     media_fps: f64,
     audio_duration_secs: f64,
     visible_rect: egui::Rect,
@@ -2328,8 +2316,6 @@ fn draw_clip_waveform(
     if peaks.is_empty() || audio_duration_secs <= 0.0 || media_fps <= 0.0 {
         return;
     }
-    let clip_start_secs = source_in as f64 / media_fps;
-    let clip_end_secs = source_out as f64 / media_fps;
     if clip_end_secs <= clip_start_secs {
         return;
     }
@@ -2359,7 +2345,8 @@ fn draw_clip_waveform(
         );
         // Il gain vive in frame *sorgente*, come nel mixer: la forma
         // disegnata è quella che si sentirà davvero, clipping compreso.
-        let source_frame = source_in + (frac * (source_out - source_in) as f64) as FrameIdx;
+        let secs = clip_start_secs + frac * (clip_end_secs - clip_start_secs);
+        let source_frame = (secs * media_fps).floor() as FrameIdx;
         let amplified = peaks[bin] * db_to_linear(gain_db.value_at(source_frame));
         let h = (half_height * amplified.min(1.0)).max(0.5);
         painter.line_segment(
@@ -2573,7 +2560,7 @@ fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (F
         track_index,
         &[clip_id],
         v.clip.timeline_start,
-        v.clip.timeline_len(),
+        v.clip.timeline_len,
     )
 }
 
@@ -2686,7 +2673,7 @@ fn group_drag_bounds(
         let len = visuals
             .iter()
             .find(|v| v.clip.id == id)
-            .map(|v| v.clip.timeline_len())
+            .map(|v| v.clip.timeline_len)
             .unwrap_or(0);
         match target {
             EffectiveTrack::Existing(track) => {
@@ -2735,10 +2722,8 @@ fn combined_trim_range(
     let Some(group) = visual.clip.linked_group else {
         return (min_value, max_value, Vec::new());
     };
-    // Le clip collegate condividono lo stesso spazio numerico
-    // source_in/source_out/timeline_start (vedi `insert_media_clip` in
-    // main.rs): lo stesso identico `new_value` si applica a tutte, quindi
-    // il range valido è l'intersezione di tutte.
+    // `new_value` è una posizione di timeline, la stessa per tutte le clip
+    // collegate: il range valido è l'intersezione di tutte.
     let mut linked_others = Vec::new();
     for other in visuals
         .iter()
@@ -3692,8 +3677,17 @@ mod tests {
     fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
         let (project, media_id) = project_with_media(4000);
         let mut visuals = vec![media_clip_visual(0, 1, 3000, 2000, 2400, media_id)];
-        visuals[0].clip.rate =
-            vv_core::Rational::conform_rate(vv_core::Rational::new(30, 1), vv_core::Rational::new(30_000, 1001));
+        visuals[0].clip = Clip::from_source_range(
+            visuals[0].clip.id,
+            visuals[0].clip.source.clone(),
+            2000,
+            2400,
+            3000,
+            vv_core::Rational::conform_rate(
+                vv_core::Rational::new(30, 1),
+                vv_core::Rational::new(30_000, 1001),
+            ),
+        );
 
         let (min_value, _) =
             single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);

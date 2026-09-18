@@ -93,7 +93,7 @@ mod tests {
 
         let loaded_clip = &loaded_timeline.tracks[0].clips[0];
         assert_eq!(loaded_clip.id, clip_id);
-        assert_eq!(loaded_clip.source_out, 50);
+        assert_eq!(loaded_clip.source_out(), 50);
         assert_eq!(
             loaded_clip.effects.gain_db.keyframe_at(10),
             Some((-6.0, Interpolation::Linear))

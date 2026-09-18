@@ -2,8 +2,8 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    source_frame_of, Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId,
-    MediaId, MediaItem, Project, Rational, Rgba, TimelineId, Track, TrackKind, Transform,
+    Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId,
+    MediaId, MediaItem, Project, Rgba, TimelineId, Track, TrackKind, Transform,
     TransformParam,
 };
 use std::cell::{Cell, RefCell};
@@ -322,7 +322,7 @@ impl Command for RippleDeleteAllTracks {
         };
         let primary = track.clips.remove(pos);
         let gap_start = primary.timeline_start;
-        let gap_len = primary.timeline_len();
+        let gap_len = primary.timeline_len;
 
         let mut removed = vec![(self.track_index, primary)];
         for &(also_track, also_id) in &self.also_remove {
@@ -564,10 +564,9 @@ impl Command for MoveClips {
     }
 }
 
-/// Quale bordo di una clip viene trimmato: `Start` cambia `source_in`
-/// *e* `timeline_start` insieme (la fine sulla timeline resta ferma,
-/// solo l'inizio si muove), `End` cambia solo `source_out` (l'inizio
-/// resta fermo, solo la fine si muove).
+/// Quale bordo di una clip viene trimmato: `Start` sposta l'inizio
+/// insieme al contenuto (la fine sulla timeline resta ferma), `End` sposta
+/// solo la fine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrimEdge {
     Start,
@@ -586,9 +585,10 @@ pub struct TrimClip {
     pub track_index: usize,
     pub clip_id: ClipId,
     pub edge: TrimEdge,
-    /// Nuovo `source_in` (bordo `Start`) o `source_out` (bordo `End`).
+    /// Nuova posizione di timeline del bordo.
     pub new_value: FrameIdx,
-    old: Option<(FrameIdx, FrameIdx, FrameIdx)>, // (source_in, source_out, timeline_start) precedenti
+    /// `(timeline_start, source_offset, timeline_len)` precedenti.
+    old: Option<(FrameIdx, FrameIdx, FrameIdx)>,
 }
 
 impl TrimClip {
@@ -616,33 +616,31 @@ impl Command for TrimClip {
         let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
             return;
         };
-        self.old = Some((clip.source_in, clip.source_out, clip.timeline_start));
+        self.old = Some((clip.timeline_start, clip.source_offset, clip.timeline_len));
         match self.edge {
             TrimEdge::Start => {
-                // La fine sulla timeline resta ferma: il nuovo
-                // `timeline_start` si ricava dalla durata aggiornata, non
-                // dal delta in frame *sorgente* (che con una clip
-                // conformata, `Clip::rate`, è un'altra unità di misura).
-                let end = clip.timeline_end();
-                clip.source_in = self.new_value;
-                clip.timeline_start = end - clip.timeline_len();
+                let delta = self.new_value - clip.timeline_start;
+                clip.timeline_start = self.new_value;
+                clip.source_offset += delta;
+                clip.timeline_len -= delta;
             }
             TrimEdge::End => {
-                clip.source_out = self.new_value;
+                clip.timeline_len = self.new_value - clip.timeline_start;
             }
         }
+        debug_assert!(clip.timeline_len >= 1 && clip.source_offset >= 0, "trim fuori dai limiti");
         resort(track);
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some((source_in, source_out, timeline_start)) = self.old else {
+        let Some((timeline_start, source_offset, timeline_len)) = self.old else {
             return;
         };
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.source_in = source_in;
-            clip.source_out = source_out;
             clip.timeline_start = timeline_start;
+            clip.source_offset = source_offset;
+            clip.timeline_len = timeline_len;
         }
         resort(track);
     }
@@ -794,18 +792,17 @@ impl Command for LinkClips {
 }
 
 /// Divide una clip in due al tempo di timeline `split_at`. La seconda metà
-/// riceve un nuovo `ClipId`. Assume speed=1 nel mappare `split_at` allo
-/// spazio del frame sorgente (coerente finché lo speed ramping non è
-/// implementato, milestone 7). Su una clip conformata (`Clip::rate`) il
-/// taglio si arrotonda al bordo del frame sorgente più vicino: le due
-/// metà restano contigue e coprono esattamente l'intervallo di prima.
+/// riceve un nuovo `ClipId`. Su una clip conformata (`Clip::rate`) le due
+/// metà possono condividere il frame sorgente a cavallo del taglio,
+/// mostrato per una parte del suo tempo a sinistra e per il resto a
+/// destra.
 #[derive(Debug)]
 pub struct SplitClip {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
     pub split_at: FrameIdx,
-    original_source_out: Option<FrameIdx>,
+    original_len: Option<FrameIdx>,
     new_clip_id: Option<ClipId>,
     /// Se impostato (`with_new_clip_id`), l'id della metà destra è questo
     /// invece di uno allocato al volo: serve a chi orchestra più split
@@ -826,7 +823,7 @@ impl SplitClip {
             track_index,
             clip_id,
             split_at,
-            original_source_out: None,
+            original_len: None,
             new_clip_id: None,
             preallocated_new_clip_id: None,
         }
@@ -856,33 +853,10 @@ impl Command for SplitClip {
             return; // fuori dal corpo della clip: niente da dividere
         }
 
-        // Il taglio può cadere solo su un bordo di frame *sorgente*: con
-        // una clip conformata (`Clip::rate`) un frame sorgente può coprire
-        // due frame di timeline, e in mezzo non c'è nessun bordo dove
-        // tagliare. Si prende il bordo più vicino a `split_at`, a parità
-        // quello prima — così il frame che si sta guardando è il primo
-        // della metà destra, invece di restare duplicato in coda a quella
-        // sinistra. Chi chiama può leggere da `new_clip_id` dove il taglio
-        // è finito davvero (`split_at_playhead` ci porta la testina).
-        let floor_source = clip.source_frame_at(self.split_at);
-        let split_source = if clip.timeline_frame_at(floor_source) == self.split_at {
-            floor_source
-        } else {
-            let before = self.split_at - clip.timeline_frame_at(floor_source);
-            let after = clip.timeline_frame_at(floor_source + 1) - self.split_at;
-            if after < before {
-                floor_source + 1
-            } else {
-                floor_source
-            }
-        };
-        if split_source <= clip.source_in || split_source >= clip.source_out {
-            return; // conformata: nessun frame sorgente cade davvero qui
-        }
-
-        self.original_source_out = Some(clip.source_out);
+        self.original_len = Some(clip.timeline_len);
         let mut second_half = clip.clone();
-        clip.source_out = split_source;
+        let left_len = self.split_at - clip.timeline_start;
+        clip.timeline_len = left_len;
         // `clip` (la metà sinistra) mantiene il suo `linked_group`
         // invariato: è la stessa clip di prima, solo accorciata, e resta
         // collegata a chiunque altro condivida quel gruppo (che sia stato
@@ -890,13 +864,9 @@ impl Command for SplitClip {
         // scollegata — chi orchestra più split insieme (`split_at_playhead`)
         // ricollega le metà destre tra loro con un `LinkClips` a parte.
         second_half.id = new_id;
-        second_half.source_in = split_source;
-        // La fine della metà sinistra, non `split_at`: con una clip
-        // conformata (`Clip::rate`) il taglio cade sul bordo del frame
-        // sorgente più vicino, che può essere a un frame di distanza —
-        // partire da lì tiene le due metà attaccate e la copertura
-        // complessiva identica all'originale.
-        second_half.timeline_start = clip.timeline_end();
+        second_half.timeline_start = self.split_at;
+        second_half.source_offset += left_len;
+        second_half.timeline_len -= left_len;
         second_half.linked_group = None;
         self.new_clip_id = Some(new_id);
 
@@ -907,15 +877,14 @@ impl Command for SplitClip {
     }
 
     fn undo(&self, project: &mut Project) {
-        let (Some(original_source_out), Some(new_clip_id)) =
-            (self.original_source_out, self.new_clip_id)
+        let (Some(original_len), Some(new_clip_id)) = (self.original_len, self.new_clip_id)
         else {
             return;
         };
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         track.clips.retain(|c| c.id != new_clip_id);
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.source_out = original_source_out;
+            clip.timeline_len = original_len;
         }
     }
 }
@@ -1496,27 +1465,20 @@ impl Command for RemoveMedia {
     }
 }
 
-/// `(timeline_start, timeline_end, source_in, rate)` di una clip, se
-/// esiste: quanto serve a `resolve_overlap` per convertire una
-/// posizione di timeline in frame sorgente.
+/// `(timeline_start, timeline_end)` di una clip, se esiste.
 fn clip_bounds(
     project: &Project,
     timeline_id: TimelineId,
     track_index: usize,
     clip_id: ClipId,
-) -> Option<(FrameIdx, FrameIdx, FrameIdx, Rational)> {
+) -> Option<(FrameIdx, FrameIdx)> {
     let clip = project.timelines[timeline_id]
         .tracks
         .get(track_index)?
         .clips
         .iter()
         .find(|c| c.id == clip_id)?;
-    Some((
-        clip.timeline_start,
-        clip.timeline_end(),
-        clip.source_in,
-        clip.rate,
-    ))
+    Some((clip.timeline_start, clip.timeline_end()))
 }
 
 /// Applica la modifica necessaria a *una* clip esistente che si
@@ -1524,7 +1486,7 @@ fn clip_bounds(
 /// coperta, accorciata da un bordo se sporge solo da un lato, divisa
 /// in due se il nuovo intervallo cade nel suo mezzo (il pezzo
 /// centrale, quello coperto, sparisce — comportamento "overwrite" di
-/// un vero NLE). `old_start`/`old_end`/`source_in` sono lo stato
+/// un vero NLE). `old_start`/`old_end` sono lo stato
 /// *attuale* della clip (letto dal chiamante prima di accodare
 /// comandi, mai da uno stato immaginato). Ritorna `Some((id_sinistra,
 /// id_destra))` solo nel caso di uno split, per permettere al
@@ -1539,19 +1501,10 @@ fn resolve_overlap(
     clip_id: ClipId,
     old_start: FrameIdx,
     old_end: FrameIdx,
-    source_in: FrameIdx,
-    rate: Rational,
     new_start: FrameIdx,
     new_end: FrameIdx,
     commands: &mut Vec<Box<dyn Command>>,
 ) -> Option<(ClipId, ClipId)> {
-    // `TrimClip::new_value` è un frame *sorgente*, la posizione di
-    // taglio un frame di *timeline*: la conversione passa dal `rate`
-    // della clip (`Clip::source_frame_at`), non da una differenza
-    // diretta, che con una clip conformata sarebbe un'altra unità.
-    let source_at = |timeline_frame| {
-        source_frame_of(rate, old_start, source_in, timeline_frame)
-    };
     if old_start >= new_start && old_end <= new_end {
         commands.push(Box::new(LiftDelete::new(
             timeline_id,
@@ -1562,8 +1515,7 @@ fn resolve_overlap(
     } else if old_start < new_start && old_end > new_end {
         // Il nuovo intervallo cade nel mezzo: divide la clip in due,
         // poi accorcia la metà destra dal suo bordo sinistro fino a
-        // `new_end` (la stessa formula usata sotto per `TrimEdge::Start`,
-        // applicata alla clip *originale*: vedi nota lì).
+        // `new_end`.
         let right_id = project.alloc_clip_id();
         commands.push(Box::new(
             SplitClip::new(timeline_id, track_index, clip_id, new_start)
@@ -1574,7 +1526,7 @@ fn resolve_overlap(
             track_index,
             right_id,
             TrimEdge::Start,
-            source_at(new_end),
+            new_end,
         )));
         Some((clip_id, right_id))
     } else if old_start < new_start {
@@ -1585,7 +1537,7 @@ fn resolve_overlap(
             track_index,
             clip_id,
             TrimEdge::End,
-            source_at(new_start),
+            new_start,
         )));
         None
     } else {
@@ -1596,7 +1548,7 @@ fn resolve_overlap(
             track_index,
             clip_id,
             TrimEdge::Start,
-            source_at(new_end),
+            new_end,
         )));
         None
     }
@@ -1642,8 +1594,6 @@ pub fn make_room_for_ranges(
             ClipId,
             FrameIdx,
             FrameIdx,
-            FrameIdx,
-            Rational,
             Option<LinkGroupId>,
         );
         let overlapping: Vec<Overlapping> =
@@ -1659,8 +1609,6 @@ pub fn make_room_for_ranges(
                                 c.id,
                                 c.timeline_start,
                                 c.timeline_end(),
-                                c.source_in,
-                                c.rate,
                                 c.linked_group,
                             )
                         })
@@ -1668,7 +1616,7 @@ pub fn make_room_for_ranges(
                 })
                 .unwrap_or_default();
 
-        for (clip_id, old_start, old_end, source_in, rate, group) in overlapping {
+        for (clip_id, old_start, old_end, group) in overlapping {
             if !processed.insert((track_index, clip_id)) {
                 continue;
             }
@@ -1678,8 +1626,6 @@ pub fn make_room_for_ranges(
                 clip_id,
                 old_start,
                 old_end,
-                source_in,
-                rate,
                 new_start,
                 new_end,
                 commands,
@@ -1697,7 +1643,7 @@ pub fn make_room_for_ranges(
                 {
                     continue;
                 }
-                let Some((m_start, m_end, m_source_in, m_rate)) =
+                let Some((m_start, m_end)) =
                     clip_bounds(project, timeline_id, member_track, member_id)
                 else {
                     continue;
@@ -1708,8 +1654,6 @@ pub fn make_room_for_ranges(
                     member_id,
                     m_start,
                     m_end,
-                    m_source_in,
-                    m_rate,
                     new_start,
                     new_end,
                     commands,
@@ -1742,24 +1686,23 @@ pub fn cut_overlaps(
     commands: &mut Vec<Box<dyn Command>>,
 ) {
     for track_index in 0..project.timelines[timeline_id].tracks.len() {
-        let clips: Vec<(ClipId, FrameIdx, FrameIdx, FrameIdx, Rational)> = project.timelines
-            [timeline_id]
-            .tracks[track_index]
+        let clips: Vec<(ClipId, FrameIdx, FrameIdx)> = project.timelines[timeline_id].tracks
+            [track_index]
             .clips
             .iter()
-            .map(|c| (c.id, c.timeline_start, c.timeline_end(), c.source_in, c.rate))
+            .map(|c| (c.id, c.timeline_start, c.timeline_end()))
             .collect();
-        for (i, &(clip_id, start, end, source_in, rate)) in clips.iter().enumerate() {
-            let Some(&(_, cut_at, _, _, _)) = clips[i + 1..]
+        for (i, &(clip_id, start, end)) in clips.iter().enumerate() {
+            let Some(&(_, cut_at, _)) = clips[i + 1..]
                 .iter()
-                .filter(|&&(_, other_start, _, _, _)| other_start > start && other_start < end)
-                .min_by_key(|&&(_, other_start, _, _, _)| other_start)
+                .filter(|&&(_, other_start, _)| other_start > start && other_start < end)
+                .min_by_key(|&&(_, other_start, _)| other_start)
             else {
                 // Nessuna clip che comincia dentro questa: o non si
                 // sovrappone a nulla, o è lei quella coperta del tutto.
                 if clips[i + 1..]
                     .iter()
-                    .any(|&(_, other_start, other_end, _, _)| {
+                    .any(|&(_, other_start, other_end)| {
                         other_start <= start && other_end >= end
                     })
                 {
@@ -1772,7 +1715,7 @@ pub fn cut_overlaps(
                 track_index,
                 clip_id,
                 TrimEdge::End,
-                source_frame_of(rate, start, source_in, cut_at),
+                cut_at,
             )));
         }
     }
