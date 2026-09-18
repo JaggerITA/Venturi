@@ -1,5 +1,5 @@
 FINESTRA DI PREVIEW:
-[ ] Quando Premo CTRL+f, il player deve andare a schermo intero. nella vista a schermo intero, compare un overlay in basso (solo al passaggio col mouse) con la barra di riproduzione (interagibile) e il tasto play/pausa - si esce con ESC.
+[x] Quando Premo CTRL+f, il player deve andare a schermo intero. nella vista a schermo intero, compare un overlay in basso (solo al passaggio col mouse) con la barra di riproduzione (interagibile) e il tasto play/pausa - si esce con ESC.
 
 SHORTCUTS:
 [ ] Attualmente sono fissate. Devono essere configurabili dall'utente:

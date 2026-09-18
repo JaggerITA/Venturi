@@ -501,6 +501,7 @@ struct VibeVideoApp {
     /// picchi, con un effetto "a scatti" invece di due barre che scendono
     /// dolcemente.
     audiometer_level: (f32, f32),
+    viewer_fullscreen: bool,
 }
 
 /// Stato UI di un export in corso: progresso/cancellazione condivisi col
@@ -575,6 +576,7 @@ impl Default for VibeVideoApp {
             show_media_pool: true,
             show_effects: false,
             audiometer_level: (0.0, 0.0),
+            viewer_fullscreen: false,
         }
     }
 }
@@ -2722,6 +2724,88 @@ impl VibeVideoApp {
 
     /// Handle di transform della prima clip video selezionata, se è sotto
     /// alla testina e il viewer mostra la timeline ferma.
+    /// `(total, playhead, (in, out), playing)` della barra di riproduzione.
+    fn transport_state(&self) -> (FrameIdx, FrameIdx, (FrameIdx, FrameIdx), bool) {
+        let playing = self.is_timeline_playing();
+        if self.browsing_media.is_some() {
+            let total = self.browse_total_frames();
+            (total, self.browse_playhead, self.browse_marks.resolve(total), playing)
+        } else {
+            let total = self
+                .timeline_id
+                .map_or(0, |id| self.project.timelines[id].total_frames());
+            (
+                total,
+                self.timeline_state.playhead,
+                self.timeline_state.export_marks.resolve(total),
+                playing,
+            )
+        }
+    }
+
+    /// Player a tutto schermo sopra al resto dell'interfaccia, che resta
+    /// disegnata sotto (e continua a gestire le scorciatoie) ma non riceve
+    /// più il mouse. La barra di riproduzione compare solo col mouse in basso.
+    fn show_fullscreen_viewer(&mut self, ctx: &egui::Context) -> transport::TransportResponse {
+        const BAR_ZONE: f32 = 90.0;
+        let screen = ctx.content_rect();
+        let (total, playhead, marks, playing) = self.transport_state();
+        let mut action = transport::TransportResponse::default();
+        egui::Area::new(egui::Id::new("fullscreen_viewer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                ui.set_min_size(screen.size());
+                ui.interact(screen, ui.id().with("block"), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::BLACK);
+
+                let image = match self.last_viewer_frame_kind {
+                    Some(ViewerFrameKind::Video) => self
+                        .video_texture_id
+                        .zip(self.video_display_size),
+                    Some(ViewerFrameKind::SolidColor) => self
+                        .frame_texture
+                        .as_ref()
+                        .map(|t| (t.id(), t.size_vec2())),
+                    Some(ViewerFrameKind::Offline) | None => None,
+                };
+                if let Some((id, size)) = image {
+                    let scale = (screen.width() / size.x).min(screen.height() / size.y);
+                    let rect = egui::Rect::from_center_size(screen.center(), size * scale.max(0.0));
+                    ui.painter().image(
+                        id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                } else if self.last_viewer_frame_kind == Some(ViewerFrameKind::Offline) {
+                    ui.painter().text(
+                        screen.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "⚠  Media offline",
+                        egui::FontId::proportional(24.0),
+                        egui::Color32::from_rgb(230, 70, 70),
+                    );
+                }
+
+                let hovering_bar = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .is_some_and(|p| p.y >= screen.bottom() - BAR_ZONE);
+                if hovering_bar {
+                    let bar = egui::Rect::from_min_max(
+                        egui::pos2(screen.left(), screen.bottom() - BAR_ZONE),
+                        screen.max,
+                    );
+                    ui.painter().rect_filled(bar, 0.0, egui::Color32::from_black_alpha(170));
+                    let inner = bar.shrink2(egui::vec2(24.0, 24.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                        action = transport::show_transport(ui, total, playhead, marks, playing);
+                    });
+                }
+            });
+        action
+    }
+
     fn show_viewer_overlay(
         &mut self,
         ui: &egui::Ui,
@@ -4606,6 +4690,7 @@ impl eframe::App for VibeVideoApp {
         // RwLock write... Deadlock?").
         let mut clipboard_events: Vec<egui::Event> = Vec::new();
         let mut arrow_input = (None, 0.0);
+        let mut set_fullscreen = None;
         // I tasti scritti in un campo di testo (es. il titolo) non sono
         // scorciatoie: "T" taglierebbe le clip, Backspace le cancellerebbe.
         let typing = ui.ctx().egui_wants_keyboard_input();
@@ -4730,7 +4815,18 @@ impl eframe::App for VibeVideoApp {
             if i.modifiers.command && i.key_pressed(egui::Key::Minus) {
                 self.timeline_state.zoom_out();
             }
+            if i.modifiers.command && i.key_pressed(egui::Key::F) {
+                set_fullscreen = Some(!self.viewer_fullscreen);
+            }
+            if self.viewer_fullscreen && i.key_pressed(egui::Key::Escape) {
+                set_fullscreen = Some(false);
+            }
         });
+        // Fuori da `ui.input`: `send_viewport_cmd` riprende lo stesso lock.
+        if let Some(on) = set_fullscreen.take() {
+            self.viewer_fullscreen = on;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
         self.handle_clipboard_events(ui, &clipboard_events);
         if self.step_playhead_with_arrows(arrow_input.0, arrow_input.1) {
             ui.ctx().request_repaint();
@@ -4974,9 +5070,19 @@ impl eframe::App for VibeVideoApp {
                         .on_hover_text(
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
                         );
+                    ui.separator();
+                    if ui.button("Player a schermo intero (Ctrl+F)").clicked() {
+                        set_fullscreen = Some(true);
+                        ui.close();
+                    }
                 });
             });
         });
+
+        if let Some(true) = set_fullscreen.take() {
+            self.viewer_fullscreen = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -5881,25 +5987,7 @@ impl eframe::App for VibeVideoApp {
                             .on_hover_text("Handle di posizione, scala e anchor point sul viewer");
                     });
                 });
-            let (total, playhead, marks, playing) = if self.browsing_media.is_some() {
-                let total = self.browse_total_frames();
-                (
-                    total,
-                    self.browse_playhead,
-                    self.browse_marks.resolve(total),
-                    self.is_timeline_playing(),
-                )
-            } else {
-                let total = self
-                    .timeline_id
-                    .map_or(0, |id| self.project.timelines[id].total_frames());
-                (
-                    total,
-                    self.timeline_state.playhead,
-                    self.timeline_state.export_marks.resolve(total),
-                    self.is_timeline_playing(),
-                )
-            };
+            let (total, playhead, marks, playing) = self.transport_state();
             egui::Panel::bottom("transport")
                 .resizable(false)
                 .show(ui, |ui| {
@@ -6118,6 +6206,10 @@ impl eframe::App for VibeVideoApp {
                 }
             }
         });
+
+        if self.viewer_fullscreen {
+            transport_action = self.show_fullscreen_viewer(ui.ctx());
+        }
 
         let pointer_down = ui.input(|i| i.pointer.any_down());
         self.apply_effect_changes(overlay_effects, pointer_down);
