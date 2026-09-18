@@ -566,13 +566,6 @@ impl VibeVideoApp {
                 // l'import: un `content_hash` sbagliato al più fa
                 // rigenerare un proxy che poteva essere riusato).
                 let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-                // Letti *prima* dell'insert (che muove `meta`): servono
-                // per decidere se accodare la waveform (solo i media con
-                // audio) e quanti picchi generare (proporzionali alla
-                // durata).
-                let has_audio = meta.has_audio;
-                let num_peaks =
-                    vv_media::recommended_num_peaks(meta.duration_frames as f64 / meta.fps.as_f64());
                 let media_id = self.project.media_pool.insert(vv_core::MediaItem {
                     path: path.clone(),
                     meta,
@@ -585,38 +578,15 @@ impl VibeVideoApp {
                 // quando/se l'utente lo riattiva, invece di aspettare la
                 // prima volta che serve davvero.
                 self.enqueue_media_background_jobs(media_id);
-                self.enqueue_waveforms(&path, content_hash, has_audio, num_peaks);
                 Ok(media_id)
             }
             Err(e) => Err(e.to_string()),
         }
     }
 
-    /// Waveform solo per i media con audio: la timeline la disegna solo
-    /// sulle clip audio, e un media senza audio non ne avrebbe mai una da
-    /// disegnare. Un media può avere più stream audio (vedi doc di
-    /// `Clip::audio_stream_index`): una waveform per ciascuno. Se il
-    /// (ri)probe fallisce, ricade su un solo stream.
-    fn enqueue_waveforms(
-        &mut self,
-        path: &Path,
-        content_hash: u64,
-        has_audio: bool,
-        num_peaks: usize,
-    ) {
-        if !has_audio {
-            return;
-        }
-        let num_audio_streams = vv_media::audio_streams(path).map(|s| s.len().max(1)).unwrap_or(1);
-        for stream_index in 0..num_audio_streams {
-            self.waveform_worker
-                .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
-                .enqueue(path.to_path_buf(), content_hash, stream_index, num_peaks);
-        }
-    }
-
-    /// Proxy e miniatura di un media del pool, sia appena importato sia
-    /// da un progetto aperto.
+    /// Proxy, miniatura e waveform di un media del pool, sia appena
+    /// importato sia da un progetto aperto: quel che è già in cache su
+    /// disco viene saltato dai worker.
     fn enqueue_media_background_jobs(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
@@ -633,6 +603,14 @@ impl VibeVideoApp {
                     item.content_hash,
                     item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
                 );
+        }
+        // Solo i media con audio: la timeline disegna la waveform solo
+        // sulle clip audio.
+        if item.meta.has_audio {
+            let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
+            self.waveform_worker
+                .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
+                .enqueue(item.path.clone(), item.content_hash, vv_media::recommended_num_peaks(secs));
         }
     }
 
@@ -809,19 +787,6 @@ impl VibeVideoApp {
         match imported {
             Ok(imported) => {
                 self.replace_project(imported.project, None);
-                let media: Vec<(PathBuf, u64, bool, usize)> = self
-                    .project
-                    .media_pool
-                    .values()
-                    .map(|item| {
-                        let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
-                        let num_peaks = vv_media::recommended_num_peaks(secs);
-                        (item.path.clone(), item.content_hash, item.meta.has_audio, num_peaks)
-                    })
-                    .collect();
-                for (media_path, content_hash, has_audio, num_peaks) in media {
-                    self.enqueue_waveforms(&media_path, content_hash, has_audio, num_peaks);
-                }
                 self.import_warnings = imported.warnings;
             }
             Err(e) => self.project_error = Some(format!("Importazione OTIO fallita: {e}")),
@@ -7784,6 +7749,47 @@ mod tests {
         assert!(app.project_error.is_some(), "salvataggio fallito");
         assert!(app.has_unsaved_changes());
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].id, clip_id);
+    }
+
+    /// La cache delle waveform può mancare (cancellata, altra macchina):
+    /// aprire il progetto la rigenera.
+    #[test]
+    fn opening_a_project_regenerates_missing_waveforms() {
+        let dir = std::env::temp_dir().join("vv-app-waveform-on-load-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("tono.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=1"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+            .arg(&media)
+            .status()
+            .expect("ffmpeg CLI non trovato");
+        assert!(status.success());
+
+        // Hash mai visto: nessuna waveform in cache per questo media.
+        let content_hash = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut project = vv_core::Project::default();
+        project.media_pool.insert(vv_core::MediaItem {
+            path: media.clone(),
+            meta: vv_media::probe(&media).unwrap(),
+            content_hash,
+        });
+        let project_path = dir.join("p.vvproj");
+        vv_core::save_project(&project, &project_path).unwrap();
+        assert!(!vv_media::waveform::waveform_exists(content_hash, 0));
+
+        let mut app = VibeVideoApp::default();
+        app.load_project_from(project_path);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !vv_media::waveform::waveform_exists(content_hash, 0) {
+            assert!(std::time::Instant::now() < deadline, "waveform non generata");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(vv_media::waveform::waveform_path_for(content_hash, 0));
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il
