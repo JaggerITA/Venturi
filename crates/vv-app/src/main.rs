@@ -126,7 +126,6 @@ struct PanelTarget {
 /// quelli a cui portano le frecce di navigazione.
 #[derive(Debug, Clone, Copy)]
 struct ParamKeyframeState {
-    constant: bool,
     on_keyframe: bool,
     prev: Option<FrameIdx>,
     next: Option<FrameIdx>,
@@ -179,14 +178,12 @@ struct ClipPanelInfo {
     /// `TransformParam::index`.
     params: Vec<ParamKeyframeState>,
     transform: vv_core::Transform,
-    gain_constant: bool,
     gain_kf_here: bool,
     gain: f32,
     /// Keyframe di gain più vicini prima/dopo, in frame sorgente: le frecce
     /// di navigazione della riga Volume.
     gain_prev: Option<FrameIdx>,
     gain_next: Option<FrameIdx>,
-    color_constant: bool,
     color_kf_here: bool,
     color: vv_core::Rgba,
     title: Option<vv_core::TitleParams>,
@@ -2385,7 +2382,6 @@ impl VibeVideoApp {
                 .map(|p| {
                     let track = clip.effects.transform.track(*p);
                     ParamKeyframeState {
-                        constant: track.is_constant(),
                         on_keyframe: track.keyframe_at(frame).is_some(),
                         prev: clip.effects.transform.previous_keyframe(&[*p], frame).filter(in_clip),
                         next: clip.effects.transform.next_keyframe(&[*p], frame).filter(in_clip),
@@ -2393,7 +2389,6 @@ impl VibeVideoApp {
                 })
                 .collect(),
             transform: clip.effects.transform.value_at(frame),
-            gain_constant: clip.effects.gain_db.is_constant(),
             gain_kf_here: clip.effects.gain_db.keyframe_at(frame).is_some(),
             gain: clip.effects.gain_db.value_at(frame),
             gain_prev: clip
@@ -2413,7 +2408,6 @@ impl VibeVideoApp {
                 .find(|(f, _, _)| *f > frame)
                 .map(|(f, _, _)| *f)
                 .filter(in_clip),
-            color_constant: clip.effects.color.as_ref().is_none_or(|k| k.is_constant()),
             color_kf_here: clip
                 .effects
                 .color
@@ -2873,11 +2867,14 @@ impl VibeVideoApp {
         ) else {
             return;
         };
-        let changed: Vec<vv_core::TransformParam> = vv_core::TransformParam::ALL
-            .into_iter()
-            .filter(|p| p.of(&new) != p.of(&info.transform))
-            .collect();
-        push_param_changes(pending, video_targets, &changed, &new, &info);
+        push_param_changes(
+            pending,
+            Some(&self.project.timelines[timeline_id]),
+            video_targets,
+            &vv_core::TransformParam::ALL,
+            &new,
+            &info.transform,
+        );
     }
 
     fn apply_effect_changes(&mut self, changes: Vec<PendingEffectChange>, pointer_down: bool) {
@@ -4317,33 +4314,50 @@ fn param_row(
     response
 }
 
-/// Le modifiche da accodare quando una riga cambia valore: per ogni clip
-/// bersaglio e ogni parametro della riga, il nuovo valore come default se
-/// quel parametro non è animato, come keyframe al frame di quella clip se
-/// lo è (altrimenti scrivere il default non si vedrebbe nemmeno).
+/// Gli effetti di una clip bersaglio del pannello.
+fn target_effects<'a>(
+    tl: Option<&'a vv_core::Timeline>,
+    t: &PanelTarget,
+) -> Option<&'a vv_core::EffectStack> {
+    tl?.tracks
+        .get(t.track_index)?
+        .clips
+        .iter()
+        .find(|c| c.id == t.clip_id)
+        .map(|c| &c.effects)
+}
+
+/// Le modifiche da accodare quando dei parametri cambiano valore: solo
+/// quelli diversi da `before`, così le altre clip selezionate tengono i
+/// propri valori per tutto il resto. Per ogni clip il nuovo valore va nel
+/// default se lì quel parametro non è animato, altrimenti in un keyframe al
+/// suo frame (scrivere il default non si vedrebbe nemmeno).
 fn push_param_changes(
     pending: &mut Vec<PendingEffectChange>,
+    tl: Option<&vv_core::Timeline>,
     targets: &[PanelTarget],
     params: &[vv_core::TransformParam],
     transform: &vv_core::Transform,
-    info: &ClipPanelInfo,
+    before: &vv_core::Transform,
 ) {
+    let changed: Vec<_> = params
+        .iter()
+        .filter(|p| p.of(transform) != p.of(before))
+        .collect();
     for t in targets {
-        for param in params {
+        let Some(effects) = target_effects(tl, t) else {
+            continue;
+        };
+        for &&param in &changed {
             let value = param.of(transform);
-            pending.push(if info.params[param.index()].constant {
-                PendingEffectChange::SetTransformParamDefault(
-                    t.track_index,
-                    t.clip_id,
-                    *param,
-                    value,
-                )
+            pending.push(if effects.transform.track(param).is_constant() {
+                PendingEffectChange::SetTransformParamDefault(t.track_index, t.clip_id, param, value)
             } else {
                 PendingEffectChange::UpsertTransformKeyframe(
                     t.track_index,
                     t.clip_id,
                     t.source_frame,
-                    *param,
+                    param,
                     value,
                 )
             });
@@ -5382,12 +5396,10 @@ impl eframe::App for VibeVideoApp {
                                         source_size,
                                         timeline_size,
                                         mut transform,
-                                        gain_constant,
                                         gain_kf_here,
                                         mut gain,
                                         gain_prev,
                                         gain_next,
-                                        color_constant,
                                         color_kf_here,
                                         mut color,
                                         ..
@@ -5638,11 +5650,22 @@ impl eframe::App for VibeVideoApp {
                                                 x || y
                                             });
                                             if flip_row.changed {
+                                                let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                                 for t in targets {
+                                                    let Some(effects) = target_effects(tl, t) else {
+                                                        continue;
+                                                    };
+                                                    // Solo l'asse cliccato.
+                                                    let mut flip = effects.transform.flip;
+                                                    for axis in 0..2 {
+                                                        if transform.flip[axis] != info.transform.flip[axis] {
+                                                            flip[axis] = transform.flip[axis];
+                                                        }
+                                                    }
                                                     pending_effects.push(PendingEffectChange::SetFlip(
                                                         t.track_index,
                                                         t.clip_id,
-                                                        transform.flip,
+                                                        flip,
                                                     ));
                                                 }
                                             }
@@ -5704,14 +5727,16 @@ impl eframe::App for VibeVideoApp {
                                             );
                                             rows.push((softness_params, row));
 
+                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                             for (params, row) in &rows {
                                                 if row.changed {
                                                     push_param_changes(
                                                         &mut pending_effects,
+                                                        tl,
                                                         targets,
                                                         params,
                                                         &transform,
-                                                        &info,
+                                                        &info.transform,
                                                     );
                                                 }
                                                 if row.toggled_keyframe {
@@ -5719,6 +5744,11 @@ impl eframe::App for VibeVideoApp {
                                                         .iter()
                                                         .all(|p| info.params[p.index()].on_keyframe);
                                                     for t in targets {
+                                                        // Il keyframe fissa il valore che
+                                                        // ha già ciascuna clip.
+                                                        let Some(effects) = target_effects(tl, t) else {
+                                                            continue;
+                                                        };
                                                         for p in params {
                                                             pending_effects.push(if on_keyframe {
                                                                 PendingEffectChange::RemoveTransformKeyframe(
@@ -5733,7 +5763,10 @@ impl eframe::App for VibeVideoApp {
                                                                     t.clip_id,
                                                                     t.source_frame,
                                                                     *p,
-                                                                    p.of(&transform),
+                                                                    effects
+                                                                        .transform
+                                                                        .track(*p)
+                                                                        .value_at(t.source_frame),
                                                                 )
                                                             });
                                                         }
@@ -5785,7 +5818,11 @@ impl eframe::App for VibeVideoApp {
                                                     ui.label(egui::RichText::new("Colore").strong());
                                                     if keyframe_button(ui, color_kf_here).clicked()
                                                     {
+                                                        let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                                         for t in &solid {
+                                                            let own = target_effects(tl, t)
+                                                                .and_then(|e| e.color.as_ref())
+                                                                .map_or(color, |k| k.value_at(t.source_frame));
                                                             pending_effects.push(if color_kf_here {
                                                                 PendingEffectChange::RemoveColorKeyframe(
                                                                     t.track_index,
@@ -5797,7 +5834,7 @@ impl eframe::App for VibeVideoApp {
                                                                     t.track_index,
                                                                     t.clip_id,
                                                                     t.source_frame,
-                                                                    color,
+                                                                    own,
                                                                 )
                                                             });
                                                         }
@@ -5814,8 +5851,11 @@ impl eframe::App for VibeVideoApp {
                                                         b: rgba[2],
                                                         a: rgba[3],
                                                     };
+                                                    let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                                     for t in &solid {
-                                                        pending_effects.push(if color_constant {
+                                                        let constant = target_effects(tl, t)
+                                                            .is_none_or(|e| e.color.as_ref().is_none_or(|k| k.is_constant()));
+                                                        pending_effects.push(if constant {
                                                             PendingEffectChange::SetColorDefault(
                                                                 t.track_index,
                                                                 t.clip_id,
@@ -5852,9 +5892,12 @@ impl eframe::App for VibeVideoApp {
                                                     )
                                                 },
                                             );
+                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                             if row.changed {
                                                 for t in targets {
-                                                    pending_effects.push(if gain_constant {
+                                                    let constant = target_effects(tl, t)
+                                                        .is_none_or(|e| e.gain_db.is_constant());
+                                                    pending_effects.push(if constant {
                                                         PendingEffectChange::SetGainDefault(
                                                             t.track_index,
                                                             t.clip_id,
@@ -5872,6 +5915,9 @@ impl eframe::App for VibeVideoApp {
                                             }
                                             if row.toggled_keyframe {
                                                 for t in targets {
+                                                    let Some(effects) = target_effects(tl, t) else {
+                                                        continue;
+                                                    };
                                                     pending_effects.push(if gain_kf_here {
                                                         PendingEffectChange::RemoveGainKeyframe(
                                                             t.track_index,
@@ -5883,7 +5929,7 @@ impl eframe::App for VibeVideoApp {
                                                             t.track_index,
                                                             t.clip_id,
                                                             t.source_frame,
-                                                            gain,
+                                                            effects.gain_db.value_at(t.source_frame),
                                                         )
                                                     });
                                                 }
@@ -7273,6 +7319,57 @@ mod tests {
                 .all(|c| c.effects.transform.value_at(0).position == [0.0, 0.0]),
             "un solo undo le riporta indietro tutte"
         );
+    }
+
+    #[test]
+    fn editing_one_param_on_several_clips_keeps_their_other_values() {
+        use vv_core::TransformParam as P;
+        let mut app = VibeVideoApp::default();
+        let first = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let second = make_timeline_with_clip(&mut app, 0, 30, 20);
+        let timeline_id = app.timeline_id.unwrap();
+        let target = |clip_id, timeline_start| PanelTarget {
+            track_index: 0,
+            clip_id,
+            source_frame: 0,
+            timeline_start,
+            is_solid_color: false,
+            is_text: false,
+        };
+        let targets = [target(first, 0), target(second, 30)];
+        let cmd = build_effect_command(
+            timeline_id,
+            PendingEffectChange::SetTransformParamDefault(0, second, P::PositionX, 50.0),
+        );
+        app.history.do_command(&mut app.project, cmd);
+        // Il secondo ha Y animata: la modifica va in un keyframe.
+        let cmd = build_effect_command(
+            timeline_id,
+            PendingEffectChange::UpsertTransformKeyframe(0, second, 10, P::PositionY, 5.0),
+        );
+        app.history.do_command(&mut app.project, cmd);
+
+        let before = app.project.timelines[timeline_id].tracks[0].clips[0]
+            .effects
+            .transform
+            .value_at(0);
+        let mut after = before;
+        after.position[1] = 80.0;
+        let mut pending = Vec::new();
+        push_param_changes(
+            &mut pending,
+            Some(&app.project.timelines[timeline_id]),
+            &targets,
+            &[P::PositionX, P::PositionY],
+            &after,
+            &before,
+        );
+        app.apply_effect_changes(pending, false);
+
+        let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+        assert_eq!(clips[0].effects.transform.value_at(0).position, [0.0, 80.0]);
+        assert_eq!(clips[1].effects.transform.value_at(0).position, [50.0, 80.0]);
+        assert_eq!(clips[1].effects.transform.value_at(10).position, [50.0, 5.0]);
     }
 
     #[test]
