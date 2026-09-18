@@ -1136,9 +1136,6 @@ pub fn show_timeline(
                     state.playhead =
                         snap_frame(raw_frame, 0, &visuals, &[], px_per_frame, snapping_enabled);
                 }
-                if ruler_resp.clicked() {
-                    state.clear_selection();
-                }
 
                 // Marker temporali (tipici di un NLE: tacche maggiori con
                 // etichetta mm:ss/h:mm:ss a intervallo "pulito" adattivo
