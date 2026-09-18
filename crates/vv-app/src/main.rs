@@ -5090,7 +5090,7 @@ impl eframe::App for VibeVideoApp {
                 });
 
                 ui.menu_button("Visualizza", |ui| {
-                    ui.checkbox(&mut self.properties_panel_open, "Pannello proprietà");
+                    ui.checkbox(&mut self.properties_panel_open, "Inspector");
                     ui.checkbox(&mut self.audiometer_enabled, "Audiometer")
                         .on_hover_text(
                             "Livello del player attivo, in una fascia stretta a destra della timeline",
@@ -5117,6 +5117,10 @@ impl eframe::App for VibeVideoApp {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, err);
                 }
+                // Sopra al pannello che apre, come i toggle a sinistra.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.toggle_value(&mut self.properties_panel_open, "Inspector");
+                });
             });
         });
 
@@ -5348,19 +5352,6 @@ impl eframe::App for VibeVideoApp {
                 .resizable(true)
                 .default_size(300.0)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading("Proprietà");
-                        // "x" ASCII invece di "✕" Unicode: stesso motivo
-                        // del label play/pause qui sopra.
-                        if ui
-                            .small_button("x")
-                            .on_hover_text("Nascondi pannello")
-                            .clicked()
-                        {
-                            self.properties_panel_open = false;
-                        }
-                    });
-                    ui.separator();
                     // Senza, il pannello si restringerebbe alla larghezza
                     // del contenuto (etichette/slider) invece di riempire
                     // quella assegnata dal Panel — stessa causa del bug
