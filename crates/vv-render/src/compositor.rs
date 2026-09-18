@@ -520,57 +520,67 @@ impl Compositor {
         if layers.is_empty() {
             self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(BLACK), None);
         }
-        for (i, layer) in layers.iter().enumerate() {
-            let load = if i == 0 {
-                wgpu::LoadOp::Clear(BLACK)
-            } else {
-                wgpu::LoadOp::Load
-            };
-            let bind_group = match layer {
+        let mut first = true;
+        for layer in layers {
+            let bind_groups = match layer {
                 Layer::Video {
                     frame,
                     transform,
                     source_size,
-                } => self.layer_bind_group(
+                } => vec![self.layer_bind_group(
                     frame,
                     transform,
                     output,
                     *source_size,
                     (frame.width, frame.height),
                     Fill::Video,
-                ),
+                )],
                 // Il colore arriva dall'uniform: i piani sono solo segnaposto.
-                Layer::Solid { color, transform } => self.layer_bind_group(
+                Layer::Solid { color, transform } => vec![self.layer_bind_group(
                     &SOLID_PLACEHOLDER,
                     transform,
                     output,
                     output.timeline_size,
                     output.timeline_size,
                     Fill::Solid(*color),
-                ),
+                )],
                 Layer::Text { title, transform } => {
-                    let mask = crate::text::render_title(
+                    let render = crate::text::render_title(
                         title,
                         output.timeline_size,
                         (output.width, output.height),
                     );
-                    let frame = YuvFrame {
-                        y: &mask.data,
-                        width: mask.width,
-                        height: mask.height,
-                        ..SOLID_PLACEHOLDER
-                    };
-                    self.layer_bind_group(
-                        &frame,
-                        transform,
-                        output,
-                        output.timeline_size,
-                        output.timeline_size,
-                        Fill::Mask(title.color),
-                    )
+                    render
+                        .layers
+                        .iter()
+                        .map(|(mask, color)| {
+                            let frame = YuvFrame {
+                                y: &mask.data,
+                                width: mask.width,
+                                height: mask.height,
+                                ..SOLID_PLACEHOLDER
+                            };
+                            self.layer_bind_group(
+                                &frame,
+                                transform,
+                                output,
+                                output.timeline_size,
+                                output.timeline_size,
+                                Fill::Mask(*color),
+                            )
+                        })
+                        .collect()
                 }
             };
-            self.pass(&mut encoder, &output_view, load, Some(&bind_group));
+            for bind_group in &bind_groups {
+                let load = if first {
+                    wgpu::LoadOp::Clear(BLACK)
+                } else {
+                    wgpu::LoadOp::Load
+                };
+                first = false;
+                self.pass(&mut encoder, &output_view, load, Some(bind_group));
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));

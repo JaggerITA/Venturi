@@ -3643,19 +3643,7 @@ fn title_editor(
         title.italic = defaults.italic;
     }
 
-    let row = param_row(ui, "Colore", None, |ui| {
-        let c = title.color;
-        let mut rgba = [c.r, c.g, c.b, c.a];
-        let changed = ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed();
-        title.color = vv_core::Rgba {
-            r: rgba[0],
-            g: rgba[1],
-            b: rgba[2],
-            a: rgba[3],
-        };
-        changed
-    });
-    if row.reset {
+    if color_row(ui, "Colore", &mut title.color).reset {
         title.color = defaults.color;
     }
 
@@ -3772,7 +3760,132 @@ fn title_editor(
         title.position = defaults.position;
     }
 
+    ui.add_space(8.0);
+    let shadow = &mut title.shadow;
+    if title_section_header(ui, "Drop Shadow", &mut shadow.enabled) {
+        *shadow = vv_core::TitleShadow {
+            enabled: shadow.enabled,
+            ..Default::default()
+        };
+    }
+    if shadow.enabled {
+        let d = vv_core::TitleShadow::default();
+        if color_row(ui, "Colore", &mut shadow.color).reset {
+            shadow.color = d.color;
+        }
+        let row = param_row(ui, "Offset", None, |ui| {
+            axis_field(ui, "X", &mut shadow.offset[0], 0.5, 1, -frame_w..=frame_w)
+                | axis_field(ui, "Y", &mut shadow.offset[1], 0.5, 1, -frame_h..=frame_h)
+        });
+        if row.reset {
+            shadow.offset = d.offset;
+        }
+        for (label, value, default, range) in [
+            ("Sfocatura", &mut shadow.blur, d.blur, 0.0..=200.0),
+            ("Opacità", &mut shadow.opacity, d.opacity, 0.0..=100.0),
+        ] {
+            if param_row(ui, label, None, |ui| slider_field(ui, value, range, 0.5, 0)).reset {
+                *value = default;
+            }
+        }
+    }
+
+    ui.add_space(8.0);
+    let bg = &mut title.background;
+    if title_section_header(ui, "Background", &mut bg.enabled) {
+        *bg = vv_core::TitleBackground {
+            enabled: bg.enabled,
+            ..Default::default()
+        };
+    }
+    if bg.enabled {
+        let d = vv_core::TitleBackground::default();
+        if color_row(ui, "Colore", &mut bg.color).reset {
+            bg.color = d.color;
+        }
+        if color_row(ui, "Colore bordo", &mut bg.outline_color).reset {
+            bg.outline_color = d.outline_color;
+        }
+        for (label, value, default, range, decimals) in [
+            ("Spessore bordo", &mut bg.outline_width, d.outline_width, 0.0..=100.0, 0),
+            ("Larghezza", &mut bg.width, d.width, 0.0..=1.0, 3),
+            ("Altezza", &mut bg.height, d.height, 0.0..=1.0, 3),
+            ("Raggio angoli", &mut bg.corner_radius, d.corner_radius, 0.0..=0.5, 3),
+        ] {
+            let speed = if decimals == 0 { 0.5 } else { 0.005 };
+            let row = param_row(ui, label, None, |ui| slider_field(ui, value, range, speed, decimals));
+            if row.reset {
+                *value = default;
+            }
+        }
+        let row = param_row(ui, "Centro", None, |ui| {
+            axis_field(ui, "X", &mut bg.center[0], 1.0, 1, -frame_w..=frame_w)
+                | axis_field(ui, "Y", &mut bg.center[1], 1.0, 1, -frame_h..=frame_h)
+        });
+        if row.reset {
+            bg.center = d.center;
+        }
+        let row = param_row(ui, "Opacità", None, |ui| {
+            slider_field(ui, &mut bg.opacity, 0.0..=100.0, 0.5, 0)
+        });
+        if row.reset {
+            bg.opacity = d.opacity;
+        }
+    }
+
     *title != before
+}
+
+fn color_row(ui: &mut egui::Ui, label: &str, color: &mut vv_core::Rgba) -> RowResponse {
+    param_row(ui, label, None, |ui| {
+        let mut rgba = [color.r, color.g, color.b, color.a];
+        let changed = ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed();
+        *color = vv_core::Rgba {
+            r: rgba[0],
+            g: rgba[1],
+            b: rgba[2],
+            a: rgba[3],
+        };
+        changed
+    })
+}
+
+/// Intestazione di una sezione attivabile: interruttore, titolo e ripristino
+/// dell'intera sezione (`true` se cliccato).
+fn title_section_header(ui: &mut egui::Ui, title: &str, enabled: &mut bool) -> bool {
+    let mut reset = false;
+    ui.horizontal(|ui| {
+        toggle_switch(ui, enabled);
+        ui.label(egui::RichText::new(title).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            reset = ui
+                .small_button("↺")
+                .on_hover_text("Ripristina tutti i parametri di questa sezione")
+                .clicked();
+        });
+    });
+    reset
+}
+
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let size = egui::vec2(26.0, 14.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let t = ui.ctx().animate_bool(response.id, *on);
+    let painter = ui.painter();
+    let track = if *on {
+        egui::Color32::from_rgb(200, 60, 60)
+    } else {
+        ui.visuals().widgets.inactive.bg_fill
+    };
+    painter.rect_filled(rect, rect.height() / 2.0, track);
+    let r = rect.height() / 2.0 - 2.0;
+    let x = egui::lerp(rect.left() + r + 2.0..=rect.right() - r - 2.0, t);
+    painter.circle_filled(egui::pos2(x, rect.center().y), r, egui::Color32::WHITE);
+    response
 }
 
 /// Porta su `target` solo i campi che l'utente ha cambiato (`before` ->
@@ -3785,12 +3898,29 @@ fn apply_title_edit(
 ) -> vv_core::TitleParams {
     let mut out = target.clone();
     macro_rules! copy_changed {
+        ($group:ident : $($name:ident),*) => {
+            $(if before.$group.$name != after.$group.$name {
+                out.$group.$name = after.$group.$name.clone();
+            })*
+        };
         ($($field:ident),*) => {
             $(if before.$field != after.$field {
                 out.$field = after.$field.clone();
             })*
         };
     }
+    copy_changed!(shadow: enabled, color, offset, blur, opacity);
+    copy_changed!(
+        background: enabled,
+        color,
+        outline_color,
+        outline_width,
+        width,
+        height,
+        corner_radius,
+        center,
+        opacity
+    );
     copy_changed!(
         content,
         font_family,
@@ -4894,398 +5024,556 @@ impl eframe::App for VibeVideoApp {
                     // vedi il commento in timeline_ui::show_timeline.
                     ui.set_min_width(ui.available_width());
 
-                    let selected_count = self.timeline_state.selected.len();
-                    if selected_count > 0 {
-                        properties_tab_bar(ui, &mut self.properties_tab);
-                        ui.separator();
+                    // Barra fissa: quella flottante coprirebbe i ripristini a destra.
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
+                        .show(ui, |ui| {
+                        let selected_count = self.timeline_state.selected.len();
+                        if selected_count > 0 {
+                            properties_tab_bar(ui, &mut self.properties_tab);
+                            ui.separator();
 
-                        // I valori mostrati sono quelli della prima clip del
-                        // gruppo; ogni modifica va a tutte quelle della
-                        // scheda (le clip dell'altro tipo di track restano
-                        // fuori: un transform su una clip audio non vuol
-                        // dire niente).
-                        if self.properties_tab == PropertiesTab::Selection {
-                            self.show_selection_list(ui, &video_targets, &audio_targets);
-                        } else {
-                        let targets = if self.properties_tab == PropertiesTab::Audio {
-                            &audio_targets
-                        } else {
-                            &video_targets
-                        };
-                        let primary = targets.first().copied();
-                        let info = primary.and_then(|t| self.clip_panel_info(t));
+                            // I valori mostrati sono quelli della prima clip del
+                            // gruppo; ogni modifica va a tutte quelle della
+                            // scheda (le clip dell'altro tipo di track restano
+                            // fuori: un transform su una clip audio non vuol
+                            // dire niente).
+                            if self.properties_tab == PropertiesTab::Selection {
+                                self.show_selection_list(ui, &video_targets, &audio_targets);
+                            } else {
+                            let targets = if self.properties_tab == PropertiesTab::Audio {
+                                &audio_targets
+                            } else {
+                                &video_targets
+                            };
+                            let primary = targets.first().copied();
+                            let info = primary.and_then(|t| self.clip_panel_info(t));
 
-                        match (primary, info) {
-                            (Some(primary), Some(info)) => {
-                                let ClipPanelInfo {
-                                    is_solid_color,
-                                    source_size,
-                                    timeline_size,
-                                    mut transform,
-                                    gain_constant,
-                                    gain_kf_here,
-                                    mut gain,
-                                    gain_prev,
-                                    gain_next,
-                                    color_constant,
-                                    color_kf_here,
-                                    mut color,
-                                    ..
-                                } = info.clone();
-                                if targets.len() > 1 {
-                                    ui.small(format!(
-                                        "Modifiche applicate a tutte le {} clip di questa scheda.",
-                                        targets.len()
-                                    ));
-                                }
-                                ui.separator();
-
-                                let is_text = self.properties_tab == PropertiesTab::Video
-                                    && info.title.is_some();
-                                if is_text {
-                                    video_subtab_bar(ui, &mut self.video_subtab);
-                                    ui.add_space(4.0);
-                                }
-                                match self.properties_tab {
-                                    // La scheda Selezione non arriva qui:
-                                    // è servita prima, senza clip primaria.
-                                    PropertiesTab::Selection => {}
-                                    PropertiesTab::Video
-                                        if is_text && self.video_subtab == VideoSubTab::Title =>
-                                    {
-                                        let before = info.title.clone().unwrap_or_default();
-                                        let mut title = before.clone();
-                                        if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
-                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                            for t in targets.iter().filter(|t| t.is_text) {
-                                                let Some(current) = tl
-                                                    .and_then(|tl| tl.tracks.get(t.track_index))
-                                                    .and_then(|tr| tr.clips.iter().find(|c| c.id == t.clip_id))
-                                                    .and_then(|c| c.effects.title.as_ref())
-                                                else {
-                                                    continue;
-                                                };
-                                                pending_effects.push(PendingEffectChange::SetTitle(
-                                                    t.track_index,
-                                                    t.clip_id,
-                                                    apply_title_edit(current, &before, &title),
-                                                ));
-                                            }
-                                        }
+                            match (primary, info) {
+                                (Some(primary), Some(info)) => {
+                                    let ClipPanelInfo {
+                                        is_solid_color,
+                                        source_size,
+                                        timeline_size,
+                                        mut transform,
+                                        gain_constant,
+                                        gain_kf_here,
+                                        mut gain,
+                                        gain_prev,
+                                        gain_next,
+                                        color_constant,
+                                        color_kf_here,
+                                        mut color,
+                                        ..
+                                    } = info.clone();
+                                    if targets.len() > 1 {
+                                        ui.small(format!(
+                                            "Modifiche applicate a tutte le {} clip di questa scheda.",
+                                            targets.len()
+                                        ));
                                     }
-                                    PropertiesTab::Video => {
-                                        use vv_core::TransformParam as P;
-                                        let (frame_w, frame_h) =
-                                            (timeline_size.0 as f32, timeline_size.1 as f32);
-                                        let (source_w, source_h) =
-                                            (source_size.0 as f32, source_size.1 as f32);
+                                    ui.separator();
 
-                                        // Stato del diamante di una riga: su
-                                        // un keyframe solo se lo sono tutti i
-                                        // parametri della riga, frecce verso
-                                        // il keyframe più vicino di uno
-                                        // qualunque di essi.
-                                        let row_keyframe = |params: &[P]| RowKeyframe {
-                                            on_keyframe: params
-                                                .iter()
-                                                .all(|p| info.params[p.index()].on_keyframe),
-                                            prev: params
-                                                .iter()
-                                                .filter_map(|p| info.params[p.index()].prev)
-                                                .max(),
-                                            next: params
-                                                .iter()
-                                                .filter_map(|p| info.params[p.index()].next)
-                                                .min(),
-                                        };
-
-                                        let section_reset = |ui: &mut egui::Ui, title: &str| {
-                                            let mut clicked = false;
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new(title).strong());
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
-                                                    ),
-                                                    |ui| {
-                                                        clicked = ui
-                                                            .small_button("↺")
-                                                            .on_hover_text(
-                                                                "Ripristina tutti i parametri di questa sezione",
-                                                            )
-                                                            .clicked();
-                                                    },
-                                                );
-                                            });
-                                            clicked
-                                        };
-
-                                        const TRANSFORM_PARAMS: [P; 7] = [
-                                            P::ZoomX,
-                                            P::ZoomY,
-                                            P::PositionX,
-                                            P::PositionY,
-                                            P::Rotation,
-                                            P::AnchorX,
-                                            P::AnchorY,
-                                        ];
-                                        const CROP_PARAMS: [P; 5] = [
-                                            P::CropLeft,
-                                            P::CropTop,
-                                            P::CropRight,
-                                            P::CropBottom,
-                                            P::CropSoftness,
-                                        ];
-
-                                        // Le righe, ognuna con i parametri che
-                                        // il suo diamante anima; il reset di
-                                        // una riga azzera quei parametri,
-                                        // keyframe compresi.
-                                        let mut rows: Vec<(Vec<P>, RowResponse)> = Vec::new();
-                                        let mut reset_groups: Vec<(Vec<P>, bool)> = Vec::new();
-
-                                        if section_reset(ui, "Transform") {
-                                            reset_groups.push((TRANSFORM_PARAMS.to_vec(), true));
-                                        }
-
-                                        let zoom_params = vec![P::ZoomX, P::ZoomY];
-                                        let row = param_row(
-                                            ui,
-                                            "Zoom",
-                                            Some(row_keyframe(&zoom_params)),
-                                            |ui| {
-                                                let mut changed = axis_field(
-                                                    ui,
-                                                    "X",
-                                                    &mut transform.zoom[0],
-                                                    0.01,
-                                                    3,
-                                                    0.01..=20.0,
-                                                );
-                                                if link_button(ui, &mut self.zoom_link).changed()
-                                                    && self.zoom_link
-                                                {
-                                                    transform.zoom[1] = transform.zoom[0];
-                                                    changed = true;
+                                    let is_text = self.properties_tab == PropertiesTab::Video
+                                        && info.title.is_some();
+                                    if is_text {
+                                        video_subtab_bar(ui, &mut self.video_subtab);
+                                        ui.add_space(4.0);
+                                    }
+                                    match self.properties_tab {
+                                        // La scheda Selezione non arriva qui:
+                                        // è servita prima, senza clip primaria.
+                                        PropertiesTab::Selection => {}
+                                        PropertiesTab::Video
+                                            if is_text && self.video_subtab == VideoSubTab::Title =>
+                                        {
+                                            let before = info.title.clone().unwrap_or_default();
+                                            let mut title = before.clone();
+                                            if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
+                                                let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                for t in targets.iter().filter(|t| t.is_text) {
+                                                    let Some(current) = tl
+                                                        .and_then(|tl| tl.tracks.get(t.track_index))
+                                                        .and_then(|tr| tr.clips.iter().find(|c| c.id == t.clip_id))
+                                                        .and_then(|c| c.effects.title.as_ref())
+                                                    else {
+                                                        continue;
+                                                    };
+                                                    pending_effects.push(PendingEffectChange::SetTitle(
+                                                        t.track_index,
+                                                        t.clip_id,
+                                                        apply_title_edit(current, &before, &title),
+                                                    ));
                                                 }
-                                                let y_changed = axis_field(
-                                                    ui,
-                                                    "Y",
-                                                    &mut transform.zoom[1],
-                                                    0.01,
-                                                    3,
-                                                    0.01..=20.0,
-                                                );
-                                                if self.zoom_link {
-                                                    // Il link vale in entrambi
-                                                    // i versi: chi è stato
-                                                    // mosso detta l'altro.
-                                                    if changed {
-                                                        transform.zoom[1] = transform.zoom[0];
-                                                    } else if y_changed {
-                                                        transform.zoom[0] = transform.zoom[1];
-                                                    }
-                                                }
-                                                changed || y_changed
-                                            },
-                                        );
-                                        rows.push((zoom_params, row));
-
-                                        let position_params = vec![P::PositionX, P::PositionY];
-                                        let row = param_row(
-                                            ui,
-                                            "Posizione",
-                                            Some(row_keyframe(&position_params)),
-                                            |ui| {
-                                                let x = axis_field(
-                                                    ui,
-                                                    "X",
-                                                    &mut transform.position[0],
-                                                    1.0,
-                                                    1,
-                                                    -frame_w..=frame_w,
-                                                );
-                                                let y = axis_field(
-                                                    ui,
-                                                    "Y",
-                                                    &mut transform.position[1],
-                                                    1.0,
-                                                    1,
-                                                    -frame_h..=frame_h,
-                                                );
-                                                x || y
-                                            },
-                                        );
-                                        rows.push((position_params, row));
-
-                                        let rotation_params = vec![P::Rotation];
-                                        let row = param_row(
-                                            ui,
-                                            "Rotazione",
-                                            Some(row_keyframe(&rotation_params)),
-                                            |ui| {
-                                                slider_field(
-                                                    ui,
-                                                    &mut transform.rotation,
-                                                    -180.0..=180.0,
-                                                    0.5,
-                                                    1,
-                                                )
-                                            },
-                                        );
-                                        rows.push((rotation_params, row));
-
-                                        let anchor_params = vec![P::AnchorX, P::AnchorY];
-                                        let row = param_row(
-                                            ui,
-                                            "Anchor point",
-                                            Some(row_keyframe(&anchor_params)),
-                                            |ui| {
-                                                let x = axis_field(
-                                                    ui,
-                                                    "X",
-                                                    &mut transform.anchor[0],
-                                                    1.0,
-                                                    1,
-                                                    -frame_w..=frame_w,
-                                                );
-                                                let y = axis_field(
-                                                    ui,
-                                                    "Y",
-                                                    &mut transform.anchor[1],
-                                                    1.0,
-                                                    1,
-                                                    -frame_h..=frame_h,
-                                                );
-                                                x || y
-                                            },
-                                        );
-                                        rows.push((anchor_params, row));
-
-                                        // Il flip non si anima: niente
-                                        // diamante, solo il ripristino.
-                                        let flip_row = param_row(ui, "Flip", None, |ui| {
-                                            let x = ui
-                                                .selectable_label(transform.flip[0], "⬌")
-                                                .on_hover_text("Specchia in orizzontale")
-                                                .clicked();
-                                            let y = ui
-                                                .selectable_label(transform.flip[1], "⬍")
-                                                .on_hover_text("Specchia in verticale")
-                                                .clicked();
-                                            transform.flip[0] ^= x;
-                                            transform.flip[1] ^= y;
-                                            x || y
-                                        });
-                                        if flip_row.changed {
-                                            for t in targets {
-                                                pending_effects.push(PendingEffectChange::SetFlip(
-                                                    t.track_index,
-                                                    t.clip_id,
-                                                    transform.flip,
-                                                ));
                                             }
                                         }
-                                        if flip_row.reset {
-                                            reset_groups.push((Vec::new(), true));
-                                        }
+                                        PropertiesTab::Video => {
+                                            use vv_core::TransformParam as P;
+                                            let (frame_w, frame_h) =
+                                                (timeline_size.0 as f32, timeline_size.1 as f32);
+                                            let (source_w, source_h) =
+                                                (source_size.0 as f32, source_size.1 as f32);
 
-                                        ui.add_space(6.0);
-                                        if section_reset(ui, "Cropping") {
-                                            reset_groups.push((CROP_PARAMS.to_vec(), false));
-                                        }
+                                            // Stato del diamante di una riga: su
+                                            // un keyframe solo se lo sono tutti i
+                                            // parametri della riga, frecce verso
+                                            // il keyframe più vicino di uno
+                                            // qualunque di essi.
+                                            let row_keyframe = |params: &[P]| RowKeyframe {
+                                                on_keyframe: params
+                                                    .iter()
+                                                    .all(|p| info.params[p.index()].on_keyframe),
+                                                prev: params
+                                                    .iter()
+                                                    .filter_map(|p| info.params[p.index()].prev)
+                                                    .max(),
+                                                next: params
+                                                    .iter()
+                                                    .filter_map(|p| info.params[p.index()].next)
+                                                    .min(),
+                                            };
 
-                                        for (label, param, index, limit) in [
-                                            ("Crop sinistra", P::CropLeft, 0, source_w),
-                                            ("Crop destra", P::CropRight, 2, source_w),
-                                            ("Crop alto", P::CropTop, 1, source_h),
-                                            ("Crop basso", P::CropBottom, 3, source_h),
-                                        ] {
-                                            let params = vec![param];
+                                            let section_reset = |ui: &mut egui::Ui, title: &str| {
+                                                let mut clicked = false;
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new(title).strong());
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            clicked = ui
+                                                                .small_button("↺")
+                                                                .on_hover_text(
+                                                                    "Ripristina tutti i parametri di questa sezione",
+                                                                )
+                                                                .clicked();
+                                                        },
+                                                    );
+                                                });
+                                                clicked
+                                            };
+
+                                            const TRANSFORM_PARAMS: [P; 7] = [
+                                                P::ZoomX,
+                                                P::ZoomY,
+                                                P::PositionX,
+                                                P::PositionY,
+                                                P::Rotation,
+                                                P::AnchorX,
+                                                P::AnchorY,
+                                            ];
+                                            const CROP_PARAMS: [P; 5] = [
+                                                P::CropLeft,
+                                                P::CropTop,
+                                                P::CropRight,
+                                                P::CropBottom,
+                                                P::CropSoftness,
+                                            ];
+
+                                            // Le righe, ognuna con i parametri che
+                                            // il suo diamante anima; il reset di
+                                            // una riga azzera quei parametri,
+                                            // keyframe compresi.
+                                            let mut rows: Vec<(Vec<P>, RowResponse)> = Vec::new();
+                                            let mut reset_groups: Vec<(Vec<P>, bool)> = Vec::new();
+
+                                            if section_reset(ui, "Transform") {
+                                                reset_groups.push((TRANSFORM_PARAMS.to_vec(), true));
+                                            }
+
+                                            let zoom_params = vec![P::ZoomX, P::ZoomY];
                                             let row = param_row(
                                                 ui,
-                                                label,
-                                                Some(row_keyframe(&params)),
+                                                "Zoom",
+                                                Some(row_keyframe(&zoom_params)),
+                                                |ui| {
+                                                    let mut changed = axis_field(
+                                                        ui,
+                                                        "X",
+                                                        &mut transform.zoom[0],
+                                                        0.01,
+                                                        3,
+                                                        0.01..=20.0,
+                                                    );
+                                                    if link_button(ui, &mut self.zoom_link).changed()
+                                                        && self.zoom_link
+                                                    {
+                                                        transform.zoom[1] = transform.zoom[0];
+                                                        changed = true;
+                                                    }
+                                                    let y_changed = axis_field(
+                                                        ui,
+                                                        "Y",
+                                                        &mut transform.zoom[1],
+                                                        0.01,
+                                                        3,
+                                                        0.01..=20.0,
+                                                    );
+                                                    if self.zoom_link {
+                                                        // Il link vale in entrambi
+                                                        // i versi: chi è stato
+                                                        // mosso detta l'altro.
+                                                        if changed {
+                                                            transform.zoom[1] = transform.zoom[0];
+                                                        } else if y_changed {
+                                                            transform.zoom[0] = transform.zoom[1];
+                                                        }
+                                                    }
+                                                    changed || y_changed
+                                                },
+                                            );
+                                            rows.push((zoom_params, row));
+
+                                            let position_params = vec![P::PositionX, P::PositionY];
+                                            let row = param_row(
+                                                ui,
+                                                "Posizione",
+                                                Some(row_keyframe(&position_params)),
+                                                |ui| {
+                                                    let x = axis_field(
+                                                        ui,
+                                                        "X",
+                                                        &mut transform.position[0],
+                                                        1.0,
+                                                        1,
+                                                        -frame_w..=frame_w,
+                                                    );
+                                                    let y = axis_field(
+                                                        ui,
+                                                        "Y",
+                                                        &mut transform.position[1],
+                                                        1.0,
+                                                        1,
+                                                        -frame_h..=frame_h,
+                                                    );
+                                                    x || y
+                                                },
+                                            );
+                                            rows.push((position_params, row));
+
+                                            let rotation_params = vec![P::Rotation];
+                                            let row = param_row(
+                                                ui,
+                                                "Rotazione",
+                                                Some(row_keyframe(&rotation_params)),
                                                 |ui| {
                                                     slider_field(
                                                         ui,
-                                                        &mut transform.crop[index],
-                                                        0.0..=limit,
+                                                        &mut transform.rotation,
+                                                        -180.0..=180.0,
+                                                        0.5,
+                                                        1,
+                                                    )
+                                                },
+                                            );
+                                            rows.push((rotation_params, row));
+
+                                            let anchor_params = vec![P::AnchorX, P::AnchorY];
+                                            let row = param_row(
+                                                ui,
+                                                "Anchor point",
+                                                Some(row_keyframe(&anchor_params)),
+                                                |ui| {
+                                                    let x = axis_field(
+                                                        ui,
+                                                        "X",
+                                                        &mut transform.anchor[0],
+                                                        1.0,
+                                                        1,
+                                                        -frame_w..=frame_w,
+                                                    );
+                                                    let y = axis_field(
+                                                        ui,
+                                                        "Y",
+                                                        &mut transform.anchor[1],
+                                                        1.0,
+                                                        1,
+                                                        -frame_h..=frame_h,
+                                                    );
+                                                    x || y
+                                                },
+                                            );
+                                            rows.push((anchor_params, row));
+
+                                            // Il flip non si anima: niente
+                                            // diamante, solo il ripristino.
+                                            let flip_row = param_row(ui, "Flip", None, |ui| {
+                                                let x = ui
+                                                    .selectable_label(transform.flip[0], "⬌")
+                                                    .on_hover_text("Specchia in orizzontale")
+                                                    .clicked();
+                                                let y = ui
+                                                    .selectable_label(transform.flip[1], "⬍")
+                                                    .on_hover_text("Specchia in verticale")
+                                                    .clicked();
+                                                transform.flip[0] ^= x;
+                                                transform.flip[1] ^= y;
+                                                x || y
+                                            });
+                                            if flip_row.changed {
+                                                for t in targets {
+                                                    pending_effects.push(PendingEffectChange::SetFlip(
+                                                        t.track_index,
+                                                        t.clip_id,
+                                                        transform.flip,
+                                                    ));
+                                                }
+                                            }
+                                            if flip_row.reset {
+                                                reset_groups.push((Vec::new(), true));
+                                            }
+
+                                            ui.add_space(6.0);
+                                            if section_reset(ui, "Cropping") {
+                                                reset_groups.push((CROP_PARAMS.to_vec(), false));
+                                            }
+
+                                            for (label, param, index, limit) in [
+                                                ("Crop sinistra", P::CropLeft, 0, source_w),
+                                                ("Crop destra", P::CropRight, 2, source_w),
+                                                ("Crop alto", P::CropTop, 1, source_h),
+                                                ("Crop basso", P::CropBottom, 3, source_h),
+                                            ] {
+                                                let params = vec![param];
+                                                let row = param_row(
+                                                    ui,
+                                                    label,
+                                                    Some(row_keyframe(&params)),
+                                                    |ui| {
+                                                        slider_field(
+                                                            ui,
+                                                            &mut transform.crop[index],
+                                                            0.0..=limit,
+                                                            1.0,
+                                                            1,
+                                                        )
+                                                    },
+                                                );
+                                                rows.push((params, row));
+                                            }
+                                            // I due tagli opposti non possono
+                                            // mangiarsi tutto il frame a vicenda:
+                                            // almeno un pixel resta.
+                                            transform.crop[0] =
+                                                transform.crop[0].min(source_w - 1.0 - transform.crop[2]);
+                                            transform.crop[1] =
+                                                transform.crop[1].min(source_h - 1.0 - transform.crop[3]);
+
+                                            let softness_params = vec![P::CropSoftness];
+                                            let row = param_row(
+                                                ui,
+                                                "Sfumatura",
+                                                Some(row_keyframe(&softness_params)),
+                                                |ui| {
+                                                    let limit = source_w.min(source_h) / 2.0;
+                                                    slider_field(
+                                                        ui,
+                                                        &mut transform.crop_softness,
+                                                        -limit..=limit,
                                                         1.0,
                                                         1,
                                                     )
                                                 },
                                             );
-                                            rows.push((params, row));
-                                        }
-                                        // I due tagli opposti non possono
-                                        // mangiarsi tutto il frame a vicenda:
-                                        // almeno un pixel resta.
-                                        transform.crop[0] =
-                                            transform.crop[0].min(source_w - 1.0 - transform.crop[2]);
-                                        transform.crop[1] =
-                                            transform.crop[1].min(source_h - 1.0 - transform.crop[3]);
+                                            rows.push((softness_params, row));
 
-                                        let softness_params = vec![P::CropSoftness];
-                                        let row = param_row(
-                                            ui,
-                                            "Sfumatura",
-                                            Some(row_keyframe(&softness_params)),
-                                            |ui| {
-                                                let limit = source_w.min(source_h) / 2.0;
-                                                slider_field(
-                                                    ui,
-                                                    &mut transform.crop_softness,
-                                                    -limit..=limit,
-                                                    1.0,
-                                                    1,
-                                                )
-                                            },
-                                        );
-                                        rows.push((softness_params, row));
-
-                                        for (params, row) in &rows {
-                                            if row.changed {
-                                                push_param_changes(
-                                                    &mut pending_effects,
-                                                    targets,
-                                                    params,
-                                                    &transform,
-                                                    &info,
-                                                );
+                                            for (params, row) in &rows {
+                                                if row.changed {
+                                                    push_param_changes(
+                                                        &mut pending_effects,
+                                                        targets,
+                                                        params,
+                                                        &transform,
+                                                        &info,
+                                                    );
+                                                }
+                                                if row.toggled_keyframe {
+                                                    let on_keyframe = params
+                                                        .iter()
+                                                        .all(|p| info.params[p.index()].on_keyframe);
+                                                    for t in targets {
+                                                        for p in params {
+                                                            pending_effects.push(if on_keyframe {
+                                                                PendingEffectChange::RemoveTransformKeyframe(
+                                                                    t.track_index,
+                                                                    t.clip_id,
+                                                                    t.source_frame,
+                                                                    *p,
+                                                                )
+                                                            } else {
+                                                                PendingEffectChange::UpsertTransformKeyframe(
+                                                                    t.track_index,
+                                                                    t.clip_id,
+                                                                    t.source_frame,
+                                                                    *p,
+                                                                    p.of(&transform),
+                                                                )
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                                if row.reset {
+                                                    reset_groups.push((params.clone(), false));
+                                                }
+                                                // Le frecce portano la testina sul
+                                                // keyframe più vicino: il frame è
+                                                // sorgente, la testina vive in
+                                                // frame di timeline.
+                                                if let Some(source_frame) = row.goto {
+                                                    pending_playhead = self
+                                                        .timeline_id
+                                                        .and_then(|tid| {
+                                                            self.project.timelines[tid]
+                                                                .tracks
+                                                                .get(primary.track_index)?
+                                                                .clips
+                                                                .iter()
+                                                                .find(|c| c.id == primary.clip_id)
+                                                        })
+                                                        .map(|c| c.timeline_frame_at(source_frame));
+                                                }
                                             }
-                                            if row.toggled_keyframe {
-                                                let on_keyframe = params
-                                                    .iter()
-                                                    .all(|p| info.params[p.index()].on_keyframe);
+
+                                            for (params, reset_flip) in reset_groups {
                                                 for t in targets {
-                                                    for p in params {
-                                                        pending_effects.push(if on_keyframe {
-                                                            PendingEffectChange::RemoveTransformKeyframe(
+                                                    pending_effects.push(
+                                                        PendingEffectChange::ResetTransformParams(
+                                                            t.track_index,
+                                                            t.clip_id,
+                                                            params.clone(),
+                                                            reset_flip,
+                                                        ),
+                                                    );
+                                                }
+                                            }
+
+                                            // Il colore vale solo per le clip
+                                            // generatore: le altre clip video
+                                            // selezionate restano fuori.
+                                            if is_solid_color {
+                                                let solid: Vec<&PanelTarget> =
+                                                    targets.iter().filter(|t| t.is_solid_color).collect();
+                                                ui.add_space(6.0);
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("Colore").strong());
+                                                    if keyframe_button(ui, color_kf_here).clicked()
+                                                    {
+                                                        for t in &solid {
+                                                            pending_effects.push(if color_kf_here {
+                                                                PendingEffectChange::RemoveColorKeyframe(
+                                                                    t.track_index,
+                                                                    t.clip_id,
+                                                                    t.source_frame,
+                                                                )
+                                                            } else {
+                                                                PendingEffectChange::UpsertColorKeyframe(
+                                                                    t.track_index,
+                                                                    t.clip_id,
+                                                                    t.source_frame,
+                                                                    color,
+                                                                )
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                                let mut rgba = [color.r, color.g, color.b, color.a];
+                                                if ui
+                                                    .color_edit_button_rgba_unmultiplied(&mut rgba)
+                                                    .changed()
+                                                {
+                                                    color = vv_core::Rgba {
+                                                        r: rgba[0],
+                                                        g: rgba[1],
+                                                        b: rgba[2],
+                                                        a: rgba[3],
+                                                    };
+                                                    for t in &solid {
+                                                        pending_effects.push(if color_constant {
+                                                            PendingEffectChange::SetColorDefault(
                                                                 t.track_index,
                                                                 t.clip_id,
-                                                                t.source_frame,
-                                                                *p,
+                                                                color,
                                                             )
                                                         } else {
-                                                            PendingEffectChange::UpsertTransformKeyframe(
+                                                            PendingEffectChange::UpsertColorKeyframe(
                                                                 t.track_index,
                                                                 t.clip_id,
                                                                 t.source_frame,
-                                                                *p,
-                                                                p.of(&transform),
+                                                                color,
                                                             )
                                                         });
                                                     }
                                                 }
                                             }
-                                            if row.reset {
-                                                reset_groups.push((params.clone(), false));
+                                        }
+                                        PropertiesTab::Audio => {
+                                            let row = param_row(
+                                                ui,
+                                                "Volume",
+                                                Some(RowKeyframe {
+                                                    on_keyframe: gain_kf_here,
+                                                    prev: gain_prev,
+                                                    next: gain_next,
+                                                }),
+                                                |ui| {
+                                                    slider_field(
+                                                        ui,
+                                                        &mut gain,
+                                                        -100.0..=30.0,
+                                                        0.2,
+                                                        1,
+                                                    )
+                                                },
+                                            );
+                                            if row.changed {
+                                                for t in targets {
+                                                    pending_effects.push(if gain_constant {
+                                                        PendingEffectChange::SetGainDefault(
+                                                            t.track_index,
+                                                            t.clip_id,
+                                                            gain,
+                                                        )
+                                                    } else {
+                                                        PendingEffectChange::UpsertGainKeyframe(
+                                                            t.track_index,
+                                                            t.clip_id,
+                                                            t.source_frame,
+                                                            gain,
+                                                        )
+                                                    });
+                                                }
                                             }
-                                            // Le frecce portano la testina sul
-                                            // keyframe più vicino: il frame è
-                                            // sorgente, la testina vive in
-                                            // frame di timeline.
+                                            if row.toggled_keyframe {
+                                                for t in targets {
+                                                    pending_effects.push(if gain_kf_here {
+                                                        PendingEffectChange::RemoveGainKeyframe(
+                                                            t.track_index,
+                                                            t.clip_id,
+                                                            t.source_frame,
+                                                        )
+                                                    } else {
+                                                        PendingEffectChange::UpsertGainKeyframe(
+                                                            t.track_index,
+                                                            t.clip_id,
+                                                            t.source_frame,
+                                                            gain,
+                                                        )
+                                                    });
+                                                }
+                                            }
+                                            if row.reset {
+                                                for t in targets {
+                                                    pending_effects.push(PendingEffectChange::ResetGain(
+                                                        t.track_index,
+                                                        t.clip_id,
+                                                    ));
+                                                }
+                                            }
                                             if let Some(source_frame) = row.goto {
                                                 pending_playhead = self
                                                     .timeline_id
@@ -5300,188 +5588,39 @@ impl eframe::App for VibeVideoApp {
                                                     .map(|c| c.timeline_frame_at(source_frame));
                                             }
                                         }
-
-                                        for (params, reset_flip) in reset_groups {
-                                            for t in targets {
-                                                pending_effects.push(
-                                                    PendingEffectChange::ResetTransformParams(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        params.clone(),
-                                                        reset_flip,
-                                                    ),
-                                                );
-                                            }
-                                        }
-
-                                        // Il colore vale solo per le clip
-                                        // generatore: le altre clip video
-                                        // selezionate restano fuori.
-                                        if is_solid_color {
-                                            let solid: Vec<&PanelTarget> =
-                                                targets.iter().filter(|t| t.is_solid_color).collect();
-                                            ui.add_space(6.0);
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("Colore").strong());
-                                                if keyframe_button(ui, color_kf_here).clicked()
-                                                {
-                                                    for t in &solid {
-                                                        pending_effects.push(if color_kf_here {
-                                                            PendingEffectChange::RemoveColorKeyframe(
-                                                                t.track_index,
-                                                                t.clip_id,
-                                                                t.source_frame,
-                                                            )
-                                                        } else {
-                                                            PendingEffectChange::UpsertColorKeyframe(
-                                                                t.track_index,
-                                                                t.clip_id,
-                                                                t.source_frame,
-                                                                color,
-                                                            )
-                                                        });
-                                                    }
-                                                }
-                                            });
-                                            let mut rgba = [color.r, color.g, color.b, color.a];
-                                            if ui
-                                                .color_edit_button_rgba_unmultiplied(&mut rgba)
-                                                .changed()
-                                            {
-                                                color = vv_core::Rgba {
-                                                    r: rgba[0],
-                                                    g: rgba[1],
-                                                    b: rgba[2],
-                                                    a: rgba[3],
-                                                };
-                                                for t in &solid {
-                                                    pending_effects.push(if color_constant {
-                                                        PendingEffectChange::SetColorDefault(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            color,
-                                                        )
-                                                    } else {
-                                                        PendingEffectChange::UpsertColorKeyframe(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            t.source_frame,
-                                                            color,
-                                                        )
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                    PropertiesTab::Audio => {
-                                        let row = param_row(
-                                            ui,
-                                            "Volume",
-                                            Some(RowKeyframe {
-                                                on_keyframe: gain_kf_here,
-                                                prev: gain_prev,
-                                                next: gain_next,
-                                            }),
-                                            |ui| {
-                                                slider_field(
-                                                    ui,
-                                                    &mut gain,
-                                                    -100.0..=30.0,
-                                                    0.2,
-                                                    1,
-                                                )
-                                            },
-                                        );
-                                        if row.changed {
-                                            for t in targets {
-                                                pending_effects.push(if gain_constant {
-                                                    PendingEffectChange::SetGainDefault(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        gain,
-                                                    )
-                                                } else {
-                                                    PendingEffectChange::UpsertGainKeyframe(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        t.source_frame,
-                                                        gain,
-                                                    )
-                                                });
-                                            }
-                                        }
-                                        if row.toggled_keyframe {
-                                            for t in targets {
-                                                pending_effects.push(if gain_kf_here {
-                                                    PendingEffectChange::RemoveGainKeyframe(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        t.source_frame,
-                                                    )
-                                                } else {
-                                                    PendingEffectChange::UpsertGainKeyframe(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        t.source_frame,
-                                                        gain,
-                                                    )
-                                                });
-                                            }
-                                        }
-                                        if row.reset {
-                                            for t in targets {
-                                                pending_effects.push(PendingEffectChange::ResetGain(
-                                                    t.track_index,
-                                                    t.clip_id,
-                                                ));
-                                            }
-                                        }
-                                        if let Some(source_frame) = row.goto {
-                                            pending_playhead = self
-                                                .timeline_id
-                                                .and_then(|tid| {
-                                                    self.project.timelines[tid]
-                                                        .tracks
-                                                        .get(primary.track_index)?
-                                                        .clips
-                                                        .iter()
-                                                        .find(|c| c.id == primary.clip_id)
-                                                })
-                                                .map(|c| c.timeline_frame_at(source_frame));
-                                        }
                                     }
                                 }
+                                _ => {
+                                    ui.small(if self.properties_tab == PropertiesTab::Audio {
+                                        "Nessuna clip audio selezionata."
+                                    } else {
+                                        "Nessuna clip video selezionata."
+                                    });
+                                }
                             }
-                            _ => {
-                                ui.small(if self.properties_tab == PropertiesTab::Audio {
-                                    "Nessuna clip audio selezionata."
-                                } else {
-                                    "Nessuna clip video selezionata."
-                                });
                             }
+                        } else if let Some(timeline_id) = self.timeline_id {
+                            let tl = &self.project.timelines[timeline_id];
+                            ui.heading("Timeline");
+                            ui.label(tl.name.clone());
+                            ui.label(format!(
+                                "{}x{} · {:.2} fps",
+                                tl.resolution.0,
+                                tl.resolution.1,
+                                tl.fps.as_f64()
+                            ));
+                            ui.label(format!("{} track", tl.tracks.len()));
+                            let playhead_secs =
+                                self.timeline_state.playhead as f64 / tl.fps.as_f64().max(1.0);
+                            ui.label(format!(
+                                "Playhead: frame {} ({playhead_secs:.2}s)",
+                                self.timeline_state.playhead
+                            ));
+                            ui.small("Nessuna clip selezionata.");
+                        } else {
+                            ui.label("Importa un media per creare la timeline.");
                         }
-                        }
-                    } else if let Some(timeline_id) = self.timeline_id {
-                        let tl = &self.project.timelines[timeline_id];
-                        ui.heading("Timeline");
-                        ui.label(tl.name.clone());
-                        ui.label(format!(
-                            "{}x{} · {:.2} fps",
-                            tl.resolution.0,
-                            tl.resolution.1,
-                            tl.fps.as_f64()
-                        ));
-                        ui.label(format!("{} track", tl.tracks.len()));
-                        let playhead_secs =
-                            self.timeline_state.playhead as f64 / tl.fps.as_f64().max(1.0);
-                        ui.label(format!(
-                            "Playhead: frame {} ({playhead_secs:.2}s)",
-                            self.timeline_state.playhead
-                        ));
-                        ui.small("Nessuna clip selezionata.");
-                    } else {
-                        ui.label("Importa un media per creare la timeline.");
-                    }
+                        });
                 });
         }
 
@@ -6974,6 +7113,14 @@ mod tests {
         let merged = apply_title_edit(&other, &before, &after);
         assert_eq!(merged.content, "Altro");
         assert_eq!(merged.size, 40.0);
+
+        // Dentro l'ombra, solo il campo toccato.
+        let mut after = before.clone();
+        after.shadow.blur = 30.0;
+        let mut other = before.clone();
+        other.shadow.opacity = 10.0;
+        let merged = apply_title_edit(&other, &before, &after);
+        assert_eq!((merged.shadow.blur, merged.shadow.opacity), (30.0, 10.0));
     }
 
     #[test]

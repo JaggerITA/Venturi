@@ -563,6 +563,85 @@ pub struct TitleParams {
     pub anchor: (HAnchor, VAnchor),
     /// Dal centro del frame, Y verso l'alto.
     pub position: [f32; 2],
+    #[serde(default)]
+    pub shadow: TitleShadow,
+    #[serde(default)]
+    pub background: TitleBackground,
+}
+
+/// Ombra del solo testo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TitleShadow {
+    pub enabled: bool,
+    pub color: Rgba,
+    /// In pixel di timeline, Y verso l'alto.
+    pub offset: [f32; 2],
+    /// Raggio della sfocatura, in pixel di timeline.
+    pub blur: f32,
+    /// 0-100.
+    pub opacity: f32,
+}
+
+impl Default for TitleShadow {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            offset: [4.0, -4.0],
+            blur: 10.0,
+            opacity: 75.0,
+        }
+    }
+}
+
+/// Rettangolo dietro al testo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TitleBackground {
+    pub enabled: bool,
+    pub color: Rgba,
+    pub outline_color: Rgba,
+    /// In pixel di timeline, verso l'interno del rettangolo.
+    pub outline_width: f32,
+    /// Frazione della larghezza/altezza del frame; 0 = attorno al testo.
+    pub width: f32,
+    pub height: f32,
+    /// Frazione del lato più corto del rettangolo, fino a 0.5.
+    pub corner_radius: f32,
+    /// Spostamento dal centro del testo, in pixel di timeline, Y verso l'alto.
+    pub center: [f32; 2],
+    /// 0-100.
+    pub opacity: f32,
+}
+
+impl Default for TitleBackground {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            outline_color: Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            outline_width: 0.0,
+            width: 0.0,
+            height: 0.0,
+            corner_radius: 0.1,
+            center: [0.0, 0.0],
+            opacity: 50.0,
+        }
+    }
 }
 
 impl Default for TitleParams {
@@ -587,6 +666,8 @@ impl Default for TitleParams {
             align: TextAlign::Center,
             anchor: (HAnchor::Center, VAnchor::Middle),
             position: [0.0, 0.0],
+            shadow: TitleShadow::default(),
+            background: TitleBackground::default(),
         }
     }
 }

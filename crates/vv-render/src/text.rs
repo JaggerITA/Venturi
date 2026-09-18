@@ -1,19 +1,32 @@
-//! Rasterizzazione dei titoli (`ClipSource::Text`) via `cosmic-text`: il
-//! testo è di un solo colore, quindi basta una maschera di copertura a 8
-//! bit che il compositor colora (`Layer::Text`).
+//! Rasterizzazione dei titoli (`ClipSource::Text`) via `cosmic-text`. Ogni
+//! elemento (sfondo, bordo, ombra, testo) è di un solo colore: basta una
+//! maschera di copertura a 8 bit per ciascuno, che il compositor colora e
+//! sovrappone (`Layer::Text`).
 
 use cosmic_text::{
     Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
     UnderlineStyle, Weight,
 };
 use std::sync::{Arc, Mutex, OnceLock};
-use vv_core::{HAnchor, TextAlign, TitleParams, VAnchor};
+use vv_core::{HAnchor, Rgba, TextAlign, TitleParams, VAnchor};
 
 /// Copertura del testo (0 = trasparente), grande quanto il frame di output.
 pub struct TextMask {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
+}
+
+/// Le maschere di un titolo dal basso verso l'alto, col colore di
+/// ciascuna (opacità già nell'alpha).
+pub struct TitleRender {
+    pub layers: Vec<(TextMask, Rgba)>,
+}
+
+impl TitleRender {
+    pub fn text(&self) -> &TextMask {
+        &self.layers.last().expect("il testo c'è sempre").0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +42,7 @@ struct TextState {
     font_system: FontSystem,
     swash: SwashCache,
     /// Più recente in coda.
-    cache: Vec<(CacheKey, Arc<TextMask>)>,
+    cache: Vec<(CacheKey, Arc<TitleRender>)>,
 }
 
 const CACHE_LEN: usize = 16;
@@ -108,13 +121,13 @@ pub fn face_name(weight: u16, italic: bool) -> String {
     }
 }
 
-/// Maschera del titolo per un frame di output `output_size`; le misure di
+/// Maschere del titolo per un frame di output `output_size`; le misure di
 /// `params` sono in pixel di una timeline `timeline_size`.
 pub fn render_title(
     params: &TitleParams,
     timeline_size: (u32, u32),
     output_size: (u32, u32),
-) -> Arc<TextMask> {
+) -> Arc<TitleRender> {
     let key: CacheKey = (params.clone(), timeline_size, output_size);
     let mut state = lock();
     if let Some(pos) = state.cache.iter().position(|(k, _)| *k == key) {
@@ -134,13 +147,20 @@ pub fn render_title(
     mask
 }
 
+fn with_opacity(color: Rgba, opacity: f32) -> Rgba {
+    Rgba {
+        a: color.a * (opacity / 100.0).clamp(0.0, 1.0),
+        ..color
+    }
+}
+
 fn rasterize(
     font_system: &mut FontSystem,
     swash: &mut SwashCache,
     params: &TitleParams,
     timeline_size: (u32, u32),
     output_size: (u32, u32),
-) -> TextMask {
+) -> TitleRender {
     let (width, height) = (output_size.0.max(1), output_size.1.max(1));
     let mut data = vec![0u8; (width * height) as usize];
     let scale = width as f32 / timeline_size.0.max(1) as f32;
@@ -219,10 +239,151 @@ fn rasterize(
         }
     });
 
-    TextMask {
+    let scale_px = |v: f32| v * scale;
+    let text = TextMask {
         width,
         height,
         data,
+    };
+    let mut layers = Vec::new();
+
+    let bg = &params.background;
+    if bg.enabled {
+        let padding = font_size * 0.2;
+        let box_w = if bg.width > 0.0 {
+            bg.width * width as f32
+        } else {
+            block_w + padding * 2.0
+        };
+        let box_h = if bg.height > 0.0 {
+            bg.height * height as f32
+        } else {
+            block_h + padding * 2.0
+        };
+        let center = (
+            origin_x as f32 + block_w / 2.0 + scale_px(bg.center[0]),
+            origin_y as f32 + block_h / 2.0 - scale_px(bg.center[1]),
+        );
+        let radius = bg.corner_radius.clamp(0.0, 0.5) * box_w.min(box_h);
+        let outline = scale_px(bg.outline_width).max(0.0);
+        let (fill, ring) = rounded_rect_masks(width, height, center, (box_w, box_h), radius, outline);
+        layers.push((fill, with_opacity(bg.color, bg.opacity)));
+        if let Some(ring) = ring {
+            layers.push((ring, with_opacity(bg.outline_color, bg.opacity)));
+        }
+    }
+
+    let shadow = &params.shadow;
+    if shadow.enabled {
+        let dx = scale_px(shadow.offset[0]).round() as i32;
+        let dy = -scale_px(shadow.offset[1]).round() as i32;
+        let mut mask = shifted(&text, dx, dy);
+        blur(&mut mask, scale_px(shadow.blur).max(0.0));
+        layers.push((mask, with_opacity(shadow.color, shadow.opacity)));
+    }
+
+    layers.push((text, params.color));
+    TitleRender { layers }
+}
+
+/// Riempimento e (se `outline > 0`) bordo interno di un rettangolo
+/// arrotondato, con i bordi antialiasati dalla distanza con segno.
+fn rounded_rect_masks(
+    width: u32,
+    height: u32,
+    center: (f32, f32),
+    size: (f32, f32),
+    radius: f32,
+    outline: f32,
+) -> (TextMask, Option<TextMask>) {
+    let len = (width * height) as usize;
+    let mut fill = vec![0u8; len];
+    let mut ring = (outline > 0.0).then(|| vec![0u8; len]);
+    let half = (size.0 / 2.0, size.1 / 2.0);
+    let x_range = ((center.0 - half.0 - 1.0).floor().max(0.0) as u32)
+        ..((center.0 + half.0 + 1.0).ceil().clamp(0.0, width as f32) as u32);
+    let y_range = ((center.1 - half.1 - 1.0).floor().max(0.0) as u32)
+        ..((center.1 + half.1 + 1.0).ceil().clamp(0.0, height as f32) as u32);
+    let coverage = |d: f32| (0.5 - d).clamp(0.0, 1.0);
+    for y in y_range {
+        for x in x_range.clone() {
+            let px = (x as f32 + 0.5 - center.0).abs() - (half.0 - radius);
+            let py = (y as f32 + 0.5 - center.1).abs() - (half.1 - radius);
+            let outside = (px.max(0.0).powi(2) + py.max(0.0).powi(2)).sqrt();
+            let d = outside + px.max(py).min(0.0) - radius;
+            let i = (y * width + x) as usize;
+            let inside = coverage(d);
+            fill[i] = (inside * 255.0).round() as u8;
+            if let Some(ring) = &mut ring {
+                ring[i] = ((inside - coverage(d + outline)).max(0.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    let mask = |data| TextMask {
+        width,
+        height,
+        data,
+    };
+    (mask(fill), ring.map(mask))
+}
+
+fn shifted(mask: &TextMask, dx: i32, dy: i32) -> TextMask {
+    let (w, h) = (mask.width as i32, mask.height as i32);
+    let mut data = vec![0u8; mask.data.len()];
+    for y in 0..h {
+        let sy = y - dy;
+        if sy < 0 || sy >= h {
+            continue;
+        }
+        for x in 0..w {
+            let sx = x - dx;
+            if sx >= 0 && sx < w {
+                data[(y * w + x) as usize] = mask.data[(sy * w + sx) as usize];
+            }
+        }
+    }
+    TextMask {
+        width: mask.width,
+        height: mask.height,
+        data,
+    }
+}
+
+/// Tre box blur separabili: un'approssimazione economica di una gaussiana
+/// con sigma circa `radius / 2`.
+fn blur(mask: &mut TextMask, radius: f32) {
+    let box_radius = (radius / 2.0).round() as usize;
+    if box_radius == 0 {
+        return;
+    }
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let mut line = Vec::new();
+    for _ in 0..3 {
+        for y in 0..h {
+            line.clear();
+            line.extend((0..w).map(|x| mask.data[y * w + x]));
+            box_blur_line(&line, box_radius, |x, v| mask.data[y * w + x] = v);
+        }
+        for x in 0..w {
+            line.clear();
+            line.extend((0..h).map(|y| mask.data[y * w + x]));
+            box_blur_line(&line, box_radius, |y, v| mask.data[y * w + x] = v);
+        }
+    }
+}
+
+/// Media mobile su `2 * radius + 1` campioni, con zeri oltre i bordi.
+fn box_blur_line(src: &[u8], radius: usize, mut write: impl FnMut(usize, u8)) {
+    let window = (2 * radius + 1) as u32;
+    let mut sum: u32 = src.iter().take(radius + 1).map(|&v| v as u32).sum();
+    for i in 0..src.len() {
+        write(i, ((sum + window / 2) / window) as u8);
+        if let Some(&v) = src.get(i + radius + 1) {
+            sum += v as u32;
+        }
+        if i >= radius {
+            sum -= src[i - radius] as u32;
+        }
     }
 }
 
@@ -248,8 +409,8 @@ mod tests {
 
     #[test]
     fn default_title_is_drawn_around_the_center() {
-        let mask = render_title(&TitleParams::default(), (640, 360), (640, 360));
-        let (x0, y0, x1, y1) = covered_bounds(&mask).expect("nessun pixel disegnato");
+        let render = render_title(&TitleParams::default(), (640, 360), (640, 360));
+        let (x0, y0, x1, y1) = covered_bounds(render.text()).expect("nessun pixel disegnato");
         let (cx, cy) = ((x0 + x1) / 2, (y0 + y1) / 2);
         assert!((cx as i32 - 320).abs() < 20, "centro x {cx}");
         assert!((cy as i32 - 180).abs() < 30, "centro y {cy}");
@@ -261,9 +422,52 @@ mod tests {
             anchor: (HAnchor::Left, VAnchor::Middle),
             ..Default::default()
         };
-        let mask = render_title(&params, (640, 360), (640, 360));
-        let (x0, ..) = covered_bounds(&mask).unwrap();
+        let render = render_title(&params, (640, 360), (640, 360));
+        let (x0, ..) = covered_bounds(render.text()).unwrap();
         assert!((x0 as i32 - 320).abs() < 12, "inizio x {x0}");
+    }
+
+    #[test]
+    fn background_is_under_the_text_and_contains_it() {
+        let params = TitleParams {
+            background: vv_core::TitleBackground {
+                enabled: true,
+                outline_width: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let render = render_title(&params, (640, 360), (640, 360));
+        assert_eq!(render.layers.len(), 3, "sfondo, bordo, testo");
+        let (tx0, ty0, tx1, ty1) = covered_bounds(render.text()).unwrap();
+        let (bx0, by0, bx1, by1) = covered_bounds(&render.layers[0].0).unwrap();
+        assert!(bx0 < tx0 && by0 < ty0 && bx1 > tx1 && by1 > ty1);
+        // Il bordo sta sul perimetro: al centro del rettangolo non c'è.
+        let ring = &render.layers[1].0;
+        let (cx, cy) = ((bx0 + bx1) / 2, (by0 + by1) / 2);
+        assert_eq!(ring.data[(cy * ring.width + cx) as usize], 0);
+        assert!(ring.data[(cy * ring.width + bx0 + 1) as usize] > 0);
+    }
+
+    #[test]
+    fn shadow_follows_the_offset_and_spreads_with_blur() {
+        let shadow = |blur| TitleParams {
+            shadow: vv_core::TitleShadow {
+                enabled: true,
+                offset: [20.0, -10.0],
+                blur,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sharp = render_title(&shadow(0.0), (640, 360), (640, 360));
+        let (tx0, ty0, ..) = covered_bounds(sharp.text()).unwrap();
+        let (sx0, sy0, ..) = covered_bounds(&sharp.layers[0].0).unwrap();
+        assert_eq!((sx0 as i32 - tx0 as i32, sy0 as i32 - ty0 as i32), (20, 10));
+
+        let soft = render_title(&shadow(12.0), (640, 360), (640, 360));
+        let (bx0, ..) = covered_bounds(&soft.layers[0].0).unwrap();
+        assert!(bx0 < sx0, "la sfocatura allarga l'ombra");
     }
 
     #[test]
@@ -274,7 +478,7 @@ mod tests {
             let (x0, _, x1, _) = covered_bounds(m).unwrap();
             (x1 - x0) as f32
         };
-        let ratio = width(&half) / width(&full);
+        let ratio = width(half.text()) / width(full.text());
         assert!((ratio - 0.5).abs() < 0.08, "rapporto {ratio}");
     }
 }
