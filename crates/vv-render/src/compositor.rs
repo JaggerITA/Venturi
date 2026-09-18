@@ -10,9 +10,9 @@
 //!
 //! Due modi di ottenere il risultato, che condividono gli stessi pass:
 //! - [`Compositor::render_layers`] fa un round-trip CPU→GPU→CPU (upload,
-//!   render, readback) — usato dall'export, che ha bisogno di byte RGBA
-//!   densi da passare all'encoder (`vv_media::Encoder::write_video_frame`),
-//!   non di una texture GPU.
+//!   render, readback) in RGBA; [`Compositor::render_layers_i420`] fa lo
+//!   stesso ma converte in I420 sulla GPU — usato dall'export, che passa
+//!   i piani direttamente all'encoder (`vv_media::Encoder::write_video_frame`).
 //! - [`Compositor::render_layers_to_texture`] resta sulla GPU, nessun
 //!   readback: usato dall'anteprima (`vv-app::main`), che registra la
 //!   texture direttamente in `egui-wgpu` (`Renderer::register_native_texture`
@@ -259,6 +259,7 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    i420_pipeline: wgpu::ComputePipeline,
 }
 
 impl Compositor {
@@ -352,12 +353,26 @@ impl Compositor {
             ..Default::default()
         });
 
+        let i420_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vv-render rgba->i420 shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/rgba_to_i420.wgsl").into()),
+        });
+        let i420_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("vv-render rgba->i420 pipeline"),
+            layout: None,
+            module: &i420_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Self {
             device,
             queue,
             pipeline,
             bind_group_layout,
             sampler,
+            i420_pipeline,
         }
     }
 
@@ -472,6 +487,97 @@ impl Compositor {
         }
         output_buffer.unmap();
 
+        out
+    }
+
+    /// Come [`Compositor::render_layers`], ma restituisce I420 denso
+    /// (piano Y, poi U, poi V, croma `(w+1)/2 x (h+1)/2`) in BT.709 range
+    /// limitato: la conversione su GPU evita quella su CPU nell'encoder e
+    /// dimezza abbondantemente il readback.
+    pub fn render_layers_i420(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
+        const WORKGROUP: u32 = 256;
+        const MAX_GROUPS_PER_DIM: u32 = 65535;
+
+        let output_texture = self.render_layers_to_texture(layers, output);
+        let (w, h) = (output.width, output.height);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let len = (w * h + 2 * cw * ch) as usize;
+        let total_words = len.div_ceil(4) as u32;
+        let groups = total_words.div_ceil(WORKGROUP);
+        let groups_x = groups.min(MAX_GROUPS_PER_DIM);
+        let groups_y = groups.div_ceil(groups_x);
+        let params: [u32; 8] = [w, h, cw, ch, groups_x * WORKGROUP, total_words, 0, 0];
+
+        let buffer_size = total_words as wgpu::BufferAddress * 4;
+        let storage = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vv-render i420 storage"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vv-render i420 params"),
+                contents: bytemuck::cast_slice(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vv-render i420 readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let texture_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vv-render i420 bind group"),
+            layout: &self.i420_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: storage.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vv-render i420 encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vv-render i420 pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.i420_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
+        }
+        encoder.copy_buffer_to_buffer(&storage, 0, &readback, 0, buffer_size);
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll del device wgpu fallito");
+        rx.recv()
+            .expect("il callback di map_async non ha risposto")
+            .expect("map_async fallita");
+        let out = slice.get_mapped_range().expect("get_mapped_range fallita")[..len].to_vec();
+        readback.unmap();
         out
     }
 
@@ -1409,6 +1515,23 @@ mod tests {
         assert_eq!(px(1, 2), &[0, 0, 0, 255], "a sinistra resta scoperto");
         assert_eq!(px(3, 2), &[255, 0, 0, 255]);
         assert_eq!(px(6, 2), &[0, 0, 0, 255], "oltre il crop");
+    }
+
+    #[test]
+    fn render_layers_i420_packs_dense_planes_for_odd_sizes() {
+        let compositor = Compositor::new_headless();
+        let out = compositor.render_layers_i420(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform::default(),
+            }],
+            OutputFrame::exact(5, 3),
+        );
+        // Croma 3x2; 15 + 6 + 6 = 27 byte, non multiplo di 4.
+        let mut expected = vec![63u8; 15];
+        expected.extend([102; 6]);
+        expected.extend([240; 6]);
+        assert_eq!(out, expected);
     }
 
     #[test]

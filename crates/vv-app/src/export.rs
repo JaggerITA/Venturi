@@ -34,6 +34,7 @@ use crate::frame_provider::{
 };
 
 const PROJECT_CHANNELS: u16 = 2;
+const RENDER_AHEAD_FRAMES: usize = 8;
 
 #[derive(Default)]
 pub struct ExportProgress {
@@ -183,44 +184,104 @@ pub fn export_timeline(
     )
     .map_err(|e| e.to_string())?;
 
-    // Compositor indipendente, di proprietà di questo thread: evita
-    // qualunque contesa GPU col device della UI (che ha il suo,
-    // `Compositor::new_headless()` in `main.rs`).
-    let compositor = vv_render::Compositor::new_headless();
+    // Decode, composizione GPU ed encode su tre thread: in serie ognuno
+    // aspettava gli altri e nessuno saturava la macchina.
+    let (decoded_tx, decoded_rx) =
+        std::sync::mpsc::sync_channel::<Result<DecodedLayers, String>>(RENDER_AHEAD_FRAMES);
+    let (composed_tx, composed_rx) =
+        std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(RENDER_AHEAD_FRAMES);
+    let resolution = timeline.resolution;
+    std::thread::scope(|scope| {
+        let mut audio_mix = has_audio_track.then(|| {
+            let range = range.clone();
+            scope.spawn(move || mix_audio_track(project, timeline, range))
+        });
 
-    let mut provider = StreamingFrameProvider::default();
-    for frame in range.clone() {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("annullato".to_string());
+        let decode_range = range.clone();
+        scope.spawn(move || {
+            let mut provider = StreamingFrameProvider::default();
+            for frame in decode_range {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let decoded =
+                    decode_video_frame(project, timeline, &mut provider, frame, resolution);
+                let failed = decoded.is_err();
+                // `send` fallisce solo se lo stadio dopo ha già smesso.
+                if decoded_tx.send(decoded).is_err() || failed {
+                    return;
+                }
+            }
+        });
+
+        let compose_range = range.clone();
+        scope.spawn(move || {
+            // Compositor indipendente: evita qualunque contesa GPU col
+            // device della UI (che ha il suo, in `main.rs`).
+            let compositor = vv_render::Compositor::new_headless();
+            for (frame, decoded) in compose_range.zip(decoded_rx) {
+                let composed = decoded.map(|decoded| {
+                    compose_video_frame(timeline, &compositor, frame, &decoded, resolution)
+                });
+                let failed = composed.is_err();
+                if composed_tx.send(composed).is_err() || failed {
+                    return;
+                }
+            }
+        });
+
+        // Dentro la closure: se l'encoder esce in errore `composed_rx` va
+        // chiuso prima del join, o gli stadi a monte restano su `send`.
+        let composed_rx = composed_rx;
+        // L'audio va scritto man mano col video: tutto in coda al video, il
+        // muxer si tiene in RAM l'intero video e l'interleave diventa
+        // quadratico (minuti su una timeline di pochi minuti).
+        let mut audio = AudioInterleaver::new(timeline, range.start);
+        for frame in range.clone() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("annullato".to_string());
+            }
+            let frame_i420 = match composed_rx.recv() {
+                Ok(frame_i420) => frame_i420?,
+                Err(_) => return Err("annullato".to_string()),
+            };
+            encoder
+                .write_video_frame(&frame_i420)
+                .map_err(|e| e.to_string())?;
+            if audio_mix.as_ref().is_some_and(|h| h.is_finished()) {
+                audio.mixed = Some(join_audio_mix(audio_mix.take())?);
+            }
+            audio.write_until(&mut encoder, frame + 1)?;
+
+            progress.lock().unwrap().current_frame = frame - range.start + 1;
         }
-
-        let rgba = render_video_frame(
-            project,
-            timeline,
-            &compositor,
-            &mut provider,
-            frame,
-            timeline.resolution,
-        )?;
-        encoder
-            .write_video_frame(&rgba)
-            .map_err(|e| e.to_string())?;
-
-        progress.lock().unwrap().current_frame = frame - range.start + 1;
-    }
-
-    if has_audio_track {
-        let mixed = mix_audio_track(project, timeline, range)?;
-        encoder
-            .write_audio_samples(&mixed)
-            .map_err(|e| e.to_string())?;
-    }
+        if audio_mix.is_some() {
+            audio.mixed = Some(join_audio_mix(audio_mix)?);
+        }
+        audio.write_until(&mut encoder, range.end)
+    })?;
 
     encoder.finish().map_err(|e| e.to_string())?;
     progress.lock().unwrap().done = true;
     Ok(())
 }
 
+/// Per ogni clip attiva (stesso ordine di `active_video_clips_at`): il
+/// frame decodificato e, per le clip Media, transform e dimensione nativa.
+type DecodedLayers = Vec<(
+    Option<Arc<vv_media::FrameYuv420>>,
+    Option<(vv_core::Transform, (u32, u32))>,
+)>;
+
+fn active_clips(timeline: &Timeline, frame: FrameIdx) -> Vec<&Clip> {
+    timeline
+        .active_video_clips_at(frame)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect()
+}
+
+#[cfg(test)]
 fn render_video_frame(
     project: &Project,
     timeline: &Timeline,
@@ -229,16 +290,20 @@ fn render_video_frame(
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
-    let clips: Vec<&Clip> = timeline
-        .active_video_clips_at(frame)
-        .into_iter()
-        .map(|(_, c)| c)
-        .collect();
+    let decoded = decode_video_frame(project, timeline, provider, frame, resolution)?;
+    Ok(compose_video_frame(timeline, compositor, frame, &decoded, resolution))
+}
+
+fn decode_video_frame(
+    project: &Project,
+    timeline: &Timeline,
+    provider: &mut StreamingFrameProvider,
+    frame: FrameIdx,
+    resolution: (u32, u32),
+) -> Result<DecodedLayers, String> {
+    let clips = active_clips(timeline, frame);
     provider.retain_clips(&clips.iter().map(|c| c.id).collect::<Vec<_>>());
 
-    // I frame decodificati vanno tenuti vivi finché i layer che li
-    // prestano non sono stati composti, quindi due passate: prima il
-    // decode di tutte le clip attive, poi lo stack.
     let mut decoded = Vec::with_capacity(clips.len());
     for clip in &clips {
         match &clip.source {
@@ -259,10 +324,20 @@ fn render_video_frame(
             ClipSource::SolidColor | ClipSource::Text => decoded.push((None, None)),
         }
     }
+    Ok(decoded)
+}
 
+fn compose_video_frame(
+    timeline: &Timeline,
+    compositor: &vv_render::Compositor,
+    frame: FrameIdx,
+    decoded: &DecodedLayers,
+    resolution: (u32, u32),
+) -> Vec<u8> {
+    let clips = active_clips(timeline, frame);
     let layers: Vec<vv_render::Layer> = clips
         .iter()
-        .zip(&decoded)
+        .zip(decoded)
         .filter_map(|(clip, (frame_yuv, transform))| match (frame_yuv, transform) {
             (Some(f), Some((transform, source_size))) => Some(vv_render::Layer::Video {
                 frame: as_render_yuv_frame(f),
@@ -294,10 +369,61 @@ fn render_video_frame(
         })
         .collect();
 
-    Ok(compositor.render_layers(
+    compositor.render_layers_i420(
         &layers,
         vv_render::OutputFrame::exact(resolution.0, resolution.1),
-    ))
+    )
+}
+
+fn join_audio_mix(
+    handle: Option<std::thread::ScopedJoinHandle<'_, Result<Vec<f32>, String>>>,
+) -> Result<Vec<f32>, String> {
+    handle
+        .expect("mix audio già consumato")
+        .join()
+        .expect("thread di mix audio andato in panic")
+}
+
+/// Scrive il mix audio all'encoder a pezzi, allineato ai frame video.
+struct AudioInterleaver {
+    mixed: Option<Vec<f32>>,
+    written: usize,
+    fps: f64,
+    start_sample: u64,
+}
+
+impl AudioInterleaver {
+    fn new(timeline: &Timeline, start_frame: FrameIdx) -> Self {
+        let fps = timeline.fps.as_f64();
+        Self {
+            mixed: None,
+            written: 0,
+            fps,
+            start_sample: timeline_frame_to_sample(start_frame, fps, PROJECT_SAMPLE_RATE),
+        }
+    }
+
+    /// Scrive i campioni fino all'inizio di `frame` (esclusivo); no-op
+    /// finché il mix non è pronto.
+    fn write_until(
+        &mut self,
+        encoder: &mut vv_media::Encoder,
+        frame: FrameIdx,
+    ) -> Result<(), String> {
+        let Some(mixed) = &self.mixed else {
+            return Ok(());
+        };
+        let end_sample = timeline_frame_to_sample(frame, self.fps, PROJECT_SAMPLE_RATE);
+        let end = ((end_sample - self.start_sample) as usize * PROJECT_CHANNELS as usize)
+            .min(mixed.len());
+        if end > self.written {
+            encoder
+                .write_audio_samples(&mixed[self.written..end])
+                .map_err(|e| e.to_string())?;
+            self.written = end;
+        }
+        Ok(())
+    }
 }
 
 /// Mix di tutte le track audio a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
@@ -428,6 +554,19 @@ mod tests {
         assert_eq!(tl.active_clip_at(0, 25).map(|c| c.id), Some(ClipId(2)));
     }
 
+    // BT.709 range limitato, come `Compositor::render_layers_i420`.
+    const BLACK_I420: [u8; 3] = [16, 128, 128];
+    const RED_I420: [u8; 3] = [63, 102, 240];
+    const BLUE_I420: [u8; 3] = [32, 240, 118];
+
+    fn solid_i420(width: usize, height: usize, [y, u, v]: [u8; 3]) -> Vec<u8> {
+        let chroma = width.div_ceil(2) * height.div_ceil(2);
+        let mut data = vec![y; width * height];
+        data.extend(std::iter::repeat_n(u, chroma));
+        data.extend(std::iter::repeat_n(v, chroma));
+        data
+    }
+
     fn red() -> Rgba {
         Rgba {
             r: 1.0,
@@ -459,13 +598,7 @@ mod tests {
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
         let frame = render_video_frame(&project, &tl, &compositor, &mut active, 0, (2, 2)).unwrap();
-        assert!(
-            frame
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|px| px == &[0, 0, 0, 255])
-        );
+        assert_eq!(frame, solid_i420(2, 2, BLACK_I420));
     }
 
     #[test]
@@ -482,13 +615,7 @@ mod tests {
         let mut active = StreamingFrameProvider::default();
         let frame =
             render_video_frame(&project, &tl, &compositor, &mut active, 12, (2, 2)).unwrap();
-        assert!(
-            frame
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|px| px == &[255, 0, 0, 255])
-        );
+        assert_eq!(frame, solid_i420(2, 2, RED_I420));
     }
 
     #[test]
@@ -511,9 +638,9 @@ mod tests {
         let mut active = StreamingFrameProvider::default();
         let frame =
             render_video_frame(&project, &tl, &compositor, &mut active, 0, (4, 2)).unwrap();
-        let px = frame.as_chunks::<4>().0;
-        assert_eq!(px[0], [255, 0, 0, 255]);
-        assert_eq!(px[3], [0, 0, 0, 255]);
+        // Prima riga del piano Y.
+        assert_eq!(frame[0], RED_I420[0]);
+        assert_eq!(frame[3], BLACK_I420[0]);
     }
 
     /// `FrameProvider::frame_for` (REFACTOR_PIPELINE.md B1, doc lì): un
@@ -594,25 +721,11 @@ mod tests {
 
         let below =
             render_video_frame(&project, &tl, &compositor, &mut provider, 5, (2, 2)).unwrap();
-        assert!(
-            below
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|px| px == &[255, 0, 0, 255]),
-            "sotto la track top: si vede quella bottom"
-        );
+        assert_eq!(below, solid_i420(2, 2, RED_I420), "sotto la track top: si vede quella bottom");
 
         let above =
             render_video_frame(&project, &tl, &compositor, &mut provider, 15, (2, 2)).unwrap();
-        assert!(
-            above
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|px| px == &[0, 0, 255, 255]),
-            "la track top ha una clip qui: vince lei"
-        );
+        assert_eq!(above, solid_i420(2, 2, BLUE_I420), "la track top ha una clip qui: vince lei");
     }
 
     #[test]

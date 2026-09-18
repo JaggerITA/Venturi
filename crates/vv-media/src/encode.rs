@@ -1,10 +1,9 @@
 //! Encoding + muxing verso file (H.264 + AAC in MP4), via `ffmpeg-next` —
 //! simmetrico a `decode.rs` ma nella direzione opposta: chi chiama fornisce
-//! frame RGBA8 già compositati e campioni PCM già mixati (vedi la pipeline
-//! di export in `vv-app`), `Encoder` li converte nel formato che i codec si
-//! aspettano (YUV420P per il video, riusando lo stesso `Scaler` di
-//! `decode.rs` ma al contrario; il formato nativo dell'encoder AAC per
-//! l'audio, tipicamente FLTP) e scrive il file. Pattern di invio
+//! frame I420 già compositati (BT.709 range limitato, convertiti su GPU dal
+//! compositor) e campioni PCM già mixati (vedi la pipeline di export in
+//! `vv-app`), `Encoder` converte l'audio nel formato nativo dell'encoder
+//! AAC (tipicamente FLTP) e scrive il file. Pattern di invio
 //! pacchetti/flush preso dagli esempi ufficiali di `ffmpeg-next`
 //! (`examples/transcode-x264.rs`, `examples/transcode-audio.rs`):
 //! `send_frame`/`receive_packet`/`write_interleaved`, `send_eof` per il
@@ -14,14 +13,12 @@ use ffmpeg::codec::{self, encoder};
 use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg::format::{self, Pixel};
 use ffmpeg::software::resampling::context::Context as Resampler;
-use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::{ChannelLayout, Dictionary};
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
 
 struct VideoState {
     encoder: encoder::Video,
-    scaler: Scaler,
     stream_index: usize,
     /// Time base dell'encoder (1/fps: un pts in unità = un frame), diverso
     /// da quello dello stream di output (`ost_time_base`) su cui vanno
@@ -94,6 +91,14 @@ impl Encoder {
         video_ctx.set_format(Pixel::YUV420P);
         video_ctx.set_time_base(video_time_base);
         video_ctx.set_frame_rate(Some(ffmpeg::Rational::new(fps.num, fps.den)));
+        video_ctx.set_colorspace(ffmpeg::color::Space::BT709);
+        video_ctx.set_color_range(ffmpeg::color::Range::MPEG);
+        // ffmpeg-next non ha setter per primaries/trc.
+        unsafe {
+            let raw = video_ctx.as_mut_ptr();
+            (*raw).color_primaries = ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_BT709;
+            (*raw).color_trc = ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
+        }
         if global_header {
             video_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
         }
@@ -103,16 +108,6 @@ impl Encoder {
         let video_encoder = video_ctx.open_with(x264_opts)?;
         let mut video_ost = video_ost;
         video_ost.set_parameters(&video_encoder);
-
-        let scaler = Scaler::get(
-            Pixel::RGBA,
-            width,
-            height,
-            Pixel::YUV420P,
-            width,
-            height,
-            Flags::BILINEAR,
-        )?;
 
         // --- audio: AAC (opzionale) ---
         let audio_state = match audio {
@@ -195,7 +190,6 @@ impl Encoder {
         let video_ost_time_base = octx.stream(video_stream_index).unwrap().time_base();
         let video = VideoState {
             encoder: video_encoder,
-            scaler,
             stream_index: video_stream_index,
             time_base: video_time_base,
             ost_time_base: video_ost_time_base,
@@ -210,12 +204,12 @@ impl Encoder {
         Ok(Self { octx, video, audio })
     }
 
-    /// `rgba`: RGBA8 denso, `width*height*4` byte (stesso formato di
-    /// `FrameRgba::data`/`Compositor::render_frame`) — un avanzamento di un
-    /// frame video in output.
-    pub fn write_video_frame(&mut self, rgba: &[u8]) -> Result<(), crate::MediaError> {
+    /// `i420`: piani Y, U, V densi e consecutivi, croma `(w+1)/2 x (h+1)/2`
+    /// (formato di `vv_render::Compositor::render_layers_i420`) — un
+    /// avanzamento di un frame video in output.
+    pub fn write_video_frame(&mut self, i420: &[u8]) -> Result<(), crate::MediaError> {
         let Self { octx, video, .. } = self;
-        write_video_frame_impl(octx, video, rgba)
+        write_video_frame_impl(octx, video, i420)
     }
 
     /// `samples`: PCM f32 interleaved, già al sample rate/canali dichiarati
@@ -226,12 +220,16 @@ impl Encoder {
         let Some(audio) = audio else {
             return Ok(());
         };
-        audio.pending.extend_from_slice(samples);
+        // Mai `drain` dalla testa di `pending` blocco per blocco: con tutto
+        // l'audio dell'export in un colpo diventa quadratico (minuti).
+        let mut pending = std::mem::take(&mut audio.pending);
+        pending.extend_from_slice(samples);
         let frame_len = audio.frame_size * audio.channels as usize;
-        while audio.pending.len() >= frame_len {
-            let chunk: Vec<f32> = audio.pending.drain(..frame_len).collect();
-            write_audio_chunk(octx, audio, &chunk)?;
+        let mut chunks = pending.chunks_exact(frame_len);
+        for chunk in &mut chunks {
+            write_audio_chunk(octx, audio, chunk)?;
         }
+        audio.pending = chunks.remainder().to_vec();
         Ok(())
     }
 
@@ -262,25 +260,24 @@ impl Encoder {
 fn write_video_frame_impl(
     octx: &mut format::context::Output,
     video: &mut VideoState,
-    rgba: &[u8],
+    i420: &[u8],
 ) -> Result<(), crate::MediaError> {
-    let width = video.encoder.width();
-    let height = video.encoder.height();
-    let mut src = ffmpeg::frame::Video::new(Pixel::RGBA, width, height);
-    let stride = src.stride(0);
-    let row_bytes = (width * 4) as usize;
+    let width = video.encoder.width() as usize;
+    let height = video.encoder.height() as usize;
+    let chroma_width = width.div_ceil(2);
+    let mut yuv = ffmpeg::frame::Video::new(Pixel::YUV420P, width as u32, height as u32);
+    let (luma, chroma) = i420.split_at(width * height);
+    let (u, v) = chroma.split_at(chroma.len() / 2);
+    for (plane, (src, row_bytes)) in [(luma, width), (u, chroma_width), (v, chroma_width)]
+        .into_iter()
+        .enumerate()
     {
-        let data = src.data_mut(0);
-        for y in 0..height as usize {
-            let src_start = y * row_bytes;
-            let dst_start = y * stride;
-            data[dst_start..dst_start + row_bytes]
-                .copy_from_slice(&rgba[src_start..src_start + row_bytes]);
+        let stride = yuv.stride(plane);
+        let data = yuv.data_mut(plane);
+        for (y, row) in src.chunks_exact(row_bytes).enumerate() {
+            data[y * stride..y * stride + row_bytes].copy_from_slice(row);
         }
     }
-
-    let mut yuv = ffmpeg::frame::Video::empty();
-    video.scaler.run(&src, &mut yuv)?;
     yuv.set_pts(Some(video.next_pts));
     yuv.set_kind(ffmpeg::picture::Type::None);
     video.next_pts += 1;
@@ -355,6 +352,14 @@ mod tests {
     // implicito nel resto della test suite (i fixture generati con
     // `ffmpeg` CLI vengono verificati decodificandoli con questo crate).
 
+    fn solid_i420(width: usize, height: usize, [y, u, v]: [u8; 3]) -> Vec<u8> {
+        let chroma = width.div_ceil(2) * height.div_ceil(2);
+        let mut data = vec![y; width * height];
+        data.extend(std::iter::repeat_n(u, chroma));
+        data.extend(std::iter::repeat_n(v, chroma));
+        data
+    }
+
     #[test]
     fn encodes_video_only_file_with_correct_dimensions_and_frame_count() {
         let dir = std::env::temp_dir().join("vv-media-encode-test");
@@ -363,13 +368,8 @@ mod tests {
 
         let fps = vv_core::Rational::new(25, 1);
         let mut encoder = Encoder::new(&path, 16, 16, fps, None).unwrap();
-        let red = {
-            let mut data = Vec::with_capacity(16 * 16 * 4);
-            for _ in 0..(16 * 16) {
-                data.extend_from_slice(&[255, 0, 0, 255]);
-            }
-            data
-        };
+        // Rosso in BT.709 range limitato.
+        let red = solid_i420(16, 16, [63, 102, 240]);
         for _ in 0..25 {
             encoder.write_video_frame(&red).unwrap();
         }
@@ -400,7 +400,7 @@ mod tests {
 
         let fps = vv_core::Rational::new(25, 1);
         let mut encoder = Encoder::new(&path, 16, 16, fps, Some((48000, 2))).unwrap();
-        let black = vec![0u8; 16 * 16 * 4];
+        let black = solid_i420(16, 16, [16, 128, 128]);
         for _ in 0..25 {
             encoder.write_video_frame(&black).unwrap();
         }

@@ -169,8 +169,10 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    si vedono già in editing senza upscalare il contenuto;
    `Compositor::render_layers_to_texture` resta sulla GPU e la
    texture è registrata in `egui-wgpu`, senza readback. Export:
-   `Compositor::render_layers` compone alla risoluzione della timeline e fa
-   il readback in RGBA per l'encoder.
+   `Compositor::render_layers_i420` compone alla risoluzione della timeline,
+   converte in I420 BT.709 su GPU (compute shader) e fa il readback dei
+   piani per l'encoder. Decode, composizione ed encode girano su tre
+   thread in pipeline.
 6. Senza clip video (vuoto su tutte le track): frame nero — in anteprima
    generato su CPU (`vv-render/src/generator.rs`), che resta anche per il
    caso "solo clip SolidColor".
