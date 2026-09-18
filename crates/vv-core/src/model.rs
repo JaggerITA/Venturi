@@ -283,6 +283,43 @@ impl<T: Lerp + Clone> Keyframed<T> {
             }
         }
     }
+
+    /// Scarta i keyframe prima di `start` preservando il valore da `start`
+    /// in poi: resta un keyframe di raccordo solo se l'animazione ne dipende.
+    pub fn drop_before(&mut self, start: FrameIdx)
+    where
+        T: PartialEq,
+    {
+        let Some(lead) = self.keyframes.iter().rev().find(|(f, _, _)| *f < start) else {
+            return;
+        };
+        let lead_interp = lead.2;
+        let at_start = self.value_at(start);
+        self.keyframes.retain(|(f, _, _)| *f >= start);
+        if self.keyframes.is_empty() {
+            self.default = at_start;
+        } else if self.value_at(start) != at_start {
+            self.upsert(start, at_start, lead_interp);
+        }
+    }
+
+    /// Simmetrica di `drop_before`: tiene solo i keyframe prima di `end`.
+    pub fn drop_from(&mut self, end: FrameIdx)
+    where
+        T: PartialEq,
+    {
+        if self.keyframes.last().is_none_or(|(f, _, _)| *f < end) {
+            return;
+        }
+        let last = end - 1;
+        let at_last = self.value_at(last);
+        self.keyframes.retain(|(f, _, _)| *f < end);
+        if self.keyframes.is_empty() {
+            self.default = at_last;
+        } else if self.value_at(last) != at_last {
+            self.upsert(last, at_last, Interpolation::Linear);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -727,6 +764,30 @@ impl Default for EffectStack {
 }
 
 impl EffectStack {
+    /// Vedi `Keyframed::drop_before`, su ogni parametro animabile.
+    pub fn drop_keyframes_before(&mut self, start: FrameIdx) {
+        self.for_each_f32_track(|k| k.drop_before(start));
+        if let Some(c) = &mut self.color {
+            c.drop_before(start);
+        }
+    }
+
+    /// Vedi `Keyframed::drop_from`, su ogni parametro animabile.
+    pub fn drop_keyframes_from(&mut self, end: FrameIdx) {
+        self.for_each_f32_track(|k| k.drop_from(end));
+        if let Some(c) = &mut self.color {
+            c.drop_from(end);
+        }
+    }
+
+    fn for_each_f32_track(&mut self, mut f: impl FnMut(&mut Keyframed<f32>)) {
+        for p in TransformParam::ALL {
+            f(self.transform.track_mut(p));
+        }
+        f(&mut self.speed);
+        f(&mut self.gain_db);
+    }
+
     /// `true` se nessuna proprietà è stata toccata rispetto al default: la
     /// timeline disegna più scure le clip per cui è `false`. Il titolo non
     /// conta: è il contenuto della clip, non un effetto.

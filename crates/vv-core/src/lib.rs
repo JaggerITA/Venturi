@@ -357,6 +357,64 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[0].source_out(), 20);
     }
 
+    fn split_clip_with_gain_keyframes(keyframes: &[(FrameIdx, f32)], split_at: FrameIdx) -> (Project, History, TimelineId) {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let mut a = make_clip(&mut project, 0, 20);
+        for (f, v) in keyframes {
+            a.effects.gain_db.upsert(*f, *v, Interpolation::Linear);
+        }
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SplitClip::new(timeline, 0, a_id, split_at)),
+        );
+        (project, history, timeline)
+    }
+
+    #[test]
+    fn split_after_the_last_keyframe_leaves_the_right_half_without_keyframes() {
+        let (project, _, timeline) = split_clip_with_gain_keyframes(&[(2, 0.0), (5, -6.0)], 12);
+        let clips = &project.timelines[timeline].tracks[0].clips;
+        assert_eq!(clips[0].effects.gain_db.keyframes().len(), 2);
+        let right = &clips[1].effects.gain_db;
+        assert!(right.is_constant());
+        assert_eq!(right.value_at(12), -6.0, "tiene il valore che aveva al taglio");
+    }
+
+    #[test]
+    fn split_mid_interpolation_keeps_the_values_on_both_sides() {
+        let (project, _, timeline) = split_clip_with_gain_keyframes(&[(0, 0.0), (10, -10.0)], 4);
+        let clips = &project.timelines[timeline].tracks[0].clips;
+        let (left, right) = (&clips[0].effects.gain_db, &clips[1].effects.gain_db);
+        assert!(left.keyframes().iter().all(|(f, _, _)| *f < 4));
+        assert!(right.keyframes().iter().all(|(f, _, _)| *f >= 4));
+        for f in 0..4 {
+            assert_eq!(left.value_at(f), -(f as f32));
+        }
+        for f in 4..20 {
+            assert_eq!(right.value_at(f), -(f.min(10) as f32));
+        }
+    }
+
+    #[test]
+    fn undo_split_restores_the_keyframes_of_the_left_half() {
+        let (mut project, mut history, timeline) =
+            split_clip_with_gain_keyframes(&[(2, 0.0), (15, -6.0)], 8);
+        history.undo(&mut project);
+        let clip = &project.timelines[timeline].tracks[0].clips[0];
+        assert_eq!(clip.effects.gain_db.keyframes().len(), 2);
+        assert_eq!(clip.effects.gain_db.value_at(15), -6.0);
+    }
+
     const RATES: [Rational; 4] = [
         Rational::new(1, 1),
         Rational::new(1001, 1000),

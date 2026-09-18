@@ -2199,24 +2199,20 @@ impl VibeVideoApp {
         for (i, clip) in clips.iter().enumerate() {
             match &clip.source {
                 vv_core::ClipSource::SolidColor => {
-                    let local_frame = (playhead - clip.timeline_start).max(0);
-                    let timeline_frame = playhead.max(clip.timeline_start);
+                    let source_frame = clip.source_frame_at(playhead.max(clip.timeline_start));
                     layers.push(PreviewLayer::Solid {
                         color: clip
                             .effects
                             .color
                             .as_ref()
-                            .map(|k| k.value_at(local_frame))
+                            .map(|k| k.value_at(source_frame))
                             .unwrap_or(vv_core::Rgba {
                                 r: 0.0,
                                 g: 0.0,
                                 b: 0.0,
                                 a: 1.0,
                             }),
-                        transform: clip
-                            .effects
-                            .transform
-                            .value_at(clip.source_frame_at(timeline_frame)),
+                        transform: clip.effects.transform.value_at(source_frame),
                     });
                 }
                 vv_core::ClipSource::Text => {
@@ -2335,6 +2331,8 @@ impl VibeVideoApp {
             .iter()
             .find(|c| c.id == target.clip_id)?;
         let frame = target.source_frame;
+        // Un keyframe fuori dal trim porterebbe la testina fuori dalla clip.
+        let in_clip = |f: &FrameIdx| (clip.source_in()..clip.source_out()).contains(f);
         Some(ClipPanelInfo {
             is_solid_color: target.is_solid_color,
             source_size: frame_provider::clip_source_size(&self.project, clip, timeline_size),
@@ -2346,8 +2344,8 @@ impl VibeVideoApp {
                     ParamKeyframeState {
                         constant: track.is_constant(),
                         on_keyframe: track.keyframe_at(frame).is_some(),
-                        prev: clip.effects.transform.previous_keyframe(&[*p], frame),
-                        next: clip.effects.transform.next_keyframe(&[*p], frame),
+                        prev: clip.effects.transform.previous_keyframe(&[*p], frame).filter(in_clip),
+                        next: clip.effects.transform.next_keyframe(&[*p], frame).filter(in_clip),
                     }
                 })
                 .collect(),
@@ -2362,14 +2360,16 @@ impl VibeVideoApp {
                 .iter()
                 .rev()
                 .find(|(f, _, _)| *f < frame)
-                .map(|(f, _, _)| *f),
+                .map(|(f, _, _)| *f)
+                .filter(in_clip),
             gain_next: clip
                 .effects
                 .gain_db
                 .keyframes()
                 .iter()
                 .find(|(f, _, _)| *f > frame)
-                .map(|(f, _, _)| *f),
+                .map(|(f, _, _)| *f)
+                .filter(in_clip),
             color_constant: clip.effects.color.as_ref().is_none_or(|k| k.is_constant()),
             color_kf_here: clip
                 .effects
@@ -7068,6 +7068,29 @@ mod tests {
         });
         output.textures_delta.clear();
         width
+    }
+
+    #[test]
+    fn keyframe_arrows_ignore_keyframes_outside_the_clip() {
+        let mut app = VibeVideoApp::default();
+        let id = make_timeline_with_clip(&mut app, 0, 0, 100);
+        let timeline_id = app.timeline_id.unwrap();
+        let clip = &mut app.project.timelines[timeline_id].tracks[0].clips[0];
+        clip.source_offset = 50;
+        clip.timeline_len = 50;
+        let zoom = clip.effects.transform.track_mut(vv_core::TransformParam::ZoomX);
+        zoom.upsert(10, 2.0, vv_core::Interpolation::Linear);
+        zoom.upsert(40, 1.0, vv_core::Interpolation::Linear);
+        let target = PanelTarget {
+            track_index: 0,
+            clip_id: id,
+            source_frame: 70,
+            timeline_start: 0,
+            is_solid_color: true,
+            is_text: false,
+        };
+        let info = app.clip_panel_info(target).unwrap();
+        assert_eq!(info.params[vv_core::TransformParam::ZoomX.index()].prev, None);
     }
 
     /// Selezione multipla: il pannello costruisce un comando per clip e li

@@ -275,20 +275,20 @@ fn render_video_frame(
                 transform: clip.effects.transform.value_at(clip.source_frame_at(frame)),
             }),
             _ => {
-                let local = frame - clip.timeline_start;
+                let source_frame = clip.source_frame_at(frame);
                 Some(vv_render::Layer::Solid {
                     color: clip
                         .effects
                         .color
                         .as_ref()
-                        .map(|k| k.value_at(local))
+                        .map(|k| k.value_at(source_frame))
                         .unwrap_or(Rgba {
                             r: 0.0,
                             g: 0.0,
                             b: 0.0,
                             a: 1.0,
                         }),
-                    transform: clip.effects.transform.value_at(clip.source_frame_at(frame)),
+                    transform: clip.effects.transform.value_at(source_frame),
                 })
             }
         })
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn render_video_frame_reads_solid_color_at_the_clips_local_frame() {
+    fn render_video_frame_reads_solid_color_at_the_clips_source_frame() {
         let project = Project::default();
         let tl = timeline_with(vec![Track {
             kind: TrackKind::Video,

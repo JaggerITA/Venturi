@@ -2,7 +2,7 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipId, ClipSource, FrameIdx, Interpolation, Keyframed, LinkGroupId,
+    Clip, ClipId, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId,
     MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
     TransformParam,
 };
@@ -918,6 +918,7 @@ pub struct SplitClip {
     pub clip_id: ClipId,
     pub split_at: FrameIdx,
     original_len: Option<FrameIdx>,
+    original_effects: Option<EffectStack>,
     new_clip_id: Option<ClipId>,
     /// Se impostato (`with_new_clip_id`), l'id della metà destra è questo
     /// invece di uno allocato al volo: serve a chi orchestra più split
@@ -939,6 +940,7 @@ impl SplitClip {
             clip_id,
             split_at,
             original_len: None,
+            original_effects: None,
             new_clip_id: None,
             preallocated_new_clip_id: None,
         }
@@ -985,6 +987,12 @@ impl Command for SplitClip {
         second_half.linked_group = None;
         self.new_clip_id = Some(new_id);
 
+        // Ogni metà si tiene solo i keyframe del proprio lato del taglio:
+        // altrimenti la destra interpolerebbe dai keyframe della sinistra.
+        self.original_effects = Some(clip.effects.clone());
+        clip.effects.drop_keyframes_from(clip.source_out());
+        second_half.effects.drop_keyframes_before(second_half.source_in());
+
         let insert_at = track
             .clips
             .partition_point(|c| c.timeline_start < second_half.timeline_start);
@@ -1000,6 +1008,9 @@ impl Command for SplitClip {
         track.clips.retain(|c| c.id != new_clip_id);
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
             clip.timeline_len = original_len;
+            if let Some(effects) = &self.original_effects {
+                clip.effects = effects.clone();
+            }
         }
     }
 }
