@@ -30,6 +30,11 @@ const GROUP_DIVIDER_HEIGHT: f32 = 8.0;
 /// Colonna fissa a sinistra della timeline (etichetta track + rimuovi),
 /// non coinvolta nello scroll orizzontale — vedi `draw_track_headers`.
 const TRACK_HEADER_WIDTH: f32 = 140.0;
+const MIN_PANE_HEIGHT: f32 = 20.0;
+/// Zona "nuova track" minima oltre l'ultima track quando il riquadro
+/// scorre: senza, con molte track non ci sarebbe dove trascinarne una nuova.
+const NEW_TRACK_ZONE_HEIGHT: f32 = 24.0;
+const PANE_SCROLLBAR_WIDTH: f32 = 8.0;
 
 /// (indice track, id clip): coppia usata ovunque per identificare univocamente
 /// una clip nella timeline (l'id da solo non basta, la stessa clip non può
@@ -75,9 +80,13 @@ pub struct TimelineState {
     /// stato copiato nulla in questa sessione.
     pub clipboard: Vec<ClipboardEntry>,
     trim: Option<TrimState>,
-    /// Margine sopra al gruppo Video se l'utente ha trascinato il
-    /// separatore (vedi `GROUP_DIVIDER_HEIGHT`); `None` = centrato di default.
-    track_top_margin: Option<f32>,
+    /// Altezza del riquadro Video se l'utente ha trascinato il separatore
+    /// (vedi `GROUP_DIVIDER_HEIGHT`); `None` = gruppi centrati di default.
+    video_pane_height: Option<f32>,
+    /// Scroll verticale del riquadro Video, misurato dal basso: le track
+    /// video stanno appoggiate al separatore, come in un NLE.
+    video_scroll: f32,
+    audio_scroll: f32,
     /// In/out della timeline: porzione esportata.
     pub export_marks: crate::transport::MarkRange,
 }
@@ -210,7 +219,9 @@ impl Default for TimelineState {
             selected_gap: None,
             clipboard: Vec::new(),
             trim: None,
-            track_top_margin: None,
+            video_pane_height: None,
+            video_scroll: 0.0,
+            audio_scroll: 0.0,
             export_marks: crate::transport::MarkRange::default(),
         }
     }
@@ -350,6 +361,141 @@ fn track_row_order(track_kinds: &[TrackKind]) -> Vec<usize> {
     order
 }
 
+/// Geometria verticale (`y` locali al contenuto) dei due riquadri, Video
+/// sopra e Audio sotto al separatore, ognuno con il proprio scroll.
+#[derive(Clone, Copy, Debug)]
+struct PaneLayout {
+    video_pane: egui::Rangef,
+    audio_pane: egui::Rangef,
+    video_rows_top: f32,
+    audio_rows_top: f32,
+    video_count: usize,
+    audio_count: usize,
+    divider_height: f32,
+    video_max_scroll: f32,
+    audio_max_scroll: f32,
+    /// Limiti dell'altezza del riquadro Video trascinando il separatore.
+    video_height_range: egui::Rangef,
+}
+
+impl PaneLayout {
+    /// Clampa anche gli scroll in `state` ai limiti correnti.
+    fn new(
+        avail_below_ruler: f32,
+        video_count: usize,
+        audio_count: usize,
+        state: &mut TimelineState,
+    ) -> Self {
+        let divider_height = if video_count > 0 && audio_count > 0 {
+            GROUP_DIVIDER_HEIGHT
+        } else {
+            0.0
+        };
+        let rows_avail = (avail_below_ruler - divider_height).max(0.0);
+        let video_rows = video_count as f32 * ROW_HEIGHT;
+        let audio_rows = audio_count as f32 * ROW_HEIGHT;
+        let default_video_height = if video_rows + audio_rows <= rows_avail {
+            (rows_avail - video_rows - audio_rows) / 2.0 + video_rows
+        } else {
+            rows_avail * video_count as f32 / (video_count + audio_count) as f32
+        };
+        let min_height = if divider_height > 0.0 {
+            MIN_PANE_HEIGHT.min(rows_avail / 2.0)
+        } else {
+            0.0
+        };
+        let video_height_range = egui::Rangef::new(min_height, rows_avail - min_height);
+        let video_height = if divider_height > 0.0 {
+            state
+                .video_pane_height
+                .unwrap_or(default_video_height)
+                .clamp(video_height_range.min, video_height_range.max)
+        } else {
+            default_video_height
+        };
+        let audio_height = rows_avail - video_height;
+
+        let max_scroll = |rows: f32, pane: f32| {
+            if rows > pane {
+                rows + NEW_TRACK_ZONE_HEIGHT - pane
+            } else {
+                0.0
+            }
+        };
+        let video_max_scroll = max_scroll(video_rows, video_height);
+        let audio_max_scroll = max_scroll(audio_rows, audio_height);
+        state.video_scroll = state.video_scroll.clamp(0.0, video_max_scroll);
+        state.audio_scroll = state.audio_scroll.clamp(0.0, audio_max_scroll);
+
+        let video_bottom = RULER_HEIGHT + video_height;
+        Self {
+            video_pane: egui::Rangef::new(RULER_HEIGHT, video_bottom),
+            audio_pane: egui::Rangef::new(
+                video_bottom + divider_height,
+                RULER_HEIGHT + avail_below_ruler.max(divider_height),
+            ),
+            video_rows_top: video_bottom - video_rows + state.video_scroll,
+            audio_rows_top: video_bottom + divider_height - state.audio_scroll,
+            video_count,
+            audio_count,
+            divider_height,
+            video_max_scroll,
+            audio_max_scroll,
+            video_height_range,
+        }
+    }
+
+    fn video_height(&self) -> f32 {
+        self.video_pane.span()
+    }
+
+    fn video_rows_bottom(&self) -> f32 {
+        self.video_rows_top + self.video_count as f32 * ROW_HEIGHT
+    }
+
+    fn audio_rows_bottom(&self) -> f32 {
+        self.audio_rows_top + self.audio_count as f32 * ROW_HEIGHT
+    }
+
+    fn pane(&self, kind: TrackKind) -> egui::Rangef {
+        match kind {
+            TrackKind::Video => self.video_pane,
+            TrackKind::Audio => self.audio_pane,
+        }
+    }
+
+    /// `y` di una riga di `track_row_order`.
+    fn row_y(&self, row: usize) -> f32 {
+        if row < self.video_count {
+            self.video_rows_top + row as f32 * ROW_HEIGHT
+        } else {
+            self.audio_rows_top + (row - self.video_count) as f32 * ROW_HEIGHT
+        }
+    }
+
+    /// Riga (di `track_row_order`) più vicina a `y`, dentro al riquadro
+    /// che contiene `y`.
+    fn row_at_y(&self, y: f32) -> usize {
+        let in_video = self.video_count > 0 && (self.audio_count == 0 || y < self.audio_pane.min);
+        if in_video {
+            let row = ((y - self.video_rows_top) / ROW_HEIGHT).floor().max(0.0) as usize;
+            row.min(self.video_count - 1)
+        } else {
+            let row = ((y - self.audio_rows_top) / ROW_HEIGHT).floor().max(0.0) as usize;
+            self.video_count + row.min(self.audio_count.saturating_sub(1))
+        }
+    }
+
+    /// `y` sopra una track visibile (non in una zona vuota né nascosta
+    /// dallo scroll).
+    fn is_over_rows(&self, y: f32) -> bool {
+        (self.video_pane.contains(y) && y >= self.video_rows_top && y < self.video_rows_bottom())
+            || (self.audio_pane.contains(y)
+                && y >= self.audio_rows_top
+                && y < self.audio_rows_bottom())
+    }
+}
+
 enum TrackDragTarget {
     Track(usize),
     NewTrack,
@@ -379,42 +525,41 @@ enum TrackDestination {
 }
 
 /// Dove atterrerebbe una clip di tipo `kind` trascinata a `local_y`: su una
-/// track esistente, o in una nuova track se `local_y` cade nel margine
-/// sopra al gruppo Video/sotto al gruppo Audio (le zone di drop in
-/// `show_timeline`). `None` se non è in nessuna zona valida per `kind`
-/// (gruppo dell'altro tipo, separatore) — il chiamante resta sulla track
-/// di partenza.
+/// track esistente, o in una nuova track se `local_y` cade nella zona vuota
+/// sopra al gruppo Video/sotto al gruppo Audio. Oltre il bordo esterno del
+/// proprio riquadro conta come il bordo stesso. `None` nel riquadro
+/// dell'altro tipo o sul separatore: il chiamante resta sulla track di
+/// partenza.
 fn track_drag_target(
     local_y: f32,
     kind: TrackKind,
     row_order: &[usize],
-    video_count: usize,
-    divider_height: f32,
-    top_margin: f32,
-    bottom_margin: f32,
-    rows_height: f32,
+    layout: &PaneLayout,
 ) -> Option<TrackDragTarget> {
-    let y_in_rows = local_y - RULER_HEIGHT - top_margin;
-    let video_rows_height = video_count as f32 * ROW_HEIGHT;
     match kind {
         TrackKind::Video => {
-            if y_in_rows < 0.0 {
-                return (top_margin > 0.0).then_some(TrackDragTarget::NewTrack);
+            if local_y >= layout.video_pane.max {
+                return None;
             }
-            if y_in_rows < video_rows_height {
-                let row = (y_in_rows / ROW_HEIGHT) as usize;
-                return row_order.get(row).copied().map(TrackDragTarget::Track);
+            let y = local_y.max(layout.video_pane.min);
+            if y < layout.video_rows_top {
+                return Some(TrackDragTarget::NewTrack);
+            }
+            if y < layout.video_rows_bottom() {
+                return row_order.get(layout.row_at_y(y)).copied().map(TrackDragTarget::Track);
             }
             None
         }
         TrackKind::Audio => {
-            let audio_start = video_rows_height + divider_height;
-            if y_in_rows >= audio_start && y_in_rows < rows_height {
-                let row = ((y_in_rows - audio_start) / ROW_HEIGHT) as usize;
-                return row_order.get(video_count + row).copied().map(TrackDragTarget::Track);
+            if local_y < layout.audio_pane.min {
+                return None;
             }
-            if y_in_rows >= rows_height && y_in_rows < rows_height + bottom_margin {
+            let y = local_y.min(layout.audio_pane.max - 1.0);
+            if y >= layout.audio_rows_bottom() {
                 return Some(TrackDragTarget::NewTrack);
+            }
+            if y >= layout.audio_rows_top {
+                return row_order.get(layout.row_at_y(y)).copied().map(TrackDragTarget::Track);
             }
             None
         }
@@ -494,21 +639,16 @@ fn draw_track_headers(
     track_flags: &[TrackFlags],
     row_order: &[usize],
     row_y: &[f32],
-    video_count: usize,
-    divider_height: f32,
-    top_margin: f32,
-    slack: f32,
-    track_top_margin: &mut Option<f32>,
-    natural_content_height: f32,
+    layout: &PaneLayout,
+    video_pane_height: &mut Option<f32>,
     pending: &mut Option<PendingAction>,
     playhead: FrameIdx,
     fps: f64,
 ) {
-    let (rect, _resp) = ui.allocate_exact_size(
-        egui::vec2(TRACK_HEADER_WIDTH, natural_content_height.max(RULER_HEIGHT)),
-        egui::Sense::hover(),
-    );
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(TRACK_HEADER_WIDTH, RULER_HEIGHT), egui::Sense::hover());
     let origin = rect.min;
+    let full_clip = ui.clip_rect();
     let text_color = ui.visuals().text_color();
 
     // Timestamp della posizione testina in formato HH:MM:SS:FF, nella riga
@@ -524,6 +664,11 @@ fn draw_track_headers(
 
     for &track_index in row_order {
         let kind = track_kinds[track_index];
+        let pane = layout.pane(kind);
+        ui.set_clip_rect(full_clip.intersect(egui::Rect::from_x_y_ranges(
+            rect.x_range(),
+            (origin.y + pane.min)..=(origin.y + pane.max),
+        )));
         let row_rect = egui::Rect::from_min_size(
             egui::pos2(origin.x, origin.y + row_y[track_index]),
             egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
@@ -636,38 +781,94 @@ fn draw_track_headers(
         }
     }
 
-    // Stesso separatore dell'area scrollabile (stato condiviso in
-    // `track_top_margin`), trascinabile anche da qui.
-    if divider_height > 0.0 && video_count < row_order.len() {
-        let audio_first_track = row_order[video_count];
+    ui.set_clip_rect(full_clip);
+
+    if layout.divider_height > 0.0 {
         let divider_rect = egui::Rect::from_min_size(
-            egui::pos2(origin.x, origin.y + row_y[audio_first_track] - divider_height),
-            egui::vec2(TRACK_HEADER_WIDTH, divider_height),
+            egui::pos2(origin.x, origin.y + layout.video_pane.max),
+            egui::vec2(TRACK_HEADER_WIDTH, layout.divider_height),
         );
-        let divider_resp = ui.interact(
+        interact_divider(
+            ui,
+            ui.painter(),
             divider_rect,
             ui.id().with("timeline_header_track_split"),
-            egui::Sense::drag(),
-        );
-        let active = divider_resp.hovered() || divider_resp.dragged();
-        if active {
-            ui.ctx()
-                .output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
-        }
-        if divider_resp.dragged() {
-            *track_top_margin =
-                Some((top_margin + divider_resp.drag_delta().y).clamp(0.0, slack));
-        }
-        ui.painter().hline(
-            divider_rect.x_range(),
-            divider_rect.center().y,
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_gray(if active { 160 } else { 80 }),
-            ),
+            layout,
+            video_pane_height,
         );
     }
+}
 
+/// Separatore trascinabile Video/Audio: presente sia nella colonna degli
+/// header sia nell'area scrollabile, con lo stato condiviso.
+fn interact_divider(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    id: egui::Id,
+    layout: &PaneLayout,
+    video_pane_height: &mut Option<f32>,
+) {
+    let resp = ui.interact(rect, id, egui::Sense::drag());
+    let active = resp.hovered() || resp.dragged();
+    if active {
+        ui.ctx()
+            .output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
+    }
+    if resp.dragged() {
+        let range = layout.video_height_range;
+        *video_pane_height =
+            Some((layout.video_height() + resp.drag_delta().y).clamp(range.min, range.max));
+    }
+    painter.hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(if active { 160 } else { 80 })),
+    );
+}
+
+/// Scrollbar verticale di un riquadro; `offset` misurato dall'alto.
+/// Restituisce il nuovo offset se l'utente la trascina.
+fn pane_scrollbar(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    track_rect: egui::Rect,
+    id: egui::Id,
+    offset: f32,
+    max_offset: f32,
+) -> Option<f32> {
+    if max_offset <= 0.0 || track_rect.height() <= 0.0 {
+        return None;
+    }
+    let content_height = track_rect.height() + max_offset;
+    let thumb_height = (track_rect.height() * track_rect.height() / content_height)
+        .max(16.0)
+        .min(track_rect.height());
+    let travel = track_rect.height() - thumb_height;
+    let thumb_top = track_rect.top() + travel * offset / max_offset;
+    let thumb_rect = egui::Rect::from_min_size(
+        egui::pos2(track_rect.left(), thumb_top),
+        egui::vec2(track_rect.width(), thumb_height),
+    );
+    let resp = ui.interact(track_rect, id, egui::Sense::click_and_drag());
+    let active = resp.hovered() || resp.dragged();
+    painter.rect_filled(track_rect, 4.0, egui::Color32::from_black_alpha(90));
+    painter.rect_filled(
+        thumb_rect.shrink2(egui::vec2(1.0, 1.0)),
+        4.0,
+        egui::Color32::from_gray(if active { 170 } else { 120 }),
+    );
+    if resp.dragged() && travel > 0.0 {
+        return Some((offset + resp.drag_delta().y * max_offset / travel).clamp(0.0, max_offset));
+    }
+    if resp.clicked()
+        && let Some(pos) = resp.interact_pointer_pos()
+        && travel > 0.0
+    {
+        let target = (pos.y - track_rect.top() - thumb_height / 2.0) / travel * max_offset;
+        return Some(target.clamp(0.0, max_offset));
+    }
+    None
 }
 
 fn paint_lock_icon(painter: &egui::Painter, rect: egui::Rect, locked: bool) {
@@ -1218,52 +1419,41 @@ pub fn show_timeline(
     }
     let video_count = track_kinds.iter().filter(|k| **k == TrackKind::Video).count();
     let audio_count = track_count - video_count;
-    let divider_height = if video_count > 0 && audio_count > 0 {
-        GROUP_DIVIDER_HEIGHT
-    } else {
-        0.0
-    };
-    let rows_height = track_count as f32 * ROW_HEIGHT + divider_height;
-
-    // Centrate di default: lo spazio verticale non occupato dalle track si
-    // divide a metà sopra/sotto, salvo che l'utente abbia trascinato il
-    // separatore (`track_top_margin`).
     let avail_below_ruler = (panel_rect.height() - RULER_HEIGHT).max(0.0);
-    let slack = (avail_below_ruler - rows_height).max(0.0);
-    let default_top_margin = slack / 2.0;
-    let top_margin = state
-        .track_top_margin
-        .unwrap_or(default_top_margin)
-        .clamp(0.0, slack);
-    // Anche zona di drop "nuova track" sopra/sotto ai gruppi (vedi sotto);
-    // a zero, quella zona semplicemente sparisce.
-    let bottom_margin = slack - top_margin;
-    // Indipendente dall'altezza del pannello (mai in un `ui.allocate_*`,
-    // altrimenti `Panel::bottom` rincorre lo spazio richiesto all'infinito).
-    let content_height = RULER_HEIGHT + rows_height;
-    let visual_height = RULER_HEIGHT + avail_below_ruler.max(rows_height);
+    let mut layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
+    // Rotella: scroll verticale del riquadro sotto al puntatore (quello
+    // orizzontale resta a Shift+rotella, come già faceva la ScrollArea).
+    if let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+        && panel_rect.contains(pos)
+    {
+        let local_y = pos.y - panel_rect.top();
+        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+        if wheel != 0.0 {
+            let scrolled = if layout.video_pane.contains(local_y) && layout.video_max_scroll > 0.0 {
+                state.video_scroll += wheel;
+                true
+            } else if layout.audio_pane.contains(local_y) && layout.audio_max_scroll > 0.0 {
+                state.audio_scroll -= wheel;
+                true
+            } else {
+                false
+            };
+            if scrolled {
+                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
+            }
+        }
+    }
+    let divider_height = layout.divider_height;
+    let visual_height = layout.audio_pane.max;
+    let pane_of = |track_index: usize| layout.pane(track_kinds[track_index]);
 
     // `y` locale di ogni track (indicizzata da `track_index`), coerente con
     // `clip_local_rect`.
     let row_y: Vec<f32> = (0..track_count)
-        .map(|track_index| {
-            let row = row_of_track[track_index];
-            let extra = if row >= video_count { divider_height } else { 0.0 };
-            RULER_HEIGHT + top_margin + row as f32 * ROW_HEIGHT + extra
-        })
+        .map(|track_index| layout.row_y(row_of_track[track_index]))
         .collect();
-    // Inverso di `row_y`: `y` locale -> riga -> `track_index`.
-    let track_at_y = |local_y: f32| -> usize {
-        let y_in_rows = (local_y - RULER_HEIGHT - top_margin).max(0.0);
-        let video_rows_height = video_count as f32 * ROW_HEIGHT;
-        let row = if y_in_rows < video_rows_height {
-            (y_in_rows / ROW_HEIGHT).floor() as usize
-        } else {
-            let after_divider = (y_in_rows - video_rows_height - divider_height).max(0.0);
-            video_count + (after_divider / ROW_HEIGHT).floor() as usize
-        };
-        row_order[row.min(track_count.saturating_sub(1))]
-    };
+    let track_at_y = |local_y: f32| -> usize { row_order[layout.row_at_y(local_y)] };
 
     let mut pending: Option<PendingAction> = None;
 
@@ -1342,12 +1532,8 @@ pub fn show_timeline(
             &track_flags,
             &row_order,
             &row_y,
-            video_count,
-            divider_height,
-            top_margin,
-            slack,
-            &mut state.track_top_margin,
-            content_height,
+            &layout,
+            &mut state.video_pane_height,
             &mut pending,
             state.playhead,
             fps,
@@ -1368,23 +1554,38 @@ pub fn show_timeline(
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let (rect, _resp) = ui.allocate_exact_size(
-                    egui::vec2(content_width, content_height),
+                    egui::vec2(content_width, RULER_HEIGHT),
                     egui::Sense::hover(),
                 );
                 let origin = rect.min;
-                // Non allocato: solo per non far ritagliare i margini di
-                // centratura dal clip del painter (vedi `visual_height`).
+                // Non allocato: l'altezza dei riquadri dipende dal pannello,
+                // e allocarla farebbe crescere `Panel::bottom` all'infinito.
                 let visual_rect = egui::Rect::from_min_size(
                     origin,
                     egui::vec2(content_width, visual_height),
                 );
                 let painter = ui.painter_at(visual_rect);
                 let to_local = |pos: egui::Pos2| egui::pos2(pos.x - origin.x, pos.y - origin.y);
+                let pane_rect = |pane: egui::Rangef| {
+                    egui::Rect::from_x_y_ranges(
+                        visual_rect.x_range(),
+                        (origin.y + pane.min)..=(origin.y + pane.max),
+                    )
+                };
+                let track_pane_rect = |track_index: usize| pane_rect(pane_of(track_index));
+                let track_painter = |track_index: usize| {
+                    painter.with_clip_rect(painter.clip_rect().intersect(track_pane_rect(track_index)))
+                };
+                let local_pane_rect = |track_index: usize| {
+                    track_pane_rect(track_index).translate(-origin.to_vec2())
+                };
+                // Solo la parte della clip visibile nel suo riquadro.
+                let visible_clip_rect = |v: &ClipVisual| {
+                    clip_local_rect(v, px_per_frame, &row_y).intersect(local_pane_rect(v.track_index))
+                };
                 let press_over_a_clip = |pos: egui::Pos2| {
                     let local = to_local(pos);
-                    visuals
-                        .iter()
-                        .any(|v| clip_local_rect(v, px_per_frame, &row_y).contains(local))
+                    visuals.iter().any(|v| visible_clip_rect(v).contains(local))
                 };
 
                 // Ruler: click/drag per spostare il playhead.
@@ -1498,61 +1699,40 @@ pub fn show_timeline(
                         (false, true) => egui::Color32::from_gray(32),
                         (false, false) => egui::Color32::from_gray(27),
                     };
-                    painter.rect_filled(track_rect, 0.0, bg);
+                    track_painter(track_index).rect_filled(track_rect, 0.0, bg);
                 }
-                let track_area_rect = egui::Rect::from_min_size(
-                    egui::pos2(origin.x, origin.y + RULER_HEIGHT + top_margin),
-                    egui::vec2(content_width, rows_height),
-                );
-                // Anche i margini di centratura: il rettangolo di selezione
-                // può partire da lì.
+                let over_rows = |pos: egui::Pos2| {
+                    visual_rect.x_range().contains(pos.x) && layout.is_over_rows(pos.y - origin.y)
+                };
+                // Anche le zone vuote: il rettangolo di selezione può
+                // partire da lì.
                 let marquee_area_rect = egui::Rect::from_min_max(
                     egui::pos2(origin.x, origin.y + RULER_HEIGHT),
                     egui::pos2(origin.x + content_width, origin.y + visual_height),
                 );
                 let pointer_over_tracks = ui
                     .input(|i| i.pointer.hover_pos())
-                    .is_some_and(|p| track_area_rect.contains(p));
+                    .is_some_and(over_rows);
                 let marquee_resp = ui.interact(
                     marquee_area_rect,
                     ui.id().with("timeline_marquee"),
                     egui::Sense::click_and_drag(),
                 );
 
-                // Separatore trascinabile Video/Audio. Interagito *dopo*
-                // `marquee_resp` per vincere l'hit-test su questa fascia
-                // sottile (stesso pattern delle clip sotto).
+                // Interagito *dopo* `marquee_resp` per vincere l'hit-test su
+                // questa fascia sottile (stesso pattern delle clip sotto).
                 if divider_height > 0.0 {
-                    let divider_top = origin.y
-                        + RULER_HEIGHT
-                        + top_margin
-                        + video_count as f32 * ROW_HEIGHT;
                     let divider_rect = egui::Rect::from_min_size(
-                        egui::pos2(origin.x, divider_top),
+                        egui::pos2(origin.x, origin.y + layout.video_pane.max),
                         egui::vec2(content_width, divider_height),
                     );
-                    let divider_resp = ui.interact(
+                    interact_divider(
+                        ui,
+                        &painter,
                         divider_rect,
                         ui.id().with("timeline_track_split"),
-                        egui::Sense::drag(),
-                    );
-                    if divider_resp.hovered() || divider_resp.dragged() {
-                        ui.ctx()
-                            .output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
-                    }
-                    if divider_resp.dragged() {
-                        state.track_top_margin =
-                            Some((top_margin + divider_resp.drag_delta().y).clamp(0.0, slack));
-                    }
-                    let line_color = if divider_resp.hovered() || divider_resp.dragged() {
-                        egui::Color32::from_gray(160)
-                    } else {
-                        egui::Color32::from_gray(80)
-                    };
-                    painter.hline(
-                        divider_rect.x_range(),
-                        divider_rect.center().y,
-                        egui::Stroke::new(1.0, line_color),
+                        &layout,
+                        &mut state.video_pane_height,
                     );
                 }
 
@@ -1617,9 +1797,14 @@ pub fn show_timeline(
                     let audio_y = first_row(TrackKind::Audio);
                     for seg in drag_set_segments(project, timeline_fps, &drag) {
                         let x = origin.x + (frame + seg.offset) as f32 * px_per_frame;
-                        let rows = [(seg.has_video, video_y), (seg.has_audio, audio_y)];
-                        for (_, y) in rows.into_iter().filter(|(present, _)| *present) {
+                        let rows = [
+                            (seg.has_video, video_y, layout.video_pane),
+                            (seg.has_audio, audio_y, layout.audio_pane),
+                        ];
+                        for (_, y, pane) in rows.into_iter().filter(|(present, _, _)| *present) {
                             let Some(y) = y else { continue };
+                            let ghost_painter = ghost_painter
+                                .with_clip_rect(ghost_painter.clip_rect().intersect(pane_rect(pane)));
                             let rect = egui::Rect::from_min_size(
                                 egui::pos2(x, y),
                                 egui::vec2(seg.len as f32 * px_per_frame, ROW_HEIGHT),
@@ -1664,9 +1849,12 @@ pub fn show_timeline(
 
                 // Zone "aggiungi una nuova track": margini sopra/sotto ai
                 // gruppi (altezza zero se non c'è margine, vedi sopra).
-                let above_video_rect = egui::Rect::from_min_size(
-                    egui::pos2(origin.x, origin.y + RULER_HEIGHT),
-                    egui::vec2(content_width, top_margin),
+                let above_video_rect = egui::Rect::from_min_max(
+                    egui::pos2(origin.x, origin.y + layout.video_pane.min),
+                    egui::pos2(
+                        origin.x + content_width,
+                        origin.y + layout.video_rows_top.max(layout.video_pane.min),
+                    ),
                 );
                 let above_video_resp = ui.interact(
                     above_video_rect,
@@ -1711,12 +1899,12 @@ pub fn show_timeline(
                     media_drop = Some((drag, frame, MediaDropTarget::NewVideoTrack));
                 }
 
-                let below_audio_rect = egui::Rect::from_min_size(
+                let below_audio_rect = egui::Rect::from_min_max(
                     egui::pos2(
                         origin.x,
-                        origin.y + RULER_HEIGHT + top_margin + rows_height,
+                        origin.y + layout.audio_rows_bottom().min(layout.audio_pane.max),
                     ),
-                    egui::vec2(content_width, bottom_margin),
+                    egui::pos2(origin.x + content_width, origin.y + layout.audio_pane.max),
                 );
                 let below_audio_resp = ui.interact(
                     below_audio_rect,
@@ -1781,7 +1969,11 @@ pub fn show_timeline(
                 } else if marquee_resp.drag_stopped() {
                     if let Some(m) = state.marquee.take() {
                         let rect = egui::Rect::from_two_pos(m.start, m.current);
-                        let hits = clips_intersecting_rect(&visuals, px_per_frame, &row_y, rect);
+                        let hits: Vec<ClipKey> = visuals
+                            .iter()
+                            .filter(|v| !v.locked && visible_clip_rect(v).intersects(rect))
+                            .map(|v| (v.track_index, v.clip.id))
+                            .collect();
                         state.selected = expand_to_linked_groups(&visuals, hits.iter().copied());
                         state.selection_anchor = hits.first().copied();
                         state.selected_gap = None;
@@ -1790,7 +1982,7 @@ pub fn show_timeline(
                     && let Some(pos) = marquee_resp.interact_pointer_pos()
                     && !press_over_a_clip(pos)
                 {
-                    if row_order.is_empty() || !track_area_rect.contains(pos) {
+                    if row_order.is_empty() || !over_rows(pos) {
                         state.clear_selection();
                     } else {
                         // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
@@ -1846,6 +2038,7 @@ pub fn show_timeline(
                             ROW_HEIGHT - 4.0,
                         ),
                     );
+                    let painter = track_painter(track_index);
                     painter.rect_filled(
                         gap_rect,
                         4.0,
@@ -1870,11 +2063,7 @@ pub fn show_timeline(
                             to_local(pos).y,
                             kind,
                             &row_order,
-                            video_count,
-                            divider_height,
-                            top_margin,
-                            bottom_margin,
-                            rows_height,
+                            &layout,
                         )
                     });
                     match target {
@@ -2048,6 +2237,7 @@ pub fn show_timeline(
                                 ROW_HEIGHT - 4.0,
                             ),
                         );
+                        let painter = track_painter(visual.track_index);
                         painter.rect_filled(clip_rect, 4.0, visual.color);
                         painter.rect_stroke(
                             clip_rect,
@@ -2065,6 +2255,7 @@ pub fn show_timeline(
                     }
                 }
                 for visual in draw_order {
+                    let painter = track_painter(visual.track_index);
                     let is_trimming_this = trimmed_keys.contains(&(visual.track_index, visual.clip.id));
                     let (display_start, display_len) = if is_trimming_this
                         && let (Some(t), Some(primary_value)) = (&state.trim, trimmed_primary_new_value)
@@ -2116,14 +2307,10 @@ pub fn show_timeline(
                         // bordo attuale (vedi `EffectiveTrack::New`).
                         Some((_, EffectiveTrack::New(depth))) => match track_kinds[visual.track_index] {
                             TrackKind::Video => {
-                                origin.y + RULER_HEIGHT + top_margin - *depth as f32 * ROW_HEIGHT
+                                origin.y + layout.video_rows_top - *depth as f32 * ROW_HEIGHT
                             }
                             TrackKind::Audio => {
-                                origin.y
-                                    + RULER_HEIGHT
-                                    + top_margin
-                                    + rows_height
-                                    + (*depth - 1) as f32 * ROW_HEIGHT
+                                origin.y + layout.audio_rows_bottom() + (*depth - 1) as f32 * ROW_HEIGHT
                             }
                         },
                         None => origin.y + row_y[visual.track_index],
@@ -2140,7 +2327,11 @@ pub fn show_timeline(
                     } else {
                         egui::Sense::click_and_drag()
                     };
-                    let resp = ui.interact(clip_rect, id, sense);
+                    let resp = ui.interact(
+                        clip_rect.intersect(track_pane_rect(visual.track_index)),
+                        id,
+                        sense,
+                    );
 
                     // La selezione contiene sempre un gruppo collegato per
                     // intero (vedi `expand_to_linked_groups`), quindi non
@@ -2190,7 +2381,7 @@ pub fn show_timeline(
                             visual.clip.media_secs_at(wave_end, fps),
                             item.meta.fps.as_f64(),
                             wf.audio_duration_secs,
-                            ui.clip_rect(),
+                            painter.clip_rect(),
                             &visual.clip.effects.gain_db,
                         );
                     }
@@ -2537,6 +2728,39 @@ pub fn show_timeline(
                     playhead_color,
                     egui::Stroke::NONE,
                 ));
+
+                // Sul bordo destro visibile, non su quello del contenuto.
+                let scrollbar_x = egui::Rangef::new(
+                    ui.clip_rect().right() - PANE_SCROLLBAR_WIDTH - 2.0,
+                    ui.clip_rect().right() - 2.0,
+                );
+                let scrollbar_rect = |pane: egui::Rangef| {
+                    egui::Rect::from_x_y_ranges(
+                        scrollbar_x,
+                        (origin.y + pane.min + 2.0)..=(origin.y + pane.max - 2.0),
+                    )
+                };
+                let video_max = layout.video_max_scroll;
+                if let Some(offset) = pane_scrollbar(
+                    ui,
+                    &painter,
+                    scrollbar_rect(layout.video_pane),
+                    ui.id().with("timeline_video_vscroll"),
+                    video_max - state.video_scroll,
+                    video_max,
+                ) {
+                    state.video_scroll = video_max - offset;
+                }
+                if let Some(offset) = pane_scrollbar(
+                    ui,
+                    &painter,
+                    scrollbar_rect(layout.audio_pane),
+                    ui.id().with("timeline_audio_vscroll"),
+                    state.audio_scroll,
+                    layout.audio_max_scroll,
+                ) {
+                    state.audio_scroll = offset;
+                }
             });
 
         });
@@ -4070,48 +4294,92 @@ mod tests {
         assert_eq!((min_start, max_start), (0, 35));
     }
 
+    /// 2 track video e 1 audio; 228px sotto al righello = 50px di zona
+    /// vuota sopra e sotto ai gruppi, 0 = nessuna zona vuota.
+    fn test_layout(slack: f32) -> PaneLayout {
+        let avail = 2.0 * slack + 3.0 * ROW_HEIGHT + GROUP_DIVIDER_HEIGHT;
+        PaneLayout::new(avail, 2, 1, &mut TimelineState::default())
+    }
+
     #[test]
     fn track_drag_target_above_video_group_is_new_track_when_margin_exists() {
         let row_order = [1, 0, 2]; // 2 track video (decrescente), 1 audio
-        let target = track_drag_target(40.0, TrackKind::Video, &row_order, 2, 8.0, 50.0, 50.0, 128.0);
+        let target = track_drag_target(40.0, TrackKind::Video, &row_order, &test_layout(50.0));
         assert!(matches!(target, Some(TrackDragTarget::NewTrack)));
     }
 
     #[test]
-    fn track_drag_target_above_video_group_is_none_without_margin() {
+    fn track_drag_target_above_video_group_without_margin_is_the_top_track() {
         let row_order = [1, 0, 2];
-        let target = track_drag_target(15.0, TrackKind::Video, &row_order, 2, 8.0, 0.0, 0.0, 128.0);
-        assert!(target.is_none());
+        let target = track_drag_target(15.0, TrackKind::Video, &row_order, &test_layout(0.0));
+        assert!(matches!(target, Some(TrackDragTarget::Track(1))));
     }
 
     #[test]
     fn track_drag_target_lands_on_the_right_video_row() {
         let row_order = [1, 0, 2];
-        let first_row = track_drag_target(80.0, TrackKind::Video, &row_order, 2, 8.0, 50.0, 50.0, 128.0);
+        let layout = test_layout(50.0);
+        let first_row = track_drag_target(80.0, TrackKind::Video, &row_order, &layout);
         assert!(matches!(first_row, Some(TrackDragTarget::Track(1))));
-        let second_row = track_drag_target(120.0, TrackKind::Video, &row_order, 2, 8.0, 50.0, 50.0, 128.0);
+        let second_row = track_drag_target(120.0, TrackKind::Video, &row_order, &layout);
         assert!(matches!(second_row, Some(TrackDragTarget::Track(0))));
     }
 
     #[test]
     fn track_drag_target_video_over_audio_group_is_none() {
         let row_order = [1, 0, 2];
-        let target = track_drag_target(170.0, TrackKind::Video, &row_order, 2, 8.0, 50.0, 50.0, 128.0);
+        let target = track_drag_target(170.0, TrackKind::Video, &row_order, &test_layout(50.0));
         assert!(target.is_none());
     }
 
     #[test]
     fn track_drag_target_below_audio_group_is_new_track_when_margin_exists() {
         let row_order = [1, 0, 2];
-        let target = track_drag_target(200.0, TrackKind::Audio, &row_order, 2, 8.0, 50.0, 50.0, 128.0);
+        let target = track_drag_target(200.0, TrackKind::Audio, &row_order, &test_layout(50.0));
         assert!(matches!(target, Some(TrackDragTarget::NewTrack)));
     }
 
     #[test]
-    fn track_drag_target_below_audio_group_is_none_without_margin() {
+    fn track_drag_target_below_audio_group_without_margin_is_the_bottom_track() {
         let row_order = [1, 0, 2];
-        let target = track_drag_target(200.0, TrackKind::Audio, &row_order, 2, 8.0, 50.0, 0.0, 128.0);
-        assert!(target.is_none());
+        let target = track_drag_target(200.0, TrackKind::Audio, &row_order, &test_layout(0.0));
+        assert!(matches!(target, Some(TrackDragTarget::Track(2))));
+    }
+
+    /// Bug segnalato: con molte track video il separatore non saliva oltre
+    /// la track più in alto, quindi non si poteva fare spazio all'audio.
+    #[test]
+    fn divider_can_shrink_an_overflowing_video_pane_which_then_scrolls() {
+        let mut state = TimelineState::default();
+        let avail = 200.0;
+        let unconstrained = PaneLayout::new(avail, 6, 1, &mut state);
+        assert_eq!(unconstrained.video_height_range.min, MIN_PANE_HEIGHT);
+
+        state.video_pane_height = Some(60.0);
+        let layout = PaneLayout::new(avail, 6, 1, &mut state);
+        assert_eq!(layout.video_height(), 60.0);
+        // Appoggiate al separatore finché non si scorre.
+        assert_eq!(layout.video_rows_bottom(), layout.video_pane.max);
+        assert_eq!(layout.video_max_scroll, 6.0 * ROW_HEIGHT + NEW_TRACK_ZONE_HEIGHT - 60.0);
+
+        state.video_scroll = 10_000.0;
+        let scrolled = PaneLayout::new(avail, 6, 1, &mut state);
+        assert_eq!(state.video_scroll, layout.video_max_scroll);
+        assert_eq!(scrolled.video_rows_top, scrolled.video_pane.min + NEW_TRACK_ZONE_HEIGHT);
+    }
+
+    #[test]
+    fn audio_pane_scrolls_when_its_tracks_overflow() {
+        let mut state = TimelineState::default();
+        state.audio_scroll = 10_000.0;
+        let layout = PaneLayout::new(200.0, 1, 8, &mut state);
+        assert!(layout.audio_max_scroll > 0.0);
+        assert_eq!(
+            layout.audio_rows_bottom() + NEW_TRACK_ZONE_HEIGHT,
+            layout.audio_pane.max
+        );
+        let last_row = layout.row_at_y(layout.audio_pane.max - NEW_TRACK_ZONE_HEIGHT - 1.0);
+        assert_eq!(last_row, 8);
     }
 
     #[test]
