@@ -427,8 +427,12 @@ struct VibeVideoApp {
     /// Media importati dopo l'ultimo salvataggio: il media pool cambia
     /// senza passare dalla history.
     unsaved_media: bool,
-    /// Apertura o import in attesa della risposta a "salvare le modifiche?".
+    /// Apertura, import o uscita in attesa della risposta a "salvare le
+    /// modifiche?".
     pending_project_switch: Option<ProjectSwitch>,
+    /// L'utente ha già risposto per l'uscita: la prossima richiesta di
+    /// chiusura passa.
+    quit_confirmed: bool,
     /// Ultimo errore di salvataggio/apertura progetto, mostrato in
     /// toolbar accanto ai pulsanti — separato da `import_warnings` (quelli sono
     /// per l'import media, contesto diverso).
@@ -506,6 +510,7 @@ impl Default for VibeVideoApp {
             saved_generation: 0,
             unsaved_media: false,
             pending_project_switch: None,
+            quit_confirmed: false,
             project_error: None,
             audiometer_enabled: true,
             audiometer_level: (0.0, 0.0),
@@ -517,6 +522,7 @@ impl Default for VibeVideoApp {
 enum ProjectSwitch {
     Open,
     ImportOtio,
+    Quit,
 }
 
 enum UnsavedChoice {
@@ -733,16 +739,35 @@ impl VibeVideoApp {
         match switch {
             ProjectSwitch::Open => self.open_project_dialog(),
             ProjectSwitch::ImportOtio => self.import_otio_dialog(),
+            ProjectSwitch::Quit => self.quit_confirmed = true,
+        }
+    }
+
+    /// La chiusura della finestra si sospende finché l'utente non risponde
+    /// a "salvare le modifiche?"; poi la si richiede di nuovo.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if self.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_changes() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_project_switch = Some(ProjectSwitch::Quit);
+            ctx.request_repaint();
         }
     }
 
     fn show_unsaved_changes_dialog(&mut self, ui: &mut egui::Ui) {
-        if self.pending_project_switch.is_none() {
+        let Some(switch) = self.pending_project_switch else {
             return;
-        }
+        };
         let mut choice = None;
         let modal = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ui.ctx(), |ui| {
-            ui.heading("Salvare le modifiche?");
+            ui.heading(if switch == ProjectSwitch::Quit {
+                "Salvare le modifiche prima di uscire?"
+            } else {
+                "Salvare le modifiche?"
+            });
             ui.label("Il progetto corrente ha modifiche non salvate.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -762,6 +787,7 @@ impl VibeVideoApp {
         }
         if let Some(choice) = choice {
             self.resolve_unsaved_changes(choice);
+            ui.ctx().request_repaint();
         }
     }
 
@@ -3436,6 +3462,7 @@ impl eframe::App for VibeVideoApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.handle_close_request(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
         if self.thumbnail_worker.as_ref().is_some_and(|w| w.has_pending()) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -7892,6 +7919,49 @@ mod tests {
         assert_eq!(clip.timeline_start, 10);
         assert_eq!(clip.linked_group, None);
         assert_eq!(clip.timeline_len, 50, "2 s a 25 fps");
+    }
+
+    fn close_request_commands(app: &mut VibeVideoApp) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut output = ctx.run_ui(input, |ui| app.handle_close_request(ui.ctx()));
+        output.textures_delta.clear();
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.commands.clone())
+            .unwrap_or_default()
+    }
+
+    /// Chiudere la finestra con modifiche non salvate si ferma sul dialog;
+    /// senza modifiche, o dopo "Non salvare", si esce.
+    #[test]
+    fn closing_the_window_asks_to_save_unsaved_changes() {
+        let mut app = VibeVideoApp::default();
+        let commands = close_request_commands(&mut app);
+        assert!(!commands.contains(&egui::ViewportCommand::CancelClose), "niente da salvare");
+
+        let mut app = VibeVideoApp::default();
+        make_timeline_with_clip(&mut app, 0, 0, 10);
+        let commands = close_request_commands(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        assert_eq!(app.pending_project_switch, Some(ProjectSwitch::Quit));
+
+        app.resolve_unsaved_changes(UnsavedChoice::Cancel);
+        assert!(!app.quit_confirmed);
+
+        close_request_commands(&mut app);
+        app.resolve_unsaved_changes(UnsavedChoice::Discard);
+        assert!(app.quit_confirmed);
+        let commands = close_request_commands(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+        assert!(!commands.contains(&egui::ViewportCommand::CancelClose));
     }
 
     /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il
