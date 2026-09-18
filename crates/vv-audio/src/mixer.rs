@@ -7,7 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use vv_core::{ClipSource, FrameIdx, Keyframed, Project, Timeline, TrackKind};
+use vv_core::{ClipSource, FrameIdx, Keyframed, Project, Timeline};
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Granularità control-rate (~60Hz) del gain keyframeato, non sample-accurate.
@@ -54,11 +54,8 @@ impl MixSnapshot {
         let fps = timeline.fps.as_f64().max(1e-9);
         let ch = channels.max(1) as u64;
         let mut clips = Vec::new();
-        for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
-            if track.muted {
-                continue;
-            }
-            for clip in &track.clips {
+        for (_, track) in timeline.audible_tracks() {
+            for clip in track.clips.iter().filter(|c| !c.disabled) {
                 let ClipSource::Media(media_id) = &clip.source else {
                     continue;
                 };
@@ -485,7 +482,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use vv_core::{
-        Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track,
+        Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track, TrackKind,
     };
 
     const RATE: u32 = 100;
@@ -542,6 +539,8 @@ mod tests {
             kind: TrackKind::Audio,
             clips,
             muted: false,
+            solo: false,
+            locked: false,
         }
     }
 
@@ -605,6 +604,33 @@ mod tests {
         let mut muted = audio_track(vec![clip_at(a, 0, 0, 5)]);
         muted.muted = true;
         let tl = timeline(vec![muted, audio_track(vec![clip_at(b, 0, 0, 5)])]);
+        let out = render(&project, &tl, 0, 5);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(*s, i as f32 / 1000.0);
+        }
+    }
+
+    #[test]
+    fn only_solo_tracks_play_when_any_is_solo() {
+        let (project, a, b) = project();
+        let mut solo = audio_track(vec![clip_at(b, 0, 0, 5)]);
+        solo.solo = true;
+        let tl = timeline(vec![audio_track(vec![clip_at(a, 0, 0, 5)]), solo]);
+        let out = render(&project, &tl, 0, 5);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(*s, i as f32 / 1000.0);
+        }
+    }
+
+    #[test]
+    fn disabled_clip_is_excluded() {
+        let (project, a, b) = project();
+        let mut disabled = clip_at(a, 0, 0, 5);
+        disabled.disabled = true;
+        let tl = timeline(vec![
+            audio_track(vec![disabled]),
+            audio_track(vec![clip_at(b, 0, 0, 5)]),
+        ]);
         let out = render(&project, &tl, 0, 5);
         for (i, s) in out.iter().enumerate() {
             assert_eq!(*s, i as f32 / 1000.0);

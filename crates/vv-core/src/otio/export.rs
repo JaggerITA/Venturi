@@ -152,7 +152,7 @@ fn clip_to_otio(project: &Project, clip: &Clip, fps: Rational) -> Value {
         "source_range": time_range(clip.source_offset, clip.timeline_len, fps),
         "effects": [],
         "markers": [],
-        "enabled": true,
+        "enabled": !clip.disabled,
         "metadata": {
             "vibevideo": {
                 "effects": clip.effects,

@@ -703,7 +703,10 @@ fn clipped_media_segments(
 ) -> Vec<(usize, MediaSegment)> {
     let mut segments = Vec::new();
     for (track_index, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
-        for clip in &track.clips {
+        if track.muted {
+            continue;
+        }
+        for clip in track.clips.iter().filter(|c| !c.disabled) {
             let ClipSource::Media(media_id) = &clip.source else {
                 continue;
             };
@@ -1698,6 +1701,8 @@ mod tests {
                 media_clip(2, media_b, 50, 50),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
 
         let segments = collect_media_segments(&tl, 40, 60);
@@ -1724,6 +1729,8 @@ mod tests {
                 media_clip(3, media_a, 30, 10),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
 
         let segments = collect_media_segments(&tl, 0, 40);
@@ -1747,11 +1754,15 @@ mod tests {
                 kind: TrackKind::Video,
                 clips: vec![media_clip(1, media_a, 0, 50)],
                 muted: false,
+                solo: false,
+                locked: false,
             },
             Track {
                 kind: TrackKind::Video,
                 clips: vec![media_clip(2, media_b, 0, 50)],
                 muted: false,
+                solo: false,
+                locked: false,
             },
         ]);
 
@@ -1780,6 +1791,8 @@ mod tests {
                 media_clip(2, media_b, 50, 50),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
 
         // Finestra dietro [40,60): attraversa il taglio a 50 andando
@@ -1811,6 +1824,8 @@ mod tests {
                 media_clip(3, media_a, 30, 10),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
 
         let segments = collect_media_segments_behind(&tl, 40, 0);
@@ -1839,6 +1854,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 200)],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
 
         let segments = collect_media_segments_behind(&tl, 150, 100);
@@ -2000,6 +2017,8 @@ mod tests {
                 media_clip(2, media_b, 50, 50), // [50,100), adiacente
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -2072,6 +2091,8 @@ mod tests {
                 media_clip_trimmed(2, media_a, 50, 50, 100),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -2430,6 +2451,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 75)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2485,6 +2508,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 100)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2566,6 +2591,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 100)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2647,6 +2674,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 100)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2739,6 +2768,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 100)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2817,6 +2848,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 75)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2886,6 +2919,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 500)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2968,6 +3003,8 @@ mod tests {
                 media_clip_trimmed(2, media_a, 60, 200, 100),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3050,6 +3087,8 @@ mod tests {
                 media_clip_trimmed(2, media_a, 60, 200, 100),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3196,6 +3235,8 @@ mod tests {
                 media_clip(2, media_b, 40, 400), // [40,440)
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3289,6 +3330,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 100)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -3371,6 +3414,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 150)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -3465,6 +3510,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 50)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, 0.0, 0.0);
@@ -3534,6 +3581,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 500)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3651,6 +3700,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 500)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3758,6 +3809,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 500)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();
@@ -4104,6 +4157,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 500)],
             muted: false,
+            solo: false,
+            locked: false,
         }]));
 
         let caches = SharedFrameCache::new();

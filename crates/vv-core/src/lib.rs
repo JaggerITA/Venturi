@@ -9,7 +9,7 @@ pub use command::{
     LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     RippleDeleteAllTracks,
     cut_overlaps, make_room_for_ranges, ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain, SetClipTitle,
-    SetClipTransformParam, SplitClip,
+    SetClipTransformParam, SetClipsDisabled, SetTrackFlag, SplitClip, TrackFlag,
     TrimClip, TrimEdge,
     UnlinkClip, UpsertKeyframe,
 };
@@ -1273,5 +1273,61 @@ mod tests {
         assert_eq!(tl.tracks[1].clips.len(), 3);
         assert_eq!(tl.tracks[0].clips[2].timeline_start, 20);
         assert_eq!(tl.tracks[1].clips[2].timeline_start, 20);
+    }
+
+    #[test]
+    fn ripple_gap_leaves_locked_tracks_where_they_are() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        for track_index in 0..2 {
+            let clip = make_clip(&mut project, 20, 10);
+            history.do_command(
+                &mut project,
+                Box::new(command::InsertClip { timeline, track_index, clip }),
+            );
+        }
+        history.do_command(
+            &mut project,
+            Box::new(command::SetTrackFlag::new(timeline, 1, TrackFlag::Locked, true)),
+        );
+
+        history.do_command(&mut project, Box::new(command::RippleDeleteGap::new(timeline, 0, 20)));
+        let tl = &project.timelines[timeline];
+        assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
+        assert_eq!(tl.tracks[1].clips[0].timeline_start, 20, "track bloccata");
+
+        history.undo(&mut project);
+        history.undo(&mut project);
+        assert!(!project.timelines[timeline].tracks[1].locked);
+    }
+
+    #[test]
+    fn disabling_clips_is_undoable_and_hides_them_from_compositing() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let clip = make_clip(&mut project, 0, 10);
+        let id = clip.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 0, clip }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipsDisabled::new(timeline, vec![(0, id)], true)),
+        );
+        assert!(project.timelines[timeline].active_video_clips_at(5).is_empty());
+
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline].active_video_clips_at(5).len(), 1);
+
+        history.do_command(
+            &mut project,
+            Box::new(command::SetTrackFlag::new(timeline, 0, TrackFlag::Muted, true)),
+        );
+        assert!(
+            project.timelines[timeline].active_video_clips_at(5).is_empty(),
+            "track video disattivata"
+        );
     }
 }

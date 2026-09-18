@@ -308,8 +308,8 @@ fn mix_audio_track(
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, String> {
     let mut buffers: HashMap<(PathBuf, usize), Option<Arc<Vec<f32>>>> = HashMap::new();
-    for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
-        for clip in &track.clips {
+    for (_, track) in timeline.audible_tracks() {
+        for clip in track.clips.iter().filter(|c| !c.disabled) {
             let ClipSource::Media(media_id) = &clip.source else {
                 continue;
             };
@@ -385,11 +385,15 @@ mod tests {
                 kind: TrackKind::Video,
                 clips: vec![solid_color_clip(1, 0, 10, red())],
                 muted: false,
+                solo: false,
+                locked: false,
             },
             Track {
                 kind: TrackKind::Audio,
                 clips: vec![solid_color_clip(2, 5, 20, red())], // finisce a 25, più avanti
                 muted: false,
+                solo: false,
+                locked: false,
             },
         ]);
         assert_eq!(tl.total_frames(), 25);
@@ -401,6 +405,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
         assert_eq!(tl.total_frames(), 0);
     }
@@ -414,6 +420,8 @@ mod tests {
                 solid_color_clip(2, 20, 10, red()),
             ],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
         assert_eq!(tl.active_clip_at(0, 5).map(|c| c.id), Some(ClipId(1)));
         assert!(tl.active_clip_at(0, 15).is_none(), "buco tra le due clip");
@@ -445,6 +453,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![solid_color_clip(1, 10, 5, red())],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
@@ -465,6 +475,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![solid_color_clip(1, 10, 5, red())],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
@@ -492,6 +504,8 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![clip],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
@@ -541,6 +555,8 @@ mod tests {
                 vv_core::Rational::one(),
             )],
             muted: false,
+            solo: false,
+            locked: false,
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut provider = StreamingFrameProvider::default();
@@ -562,11 +578,15 @@ mod tests {
                 kind: TrackKind::Video,
                 clips: vec![solid_color_clip(1, 0, 30, red())],
                 muted: false,
+                solo: false,
+                locked: false,
             },
             Track {
                 kind: TrackKind::Video,
                 clips: vec![solid_color_clip(2, 10, 10, blue())],
                 muted: false,
+                solo: false,
+                locked: false,
             },
         ]);
         let compositor = vv_render::Compositor::new_headless();
@@ -603,11 +623,15 @@ mod tests {
                 kind: TrackKind::Video,
                 clips: vec![solid_color_clip(1, 0, 25, red())],
                 muted: false,
+                solo: false,
+                locked: false,
             },
             Track {
                 kind: TrackKind::Audio,
                 clips: vec![],
                 muted: false,
+                solo: false,
+                locked: false,
             },
         ]);
         let mixed = mix_audio_track(&project, &tl, 0..25).unwrap();
@@ -625,11 +649,15 @@ mod tests {
                 kind: TrackKind::Video,
                 clips: vec![solid_color_clip(1, 0, 10, red())],
                 muted: false,
+                solo: false,
+                locked: false,
             },
             Track {
                 kind: TrackKind::Audio,
                 clips: vec![],
                 muted: false,
+                solo: false,
+                locked: false,
             },
         ]);
         assert!(tl.active_clip_at(1, 5).is_none(), "track audio vuota");

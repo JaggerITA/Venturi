@@ -786,6 +786,9 @@ pub struct Clip {
     /// `source_offset`/`timeline_len` in frame sorgente.
     #[serde(default = "Rational::one")]
     pub rate: Rational,
+    /// Esclusa da compositing e mix, ma resta in timeline.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl Clip {
@@ -810,6 +813,7 @@ impl Clip {
             linked_group: None,
             audio_stream_index: 0,
             rate,
+            disabled: false,
         }
     }
 
@@ -897,7 +901,15 @@ pub struct Track {
     pub kind: TrackKind,
     /// Sempre ordinate per `timeline_start`, mai sovrapposte.
     pub clips: Vec<Clip>,
+    /// Su una track video: esclusa dal compositing.
     pub muted: bool,
+    /// Solo audio: se almeno una track è in solo, suonano solo quelle.
+    #[serde(default)]
+    pub solo: bool,
+    /// Le sue clip non si possono selezionare né modificare, e nulla ci
+    /// può atterrare sopra.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl Track {
@@ -906,6 +918,8 @@ impl Track {
             kind,
             clips: Vec::new(),
             muted: false,
+            solo: false,
+            locked: false,
         }
     }
 }
@@ -976,15 +990,35 @@ impl Timeline {
     /// Con una clip che non riempie il frame di output — aspect ratio
     /// diverso da quello della timeline, vedi il letterbox in
     /// `vv_render` — sotto le sue bande si vedono i layer precedenti.
+    /// Le clip disattivate e le track video disattivate non ci sono.
     pub fn active_video_clips_at(&self, frame: FrameIdx) -> Vec<(usize, &Clip)> {
         self.tracks_of_kind(TrackKind::Video)
+            .filter(|(_, t)| !t.muted)
             .filter_map(|(i, t)| {
                 t.clips
                     .iter()
                     .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+                    .filter(|c| !c.disabled)
                     .map(|c| (i, c))
             })
             .collect()
+    }
+
+    /// Le track audio che finiscono nel mix: non mute e, se qualcuna è in
+    /// solo, solo quelle.
+    pub fn audible_tracks(&self) -> impl Iterator<Item = (usize, &Track)> {
+        let any_solo = self.tracks_of_kind(TrackKind::Audio).any(|(_, t)| t.solo);
+        self.tracks_of_kind(TrackKind::Audio)
+            .filter(move |(_, t)| !t.muted && (!any_solo || t.solo))
+    }
+
+    pub fn is_locked(&self, track_index: usize) -> bool {
+        self.tracks.get(track_index).is_some_and(|t| t.locked)
+    }
+
+    /// La prima track di tipo `kind` non bloccata.
+    pub fn first_unlocked_track_index(&self, kind: TrackKind) -> Option<usize> {
+        self.tracks_of_kind(kind).find(|(_, t)| !t.locked).map(|(i, _)| i)
     }
 
     pub fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, &Clip)> {
@@ -1294,6 +1328,8 @@ mod timeline_tests {
                 kind: TrackKind::Video,
                 clips: vec![clip_at(0, 10, 1), clip_at(20, 5, 2)],
                 muted: false,
+                solo: false,
+                locked: false,
             }],
         };
         assert_eq!(tl.active_clip_at(0, 5).map(|c| c.id), Some(ClipId(1)));
@@ -1320,11 +1356,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(0, 30, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(10, 10, 2)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1357,11 +1397,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(0, 30, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(10, 10, 2)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1395,11 +1439,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(0, 10, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Audio,
                     clips: vec![clip_at(0, 10, 2)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1420,11 +1468,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(50, 10, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(20, 10, 2)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1445,11 +1497,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(50, 10, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(20, 10, 2)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1470,11 +1526,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(0, 10, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Audio,
                     clips: vec![clip_at(0, 10, 2)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1523,6 +1583,8 @@ mod timeline_tests {
                 kind: TrackKind::Video,
                 clips: vec![clip_at(0, 10, 1)],
                 muted: false,
+                solo: false,
+                locked: false,
             }],
         };
         assert!(tl.active_clip_at(1, 5).is_none(), "track inesistente");
@@ -1539,11 +1601,15 @@ mod timeline_tests {
                     kind: TrackKind::Video,
                     clips: vec![clip_at(0, 10, 1)],
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
                 Track {
                     kind: TrackKind::Audio,
                     clips: vec![clip_at(15, 10, 2)], // finisce a 25, più avanti della video
                     muted: false,
+                    solo: false,
+                    locked: false,
                 },
             ],
         };
@@ -1676,6 +1742,8 @@ mod timeline_tests {
                 kind: TrackKind::Video,
                 clips: vec![clip, media_clip_at(Rational::one(), 0, 10, 2000)],
                 muted: false,
+                solo: false,
+                locked: false,
             }],
         });
 

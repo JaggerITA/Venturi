@@ -200,6 +200,115 @@ impl Command for RemoveTrack {
     }
 }
 
+/// Stato di una track modificabile dalla sua intestazione.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackFlag {
+    Muted,
+    Solo,
+    Locked,
+}
+
+impl TrackFlag {
+    fn field(self, track: &mut Track) -> &mut bool {
+        match self {
+            TrackFlag::Muted => &mut track.muted,
+            TrackFlag::Solo => &mut track.solo,
+            TrackFlag::Locked => &mut track.locked,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SetTrackFlag {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub flag: TrackFlag,
+    pub value: bool,
+    old: Option<bool>,
+}
+
+impl SetTrackFlag {
+    pub fn new(timeline: TimelineId, track_index: usize, flag: TrackFlag, value: bool) -> Self {
+        Self {
+            timeline,
+            track_index,
+            flag,
+            value,
+            old: None,
+        }
+    }
+}
+
+impl Command for SetTrackFlag {
+    fn apply(&mut self, project: &mut Project) {
+        let Some(track) = project.timelines[self.timeline].tracks.get_mut(self.track_index) else {
+            return;
+        };
+        let field = self.flag.field(track);
+        self.old = Some(*field);
+        *field = self.value;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let (Some(old), Some(track)) =
+            (self.old, project.timelines[self.timeline].tracks.get_mut(self.track_index))
+        else {
+            return;
+        };
+        *self.flag.field(track) = old;
+    }
+}
+
+/// Attiva o disattiva (tasto D) un insieme di clip.
+#[derive(Debug)]
+pub struct SetClipsDisabled {
+    pub timeline: TimelineId,
+    pub clips: Vec<(usize, ClipId)>,
+    pub disabled: bool,
+    old: Vec<(usize, ClipId, bool)>,
+}
+
+impl SetClipsDisabled {
+    pub fn new(timeline: TimelineId, clips: Vec<(usize, ClipId)>, disabled: bool) -> Self {
+        Self {
+            timeline,
+            clips,
+            disabled,
+            old: Vec::new(),
+        }
+    }
+}
+
+impl Command for SetClipsDisabled {
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        self.old.clear();
+        for &(track_index, clip_id) in &self.clips {
+            if let Some(clip) = tl
+                .tracks
+                .get_mut(track_index)
+                .and_then(|t| t.clips.iter_mut().find(|c| c.id == clip_id))
+            {
+                self.old.push((track_index, clip_id, clip.disabled));
+                clip.disabled = self.disabled;
+            }
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        for &(track_index, clip_id, old) in &self.old {
+            if let Some(clip) = tl
+                .tracks
+                .get_mut(track_index)
+                .and_then(|t| t.clips.iter_mut().find(|c| c.id == clip_id))
+            {
+                clip.disabled = old;
+            }
+        }
+    }
+}
+
 /// Inserisce una clip in una track a una posizione. Se sovrappone clip
 /// esistenti, quelle sotto vengono spostate a destra (insert, non overwrite).
 #[derive(Debug)]
@@ -337,6 +446,9 @@ impl Command for RippleDeleteAllTracks {
 
         let mut shifted = Vec::new();
         for (track_index, track) in tl.tracks.iter_mut().enumerate() {
+            if track.locked {
+                continue;
+            }
             for c in &mut track.clips {
                 if c.timeline_start >= gap_start {
                     shifted.push((track_index, c.id, c.timeline_start));
@@ -399,6 +511,9 @@ impl Command for RippleDeleteGap {
         let tl = &mut project.timelines[self.timeline];
         let mut shifted = Vec::new();
         for (track_index, track) in tl.tracks.iter_mut().enumerate() {
+            if track.locked {
+                continue;
+            }
             for c in &mut track.clips {
                 if c.timeline_start >= self.gap_start {
                     shifted.push((track_index, c.id, c.timeline_start));
@@ -1728,6 +1843,9 @@ pub fn cut_overlaps(
     commands: &mut Vec<Box<dyn Command>>,
 ) {
     for track_index in 0..project.timelines[timeline_id].tracks.len() {
+        if project.timelines[timeline_id].is_locked(track_index) {
+            continue;
+        }
         let clips: Vec<(ClipId, FrameIdx, FrameIdx)> = project.timelines[timeline_id].tracks
             [track_index]
             .clips

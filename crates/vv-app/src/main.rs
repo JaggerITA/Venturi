@@ -1252,6 +1252,10 @@ impl VibeVideoApp {
         }
         self.timeline_state
             .set_selection(selected, Some((track_index, clip_id)));
+        if let Some(timeline_id) = self.timeline_id {
+            self.timeline_state
+                .drop_locked(&self.project.timelines[timeline_id]);
+        }
     }
 
     /// Allinea la clip video attiva (viewer) al playhead e, se il playhead
@@ -2533,9 +2537,24 @@ impl VibeVideoApp {
                 );
                 new_index
             }
-            timeline_ui::MediaDropTarget::Track(track) => track,
-            // Nessuna track video: non dovrebbe succedere, vedi doc di `RemoveTrack`.
-            _ => self.project.timelines[timeline_id].first_track_index(TrackKind::Video)?,
+            timeline_ui::MediaDropTarget::Track(track) => {
+                if self.project.timelines[timeline_id].is_locked(track) {
+                    return None;
+                }
+                track
+            }
+            _ => match self.project.timelines[timeline_id].first_unlocked_track_index(TrackKind::Video) {
+                Some(track) => track,
+                // Nessuna track video libera: se ne crea una.
+                None => {
+                    let new_index = self.project.timelines[timeline_id].tracks.len();
+                    self.history.do_command(
+                        &mut self.project,
+                        Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
+                    );
+                    new_index
+                }
+            },
         };
         let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
             let new_index = self.project.timelines[timeline_id].tracks.len();
@@ -2578,8 +2597,12 @@ impl VibeVideoApp {
         );
         let video_track = tracks.video;
 
+        let has_audio_tracks = self.project.timelines[timeline_id]
+            .first_track_index(TrackKind::Audio)
+            .is_some();
         let mut audio_track_indices: Vec<usize> = self.project.timelines[timeline_id]
             .tracks_of_kind(TrackKind::Audio)
+            .filter(|(_, t)| !t.locked)
             .map(|(i, _)| i)
             .collect();
 
@@ -2591,9 +2614,9 @@ impl VibeVideoApp {
         }
 
         // Senza track audio l'audio di un video si scarta, ma un media solo
-        // audio se ne crea una.
+        // audio se ne crea una. Se sono tutte bloccate se ne creano di nuove.
         let num_audio_streams = if meta.has_audio
-            && (!audio_track_indices.is_empty() || !meta.has_video)
+            && (has_audio_tracks || !meta.has_video)
         {
             self.project
                 .media_pool
@@ -2656,6 +2679,34 @@ impl VibeVideoApp {
         }
     }
 
+    /// D: disattiva le clip selezionate, o le riattiva se lo sono già tutte.
+    fn toggle_disabled_selected(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let tl = &self.project.timelines[timeline_id];
+        let selected: Vec<(usize, ClipId)> = self
+            .timeline_state
+            .selected
+            .iter()
+            .copied()
+            .filter(|&(track_index, _)| !tl.is_locked(track_index))
+            .collect();
+        if selected.is_empty() {
+            return;
+        }
+        let all_disabled = selected.iter().all(|&(track_index, clip_id)| {
+            tl.tracks
+                .get(track_index)
+                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                .is_some_and(|c| c.disabled)
+        });
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::SetClipsDisabled::new(timeline_id, selected, !all_disabled)),
+        );
+    }
+
     /// Ctrl+A: seleziona tutte le clip della timeline.
     fn select_all_clips(&mut self) {
         self.select_clips(|_| true);
@@ -2682,6 +2733,7 @@ impl VibeVideoApp {
             .tracks
             .iter()
             .enumerate()
+            .filter(|(_, track)| !track.locked)
             .flat_map(|(track_index, track)| {
                 track
                     .clips
@@ -2895,7 +2947,17 @@ impl VibeVideoApp {
             return;
         }
         let playhead = self.timeline_state.playhead;
-        let entries = self.timeline_state.clipboard.clone();
+        let tl = &self.project.timelines[timeline_id];
+        let entries: Vec<timeline_ui::ClipboardEntry> = self
+            .timeline_state
+            .clipboard
+            .iter()
+            .filter(|e| e.track_index < tl.tracks.len() && !tl.is_locked(e.track_index))
+            .cloned()
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
 
         // Pre-alloca gli id delle nuove clip: servono per risolvere i
         // link tra loro (che devono riferire il *nuovo* id della gemella,
@@ -3027,7 +3089,9 @@ impl VibeVideoApp {
             for (member_track, member_id) in std::iter::once((track_index, clip_id))
                 .chain(self.group_members(timeline_id, track_index, clip_id))
             {
-                if !processed.insert((member_track, member_id)) {
+                if self.project.timelines[timeline_id].is_locked(member_track)
+                    || !processed.insert((member_track, member_id))
+                {
                     continue;
                 }
                 let Some(clip) = self.project.timelines[timeline_id]
@@ -3149,6 +3213,7 @@ impl VibeVideoApp {
             .tracks
             .iter()
             .enumerate()
+            .filter(|(_, track)| !track.locked)
             .flat_map(|(track_index, track)| {
                 track
                     .clips
@@ -4407,6 +4472,10 @@ impl eframe::App for VibeVideoApp {
         // I tasti scritti in un campo di testo (es. il titolo) non sono
         // scorciatoie: "T" taglierebbe le clip, Backspace le cancellerebbe.
         let typing = ui.ctx().egui_wants_keyboard_input();
+        if let Some(timeline_id) = self.timeline_id {
+            self.timeline_state
+                .drop_locked(&self.project.timelines[timeline_id]);
+        }
         ui.input(|i| {
             arrow_input.1 = i.time;
             if typing {
@@ -4438,6 +4507,9 @@ impl eframe::App for VibeVideoApp {
             }
             if i.key_pressed(egui::Key::T) && !i.modifiers.command {
                 self.split_at_playhead();
+            }
+            if i.key_pressed(egui::Key::D) && !i.modifiers.command && !i.modifiers.alt {
+                self.toggle_disabled_selected();
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
@@ -7546,6 +7618,113 @@ mod tests {
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
+    }
+
+    fn lock_track(app: &mut VibeVideoApp, track_index: usize) {
+        let timeline_id = app.timeline_id.unwrap();
+        app.history.do_command(
+            &mut app.project,
+            Box::new(vv_core::SetTrackFlag::new(
+                timeline_id,
+                track_index,
+                vv_core::TrackFlag::Locked,
+                true,
+            )),
+        );
+    }
+
+    #[test]
+    fn locked_tracks_are_not_split_selected_or_pasted_on() {
+        let mut app = VibeVideoApp::default();
+        let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
+        make_timeline_with_clip(&mut app, 1, 0, 20);
+        let timeline_id = app.timeline_id.unwrap();
+        lock_track(&mut app, 1);
+
+        app.timeline_state.playhead = 8;
+        app.split_at_playhead();
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[0].clips.len(), 2);
+        assert_eq!(tl.tracks[1].clips.len(), 1, "track bloccata intatta");
+
+        app.select_all_clips();
+        assert!(app.timeline_state.selected.iter().all(|&(t, _)| t == 0));
+
+        app.timeline_state.clipboard = vec![timeline_ui::ClipboardEntry {
+            track_index: 1,
+            relative_start: 0,
+            clip: app.project.timelines[timeline_id].tracks[0].clips[0].clone(),
+            timeline_fps: vv_core::Rational::new(25, 1),
+            link_tag: None,
+        }];
+        app.timeline_state.playhead = 40;
+        app.paste_clipboard_at_playhead();
+        assert_eq!(app.project.timelines[timeline_id].tracks[1].clips.len(), 1);
+
+        app.timeline_state
+            .set_selection(BTreeSet::from([(0, video_id)]), Some((0, video_id)));
+        app.ripple_delete_selected();
+        assert_eq!(
+            app.project.timelines[timeline_id].tracks[1].clips[0].timeline_start,
+            0,
+            "il ripple non sposta la track bloccata"
+        );
+    }
+
+    #[test]
+    fn d_disables_the_selection_and_enables_it_again() {
+        let mut app = VibeVideoApp::default();
+        let a = make_timeline_with_clip(&mut app, 0, 0, 20);
+        let b = make_timeline_with_clip(&mut app, 0, 20, 20);
+        let timeline_id = app.timeline_id.unwrap();
+        let disabled = |app: &VibeVideoApp| -> Vec<bool> {
+            app.project.timelines[timeline_id].tracks[0]
+                .clips
+                .iter()
+                .map(|c| c.disabled)
+                .collect()
+        };
+
+        app.timeline_state
+            .set_selection(BTreeSet::from([(0, a)]), Some((0, a)));
+        app.toggle_disabled_selected();
+        assert_eq!(disabled(&app), vec![true, false]);
+
+        // Selezione mista: si disattiva tutto.
+        app.timeline_state
+            .set_selection(BTreeSet::from([(0, a), (0, b)]), Some((0, a)));
+        app.toggle_disabled_selected();
+        assert_eq!(disabled(&app), vec![true, true]);
+
+        app.toggle_disabled_selected();
+        assert_eq!(disabled(&app), vec![false, false]);
+    }
+
+    #[test]
+    fn dropping_media_skips_locked_tracks() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            50,
+        );
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+        let video = app.project.timelines[timeline_id]
+            .first_track_index(TrackKind::Video)
+            .unwrap();
+        lock_track(&mut app, video);
+
+        let meta = app.project.media_pool[media_id].meta.clone();
+        app.add_media_to_timeline_at(
+            timeline_ui::MediaDrag::whole(media_id, &meta),
+            0,
+            timeline_ui::MediaDropTarget::Default,
+        );
+        let tl = &app.project.timelines[timeline_id];
+        assert_eq!(tl.tracks[video].clips.len(), 1, "niente sulla track bloccata");
+        let new_video = tl.first_unlocked_track_index(TrackKind::Video).unwrap();
+        assert_ne!(new_video, video);
+        assert_eq!(tl.tracks[new_video].clips.len(), 1);
     }
 
     #[test]

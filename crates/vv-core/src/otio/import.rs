@@ -293,6 +293,7 @@ impl Importer<'_> {
             linked_group,
             audio_stream_index,
             rate,
+            disabled: item["enabled"] == false,
         };
         (duration, Some((clip, is_foreign)))
     }

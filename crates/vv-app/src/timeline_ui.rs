@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 
 use vv_core::{
     Clip, ClipId, ClipSource, FrameIdx, History, Keyframed, Project, TimelineId, Track,
-    TrackKind, TrimEdge,
+    TrackFlag, TrackKind, TrimEdge,
 };
 
 const ROW_HEIGHT: f32 = 40.0;
@@ -29,7 +29,7 @@ const TRAILING_MARGIN_SECS: f64 = 5.0;
 const GROUP_DIVIDER_HEIGHT: f32 = 8.0;
 /// Colonna fissa a sinistra della timeline (etichetta track + rimuovi),
 /// non coinvolta nello scroll orizzontale — vedi `draw_track_headers`.
-const TRACK_HEADER_WIDTH: f32 = 100.0;
+const TRACK_HEADER_WIDTH: f32 = 140.0;
 
 /// (indice track, id clip): coppia usata ovunque per identificare univocamente
 /// una clip nella timeline (l'id da solo non basta, la stessa clip non può
@@ -237,6 +237,23 @@ impl TimelineState {
         self.set_selection(clip.into_iter().collect(), clip);
     }
 
+    /// Toglie dalla selezione quel che sta su track bloccate.
+    pub fn drop_locked(&mut self, timeline: &vv_core::Timeline) {
+        self.selected.retain(|&(track_index, _)| !timeline.is_locked(track_index));
+        if self
+            .selection_anchor
+            .is_some_and(|(track_index, _)| timeline.is_locked(track_index))
+        {
+            self.selection_anchor = None;
+        }
+        if self
+            .selected_gap
+            .is_some_and(|(track_index, _, _)| timeline.is_locked(track_index))
+        {
+            self.selected_gap = None;
+        }
+    }
+
     /// Svuota la selezione (clip e vuoto).
     pub fn clear_selection(&mut self) {
         self.selected.clear();
@@ -271,6 +288,10 @@ struct ClipVisual {
     clip: Clip,
     label: String,
     color: egui::Color32,
+    /// La track è bloccata: la clip non si tocca.
+    locked: bool,
+    /// Esclusa dall'output: disattivata lei o la sua track video.
+    muted: bool,
 }
 
 /// Comando differito: raccolto durante il disegno (che prende in prestito
@@ -305,6 +326,14 @@ enum PendingAction {
     Link(Vec<ClipKey>),
     /// Rimuove la track a questo indice (e le sue clip).
     RemoveTrack(usize),
+    SetTrackFlag(usize, TrackFlag, bool),
+}
+
+#[derive(Clone, Copy)]
+struct TrackFlags {
+    muted: bool,
+    solo: bool,
+    locked: bool,
 }
 
 /// Ordine di disegno: gruppo Video (decrescente per `track_index` — la
@@ -462,6 +491,7 @@ fn drag_group_row_targets(
 fn draw_track_headers(
     ui: &mut egui::Ui,
     track_kinds: &[TrackKind],
+    track_flags: &[TrackFlags],
     row_order: &[usize],
     row_y: &[f32],
     video_count: usize,
@@ -510,6 +540,63 @@ fn draw_track_headers(
             egui::FontId::proportional(14.0),
             text_color,
         );
+
+        let flags = track_flags[track_index];
+        let toggle = |x: f32, id: &str, hover: &str, paint: &dyn Fn(&egui::Painter, egui::Rect)| {
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(row_rect.left() + x, row_rect.center().y),
+                egui::vec2(20.0, 20.0),
+            );
+            let resp = ui
+                .interact(rect, ui.id().with(id).with(track_index), egui::Sense::click())
+                .on_hover_text(hover);
+            if resp.hovered() {
+                ui.painter().rect_filled(rect, 3.0, egui::Color32::from_gray(60));
+            }
+            paint(ui.painter(), rect);
+            resp.clicked()
+        };
+        if toggle(42.0, "lock_track", "Blocca track", &|p, r| {
+            paint_lock_icon(p, r, flags.locked)
+        }) {
+            *pending = Some(PendingAction::SetTrackFlag(
+                track_index,
+                TrackFlag::Locked,
+                !flags.locked,
+            ));
+        }
+        match kind {
+            TrackKind::Video => {
+                if toggle(66.0, "mute_track", "Disattiva track video", &|p, r| {
+                    paint_film_icon(p, r, !flags.muted)
+                }) {
+                    *pending = Some(PendingAction::SetTrackFlag(
+                        track_index,
+                        TrackFlag::Muted,
+                        !flags.muted,
+                    ));
+                }
+            }
+            TrackKind::Audio => {
+                let solo_color = egui::Color32::from_rgb(215, 170, 40);
+                if toggle(66.0, "solo_track", "Solo", &|p, r| {
+                    paint_letter_button(p, r, "S", flags.solo.then_some(solo_color))
+                }) {
+                    *pending =
+                        Some(PendingAction::SetTrackFlag(track_index, TrackFlag::Solo, !flags.solo));
+                }
+                let mute_color = egui::Color32::from_rgb(200, 60, 60);
+                if toggle(90.0, "mute_track", "Muto", &|p, r| {
+                    paint_letter_button(p, r, "M", flags.muted.then_some(mute_color))
+                }) {
+                    *pending = Some(PendingAction::SetTrackFlag(
+                        track_index,
+                        TrackFlag::Muted,
+                        !flags.muted,
+                    ));
+                }
+            }
+        }
 
         let is_last_of_kind = track_kinds.iter().filter(|k| **k == kind).count() <= 1;
         const REMOVE_BTN_SIZE: f32 = 18.0;
@@ -581,6 +668,81 @@ fn draw_track_headers(
         );
     }
 
+}
+
+fn paint_lock_icon(painter: &egui::Painter, rect: egui::Rect, locked: bool) {
+    let color = if locked {
+        egui::Color32::from_gray(235)
+    } else {
+        egui::Color32::from_gray(110)
+    };
+    let c = rect.center();
+    let body = egui::Rect::from_min_max(c + egui::vec2(-5.0, -1.0), c + egui::vec2(5.0, 6.0));
+    painter.rect_filled(body, 1.5, color);
+    // Da aperto, la gamba destra dell'arco non arriva al corpo.
+    let right_leg_end = if locked { -1.0 } else { -4.0 };
+    let mut points = vec![c + egui::vec2(-3.5, -1.0), c + egui::vec2(-3.5, -3.5)];
+    points.extend((0..=8).map(|i| {
+        let a = std::f32::consts::PI * (1.0 + i as f32 / 8.0);
+        c + egui::vec2(3.5 * a.cos(), -3.5 + 3.5 * a.sin())
+    }));
+    points.push(c + egui::vec2(3.5, right_leg_end));
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.6, color)));
+}
+
+/// Pellicola; barrata in rosso se la track è disattivata.
+fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
+    let color = egui::Color32::from_gray(if enabled { 200 } else { 100 });
+    let film = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 11.0));
+    painter.rect_stroke(film, 1.0, egui::Stroke::new(1.3, color), egui::StrokeKind::Inside);
+    for i in 0..4 {
+        let x = film.left() + 2.5 + i as f32 * 3.0;
+        for y in [film.top() + 2.0, film.bottom() - 2.0] {
+            painter.rect_filled(
+                egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(1.4, 1.4)),
+                0.0,
+                color,
+            );
+        }
+    }
+    if !enabled {
+        painter.line_segment(
+            [film.left_bottom() + egui::vec2(-1.0, 1.0), film.right_top() + egui::vec2(1.0, -1.0)],
+            egui::Stroke::new(1.6, egui::Color32::from_rgb(220, 70, 70)),
+        );
+    }
+}
+
+/// Pulsante "S"/"M": pieno di `active` quando è attivo.
+fn paint_letter_button(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    letter: &str,
+    active: Option<egui::Color32>,
+) {
+    let button = rect.shrink(2.0);
+    let text_color = match active {
+        Some(fill) => {
+            painter.rect_filled(button, 3.0, fill);
+            egui::Color32::BLACK
+        }
+        None => {
+            painter.rect_stroke(
+                button,
+                3.0,
+                egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+                egui::StrokeKind::Inside,
+            );
+            egui::Color32::from_gray(150)
+        }
+    };
+    painter.text(
+        button.center(),
+        egui::Align2::CENTER_CENTER,
+        letter,
+        egui::FontId::proportional(11.0),
+        text_color,
+    );
 }
 
 /// Intervallo (in secondi) tra due tacche *maggiori* del righello, scelto
@@ -1022,12 +1184,25 @@ pub fn show_timeline(
                     clip: clip.clone(),
                     label,
                     color,
+                    locked: track.locked,
+                    muted: clip.disabled || (track.kind == TrackKind::Video && track.muted),
                 });
             }
         }
         let track_kinds: Vec<TrackKind> = tl.tracks.iter().map(|t| t.kind).collect();
         (tl.tracks.len(), track_kinds, visuals, max_end)
     };
+    let track_flags: Vec<TrackFlags> = project.timelines[timeline_id]
+        .tracks
+        .iter()
+        .map(|t| TrackFlags {
+            muted: t.muted,
+            solo: t.solo,
+            locked: t.locked,
+        })
+        .collect();
+    let track_locked = |track_index: usize| track_flags.get(track_index).is_some_and(|f| f.locked);
+    state.drop_locked(&project.timelines[timeline_id]);
 
     let total_secs = (max_end_frames as f64 / fps + TRAILING_MARGIN_SECS).max(MIN_TIMELINE_SECS);
     // A zoom basso il contenuto naturale è più stretto del pannello: forziamo
@@ -1164,6 +1339,7 @@ pub fn show_timeline(
         draw_track_headers(
             ui,
             &track_kinds,
+            &track_flags,
             &row_order,
             &row_y,
             video_count,
@@ -1317,10 +1493,10 @@ pub fn show_timeline(
                         egui::pos2(origin.x, y),
                         egui::vec2(content_width, ROW_HEIGHT),
                     );
-                    let bg = if row % 2 == 0 {
-                        egui::Color32::from_gray(32)
-                    } else {
-                        egui::Color32::from_gray(27)
+                    let bg = match (track_locked(track_index), row % 2 == 0) {
+                        (true, _) => egui::Color32::from_gray(42),
+                        (false, true) => egui::Color32::from_gray(32),
+                        (false, false) => egui::Color32::from_gray(27),
                     };
                     painter.rect_filled(track_rect, 0.0, bg);
                 }
@@ -1391,16 +1567,19 @@ pub fn show_timeline(
                 // Nei margini il drop spetta alle zone "nuova track" sotto.
                 // Un effetto va sulla track video sotto al puntatore, un
                 // media sulle track di sempre (vedi `insert_media_clip`).
+                // `None`: il puntatore è su una track bloccata.
                 let drop_target = |drag: &TimelineDrag, pos: egui::Pos2| match drag {
                     TimelineDrag::Generator(_) => {
                         let track = track_at_y(pos.y - origin.y);
-                        if track_kinds[track] == TrackKind::Video {
-                            MediaDropTarget::Track(track)
+                        if track_locked(track) {
+                            None
+                        } else if track_kinds[track] == TrackKind::Video {
+                            Some(MediaDropTarget::Track(track))
                         } else {
-                            MediaDropTarget::Default
+                            Some(MediaDropTarget::Default)
                         }
                     }
-                    TimelineDrag::Media(_) => MediaDropTarget::Default,
+                    TimelineDrag::Media(_) => Some(MediaDropTarget::Default),
                 };
                 // Layer sopra alle clip, dipinte più avanti.
                 let ghost_painter = painter.clone().with_layer_id(egui::LayerId::new(
@@ -1410,6 +1589,7 @@ pub fn show_timeline(
                 if pointer_over_tracks
                     && let Some(drag) = TimelineDrag::hovered(&marquee_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+                    && let Some(target) = drop_target(&drag, pos)
                     && !drag_set_segments(project, timeline_fps, &drag).is_empty()
                 {
                     let raw_frame =
@@ -1426,9 +1606,11 @@ pub fn show_timeline(
                     .max(0);
                     // Le track dove `insert_media_clip` mette video e audio.
                     let first_row = |kind| {
-                        track_kinds.iter().position(|k| *k == kind).map(|t| origin.y + row_y[t])
+                        (0..track_count)
+                            .find(|&t| track_kinds[t] == kind && !track_locked(t))
+                            .map(|t| origin.y + row_y[t])
                     };
-                    let video_y = match drop_target(&drag, pos) {
+                    let video_y = match target {
                         MediaDropTarget::Track(track) => Some(origin.y + row_y[track]),
                         _ => first_row(TrackKind::Video),
                     };
@@ -1463,6 +1645,7 @@ pub fn show_timeline(
                 if pointer_over_tracks
                     && let Some(drag) = TimelineDrag::released(&marquee_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                    && let Some(target) = drop_target(&drag, pos)
                 {
                     let raw_frame =
                         (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
@@ -1476,7 +1659,6 @@ pub fn show_timeline(
                         snapping_enabled,
                     )
                     .max(0);
-                    let target = drop_target(&drag, pos);
                     media_drop = Some((drag, frame, target));
                 }
 
@@ -1619,7 +1801,9 @@ pub fn show_timeline(
                         let local = to_local(pos);
                         let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
                         let track_index = track_at_y(local.y);
-                        match gap_at(&visuals, track_index, frame) {
+                        match gap_at(&visuals, track_index, frame)
+                            .filter(|_| !track_locked(track_index))
+                        {
                             Some((gap_start, gap_end)) => {
                                 state.selected.clear();
                                 state.selection_anchor = None;
@@ -1694,9 +1878,11 @@ pub fn show_timeline(
                         )
                     });
                     match target {
-                        Some(TrackDragTarget::Track(idx)) => EffectiveTrack::Existing(idx),
+                        Some(TrackDragTarget::Track(idx)) if !track_locked(idx) => {
+                            EffectiveTrack::Existing(idx)
+                        }
                         Some(TrackDragTarget::NewTrack) => EffectiveTrack::New(1),
-                        None => EffectiveTrack::Existing(d.track_index),
+                        _ => EffectiveTrack::Existing(d.track_index),
                     }
                 });
                 if let (Some(d), Some(EffectiveTrack::New(_))) = (&state.drag, drag_effective_track) {
@@ -1718,19 +1904,31 @@ pub fn show_timeline(
                 }
 
                 // Vedi `drag_group_row_targets`.
+                // Se una qualunque clip del gruppo finirebbe su una track
+                // bloccata, il gruppo resta sulle sue track.
                 let drag_group_targets: Option<Vec<(ClipId, EffectiveTrack)>> =
                     state.drag.as_ref().map(|d| {
-                        drag_group_row_targets(
-                            d.clip_id,
-                            d.track_index,
-                            drag_effective_track.unwrap(),
-                            &d.followers,
-                            &track_kinds,
-                            &row_of_track,
-                            &row_order,
-                            video_count,
-                            track_count,
-                        )
+                        let targets_for = |primary_target| {
+                            drag_group_row_targets(
+                                d.clip_id,
+                                d.track_index,
+                                primary_target,
+                                &d.followers,
+                                &track_kinds,
+                                &row_of_track,
+                                &row_order,
+                                video_count,
+                                track_count,
+                            )
+                        };
+                        let targets = targets_for(drag_effective_track.unwrap());
+                        if targets.iter().any(|(_, t)| {
+                            matches!(t, EffectiveTrack::Existing(track) if track_locked(*track))
+                        }) {
+                            targets_for(EffectiveTrack::Existing(d.track_index))
+                        } else {
+                            targets
+                        }
                     });
 
                 // Posizione (clampata, e agganciata alla calamita se attiva)
@@ -1937,7 +2135,12 @@ pub fn show_timeline(
                     );
 
                     let id = ui.id().with("clip").with(visual.clip.id.0);
-                    let resp = ui.interact(clip_rect, id, egui::Sense::click_and_drag());
+                    let sense = if visual.locked {
+                        egui::Sense::hover()
+                    } else {
+                        egui::Sense::click_and_drag()
+                    };
+                    let resp = ui.interact(clip_rect, id, sense);
 
                     // La selezione contiene sempre un gruppo collegato per
                     // intero (vedi `expand_to_linked_groups`), quindi non
@@ -1949,7 +2152,12 @@ pub fn show_timeline(
                     } else {
                         egui::Stroke::new(1.0, egui::Color32::from_gray(15))
                     };
-                    painter.rect_filled(clip_rect, 4.0, visual.color);
+                    let fill = if visual.muted {
+                        egui::Color32::from_gray(58)
+                    } else {
+                        visual.color
+                    };
+                    painter.rect_filled(clip_rect, 4.0, fill);
                     painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
 
                     // Waveform audio: dentro la clip, solo per le clip
@@ -2001,12 +2209,21 @@ pub fn show_timeline(
                     } else {
                         2.0
                     };
+                    let mut label_pos = clip_rect.left_top() + egui::vec2(4.0, label_offset_y);
+                    if visual.clip.disabled {
+                        paint_disabled_badge(&painter, label_pos);
+                        label_pos.x += DISABLED_BADGE_SIZE + 4.0;
+                    }
                     painter.text(
-                        clip_rect.left_top() + egui::vec2(4.0, label_offset_y),
+                        label_pos,
                         egui::Align2::LEFT_TOP,
                         &visual.label,
                         egui::FontId::proportional(12.0),
-                        egui::Color32::BLACK,
+                        if visual.muted {
+                            egui::Color32::from_gray(185)
+                        } else {
+                            egui::Color32::BLACK
+                        },
                     );
                     if visual.clip.linked_group.is_some() {
                         // Due anelli disegnati a mano invece del glifo Unicode
@@ -2014,7 +2231,12 @@ pub fn show_timeline(
                         // Asahi Linux) i font bundled di egui non lo
                         // renderizzano — appare come un quadratino vuoto.
                         let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
-                        let ring_stroke = egui::Stroke::new(1.3, egui::Color32::BLACK);
+                        let ring_color = if visual.muted {
+                            egui::Color32::from_gray(185)
+                        } else {
+                            egui::Color32::BLACK
+                        };
+                        let ring_stroke = egui::Stroke::new(1.3, ring_color);
                         painter.circle_stroke(center + egui::vec2(-2.5, 0.0), 3.5, ring_stroke);
                         painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
                     }
@@ -2040,8 +2262,16 @@ pub fn show_timeline(
                         adjacent(visual.clip.timeline_start, TrimEdge::Start),
                         adjacent(visual.clip.timeline_end(), TrimEdge::End),
                     );
+                    if visual.locked {
+                        painter.rect_filled(
+                            clip_rect,
+                            4.0,
+                            egui::Color32::from_rgba_unmultiplied(70, 70, 70, 140),
+                        );
+                    }
                     let edge_at = |pos: egui::Pos2| zones.at(pos.x - clip_rect.left());
                     if resp.hovered()
+                        && !visual.locked
                         && state.drag.is_none()
                         && state.trim.is_none()
                         && let Some(pos) = resp.hover_pos()
@@ -2430,6 +2660,15 @@ pub fn show_timeline(
                     Box::new(vv_core::LinkClips::new(timeline_id, targets)),
                 );
             }
+            PendingAction::SetTrackFlag(track_index, flag, value) => {
+                history.do_command(
+                    project,
+                    Box::new(vv_core::SetTrackFlag::new(timeline_id, track_index, flag, value)),
+                );
+                if flag == TrackFlag::Locked && value {
+                    state.drop_locked(&project.timelines[timeline_id]);
+                }
+            }
             PendingAction::RemoveTrack(track_index) => {
                 history.do_command(
                     project,
@@ -2565,6 +2804,22 @@ fn darken_if_edited(color: egui::Color32, clip: &Clip) -> egui::Color32 {
     )
 }
 
+const DISABLED_BADGE_SIZE: f32 = 12.0;
+
+/// Quadratino rosso barrato davanti al nome di una clip disattivata.
+fn paint_disabled_badge(painter: &egui::Painter, top_left: egui::Pos2) {
+    let rect = egui::Rect::from_min_size(
+        top_left + egui::vec2(0.0, 1.0),
+        egui::vec2(DISABLED_BADGE_SIZE, DISABLED_BADGE_SIZE),
+    );
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(200, 60, 60));
+    let inner = rect.shrink(3.0);
+    painter.line_segment(
+        [inner.left_bottom(), inner.right_top()],
+        egui::Stroke::new(1.5, egui::Color32::WHITE),
+    );
+}
+
 /// Rettangolo occupato da una clip nel disegno della timeline, in
 /// coordinate locali al contenuto scrollabile (senza l'offset di
 /// `origin`): condiviso dal disegno vero e proprio e dai test di
@@ -2686,7 +2941,7 @@ fn clips_intersecting_rect(
 ) -> Vec<ClipKey> {
     visuals
         .iter()
-        .filter(|v| clip_local_rect(v, px_per_frame, row_y).intersects(rect))
+        .filter(|v| !v.locked && clip_local_rect(v, px_per_frame, row_y).intersects(rect))
         .map(|v| (v.track_index, v.clip.id))
         .collect()
 }
@@ -2870,14 +3125,19 @@ fn expand_to_linked_groups(
     keys: impl IntoIterator<Item = ClipKey>,
 ) -> BTreeSet<ClipKey> {
     let mut result: BTreeSet<ClipKey> = BTreeSet::new();
-    for key @ (track_index, clip_id) in keys {
-        result.insert(key);
-        let group = visuals
+    for (track_index, clip_id) in keys {
+        let Some(visual) = visuals
             .iter()
-            .find(|v| v.track_index == track_index && v.clip.id == clip_id)
-            .and_then(|v| v.clip.linked_group);
-        if let Some(group) = group {
-            for v in visuals.iter().filter(|v| v.clip.linked_group == Some(group)) {
+            .find(|v| v.track_index == track_index && v.clip.id == clip_id && !v.locked)
+        else {
+            continue;
+        };
+        result.insert((track_index, clip_id));
+        if let Some(group) = visual.clip.linked_group {
+            for v in visuals
+                .iter()
+                .filter(|v| v.clip.linked_group == Some(group) && !v.locked)
+            {
                 result.insert((v.track_index, v.clip.id));
             }
         }
@@ -3422,6 +3682,8 @@ mod tests {
             ),
             label: String::new(),
             color: egui::Color32::WHITE,
+            locked: false,
+            muted: false,
         }
     }
 
@@ -3988,6 +4250,8 @@ mod tests {
             ),
             label: String::new(),
             color: egui::Color32::WHITE,
+            locked: false,
+            muted: false,
         }
     }
 
