@@ -26,3 +26,15 @@ completa una feature:
 2. Segnare il task corrispondente come completato su Vikunja.
 3. Lasciare un commento sul task completato con l'hash breve del commit
    git relativo (es. `849a7f8`).
+
+## Build
+
+Quando viene chiesta una build, copiare in `~/Nextcloud/Share/VibeVideo-builds` 
+la versione appena compilata con architettura e timestamp nel suffisso del nome.
+
+ES:
+```
+export TIMESTAMP=$(date +%s)
+cp target/appimage/VibeVideo-x86_64.AppImage ~/Nextcloud/Share/VibeVideo-builds/vv-app-$(uname -m)-${TIMESTAMP}.AppImage
+cp target/release/vv-app ~/Nextcloud/Share/VibeVideo-builds/vv-app-$(uname -m)-${TIMESTAMP}
+```
