@@ -1527,6 +1527,49 @@ mod tests {
         assert_eq!(px(6, 2), &[0, 0, 0, 255], "oltre il crop");
     }
 
+    /// L'opacità del layer (dissolvenze di clip) attenua l'alpha con cui si
+    /// compone sul layer sotto, sia per il video sia per un colore pieno.
+    #[test]
+    fn layer_opacity_blends_with_what_is_below() {
+        let compositor = Compositor::new_headless();
+        let below = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false); // bianco
+        let out = compositor.render_layers(
+            &[
+                Layer::Video {
+                    frame: below.as_yuv_frame(),
+                    transform: Transform::default(),
+                    source_size: (below.width, below.height),
+                    opacity: 1.0,
+                },
+                Layer::Solid {
+                    color: RED,
+                    transform: Transform::default(),
+                    opacity: 0.5,
+                },
+            ],
+            OutputFrame::exact(4, 4),
+        );
+        let px = |out: &[u8], x: usize, y: usize| -> [u8; 4] {
+            out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].try_into().unwrap()
+        };
+        assert_close_rgba(px(&out, 2, 2), [255, 127, 127, 255]); // 50% rosso su bianco = rosa
+
+        // Opacità 0: il layer sopra non si vede affatto.
+        let out = compositor.render_layers(
+            &[
+                Layer::Video {
+                    frame: below.as_yuv_frame(),
+                    transform: Transform::default(),
+                    source_size: (below.width, below.height),
+                    opacity: 1.0,
+                },
+                Layer::Solid { color: RED, transform: Transform::default(), opacity: 0.0 },
+            ],
+            OutputFrame::exact(4, 4),
+        );
+        assert_close_rgba(px(&out, 2, 2), [255, 255, 255, 255]);
+    }
+
     #[test]
     fn render_layers_i420_packs_dense_planes_for_odd_sizes() {
         let compositor = Compositor::new_headless();

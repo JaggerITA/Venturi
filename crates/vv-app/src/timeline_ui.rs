@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use vv_core::{
-    Clip, ClipId, ClipSource, FrameIdx, History, Keyframed, Project, TimelineId, Track,
+    Clip, ClipId, ClipSource, FadeEdge, FrameIdx, History, Keyframed, Project, TimelineId, Track,
     TrackFlag, TrackKind, TrimEdge,
 };
 
@@ -54,6 +54,7 @@ pub struct TimelineState {
     /// stato copiato nulla in questa sessione.
     pub clipboard: Vec<ClipboardEntry>,
     trim: Option<TrimState>,
+    fade_drag: Option<FadeDragState>,
     /// Altezza del riquadro Video se l'utente ha trascinato il separatore
     /// (vedi `GROUP_DIVIDER_HEIGHT`); `None` = gruppi centrati di default.
     video_pane_height: Option<f32>,
@@ -103,6 +104,17 @@ struct DragState {
     duplicate: bool,
 }
 
+/// Trascinamento dell'handle di dissolvenza (fade-in o fade-out) di una
+/// clip: nessun follower né neighbor, è sempre locale alla singola clip.
+struct FadeDragState {
+    clip_id: ClipId,
+    track_index: usize,
+    edge: FadeEdge,
+    /// Valore originale (frame) di `fade_in`/`fade_out` prima del drag.
+    original_value: FrameIdx,
+    accum_px: f32,
+}
+
 /// Trim di un bordo, separato dal drag vero e proprio.
 struct TrimState {
     clip_id: ClipId,
@@ -148,6 +160,17 @@ const TRIM_HANDLE_PX: f32 = 8.0;
 /// Semi-larghezza della zona di roll attorno al punto di contatto fra due
 /// clip adiacenti; la zona di trim comincia subito dopo, verso l'interno.
 const ROLL_HANDLE_PX: f32 = 4.0;
+/// Raggio del pallino disegnato per l'handle di fade-in/fade-out.
+const FADE_HANDLE_RADIUS: f32 = 4.0;
+/// Semi-larghezza della zona cliccabile attorno all'handle: più larga del
+/// pallino disegnato, per poterlo afferrare senza mirare al pixel.
+const FADE_HANDLE_HIT_RADIUS: f32 = 9.0;
+/// Banda in alto alla clip riservata agli handle di fade: sotto resta il
+/// trim/roll del bordo, come negli altri NLE.
+const FADE_HANDLE_ZONE_HEIGHT: f32 = 14.0;
+/// Sotto questa larghezza la clip non mostra handle di fade: non ci
+/// sarebbe spazio per afferrarli senza scontrarsi col trim.
+const MIN_FADE_CLIP_WIDTH_PX: f32 = 20.0;
 
 /// A 0,1 px/s un'ora sta in 360 px.
 const MIN_PIXELS_PER_SEC: f32 = 0.1;
@@ -168,6 +191,7 @@ impl Default for TimelineState {
             selected_gap: None,
             clipboard: Vec::new(),
             trim: None,
+            fade_drag: None,
             video_pane_height: None,
             video_scroll: 0.0,
             audio_scroll: 0.0,
@@ -258,6 +282,13 @@ enum PendingAction {
     Trim {
         trims: Vec<(ClipId, usize, TrimEdge, FrameIdx)>,
         overwritten: Vec<(usize, FrameIdx, FrameIdx)>,
+    },
+    /// Nuova durata (in frame) della dissolvenza in entrata o uscita.
+    SetFade {
+        track_index: usize,
+        clip_id: ClipId,
+        edge: FadeEdge,
+        new_value: FrameIdx,
     },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
@@ -1828,6 +1859,7 @@ pub fn show_timeline(
                 // iniziale.
                 let mut drag_finished = false;
                 let mut trim_finished = false;
+                let mut fade_drag_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
 
                 // Le clip in movimento si disegnano per ultime: invadono le altre.
@@ -1974,6 +2006,36 @@ pub fn show_timeline(
                     });
                     paint_clip_overlay(&painter, clip_rect, visual, is_proxy_backed);
 
+                    // Handle di fade-in/fade-out: presenti sempre se la
+                    // dissolvenza è già impostata, altrimenti solo mentre la
+                    // clip è sotto il mouse (per afferrarli dall'angolo).
+                    let (fade_in_preview, fade_out_preview) = fade_preview(state, visual, px_per_frame);
+                    let fade_in_dragging = state
+                        .fade_drag
+                        .as_ref()
+                        .is_some_and(|d| d.clip_id == visual.clip.id && d.edge == FadeEdge::In);
+                    let fade_out_dragging = state
+                        .fade_drag
+                        .as_ref()
+                        .is_some_and(|d| d.clip_id == visual.clip.id && d.edge == FadeEdge::Out);
+                    let show_fades = !visual.locked && clip_rect.width() >= MIN_FADE_CLIP_WIDTH_PX;
+                    let fade_in_x = clip_rect.left()
+                        + (fade_in_preview as f32 * px_per_frame).min(clip_rect.width());
+                    let fade_out_x = clip_rect.right()
+                        - (fade_out_preview as f32 * px_per_frame).min(clip_rect.width());
+                    if show_fades && (visual.clip.fade_in > 0 || fade_in_dragging || resp.hovered()) {
+                        paint_fade_wedge(&painter, clip_rect, clip_rect.left(), fade_in_x, fade_in_dragging);
+                    }
+                    if show_fades && (visual.clip.fade_out > 0 || fade_out_dragging || resp.hovered()) {
+                        paint_fade_wedge(&painter, clip_rect, clip_rect.right(), fade_out_x, fade_out_dragging);
+                    }
+                    if let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                        && (fade_in_dragging || fade_out_dragging)
+                    {
+                        let frames = if fade_in_dragging { fade_in_preview } else { fade_out_preview };
+                        paint_fade_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
+                    }
+
                     // Zone ridotte per le clip molto strette, altrimenti
                     // l'intera clip sarebbe "solo bordi" e non si potrebbe più
                     // spostare (Move) col drag normale dal centro.
@@ -1997,6 +2059,15 @@ pub fn show_timeline(
                     );
                     let edge_at = |pos: egui::Pos2| zones.at(pos.x - clip_rect.left());
                     if resp.hovered()
+                        && show_fades
+                        && state.drag.is_none()
+                        && state.trim.is_none()
+                        && state.fade_drag.is_none()
+                        && let Some(pos) = resp.hover_pos()
+                        && fade_zone_at(pos, clip_rect, fade_in_x, fade_out_x).is_some()
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    } else if resp.hovered()
                         && !visual.locked
                         && state.drag.is_none()
                         && state.trim.is_none()
@@ -2011,12 +2082,26 @@ pub fn show_timeline(
                         // piccolo movimento, e verso l'interno si sarebbe già usciti dalla zona
                         // del bordo.
                         let press_pos = ui.input(|i| i.pointer.press_origin());
-                        match press_pos.and_then(edge_at) {
-                            Some(zone) => begin_trim(state, &visuals, project, visual, zone),
-                            None => begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt)),
+                        let fade_zone = if show_fades {
+                            press_pos.and_then(|p| fade_zone_at(p, clip_rect, fade_in_x, fade_out_x))
+                        } else {
+                            None
+                        };
+                        match fade_zone {
+                            Some(edge) => begin_fade_drag(state, visual, edge),
+                            None => match press_pos.and_then(edge_at) {
+                                Some(zone) => begin_trim(state, &visuals, project, visual, zone),
+                                None => {
+                                    begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt))
+                                }
+                            },
                         }
                     } else if resp.dragged() {
-                        if let Some(t) = &mut state.trim
+                        if let Some(fd) = &mut state.fade_drag
+                            && fd.clip_id == visual.clip.id
+                        {
+                            fd.accum_px += resp.drag_delta().x;
+                        } else if let Some(t) = &mut state.trim
                             && t.clip_id == visual.clip.id
                         {
                             t.accum_px += resp.drag_delta().x;
@@ -2026,7 +2111,17 @@ pub fn show_timeline(
                             d.accum_px += resp.drag_delta().x;
                         }
                     } else if resp.drag_stopped() {
-                        if let Some(t) = &state.trim
+                        if let Some(fd) = &state.fade_drag
+                            && fd.clip_id == visual.clip.id
+                        {
+                            pending = Some(PendingAction::SetFade {
+                                track_index: fd.track_index,
+                                clip_id: fd.clip_id,
+                                edge: fd.edge,
+                                new_value: fade_drag_value(fd, visual.clip.timeline_len, px_per_frame),
+                            });
+                            fade_drag_finished = true;
+                        } else if let Some(t) = &state.trim
                             && t.clip_id == visual.clip.id
                         {
                             pending = Some(finish_trim(t, visual, &visuals, trimmed_primary_new_value));
@@ -2083,6 +2178,9 @@ pub fn show_timeline(
                 }
                 if trim_finished {
                     state.trim = None;
+                }
+                if fade_drag_finished {
+                    state.fade_drag = None;
                 }
                 if let Some(t) = &state.trim
                     && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
@@ -2253,6 +2351,51 @@ fn paint_clip_overlay(
     }
 }
 
+/// Ombra triangolare della dissolvenza (dall'angolo verso l'handle) più il
+/// pallino dell'handle stesso. `x` è la posizione corrente dell'handle,
+/// `corner_x` l'angolo (sx per il fade-in, dx per il fade-out) da cui parte
+/// il triangolo.
+fn paint_fade_wedge(painter: &egui::Painter, clip_rect: egui::Rect, corner_x: f32, x: f32, dragging: bool) {
+    let top = clip_rect.top();
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(corner_x, top),
+            egui::pos2(x, top),
+            egui::pos2(corner_x, clip_rect.bottom()),
+        ],
+        egui::Color32::from_black_alpha(110),
+        egui::Stroke::NONE,
+    ));
+    let center = egui::pos2(x, top + FADE_HANDLE_ZONE_HEIGHT * 0.5);
+    let radius = if dragging { FADE_HANDLE_RADIUS + 1.0 } else { FADE_HANDLE_RADIUS };
+    painter.circle_filled(center, radius, egui::Color32::WHITE);
+    painter.circle_stroke(center, radius, egui::Stroke::new(1.0, egui::Color32::from_gray(40)));
+}
+
+/// Overlay col tempo della dissolvenza vicino al puntatore, durante il drag
+/// dell'handle: stesso layer "sempre sopra" del cursore di trim.
+fn paint_fade_overlay(ctx: &egui::Context, pos: egui::Pos2, frames: FrameIdx, fps: f64) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("timeline_fade_overlay"),
+    ));
+    let text = format!("+{}", format_fade_duration(frames, fps));
+    let text_pos = pos + egui::vec2(12.0, 14.0);
+    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
+    let bg = egui::Rect::from_min_size(text_pos, galley.size()).expand(3.0);
+    painter.rect_filled(bg, 3.0, egui::Color32::from_black_alpha(200));
+    painter.galley(text_pos, galley, egui::Color32::WHITE);
+}
+
+/// `S:FF`: durata di una dissolvenza in secondi e frame residui, non una
+/// posizione di timeline (niente ore/minuti, le dissolvenze sono brevi).
+fn format_fade_duration(frames: FrameIdx, fps: f64) -> String {
+    let nominal = (fps.round() as i64).max(1);
+    let frames = frames.max(0);
+    let (secs, f) = (frames / nominal, frames % nominal);
+    format!("{secs}:{f:02}")
+}
+
 /// Comincia il trim di `visual` dalla zona di bordo `zone`, con le clip che lo
 /// seguono.
 fn begin_trim(
@@ -2325,6 +2468,68 @@ fn begin_drag(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVi
         followers,
         duplicate,
     });
+}
+
+/// Comincia a trascinare l'handle di fade-in/fade-out di `visual`: nessun
+/// gruppo né vicino coinvolto, è sempre locale alla clip.
+fn begin_fade_drag(state: &mut TimelineState, visual: &ClipVisual, edge: FadeEdge) {
+    let original_value = match edge {
+        FadeEdge::In => visual.clip.fade_in,
+        FadeEdge::Out => visual.clip.fade_out,
+    };
+    state.fade_drag = Some(FadeDragState {
+        clip_id: visual.clip.id,
+        track_index: visual.track_index,
+        edge,
+        original_value,
+        accum_px: 0.0,
+    });
+}
+
+/// Valore (in frame, clampato alla durata della clip) dell'anteprima di un
+/// fade drag in corso: trascinare l'handle di fade-in verso destra allunga
+/// `fade_in`, trascinare quello di fade-out verso sinistra allunga
+/// `fade_out` — verso opposti sull'asse X per lo stesso segno di `accum_px`.
+fn fade_drag_value(d: &FadeDragState, clip_len: FrameIdx, px_per_frame: f32) -> FrameIdx {
+    let signed_delta = match d.edge {
+        FadeEdge::In => d.accum_px,
+        FadeEdge::Out => -d.accum_px,
+    };
+    (d.original_value as f32 + signed_delta / px_per_frame)
+        .round()
+        .clamp(0.0, clip_len as f32) as FrameIdx
+}
+
+/// `(fade_in, fade_out)` da mostrare per `visual`: l'anteprima del drag in
+/// corso se lo riguarda, altrimenti i valori già salvati.
+fn fade_preview(state: &TimelineState, visual: &ClipVisual, px_per_frame: f32) -> (FrameIdx, FrameIdx) {
+    let mut fade_in = visual.clip.fade_in;
+    let mut fade_out = visual.clip.fade_out;
+    if let Some(d) = &state.fade_drag
+        && d.clip_id == visual.clip.id
+    {
+        let value = fade_drag_value(d, visual.clip.timeline_len, px_per_frame);
+        match d.edge {
+            FadeEdge::In => fade_in = value,
+            FadeEdge::Out => fade_out = value,
+        }
+    }
+    (fade_in, fade_out)
+}
+
+/// Handle di fade sotto `pos`, solo nella banda in alto alla clip: sotto
+/// resta il trim/roll del bordo esistente.
+fn fade_zone_at(pos: egui::Pos2, clip_rect: egui::Rect, fade_in_x: f32, fade_out_x: f32) -> Option<FadeEdge> {
+    if pos.y > clip_rect.top() + FADE_HANDLE_ZONE_HEIGHT {
+        return None;
+    }
+    if (pos.x - fade_in_x).abs() <= FADE_HANDLE_HIT_RADIUS {
+        return Some(FadeEdge::In);
+    }
+    if (pos.x - fade_out_x).abs() <= FADE_HANDLE_HIT_RADIUS {
+        return Some(FadeEdge::Out);
+    }
+    None
 }
 
 /// Trim da applicare al rilascio: lo stesso valore (già clampato) mostrato
@@ -2654,6 +2859,12 @@ fn apply_pending_action(
                 },
             ));
             history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)));
+        }
+        PendingAction::SetFade { track_index, clip_id, edge, new_value } => {
+            history.do_command(
+                project,
+                Box::new(vv_core::SetClipFade::new(timeline_id, track_index, clip_id, edge, new_value)),
+            );
         }
         PendingAction::Unlink(track_index, clip_id) => {
             history.do_command(
@@ -3565,6 +3776,61 @@ mod tests {
         assert_eq!(format_timecode(5.4, 25.0), "00:00:05:10");
         // 29,97: 30 frame per secondo nominale, non 29.
         assert_eq!(format_timecode(1799.0 / (30_000.0 / 1001.0), 30_000.0 / 1001.0), "00:00:59:29");
+    }
+
+    #[test]
+    fn format_fade_duration_is_seconds_and_leftover_frames() {
+        assert_eq!(format_fade_duration(0, 10.0), "0:00");
+        // 10 frame a 10fps = 1s esatto, niente frame residui.
+        assert_eq!(format_fade_duration(10, 10.0), "1:00");
+        // 14 frame a 10fps = 1s + 4 frame.
+        assert_eq!(format_fade_duration(14, 10.0), "1:04");
+        assert_eq!(format_fade_duration(93, 30.0), "3:03");
+    }
+
+    #[test]
+    fn fade_zone_at_only_matches_the_top_band_near_the_handle() {
+        let clip_rect = egui::Rect::from_min_size(egui::pos2(100.0, 20.0), egui::vec2(200.0, 40.0));
+        let fade_in_x = 120.0; // handle di fade-in a 20px dal bordo sx
+        let fade_out_x = 280.0; // handle di fade-out a 20px dal bordo dx
+        assert_eq!(
+            fade_zone_at(egui::pos2(120.0, 22.0), clip_rect, fade_in_x, fade_out_x),
+            Some(FadeEdge::In)
+        );
+        assert_eq!(
+            fade_zone_at(egui::pos2(280.0, 22.0), clip_rect, fade_in_x, fade_out_x),
+            Some(FadeEdge::Out)
+        );
+        // Stessa X dell'handle di fade-in, ma sotto la banda in alto: è trim/roll, non fade.
+        assert_eq!(fade_zone_at(egui::pos2(120.0, 50.0), clip_rect, fade_in_x, fade_out_x), None);
+        // Lontano da entrambi gli handle.
+        assert_eq!(fade_zone_at(egui::pos2(200.0, 22.0), clip_rect, fade_in_x, fade_out_x), None);
+    }
+
+    #[test]
+    fn fade_drag_value_moves_in_opposite_screen_directions_for_in_and_out() {
+        let px_per_frame = 2.0;
+        let drag_right = |edge| FadeDragState {
+            clip_id: ClipId(1),
+            track_index: 0,
+            edge,
+            original_value: 10,
+            accum_px: 20.0, // 20px a destra = 10 frame
+        };
+        // Fade-in: trascinare a destra allunga la dissolvenza.
+        assert_eq!(fade_drag_value(&drag_right(FadeEdge::In), 100, px_per_frame), 20);
+        // Fade-out: lo stesso movimento a destra la accorcia (l'handle si
+        // avvicina all'angolo).
+        assert_eq!(fade_drag_value(&drag_right(FadeEdge::Out), 100, px_per_frame), 0);
+        // Clampata alla durata della clip.
+        let far = FadeDragState {
+            clip_id: ClipId(1),
+            track_index: 0,
+            edge: FadeEdge::In,
+            original_value: 10,
+            accum_px: 1000.0,
+        };
+        assert_eq!(fade_drag_value(&far, 30, px_per_frame), 30);
     }
 
     /// `row_y` "identità" (nessun raggruppamento/margine) per i test.
