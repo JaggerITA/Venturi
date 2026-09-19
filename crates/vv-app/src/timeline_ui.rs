@@ -1330,55 +1330,21 @@ pub fn show_timeline(
     let mut pending: Option<PendingAction> = None;
 
     ui.horizontal_top(|ui| {
+        // `Id::with(IdSalt)` e `Id::with(&str)` danno id diversi: serve la forma
+        // che la ScrollArea usa in `begin`.
         let scroll_id = ui.make_persistent_id(egui::IdSalt::new("timeline_scroll"));
-        {
-            // `ctx` è un borrow immutabile di `ui`: deve finire prima del
-            // `ScrollArea::show` di sotto (che prende `ui` in mutabile),
-            // quindi tutto l'uso pre-`show` di `ctx` sta in questo blocco.
-            let ctx = ui.ctx();
-            // `Id::with(IdSalt)` e `Id::with(&str)` danno id diversi: serve la forma
-            // che la ScrollArea usa in `begin`.
-
-            // Zoom cambiato in questo frame: si corregge lo scroll salvato della
-            // ScrollArea (stesso id) prima del `show`, così la testina resta ferma a
-            // schermo.
-            if state.pixels_per_sec != state.last_rendered_pps {
-                if let Some(mut scroll_state) =
-                    egui::containers::scroll_area::State::load(&ctx, scroll_id)
-                {
-                    let playhead_secs = state.playhead as f64 / fps;
-                    scroll_state.offset.x +=
-                        (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
-                    scroll_state.store(&ctx, scroll_id);
-                }
-            }
-            state.last_rendered_pps = state.pixels_per_sec;
-
-            // In riproduzione la testina resta visibile: se esce si "volta pagina"
-            // portandola a un terzo da sinistra. Clamp come quello di egui in `begin`.
-            if playback_active {
-                let viewport_width =
-                    (ui.available_rect_before_wrap().width() - TRACK_HEADER_WIDTH).max(1.0);
-                let playhead_x = state.playhead as f32 * px_per_frame;
-                let visible_start =
-                    match egui::containers::scroll_area::State::load(&ctx, scroll_id) {
-                        Some(st) => st.offset.x,
-                        None => 0.0,
-                    };
-                let visible_end = visible_start + viewport_width;
-                const FOLLOW_MARGIN_FRAC: f32 = 1.0 / 3.0;
-                if playhead_x < visible_start || playhead_x > visible_end {
-                    let target = (playhead_x - viewport_width * FOLLOW_MARGIN_FRAC)
-                        .clamp(0.0, (content_width - viewport_width).max(0.0));
-                    if let Some(mut scroll_state) =
-                        egui::containers::scroll_area::State::load(&ctx, scroll_id)
-                    {
-                        scroll_state.offset.x = target;
-                        scroll_state.store(&ctx, scroll_id);
-                    }
-                }
-            }
-        }
+        let scroll_viewport_width =
+            (ui.available_rect_before_wrap().width() - TRACK_HEADER_WIDTH).max(1.0);
+        sync_timeline_scroll(
+            ui.ctx(),
+            scroll_id,
+            state,
+            fps,
+            px_per_frame,
+            scroll_viewport_width,
+            content_width,
+            playback_active,
+        );
 
         draw_track_headers(
             ui,
@@ -1435,81 +1401,19 @@ pub fn show_timeline(
                     visuals.iter().any(|v| visible_clip_rect(v).contains(local))
                 };
 
-                // Ruler: click/drag per spostare il playhead.
-                let ruler_rect =
-                    egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
-                painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(45));
-                let ruler_resp = ui.interact(
-                    ruler_rect,
-                    ui.id().with("timeline_ruler"),
-                    egui::Sense::click_and_drag(),
+                show_ruler(
+                    ui,
+                    &painter,
+                    origin,
+                    content_width,
+                    state,
+                    &visuals,
+                    fps,
+                    px_per_frame,
+                    snapping_enabled,
+                    buffered_ranges,
+                    max_end_frames,
                 );
-                // Su un click conta dove è stato rilasciato: se il frame è
-                // arrivato in ritardo, `interact_pointer_pos` è già
-                // l'ultima posizione del mouse dopo il rilascio.
-                let ruler_pos = if ruler_resp.clicked() {
-                    ui.input(|i| {
-                        i.events.iter().rev().find_map(|e| match e {
-                            egui::Event::PointerButton {
-                                pos,
-                                button: egui::PointerButton::Primary,
-                                pressed: false,
-                                ..
-                            } => Some(*pos),
-                            _ => None,
-                        })
-                    })
-                    .or_else(|| ruler_resp.interact_pointer_pos())
-                } else {
-                    ruler_resp.interact_pointer_pos()
-                };
-                if let Some(pos) = ruler_pos {
-                    let raw_frame =
-                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    state.playhead =
-                        snap_frame(raw_frame, 0, &visuals, &[], &[], px_per_frame, snapping_enabled);
-                }
-
-                // Solo le tacche visibili: una timeline lunga zoomata al frame ne avrebbe
-                // migliaia fuori schermo.
-                let visible_x = ui.clip_rect().intersect(ruler_rect);
-                draw_ruler_ticks(&painter, origin, visible_x, state.pixels_per_sec, fps);
-
-                // Sotto la linea della playhead, così resta visibile.
-                const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
-                let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
-                for &(start, end) in buffered_ranges {
-                    let x0 = origin.x + start as f32 * px_per_frame;
-                    let x1 = origin.x + (end + 1) as f32 * px_per_frame;
-                    let strip_rect = egui::Rect::from_min_max(
-                        egui::pos2(x0, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
-                        egui::pos2(x1, origin.y + RULER_HEIGHT),
-                    );
-                    painter.rect_filled(strip_rect, 0.0, buffered_color);
-                }
-
-                if !state.export_marks.is_full(max_end_frames) {
-                    let (mark_in, mark_out) = state.export_marks.resolve(max_end_frames);
-                    let band = egui::Rect::from_min_max(
-                        egui::pos2(origin.x + mark_in as f32 * px_per_frame, origin.y),
-                        egui::pos2(
-                            origin.x + mark_out as f32 * px_per_frame,
-                            origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT,
-                        ),
-                    );
-                    painter.rect_filled(
-                        band,
-                        0.0,
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
-                    );
-                    for x in [band.left(), band.right()] {
-                        painter.vline(
-                            x,
-                            band.y_range(),
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(185)),
-                        );
-                    }
-                }
 
                 // Sfondi delle track e, sopra, un'area interagibile per click e
                 // rettangolo dal vuoto. Le clip sono interagite dopo e vincono l'hit-test.
@@ -1967,42 +1871,13 @@ pub fn show_timeline(
                 for visual in draw_order {
                     let painter = track_painter(visual.track_index);
                     let is_trimming_this = trimmed_keys.contains(&(visual.track_index, visual.clip.id));
-                    let (display_start, display_len) = if is_trimming_this
-                        && let (Some(t), Some(primary_value)) = (&state.trim, trimmed_primary_new_value)
-                    {
-                        let (offset, edge) = t
-                            .followers
-                            .iter()
-                            .find(|&&(id, track, _, _)| {
-                                id == visual.clip.id && track == visual.track_index
-                            })
-                            .map_or((0, t.edge), |&(_, _, offset, edge)| (offset, edge));
-                        let new_value = primary_value + offset;
-                        match edge {
-                            TrimEdge::Start => {
-                                (new_value, (visual.clip.timeline_end() - new_value).max(1))
-                            }
-                            TrimEdge::End => (
-                                visual.clip.timeline_start,
-                                (new_value - visual.clip.timeline_start).max(1),
-                            ),
-                        }
-                    } else {
-                        let start = match (&state.drag, dragged_primary_new_start) {
-                            (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
-                            (Some(d), Some(new_start)) => match d
-                                .followers
-                                .iter()
-                                .find(|(id, track, _)| {
-                                    *id == visual.clip.id && *track == visual.track_index
-                                }) {
-                                Some((_, _, offset)) => new_start + offset,
-                                None => visual.clip.timeline_start,
-                            },
-                            _ => visual.clip.timeline_start,
-                        };
-                        (start, visual.clip.timeline_len)
-                    };
+                    let (display_start, display_len) = display_range(
+                        visual,
+                        state,
+                        is_trimming_this,
+                        trimmed_primary_new_value,
+                        dragged_primary_new_start,
+                    );
 
                     let x = origin.x + display_start as f32 * px_per_frame;
                     // Durante un drag che cambia track, l'anteprima di ogni
@@ -2044,18 +1919,7 @@ pub fn show_timeline(
                     );
 
                     let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
-                    let stroke = if is_selected {
-                        egui::Stroke::new(2.0, egui::Color32::WHITE)
-                    } else {
-                        egui::Stroke::new(1.0, egui::Color32::from_gray(15))
-                    };
-                    let fill = if visual.muted {
-                        egui::Color32::from_gray(58)
-                    } else {
-                        visual.color
-                    };
-                    painter.rect_filled(clip_rect, 4.0, fill);
-                    painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
+                    paint_clip_box(&painter, clip_rect, visual, is_selected);
 
                     // Waveform: massimo dei bin per colonna, forma indipendente dallo zoom.
                     if track_kinds[visual.track_index] == TrackKind::Audio
@@ -2089,41 +1953,7 @@ pub fn show_timeline(
                     let is_proxy_backed = proxy_ranges.iter().any(|&(s, e)| {
                         s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
                     });
-                    let label_offset_y = if is_proxy_backed {
-                        paint_proxy_strip(&painter, clip_rect);
-                        2.0 + PROXY_STRIP_HEIGHT
-                    } else {
-                        2.0
-                    };
-                    let mut label_pos = clip_rect.left_top() + egui::vec2(4.0, label_offset_y);
-                    if visual.clip.disabled {
-                        paint_disabled_badge(&painter, label_pos);
-                        label_pos.x += DISABLED_BADGE_SIZE + 4.0;
-                    }
-                    painter.text(
-                        label_pos,
-                        egui::Align2::LEFT_TOP,
-                        &visual.label,
-                        egui::FontId::proportional(12.0),
-                        if visual.muted {
-                            egui::Color32::from_gray(185)
-                        } else {
-                            egui::Color32::BLACK
-                        },
-                    );
-                    if visual.clip.linked_group.is_some() {
-                        // Due anelli a mano: su alcune piattaforme (Asahi) i font di egui non
-                        // hanno 🔗.
-                        let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
-                        let ring_color = if visual.muted {
-                            egui::Color32::from_gray(185)
-                        } else {
-                            egui::Color32::BLACK
-                        };
-                        let ring_stroke = egui::Stroke::new(1.3, ring_color);
-                        painter.circle_stroke(center + egui::vec2(-2.5, 0.0), 3.5, ring_stroke);
-                        painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
-                    }
+                    paint_clip_overlay(&painter, clip_rect, visual, is_proxy_backed);
 
                     // Zone ridotte per le clip molto strette, altrimenti
                     // l'intera clip sarebbe "solo bordi" e non si potrebbe più
@@ -2146,13 +1976,6 @@ pub fn show_timeline(
                         adjacent(visual.clip.timeline_start, TrimEdge::Start),
                         adjacent(visual.clip.timeline_end(), TrimEdge::End),
                     );
-                    if visual.locked {
-                        painter.rect_filled(
-                            clip_rect,
-                            4.0,
-                            egui::Color32::from_rgba_unmultiplied(70, 70, 70, 140),
-                        );
-                    }
                     let edge_at = |pos: egui::Pos2| zones.at(pos.x - clip_rect.left());
                     if resp.hovered()
                         && !visual.locked
@@ -2170,81 +1993,8 @@ pub fn show_timeline(
                         // del bordo.
                         let press_pos = ui.input(|i| i.pointer.press_origin());
                         match press_pos.and_then(edge_at) {
-                            Some(zone) => {
-                                let edge = zone.edge();
-                                let key = (visual.track_index, visual.clip.id);
-                                let others: Vec<(ClipKey, TrimEdge)> = match zone {
-                                    EdgeZone::Trim(_) => {
-                                        drag_group_for(&state.selected, &visuals, key)
-                                            .into_iter()
-                                            .filter(|k| *k != key)
-                                            .map(|k| (k, edge))
-                                            .collect()
-                                    }
-                                    // Solo le due clip a contatto, ognuna col
-                                    // suo gruppo collegato.
-                                    EdgeZone::Roll { neighbor, .. } => {
-                                        let opposite = match edge {
-                                            TrimEdge::Start => TrimEdge::End,
-                                            TrimEdge::End => TrimEdge::Start,
-                                        };
-                                        expand_to_linked_groups(&visuals, [key])
-                                            .into_iter()
-                                            .filter(|k| *k != key)
-                                            .map(|k| (k, edge))
-                                            .chain(
-                                                expand_to_linked_groups(&visuals, [neighbor])
-                                                    .into_iter()
-                                                    .map(|k| (k, opposite)),
-                                            )
-                                            .collect()
-                                    }
-                                };
-                                let (min_value, max_value, followers) = combined_trim_range(
-                                    &visuals, project, key, edge, &others,
-                                );
-                                let original_value = match edge {
-                                    TrimEdge::Start => visual.clip.timeline_start,
-                                    TrimEdge::End => visual.clip.timeline_end(),
-                                };
-                                state.trim = Some(TrimState {
-                                    clip_id: visual.clip.id,
-                                    track_index: visual.track_index,
-                                    edge,
-                                    original_value,
-                                    accum_px: 0.0,
-                                    min_value,
-                                    max_value: max_value.max(min_value),
-                                    followers,
-                                    roll: matches!(zone, EdgeZone::Roll { .. }),
-                                });
-                            }
-                            None => {
-                                let drag_group = drag_group_for(
-                                    &state.selected,
-                                    &visuals,
-                                    (visual.track_index, visual.clip.id),
-                                );
-                                state.selected = drag_group.clone();
-                                state.selection_anchor = Some((visual.track_index, visual.clip.id));
-
-                                let others: Vec<ClipKey> = drag_group.into_iter().collect();
-                                let (_, _, followers) = combined_drag_range(
-                                    &visuals,
-                                    visual.track_index,
-                                    visual.clip.id,
-                                    &others,
-                                );
-
-                                state.drag = Some(DragState {
-                                    clip_id: visual.clip.id,
-                                    track_index: visual.track_index,
-                                    original_start: visual.clip.timeline_start,
-                                    accum_px: 0.0,
-                                    followers,
-                                    duplicate: ui.input(|i| i.modifiers.alt),
-                                });
-                            }
+                            Some(zone) => begin_trim(state, &visuals, project, visual, zone),
+                            None => begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt)),
                         }
                     } else if resp.dragged() {
                         if let Some(t) = &mut state.trim
@@ -2260,66 +2010,17 @@ pub fn show_timeline(
                         if let Some(t) = &state.trim
                             && t.clip_id == visual.clip.id
                         {
-                            // Stesso valore (già clampato) mostrato
-                            // nell'anteprima durante il trim: quel che si
-                            // vedeva è quel che si ottiene.
-                            let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
-                            let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_value)];
-                            let mut overwritten =
-                                grown_range(&visual.clip, visual.track_index, t.edge, new_value)
-                                    .into_iter()
-                                    .collect::<Vec<_>>();
-                            for &(other_id, other_track, offset, edge) in &t.followers {
-                                let Some(other) = visuals.iter().find(|v| {
-                                    v.clip.id == other_id && v.track_index == other_track
-                                }) else {
-                                    continue;
-                                };
-                                let other_value = new_value + offset;
-                                trims.push((other_id, other_track, edge, other_value));
-                                overwritten.extend(grown_range(
-                                    &other.clip,
-                                    other_track,
-                                    edge,
-                                    other_value,
-                                ));
-                            }
-                            pending = Some(PendingAction::Trim { trims, overwritten });
+                            pending = Some(finish_trim(t, visual, &visuals, trimmed_primary_new_value));
                             trim_finished = true;
                         } else if let Some(d) = &state.drag
                             && d.clip_id == visual.clip.id
                         {
-                            // La stessa posizione mostrata durante il drag.
-                            let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
-                            let targets = drag_group_targets.as_deref().unwrap();
-                            let original_tracks =
-                                std::iter::once(d.track_index).chain(d.followers.iter().map(|(_, t, _)| *t));
-                            let starts = std::iter::once(new_start)
-                                .chain(d.followers.iter().map(|(_, _, offset)| new_start + offset));
-
-                            let mut new_video_tracks = 0usize;
-                            let mut new_audio_tracks = 0usize;
-                            let moves: Vec<(ClipId, usize, EffectiveTrack, FrameIdx)> = targets
-                                .iter()
-                                .zip(original_tracks)
-                                .zip(starts)
-                                .map(|(((id, target), from_track), start)| {
-                                    if let EffectiveTrack::New(depth) = *target {
-                                        let count = match track_kinds[from_track] {
-                                            TrackKind::Video => &mut new_video_tracks,
-                                            TrackKind::Audio => &mut new_audio_tracks,
-                                        };
-                                        *count = (*count).max(depth);
-                                    }
-                                    (*id, from_track, *target, start)
-                                })
-                                .collect();
-                            pending = Some(PendingAction::Move {
-                                new_video_tracks,
-                                new_audio_tracks,
-                                moves,
-                                duplicate: d.duplicate,
-                            });
+                            pending = Some(finish_drag(
+                                d,
+                                drag_group_targets.as_deref().unwrap(),
+                                &track_kinds,
+                                dragged_primary_new_start,
+                            ));
                             drag_finished = true;
                         }
                     } else if resp.clicked() {
@@ -2378,26 +2079,7 @@ pub fn show_timeline(
                     paint_edge_cursor(ui.ctx(), pos, cursor);
                 }
 
-                // Playhead: linea più una testina triangolare nel righello.
-                let px = origin.x + state.playhead as f32 * px_per_frame;
-                let playhead_color = egui::Color32::from_rgb(220, 50, 50);
-                painter.line_segment(
-                    [
-                        egui::pos2(px, origin.y),
-                        egui::pos2(px, origin.y + visual_height),
-                    ],
-                    egui::Stroke::new(2.0, playhead_color),
-                );
-                const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-                        egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-                        egui::pos2(px, origin.y + RULER_HEIGHT),
-                    ],
-                    playhead_color,
-                    egui::Stroke::NONE,
-                ));
+                paint_playhead(&painter, origin, state.playhead as f32 * px_per_frame, visual_height);
 
                 // Sul bordo destro visibile, non su quello del contenuto.
                 let scrollbar_x = egui::Rangef::new(
@@ -2440,6 +2122,419 @@ pub fn show_timeline(
     }
 
     media_drop
+}
+
+/// Inizio e lunghezza con cui disegnare `visual`: durante un trim o un drag
+/// la posizione di anteprima, altrimenti quella reale.
+fn display_range(
+    visual: &ClipVisual,
+    state: &TimelineState,
+    is_trimming_this: bool,
+    trimmed_primary_new_value: Option<FrameIdx>,
+    dragged_primary_new_start: Option<FrameIdx>,
+) -> (FrameIdx, FrameIdx) {
+    if is_trimming_this
+        && let (Some(t), Some(primary_value)) = (&state.trim, trimmed_primary_new_value)
+    {
+        let (offset, edge) = t
+            .followers
+            .iter()
+            .find(|&&(id, track, _, _)| id == visual.clip.id && track == visual.track_index)
+            .map_or((0, t.edge), |&(_, _, offset, edge)| (offset, edge));
+        let new_value = primary_value + offset;
+        match edge {
+            TrimEdge::Start => (new_value, (visual.clip.timeline_end() - new_value).max(1)),
+            TrimEdge::End => (
+                visual.clip.timeline_start,
+                (new_value - visual.clip.timeline_start).max(1),
+            ),
+        }
+    } else {
+        let start = match (&state.drag, dragged_primary_new_start) {
+            (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
+            (Some(d), Some(new_start)) => match d
+                .followers
+                .iter()
+                .find(|(id, track, _)| *id == visual.clip.id && *track == visual.track_index)
+            {
+                Some((_, _, offset)) => new_start + offset,
+                None => visual.clip.timeline_start,
+            },
+            _ => visual.clip.timeline_start,
+        };
+        (start, visual.clip.timeline_len)
+    }
+}
+
+/// Riempimento e bordo di una clip.
+fn paint_clip_box(painter: &egui::Painter, clip_rect: egui::Rect, visual: &ClipVisual, is_selected: bool) {
+    let stroke = if is_selected {
+        egui::Stroke::new(2.0, egui::Color32::WHITE)
+    } else {
+        egui::Stroke::new(1.0, egui::Color32::from_gray(15))
+    };
+    let fill = if visual.muted {
+        egui::Color32::from_gray(58)
+    } else {
+        visual.color
+    };
+    painter.rect_filled(clip_rect, 4.0, fill);
+    painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
+}
+
+/// Etichetta, badge "disattivata", icona di collegamento e velo delle track
+/// bloccate, sopra alla waveform.
+fn paint_clip_overlay(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    visual: &ClipVisual,
+    is_proxy_backed: bool,
+) {
+    let label_offset_y = if is_proxy_backed {
+        paint_proxy_strip(painter, clip_rect);
+        2.0 + PROXY_STRIP_HEIGHT
+    } else {
+        2.0
+    };
+    let mut label_pos = clip_rect.left_top() + egui::vec2(4.0, label_offset_y);
+    if visual.clip.disabled {
+        paint_disabled_badge(painter, label_pos);
+        label_pos.x += DISABLED_BADGE_SIZE + 4.0;
+    }
+    painter.text(
+        label_pos,
+        egui::Align2::LEFT_TOP,
+        &visual.label,
+        egui::FontId::proportional(12.0),
+        if visual.muted {
+            egui::Color32::from_gray(185)
+        } else {
+            egui::Color32::BLACK
+        },
+    );
+    if visual.clip.linked_group.is_some() {
+        // Due anelli a mano: su alcune piattaforme (Asahi) i font di egui non
+        // hanno 🔗.
+        let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
+        let ring_color = if visual.muted {
+            egui::Color32::from_gray(185)
+        } else {
+            egui::Color32::BLACK
+        };
+        let ring_stroke = egui::Stroke::new(1.3, ring_color);
+        painter.circle_stroke(center + egui::vec2(-2.5, 0.0), 3.5, ring_stroke);
+        painter.circle_stroke(center + egui::vec2(2.5, 0.0), 3.5, ring_stroke);
+    }
+    if visual.locked {
+        painter.rect_filled(
+            clip_rect,
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(70, 70, 70, 140),
+        );
+    }
+}
+
+/// Comincia il trim di `visual` dalla zona di bordo `zone`, con le clip che lo
+/// seguono.
+fn begin_trim(
+    state: &mut TimelineState,
+    visuals: &[ClipVisual],
+    project: &Project,
+    visual: &ClipVisual,
+    zone: EdgeZone,
+) {
+    let edge = zone.edge();
+    let key = (visual.track_index, visual.clip.id);
+    let others: Vec<(ClipKey, TrimEdge)> = match zone {
+        EdgeZone::Trim(_) => drag_group_for(&state.selected, visuals, key)
+            .into_iter()
+            .filter(|k| *k != key)
+            .map(|k| (k, edge))
+            .collect(),
+        // Solo le due clip a contatto, ognuna col suo gruppo collegato.
+        EdgeZone::Roll { neighbor, .. } => {
+            let opposite = match edge {
+                TrimEdge::Start => TrimEdge::End,
+                TrimEdge::End => TrimEdge::Start,
+            };
+            expand_to_linked_groups(visuals, [key])
+                .into_iter()
+                .filter(|k| *k != key)
+                .map(|k| (k, edge))
+                .chain(
+                    expand_to_linked_groups(visuals, [neighbor])
+                        .into_iter()
+                        .map(|k| (k, opposite)),
+                )
+                .collect()
+        }
+    };
+    let (min_value, max_value, followers) =
+        combined_trim_range(visuals, project, key, edge, &others);
+    let original_value = match edge {
+        TrimEdge::Start => visual.clip.timeline_start,
+        TrimEdge::End => visual.clip.timeline_end(),
+    };
+    state.trim = Some(TrimState {
+        clip_id: visual.clip.id,
+        track_index: visual.track_index,
+        edge,
+        original_value,
+        accum_px: 0.0,
+        min_value,
+        max_value: max_value.max(min_value),
+        followers,
+        roll: matches!(zone, EdgeZone::Roll { .. }),
+    });
+}
+
+/// Comincia a trascinare `visual` insieme al suo gruppo di selezione.
+fn begin_drag(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVisual, duplicate: bool) {
+    let drag_group = drag_group_for(&state.selected, visuals, (visual.track_index, visual.clip.id));
+    state.selected = drag_group.clone();
+    state.selection_anchor = Some((visual.track_index, visual.clip.id));
+
+    let others: Vec<ClipKey> = drag_group.into_iter().collect();
+    let (_, _, followers) =
+        combined_drag_range(visuals, visual.track_index, visual.clip.id, &others);
+
+    state.drag = Some(DragState {
+        clip_id: visual.clip.id,
+        track_index: visual.track_index,
+        original_start: visual.clip.timeline_start,
+        accum_px: 0.0,
+        followers,
+        duplicate,
+    });
+}
+
+/// Trim da applicare al rilascio: lo stesso valore (già clampato) mostrato
+/// nell'anteprima.
+fn finish_trim(
+    t: &TrimState,
+    visual: &ClipVisual,
+    visuals: &[ClipVisual],
+    trimmed_primary_new_value: Option<FrameIdx>,
+) -> PendingAction {
+    let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
+    let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_value)];
+    let mut overwritten: Vec<_> =
+        grown_range(&visual.clip, visual.track_index, t.edge, new_value).into_iter().collect();
+    for &(other_id, other_track, offset, edge) in &t.followers {
+        let Some(other) =
+            visuals.iter().find(|v| v.clip.id == other_id && v.track_index == other_track)
+        else {
+            continue;
+        };
+        let other_value = new_value + offset;
+        trims.push((other_id, other_track, edge, other_value));
+        overwritten.extend(grown_range(&other.clip, other_track, edge, other_value));
+    }
+    PendingAction::Trim { trims, overwritten }
+}
+
+/// Spostamento da applicare al rilascio, alla stessa posizione mostrata
+/// durante il drag.
+fn finish_drag(
+    d: &DragState,
+    targets: &[(ClipId, EffectiveTrack)],
+    track_kinds: &[TrackKind],
+    dragged_primary_new_start: Option<FrameIdx>,
+) -> PendingAction {
+    let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
+    let original_tracks =
+        std::iter::once(d.track_index).chain(d.followers.iter().map(|(_, t, _)| *t));
+    let starts = std::iter::once(new_start)
+        .chain(d.followers.iter().map(|(_, _, offset)| new_start + offset));
+
+    let mut new_video_tracks = 0usize;
+    let mut new_audio_tracks = 0usize;
+    let moves: Vec<(ClipId, usize, EffectiveTrack, FrameIdx)> = targets
+        .iter()
+        .zip(original_tracks)
+        .zip(starts)
+        .map(|(((id, target), from_track), start)| {
+            if let EffectiveTrack::New(depth) = *target {
+                let count = match track_kinds[from_track] {
+                    TrackKind::Video => &mut new_video_tracks,
+                    TrackKind::Audio => &mut new_audio_tracks,
+                };
+                *count = (*count).max(depth);
+            }
+            (*id, from_track, *target, start)
+        })
+        .collect();
+    PendingAction::Move {
+        new_video_tracks,
+        new_audio_tracks,
+        moves,
+        duplicate: d.duplicate,
+    }
+}
+
+/// Corregge lo scroll salvato della ScrollArea `scroll_id` prima del suo `show`:
+/// allo zoom la testina resta ferma a schermo, in riproduzione resta visibile.
+fn sync_timeline_scroll(
+    ctx: &egui::Context,
+    scroll_id: egui::Id,
+    state: &mut TimelineState,
+    fps: f64,
+    px_per_frame: f32,
+    viewport_width: f32,
+    content_width: f32,
+    playback_active: bool,
+) {
+    // Zoom cambiato in questo frame: si corregge lo scroll salvato della
+    // ScrollArea (stesso id) prima del `show`, così la testina resta ferma a
+    // schermo.
+    if state.pixels_per_sec != state.last_rendered_pps {
+        if let Some(mut scroll_state) =
+            egui::containers::scroll_area::State::load(ctx, scroll_id)
+        {
+            let playhead_secs = state.playhead as f64 / fps;
+            scroll_state.offset.x +=
+                (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
+            scroll_state.store(ctx, scroll_id);
+        }
+    }
+    state.last_rendered_pps = state.pixels_per_sec;
+
+    // In riproduzione la testina resta visibile: se esce si "volta pagina"
+    // portandola a un terzo da sinistra. Clamp come quello di egui in `begin`.
+    if playback_active {
+        let playhead_x = state.playhead as f32 * px_per_frame;
+        let visible_start =
+            match egui::containers::scroll_area::State::load(ctx, scroll_id) {
+                Some(st) => st.offset.x,
+                None => 0.0,
+            };
+        let visible_end = visible_start + viewport_width;
+        const FOLLOW_MARGIN_FRAC: f32 = 1.0 / 3.0;
+        if playhead_x < visible_start || playhead_x > visible_end {
+            let target = (playhead_x - viewport_width * FOLLOW_MARGIN_FRAC)
+                .clamp(0.0, (content_width - viewport_width).max(0.0));
+            if let Some(mut scroll_state) =
+                egui::containers::scroll_area::State::load(ctx, scroll_id)
+            {
+                scroll_state.offset.x = target;
+                scroll_state.store(ctx, scroll_id);
+            }
+        }
+    }
+}
+
+/// Righello: tacche, striscia dei frame in cache e marker di export; click e
+/// drag spostano il playhead.
+fn show_ruler(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    content_width: f32,
+    state: &mut TimelineState,
+    visuals: &[ClipVisual],
+    fps: f64,
+    px_per_frame: f32,
+    snapping_enabled: bool,
+    buffered_ranges: &[(FrameIdx, FrameIdx)],
+    max_end_frames: FrameIdx,
+) {
+    let ruler_rect =
+        egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
+    painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(45));
+    let ruler_resp = ui.interact(
+        ruler_rect,
+        ui.id().with("timeline_ruler"),
+        egui::Sense::click_and_drag(),
+    );
+    // Su un click conta dove è stato rilasciato: se il frame è
+    // arrivato in ritardo, `interact_pointer_pos` è già
+    // l'ultima posizione del mouse dopo il rilascio.
+    let ruler_pos = if ruler_resp.clicked() {
+        ui.input(|i| {
+            i.events.iter().rev().find_map(|e| match e {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            })
+        })
+        .or_else(|| ruler_resp.interact_pointer_pos())
+    } else {
+        ruler_resp.interact_pointer_pos()
+    };
+    if let Some(pos) = ruler_pos {
+        let raw_frame =
+            (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+        state.playhead =
+            snap_frame(raw_frame, 0, &visuals, &[], &[], px_per_frame, snapping_enabled);
+    }
+
+    // Solo le tacche visibili: una timeline lunga zoomata al frame ne avrebbe
+    // migliaia fuori schermo.
+    let visible_x = ui.clip_rect().intersect(ruler_rect);
+    draw_ruler_ticks(&painter, origin, visible_x, state.pixels_per_sec, fps);
+
+    // Sotto la linea della playhead, così resta visibile.
+    const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
+    let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
+    for &(start, end) in buffered_ranges {
+        let x0 = origin.x + start as f32 * px_per_frame;
+        let x1 = origin.x + (end + 1) as f32 * px_per_frame;
+        let strip_rect = egui::Rect::from_min_max(
+            egui::pos2(x0, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
+            egui::pos2(x1, origin.y + RULER_HEIGHT),
+        );
+        painter.rect_filled(strip_rect, 0.0, buffered_color);
+    }
+
+    if !state.export_marks.is_full(max_end_frames) {
+        let (mark_in, mark_out) = state.export_marks.resolve(max_end_frames);
+        let band = egui::Rect::from_min_max(
+            egui::pos2(origin.x + mark_in as f32 * px_per_frame, origin.y),
+            egui::pos2(
+                origin.x + mark_out as f32 * px_per_frame,
+                origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT,
+            ),
+        );
+        painter.rect_filled(
+            band,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+        );
+        for x in [band.left(), band.right()] {
+            painter.vline(
+                x,
+                band.y_range(),
+                egui::Stroke::new(1.0, egui::Color32::from_gray(185)),
+            );
+        }
+    }
+}
+
+/// Linea del playhead più una testina triangolare nel righello.
+fn paint_playhead(painter: &egui::Painter, origin: egui::Pos2, x_offset: f32, visual_height: f32) {
+    let px = origin.x + x_offset;
+    let playhead_color = egui::Color32::from_rgb(220, 50, 50);
+    painter.line_segment(
+        [
+            egui::pos2(px, origin.y),
+            egui::pos2(px, origin.y + visual_height),
+        ],
+        egui::Stroke::new(2.0, playhead_color),
+    );
+    const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+            egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+            egui::pos2(px, origin.y + RULER_HEIGHT),
+        ],
+        playhead_color,
+        egui::Stroke::NONE,
+    ));
 }
 
 fn apply_pending_action(
