@@ -1,5 +1,5 @@
 MEDIA POOL:
-[ ] Il drop dei media nel media pool dal file manager del sistema operativo non funziona. sto testando su wayland. non so se funzioni su x11.
+[x] Il drop dei media nel media pool dal file manager del sistema operativo non funziona. sto testando su wayland. non so se funzioni su x11.
 
 BACKEND:
 [x] indagare sul perché nei log dell'editor, con alcuni media, compaiono questi messaggi (nonostante tutto sembra funzionare): [swscaler @ 0xfffee8165190] deprecated pixel format used, make sure you did set range correctly

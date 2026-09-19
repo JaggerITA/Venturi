@@ -15,3 +15,8 @@ vv-core = { version = "0.1.0", path = "../vv-core" }
 vv-media = { version = "0.1.0", path = "../vv-media" }
 vv-render = { version = "0.1.0", path = "../vv-render" }
 
+
+[target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6.2"
+sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false }
+wayland-backend = { version = "0.3.17", features = ["client_system"] }

@@ -21,6 +21,8 @@ mod timeline_ui;
 mod transport;
 mod viewer_overlay;
 mod waveform_worker;
+#[cfg(target_os = "linux")]
+mod wayland_dnd;
 mod worker;
 
 use eframe::wgpu;
@@ -351,6 +353,8 @@ struct VibeVideoApp {
     /// `None` nei test: le impostazioni non vengono mai scritte su disco.
     settings_path: Option<PathBuf>,
     settings_dialog: Option<settings_dialog::SettingsDialog>,
+    #[cfg(target_os = "linux")]
+    wayland_dnd: Option<wayland_dnd::WaylandDnd>,
 }
 
 impl Default for VibeVideoApp {
@@ -422,6 +426,8 @@ impl Default for VibeVideoApp {
             settings: settings::Settings::default(),
             settings_path: None,
             settings_dialog: None,
+            #[cfg(target_os = "linux")]
+            wayland_dnd: None,
         }
     }
 }
@@ -2211,6 +2217,10 @@ fn unstick_wheel_modifiers(raw_input: &mut egui::RawInput) {
 impl eframe::App for VibeVideoApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         unstick_wheel_modifiers(raw_input);
+        #[cfg(target_os = "linux")]
+        if let Some(dnd) = &self.wayland_dnd {
+            dnd.feed(raw_input);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2709,6 +2719,10 @@ fn main() -> eframe::Result<()> {
                     std::sync::Arc::new(render_state.queue.clone()),
                 );
                 app.egui_render_state = Some(render_state);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                app.wayland_dnd = wayland_dnd::WaylandDnd::start(cc);
             }
             if let Some(path) = startup_path {
                 app.import_media(path);

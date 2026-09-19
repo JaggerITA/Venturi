@@ -3159,13 +3159,16 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
+ "smithay-client-toolkit 0.20.0",
  "vv-audio",
  "vv-core",
  "vv-media",
  "vv-render",
+ "wayland-backend",
 ]
 
 [[package]]
