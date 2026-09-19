@@ -123,13 +123,20 @@ struct FadeDragState {
 }
 
 /// Trascinamento verticale della riga del volume su una clip audio: come
-/// `FadeDragState`, sempre locale alla singola clip, mai un gruppo.
+/// `FadeDragState`, sempre locale alla singola clip, mai una selezione
+/// multipla. A differenza di fade/trim, il gain si applica davvero (via
+/// `PendingAction::SetGain`) a ogni frame di drag invece che solo al
+/// rilascio — stessa catena di eventi dello slider del pannello proprietà,
+/// così la waveform e il colore della clip seguono dal vivo. `group` tiene
+/// insieme tutti quei commit in un solo passo di undo (vedi
+/// `History::begin_group`).
 struct VolumeDragState {
     clip_id: ClipId,
     track_index: usize,
     /// Gain (dB) prima del drag.
     original_db: f32,
     accum_px: f32,
+    group: vv_core::GroupMark,
 }
 
 /// Trim di un bordo, separato dal drag vero e proprio.
@@ -1461,6 +1468,10 @@ pub fn show_timeline(
     let track_at_y = |local_y: f32| -> usize { row_order[layout.row_at_y(local_y)] };
 
     let mut pending: Option<PendingAction> = None;
+    // Preso da `state.volume_drag` prima che il reset più sotto lo azzeri, per
+    // chiudere il gruppo di undo dopo che `apply_pending_action` ha applicato
+    // l'ultimo `SetGain` del drag (vedi `VolumeDragState::group`).
+    let mut volume_drag_group: Option<vv_core::GroupMark> = None;
 
     ui.horizontal_top(|ui| {
         // `Id::with(IdSalt)` e `Id::with(&str)` danno id diversi: serve la forma
@@ -2058,17 +2069,6 @@ pub fn show_timeline(
                     let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
                     paint_clip_box(&painter, clip_rect, visual, is_selected);
 
-                    // Anteprima del drag della riga volume in corso su questa
-                    // clip, se c'è: sia la waveform sia la riga la seguono in
-                    // tempo reale, come già succede cambiando il gain dal
-                    // pannello proprietà (che applica a ogni frame di drag
-                    // dello slider, non solo al rilascio).
-                    let volume_drag_preview = state
-                        .volume_drag
-                        .as_ref()
-                        .filter(|d| d.clip_id == visual.clip.id)
-                        .map(|d| volume_drag_value(d, clip_rect.height() / 2.0));
-
                     // Waveform: massimo dei bin per colonna, forma indipendente dallo zoom.
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && let ClipSource::Media(media_id) = &visual.clip.source
@@ -2085,7 +2085,6 @@ pub fn show_timeline(
                             (visual.clip.timeline_start, visual.clip.timeline_end())
                         };
                         let fps = timeline_fps.as_f64();
-                        let live_gain = volume_drag_preview.map(Keyframed::constant);
                         draw_clip_waveform(
                             &painter,
                             clip_rect,
@@ -2095,7 +2094,7 @@ pub fn show_timeline(
                             item.meta.fps.as_f64(),
                             wf.audio_duration_secs,
                             painter.clip_rect(),
-                            live_gain.as_ref().unwrap_or(&visual.clip.effects.gain_db),
+                            &visual.clip.effects.gain_db,
                         );
                     }
 
@@ -2111,12 +2110,15 @@ pub fn show_timeline(
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && visual.clip.effects.gain_db.is_constant()
                     {
-                        let db = volume_drag_preview.unwrap_or(visual.clip.effects.gain_db.default);
+                        let dragging = state
+                            .volume_drag
+                            .as_ref()
+                            .is_some_and(|d| d.clip_id == visual.clip.id);
                         paint_gain_line(
                             &painter,
                             clip_rect,
-                            gain_line_y(db, clip_rect),
-                            volume_drag_preview.is_some(),
+                            gain_line_y(visual.clip.effects.gain_db.default, clip_rect),
+                            dragging,
                         );
                     }
 
@@ -2224,7 +2226,7 @@ pub fn show_timeline(
                             None => match press_pos.and_then(edge_at) {
                                 Some(zone) => begin_trim(state, &visuals, project, visual, zone),
                                 None if press_pos.is_some_and(volume_hit) => {
-                                    begin_volume_drag(state, visual)
+                                    begin_volume_drag(state, history, visual)
                                 }
                                 None => {
                                     begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt))
@@ -2240,6 +2242,13 @@ pub fn show_timeline(
                             && vd.clip_id == visual.clip.id
                         {
                             vd.accum_px += resp.drag_delta().y;
+                            // A differenza di fade/trim/move, si applica già qui,
+                            // a ogni frame di drag (vedi `VolumeDragState`).
+                            pending = Some(PendingAction::SetGain {
+                                track_index: vd.track_index,
+                                clip_id: vd.clip_id,
+                                new_value: volume_drag_value(vd, clip_rect.height() / 2.0),
+                            });
                         } else if let Some(t) = &mut state.trim
                             && t.clip_id == visual.clip.id
                         {
@@ -2268,6 +2277,7 @@ pub fn show_timeline(
                                 clip_id: vd.clip_id,
                                 new_value: volume_drag_value(vd, clip_rect.height() / 2.0),
                             });
+                            volume_drag_group = Some(vd.group);
                             volume_drag_finished = true;
                         } else if let Some(t) = &state.trim
                             && t.clip_id == visual.clip.id
@@ -2387,6 +2397,9 @@ pub fn show_timeline(
 
     if let Some(action) = pending {
         apply_pending_action(project, history, state, timeline_id, action);
+    }
+    if let Some(mark) = volume_drag_group {
+        history.end_group(mark);
     }
 
     media_drop
@@ -2725,13 +2738,15 @@ fn volume_line_hit(pos: egui::Pos2, clip_rect: egui::Rect, line_y: f32) -> bool 
 }
 
 /// Comincia a trascinare la riga del volume: come il fade, locale alla
-/// singola clip.
-fn begin_volume_drag(state: &mut TimelineState, visual: &ClipVisual) {
+/// singola clip. Apre il gruppo di undo che raccoglierà i `SetGain` di
+/// ogni frame del drag (vedi `VolumeDragState::group`).
+fn begin_volume_drag(state: &mut TimelineState, history: &mut History, visual: &ClipVisual) {
     state.volume_drag = Some(VolumeDragState {
         clip_id: visual.clip.id,
         track_index: visual.track_index,
         original_db: visual.clip.effects.gain_db.default,
         accum_px: 0.0,
+        group: history.begin_group(),
     });
 }
 
@@ -4142,11 +4157,13 @@ mod tests {
     #[test]
     fn volume_drag_value_follows_the_pointer_and_clamps_at_the_range_extremes() {
         let half_height = 18.0; // (ROW_HEIGHT - 4.0) / 2.0
+        let group = History::default().begin_group();
         let drag = |accum_px| VolumeDragState {
             clip_id: ClipId(1),
             track_index: 0,
             original_db: 0.0,
             accum_px,
+            group,
         };
         // A 0 dB la riga è al centro: trascinare verso l'alto (accum_px
         // negativo) alza il gain, verso il basso lo abbassa.
