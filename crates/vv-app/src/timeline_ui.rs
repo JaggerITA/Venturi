@@ -3012,8 +3012,9 @@ fn combined_drag_range(
         };
         let offset = other.clip.timeline_start - this_start;
         let (o_min, o_max) = drag_range(visuals, other_track, other_id);
-        min_start = min_start.max(o_min - offset);
-        max_start = max_start.min(o_max - offset);
+        // Saturante: senza vicini `o_max` è ~`FrameIdx::MAX`.
+        min_start = min_start.max(o_min.saturating_sub(offset));
+        max_start = max_start.min(o_max.saturating_sub(offset));
         followers.push((other_id, other_track, offset));
     }
     (min_start, max_start, followers)
@@ -3049,8 +3050,9 @@ fn group_drag_bounds(
     for (i, &(follower_id, _, offset)) in followers.iter().enumerate() {
         let (_, follower_target) = targets[i + 1];
         let (o_min, o_max) = bound_for(follower_id, follower_target, reference_start + offset);
-        min_start = min_start.max(o_min - offset);
-        max_start = max_start.min(o_max - offset);
+        // Saturante: senza vicini `o_max` è ~`FrameIdx::MAX`.
+        min_start = min_start.max(o_min.saturating_sub(offset));
+        max_start = max_start.min(o_max.saturating_sub(offset));
     }
     (min_start, max_start.max(min_start))
 }
@@ -3856,6 +3858,23 @@ mod tests {
         let followers = vec![(ClipId(2), 2, 5)];
         let (min_start, max_start) = group_drag_bounds(&visuals, 0, &targets, &followers);
         assert_eq!((min_start, max_start), (0, 35));
+    }
+
+    #[test]
+    fn dragging_from_the_middle_of_a_group_onto_an_empty_track_does_not_overflow() {
+        let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10), visual(0, 3, 40, 10)];
+        let targets = vec![
+            (ClipId(2), EffectiveTrack::Existing(1)),
+            (ClipId(1), EffectiveTrack::Existing(1)),
+            (ClipId(3), EffectiveTrack::New(1)),
+        ];
+        let followers = vec![(ClipId(1), 0, -20), (ClipId(3), 0, 20)];
+        let (min_start, max_start) = group_drag_bounds(&visuals, 20, &targets, &followers);
+        assert_eq!(min_start, 20);
+        assert!(max_start > 1_000_000);
+
+        let (min_start, _, _) = combined_drag_range(&visuals, 0, ClipId(2), &[(0, ClipId(1)), (0, ClipId(3))]);
+        assert_eq!(min_start, 20);
     }
 
     /// 2 track video e 1 audio; 228px sotto al righello = 50px di zona
