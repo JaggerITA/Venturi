@@ -67,7 +67,7 @@ pub struct TimelineAudio {
 impl TimelineAudio {
     pub fn new() -> Self {
         let mixer = Mixer::new()
-            .map_err(|e| eprintln!("vv-app: mixer audio non disponibile: {e}"))
+            .map_err(|e| eprintln!("vv-app: audio mixer unavailable: {e}"))
             .ok();
         let channels = mixer.as_ref().map_or(2, Mixer::channels);
         let (stretch_tx, stretch_rx) = mpsc::channel();

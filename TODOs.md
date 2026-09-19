@@ -13,4 +13,4 @@ FINESTRA DI EXPORT:
 [x] Al termine dell'esportazione, oltre a "export completato" deve comparire il tempo impiegato.
 
 UI:
-[ ] Tradurre tutta la UI utente in inglese e inserire il supporto multi lingua. Questo diventa un progetto internazionale.
+[x] Tradurre tutta la UI utente in inglese e inserire il supporto multi lingua. Questo diventa un progetto internazionale.

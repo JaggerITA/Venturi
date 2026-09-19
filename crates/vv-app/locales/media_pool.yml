@@ -1,0 +1,73 @@
+_version: 2
+
+pool.drag_to_timeline:
+  en: "Drag onto the timeline to add"
+  it: "Trascina sulla timeline per aggiungere"
+
+pool.name:
+  en: "Name"
+  it: "Nome"
+
+pool.duration:
+  en: "Duration"
+  it: "Durata"
+
+pool.resume:
+  en: "Resume"
+  it: "Riprendi"
+
+pool.pause:
+  en: "Pause"
+  it: "Pausa"
+
+pool.proxy_generation:
+  en: "Background proxy generation"
+  it: "Generazione proxy in background"
+
+pool.meta_image:
+  en: "image · %{width}x%{height}"
+  it: "immagine · %{width}x%{height}"
+
+pool.audio:
+  en: "audio"
+  it: "audio"
+
+pool.muted:
+  en: "no audio"
+  it: "muto"
+
+pool.meta_audio:
+  en: "audio only · %{rate} Hz · %{channels} ch"
+  it: "solo audio · %{rate} Hz · %{channels} ch"
+
+pool.proxy_progress:
+  en: "Generating proxy %{percent}%"
+  it: "Generazione proxy %{percent}%"
+
+pool.proxy_queued:
+  en: "Proxy queued"
+  it: "Proxy in coda"
+
+pool.proxy_failed:
+  en: "Proxy not generated"
+  it: "Proxy non generato"
+
+pool.item_hint:
+  en: "Click: select (ctrl/shift for multiple items) · double click: preview · drag onto the timeline to add"
+  it: "Click: seleziona (ctrl/shift per più elementi) · doppio click: anteprima · trascina sulla timeline per aggiungere"
+
+pool.relink_many:
+  en: "Relink %{count} selected clips..."
+  it: "Relink %{count} clip selezionate..."
+
+pool.relink_one:
+  en: "Relink clip..."
+  it: "Relink clip..."
+
+pool.items:
+  en: "%{count} items"
+  it: "%{count} elementi"
+
+effects.generators:
+  en: "Generators"
+  it: "Generators"

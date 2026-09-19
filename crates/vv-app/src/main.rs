@@ -2,10 +2,15 @@
 //! viewer compone sulla GPU le clip attive di tutte le track video e passa
 //! la texture a egui-wgpu senza readback (REFACTOR_PIPELINE.md B2).
 
+#[macro_use]
+extern crate rust_i18n;
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod app_menu;
 mod export;
 mod export_dialog;
 mod frame_provider;
+mod i18n;
 mod media_pool;
 mod media_pool_ui;
 mod mix_buffers;
@@ -1444,15 +1449,15 @@ impl VibeVideoApp {
         let Some(dialog) = &mut self.settings_dialog else {
             return;
         };
-        let response = dialog.show(ctx, &mut self.settings.keymap);
+        let response = dialog.show(ctx, &mut self.settings);
         if !response.open {
             self.settings_dialog = None;
         }
-        if response.keymap_changed
+        if response.changed
             && let Some(path) = &self.settings_path
             && let Err(e) = self.settings.save(path)
         {
-            self.project_error = Some(format!("Impossibile salvare le impostazioni: {e}"));
+            self.project_error = Some(t!("settings.save_failed", error = e).into_owned());
         }
     }
 
@@ -1510,7 +1515,7 @@ impl VibeVideoApp {
                     ui.painter().text(
                         screen.center(),
                         egui::Align2::CENTER_CENTER,
-                        "⚠  Media offline",
+                        t!("viewer.media_offline"),
                         egui::FontId::proportional(24.0),
                         egui::Color32::from_rgb(230, 70, 70),
                     );
@@ -2219,10 +2224,10 @@ fn show_stream_drag_handles(
 
     let video = ui
         .interact(video_rect, ui.id().with("viewer_drag_video_only"), egui::Sense::drag())
-        .on_hover_text("Trascina sulla timeline per aggiungere solo il video");
+        .on_hover_text(t!("viewer.drag_video_only"));
     let audio = ui
         .interact(audio_rect, ui.id().with("viewer_drag_audio_only"), egui::Sense::drag())
-        .on_hover_text("Trascina sulla timeline per aggiungere solo l'audio");
+        .on_hover_text(t!("viewer.drag_audio_only"));
 
     let visible = ui.rect_contains_pointer(viewer) || video.dragged() || audio.dragged();
     if visible {
@@ -2308,15 +2313,15 @@ impl eframe::App for VibeVideoApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.toggle_value(&mut self.show_media_pool, "Media pool");
-                ui.toggle_value(&mut self.show_effects, "Effects");
+                ui.toggle_value(&mut self.show_media_pool, t!("toolbar.media_pool"));
+                ui.toggle_value(&mut self.show_effects, t!("toolbar.effects"));
                 if let Some(err) = &self.project_error {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, err);
                 }
                 // Sopra al pannello che apre, come i toggle a sinistra.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.properties_panel_open, "Inspector");
+                    ui.toggle_value(&mut self.properties_panel_open, t!("menu.inspector"));
                 });
             });
         });
@@ -2471,7 +2476,7 @@ impl eframe::App for VibeVideoApp {
                     let drop_id = ui.id().with("timeline_drop_zone_empty");
                     let drop_resp = ui.interact(drop_rect, drop_id, egui::Sense::hover());
                     dropped_on_empty_timeline = timeline_ui::TimelineDrag::released(&drop_resp);
-                    ui.label("Importa un media (o trascinalo qui dal media pool) per creare la timeline.");
+                    ui.label(t!("timeline.empty_hint"));
                 }
             });
         if let Some(drag) = dropped_on_empty_timeline {
@@ -2548,9 +2553,9 @@ impl eframe::App for VibeVideoApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         magnet_toggle(ui, &mut self.snapping_enabled)
-                            .on_hover_text("Calamita: aggancia le clip trascinate ai bordi vicini");
+                            .on_hover_text(t!("toolbar.snapping"));
                         transform_overlay_toggle(ui, &mut self.show_transform_overlay)
-                            .on_hover_text("Handle di posizione, scala e anchor point sul viewer");
+                            .on_hover_text(t!("toolbar.transform_overlay"));
                     });
                 });
             let (total, playhead, marks, playing) = self.transport_state();
@@ -2657,23 +2662,23 @@ impl eframe::App for VibeVideoApp {
                     ui.centered_and_justified(|ui| {
                         ui.colored_label(
                             egui::Color32::from_rgb(230, 70, 70),
-                            egui::RichText::new("⚠  Media offline").size(24.0),
+                            egui::RichText::new(t!("viewer.media_offline")).size(24.0),
                         );
                     });
                 }
                 None => {
                     if let Some(err) = &self.preview_error {
-                        ui.colored_label(egui::Color32::RED, format!("Errore player: {err}"));
+                        ui.colored_label(egui::Color32::RED, t!("viewer.player_error", error = err));
                     } else {
                         let audio_only = self.browsing_media.is_some()
                             && self.preview_meta.as_ref().is_some_and(|m| !m.has_video);
                         let label = ui.centered_and_justified(|ui| {
                             ui.label(if audio_only {
-                                "🔊  Solo audio"
+                                t!("viewer.audio_only")
                             } else if self.browsing_media.is_some() || self.active_clip.is_some() {
-                                "Decodifica in corso..."
+                                t!("viewer.decoding")
                             } else {
-                                "Importa un media, aggiungilo alla timeline e premi Spazio."
+                                t!("viewer.empty_hint")
                             })
                         });
                         // Si trascina in timeline anche senza immagine.
@@ -2694,7 +2699,7 @@ impl eframe::App for VibeVideoApp {
                 let drag_id = ui.id().with("viewer_media_drag");
                 let resp = ui
                     .interact(rect, drag_id, egui::Sense::drag())
-                    .on_hover_text("Trascina sulla timeline per aggiungere la porzione tra in e out");
+                    .on_hover_text(t!("viewer.drag_in_out"));
                 let mut drags = vec![(resp, timeline_ui::DragStreams::All)];
                 if self.preview_meta.as_ref().is_some_and(|m| m.has_video && m.has_audio) {
                     drags.extend(show_stream_drag_handles(ui, rect));
@@ -2711,12 +2716,17 @@ impl eframe::App for VibeVideoApp {
                     if resp.dragged()
                         && let Some(item) = self.project.media_pool.get(media_id)
                     {
-                        let suffix = match streams {
-                            timeline_ui::DragStreams::All => "",
-                            timeline_ui::DragStreams::VideoOnly => " (solo video)",
-                            timeline_ui::DragStreams::AudioOnly => " (solo audio)",
+                        let name = file_label(&item.path);
+                        let ghost = match streams {
+                            timeline_ui::DragStreams::All => name,
+                            timeline_ui::DragStreams::VideoOnly => {
+                                t!("viewer.ghost_video_only", name = name).into_owned()
+                            }
+                            timeline_ui::DragStreams::AudioOnly => {
+                                t!("viewer.ghost_audio_only", name = name).into_owned()
+                            }
                         };
-                        show_drag_ghost(ui, resp.id, &format!("{}{suffix}", file_label(&item.path)));
+                        show_drag_ghost(ui, resp.id, &ghost);
                     }
                 }
             }
@@ -2785,6 +2795,7 @@ fn main() -> eframe::Result<()> {
             if let Some(path) = &app.settings_path {
                 app.settings = settings::Settings::load(path);
             }
+            app.settings.language.apply();
             // Aperto subito: aprire lo stream audio blocca per centinaia di ms.
             app.timeline_audio = Some(TimelineAudio::new());
             if let Some(render_state) = cc.wgpu_render_state.clone() {
@@ -3136,7 +3147,7 @@ mod tests {
         assert_eq!(app.project.media_pool[already_ok].content_hash, 2);
         assert_eq!(
             app.relink_message,
-            Some("Ricollegati 1 media, 1 non trovati.".to_string())
+            Some("Relinked 1 media, 1 not found.".to_string())
         );
 
         app.history.undo(&mut app.project);

@@ -12,7 +12,7 @@ pub use command::{
     set_clip_gain, set_clip_title, set_clip_transform_param,
 };
 pub use model::*;
-pub use otio::{OtioError, OtioImport, export_otio, import_otio};
+pub use otio::{OtioError, OtioImport, OtioWarning, export_otio, import_otio};
 pub use persistence::{PersistenceError, load_project, save_project};
 
 #[cfg(test)]

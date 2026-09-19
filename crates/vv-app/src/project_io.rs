@@ -277,7 +277,7 @@ impl VibeVideoApp {
             )
             .add_filter("video", &["mp4", "mov", "mkv", "avi"])
             .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
-            .add_filter("immagini", IMAGE_EXTENSIONS)
+            .add_filter(t!("file_filter.images"), IMAGE_EXTENSIONS)
             .pick_files(),
             )
         });
@@ -297,8 +297,8 @@ impl VibeVideoApp {
     /// Ctrl+Shift+S).
     pub(crate) fn save_project_as(&mut self) {
         self.spawn_file_dialog(DialogKind::SaveProjectAs, |dlg| {
-            dlg.set_file_name("progetto.vvproj")
-                .add_filter("progetto vibevideo", &["vvproj"])
+            dlg.set_file_name(format!("{}.vvproj", t!("project.default_file_name")))
+                .add_filter(t!("file_filter.project"), &["vvproj"])
                 .save_file()
         });
     }
@@ -310,7 +310,7 @@ impl VibeVideoApp {
                 self.project_error = None;
                 self.mark_saved();
             }
-            Err(e) => self.project_error = Some(format!("Salvataggio fallito: {e}")),
+            Err(e) => self.project_error = Some(t!("project.save_failed", error = e).into_owned()),
         }
     }
 
@@ -329,7 +329,7 @@ impl VibeVideoApp {
     pub(crate) fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
         self.project_error = vv_core::export_otio(&self.project, timeline_id, path)
             .err()
-            .map(|e| format!("Esportazione OTIO fallita: {e}"));
+            .map(|e| t!("project.otio_export_failed", error = e).into_owned());
     }
 
     pub(crate) fn mark_saved(&mut self) {
@@ -379,20 +379,20 @@ impl VibeVideoApp {
         let mut choice = None;
         let modal = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ui.ctx(), |ui| {
             ui.heading(if switch == ProjectSwitch::Quit {
-                "Salvare le modifiche prima di uscire?"
+                t!("project.save_before_quit")
             } else {
-                "Salvare le modifiche?"
+                t!("project.save_changes")
             });
-            ui.label("Il progetto corrente ha modifiche non salvate.");
+            ui.label(t!("project.unsaved_changes"));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Salva").clicked() {
+                if ui.button(t!("common.save")).clicked() {
                     choice = Some(UnsavedChoice::Save);
                 }
-                if ui.button("Non salvare").clicked() {
+                if ui.button(t!("project.dont_save")).clicked() {
                     choice = Some(UnsavedChoice::Discard);
                 }
-                if ui.button("Annulla").clicked() {
+                if ui.button(t!("common.cancel")).clicked() {
                     choice = Some(UnsavedChoice::Cancel);
                 }
             });
@@ -440,15 +440,15 @@ impl VibeVideoApp {
         match imported {
             Ok(imported) => {
                 self.replace_project(imported.project, None);
-                self.import_warnings = imported.warnings;
+                self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
             }
-            Err(e) => self.project_error = Some(format!("Importazione OTIO fallita: {e}")),
+            Err(e) => self.project_error = Some(t!("project.otio_import_failed", error = e).into_owned()),
         }
     }
 
     pub(crate) fn open_project_dialog(&mut self) {
         self.spawn_file_dialog(DialogKind::OpenProject, |dlg| {
-            dlg.add_filter("progetto vibevideo", &["vvproj"]).pick_file()
+            dlg.add_filter(t!("file_filter.project"), &["vvproj"]).pick_file()
         });
     }
 
@@ -456,7 +456,7 @@ impl VibeVideoApp {
     pub(crate) fn load_project_from(&mut self, path: PathBuf) {
         match vv_core::load_project(&path) {
             Ok(project) => self.replace_project(project, Some(path)),
-            Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
+            Err(e) => self.project_error = Some(t!("project.open_failed", error = e).into_owned()),
         }
     }
 
@@ -596,7 +596,8 @@ impl VibeVideoApp {
             return;
         }
         let mut close = false;
-        egui::Window::new(format!("Avvisi di importazione ({})", self.import_warnings.len()))
+        egui::Window::new(t!("project.import_warnings", count = self.import_warnings.len()))
+            .id(egui::Id::new("import_warnings"))
             .collapsible(true)
             .default_width(480.0)
             .show(ui.ctx(), |ui| {
@@ -606,7 +607,7 @@ impl VibeVideoApp {
                     }
                 });
                 ui.separator();
-                close = ui.button("Chiudi").clicked();
+                close = ui.button(t!("common.close")).clicked();
             });
         if close {
             self.import_warnings.clear();
@@ -624,7 +625,7 @@ impl VibeVideoApp {
             .show(ui.ctx(), |ui| {
                 ui.label(message.as_str());
                 ui.separator();
-                close = ui.button("Chiudi").clicked();
+                close = ui.button(t!("common.close")).clicked();
             });
         if close {
             self.relink_message = None;
@@ -653,19 +654,19 @@ impl VibeVideoApp {
                 };
                 ui.add(
                     egui::ProgressBar::new(fraction)
-                        .text(format!("{current}/{total} frame"))
+                        .text(t!("project.export_progress", current = current, total = total))
                         .animate(!done),
                 );
                 if let Some(err) = &error {
                     ui.colored_label(egui::Color32::RED, err);
                 } else if done {
-                    ui.label(format!("Export completato in {}.", format_elapsed(elapsed)));
+                    ui.label(t!("project.export_done", elapsed = format_elapsed(elapsed)));
                 }
                 ui.horizontal(|ui| {
-                    if !done && ui.button("Annulla").clicked() {
+                    if !done && ui.button(t!("common.cancel")).clicked() {
                         state.cancel.store(true, Ordering::Relaxed);
                     }
-                    if done && ui.button("Chiudi").clicked() {
+                    if done && ui.button(t!("common.close")).clicked() {
                         should_close = true;
                     }
                 });
@@ -750,12 +751,11 @@ impl VibeVideoApp {
             relinked_ids.push(media_id);
         }
         self.relink_message = Some(if commands.is_empty() {
-            "Nessun media ricollegato: nessun file corrispondente trovato nella cartella scelta."
-                .to_string()
+            t!("project.relink_none").into_owned()
         } else if missing == 0 {
-            format!("Ricollegati {} media.", commands.len())
+            t!("project.relink_done", count = commands.len()).into_owned()
         } else {
-            format!("Ricollegati {} media, {missing} non trovati.", commands.len())
+            t!("project.relink_partial", count = commands.len(), missing = missing).into_owned()
         });
         if commands.is_empty() {
             return;
@@ -769,6 +769,31 @@ impl VibeVideoApp {
             self.enqueue_media_background_jobs(media_id);
         }
     }
+}
+
+fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
+    use vv_core::OtioWarning as W;
+    match warning {
+        W::EffectIgnored { effect, clips } => t!("otio.effect_ignored", effect = effect, clips = clips),
+        W::UnsupportedInStack { schema } => t!("otio.unsupported_in_stack", schema = schema),
+        W::TrackKindIgnored { kind } => {
+            t!("otio.track_kind_ignored", kind = kind.as_deref().unwrap_or("?"))
+        }
+        W::TransitionIgnored => t!("otio.transition_ignored"),
+        W::UnsupportedItem { schema } => t!("otio.unsupported_item", schema = schema),
+        W::ClipWithoutDuration { clip } => t!("otio.clip_without_duration", clip = clip),
+        W::ClipDisabled { clip } => t!("otio.clip_disabled", clip = clip),
+        W::ClipShorterThanAFrame { clip } => t!("otio.clip_too_short", clip = clip),
+        W::AudioOnlyOnVideoTrack { clip } => t!("otio.audio_only_on_video_track", clip = clip),
+        W::UnsupportedReference { clip, schema } => {
+            t!("otio.unsupported_reference", clip = clip, schema = schema)
+        }
+        W::UnsupportedUrl { url } => t!("otio.unsupported_url", url = url),
+        W::MediaUnreadable { path, error } => {
+            t!("otio.media_unreadable", path = path.display(), error = error)
+        }
+    }
+    .into_owned()
 }
 
 fn format_elapsed(d: std::time::Duration) -> String {

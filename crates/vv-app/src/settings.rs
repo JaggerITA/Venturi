@@ -1,10 +1,13 @@
 //! Impostazioni utente del programma (non del progetto), salvate in
 //! `~/.config/vibevideo/settings.json`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::i18n::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
@@ -95,37 +98,11 @@ impl Action {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Action::TogglePlayback => "Play/pausa",
-            Action::FastPlayback => "Play veloce (1x → 2x → 4x → 8x)",
-            Action::StepBackward => "Frame precedente",
-            Action::StepForward => "Frame successivo",
-            Action::MarkIn => "Punto di inizio (in)",
-            Action::MarkOut => "Punto di fine (out)",
-            Action::FullscreenViewer => "Player a schermo intero",
-            Action::Undo => "Annulla",
-            Action::Redo => "Ripeti",
-            Action::Copy => "Copia",
-            Action::Cut => "Taglia",
-            Action::Paste => "Incolla",
-            Action::Delete => "Elimina",
-            Action::RippleDelete => "Ripple delete",
-            Action::Split => "Dividi al playhead",
-            Action::ToggleDisabled => "Disattiva/attiva clip",
-            Action::SelectAll => "Seleziona tutte le clip",
-            Action::SelectFromPlayhead => "Seleziona dal playhead in avanti",
-            Action::OpenProject => "Apri progetto",
-            Action::SaveProject => "Salva",
-            Action::SaveProjectAs => "Salva con nome",
-            Action::ImportMedia => "Importa media",
-            Action::Export => "Esporta",
-            Action::ZoomIn => "Zoom avanti timeline",
-            Action::ZoomOut => "Zoom indietro timeline",
-        }
+    pub fn label(self) -> Cow<'static, str> {
+        t!(format!("action.{}", self.id()))
     }
 
-    pub fn category(self) -> &'static str {
+    pub fn category(self) -> Cow<'static, str> {
         match self {
             Action::TogglePlayback
             | Action::FastPlayback
@@ -133,7 +110,7 @@ impl Action {
             | Action::StepForward
             | Action::MarkIn
             | Action::MarkOut
-            | Action::FullscreenViewer => "Riproduzione",
+            | Action::FullscreenViewer => t!("action_category.playback"),
             Action::Undo
             | Action::Redo
             | Action::Copy
@@ -144,13 +121,13 @@ impl Action {
             | Action::Split
             | Action::ToggleDisabled
             | Action::SelectAll
-            | Action::SelectFromPlayhead => "Modifica",
+            | Action::SelectFromPlayhead => t!("action_category.edit"),
             Action::OpenProject
             | Action::SaveProject
             | Action::SaveProjectAs
             | Action::ImportMedia
-            | Action::Export => "File",
-            Action::ZoomIn | Action::ZoomOut => "Timeline",
+            | Action::Export => t!("action_category.file"),
+            Action::ZoomIn | Action::ZoomOut => t!("action_category.timeline"),
         }
     }
 
@@ -298,18 +275,18 @@ impl Shortcut {
 
 impl std::fmt::Display for Shortcut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let key = match self.key {
-            egui::Key::IntlBackslash => "<",
-            egui::Key::Minus => "-",
-            egui::Key::ArrowLeft => "←",
-            egui::Key::ArrowRight => "→",
-            egui::Key::ArrowUp => "↑",
-            egui::Key::ArrowDown => "↓",
-            egui::Key::Space => "Spazio",
-            egui::Key::Delete => "Canc",
-            key => key.symbol_or_name(),
+        let key: Cow<str> = match self.key {
+            egui::Key::IntlBackslash => "<".into(),
+            egui::Key::Minus => "-".into(),
+            egui::Key::ArrowLeft => "←".into(),
+            egui::Key::ArrowRight => "→".into(),
+            egui::Key::ArrowUp => "↑".into(),
+            egui::Key::ArrowDown => "↓".into(),
+            egui::Key::Space => t!("key.space"),
+            egui::Key::Delete => t!("key.delete"),
+            key => key.symbol_or_name().into(),
         };
-        f.write_str(&self.join(key))
+        f.write_str(&self.join(&key))
     }
 }
 
@@ -408,12 +385,15 @@ impl Keymap {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
     pub keymap: Keymap,
+    pub language: Language,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct SettingsFile {
     #[serde(default)]
     shortcuts: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    language: Option<String>,
 }
 
 impl Settings {
@@ -434,11 +414,12 @@ impl Settings {
         let file: SettingsFile = match serde_json::from_str(&text) {
             Ok(file) => file,
             Err(e) => {
-                eprintln!("impostazioni in {} non valide: {e}", path.display());
+                eprintln!("invalid settings in {}: {e}", path.display());
                 return Self::default();
             }
         };
         let mut settings = Self::default();
+        settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
         for (id, shortcuts) in file.shortcuts {
             let Some(action) = Action::from_id(&id) else {
                 continue;
@@ -459,6 +440,7 @@ impl Settings {
                     (action.id().to_owned(), shortcuts.iter().map(|s| s.to_config()).collect())
                 })
                 .collect(),
+            language: Some(self.language.id().to_owned()),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {
@@ -480,6 +462,16 @@ mod tests {
             }
         }
         assert_eq!(Shortcut::from_config("Ctrl++"), Some(Shortcut::ctrl(egui::Key::Plus)));
+    }
+
+    #[test]
+    fn every_action_label_is_translated() {
+        for locale in rust_i18n::available_locales!() {
+            for action in Action::ALL {
+                let key = format!("action.{}", action.id());
+                assert!(crate::_rust_i18n_try_translate(&locale, &key).is_some(), "{locale}: {key}");
+            }
+        }
     }
 
     #[test]
@@ -511,6 +503,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.keymap.assign(Action::Split, Some(0), Shortcut::ctrl(egui::Key::K));
         settings.keymap.remove(Action::ZoomIn, 1);
+        settings.language = Language::Italian;
         settings.save(&path).unwrap();
 
         let loaded = Settings::load(&path);

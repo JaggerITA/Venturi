@@ -1,0 +1,125 @@
+_version: 2
+
+file_filter.images:
+  en: "images"
+  it: "immagini"
+
+file_filter.project:
+  en: "vibevideo project"
+  it: "progetto vibevideo"
+
+project.default_file_name:
+  en: "project"
+  it: "progetto"
+
+project.save_failed:
+  en: "Save failed: %{error}"
+  it: "Salvataggio fallito: %{error}"
+
+project.otio_export_failed:
+  en: "OTIO export failed: %{error}"
+  it: "Esportazione OTIO fallita: %{error}"
+
+project.save_before_quit:
+  en: "Save changes before quitting?"
+  it: "Salvare le modifiche prima di uscire?"
+
+project.save_changes:
+  en: "Save changes?"
+  it: "Salvare le modifiche?"
+
+project.unsaved_changes:
+  en: "The current project has unsaved changes."
+  it: "Il progetto corrente ha modifiche non salvate."
+
+common.save:
+  en: "Save"
+  it: "Salva"
+
+project.dont_save:
+  en: "Don't save"
+  it: "Non salvare"
+
+project.otio_import_failed:
+  en: "OTIO import failed: %{error}"
+  it: "Importazione OTIO fallita: %{error}"
+
+project.open_failed:
+  en: "Could not open the project: %{error}"
+  it: "Apertura fallita: %{error}"
+
+project.import_warnings:
+  en: "Import warnings (%{count})"
+  it: "Avvisi di importazione (%{count})"
+
+common.close:
+  en: "Close"
+  it: "Chiudi"
+
+project.export_progress:
+  en: "%{current}/%{total} frames"
+  it: "%{current}/%{total} frame"
+
+project.export_done:
+  en: "Export completed in %{elapsed}."
+  it: "Export completato in %{elapsed}."
+
+project.relink_none:
+  en: "No media relinked: no matching file found in the chosen folder."
+  it: "Nessun media ricollegato: nessun file corrispondente trovato nella cartella scelta."
+
+project.relink_done:
+  en: "Relinked %{count} media."
+  it: "Ricollegati %{count} media."
+
+project.relink_partial:
+  en: "Relinked %{count} media, %{missing} not found."
+  it: "Ricollegati %{count} media, %{missing} non trovati."
+
+otio.effect_ignored:
+  en: "effect \"%{effect}\" ignored on %{clips} clips"
+  it: "effetto \"%{effect}\" ignorato su %{clips} clip"
+
+otio.unsupported_in_stack:
+  en: "%{schema} is not supported at track level"
+  it: "%{schema} non supportato a livello di track"
+
+otio.track_kind_ignored:
+  en: "track of kind %{kind} ignored"
+  it: "track di tipo %{kind} ignorata"
+
+otio.transition_ignored:
+  en: "transition ignored: hard cut"
+  it: "transizione ignorata: taglio netto"
+
+otio.unsupported_item:
+  en: "%{schema} not supported: left empty"
+  it: "%{schema} non supportato: lasciato vuoto"
+
+otio.clip_without_duration:
+  en: "clip \"%{clip}\" has no duration: ignored"
+  it: "clip \"%{clip}\" senza durata: ignorata"
+
+otio.clip_disabled:
+  en: "clip \"%{clip}\" is disabled: ignored"
+  it: "clip \"%{clip}\" disattivata: ignorata"
+
+otio.clip_too_short:
+  en: "clip \"%{clip}\" is shorter than a frame: ignored"
+  it: "clip \"%{clip}\" più corta di un frame: ignorata"
+
+otio.audio_only_on_video_track:
+  en: "clip \"%{clip}\": audio only on a video track, ignored"
+  it: "clip \"%{clip}\": solo audio su una track video, ignorata"
+
+otio.unsupported_reference:
+  en: "clip \"%{clip}\": %{schema} reference not supported, ignored"
+  it: "clip \"%{clip}\": riferimento %{schema} non supportato, ignorata"
+
+otio.unsupported_url:
+  en: "%{url}: unsupported address"
+  it: "%{url}: indirizzo non supportato"
+
+otio.media_unreadable:
+  en: "%{path}: %{error}"
+  it: "%{path}: %{error}"

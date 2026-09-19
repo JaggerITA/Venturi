@@ -66,7 +66,7 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
     let id = ui.id().with(("effect_item", generator.label()));
     let resp = ui
         .interact(rect, id, egui::Sense::click_and_drag())
-        .on_hover_text("Trascina sulla timeline per aggiungere");
+        .on_hover_text(t!("pool.drag_to_timeline"));
     let visuals = ui.visuals();
     let (bg, stroke) = if resp.hovered() || resp.dragged() {
         (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
@@ -101,7 +101,7 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
     );
     resp.dnd_set_drag_payload(generator);
     if resp.dragged() {
-        show_drag_ghost(ui, id, generator.label());
+        show_drag_ghost(ui, id, &generator.label());
     }
 }
 
@@ -128,12 +128,12 @@ pub(crate) fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::Media
     );
     let sort = state.sort;
     for (key, label, cell) in [
-        (SortKey::Name, "Nome", name_rect),
-        (SortKey::Duration, "Durata", duration_rect),
+        (SortKey::Name, t!("pool.name"), name_rect),
+        (SortKey::Duration, t!("pool.duration"), duration_rect),
     ] {
         let resp = ui.interact(
             cell,
-            ui.id().with(("media_pool_header", label)),
+            ui.id().with(("media_pool_header", key as u8)),
             egui::Sense::click(),
         );
         let active = sort.key == key;
@@ -198,10 +198,10 @@ impl VibeVideoApp {
             let paused = worker.is_paused();
             if progress.finished < progress.total {
                 ui.horizontal(|ui| {
-                    let label = if paused { "Riprendi" } else { "Pausa" };
+                    let label = if paused { t!("pool.resume") } else { t!("pool.pause") };
                     if ui
                         .small_button(label)
-                        .on_hover_text("Generazione proxy in background")
+                        .on_hover_text(t!("pool.proxy_generation"))
                         .clicked()
                     {
                         worker.set_paused(!paused);
@@ -307,19 +307,21 @@ impl VibeVideoApp {
                                 ui.vertical(|ui| {
                                     ui.label(&label);
                                     ui.small(if meta.is_image() {
-                                        format!("immagine · {}x{}", meta.width, meta.height)
+                                        t!("pool.meta_image", width = meta.width, height = meta.height)
                                     } else if meta.has_video {
                                         format!(
                                             "{}x{} · {:.2}fps · {}",
                                             meta.width,
                                             meta.height,
                                             meta.fps.as_f64(),
-                                            if meta.has_audio { "audio" } else { "muto" }
+                                            if meta.has_audio { t!("pool.audio") } else { t!("pool.muted") }
                                         )
+                                        .into()
                                     } else {
-                                        format!(
-                                            "solo audio · {} Hz · {} ch",
-                                            meta.sample_rate, meta.channels
+                                        t!(
+                                            "pool.meta_audio",
+                                            rate = meta.sample_rate,
+                                            channels = meta.channels
                                         )
                                     });
                                 });
@@ -341,15 +343,15 @@ impl VibeVideoApp {
                                         match proxy_state {
                                         Some(proxy_worker::ProxyState::Generating(f)) => {
                                             proxy_progress_ring(ui, Some(f))
-                                                .on_hover_text(format!("Generazione proxy {:.0}%", f * 100.0));
+                                                .on_hover_text(t!("pool.proxy_progress", percent = format!("{:.0}", f * 100.0)));
                                         }
                                         Some(proxy_worker::ProxyState::Queued) => {
                                             proxy_progress_ring(ui, None)
-                                                .on_hover_text("Proxy in coda");
+                                                .on_hover_text(t!("pool.proxy_queued"));
                                         }
                                         Some(proxy_worker::ProxyState::Failed) => {
                                             ui.colored_label(egui::Color32::RED, "!")
-                                                .on_hover_text("Proxy non generato");
+                                                .on_hover_text(t!("pool.proxy_failed"));
                                         }
                                         _ => {}
                                         }
@@ -371,7 +373,7 @@ impl VibeVideoApp {
                     let resp = ui
                         .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
                         .on_hover_text(
-                            "Click: seleziona (ctrl/shift per più elementi) · doppio click: anteprima · trascina sulla timeline per aggiungere",
+                            t!("pool.item_hint"),
                         );
                     item_rects.push((id, group_resp.rect));
                     if self.media_pool_state.selected.contains(&id) {
@@ -398,9 +400,9 @@ impl VibeVideoApp {
                     resp.context_menu(|ui| {
                         let count = self.media_pool_state.selected.len().max(1);
                         let label = if count > 1 {
-                            format!("Relink {count} clip selezionate...")
+                            t!("pool.relink_many", count = count)
                         } else {
-                            "Relink clip...".to_string()
+                            t!("pool.relink_one")
                         };
                         if ui.button(label).clicked() {
                             self.relink_media_dialog();
@@ -440,7 +442,7 @@ impl VibeVideoApp {
                     }
                     if resp.dragged() {
                         let ghost = if dragged_count > 1 {
-                            format!("{dragged_count} elementi")
+                            t!("pool.items", count = dragged_count).into_owned()
                         } else {
                             label.clone()
                         };
@@ -489,7 +491,7 @@ impl VibeVideoApp {
 
     /// Sezione Effects: effetti da trascinare sulla timeline.
     pub(crate) fn show_effects_list(ui: &mut egui::Ui) {
-        effects_section_header(ui, "Generators");
+        effects_section_header(ui, &t!("effects.generators"));
         egui::ScrollArea::vertical()
             .id_salt("effects_scroll")
             .auto_shrink([false, false])

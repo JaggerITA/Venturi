@@ -1,0 +1,65 @@
+_version: 2
+
+viewer.media_offline:
+  en: "⚠  Media offline"
+  it: "⚠  Media offline"
+
+viewer.drag_video_only:
+  en: "Drag onto the timeline to add only the video"
+  it: "Trascina sulla timeline per aggiungere solo il video"
+
+viewer.drag_audio_only:
+  en: "Drag onto the timeline to add only the audio"
+  it: "Trascina sulla timeline per aggiungere solo l'audio"
+
+toolbar.media_pool:
+  en: "Media pool"
+  it: "Media pool"
+
+toolbar.effects:
+  en: "Effects"
+  it: "Effects"
+
+timeline.empty_hint:
+  en: "Import a media file (or drag it here from the media pool) to create the timeline."
+  it: "Importa un media (o trascinalo qui dal media pool) per creare la timeline."
+
+toolbar.snapping:
+  en: "Magnet: snaps dragged clips to nearby edges"
+  it: "Calamita: aggancia le clip trascinate ai bordi vicini"
+
+toolbar.transform_overlay:
+  en: "Position, scale and anchor point handles on the viewer"
+  it: "Handle di posizione, scala e anchor point sul viewer"
+
+viewer.player_error:
+  en: "Player error: %{error}"
+  it: "Errore player: %{error}"
+
+viewer.audio_only:
+  en: "🔊  Audio only"
+  it: "🔊  Solo audio"
+
+viewer.decoding:
+  en: "Decoding..."
+  it: "Decodifica in corso..."
+
+viewer.empty_hint:
+  en: "Import a media file, add it to the timeline and press Space."
+  it: "Importa un media, aggiungilo alla timeline e premi Spazio."
+
+viewer.drag_in_out:
+  en: "Drag onto the timeline to add the part between in and out"
+  it: "Trascina sulla timeline per aggiungere la porzione tra in e out"
+
+viewer.ghost_video_only:
+  en: "%{name} (video only)"
+  it: "%{name} (solo video)"
+
+viewer.ghost_audio_only:
+  en: "%{name} (audio only)"
+  it: "%{name} (solo audio)"
+
+transport.play_hint:
+  en: "Play/pause (Space) · I/O: mark in/out"
+  it: "Play/pausa (Spazio) · I/O: punto di inizio/fine"

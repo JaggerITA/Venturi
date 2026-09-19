@@ -163,7 +163,7 @@ impl FrameProvider for StreamingFrameProvider {
         let item = project
             .media_pool
             .get(media_id)
-            .ok_or_else(|| "media non trovato nel pool".to_string())?;
+            .ok_or_else(|| t!("export.error_media_not_found").into_owned())?;
         let path = item.path.clone();
         let is_image = item.meta.is_image();
 
@@ -193,7 +193,7 @@ pub fn export_timeline(
     let timeline = project
         .timelines
         .get(timeline_id)
-        .ok_or_else(|| "timeline non trovata".to_string())?;
+        .ok_or_else(|| t!("export.error_timeline_not_found").into_owned())?;
 
     let range = range.start.max(0)..range.end.min(timeline.total_frames());
     let total_frames = (range.end - range.start).max(0);
@@ -275,11 +275,11 @@ pub fn export_timeline(
         let mut audio = AudioInterleaver::new(timeline, range.start);
         for frame in range.clone() {
             if cancel.load(Ordering::Relaxed) {
-                return Err("annullato".to_string());
+                return Err(t!("export.cancelled").into_owned());
             }
             let frame_i420 = match composed_rx.recv() {
                 Ok(frame_i420) => frame_i420?,
-                Err(_) => return Err("annullato".to_string()),
+                Err(_) => return Err(t!("export.cancelled").into_owned()),
             };
             encoder
                 .write_video_frame(&frame_i420)
@@ -610,7 +610,7 @@ mod tests {
         let mut provider = StreamingFrameProvider::default();
         let err = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2))
             .expect_err("un media assente dal pool deve fallire, non produrre un frame nero");
-        assert!(err.contains("media non trovato"), "err={err}");
+        assert!(err.contains("media not found"), "err={err}");
     }
 
     /// Dove la track in alto non ha clip si vede quella sotto.

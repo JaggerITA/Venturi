@@ -1,0 +1,185 @@
+_version: 2
+
+menu.file:
+  en: "File"
+  it: "File"
+
+menu.open_project:
+  en: "Open project..."
+  it: "Apri progetto..."
+
+menu.save:
+  en: "Save"
+  it: "Salva"
+
+menu.save_as:
+  en: "Save as..."
+  it: "Salva con nome..."
+
+menu.import_media:
+  en: "Import media..."
+  it: "Importa media..."
+
+menu.import_otio:
+  en: "Import OTIO..."
+  it: "Importa OTIO..."
+
+menu.import_otio_hint:
+  en: "Opens an OpenTimelineIO timeline as a new project"
+  it: "Apre una timeline OpenTimelineIO come nuovo progetto"
+
+menu.export:
+  en: "Export..."
+  it: "Esporta..."
+
+menu.export_hint:
+  en: "Exports the timeline between in and out (I/O keys) to an MP4 file (H.264 + AAC)"
+  it: "Esporta la timeline tra in e out (tasti I/O) in un file MP4 (H.264 + AAC)"
+
+menu.export_otio:
+  en: "Export OTIO..."
+  it: "Esporta OTIO..."
+
+menu.export_otio_hint:
+  en: "Exports the timeline to OpenTimelineIO, to open it in another editor"
+  it: "Esporta la timeline in OpenTimelineIO, per aprirla in un altro editor"
+
+menu.settings:
+  en: "Settings..."
+  it: "Impostazioni..."
+
+menu.edit:
+  en: "Edit"
+  it: "Modifica"
+
+menu.undo:
+  en: "Undo"
+  it: "Annulla"
+
+menu.redo:
+  en: "Redo"
+  it: "Ripeti"
+
+menu.copy:
+  en: "Copy"
+  it: "Copia"
+
+menu.cut:
+  en: "Cut"
+  it: "Taglia"
+
+menu.paste:
+  en: "Paste"
+  it: "Incolla"
+
+menu.paste_hint:
+  en: "Pastes at the playhead position"
+  it: "Incolla alla posizione del playhead"
+
+menu.delete:
+  en: "Delete"
+  it: "Elimina"
+
+menu.ripple_delete:
+  en: "Ripple delete"
+  it: "Ripple delete"
+
+menu.ripple_delete_hint:
+  en: "Removes the clip and closes the gap on every track, keeping A/V sync"
+  it: "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V"
+
+menu.split:
+  en: "Split"
+  it: "Dividi"
+
+menu.split_hint:
+  en: "Cuts the selected clips at the playhead, or all of them if nothing is selected"
+  it: "Taglia al playhead le clip selezionate, o tutte se non c'è selezione"
+
+menu.timeline:
+  en: "Timeline"
+  it: "Timeline"
+
+menu.selection_follows_playhead:
+  en: "Selection follows playhead"
+  it: "Selection follows playhead"
+
+menu.selection_follows_playhead_hint:
+  en: "Moves the selection to the video clip under the playhead on every scrub/cut/ripple delete"
+  it: "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete"
+
+menu.scrub_audio:
+  en: "Audio while scrubbing"
+  it: "Audio durante lo scrub"
+
+menu.scrub_audio_hint:
+  en: "Plays a short audio snippet on every manual playhead move"
+  it: "Suona un breve frammento audio a ogni spostamento manuale del playhead"
+
+menu.zoom_in:
+  en: "Zoom in"
+  it: "Zoom avanti"
+
+menu.zoom_out:
+  en: "Zoom out"
+  it: "Zoom indietro"
+
+menu.zoom_hint:
+  en: "Alt+scroll (or pinch) over the timeline zooms the same way."
+  it: "Alt+scroll (o pinch) sopra la timeline zooma allo stesso modo."
+
+menu.playback:
+  en: "Playback"
+  it: "Playback"
+
+menu.use_proxy:
+  en: "Use proxies"
+  it: "Usa proxy"
+
+menu.use_proxy_hint:
+  en: "Preview/edit from a low-resolution copy generated in the background instead of the source: much smoother scrubbing on long sources. Export is never affected, it always uses the original sources. Turn off for work that needs full quality."
+  it: "Anteprima/editing da una copia a bassa risoluzione generata in background invece che dal sorgente: scrub molto più fluido su sorgenti lunghi. L'export non è mai influenzato, usa sempre i sorgenti originali. Disattiva per lavori che richiedono la qualità piena."
+
+menu.read_ahead:
+  en: "Read-ahead forward:"
+  it: "Read-ahead avanti:"
+
+menu.read_ahead_hint:
+  en: "How many seconds of timeline to buffer ahead of the playhead. More = smoother scrub/playback but more RAM and CPU spent on frames that may never be needed; less = lighter but a short wait during fast scrubbing is more likely. A minimum margin remains even at 0."
+  it: "Quanti secondi di timeline bufferizzare in anticipo avanti dalla testina. Di più = scrub/playback più fluidi ma più RAM e CPU spesi su frame che potrebbero non servire mai; di meno = più leggero ma più probabile una breve attesa durante uno scrub veloce. Resta comunque un margine minimo anche a 0."
+
+menu.read_behind:
+  en: "Read-ahead behind:"
+  it: "Read-ahead dietro:"
+
+menu.read_behind_hint:
+  en: "How many seconds of timeline to keep buffered behind the playhead too, besides the forward window: makes short back-and-forth scrubbing cheap without decoding again every time. A minimum margin remains even at 0."
+  it: "Quanti secondi di timeline tenere bufferizzati anche dietro la testina, oltre alla finestra in avanti: rende economico uno scrub avanti-indietro ravvicinato senza dover ridecodificare ogni volta. Resta comunque un margine minimo anche a 0."
+
+menu.video_cache:
+  en: "Video cache:"
+  it: "Cache video:"
+
+menu.video_cache_hint:
+  en: "How much RAM to use for pre-decoded frames: more = smoother scrub/playback, less = lower risk of running out of memory (especially with 4K+ sources)."
+  it: "Quanta RAM usare per i frame pre-decodificati: di più = scrub/playback più fluidi, di meno = meno rischio di esaurire la memoria (soprattutto con sorgenti 4K+)."
+
+menu.view:
+  en: "View"
+  it: "Visualizza"
+
+menu.inspector:
+  en: "Inspector"
+  it: "Inspector"
+
+menu.audiometer:
+  en: "Audiometer"
+  it: "Audiometer"
+
+menu.audiometer_hint:
+  en: "Level of the active player, in a narrow strip to the right of the timeline"
+  it: "Livello del player attivo, in una fascia stretta a destra della timeline"
+
+menu.fullscreen_player:
+  en: "Fullscreen player"
+  it: "Player a schermo intero"

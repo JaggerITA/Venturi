@@ -27,7 +27,7 @@ pub fn stretch_samples(
     tempo: f64,
 ) -> Result<Vec<f32>, String> {
     if !(tempo > 0.0) {
-        return Err(format!("tempo di stretch non valido: {tempo}"));
+        return Err(format!("invalid stretch tempo: {tempo}"));
     }
     ensure_init();
 

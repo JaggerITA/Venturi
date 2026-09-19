@@ -1,18 +1,23 @@
 //! Finestra File → Impostazioni.
 
-use crate::settings::{Action, Keymap, Shortcut};
+use std::borrow::Cow;
+
+use crate::i18n::Language;
+use crate::settings::{Action, Keymap, Settings, Shortcut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
+    General,
     Shortcuts,
 }
 
 impl Section {
-    const ALL: [Section; 1] = [Section::Shortcuts];
+    const ALL: [Section; 2] = [Section::General, Section::Shortcuts];
 
-    fn title(self) -> &'static str {
+    fn title(self) -> Cow<'static, str> {
         match self {
-            Section::Shortcuts => "Scorciatoie da tastiera",
+            Section::General => t!("settings.section_general"),
+            Section::Shortcuts => t!("settings.section_shortcuts"),
         }
     }
 }
@@ -33,12 +38,12 @@ pub struct SettingsDialog {
 
 pub struct SettingsDialogResponse {
     pub open: bool,
-    pub keymap_changed: bool,
+    pub changed: bool,
 }
 
 impl SettingsDialog {
     pub fn new() -> Self {
-        Self { section: Section::Shortcuts, capture: None, notice: None }
+        Self { section: Section::General, capture: None, notice: None }
     }
 
     /// Finché aspetta un tasto le scorciatoie globali vanno sospese.
@@ -46,10 +51,11 @@ impl SettingsDialog {
         self.capture.is_some()
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, keymap: &mut Keymap) -> SettingsDialogResponse {
-        let mut response = SettingsDialogResponse { open: true, keymap_changed: false };
-        response.keymap_changed |= self.capture_key(ctx, keymap);
-        egui::Window::new("Impostazioni")
+    pub fn show(&mut self, ctx: &egui::Context, settings: &mut Settings) -> SettingsDialogResponse {
+        let mut response = SettingsDialogResponse { open: true, changed: false };
+        response.changed |= self.capture_key(ctx, &mut settings.keymap);
+        egui::Window::new(t!("settings.title"))
+            .id(egui::Id::new("settings_window"))
             .open(&mut response.open)
             .collapsible(false)
             .default_size([640.0, 480.0])
@@ -63,8 +69,11 @@ impl SettingsDialog {
                     });
                     ui.separator();
                     ui.vertical(|ui| match self.section {
+                        Section::General => {
+                            response.changed |= general_section(ui, settings);
+                        }
                         Section::Shortcuts => {
-                            response.keymap_changed |= self.shortcuts_section(ui, keymap);
+                            response.changed |= self.shortcuts_section(ui, &mut settings.keymap);
                         }
                     });
                 });
@@ -99,15 +108,20 @@ impl SettingsDialog {
         }
         let stolen = keymap.assign(capture.action, capture.slot, shortcut);
         self.notice = (!stolen.is_empty()).then(|| {
-            let names: Vec<&str> = stolen.iter().map(|a| a.label()).collect();
-            format!("{shortcut} tolta da: {}", names.join(", "))
+            let names: Vec<Cow<str>> = stolen.iter().map(|a| a.label()).collect();
+            t!(
+                "settings.shortcut_taken_from",
+                shortcut = shortcut,
+                actions = names.join(", ")
+            )
+            .into_owned()
         });
         true
     }
 
     fn shortcuts_section(&mut self, ui: &mut egui::Ui, keymap: &mut Keymap) -> bool {
         let mut changed = false;
-        ui.label("Clicca una scorciatoia e premi i tasti nuovi (Esc annulla).");
+        ui.label(t!("settings.shortcuts_hint"));
         if let Some(notice) = &self.notice {
             ui.colored_label(egui::Color32::YELLOW, notice);
         }
@@ -116,12 +130,12 @@ impl SettingsDialog {
             .max_height(ui.available_height() - 36.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                let mut category = "";
+                let mut category = Cow::Borrowed("");
                 for action in Action::ALL {
                     if action.category() != category {
                         category = action.category();
                         ui.add_space(6.0);
-                        ui.strong(category);
+                        ui.strong(category.as_ref());
                     }
                     ui.horizontal(|ui| {
                         ui.add_sized([220.0, 20.0], egui::Label::new(action.label()).truncate());
@@ -130,7 +144,7 @@ impl SettingsDialog {
                 }
             });
         ui.separator();
-        if ui.button("Ripristina predefinite").clicked() {
+        if ui.button(t!("settings.restore_defaults")).clicked() {
             *keymap = Keymap::default();
             self.capture = None;
             self.notice = None;
@@ -145,19 +159,19 @@ impl SettingsDialog {
         let mut remove = None;
         for (slot, shortcut) in keymap.shortcuts(action).iter().enumerate() {
             let text = if waiting(Some(slot)) {
-                "Premi un tasto...".to_owned()
+                t!("settings.press_a_key").into_owned()
             } else {
                 shortcut.to_string()
             };
             if ui.button(text).clicked() {
                 self.capture = Some(Capture { action, slot: Some(slot) });
             }
-            if ui.small_button("x").on_hover_text("Rimuovi").clicked() {
+            if ui.small_button("x").on_hover_text(t!("settings.remove")).clicked() {
                 remove = Some(slot);
             }
         }
-        let add = if waiting(None) { "Premi un tasto..." } else { "+" };
-        if ui.small_button(add).on_hover_text("Aggiungi scorciatoia").clicked() {
+        let add = if waiting(None) { t!("settings.press_a_key") } else { "+".into() };
+        if ui.small_button(add).on_hover_text(t!("settings.add_shortcut")).clicked() {
             self.capture = Some(Capture { action, slot: None });
         }
         if let Some(slot) = remove {
@@ -167,4 +181,24 @@ impl SettingsDialog {
         }
         false
     }
+}
+
+fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(t!("settings.language"));
+        egui::ComboBox::from_id_salt("settings_language")
+            .selected_text(settings.language.label())
+            .show_ui(ui, |ui| {
+                for language in Language::ALL {
+                    changed |= ui
+                        .selectable_value(&mut settings.language, language, language.label())
+                        .changed();
+                }
+            });
+    });
+    if changed {
+        settings.language.apply();
+    }
+    changed
 }

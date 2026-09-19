@@ -166,7 +166,7 @@ pub fn show_transport(
             ));
         }
         if button_resp
-            .on_hover_text("Play/pausa (Spazio) · I/O: punto di inizio/fine")
+            .on_hover_text(t!("transport.play_hint"))
             .clicked()
         {
             response.toggle_play = true;

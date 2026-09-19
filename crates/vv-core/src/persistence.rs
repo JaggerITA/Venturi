@@ -6,11 +6,11 @@ use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
-    #[error("errore di I/O: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("errore RON: {0}")]
+    #[error("RON error: {0}")]
     Ron(#[from] ron::Error),
-    #[error("errore RON: {0}")]
+    #[error("RON error: {0}")]
     RonParse(#[from] ron::error::SpannedError),
 }
 

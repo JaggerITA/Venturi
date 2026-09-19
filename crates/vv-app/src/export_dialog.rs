@@ -1,5 +1,6 @@
 //! Finestra delle impostazioni di export, mostrata prima di avviarlo.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use vv_core::{FrameIdx, Rational};
@@ -52,7 +53,8 @@ impl ExportDialog {
     pub fn show(&mut self, ctx: &egui::Context, info: &TimelineInfo) -> ExportDialogAction {
         let mut action = ExportDialogAction::None;
         let mut open = true;
-        egui::Window::new("Esporta")
+        egui::Window::new(t!("export.title"))
+            .id(egui::Id::new("export_dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -75,11 +77,11 @@ impl ExportDialog {
     }
 
     fn destination_section(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Destinazione");
+        ui.strong(t!("export.destination"));
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.path_text).desired_width(340.0));
             if ui
-                .add_enabled(self.browsing.is_none(), egui::Button::new("Sfoglia..."))
+                .add_enabled(self.browsing.is_none(), egui::Button::new(t!("export.browse")))
                 .clicked()
             {
                 let current = PathBuf::from(&self.path_text);
@@ -115,7 +117,7 @@ impl ExportDialog {
             Ok(path) if path.exists() => {
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "Il file esiste già e verrà sovrascritto.",
+                    t!("export.overwrite_warning"),
                 );
             }
             Ok(_) => {}
@@ -126,33 +128,30 @@ impl ExportDialog {
     }
 
     fn range_section(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) {
-        ui.strong("Intervallo");
+        ui.strong(t!("export.range"));
         let fps = info.fps.as_f64();
         match info.marks {
             Some((mark_in, mark_out)) => {
                 ui.radio_value(
                     &mut self.whole_timeline,
                     false,
-                    format!(
-                        "In/Out: {} – {} ({})",
-                        format_duration(mark_in, fps),
-                        format_duration(mark_out, fps),
-                        format_duration(mark_out - mark_in, fps)
+                    t!(
+                        "export.range_in_out",
+                        start = format_duration(mark_in, fps),
+                        end = format_duration(mark_out, fps),
+                        duration = format_duration(mark_out - mark_in, fps)
                     ),
                 );
                 ui.radio_value(
                     &mut self.whole_timeline,
                     true,
-                    format!(
-                        "Tutta la timeline ({})",
-                        format_duration(info.total_frames, fps)
-                    ),
+                    t!("export.range_whole", duration = format_duration(info.total_frames, fps)),
                 );
             }
             None => {
-                ui.label(format!(
-                    "Tutta la timeline ({})",
-                    format_duration(info.total_frames, fps)
+                ui.label(t!(
+                    "export.range_whole",
+                    duration = format_duration(info.total_frames, fps)
                 ));
             }
         }
@@ -165,7 +164,7 @@ impl ExportDialog {
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Encoder");
+                ui.label(t!("export.encoder"));
                 let before = video.codec;
                 egui::ComboBox::from_id_salt("export_video_codec")
                     .selected_text(video_codec_label(video.codec))
@@ -177,7 +176,7 @@ impl ExportDialog {
                                     codec,
                                     video_codec_label(codec),
                                 )
-                                .on_disabled_hover_text("Non disponibile su questo sistema");
+                                .on_disabled_hover_text(t!("export.unavailable_on_system"));
                             });
                         }
                     });
@@ -186,7 +185,7 @@ impl ExportDialog {
                 }
                 ui.end_row();
 
-                ui.label("Preset");
+                ui.label(t!("export.preset"));
                 egui::ComboBox::from_id_salt("export_video_preset")
                     .selected_text(&video.preset)
                     .show_ui(ui, |ui| {
@@ -195,18 +194,18 @@ impl ExportDialog {
                         }
                     })
                     .response
-                    .on_hover_text("Più veloce = file più grande a parità di qualità");
+                    .on_hover_text(t!("export.preset_hint"));
                 ui.end_row();
 
                 ui.label(match video.codec {
-                    VideoCodec::X264 => "Qualità (CRF)",
-                    VideoCodec::Nvenc => "Qualità (CQ)",
+                    VideoCodec::X264 => t!("export.quality_crf"),
+                    VideoCodec::Nvenc => t!("export.quality_cq"),
                 });
                 ui.add(egui::Slider::new(&mut video.quality, 0..=51))
-                    .on_hover_text("Più basso = qualità più alta e file più grande");
+                    .on_hover_text(t!("export.quality_hint"));
                 ui.end_row();
 
-                ui.label("Risoluzione");
+                ui.label(t!("export.resolution"));
                 let scale = &mut self.settings.scale_percent;
                 let size_label = |percent: u32| {
                     let mut probe = ExportSettings::new(PathBuf::new());
@@ -223,8 +222,8 @@ impl ExportDialog {
                     });
                 ui.end_row();
 
-                ui.label("Frame rate");
-                ui.label(format!("{:.3} fps (timeline)", info.fps.as_f64()));
+                ui.label(t!("export.frame_rate"));
+                ui.label(t!("export.fps_of_timeline", fps = format!("{:.3}", info.fps.as_f64())));
                 ui.end_row();
             });
     }
@@ -232,11 +231,11 @@ impl ExportDialog {
     fn audio_section(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) {
         ui.strong("Audio");
         if !info.has_audio {
-            ui.label("Nessuna clip audio nella timeline.");
+            ui.label(t!("export.no_audio"));
             return;
         }
         let mut include = self.settings.audio.is_some();
-        ui.checkbox(&mut include, "Includi audio");
+        ui.checkbox(&mut include, t!("export.include_audio"));
         if !include {
             if let Some(audio) = self.settings.audio.take() {
                 self.audio_settings = audio;
@@ -251,7 +250,7 @@ impl ExportDialog {
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                ui.label("Encoder");
+                ui.label(t!("export.encoder"));
                 egui::ComboBox::from_id_salt("export_audio_codec")
                     .selected_text(audio_codec_label(audio.codec))
                     .show_ui(ui, |ui| {
@@ -263,7 +262,7 @@ impl ExportDialog {
                                     audio_codec_label(codec),
                                 )
                                 .on_disabled_hover_text(
-                                    "Non disponibile in questa build di ffmpeg",
+                                    t!("export.unavailable_in_ffmpeg"),
                                 );
                             });
                         }
@@ -271,7 +270,7 @@ impl ExportDialog {
                 ui.end_row();
 
                 if audio.codec == AudioCodec::Aac {
-                    ui.label("Preset");
+                    ui.label(t!("export.preset"));
                     egui::ComboBox::from_id_salt("export_audio_coder")
                         .selected_text(aac_coder_label(audio.fast_coder))
                         .show_ui(ui, |ui| {
@@ -313,7 +312,7 @@ impl ExportDialog {
         let path = validate_path(&self.path_text);
         let mut action = ExportDialogAction::None;
         ui.horizontal(|ui| {
-            if ui.add_enabled(path.is_ok(), egui::Button::new("Esporta")).clicked()
+            if ui.add_enabled(path.is_ok(), egui::Button::new(t!("export.start"))).clicked()
                 && let Ok(path) = path
             {
                 let mut settings = self.settings.clone();
@@ -323,7 +322,7 @@ impl ExportDialog {
                     range: self.export_range(info),
                 };
             }
-            if ui.button("Annulla").clicked() {
+            if ui.button(t!("common.cancel")).clicked() {
                 action = ExportDialogAction::Cancel;
             }
         });
@@ -332,14 +331,14 @@ impl ExportDialog {
 }
 
 /// Percorso di output valido, con estensione `.mp4` aggiunta se manca.
-fn validate_path(text: &str) -> Result<PathBuf, &'static str> {
+fn validate_path(text: &str) -> Result<PathBuf, Cow<'static, str>> {
     let text = text.trim();
     if text.is_empty() {
-        return Err("Scegli un file di destinazione.");
+        return Err(t!("export.error_no_path"));
     }
     let mut path = PathBuf::from(text);
     if path.file_name().is_none() {
-        return Err("Manca il nome del file.");
+        return Err(t!("export.error_no_file_name"));
     }
     if !path
         .extension()
@@ -349,7 +348,7 @@ fn validate_path(text: &str) -> Result<PathBuf, &'static str> {
     }
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
     if parent.is_some_and(|p| !p.is_dir()) {
-        return Err("La cartella di destinazione non esiste.");
+        return Err(t!("export.error_missing_folder"));
     }
     Ok(path)
 }
@@ -372,15 +371,15 @@ fn video_codec_label(codec: VideoCodec) -> &'static str {
     }
 }
 
-fn audio_codec_label(codec: AudioCodec) -> &'static str {
+fn audio_codec_label(codec: AudioCodec) -> Cow<'static, str> {
     match codec {
-        AudioCodec::Aac => "AAC – ffmpeg",
-        AudioCodec::FdkAac => "AAC – Fraunhofer FDK (più veloce)",
+        AudioCodec::Aac => "AAC – ffmpeg".into(),
+        AudioCodec::FdkAac => t!("export.codec_fdk"),
     }
 }
 
-fn aac_coder_label(fast: bool) -> &'static str {
-    if fast { "Più veloce" } else { "Qualità" }
+fn aac_coder_label(fast: bool) -> Cow<'static, str> {
+    if fast { t!("export.coder_fast") } else { t!("export.coder_quality") }
 }
 
 #[cfg(test)]

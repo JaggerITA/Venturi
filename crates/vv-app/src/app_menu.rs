@@ -138,27 +138,27 @@ impl VibeVideoApp {
                     || self.export.is_some()
                     || self.export_dialog.is_some();
 
-                ui.menu_button("File", |ui| {
-                    if ui.button(keymap.menu_label("Apri progetto...", Action::OpenProject)).clicked() {
+                ui.menu_button(t!("menu.file"), |ui| {
+                    if ui.button(keymap.menu_label(&t!("menu.open_project"), Action::OpenProject)).clicked() {
                         self.request_project_switch(ProjectSwitch::Open);
                         ui.close();
                     }
-                    if ui.button(keymap.menu_label("Salva", Action::SaveProject)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.save"), Action::SaveProject)).clicked() {
                         self.save_project();
                         ui.close();
                     }
-                    if ui.button(keymap.menu_label("Salva con nome...", Action::SaveProjectAs)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.save_as"), Action::SaveProjectAs)).clicked() {
                         self.save_project_as();
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button(keymap.menu_label("Importa media...", Action::ImportMedia)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.import_media"), Action::ImportMedia)).clicked() {
                         self.import_media_dialog();
                         ui.close();
                     }
                     if ui
-                        .button("Importa OTIO...")
-                        .on_hover_text("Apre una timeline OpenTimelineIO come nuovo progetto")
+                        .button(t!("menu.import_otio"))
+                        .on_hover_text(t!("menu.import_otio_hint"))
                         .clicked()
                     {
                         self.request_project_switch(ProjectSwitch::ImportOtio);
@@ -166,34 +166,34 @@ impl VibeVideoApp {
                     }
                     ui.separator();
                     if ui
-                        .add_enabled(!export_disabled, egui::Button::new(keymap.menu_label("Esporta...", Action::Export)))
-                        .on_hover_text("Esporta la timeline tra in e out (tasti I/O) in un file MP4 (H.264 + AAC)")
+                        .add_enabled(!export_disabled, egui::Button::new(keymap.menu_label(&t!("menu.export"), Action::Export)))
+                        .on_hover_text(t!("menu.export_hint"))
                         .clicked()
                     {
                         self.start_export();
                         ui.close();
                     }
                     if ui
-                        .add_enabled(self.timeline_id.is_some(), egui::Button::new("Esporta OTIO..."))
-                        .on_hover_text("Esporta la timeline in OpenTimelineIO, per aprirla in un altro editor")
+                        .add_enabled(self.timeline_id.is_some(), egui::Button::new(t!("menu.export_otio")))
+                        .on_hover_text(t!("menu.export_otio_hint"))
                         .clicked()
                     {
                         self.export_otio_dialog();
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Impostazioni...").clicked() {
+                    if ui.button(t!("menu.settings")).clicked() {
                         self.settings_dialog = Some(settings_dialog::SettingsDialog::new());
                         ui.close();
                     }
                 });
 
-                ui.menu_button("Modifica", |ui| {
-                    if ui.button(keymap.menu_label("Undo", Action::Undo)).clicked() {
+                ui.menu_button(t!("menu.edit"), |ui| {
+                    if ui.button(keymap.menu_label(&t!("menu.undo"), Action::Undo)).clicked() {
                         self.history.undo(&mut self.project);
                         ui.close();
                     }
-                    if ui.button(keymap.menu_label("Redo", Action::Redo)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.redo"), Action::Redo)).clicked() {
                         self.history.redo(&mut self.project);
                         ui.close();
                     }
@@ -201,7 +201,7 @@ impl VibeVideoApp {
                     if ui
                         .add_enabled(
                             !self.timeline_state.selected.is_empty(),
-                            egui::Button::new(keymap.menu_label("Copia", Action::Copy)),
+                            egui::Button::new(keymap.menu_label(&t!("menu.copy"), Action::Copy)),
                         )
                         .clicked()
                     {
@@ -213,7 +213,7 @@ impl VibeVideoApp {
                     if ui
                         .add_enabled(
                             !self.timeline_state.selected.is_empty(),
-                            egui::Button::new(keymap.menu_label("Taglia", Action::Cut)),
+                            egui::Button::new(keymap.menu_label(&t!("menu.cut"), Action::Cut)),
                         )
                         .clicked()
                     {
@@ -223,23 +223,23 @@ impl VibeVideoApp {
                     if ui
                         .add_enabled(
                             !self.timeline_state.clipboard.is_empty(),
-                            egui::Button::new(keymap.menu_label("Incolla", Action::Paste)),
+                            egui::Button::new(keymap.menu_label(&t!("menu.paste"), Action::Paste)),
                         )
-                        .on_hover_text("Incolla alla posizione del playhead")
+                        .on_hover_text(t!("menu.paste_hint"))
                         .clicked()
                     {
                         self.paste_clipboard_at_playhead();
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button(keymap.menu_label("Elimina", Action::Delete)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.delete"), Action::Delete)).clicked() {
                         self.delete_selected();
                         ui.close();
                     }
                     if ui
-                        .button(keymap.menu_label("Ripple delete", Action::RippleDelete))
+                        .button(keymap.menu_label(&t!("menu.ripple_delete"), Action::RippleDelete))
                         .on_hover_text(
-                            "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
+                            t!("menu.ripple_delete_hint"),
                         )
                         .clicked()
                     {
@@ -247,8 +247,8 @@ impl VibeVideoApp {
                         ui.close();
                     }
                     if ui
-                        .button(keymap.menu_label("Dividi", Action::Split))
-                        .on_hover_text("Taglia al playhead le clip selezionate, o tutte se non c'è selezione")
+                        .button(keymap.menu_label(&t!("menu.split"), Action::Split))
+                        .on_hover_text(t!("menu.split_hint"))
                         .clicked()
                     {
                         self.split_at_playhead();
@@ -256,40 +256,36 @@ impl VibeVideoApp {
                     }
                 });
 
-                ui.menu_button("Timeline", |ui| {
+                ui.menu_button(t!("menu.timeline"), |ui| {
                     // Checkbox: restano aperti al click, a differenza dei
                     // pulsanti-azione altrove nei menu.
                     ui.checkbox(
                         &mut self.selection_follows_playhead,
-                        "Selection follows playhead",
+                        t!("menu.selection_follows_playhead"),
                     )
                     .on_hover_text(
-                        "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
+                        t!("menu.selection_follows_playhead_hint"),
                     );
-                    ui.checkbox(&mut self.scrub_audio, "Audio durante lo scrub")
-                        .on_hover_text("Suona un breve frammento audio a ogni spostamento manuale del playhead");
+                    ui.checkbox(&mut self.scrub_audio, t!("menu.scrub_audio"))
+                        .on_hover_text(t!("menu.scrub_audio_hint"));
                     ui.separator();
-                    if ui.button(keymap.menu_label("Zoom avanti", Action::ZoomIn)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.zoom_in"), Action::ZoomIn)).clicked() {
                         self.timeline_state.zoom_in();
                         ui.close();
                     }
-                    if ui.button(keymap.menu_label("Zoom indietro", Action::ZoomOut)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.zoom_out"), Action::ZoomOut)).clicked() {
                         self.timeline_state.zoom_out();
                         ui.close();
                     }
-                    ui.label("Alt+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
+                    ui.label(t!("menu.zoom_hint"));
                 });
 
-                ui.menu_button("Playback", |ui| {
+                ui.menu_button(t!("menu.playback"), |ui| {
                     ui.menu_button("Proxy", |ui| {
                         if ui
-                            .checkbox(&mut self.proxy_enabled, "Usa proxy")
+                            .checkbox(&mut self.proxy_enabled, t!("menu.use_proxy"))
                             .on_hover_text(
-                                "Anteprima/editing da una copia a bassa risoluzione generata in \
-                                 background invece che dal sorgente: scrub molto più fluido su \
-                                 sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
-                                 sorgenti originali. Disattiva per lavori che richiedono la \
-                                 qualità piena.",
+                                t!("menu.use_proxy_hint"),
                             )
                             .changed()
                         {
@@ -298,7 +294,7 @@ impl VibeVideoApp {
                             }
                         }
                         ui.horizontal(|ui| {
-                            ui.label("Read-ahead avanti:");
+                            ui.label(t!("menu.read_ahead"));
                             if ui
                                 .add(
                                     egui::DragValue::new(&mut self.lookahead_secs)
@@ -307,11 +303,7 @@ impl VibeVideoApp {
                                         .suffix(" s"),
                                 )
                                 .on_hover_text(
-                                    "Quanti secondi di timeline bufferizzare in anticipo avanti \
-                                     dalla testina. Di più = scrub/playback più fluidi ma più RAM \
-                                     e CPU spesi su frame che potrebbero non servire mai; di meno \
-                                     = più leggero ma più probabile una breve attesa durante uno \
-                                     scrub veloce. Resta comunque un margine minimo anche a 0.",
+                                    t!("menu.read_ahead_hint"),
                                 )
                                 .changed()
                             {
@@ -321,7 +313,7 @@ impl VibeVideoApp {
                             }
                         });
                         ui.horizontal(|ui| {
-                            ui.label("Read-ahead dietro:");
+                            ui.label(t!("menu.read_behind"));
                             if ui
                                 .add(
                                     egui::DragValue::new(&mut self.behind_secs)
@@ -330,11 +322,7 @@ impl VibeVideoApp {
                                         .suffix(" s"),
                                 )
                                 .on_hover_text(
-                                    "Quanti secondi di timeline tenere bufferizzati anche dietro \
-                                     la testina, oltre alla finestra in avanti: rende economico \
-                                     uno scrub avanti-indietro ravvicinato senza dover \
-                                     ridecodificare ogni volta. Resta comunque un margine minimo \
-                                     anche a 0.",
+                                    t!("menu.read_behind_hint"),
                                 )
                                 .changed()
                             {
@@ -344,7 +332,7 @@ impl VibeVideoApp {
                             }
                         });
                         ui.horizontal(|ui| {
-                            ui.label("Cache video:");
+                            ui.label(t!("menu.video_cache"));
                             // Espresso in MB nella UI, `cache_budget_bytes` in byte.
                             let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
                             if ui
@@ -354,9 +342,7 @@ impl VibeVideoApp {
                                         .suffix(" MB"),
                                 )
                                 .on_hover_text(
-                                    "Quanta RAM usare per i frame pre-decodificati: di più = \
-                                     scrub/playback più fluidi, di meno = meno rischio di esaurire \
-                                     la memoria (soprattutto con sorgenti 4K+).",
+                                    t!("menu.video_cache_hint"),
                                 )
                                 .changed()
                             {
@@ -369,14 +355,14 @@ impl VibeVideoApp {
                     });
                 });
 
-                ui.menu_button("Visualizza", |ui| {
-                    ui.checkbox(&mut self.properties_panel_open, "Inspector");
-                    ui.checkbox(&mut self.audiometer_enabled, "Audiometer")
+                ui.menu_button(t!("menu.view"), |ui| {
+                    ui.checkbox(&mut self.properties_panel_open, t!("menu.inspector"));
+                    ui.checkbox(&mut self.audiometer_enabled, t!("menu.audiometer"))
                         .on_hover_text(
-                            "Livello del player attivo, in una fascia stretta a destra della timeline",
+                            t!("menu.audiometer_hint"),
                         );
                     ui.separator();
-                    if ui.button(keymap.menu_label("Player a schermo intero", Action::FullscreenViewer)).clicked() {
+                    if ui.button(keymap.menu_label(&t!("menu.fullscreen_player"), Action::FullscreenViewer)).clicked() {
                         set_fullscreen = Some(true);
                         ui.close();
                     }

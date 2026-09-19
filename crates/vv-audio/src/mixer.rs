@@ -327,7 +327,7 @@ impl Mixer {
                     cb_peak_left.store(l.to_bits(), Ordering::Relaxed);
                     cb_peak_right.store(r.to_bits(), Ordering::Relaxed);
                 },
-                move |err| eprintln!("vv-audio: errore stream mixer: {err}"),
+                move |err| eprintln!("vv-audio: mixer stream error: {err}"),
                 None,
             )
             .map_err(|e| e.to_string())?;

@@ -70,7 +70,7 @@ fn generate(job: &Job) -> Vec<(u64, usize)> {
                 .map(|(&i, _)| (job.content_hash, i)),
         ),
         Err(e) => eprintln!(
-            "[waveform_worker] generazione fallita per {}: {e}",
+            "[waveform_worker] generation failed for {}: {e}",
             job.path.display()
         ),
     }

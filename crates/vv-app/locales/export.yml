@@ -1,0 +1,125 @@
+_version: 2
+
+export.title:
+  en: "Export"
+  it: "Esporta"
+
+export.destination:
+  en: "Destination"
+  it: "Destinazione"
+
+export.browse:
+  en: "Browse..."
+  it: "Sfoglia..."
+
+export.overwrite_warning:
+  en: "The file already exists and will be overwritten."
+  it: "Il file esiste già e verrà sovrascritto."
+
+export.range:
+  en: "Range"
+  it: "Intervallo"
+
+export.range_in_out:
+  en: "In/Out: %{start} – %{end} (%{duration})"
+  it: "In/Out: %{start} – %{end} (%{duration})"
+
+export.range_whole:
+  en: "Whole timeline (%{duration})"
+  it: "Tutta la timeline (%{duration})"
+
+export.encoder:
+  en: "Encoder"
+  it: "Encoder"
+
+export.unavailable_on_system:
+  en: "Not available on this system"
+  it: "Non disponibile su questo sistema"
+
+export.preset:
+  en: "Preset"
+  it: "Preset"
+
+export.preset_hint:
+  en: "Faster = bigger file at the same quality"
+  it: "Più veloce = file più grande a parità di qualità"
+
+export.quality_crf:
+  en: "Quality (CRF)"
+  it: "Qualità (CRF)"
+
+export.quality_cq:
+  en: "Quality (CQ)"
+  it: "Qualità (CQ)"
+
+export.quality_hint:
+  en: "Lower = higher quality and bigger file"
+  it: "Più basso = qualità più alta e file più grande"
+
+export.resolution:
+  en: "Resolution"
+  it: "Risoluzione"
+
+export.frame_rate:
+  en: "Frame rate"
+  it: "Frame rate"
+
+export.fps_of_timeline:
+  en: "%{fps} fps (timeline)"
+  it: "%{fps} fps (timeline)"
+
+export.no_audio:
+  en: "No audio clips in the timeline."
+  it: "Nessuna clip audio nella timeline."
+
+export.include_audio:
+  en: "Include audio"
+  it: "Includi audio"
+
+export.unavailable_in_ffmpeg:
+  en: "Not available in this ffmpeg build"
+  it: "Non disponibile in questa build di ffmpeg"
+
+export.start:
+  en: "Export"
+  it: "Esporta"
+
+common.cancel:
+  en: "Cancel"
+  it: "Annulla"
+
+export.error_no_path:
+  en: "Choose a destination file."
+  it: "Scegli un file di destinazione."
+
+export.error_no_file_name:
+  en: "The file name is missing."
+  it: "Manca il nome del file."
+
+export.error_missing_folder:
+  en: "The destination folder does not exist."
+  it: "La cartella di destinazione non esiste."
+
+export.codec_fdk:
+  en: "AAC – Fraunhofer FDK (faster)"
+  it: "AAC – Fraunhofer FDK (più veloce)"
+
+export.coder_fast:
+  en: "Faster"
+  it: "Più veloce"
+
+export.coder_quality:
+  en: "Quality"
+  it: "Qualità"
+
+export.error_media_not_found:
+  en: "media not found in the pool"
+  it: "media non trovato nel pool"
+
+export.error_timeline_not_found:
+  en: "timeline not found"
+  it: "timeline non trovata"
+
+export.cancelled:
+  en: "cancelled"
+  it: "annullato"

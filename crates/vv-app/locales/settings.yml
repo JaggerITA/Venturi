@@ -1,0 +1,134 @@
+_version: 2
+
+settings.title:
+  en: Settings
+  it: Impostazioni
+settings.section_general:
+  en: General
+  it: Generali
+settings.section_shortcuts:
+  en: Keyboard shortcuts
+  it: Scorciatoie da tastiera
+settings.language:
+  en: Language
+  it: Lingua
+settings.language_system:
+  en: System default
+  it: Predefinita di sistema
+settings.shortcuts_hint:
+  en: Click a shortcut and press the new keys (Esc cancels).
+  it: Clicca una scorciatoia e premi i tasti nuovi (Esc annulla).
+settings.shortcut_taken_from:
+  en: "%{shortcut} removed from: %{actions}"
+  it: "%{shortcut} tolta da: %{actions}"
+settings.restore_defaults:
+  en: Restore defaults
+  it: Ripristina predefinite
+settings.press_a_key:
+  en: Press a key...
+  it: Premi un tasto...
+settings.remove:
+  en: Remove
+  it: Rimuovi
+settings.add_shortcut:
+  en: Add shortcut
+  it: Aggiungi scorciatoia
+settings.save_failed:
+  en: "Could not save the settings: %{error}"
+  it: "Impossibile salvare le impostazioni: %{error}"
+
+key.space:
+  en: Space
+  it: Spazio
+key.delete:
+  en: Del
+  it: Canc
+
+action_category.playback:
+  en: Playback
+  it: Riproduzione
+action_category.edit:
+  en: Edit
+  it: Modifica
+action_category.file:
+  en: File
+  it: File
+action_category.timeline:
+  en: Timeline
+  it: Timeline
+
+action.toggle_playback:
+  en: Play/pause
+  it: Play/pausa
+action.fast_playback:
+  en: Fast play (1x → 2x → 4x → 8x)
+  it: Play veloce (1x → 2x → 4x → 8x)
+action.step_backward:
+  en: Previous frame
+  it: Frame precedente
+action.step_forward:
+  en: Next frame
+  it: Frame successivo
+action.mark_in:
+  en: Mark in
+  it: Punto di inizio (in)
+action.mark_out:
+  en: Mark out
+  it: Punto di fine (out)
+action.fullscreen_viewer:
+  en: Fullscreen player
+  it: Player a schermo intero
+action.undo:
+  en: Undo
+  it: Annulla
+action.redo:
+  en: Redo
+  it: Ripeti
+action.copy:
+  en: Copy
+  it: Copia
+action.cut:
+  en: Cut
+  it: Taglia
+action.paste:
+  en: Paste
+  it: Incolla
+action.delete:
+  en: Delete
+  it: Elimina
+action.ripple_delete:
+  en: Ripple delete
+  it: Ripple delete
+action.split:
+  en: Split at playhead
+  it: Dividi al playhead
+action.toggle_disabled:
+  en: Disable/enable clip
+  it: Disattiva/attiva clip
+action.select_all:
+  en: Select all clips
+  it: Seleziona tutte le clip
+action.select_from_playhead:
+  en: Select forward from playhead
+  it: Seleziona dal playhead in avanti
+action.open_project:
+  en: Open project
+  it: Apri progetto
+action.save_project:
+  en: Save
+  it: Salva
+action.save_project_as:
+  en: Save as
+  it: Salva con nome
+action.import_media:
+  en: Import media
+  it: Importa media
+action.export:
+  en: Export
+  it: Esporta
+action.zoom_in:
+  en: Zoom timeline in
+  it: Zoom avanti timeline
+action.zoom_out:
+  en: Zoom timeline out
+  it: Zoom indietro timeline

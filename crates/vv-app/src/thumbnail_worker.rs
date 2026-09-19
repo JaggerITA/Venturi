@@ -30,7 +30,7 @@ impl ThumbnailWorker {
                 let thumb = vv_media::generate_thumbnail(&job.path, job.duration_secs, THUMBNAIL_WIDTH)
                     .inspect_err(|e| {
                         eprintln!(
-                            "[thumbnail_worker] miniatura fallita per {}: {e}",
+                            "[thumbnail_worker] thumbnail failed for {}: {e}",
                             job.path.display()
                         )
                     })

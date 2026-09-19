@@ -95,7 +95,7 @@ impl ProxyWorker {
                     Err(vv_media::MediaError::Cancelled) => return,
                     Err(e) => {
                         eprintln!(
-                            "[proxy_worker] generazione fallita per {}: {e}",
+                            "[proxy_worker] generation failed for {}: {e}",
                             job.path.display()
                         );
                         shared.set_state(job.content_hash, ProxyState::Failed);

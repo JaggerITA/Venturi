@@ -19,7 +19,24 @@ pub type ProbeResult = Result<(MediaMeta, u64), String>;
 pub struct OtioImport {
     pub project: Project,
     /// Quel che non è stato importato o è stato approssimato, per l'utente.
-    pub warnings: Vec<String>,
+    pub warnings: Vec<OtioWarning>,
+}
+
+/// Il testo lo compone la UI, nella sua lingua.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtioWarning {
+    EffectIgnored { effect: String, clips: usize },
+    UnsupportedInStack { schema: String },
+    TrackKindIgnored { kind: Option<String> },
+    TransitionIgnored,
+    UnsupportedItem { schema: String },
+    ClipWithoutDuration { clip: String },
+    ClipDisabled { clip: String },
+    ClipShorterThanAFrame { clip: String },
+    AudioOnlyOnVideoTrack { clip: String },
+    UnsupportedReference { clip: String, schema: String },
+    UnsupportedUrl { url: String },
+    MediaUnreadable { path: PathBuf, error: String },
 }
 
 pub fn import_otio(
@@ -40,7 +57,7 @@ pub fn project_from_otio(
     let mut timelines = Vec::new();
     collect_timelines(value, &mut timelines);
     if timelines.is_empty() {
-        return Err(OtioError::Format("nessuna timeline nel file OTIO".into()));
+        return Err(OtioError::Format("no timeline in the OTIO file".into()));
     }
     let mut importer = Importer {
         project: Project::default(),
@@ -54,7 +71,7 @@ pub fn project_from_otio(
         importer.timeline(timeline);
     }
     for (effect, clips) in std::mem::take(&mut importer.ignored_effects) {
-        importer.warn(format!("effetto \"{effect}\" ignorato su {clips} clip"));
+        importer.warn(OtioWarning::EffectIgnored { effect, clips });
     }
     Ok(OtioImport {
         project: importer.project,
@@ -64,7 +81,7 @@ pub fn project_from_otio(
 
 struct Importer<'a> {
     project: Project,
-    warnings: Vec<String>,
+    warnings: Vec<OtioWarning>,
     media: HashMap<PathBuf, Option<MediaId>>,
     /// Nome dell'effetto → quante clip lo avevano: un avviso per effetto,
     /// non uno per clip.
@@ -102,14 +119,14 @@ impl Importer<'_> {
         let mut tracks = Vec::new();
         for otio_track in children(&otio["tracks"]) {
             if schema(otio_track) != "Track" {
-                self.warn(format!("{} non supportato a livello di track", schema(otio_track)));
+                self.warn(OtioWarning::UnsupportedInStack { schema: schema(otio_track).to_owned() });
                 continue;
             }
             let kind = match otio_track["kind"].as_str() {
                 Some("Video") => TrackKind::Video,
                 Some("Audio") => TrackKind::Audio,
                 other => {
-                    self.warn(format!("track di tipo {other:?} ignorata"));
+                    self.warn(OtioWarning::TrackKindIgnored { kind: other.map(str::to_owned) });
                     continue;
                 }
             };
@@ -121,7 +138,7 @@ impl Importer<'_> {
                 let duration = match schema(item) {
                     // Non occupa tempo sulla track: si sovrappone alle vicine.
                     "Transition" => {
-                        self.warn("transizione ignorata: taglio netto".into());
+                        self.warn(OtioWarning::TransitionIgnored);
                         continue;
                     }
                     "Gap" => item_duration(item),
@@ -140,7 +157,7 @@ impl Importer<'_> {
                         duration
                     }
                     other => {
-                        self.warn(format!("{other} non supportato: lasciato vuoto"));
+                        self.warn(OtioWarning::UnsupportedItem { schema: other.to_owned() });
                         item_duration(item)
                     }
                 };
@@ -191,16 +208,16 @@ impl Importer<'_> {
         let Some((source_start, duration)) =
             time_range(&item["source_range"]).or_else(|| time_range(&reference["available_range"]))
         else {
-            self.warn(format!("clip \"{name}\" senza durata: ignorata"));
+            self.warn(OtioWarning::ClipWithoutDuration { clip: name.to_owned() });
             return (0.0, None);
         };
         let timeline_len = to_frames(cursor + duration, fps) - timeline_start;
         if item["enabled"] == false {
-            self.warn(format!("clip \"{name}\" disattivata: ignorata"));
+            self.warn(OtioWarning::ClipDisabled { clip: name.to_owned() });
             return (duration, None);
         }
         if timeline_len < 1 {
-            self.warn(format!("clip \"{name}\" più corta di un frame: ignorata"));
+            self.warn(OtioWarning::ClipShorterThanAFrame { clip: name.to_owned() });
             return (duration, None);
         }
         let vibevideo = &item["metadata"]["vibevideo"];
@@ -216,7 +233,7 @@ impl Importer<'_> {
                 };
                 let meta = &self.project.media_pool[media_id].meta;
                 if kind == TrackKind::Video && !meta.has_video {
-                    self.warn(format!("clip \"{name}\": solo audio su una track video, ignorata"));
+                    self.warn(OtioWarning::AudioOnlyOnVideoTrack { clip: name.to_owned() });
                     return (duration, None);
                 }
                 let media_fps = meta.fps;
@@ -255,7 +272,7 @@ impl Importer<'_> {
                 (ClipSource::Text, Rational::one(), 0, None)
             }
             other => {
-                self.warn(format!("clip \"{name}\": riferimento {other} non supportato, ignorata"));
+                self.warn(OtioWarning::UnsupportedReference { clip: name.to_owned(), schema: other.to_owned() });
                 return (duration, None);
             }
         };
@@ -330,7 +347,7 @@ impl Importer<'_> {
     /// Il media al `target_url`, sondato una volta sola per file.
     fn media(&mut self, url: &str) -> Option<MediaId> {
         let Some(path) = url_to_path(url, self.base_dir) else {
-            self.warn(format!("{url}: indirizzo non supportato"));
+            self.warn(OtioWarning::UnsupportedUrl { url: url.to_owned() });
             return None;
         };
         if let Some(media) = self.media.get(&path) {
@@ -343,7 +360,7 @@ impl Importer<'_> {
                 content_hash,
             })),
             Err(e) => {
-                self.warn(format!("{}: {e}", path.display()));
+                self.warn(OtioWarning::MediaUnreadable { path: path.clone(), error: e });
                 None
             }
         };
@@ -388,7 +405,7 @@ impl Importer<'_> {
             })
     }
 
-    fn warn(&mut self, warning: String) {
+    fn warn(&mut self, warning: OtioWarning) {
         self.warnings.push(warning);
     }
 }
@@ -701,9 +718,9 @@ mod tests {
         let imported = project_from_otio(&otio, Path::new("/media"), &mut probe).unwrap();
 
         assert_eq!(imported.warnings.len(), 3, "{:?}", imported.warnings);
-        assert!(imported.warnings[0].contains("transizione"));
-        assert!(imported.warnings[1].contains("spenta"));
-        assert!(imported.warnings[2].contains("manca.mov"));
+        assert_eq!(imported.warnings[0], OtioWarning::TransitionIgnored);
+        assert_eq!(imported.warnings[1], OtioWarning::ClipDisabled { clip: "spenta".into() });
+        assert!(matches!(&imported.warnings[2], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("manca.mov")));
         assert_eq!(imported.project.media_pool.len(), 1, "stesso file sondato una volta");
 
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
@@ -801,7 +818,7 @@ mod tests {
         let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
         let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
 
-        assert_eq!(imported.warnings, ["effetto \"Zoom\" ignorato su 2 clip"]);
+        assert_eq!(imported.warnings, [OtioWarning::EffectIgnored { effect: "Zoom".into(), clips: 2 }]);
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
         let (video, audio) = (&tl.tracks[0].clips, &tl.tracks[1].clips);
         assert_eq!(audio[0].effects.gain_db.value_at(0), 3.5);
@@ -889,7 +906,7 @@ mod tests {
         });
         let imported = project_from_otio(&foreign, Path::new("/"), &mut probe).unwrap();
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
-        assert!(imported.warnings[0].contains("solo audio"));
+        assert!(matches!(imported.warnings[0], OtioWarning::AudioOnlyOnVideoTrack { .. }));
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
         assert!(tl.tracks[0].clips.is_empty());
         let clip = &tl.tracks[1].clips[0];

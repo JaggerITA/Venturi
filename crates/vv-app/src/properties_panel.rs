@@ -1,20 +1,22 @@
 //! Pannello proprietà (inspector): schede Video/Audio, righe dei parametri
 //! con keyframe, editor del titolo.
 
+use std::borrow::Cow;
+
 use super::*;
 
 /// Schede del pannello: etichette, l'attiva sottolineata.
 pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab) {
-    const TABS: [(PropertiesTab, &str); 3] = [
-        (PropertiesTab::Video, "Video"),
-        (PropertiesTab::Audio, "Audio"),
-        (PropertiesTab::Selection, "Selezione"),
+    let tabs = [
+        (PropertiesTab::Video, t!("props.tab_video")),
+        (PropertiesTab::Audio, t!("props.tab_audio")),
+        (PropertiesTab::Selection, t!("props.tab_selection")),
     ];
     const TAB_HEIGHT: f32 = 26.0;
     const UNDERLINE: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for (tab, label) in TABS {
+        for (tab, label) in tabs {
             let active = *current == tab;
             let galley = ui.painter().layout_no_wrap(
                 label.to_string(),
@@ -57,7 +59,7 @@ pub(crate) fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
     ui.columns(2, |cols| {
         for (col, (tab, label)) in cols
             .iter_mut()
-            .zip([(VideoSubTab::Title, "Title"), (VideoSubTab::Settings, "Settings")])
+            .zip([(VideoSubTab::Title, t!("props.subtab_title")), (VideoSubTab::Settings, t!("props.subtab_settings"))])
         {
             let button = egui::Button::selectable(*current == tab, label)
                 .min_size(egui::vec2(col.available_width(), 22.0));
@@ -110,7 +112,7 @@ pub(crate) fn title_editor(
     let before = title.clone();
     let (frame_w, frame_h) = (timeline_size.0 as f32, timeline_size.1 as f32);
 
-    ui.label(egui::RichText::new("Testo").strong());
+    ui.label(egui::RichText::new(t!("props.text")).strong());
     ui.add(
         egui::TextEdit::multiline(&mut title.content)
             .desired_rows(4)
@@ -118,7 +120,7 @@ pub(crate) fn title_editor(
     );
     ui.add_space(4.0);
 
-    let row = param_row(ui, "Font", None, |ui| {
+    let row = param_row(ui, &t!("props.font"), None, |ui| {
         let shown = if title.font_family.is_empty() {
             "Sans-serif"
         } else {
@@ -145,7 +147,7 @@ pub(crate) fn title_editor(
         title.font_family = defaults.font_family.clone();
     }
 
-    let row = param_row(ui, "Stile", None, |ui| {
+    let row = param_row(ui, &t!("props.style"), None, |ui| {
         let mut faces = fonts.faces(&title.font_family).to_vec();
         if faces.is_empty() {
             faces = [(400, false), (700, false), (400, true), (700, true)]
@@ -178,29 +180,29 @@ pub(crate) fn title_editor(
         title.italic = defaults.italic;
     }
 
-    if color_row(ui, "Colore", &mut title.color).reset {
+    if color_row(ui, &t!("props.color"), &mut title.color).reset {
         title.color = defaults.color;
     }
 
     for (label, value, default, range, speed) in [
-        ("Dimensione", &mut title.size, defaults.size, 1.0..=1000.0, 1.0),
-        ("Tracking", &mut title.tracking, defaults.tracking, -300.0..=1000.0, 1.0),
-        ("Interlinea", &mut title.line_spacing, defaults.line_spacing, -200.0..=500.0, 1.0),
+        (t!("props.size"), &mut title.size, defaults.size, 1.0..=1000.0, 1.0),
+        (t!("props.tracking"), &mut title.tracking, defaults.tracking, -300.0..=1000.0, 1.0),
+        (t!("props.line_spacing"), &mut title.line_spacing, defaults.line_spacing, -200.0..=500.0, 1.0),
     ] {
-        let row = param_row(ui, label, None, |ui| slider_field(ui, value, range, speed, 0));
+        let row = param_row(ui, &label, None, |ui| slider_field(ui, value, range, speed, 0));
         if row.reset {
             *value = default;
         }
     }
 
-    let row = param_row(ui, "Decorazioni", None, |ui| {
+    let row = param_row(ui, &t!("props.decorations"), None, |ui| {
         let u = ui
             .selectable_label(title.underline, egui::RichText::new("U").underline())
-            .on_hover_text("Sottolineato")
+            .on_hover_text(t!("props.underline"))
             .clicked();
         let s = ui
             .selectable_label(title.strikethrough, egui::RichText::new("S").strikethrough())
-            .on_hover_text("Barrato")
+            .on_hover_text(t!("props.strikethrough"))
             .clicked();
         title.underline ^= u;
         title.strikethrough ^= s;
@@ -211,12 +213,12 @@ pub(crate) fn title_editor(
         title.strikethrough = defaults.strikethrough;
     }
 
-    let row = param_row(ui, "Maiuscole", None, |ui| {
+    let row = param_row(ui, &t!("props.case"), None, |ui| {
         let label = |case| match case {
-            FontCase::Mixed => "Come scritto",
-            FontCase::Upper => "MAIUSCOLO",
-            FontCase::Lower => "minuscolo",
-            FontCase::Title => "Iniziali Maiuscole",
+            FontCase::Mixed => t!("props.case_mixed"),
+            FontCase::Upper => t!("props.case_upper"),
+            FontCase::Lower => t!("props.case_lower"),
+            FontCase::Title => t!("props.case_title"),
         };
         let mut changed = false;
         egui::ComboBox::from_id_salt("title_font_case")
@@ -233,13 +235,13 @@ pub(crate) fn title_editor(
         title.case = defaults.case;
     }
 
-    let row = param_row(ui, "Allineamento", None, |ui| {
+    let row = param_row(ui, &t!("props.align"), None, |ui| {
         let mut changed = false;
         for (align, hint) in [
-            (TextAlign::Left, "A sinistra"),
-            (TextAlign::Center, "Al centro"),
-            (TextAlign::Right, "A destra"),
-            (TextAlign::Justify, "Giustificato"),
+            (TextAlign::Left, t!("props.align_left")),
+            (TextAlign::Center, t!("props.align_center")),
+            (TextAlign::Right, t!("props.align_right")),
+            (TextAlign::Justify, t!("props.align_justify")),
         ] {
             if text_align_button(ui, title.align == align, align).on_hover_text(hint).clicked() {
                 title.align = align;
@@ -252,12 +254,12 @@ pub(crate) fn title_editor(
         title.align = defaults.align;
     }
 
-    let row = param_row(ui, "Ancoraggio", None, |ui| {
+    let row = param_row(ui, &t!("props.anchor"), None, |ui| {
         let mut changed = false;
         for (anchor, text, hint) in [
-            (HAnchor::Left, "⇤", "Il punto di posizione è il bordo sinistro"),
-            (HAnchor::Center, "↔", "Il punto di posizione è il centro"),
-            (HAnchor::Right, "⇥", "Il punto di posizione è il bordo destro"),
+            (HAnchor::Left, "⇤", t!("props.anchor_left")),
+            (HAnchor::Center, "↔", t!("props.anchor_center")),
+            (HAnchor::Right, "⇥", t!("props.anchor_right")),
         ] {
             if ui.selectable_label(title.anchor.0 == anchor, text).on_hover_text(hint).clicked() {
                 title.anchor.0 = anchor;
@@ -266,9 +268,9 @@ pub(crate) fn title_editor(
         }
         ui.separator();
         for (anchor, text, hint) in [
-            (VAnchor::Top, "⤒", "Il punto di posizione è il bordo alto"),
-            (VAnchor::Middle, "↕", "Il punto di posizione è il centro"),
-            (VAnchor::Bottom, "⤓", "Il punto di posizione è il bordo basso"),
+            (VAnchor::Top, "⤒", t!("props.anchor_top")),
+            (VAnchor::Middle, "↕", t!("props.anchor_center")),
+            (VAnchor::Bottom, "⤓", t!("props.anchor_bottom")),
         ] {
             if ui.selectable_label(title.anchor.1 == anchor, text).on_hover_text(hint).clicked() {
                 title.anchor.1 = anchor;
@@ -283,7 +285,7 @@ pub(crate) fn title_editor(
 
     // Mostrata dall'angolo in basso a sinistra, come nel riferimento
     // (960x540 = centro di un frame 1080p); salvata dal centro.
-    let row = param_row(ui, "Posizione", None, |ui| {
+    let row = param_row(ui, &t!("props.position"), None, |ui| {
         let mut x = title.position[0] + frame_w / 2.0;
         let mut y = title.position[1] + frame_h / 2.0;
         let changed = axis_field(ui, "X", &mut x, 1.0, 1, -frame_w..=frame_w * 2.0)
@@ -297,7 +299,7 @@ pub(crate) fn title_editor(
 
     ui.add_space(8.0);
     let shadow = &mut title.shadow;
-    if title_section_header(ui, "Drop Shadow", &mut shadow.enabled) {
+    if title_section_header(ui, &t!("props.drop_shadow"), &mut shadow.enabled) {
         *shadow = vv_core::TitleShadow {
             enabled: shadow.enabled,
             ..Default::default()
@@ -305,10 +307,10 @@ pub(crate) fn title_editor(
     }
     if shadow.enabled {
         let d = vv_core::TitleShadow::default();
-        if color_row(ui, "Colore", &mut shadow.color).reset {
+        if color_row(ui, &t!("props.color"), &mut shadow.color).reset {
             shadow.color = d.color;
         }
-        let row = param_row(ui, "Offset", None, |ui| {
+        let row = param_row(ui, &t!("props.offset"), None, |ui| {
             axis_field(ui, "X", &mut shadow.offset[0], 0.5, 1, -frame_w..=frame_w)
                 | axis_field(ui, "Y", &mut shadow.offset[1], 0.5, 1, -frame_h..=frame_h)
         });
@@ -316,10 +318,10 @@ pub(crate) fn title_editor(
             shadow.offset = d.offset;
         }
         for (label, value, default, range) in [
-            ("Sfocatura", &mut shadow.blur, d.blur, 0.0..=200.0),
-            ("Opacità", &mut shadow.opacity, d.opacity, 0.0..=100.0),
+            (t!("props.blur"), &mut shadow.blur, d.blur, 0.0..=200.0),
+            (t!("props.opacity"), &mut shadow.opacity, d.opacity, 0.0..=100.0),
         ] {
-            if param_row(ui, label, None, |ui| slider_field(ui, value, range, 0.5, 0)).reset {
+            if param_row(ui, &label, None, |ui| slider_field(ui, value, range, 0.5, 0)).reset {
                 *value = default;
             }
         }
@@ -327,7 +329,7 @@ pub(crate) fn title_editor(
 
     ui.add_space(8.0);
     let bg = &mut title.background;
-    if title_section_header(ui, "Background", &mut bg.enabled) {
+    if title_section_header(ui, &t!("props.background"), &mut bg.enabled) {
         *bg = vv_core::TitleBackground {
             enabled: bg.enabled,
             ..Default::default()
@@ -335,32 +337,32 @@ pub(crate) fn title_editor(
     }
     if bg.enabled {
         let d = vv_core::TitleBackground::default();
-        if color_row(ui, "Colore", &mut bg.color).reset {
+        if color_row(ui, &t!("props.color"), &mut bg.color).reset {
             bg.color = d.color;
         }
-        if color_row(ui, "Colore bordo", &mut bg.outline_color).reset {
+        if color_row(ui, &t!("props.outline_color"), &mut bg.outline_color).reset {
             bg.outline_color = d.outline_color;
         }
         for (label, value, default, range, decimals) in [
-            ("Spessore bordo", &mut bg.outline_width, d.outline_width, 0.0..=100.0, 0),
-            ("Larghezza", &mut bg.width, d.width, 0.0..=1.0, 3),
-            ("Altezza", &mut bg.height, d.height, 0.0..=1.0, 3),
-            ("Raggio angoli", &mut bg.corner_radius, d.corner_radius, 0.0..=0.5, 3),
+            (t!("props.outline_width"), &mut bg.outline_width, d.outline_width, 0.0..=100.0, 0),
+            (t!("props.width"), &mut bg.width, d.width, 0.0..=1.0, 3),
+            (t!("props.height"), &mut bg.height, d.height, 0.0..=1.0, 3),
+            (t!("props.corner_radius"), &mut bg.corner_radius, d.corner_radius, 0.0..=0.5, 3),
         ] {
             let speed = if decimals == 0 { 0.5 } else { 0.005 };
-            let row = param_row(ui, label, None, |ui| slider_field(ui, value, range, speed, decimals));
+            let row = param_row(ui, &label, None, |ui| slider_field(ui, value, range, speed, decimals));
             if row.reset {
                 *value = default;
             }
         }
-        let row = param_row(ui, "Centro", None, |ui| {
+        let row = param_row(ui, &t!("props.center"), None, |ui| {
             axis_field(ui, "X", &mut bg.center[0], 1.0, 1, -frame_w..=frame_w)
                 | axis_field(ui, "Y", &mut bg.center[1], 1.0, 1, -frame_h..=frame_h)
         });
         if row.reset {
             bg.center = d.center;
         }
-        let row = param_row(ui, "Opacità", None, |ui| {
+        let row = param_row(ui, &t!("props.opacity"), None, |ui| {
             slider_field(ui, &mut bg.opacity, 0.0..=100.0, 0.5, 0)
         });
         if row.reset {
@@ -390,7 +392,7 @@ pub(crate) fn title_section_header(ui: &mut egui::Ui, title: &str, enabled: &mut
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             reset = ui
                 .small_button("↺")
-                .on_hover_text("Ripristina tutti i parametri di questa sezione")
+                .on_hover_text(t!("props.reset_section"))
                 .clicked();
         });
     });
@@ -515,7 +517,7 @@ pub(crate) fn param_row(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             response.reset = ui
                 .small_button("↺")
-                .on_hover_text("Ripristina questo parametro")
+                .on_hover_text(t!("props.reset_param"))
                 .clicked();
             // Stacca i controlli dei keyframe dal ripristino, che sta subito
             // a destra (siamo in un layout destra->sinistra).
@@ -534,7 +536,7 @@ pub(crate) fn param_row(
                             ui,
                             "◀",
                             keyframe.prev,
-                            "Vai al keyframe precedente",
+                            &t!("props.prev_keyframe"),
                         );
                         response.toggled_keyframe =
                             keyframe_button(ui, keyframe.on_keyframe).clicked();
@@ -542,7 +544,7 @@ pub(crate) fn param_row(
                             ui,
                             "▶",
                             keyframe.next,
-                            "Vai al keyframe successivo",
+                            &t!("props.next_keyframe"),
                         );
                         response.goto = prev.or(next);
                     },
@@ -652,7 +654,7 @@ pub(crate) fn slider_field(
 pub(crate) fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Response {
     let mut response = ui
         .selectable_label(*linked, "🔗")
-        .on_hover_text("Tieni insieme zoom X e Y");
+        .on_hover_text(t!("props.link_zoom"));
     if response.clicked() {
         *linked = !*linked;
         response.mark_changed();
@@ -664,9 +666,9 @@ pub(crate) fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Respons
 /// i font di egui non hanno ◇/◆.
 pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Response {
     let tooltip = if on_keyframe {
-        "Rimuovi il keyframe qui"
+        t!("props.remove_keyframe")
     } else {
-        "Aggiungi un keyframe qui"
+        t!("props.add_keyframe")
     };
 
     let (rect, response) = ui.allocate_exact_size(KEYFRAME_DIAMOND_SIZE, egui::Sense::click());
@@ -839,19 +841,26 @@ impl VibeVideoApp {
         video_targets: &[PanelTarget],
         audio_targets: &[PanelTarget],
     ) {
-        let rows: Vec<(&str, &PanelTarget)> = video_targets
+        let rows: Vec<(Cow<str>, &PanelTarget)> = video_targets
             .iter()
-            .map(|t| ("Video", t))
-            .chain(audio_targets.iter().map(|t| ("Audio", t)))
+            .map(|t| (t!("props.kind_video"), t))
+            .chain(audio_targets.iter().map(|t| (t!("props.kind_audio"), t)))
             .collect();
-        ui.label(format!("{} clip selezionate", rows.len()));
+        ui.label(t!("props.selected_clips", count = rows.len()));
         ui.add_space(4.0);
         egui::Grid::new("selection_list")
             .num_columns(6)
             .striped(true)
             .spacing(egui::vec2(10.0, 4.0))
             .show(ui, |ui| {
-                for header in ["Tipo", "Track", "Nome", "Start", "Durata", "Frame"] {
+                for header in [
+                    t!("props.col_kind"),
+                    t!("props.col_track"),
+                    t!("props.col_name"),
+                    t!("props.col_start"),
+                    t!("props.col_duration"),
+                    t!("props.col_frame"),
+                ] {
                     ui.label(egui::RichText::new(header).strong());
                 }
                 ui.end_row();
@@ -869,8 +878,8 @@ impl VibeVideoApp {
                                     .get(*id)
                                     .map(|item| file_label(&item.path))
                                     .unwrap_or_else(|| "⚠ offline".to_string()),
-                                vv_core::ClipSource::SolidColor => "Solid Color".to_string(),
-                                vv_core::ClipSource::Text => "Text".to_string(),
+                                vv_core::ClipSource::SolidColor => t!("generator.solid_color").into_owned(),
+                                vv_core::ClipSource::Text => t!("generator.text").into_owned(),
                             },
                             clip.timeline_len,
                         ),
@@ -1013,10 +1022,7 @@ impl VibeVideoApp {
                                         ..
                                     } = info.clone();
                                     if targets.len() > 1 {
-                                        ui.small(format!(
-                                            "Modifiche applicate a tutte le {} clip di questa scheda.",
-                                            targets.len()
-                                        ));
+                                        ui.small(t!("props.applies_to_all", count = targets.len()));
                                     }
                                     ui.separator();
 
@@ -1082,9 +1088,7 @@ impl VibeVideoApp {
                                                         |ui| {
                                                             clicked = ui
                                                                 .small_button("↺")
-                                                                .on_hover_text(
-                                                                    "Ripristina tutti i parametri di questa sezione",
-                                                                )
+                                                                .on_hover_text(t!("props.reset_section"))
                                                                 .clicked();
                                                         },
                                                     );
@@ -1114,14 +1118,14 @@ impl VibeVideoApp {
                                             let mut rows: Vec<(Vec<P>, RowResponse)> = Vec::new();
                                             let mut reset_groups: Vec<(Vec<P>, bool)> = Vec::new();
 
-                                            if section_reset(ui, "Transform") {
+                                            if section_reset(ui, &t!("props.transform")) {
                                                 reset_groups.push((TRANSFORM_PARAMS.to_vec(), true));
                                             }
 
                                             let zoom_params = vec![P::ZoomX, P::ZoomY];
                                             let row = param_row(
                                                 ui,
-                                                "Zoom",
+                                                &t!("props.zoom"),
                                                 Some(row_keyframe(&zoom_params)),
                                                 |ui| {
                                                     let mut changed = axis_field(
@@ -1164,7 +1168,7 @@ impl VibeVideoApp {
                                             let position_params = vec![P::PositionX, P::PositionY];
                                             let row = param_row(
                                                 ui,
-                                                "Posizione",
+                                                &t!("props.position"),
                                                 Some(row_keyframe(&position_params)),
                                                 |ui| {
                                                     let x = axis_field(
@@ -1191,7 +1195,7 @@ impl VibeVideoApp {
                                             let rotation_params = vec![P::Rotation];
                                             let row = param_row(
                                                 ui,
-                                                "Rotazione",
+                                                &t!("props.rotation"),
                                                 Some(row_keyframe(&rotation_params)),
                                                 |ui| {
                                                     slider_field(
@@ -1208,7 +1212,7 @@ impl VibeVideoApp {
                                             let anchor_params = vec![P::AnchorX, P::AnchorY];
                                             let row = param_row(
                                                 ui,
-                                                "Anchor point",
+                                                &t!("props.anchor_point"),
                                                 Some(row_keyframe(&anchor_params)),
                                                 |ui| {
                                                     let x = axis_field(
@@ -1234,14 +1238,14 @@ impl VibeVideoApp {
 
                                             // Il flip non si anima: niente
                                             // diamante, solo il ripristino.
-                                            let flip_row = param_row(ui, "Flip", None, |ui| {
+                                            let flip_row = param_row(ui, &t!("props.flip"), None, |ui| {
                                                 let x = ui
                                                     .selectable_label(transform.flip[0], "⬌")
-                                                    .on_hover_text("Specchia in orizzontale")
+                                                    .on_hover_text(t!("props.flip_h"))
                                                     .clicked();
                                                 let y = ui
                                                     .selectable_label(transform.flip[1], "⬍")
-                                                    .on_hover_text("Specchia in verticale")
+                                                    .on_hover_text(t!("props.flip_v"))
                                                     .clicked();
                                                 transform.flip[0] ^= x;
                                                 transform.flip[1] ^= y;
@@ -1268,20 +1272,20 @@ impl VibeVideoApp {
                                             }
 
                                             ui.add_space(6.0);
-                                            if section_reset(ui, "Cropping") {
+                                            if section_reset(ui, &t!("props.cropping")) {
                                                 reset_groups.push((CROP_PARAMS.to_vec(), false));
                                             }
 
                                             for (label, param, index, limit) in [
-                                                ("Crop sinistra", P::CropLeft, 0, source_w),
-                                                ("Crop destra", P::CropRight, 2, source_w),
-                                                ("Crop alto", P::CropTop, 1, source_h),
-                                                ("Crop basso", P::CropBottom, 3, source_h),
+                                                (t!("props.crop_left"), P::CropLeft, 0, source_w),
+                                                (t!("props.crop_right"), P::CropRight, 2, source_w),
+                                                (t!("props.crop_top"), P::CropTop, 1, source_h),
+                                                (t!("props.crop_bottom"), P::CropBottom, 3, source_h),
                                             ] {
                                                 let params = vec![param];
                                                 let row = param_row(
                                                     ui,
-                                                    label,
+                                                    &label,
                                                     Some(row_keyframe(&params)),
                                                     |ui| {
                                                         slider_field(
@@ -1306,7 +1310,7 @@ impl VibeVideoApp {
                                             let softness_params = vec![P::CropSoftness];
                                             let row = param_row(
                                                 ui,
-                                                "Sfumatura",
+                                                &t!("props.softness"),
                                                 Some(row_keyframe(&softness_params)),
                                                 |ui| {
                                                     let limit = source_w.min(source_h) / 2.0;
@@ -1386,7 +1390,7 @@ impl VibeVideoApp {
                                                     targets.iter().filter(|t| t.is_solid_color).collect();
                                                 ui.add_space(6.0);
                                                 ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new("Colore").strong());
+                                                    ui.label(egui::RichText::new(t!("props.color")).strong());
                                                     if keyframe_button(ui, color_kf_here).clicked()
                                                     {
                                                         let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
@@ -1424,7 +1428,7 @@ impl VibeVideoApp {
                                         PropertiesTab::Audio => {
                                             let row = param_row(
                                                 ui,
-                                                "Volume",
+                                                &t!("props.volume"),
                                                 Some(RowKeyframe {
                                                     on_keyframe: gain_kf_here,
                                                     prev: gain_prev,
@@ -1483,16 +1487,16 @@ impl VibeVideoApp {
                                 }
                                 _ => {
                                     ui.small(if self.properties_tab == PropertiesTab::Audio {
-                                        "Nessuna clip audio selezionata."
+                                        t!("props.no_audio_clip")
                                     } else {
-                                        "Nessuna clip video selezionata."
+                                        t!("props.no_video_clip")
                                     });
                                 }
                             }
                             }
                         } else if let Some(timeline_id) = self.timeline_id {
                             let tl = &self.project.timelines[timeline_id];
-                            ui.heading("Timeline");
+                            ui.heading(t!("props.timeline"));
                             ui.label(tl.name.clone());
                             ui.label(format!(
                                 "{}x{} · {:.2} fps",
@@ -1500,16 +1504,17 @@ impl VibeVideoApp {
                                 tl.resolution.1,
                                 tl.fps.as_f64()
                             ));
-                            ui.label(format!("{} track", tl.tracks.len()));
+                            ui.label(t!("props.track_count", count = tl.tracks.len()));
                             let playhead_secs =
                                 self.timeline_state.playhead as f64 / tl.fps.as_f64().max(1.0);
-                            ui.label(format!(
-                                "Playhead: frame {} ({playhead_secs:.2}s)",
-                                self.timeline_state.playhead
+                            ui.label(t!(
+                                "props.playhead",
+                                frame = self.timeline_state.playhead,
+                                secs = format!("{playhead_secs:.2}")
                             ));
-                            ui.small("Nessuna clip selezionata.");
+                            ui.small(t!("props.no_clip"));
                         } else {
-                            ui.label("Importa un media per creare la timeline.");
+                            ui.label(t!("props.import_to_start"));
                         }
                         });
                 });

@@ -1,0 +1,333 @@
+_version: 2
+
+props.tab_video:
+  en: "Video"
+  it: "Video"
+
+props.tab_audio:
+  en: "Audio"
+  it: "Audio"
+
+props.tab_selection:
+  en: "Selection"
+  it: "Selezione"
+
+props.subtab_title:
+  en: "Title"
+  it: "Title"
+
+props.subtab_settings:
+  en: "Settings"
+  it: "Settings"
+
+props.text:
+  en: "Text"
+  it: "Testo"
+
+props.font:
+  en: "Font"
+  it: "Font"
+
+props.style:
+  en: "Style"
+  it: "Stile"
+
+props.color:
+  en: "Color"
+  it: "Colore"
+
+props.size:
+  en: "Size"
+  it: "Dimensione"
+
+props.tracking:
+  en: "Tracking"
+  it: "Tracking"
+
+props.line_spacing:
+  en: "Line spacing"
+  it: "Interlinea"
+
+props.decorations:
+  en: "Decorations"
+  it: "Decorazioni"
+
+props.underline:
+  en: "Underline"
+  it: "Sottolineato"
+
+props.strikethrough:
+  en: "Strikethrough"
+  it: "Barrato"
+
+props.case:
+  en: "Case"
+  it: "Maiuscole"
+
+props.case_mixed:
+  en: "As typed"
+  it: "Come scritto"
+
+props.case_upper:
+  en: "UPPERCASE"
+  it: "MAIUSCOLO"
+
+props.case_lower:
+  en: "lowercase"
+  it: "minuscolo"
+
+props.case_title:
+  en: "Title Case"
+  it: "Iniziali Maiuscole"
+
+props.align:
+  en: "Alignment"
+  it: "Allineamento"
+
+props.align_left:
+  en: "Left"
+  it: "A sinistra"
+
+props.align_center:
+  en: "Center"
+  it: "Al centro"
+
+props.align_right:
+  en: "Right"
+  it: "A destra"
+
+props.align_justify:
+  en: "Justified"
+  it: "Giustificato"
+
+props.anchor:
+  en: "Anchor"
+  it: "Ancoraggio"
+
+props.anchor_left:
+  en: "The position point is the left edge"
+  it: "Il punto di posizione è il bordo sinistro"
+
+props.anchor_center:
+  en: "The position point is the center"
+  it: "Il punto di posizione è il centro"
+
+props.anchor_right:
+  en: "The position point is the right edge"
+  it: "Il punto di posizione è il bordo destro"
+
+props.anchor_top:
+  en: "The position point is the top edge"
+  it: "Il punto di posizione è il bordo alto"
+
+props.anchor_bottom:
+  en: "The position point is the bottom edge"
+  it: "Il punto di posizione è il bordo basso"
+
+props.position:
+  en: "Position"
+  it: "Posizione"
+
+props.drop_shadow:
+  en: "Drop Shadow"
+  it: "Drop Shadow"
+
+props.offset:
+  en: "Offset"
+  it: "Offset"
+
+props.blur:
+  en: "Blur"
+  it: "Sfocatura"
+
+props.opacity:
+  en: "Opacity"
+  it: "Opacità"
+
+props.background:
+  en: "Background"
+  it: "Background"
+
+props.outline_color:
+  en: "Outline color"
+  it: "Colore bordo"
+
+props.outline_width:
+  en: "Outline width"
+  it: "Spessore bordo"
+
+props.width:
+  en: "Width"
+  it: "Larghezza"
+
+props.height:
+  en: "Height"
+  it: "Altezza"
+
+props.corner_radius:
+  en: "Corner radius"
+  it: "Raggio angoli"
+
+props.center:
+  en: "Center"
+  it: "Centro"
+
+props.reset_section:
+  en: "Reset every parameter in this section"
+  it: "Ripristina tutti i parametri di questa sezione"
+
+props.reset_param:
+  en: "Reset this parameter"
+  it: "Ripristina questo parametro"
+
+props.prev_keyframe:
+  en: "Go to the previous keyframe"
+  it: "Vai al keyframe precedente"
+
+props.next_keyframe:
+  en: "Go to the next keyframe"
+  it: "Vai al keyframe successivo"
+
+props.link_zoom:
+  en: "Keep zoom X and Y together"
+  it: "Tieni insieme zoom X e Y"
+
+props.remove_keyframe:
+  en: "Remove the keyframe here"
+  it: "Rimuovi il keyframe qui"
+
+props.add_keyframe:
+  en: "Add a keyframe here"
+  it: "Aggiungi un keyframe qui"
+
+props.kind_video:
+  en: "Video"
+  it: "Video"
+
+props.kind_audio:
+  en: "Audio"
+  it: "Audio"
+
+props.selected_clips:
+  en: "%{count} clips selected"
+  it: "%{count} clip selezionate"
+
+props.col_kind:
+  en: "Type"
+  it: "Tipo"
+
+props.col_track:
+  en: "Track"
+  it: "Track"
+
+props.col_name:
+  en: "Name"
+  it: "Nome"
+
+props.col_start:
+  en: "Start"
+  it: "Start"
+
+props.col_duration:
+  en: "Duration"
+  it: "Durata"
+
+props.col_frame:
+  en: "Frame"
+  it: "Frame"
+
+generator.solid_color:
+  en: "Solid Color"
+  it: "Solid Color"
+
+generator.text:
+  en: "Text"
+  it: "Text"
+
+props.applies_to_all:
+  en: "Changes apply to all %{count} clips in this tab."
+  it: "Modifiche applicate a tutte le %{count} clip di questa scheda."
+
+props.transform:
+  en: "Transform"
+  it: "Transform"
+
+props.zoom:
+  en: "Zoom"
+  it: "Zoom"
+
+props.rotation:
+  en: "Rotation"
+  it: "Rotazione"
+
+props.anchor_point:
+  en: "Anchor point"
+  it: "Anchor point"
+
+props.flip:
+  en: "Flip"
+  it: "Flip"
+
+props.flip_h:
+  en: "Flip horizontally"
+  it: "Specchia in orizzontale"
+
+props.flip_v:
+  en: "Flip vertically"
+  it: "Specchia in verticale"
+
+props.cropping:
+  en: "Cropping"
+  it: "Cropping"
+
+props.crop_left:
+  en: "Crop left"
+  it: "Crop sinistra"
+
+props.crop_right:
+  en: "Crop right"
+  it: "Crop destra"
+
+props.crop_top:
+  en: "Crop top"
+  it: "Crop alto"
+
+props.crop_bottom:
+  en: "Crop bottom"
+  it: "Crop basso"
+
+props.softness:
+  en: "Softness"
+  it: "Sfumatura"
+
+props.volume:
+  en: "Volume"
+  it: "Volume"
+
+props.no_audio_clip:
+  en: "No audio clip selected."
+  it: "Nessuna clip audio selezionata."
+
+props.no_video_clip:
+  en: "No video clip selected."
+  it: "Nessuna clip video selezionata."
+
+props.timeline:
+  en: "Timeline"
+  it: "Timeline"
+
+props.track_count:
+  en: "%{count} tracks"
+  it: "%{count} track"
+
+props.playhead:
+  en: "Playhead: frame %{frame} (%{secs}s)"
+  it: "Playhead: frame %{frame} (%{secs}s)"
+
+props.no_clip:
+  en: "No clip selected."
+  it: "Nessuna clip selezionata."
+
+props.import_to_start:
+  en: "Import a media file to create the timeline."
+  it: "Importa un media per creare la timeline."

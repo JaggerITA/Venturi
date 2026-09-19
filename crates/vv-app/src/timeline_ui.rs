@@ -611,7 +611,7 @@ fn draw_track_headers(
             paint(ui.painter(), rect);
             resp.clicked()
         };
-        if toggle(42.0, "lock_track", "Blocca track", &|p, r| {
+        if toggle(42.0, "lock_track", &t!("timeline.lock_track"), &|p, r| {
             paint_lock_icon(p, r, flags.locked)
         }) {
             *pending = Some(PendingAction::SetTrackFlag(
@@ -622,7 +622,7 @@ fn draw_track_headers(
         }
         match kind {
             TrackKind::Video => {
-                if toggle(66.0, "mute_track", "Disattiva track video", &|p, r| {
+                if toggle(66.0, "mute_track", &t!("timeline.disable_video_track"), &|p, r| {
                     paint_film_icon(p, r, !flags.muted)
                 }) {
                     *pending = Some(PendingAction::SetTrackFlag(
@@ -634,14 +634,14 @@ fn draw_track_headers(
             }
             TrackKind::Audio => {
                 let solo_color = egui::Color32::from_rgb(215, 170, 40);
-                if toggle(66.0, "solo_track", "Solo", &|p, r| {
+                if toggle(66.0, "solo_track", &t!("timeline.solo"), &|p, r| {
                     paint_letter_button(p, r, "S", flags.solo.then_some(solo_color))
                 }) {
                     *pending =
                         Some(PendingAction::SetTrackFlag(track_index, TrackFlag::Solo, !flags.solo));
                 }
                 let mute_color = egui::Color32::from_rgb(200, 60, 60);
-                if toggle(90.0, "mute_track", "Muto", &|p, r| {
+                if toggle(90.0, "mute_track", &t!("timeline.mute"), &|p, r| {
                     paint_letter_button(p, r, "M", flags.muted.then_some(mute_color))
                 }) {
                     *pending = Some(PendingAction::SetTrackFlag(
@@ -667,9 +667,9 @@ fn draw_track_headers(
         let remove_resp = ui
             .interact(remove_rect, ui.id().with("remove_track").with(track_index), sense)
             .on_hover_text(if is_last_of_kind {
-                "Non si può rimuovere l'ultima track di questo tipo"
+                t!("timeline.cannot_remove_last_track")
             } else {
-                "Rimuovi track"
+                t!("timeline.remove_track")
             });
         if !is_last_of_kind && remove_resp.hovered() {
             ui.painter()
@@ -1085,10 +1085,10 @@ impl Generator {
 
     const DEFAULT_SECS: f64 = 5.0;
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Generator::SolidColor => "Solid Color",
-            Generator::Text => "Text",
+            Generator::SolidColor => t!("generator.solid_color"),
+            Generator::Text => t!("generator.text"),
         }
     }
 
@@ -1592,7 +1592,7 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if TimelineDrag::hovered(&above_video_resp).is_some() {
-                    paint_drop_zone(&painter, above_video_rect, Some("+ nuova track Video"));
+                    paint_drop_zone(&painter, above_video_rect, Some(&t!("timeline.new_video_track")));
                 }
                 if let Some(drag) = TimelineDrag::released(&above_video_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
@@ -1614,7 +1614,7 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if TimelineDrag::hovered(&below_audio_resp).is_some_and(|d| d.is_media()) {
-                    paint_drop_zone(&painter, below_audio_rect, Some("+ nuova track Audio"));
+                    paint_drop_zone(&painter, below_audio_rect, Some(&t!("timeline.new_audio_track")));
                 }
                 if let Some(drag) = TimelineDrag::released(&below_audio_resp)
                     && drag.is_media()
@@ -2060,19 +2060,19 @@ pub fn show_timeline(
 
                     resp.context_menu(|ui| {
                         if visual.clip.linked_group.is_some() {
-                            if ui.button("Scollega").clicked() {
+                            if ui.button(t!("timeline.unlink")).clicked() {
                                 pending =
                                     Some(PendingAction::Unlink(visual.track_index, visual.clip.id));
                                 ui.close();
                             }
                         } else if state.selected.len() >= 2 {
-                            if ui.button("Collega").clicked() {
+                            if ui.button(t!("timeline.link")).clicked() {
                                 pending =
                                     Some(PendingAction::Link(state.selected.iter().copied().collect()));
                                 ui.close();
                             }
                         } else {
-                            ui.label("Seleziona almeno 2 clip per collegarle");
+                            ui.label(t!("timeline.link_hint"));
                         }
                     });
                 }
@@ -2746,7 +2746,7 @@ fn clip_label_and_color(
     match &clip.source {
         vv_core::ClipSource::Media(media_id) => {
             if offline {
-                return ("⚠ Media offline".to_string(), OFFLINE_COLOR);
+                return (t!("timeline.media_offline").into_owned(), OFFLINE_COLOR);
             }
             let label = media_labels(*media_id);
             let color = if track.kind == TrackKind::Video {
@@ -2757,7 +2757,7 @@ fn clip_label_and_color(
             (label, darken_if_edited(color, clip))
         }
         vv_core::ClipSource::SolidColor => (
-            "Solid Color".to_string(),
+            t!("generator.solid_color").into_owned(),
             darken_if_edited(egui::Color32::from_rgb(200, 170, 90), clip),
         ),
         vv_core::ClipSource::Text => (
@@ -2765,8 +2765,7 @@ fn clip_label_and_color(
                 .title
                 .as_ref()
                 .and_then(|t| t.content.lines().next())
-                .unwrap_or("Text")
-                .to_string(),
+                .map_or_else(|| t!("generator.text").into_owned(), str::to_string),
             darken_if_edited(egui::Color32::from_rgb(170, 110, 200), clip),
         ),
     }

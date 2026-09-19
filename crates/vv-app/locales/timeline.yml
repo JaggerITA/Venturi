@@ -1,0 +1,49 @@
+_version: 2
+
+timeline.lock_track:
+  en: "Lock track"
+  it: "Blocca track"
+
+timeline.disable_video_track:
+  en: "Disable video track"
+  it: "Disattiva track video"
+
+timeline.solo:
+  en: "Solo"
+  it: "Solo"
+
+timeline.mute:
+  en: "Mute"
+  it: "Muto"
+
+timeline.cannot_remove_last_track:
+  en: "The last track of this kind cannot be removed"
+  it: "Non si può rimuovere l'ultima track di questo tipo"
+
+timeline.remove_track:
+  en: "Remove track"
+  it: "Rimuovi track"
+
+timeline.new_video_track:
+  en: "+ new Video track"
+  it: "+ nuova track Video"
+
+timeline.new_audio_track:
+  en: "+ new Audio track"
+  it: "+ nuova track Audio"
+
+timeline.unlink:
+  en: "Unlink"
+  it: "Scollega"
+
+timeline.link:
+  en: "Link"
+  it: "Collega"
+
+timeline.link_hint:
+  en: "Select at least 2 clips to link them"
+  it: "Seleziona almeno 2 clip per collegarle"
+
+timeline.media_offline:
+  en: "⚠ Media offline"
+  it: "⚠ Media offline"

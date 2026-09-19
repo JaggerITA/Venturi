@@ -29,11 +29,11 @@ pub use waveform::{
 pub enum MediaError {
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),
-    #[error("nessuno stream video/audio trovato in {0}")]
+    #[error("no video/audio stream found in {0}")]
     NoStream(String),
-    #[error("operazione annullata")]
+    #[error("operation cancelled")]
     Cancelled,
-    #[error("errore di I/O: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 
