@@ -1080,7 +1080,7 @@ impl VibeVideoApp {
                 }
             }
         }
-        self.history.end_group(group);
+        self.history.end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
     fn add_drop_to_timeline_at(
@@ -1119,7 +1119,7 @@ impl VibeVideoApp {
             vv_core::Rational::one(),
         );
         clip.effects = effects;
-        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)]);
+        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)], vv_core::CommandLabel::InsertClips);
     }
 
     fn insert_text_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
@@ -1133,7 +1133,7 @@ impl VibeVideoApp {
             vv_core::Rational::one(),
         );
         clip.effects.title = Some(vv_core::TitleParams::default());
-        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)]);
+        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)], vv_core::CommandLabel::InsertClips);
     }
 
     /// Come un vero NLE, le clip già presenti sotto a quelle nuove vengono
@@ -1142,11 +1142,12 @@ impl VibeVideoApp {
         &mut self,
         timeline_id: TimelineId,
         clips: Vec<(usize, vv_core::Clip, Option<u64>)>,
+        label: vv_core::CommandLabel,
     ) {
         let commands = vv_core::insert_overwriting(&mut self.project, timeline_id, clips);
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(label, commands)),
         );
     }
 
@@ -1314,7 +1315,7 @@ impl VibeVideoApp {
             let rate = vv_core::Rational::conform_rate(timeline_fps, meta.fps);
             cursor += drag.timeline_len(rate);
         }
-        self.history.end_group(group);
+        self.history.end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
     /// Crea le track richieste da `target` (una volta sola per drop) e
@@ -1442,7 +1443,7 @@ impl VibeVideoApp {
             audio_clip.audio_stream_index = stream_index;
             new_clips.push((track_index, audio_clip, Some(0)));
         }
-        self.insert_clips_overwriting(timeline_id, new_clips);
+        self.insert_clips_overwriting(timeline_id, new_clips, vv_core::CommandLabel::InsertClips);
     }
 
     /// Handle di transform della prima clip video selezionata, se è sotto
@@ -1675,7 +1676,7 @@ impl VibeVideoApp {
             .collect();
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::DeleteClips, commands)),
         );
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
@@ -1703,7 +1704,7 @@ impl VibeVideoApp {
         }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RemoveMedia, commands)),
         );
         self.media_pool_state.clear();
     }
@@ -1857,7 +1858,7 @@ impl VibeVideoApp {
         let new_selection: BTreeSet<(usize, ClipId)> =
             clips.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
         let end = clips.iter().map(|(_, clip, _)| clip.timeline_end()).max();
-        self.insert_clips_overwriting(timeline_id, clips);
+        self.insert_clips_overwriting(timeline_id, clips, vv_core::CommandLabel::PasteClips);
         let anchor = new_selection.iter().next().copied();
         self.timeline_state.set_selection(new_selection, anchor);
         if let Some(end) = end {
@@ -1956,7 +1957,7 @@ impl VibeVideoApp {
         let mark = self.history.begin_group();
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RippleDelete, commands)),
         );
         self.cut_remaining_overlaps(timeline_id);
         self.history.end_group(mark);
@@ -1978,7 +1979,7 @@ impl VibeVideoApp {
         }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)),
         );
     }
 
@@ -2058,7 +2059,7 @@ impl VibeVideoApp {
 
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::SplitClips, commands)),
         );
 
         // Seleziona la metà *sinistra* (quella sotto il playhead sarebbe la
@@ -3381,7 +3382,7 @@ mod tests {
         )));
         app.history.do_command(
             &mut app.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)),
         );
     }
 
@@ -3577,7 +3578,7 @@ mod tests {
         )));
         app.history.do_command(
             &mut app.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::MoveClips, commands)),
         );
 
         let clips = &app.project.timelines[timeline_id].tracks[0].clips;
@@ -3923,7 +3924,7 @@ mod tests {
             .collect();
         app.history.do_command(
             &mut app.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::Transform, commands)),
         );
 
         let clips = &app.project.timelines[timeline_id].tracks[0].clips;

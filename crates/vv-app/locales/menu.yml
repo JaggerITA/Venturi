@@ -60,6 +60,10 @@ menu.redo:
   en: "Redo"
   it: "Ripeti"
 
+menu.undo_history:
+  en: "Undo History"
+  it: "Cronologia azioni"
+
 menu.copy:
   en: "Copy"
   it: "Copia"

@@ -762,7 +762,7 @@ impl VibeVideoApp {
         }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
+            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RelinkMedia, commands)),
         );
         self.unsaved_media = true;
         for media_id in relinked_ids {

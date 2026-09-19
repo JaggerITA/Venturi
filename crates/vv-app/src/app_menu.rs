@@ -197,6 +197,7 @@ impl VibeVideoApp {
                         self.history.redo(&mut self.project);
                         ui.close();
                     }
+                    self.undo_history_menu(ui);
                     ui.separator();
                     if ui
                         .add_enabled(
@@ -397,5 +398,65 @@ impl VibeVideoApp {
                     ui.label(t!("about.author", author = "Moreno Razzoli a.k.a. Morrolinux"));
                 });
             });
+    }
+
+    /// Come in Blender: dal più recente, il pallino sullo stato attuale e un
+    /// click per saltare a qualunque punto, avanti o indietro.
+    fn undo_history_menu(&mut self, ui: &mut egui::Ui) {
+        let labels: Vec<vv_core::CommandLabel> = self.history.labels().collect();
+        let current = self.history.position();
+        let mut jump = None;
+        ui.add_enabled_ui(!labels.is_empty(), |ui| {
+            ui.menu_button(t!("menu.undo_history"), |ui| {
+                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                    for position in (0..=labels.len()).rev() {
+                        let text = match position {
+                            0 => t!("history.original"),
+                            _ => command_label(labels[position - 1]),
+                        };
+                        if ui.radio(position == current, text).clicked() {
+                            jump = Some(position);
+                        }
+                    }
+                });
+            });
+        });
+        if let Some(position) = jump {
+            self.history.go_to(&mut self.project, position);
+            ui.close();
+        }
+    }
+}
+
+fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str> {
+    use vv_core::CommandLabel as L;
+    match label {
+        L::AddTrack => t!("history.add_track"),
+        L::RemoveTrack => t!("history.remove_track"),
+        L::MuteTrack => t!("history.mute_track"),
+        L::SoloTrack => t!("history.solo_track"),
+        L::LockTrack => t!("history.lock_track"),
+        L::ToggleClipsDisabled => t!("history.toggle_clips_disabled"),
+        L::InsertClips => t!("history.insert_clips"),
+        L::PasteClips => t!("history.paste_clips"),
+        L::DuplicateClips => t!("history.duplicate_clips"),
+        L::DeleteClips => t!("history.delete_clips"),
+        L::RippleDelete => t!("history.ripple_delete"),
+        L::MoveClips => t!("history.move_clips"),
+        L::TrimClips => t!("history.trim_clips"),
+        L::UnlinkClips => t!("history.unlink_clips"),
+        L::LinkClips => t!("history.link_clips"),
+        L::SplitClips => t!("history.split_clips"),
+        L::Transform => t!("history.transform"),
+        L::Flip => t!("history.flip"),
+        L::Gain => t!("history.gain"),
+        L::ResetGain => t!("history.reset_gain"),
+        L::Title => t!("history.title"),
+        L::ResetTransform => t!("history.reset_transform"),
+        L::ClipColor => t!("history.clip_color"),
+        L::SetKeyframe => t!("history.set_keyframe"),
+        L::RemoveKeyframe => t!("history.remove_keyframe"),
+        L::RemoveMedia => t!("history.remove_media"),
+        L::RelinkMedia => t!("history.relink_media"),
     }
 }

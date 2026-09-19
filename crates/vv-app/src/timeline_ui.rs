@@ -2625,7 +2625,7 @@ fn apply_pending_action(
                 &mut commands,
             );
             commands.push(Box::new(vv_core::MoveClips::new(timeline_id, moves)));
-            history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
+            history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::MoveClips, commands)));
         }
         PendingAction::Trim { trims, overwritten } => {
             // Il tratto guadagnato allungando sovrascrive quel che c'era; le clip
@@ -2653,7 +2653,7 @@ fn apply_pending_action(
                     )) as Box<dyn vv_core::Command>
                 },
             ));
-            history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
+            history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)));
         }
         PendingAction::Unlink(track_index, clip_id) => {
             history.do_command(
@@ -2728,7 +2728,7 @@ fn duplicate_clips(
     let new_selection: BTreeSet<ClipKey> =
         copies.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
     let commands = vv_core::insert_overwriting(project, timeline_id, copies);
-    history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
+    history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::DuplicateClips, commands)));
 
     let anchor = new_selection.iter().next().copied();
     state.set_selection(new_selection, anchor);

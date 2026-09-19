@@ -1,0 +1,113 @@
+_version: 2
+
+history.original:
+  en: "Original"
+  it: "Originale"
+
+history.add_track:
+  en: "Add track"
+  it: "Aggiungi track"
+
+history.remove_track:
+  en: "Remove track"
+  it: "Rimuovi track"
+
+history.mute_track:
+  en: "Mute track"
+  it: "Muto track"
+
+history.solo_track:
+  en: "Solo track"
+  it: "Solo track"
+
+history.lock_track:
+  en: "Lock track"
+  it: "Blocca track"
+
+history.toggle_clips_disabled:
+  en: "Enable/disable clips"
+  it: "Disattiva/attiva clip"
+
+history.insert_clips:
+  en: "Insert clips"
+  it: "Inserisci clip"
+
+history.paste_clips:
+  en: "Paste clips"
+  it: "Incolla clip"
+
+history.duplicate_clips:
+  en: "Duplicate clips"
+  it: "Duplica clip"
+
+history.delete_clips:
+  en: "Delete clips"
+  it: "Elimina clip"
+
+history.ripple_delete:
+  en: "Ripple delete"
+  it: "Ripple delete"
+
+history.move_clips:
+  en: "Move clips"
+  it: "Sposta clip"
+
+history.trim_clips:
+  en: "Trim clips"
+  it: "Rifila clip"
+
+history.unlink_clips:
+  en: "Unlink clips"
+  it: "Scollega clip"
+
+history.link_clips:
+  en: "Link clips"
+  it: "Collega clip"
+
+history.split_clips:
+  en: "Split clips"
+  it: "Dividi clip"
+
+history.transform:
+  en: "Transform"
+  it: "Trasformazione"
+
+history.flip:
+  en: "Flip"
+  it: "Rifletti"
+
+history.gain:
+  en: "Gain"
+  it: "Guadagno"
+
+history.reset_gain:
+  en: "Reset gain"
+  it: "Reimposta guadagno"
+
+history.title:
+  en: "Edit title"
+  it: "Modifica titolo"
+
+history.reset_transform:
+  en: "Reset transform"
+  it: "Reimposta trasformazione"
+
+history.clip_color:
+  en: "Clip color"
+  it: "Colore clip"
+
+history.set_keyframe:
+  en: "Set keyframe"
+  it: "Imposta keyframe"
+
+history.remove_keyframe:
+  en: "Remove keyframe"
+  it: "Rimuovi keyframe"
+
+history.remove_media:
+  en: "Remove media"
+  it: "Rimuovi media"
+
+history.relink_media:
+  en: "Relink media"
+  it: "Ricollega media"

@@ -950,7 +950,7 @@ impl VibeVideoApp {
             let cmd = if commands.len() == 1 {
                 commands.remove(0)
             } else {
-                Box::new(vv_core::CompositeCommand::new(commands))
+                Box::new(vv_core::CompositeCommand::new(commands[0].label(), commands))
             };
             self.history.do_command(&mut self.project, cmd);
         }

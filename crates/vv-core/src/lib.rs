@@ -4,7 +4,7 @@ pub mod otio;
 pub mod persistence;
 
 pub use command::{
-    AddTrack, Command, CompositeCommand, GroupMark, History, InsertClip, KeyframeTarget,
+    AddTrack, Command, CommandLabel, CompositeCommand, GroupMark, History, InsertClip, KeyframeTarget,
     KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipValue, SetClipsDisabled,
     SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
@@ -133,6 +133,55 @@ mod tests {
 
         history.undo(&mut project);
         assert_eq!(project.timelines[timeline].tracks.len(), 2);
+    }
+
+    #[test]
+    fn go_to_jumps_back_and_forth_through_the_history() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        for _ in 0..3 {
+            history.do_command(
+                &mut project,
+                Box::new(command::AddTrack::new(timeline, TrackKind::Video)),
+            );
+        }
+        history.do_command(
+            &mut project,
+            Box::new(command::SetTrackFlag::new(timeline, 0, TrackFlag::Muted, true)),
+        );
+
+        history.go_to(&mut project, 1);
+        assert_eq!(project.timelines[timeline].tracks.len(), 3);
+        assert!(!project.timelines[timeline].tracks[0].muted);
+        assert_eq!(history.position(), 1);
+        assert_eq!(history.labels().count(), 4, "i passi annullati restano in elenco");
+
+        history.go_to(&mut project, 4);
+        assert_eq!(project.timelines[timeline].tracks.len(), 5);
+        assert!(project.timelines[timeline].tracks[0].muted);
+        assert_eq!(history.labels().last(), Some(CommandLabel::MuteTrack));
+
+        history.go_to(&mut project, 0);
+        assert_eq!(project.timelines[timeline].tracks.len(), 2);
+        history.go_to(&mut project, 99);
+        assert_eq!(history.position(), 4);
+    }
+
+    #[test]
+    fn group_takes_the_explicit_label_over_its_first_command() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let mark = history.begin_group();
+        history.do_command(
+            &mut project,
+            Box::new(command::AddTrack::new(timeline, TrackKind::Video)),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SetTrackFlag::new(timeline, 2, TrackFlag::Locked, true)),
+        );
+        history.end_group_as(mark, CommandLabel::InsertClips);
+        assert_eq!(history.labels().collect::<Vec<_>>(), [CommandLabel::InsertClips]);
     }
 
     #[test]
@@ -1211,7 +1260,7 @@ mod tests {
         // "Taglia tutto al frame 8": due SplitClip in un solo passo di history.
         history.do_command(
             &mut project,
-            Box::new(command::CompositeCommand::new(vec![
+            Box::new(command::CompositeCommand::new(CommandLabel::SplitClips, vec![
                 Box::new(command::SplitClip::new(timeline, 0, video_id, 8)),
                 Box::new(command::SplitClip::new(timeline, 1, audio_id, 8)),
             ])),

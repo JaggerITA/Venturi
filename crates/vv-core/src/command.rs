@@ -13,21 +13,59 @@ use std::path::PathBuf;
 pub trait Command: std::fmt::Debug {
     fn apply(&mut self, project: &mut Project);
     fn undo(&self, project: &mut Project);
+    fn label(&self) -> CommandLabel;
+}
+
+/// Nome di un passo di history; il testo tradotto lo sceglie l'app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandLabel {
+    AddTrack,
+    RemoveTrack,
+    MuteTrack,
+    SoloTrack,
+    LockTrack,
+    ToggleClipsDisabled,
+    InsertClips,
+    PasteClips,
+    DuplicateClips,
+    DeleteClips,
+    RippleDelete,
+    MoveClips,
+    TrimClips,
+    UnlinkClips,
+    LinkClips,
+    SplitClips,
+    Transform,
+    Flip,
+    Gain,
+    ResetGain,
+    Title,
+    ResetTransform,
+    ClipColor,
+    SetKeyframe,
+    RemoveKeyframe,
+    RemoveMedia,
+    RelinkMedia,
 }
 
 /// Più comandi in un solo passo di history.
 #[derive(Debug)]
 pub struct CompositeCommand {
     commands: Vec<Box<dyn Command>>,
+    label: CommandLabel,
 }
 
 impl CompositeCommand {
-    pub fn new(commands: Vec<Box<dyn Command>>) -> Self {
-        Self { commands }
+    pub fn new(label: CommandLabel, commands: Vec<Box<dyn Command>>) -> Self {
+        Self { commands, label }
     }
 }
 
 impl Command for CompositeCommand {
+    fn label(&self) -> CommandLabel {
+        self.label
+    }
+
     fn apply(&mut self, project: &mut Project) {
         for cmd in &mut self.commands {
             cmd.apply(project);
@@ -66,11 +104,23 @@ impl History {
         GroupMark(self.undo_stack.len())
     }
 
+    /// Il gruppo prende il nome del suo primo comando.
     pub fn end_group(&mut self, mark: GroupMark) {
+        self.close_group(mark, None);
+    }
+
+    /// Per i gruppi il cui primo comando è accessorio (es. la track creata
+    /// al volo da un drop) e non darebbe il nome giusto.
+    pub fn end_group_as(&mut self, mark: GroupMark, label: CommandLabel) {
+        self.close_group(mark, Some(label));
+    }
+
+    fn close_group(&mut self, mark: GroupMark, label: Option<CommandLabel>) {
         let commands = self.undo_stack.split_off(mark.0.min(self.undo_stack.len()));
         if commands.len() > 1 {
+            let label = label.unwrap_or_else(|| commands[0].label());
             self.undo_stack
-                .push(Box::new(CompositeCommand::new(commands)));
+                .push(Box::new(CompositeCommand::new(label, commands)));
         } else {
             self.undo_stack.extend(commands);
         }
@@ -89,6 +139,29 @@ impl History {
             cmd.apply(project);
             self.undo_stack.push(cmd);
             self.generation += 1;
+        }
+    }
+
+    /// Tutti i passi, dal più vecchio: i primi `position()` sono applicati,
+    /// gli altri si possono rifare.
+    pub fn labels(&self) -> impl Iterator<Item = CommandLabel> + '_ {
+        self.undo_stack
+            .iter()
+            .chain(self.redo_stack.iter().rev())
+            .map(|cmd| cmd.label())
+    }
+
+    pub fn position(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    /// Annulla o rifà fino a lasciare applicati i primi `position` passi.
+    pub fn go_to(&mut self, project: &mut Project, position: usize) {
+        while self.undo_stack.len() > position {
+            self.undo(project);
+        }
+        while self.undo_stack.len() < position && !self.redo_stack.is_empty() {
+            self.redo(project);
         }
     }
 
@@ -126,6 +199,10 @@ impl AddTrack {
 }
 
 impl Command for AddTrack {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::AddTrack
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         tl.tracks.push(Track::new(self.kind));
@@ -163,6 +240,10 @@ impl RemoveTrack {
 }
 
 impl Command for RemoveTrack {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::RemoveTrack
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         if self.track_index >= tl.tracks.len() {
@@ -221,6 +302,14 @@ impl SetTrackFlag {
 }
 
 impl Command for SetTrackFlag {
+    fn label(&self) -> CommandLabel {
+        match self.flag {
+            TrackFlag::Muted => CommandLabel::MuteTrack,
+            TrackFlag::Solo => CommandLabel::SoloTrack,
+            TrackFlag::Locked => CommandLabel::LockTrack,
+        }
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let Some(track) = project.timelines[self.timeline].tracks.get_mut(self.track_index) else {
             return;
@@ -261,6 +350,10 @@ impl SetClipsDisabled {
 }
 
 impl Command for SetClipsDisabled {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::ToggleClipsDisabled
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         self.old.clear();
@@ -292,6 +385,10 @@ pub struct InsertClip {
 }
 
 impl Command for InsertClip {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::InsertClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         project.timelines[self.timeline].tracks[self.track_index].insert_sorted(self.clip.clone());
     }
@@ -323,6 +420,10 @@ impl LiftDelete {
 }
 
 impl Command for LiftDelete {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::DeleteClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         self.removed =
             project.timelines[self.timeline].tracks[self.track_index].remove_clip(self.clip_id);
@@ -362,6 +463,10 @@ impl RippleDeleteGap {
 }
 
 impl Command for RippleDeleteGap {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::RippleDelete
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         let mut shifted = Vec::new();
@@ -413,6 +518,10 @@ impl MoveClips {
 }
 
 impl Command for MoveClips {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::MoveClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         self.old_starts.clear();
         for &(clip_id, from_track, to_track, new_start) in &self.moves {
@@ -487,6 +596,10 @@ impl TrimClip {
 }
 
 impl Command for TrimClip {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::TrimClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         let Some(clip) = track.clip_mut(self.clip_id) else {
@@ -544,6 +657,10 @@ impl UnlinkClip {
 }
 
 impl Command for UnlinkClip {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::UnlinkClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         let Some(group) = tl.clip(self.track_index, self.clip_id).and_then(|c| c.linked_group)
@@ -596,6 +713,10 @@ impl LinkClips {
 }
 
 impl Command for LinkClips {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::LinkClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         if self.targets.len() < 2 {
             return;
@@ -684,6 +805,10 @@ impl SplitClip {
 }
 
 impl Command for SplitClip {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::SplitClips
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let new_id = self
             .preallocated_new_clip_id
@@ -743,6 +868,7 @@ pub struct SetClipValue<T> {
     value: T,
     access: Box<dyn Fn(&mut Clip) -> &mut T>,
     old: Option<T>,
+    label: CommandLabel,
 }
 
 impl<T> SetClipValue<T> {
@@ -750,6 +876,7 @@ impl<T> SetClipValue<T> {
         timeline: TimelineId,
         track_index: usize,
         clip_id: ClipId,
+        label: CommandLabel,
         value: T,
         access: impl Fn(&mut Clip) -> &mut T + 'static,
     ) -> Self {
@@ -760,6 +887,7 @@ impl<T> SetClipValue<T> {
             value,
             access: Box::new(access),
             old: None,
+            label,
         }
     }
 }
@@ -774,6 +902,10 @@ impl<T> std::fmt::Debug for SetClipValue<T> {
 }
 
 impl<T: Clone> Command for SetClipValue<T> {
+    fn label(&self) -> CommandLabel {
+        self.label
+    }
+
     fn apply(&mut self, project: &mut Project) {
         if let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) {
             self.old = Some(std::mem::replace((self.access)(clip), self.value.clone()));
@@ -798,7 +930,7 @@ pub fn set_clip_transform_param(
     param: TransformParam,
     value: f32,
 ) -> SetClipValue<f32> {
-    SetClipValue::new(timeline, track_index, clip_id, value, move |c| {
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Transform, value, move |c| {
         &mut c.effects.transform.track_mut(param).default
     })
 }
@@ -809,7 +941,7 @@ pub fn set_clip_flip(
     clip_id: ClipId,
     value: [bool; 2],
 ) -> SetClipValue<[bool; 2]> {
-    SetClipValue::new(timeline, track_index, clip_id, value, |c| &mut c.effects.transform.flip)
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Flip, value, |c| &mut c.effects.transform.flip)
 }
 
 /// Gain statico (dB).
@@ -819,7 +951,7 @@ pub fn set_clip_gain(
     clip_id: ClipId,
     value: f32,
 ) -> SetClipValue<f32> {
-    SetClipValue::new(timeline, track_index, clip_id, value, |c| &mut c.effects.gain_db.default)
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Gain, value, |c| &mut c.effects.gain_db.default)
 }
 
 /// Gain a 0 dB, keyframe compresi.
@@ -828,7 +960,7 @@ pub fn reset_clip_gain(
     track_index: usize,
     clip_id: ClipId,
 ) -> SetClipValue<Keyframed<f32>> {
-    SetClipValue::new(timeline, track_index, clip_id, Keyframed::constant(0.0), |c| {
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::ResetGain, Keyframed::constant(0.0), |c| {
         &mut c.effects.gain_db
     })
 }
@@ -839,7 +971,7 @@ pub fn set_clip_title(
     clip_id: ClipId,
     value: TitleParams,
 ) -> SetClipValue<Option<TitleParams>> {
-    SetClipValue::new(timeline, track_index, clip_id, Some(value), |c| &mut c.effects.title)
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Title, Some(value), |c| &mut c.effects.title)
 }
 
 /// Riporta un gruppo di parametri del transform al valore di default,
@@ -876,6 +1008,10 @@ impl ResetTransformParams {
 }
 
 impl Command for ResetTransformParams {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::ResetTransform
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
@@ -935,6 +1071,10 @@ impl SetClipColor {
 }
 
 impl Command for SetClipColor {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::ClipColor
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
@@ -1009,6 +1149,10 @@ impl UpsertKeyframe {
 }
 
 impl Command for UpsertKeyframe {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::SetKeyframe
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
@@ -1117,6 +1261,10 @@ impl RemoveKeyframe {
 }
 
 impl Command for RemoveKeyframe {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::RemoveKeyframe
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
@@ -1184,6 +1332,10 @@ impl RemoveMedia {
 }
 
 impl Command for RemoveMedia {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::RemoveMedia
+    }
+
     fn apply(&mut self, project: &mut Project) {
         *self.removed.borrow_mut() = project.media_pool.remove(self.media.get());
     }
@@ -1228,6 +1380,10 @@ impl SetMediaPath {
 }
 
 impl Command for SetMediaPath {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::RelinkMedia
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let Some(item) = project.media_pool.get_mut(self.media) else {
             return;
