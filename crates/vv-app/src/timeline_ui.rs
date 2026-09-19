@@ -55,6 +55,7 @@ pub struct TimelineState {
     pub clipboard: Vec<ClipboardEntry>,
     trim: Option<TrimState>,
     fade_drag: Option<FadeDragState>,
+    volume_drag: Option<VolumeDragState>,
     /// Altezza del riquadro Video se l'utente ha trascinato il separatore
     /// (vedi `GROUP_DIVIDER_HEIGHT`); `None` = gruppi centrati di default.
     video_pane_height: Option<f32>,
@@ -121,6 +122,16 @@ struct FadeDragState {
     accum_px: f32,
 }
 
+/// Trascinamento verticale della riga del volume su una clip audio: come
+/// `FadeDragState`, sempre locale alla singola clip, mai un gruppo.
+struct VolumeDragState {
+    clip_id: ClipId,
+    track_index: usize,
+    /// Gain (dB) prima del drag.
+    original_db: f32,
+    accum_px: f32,
+}
+
 /// Trim di un bordo, separato dal drag vero e proprio.
 struct TrimState {
     clip_id: ClipId,
@@ -177,6 +188,9 @@ const FADE_HANDLE_ZONE_HEIGHT: f32 = 14.0;
 /// Sotto questa larghezza la clip non mostra handle di fade: non ci
 /// sarebbe spazio per afferrarli senza scontrarsi col trim.
 const MIN_FADE_CLIP_WIDTH_PX: f32 = 20.0;
+/// Distanza verticale (px) entro cui il puntatore afferra la riga del
+/// volume di una clip audio.
+const VOLUME_LINE_HIT_PX: f32 = 5.0;
 
 /// A 0,1 px/s un'ora sta in 360 px.
 const MIN_PIXELS_PER_SEC: f32 = 0.1;
@@ -207,6 +221,7 @@ impl Default for TimelineState {
             clipboard: Vec::new(),
             trim: None,
             fade_drag: None,
+            volume_drag: None,
             video_pane_height: None,
             video_scroll: 0.0,
             audio_scroll: 0.0,
@@ -307,6 +322,12 @@ enum PendingAction {
         clip_id: ClipId,
         edge: FadeEdge,
         new_value: FrameIdx,
+    },
+    /// Nuovo gain costante (dB), dal drag della riga volume in timeline.
+    SetGain {
+        track_index: usize,
+        clip_id: ClipId,
+        new_value: f32,
     },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
@@ -1924,6 +1945,7 @@ pub fn show_timeline(
                 let mut drag_finished = false;
                 let mut trim_finished = false;
                 let mut fade_drag_finished = false;
+                let mut volume_drag_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
 
                 // Le clip in movimento si disegnano per ultime: invadono le altre.
@@ -2036,6 +2058,17 @@ pub fn show_timeline(
                     let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
                     paint_clip_box(&painter, clip_rect, visual, is_selected);
 
+                    // Anteprima del drag della riga volume in corso su questa
+                    // clip, se c'è: sia la waveform sia la riga la seguono in
+                    // tempo reale, come già succede cambiando il gain dal
+                    // pannello proprietà (che applica a ogni frame di drag
+                    // dello slider, non solo al rilascio).
+                    let volume_drag_preview = state
+                        .volume_drag
+                        .as_ref()
+                        .filter(|d| d.clip_id == visual.clip.id)
+                        .map(|d| volume_drag_value(d, clip_rect.height() / 2.0));
+
                     // Waveform: massimo dei bin per colonna, forma indipendente dallo zoom.
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && let ClipSource::Media(media_id) = &visual.clip.source
@@ -2052,6 +2085,7 @@ pub fn show_timeline(
                             (visual.clip.timeline_start, visual.clip.timeline_end())
                         };
                         let fps = timeline_fps.as_f64();
+                        let live_gain = volume_drag_preview.map(Keyframed::constant);
                         draw_clip_waveform(
                             &painter,
                             clip_rect,
@@ -2061,7 +2095,7 @@ pub fn show_timeline(
                             item.meta.fps.as_f64(),
                             wf.audio_duration_secs,
                             painter.clip_rect(),
-                            &visual.clip.effects.gain_db,
+                            live_gain.as_ref().unwrap_or(&visual.clip.effects.gain_db),
                         );
                     }
 
@@ -2069,6 +2103,22 @@ pub fn show_timeline(
                         s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
                     });
                     paint_clip_overlay(&painter, clip_rect, visual, is_proxy_backed);
+
+                    // Riga del volume: sottile linea orizzontale trascinabile
+                    // in verticale, centrata a 0 dB (vedi `gain_offset`). Solo
+                    // se il gain non è keyframato: una riga piatta mentirebbe
+                    // sulla curva reale, che si edita dal pannello proprietà.
+                    if track_kinds[visual.track_index] == TrackKind::Audio
+                        && visual.clip.effects.gain_db.is_constant()
+                    {
+                        let db = volume_drag_preview.unwrap_or(visual.clip.effects.gain_db.default);
+                        paint_gain_line(
+                            &painter,
+                            clip_rect,
+                            gain_line_y(db, clip_rect),
+                            volume_drag_preview.is_some(),
+                        );
+                    }
 
                     // Handle di fade-in/fade-out: presenti sempre se la
                     // dissolvenza è già impostata, altrimenti solo mentre la
@@ -2122,6 +2172,15 @@ pub fn show_timeline(
                         adjacent(visual.clip.timeline_end(), TrimEdge::End),
                     );
                     let edge_at = |pos: egui::Pos2| zones.at(pos.x - clip_rect.left());
+                    let volume_hit = |pos: egui::Pos2| {
+                        track_kinds[visual.track_index] == TrackKind::Audio
+                            && visual.clip.effects.gain_db.is_constant()
+                            && volume_line_hit(
+                                pos,
+                                clip_rect,
+                                gain_line_y(visual.clip.effects.gain_db.default, clip_rect),
+                            )
+                    };
                     if resp.hovered()
                         && show_fades
                         && state.drag.is_none()
@@ -2139,6 +2198,15 @@ pub fn show_timeline(
                         && let Some(zone) = edge_at(pos)
                     {
                         edge_cursor = Some((pos, EdgeCursor::from_zone(zone)));
+                    } else if resp.hovered()
+                        && !visual.locked
+                        && state.drag.is_none()
+                        && state.trim.is_none()
+                        && state.volume_drag.is_none()
+                        && let Some(pos) = resp.hover_pos()
+                        && volume_hit(pos)
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                     }
 
                     if resp.drag_started() {
@@ -2155,6 +2223,9 @@ pub fn show_timeline(
                             Some(edge) => begin_fade_drag(state, visual, edge),
                             None => match press_pos.and_then(edge_at) {
                                 Some(zone) => begin_trim(state, &visuals, project, visual, zone),
+                                None if press_pos.is_some_and(volume_hit) => {
+                                    begin_volume_drag(state, visual)
+                                }
                                 None => {
                                     begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt))
                                 }
@@ -2165,6 +2236,10 @@ pub fn show_timeline(
                             && fd.clip_id == visual.clip.id
                         {
                             fd.accum_px += resp.drag_delta().x;
+                        } else if let Some(vd) = &mut state.volume_drag
+                            && vd.clip_id == visual.clip.id
+                        {
+                            vd.accum_px += resp.drag_delta().y;
                         } else if let Some(t) = &mut state.trim
                             && t.clip_id == visual.clip.id
                         {
@@ -2185,6 +2260,15 @@ pub fn show_timeline(
                                 new_value: fade_drag_value(fd, visual.clip.timeline_len, px_per_frame),
                             });
                             fade_drag_finished = true;
+                        } else if let Some(vd) = &state.volume_drag
+                            && vd.clip_id == visual.clip.id
+                        {
+                            pending = Some(PendingAction::SetGain {
+                                track_index: vd.track_index,
+                                clip_id: vd.clip_id,
+                                new_value: volume_drag_value(vd, clip_rect.height() / 2.0),
+                            });
+                            volume_drag_finished = true;
                         } else if let Some(t) = &state.trim
                             && t.clip_id == visual.clip.id
                         {
@@ -2245,6 +2329,9 @@ pub fn show_timeline(
                 }
                 if fade_drag_finished {
                     state.fade_drag = None;
+                }
+                if volume_drag_finished {
+                    state.volume_drag = None;
                 }
                 if let Some(t) = &state.trim
                     && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
@@ -2594,6 +2681,69 @@ fn fade_zone_at(pos: egui::Pos2, clip_rect: egui::Rect, fade_in_x: f32, fade_out
         return Some(FadeEdge::Out);
     }
     None
+}
+
+/// Offset verticale normalizzato (-1 in basso, +1 in alto) della riga del
+/// volume per un gain in dB: centrato a 0 dB, i due rami usano scale diverse
+/// perché `GAIN_DB_MIN`/`GAIN_DB_MAX` non sono simmetrici.
+fn gain_offset(db: f32) -> f32 {
+    if db >= 0.0 {
+        (db / vv_core::GAIN_DB_MAX).clamp(0.0, 1.0)
+    } else {
+        -(db / vv_core::GAIN_DB_MIN).clamp(0.0, 1.0)
+    }
+}
+
+/// Inversa di `gain_offset`.
+fn gain_from_offset(offset: f32) -> f32 {
+    let offset = offset.clamp(-1.0, 1.0);
+    if offset >= 0.0 {
+        offset * vv_core::GAIN_DB_MAX
+    } else {
+        -offset * vv_core::GAIN_DB_MIN
+    }
+}
+
+/// Coordinata Y della riga del volume per un gain in dB.
+fn gain_line_y(db: f32, clip_rect: egui::Rect) -> f32 {
+    clip_rect.center().y - gain_offset(db) * clip_rect.height() / 2.0
+}
+
+fn paint_gain_line(painter: &egui::Painter, clip_rect: egui::Rect, line_y: f32, dragging: bool) {
+    let alpha = if dragging { 220 } else { 130 };
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+    painter.line_segment(
+        [egui::pos2(clip_rect.left(), line_y), egui::pos2(clip_rect.right(), line_y)],
+        stroke,
+    );
+}
+
+/// La riga del volume è larga quanto la clip ma sottile: si afferra entro
+/// `VOLUME_LINE_HIT_PX` in verticale, non serve un test orizzontale stretto.
+fn volume_line_hit(pos: egui::Pos2, clip_rect: egui::Rect, line_y: f32) -> bool {
+    clip_rect.x_range().contains(pos.x) && (pos.y - line_y).abs() <= VOLUME_LINE_HIT_PX
+}
+
+/// Comincia a trascinare la riga del volume: come il fade, locale alla
+/// singola clip.
+fn begin_volume_drag(state: &mut TimelineState, visual: &ClipVisual) {
+    state.volume_drag = Some(VolumeDragState {
+        clip_id: visual.clip.id,
+        track_index: visual.track_index,
+        original_db: visual.clip.effects.gain_db.default,
+        accum_px: 0.0,
+    });
+}
+
+/// Gain (dB) dell'anteprima di un drag della riga volume in corso: il drag è
+/// verticale e lineare nello spazio "offset" disegnato, non in dB, così la
+/// riga segue esattamente il puntatore lungo tutta la corsa.
+fn volume_drag_value(d: &VolumeDragState, half_height: f32) -> f32 {
+    if half_height <= 0.0 {
+        return d.original_db;
+    }
+    let offset = gain_offset(d.original_db) - d.accum_px / half_height;
+    gain_from_offset(offset)
 }
 
 /// Trim da applicare al rilascio: lo stesso valore (già clampato) mostrato
@@ -2997,6 +3147,12 @@ fn apply_pending_action(
             history.do_command(
                 project,
                 Box::new(vv_core::SetClipFade::new(timeline_id, track_index, clip_id, edge, new_value)),
+            );
+        }
+        PendingAction::SetGain { track_index, clip_id, new_value } => {
+            history.do_command(
+                project,
+                Box::new(vv_core::set_clip_gain(timeline_id, track_index, clip_id, new_value)),
             );
         }
         PendingAction::Unlink(track_index, clip_id) => {
@@ -3964,6 +4120,41 @@ mod tests {
             accum_px: 1000.0,
         };
         assert_eq!(fade_drag_value(&far, 30, px_per_frame), 30);
+    }
+
+    #[test]
+    fn gain_offset_is_zero_at_zero_db_and_reaches_the_edges_at_the_range_extremes() {
+        assert_eq!(gain_offset(0.0), 0.0);
+        assert_eq!(gain_offset(vv_core::GAIN_DB_MAX), 1.0);
+        assert_eq!(gain_offset(vv_core::GAIN_DB_MIN), -1.0);
+        // Oltre gli estremi resta clampato, non sfora [-1, 1].
+        assert_eq!(gain_offset(vv_core::GAIN_DB_MAX + 10.0), 1.0);
+        assert_eq!(gain_offset(vv_core::GAIN_DB_MIN - 10.0), -1.0);
+    }
+
+    #[test]
+    fn gain_from_offset_is_the_inverse_of_gain_offset() {
+        for db in [vv_core::GAIN_DB_MIN, -50.0, -6.0, 0.0, 6.0, vv_core::GAIN_DB_MAX] {
+            assert!((gain_from_offset(gain_offset(db)) - db).abs() < 1e-4, "db={db}");
+        }
+    }
+
+    #[test]
+    fn volume_drag_value_follows_the_pointer_and_clamps_at_the_range_extremes() {
+        let half_height = 18.0; // (ROW_HEIGHT - 4.0) / 2.0
+        let drag = |accum_px| VolumeDragState {
+            clip_id: ClipId(1),
+            track_index: 0,
+            original_db: 0.0,
+            accum_px,
+        };
+        // A 0 dB la riga è al centro: trascinare verso l'alto (accum_px
+        // negativo) alza il gain, verso il basso lo abbassa.
+        assert!(volume_drag_value(&drag(-half_height), half_height) > 0.0);
+        assert!(volume_drag_value(&drag(half_height), half_height) < 0.0);
+        // Oltre la corsa disponibile si clampa agli estremi del range.
+        assert_eq!(volume_drag_value(&drag(-half_height * 10.0), half_height), vv_core::GAIN_DB_MAX);
+        assert_eq!(volume_drag_value(&drag(half_height * 10.0), half_height), vv_core::GAIN_DB_MIN);
     }
 
     /// `row_y` "identità" (nessun raggruppamento/margine) per i test.

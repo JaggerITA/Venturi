@@ -762,6 +762,11 @@ pub enum ClipSource {
     Text,
 }
 
+/// Estremi di `gain_db`: condivisi fra lo slider del pannello proprietà e la
+/// riga del volume in timeline, così restano sempre uno solo.
+pub const GAIN_DB_MIN: f32 = -100.0;
+pub const GAIN_DB_MAX: f32 = 30.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectStack {
     pub transform: TransformTracks,

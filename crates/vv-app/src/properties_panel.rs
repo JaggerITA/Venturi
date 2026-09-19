@@ -1438,7 +1438,7 @@ impl VibeVideoApp {
                                                     slider_field(
                                                         ui,
                                                         &mut gain,
-                                                        -100.0..=30.0,
+                                                        vv_core::GAIN_DB_MIN..=vv_core::GAIN_DB_MAX,
                                                         0.2,
                                                         1,
                                                     )
