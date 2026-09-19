@@ -21,6 +21,20 @@ container/run.sh cargo test -p vv-app -- --test-threads=1
 container/run.sh bash   # shell interattiva
 ```
 
+## Build dell'AppImage
+
+`scripts/build-appimage.sh` gira dentro questo container (compila FFmpeg
+da sorgente, linka vv-app contro quel prefix, impacchetta con
+appimagetool):
+
+```sh
+container/run.sh scripts/build-appimage.sh   # -> target/appimage/VibeVideo-<arch>.AppImage
+```
+
+Si appoggia al toolchain dell'immagine (`patchelf`, `git`, `nasm`,
+`file`): se modifichi il `Containerfile`, ricostruisci l'immagine (vedi
+Setup) prima di rilanciare.
+
 ## Uso per testare la UI (sessione persistente)
 
 Un comando singolo (`run.sh`) non basta per "avvia l'app, interagisci,
