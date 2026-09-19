@@ -75,34 +75,6 @@ cargo build -p vv-app --release  # release (ottimizzato, molto più lento da com
 Il primo build è lento (bindgen di `ffmpeg-next` + compilazione di `wgpu`);
 i successivi sono incrementali.
 
-### Build statica (binario redistribuibile)
-
-```sh
-scripts/build-static.sh
-```
-
-Produce `target/release/vv-app` con FFmpeg e libx264 compilati da sorgente e
-linkati statici: a runtime non servono né `libav*` né `libx264` di sistema
-(restano solo glibc, ALSA e le librerie grafiche caricate dinamicamente).
-
-Lo script compila prima x264 in `target/x264` (una volta sola), poi lancia
-`cargo build --release --features static-ffmpeg` puntando `PKG_CONFIG_PATH`
-lì. Lanciare la feature direttamente con `cargo` funziona, ma x264 finirebbe
-linkato dinamicamente alla `.so` di sistema.
-
-Servono `git`, `nasm`, `make` e un compilatore C, oltre alle dipendenze non
-FFmpeg elencate sopra (FFmpeg di sistema e RPM Fusion non servono):
-
-```sh
-sudo dnf install git nasm make gcc   # Fedora
-sudo pacman -S git nasm make gcc     # Arch
-```
-
-Il binario richiede una glibc almeno pari a quella della macchina di build:
-per la massima compatibilità compilare sulla distro più vecchia da
-supportare. È GPL e non include FDK-AAC (non-free, non redistribuibile):
-l'export usa l'encoder AAC nativo di FFmpeg.
-
 ## Eseguire
 
 ```sh

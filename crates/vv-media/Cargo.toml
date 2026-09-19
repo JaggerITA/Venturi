@@ -7,12 +7,3 @@ edition.workspace = true
 ffmpeg-next = "9.0.0"
 thiserror = "2.0.20"
 vv-core = { version = "0.1.0", path = "../vv-core" }
-
-[features]
-# FFmpeg compilato da sorgente e linkato statico nel binario. GPL per
-# libx264; niente libfdk-aac, che renderebbe il binario non redistribuibile.
-static-ffmpeg = [
-    "ffmpeg-next/build",
-    "ffmpeg-next/build-license-gpl",
-    "ffmpeg-next/build-lib-x264",
-]
