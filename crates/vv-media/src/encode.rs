@@ -115,6 +115,10 @@ impl AudioCodec {
     }
 
     pub fn is_available(self) -> bool {
+        // FDK è non-free: mai nel binario statico redistribuibile.
+        if cfg!(feature = "static-ffmpeg") && self == Self::FdkAac {
+            return false;
+        }
         crate::probe::ensure_init();
         encoder::find_by_name(self.ffmpeg_name()).is_some()
     }

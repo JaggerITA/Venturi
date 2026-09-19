@@ -17,6 +17,8 @@ vv-core = { version = "0.1.0", path = "../vv-core" }
 vv-media = { version = "0.1.0", path = "../vv-media" }
 vv-render = { version = "0.1.0", path = "../vv-render" }
 
+[features]
+static-ffmpeg = ["vv-media/static-ffmpeg"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 raw-window-handle = "0.6.2"
