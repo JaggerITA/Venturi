@@ -636,9 +636,9 @@ impl VibeVideoApp {
             return;
         };
 
-        let (current, total, done, error) = {
+        let (current, total, done, error, elapsed) = {
             let p = state.progress.lock().unwrap();
-            (p.current_frame, p.total_frames, p.done, p.error.clone())
+            (p.current_frame, p.total_frames, p.done, p.error.clone(), p.elapsed)
         };
 
         let mut should_close = false;
@@ -659,7 +659,7 @@ impl VibeVideoApp {
                 if let Some(err) = &error {
                     ui.colored_label(egui::Color32::RED, err);
                 } else if done {
-                    ui.label("Export completato.");
+                    ui.label(format!("Export completato in {}.", format_elapsed(elapsed)));
                 }
                 ui.horizontal(|ui| {
                     if !done && ui.button("Annulla").clicked() {
@@ -768,5 +768,14 @@ impl VibeVideoApp {
         for media_id in relinked_ids {
             self.enqueue_media_background_jobs(media_id);
         }
+    }
+}
+
+fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..60 => format!("{:.1} s", d.as_secs_f32()),
+        60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
+        _ => format!("{}h {:02}m {:02}s", secs / 3600, secs / 60 % 60, secs % 60),
     }
 }

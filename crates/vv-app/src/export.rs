@@ -77,6 +77,7 @@ pub struct ExportProgress {
     pub total_frames: FrameIdx,
     pub done: bool,
     pub error: Option<String>,
+    pub elapsed: std::time::Duration,
 }
 
 /// Decoder tenuto aperto per la clip video attiva, con seek/riapertura solo
@@ -183,6 +184,12 @@ pub fn export_timeline(
     progress: &Mutex<ExportProgress>,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let finish = || {
+        let mut p = progress.lock().unwrap();
+        p.elapsed = started.elapsed();
+        p.done = true;
+    };
     let timeline = project
         .timelines
         .get(timeline_id)
@@ -192,7 +199,7 @@ pub fn export_timeline(
     let total_frames = (range.end - range.start).max(0);
     progress.lock().unwrap().total_frames = total_frames;
     if total_frames <= 0 {
-        progress.lock().unwrap().done = true;
+        finish();
         return Ok(());
     }
 
@@ -291,7 +298,7 @@ pub fn export_timeline(
     })?;
 
     encoder.finish().map_err(|e| e.to_string())?;
-    progress.lock().unwrap().done = true;
+    finish();
     Ok(())
 }
 
