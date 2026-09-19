@@ -1301,22 +1301,26 @@ pub fn show_timeline(
         }
     }
 
-    // Un tocco nuovo sulla timeline interrompe subito qualunque inerzia
-    // residua, come su un vero touchpad: un click/tap (1 dito) o l'inizio
-    // di un gesto di scroll (2 dita, `TouchPhase::Start`) prima ancora che
-    // produca un delta.
-    if pointer_over_panel {
-        let touch_started = ui.input(|i| {
-            i.pointer.any_pressed()
-                || i.events.iter().any(|e| {
-                    matches!(e, egui::Event::MouseWheel { phase: egui::TouchPhase::Start, .. })
-                })
-        });
-        if touch_started {
-            state.video_scroll_vel = 0.0;
-            state.audio_scroll_vel = 0.0;
-            state.hscroll_vel = 0.0;
-        }
+    // Un tocco nuovo interrompe subito qualunque inerzia residua, come su
+    // un vero touchpad: un click/tap (1 dito), l'inizio di un gesto di
+    // scroll (2 dita, `TouchPhase::Start`) prima ancora che produca un
+    // delta, o anche solo il puntatore che si muove — appoggiare le dita
+    // sul touchpad senza sollevarle non genera nessun evento dedicato (il
+    // sistema riporta solo variazioni, non "dita ferme"), ma un tocco vero
+    // non è mai perfettamente immobile: un micro-movimento del puntatore è
+    // il segnale che ci resta per accorgercene.
+    let touch_started = ui.input(|i| {
+        i.pointer.delta() != egui::Vec2::ZERO
+            || (pointer_over_panel
+                && (i.pointer.any_pressed()
+                    || i.events.iter().any(|e| {
+                        matches!(e, egui::Event::MouseWheel { phase: egui::TouchPhase::Start, .. })
+                    })))
+    });
+    if touch_started {
+        state.video_scroll_vel = 0.0;
+        state.audio_scroll_vel = 0.0;
+        state.hscroll_vel = 0.0;
     }
 
     let timeline_fps = project.timelines[timeline_id].fps;
