@@ -111,7 +111,7 @@ impl Decoder {
         let decoder = decoder_ctx.video()?;
 
         let scaler = Scaler::get(
-            decoder.format(),
+            without_deprecated_range(decoder.format()),
             decoder.width(),
             decoder.height(),
             Pixel::YUV420P,
@@ -222,7 +222,7 @@ impl Decoder {
         // EOF già inviato: si drenano solo i frame rimasti.
         if self.eof_sent {
             return Ok(if self.decoder.receive_frame(&mut decoded).is_ok() {
-                Some(self.finish_frame(&decoded)?)
+                Some(self.finish_frame(&mut decoded)?)
             } else {
                 None
             });
@@ -238,14 +238,14 @@ impl Decoder {
                     }
                     self.decoder.send_packet(&packet)?;
                     if self.decoder.receive_frame(&mut decoded).is_ok() {
-                        return Ok(Some(self.finish_frame(&decoded)?));
+                        return Ok(Some(self.finish_frame(&mut decoded)?));
                     }
                 }
                 Err(ffmpeg::Error::Eof) => {
                     self.decoder.send_eof()?;
                     self.eof_sent = true;
                     if self.decoder.receive_frame(&mut decoded).is_ok() {
-                        return Ok(Some(self.finish_frame(&decoded)?));
+                        return Ok(Some(self.finish_frame(&mut decoded)?));
                     }
                     return Ok(None);
                 }
@@ -256,16 +256,33 @@ impl Decoder {
 
     fn finish_frame(
         &mut self,
-        decoded: &ffmpeg::frame::Video,
+        decoded: &mut ffmpeg::frame::Video,
     ) -> Result<(FrameIdx, FrameYuv420), crate::MediaError> {
         let pts = decoded.pts().unwrap_or(0);
         let secs =
             pts as f64 * self.time_base.numerator() as f64 / self.time_base.denominator() as f64;
         let idx = (secs * self.fps.as_f64()).round() as FrameIdx;
         let matrix = guess_matrix(decoded.color_space(), decoded.height());
-        let full_range = decoded.color_range() == color::Range::JPEG;
+        let format = decoded.format();
+        let full_range = decoded.color_range() == color::Range::JPEG
+            || without_deprecated_range(format) != format;
+        decoded.set_format(without_deprecated_range(format));
         let frame = yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range)?;
         Ok((idx, frame))
+    }
+}
+
+/// I formati `yuvj*` fanno comprimere a sws il range full in limited, ma
+/// il range è già portato da `FrameYuv420::full_range`: si converte come se
+/// fossero `yuv*`, lasciando i valori intatti.
+fn without_deprecated_range(format: Pixel) -> Pixel {
+    match format {
+        Pixel::YUVJ420P => Pixel::YUV420P,
+        Pixel::YUVJ422P => Pixel::YUV422P,
+        Pixel::YUVJ444P => Pixel::YUV444P,
+        Pixel::YUVJ440P => Pixel::YUV440P,
+        Pixel::YUVJ411P => Pixel::YUV411P,
+        other => other,
     }
 }
 
@@ -539,6 +556,23 @@ mod tests {
         let (idx_next, frame_next) = decoder.next_frame().unwrap().expect("mai EOF per un'immagine");
         assert!(idx_next > idx_far);
         assert_eq!(frame_next.y, frame0.y);
+    }
+
+    /// I JPEG decodificano in `yuvj420p`: il range full va preservato, non
+    /// compresso a limited dallo scaler.
+    #[test]
+    fn full_range_jpeg_keeps_its_luma_range() {
+        let dir = std::env::temp_dir().join("vv-media-decode-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("white.jpg");
+        crate::test_support::ffmpeg(
+            &["-f", "lavfi", "-i", "color=white:size=64x64", "-frames:v", "1", "-update", "1"],
+            &path,
+        );
+        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+        assert!(frame.full_range);
+        assert!(frame.y.iter().all(|&y| y >= 250), "luma compressa: {}", frame.y[0]);
     }
 
     #[test]
