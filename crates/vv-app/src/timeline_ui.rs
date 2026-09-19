@@ -62,6 +62,12 @@ pub struct TimelineState {
     /// video stanno appoggiate al separatore, come in un NLE.
     video_scroll: f32,
     audio_scroll: f32,
+    /// Velocità residua (px/s) dello scroll cinetico da touchpad: a gesto
+    /// finito la vista continua a scorrere e frena con attrito finché non
+    /// arriva a `KINETIC_STOP_SPEED`, invece di fermarsi di scatto.
+    hscroll_vel: f32,
+    video_scroll_vel: f32,
+    audio_scroll_vel: f32,
     /// In/out della timeline: porzione esportata.
     pub export_marks: crate::transport::MarkRange,
 }
@@ -176,6 +182,12 @@ const MIN_FADE_CLIP_WIDTH_PX: f32 = 20.0;
 const MIN_PIXELS_PER_SEC: f32 = 0.1;
 const MAX_PIXELS_PER_SEC: f32 = 800.0;
 
+/// Stessa fisica del drag-to-scroll nativo di egui (`ScrollArea`): sotto
+/// questa velocità lo scroll cinetico si ferma invece di strisciare
+/// all'infinito.
+const KINETIC_STOP_SPEED: f32 = 20.0; // px/s
+const KINETIC_FRICTION: f32 = 1000.0; // px/s^2
+
 impl Default for TimelineState {
     fn default() -> Self {
         Self {
@@ -195,6 +207,9 @@ impl Default for TimelineState {
             video_pane_height: None,
             video_scroll: 0.0,
             audio_scroll: 0.0,
+            hscroll_vel: 0.0,
+            video_scroll_vel: 0.0,
+            audio_scroll_vel: 0.0,
             export_marks: crate::transport::MarkRange::default(),
         }
     }
@@ -1343,6 +1358,19 @@ pub fn show_timeline(
     let audio_count = track_count - video_count;
     let avail_below_ruler = (panel_rect.height() - RULER_HEIGHT).max(0.0);
     let mut layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+
+    // Inerzia residua da uno swipe da touchpad appena finito: continua a
+    // scorrere e frena, anche se nel frattempo il puntatore si è spostato.
+    let video_coasted =
+        apply_kinetic_scroll(&mut state.video_scroll, &mut state.video_scroll_vel, layout.video_max_scroll, dt);
+    let audio_coasted =
+        apply_kinetic_scroll(&mut state.audio_scroll, &mut state.audio_scroll_vel, layout.audio_max_scroll, dt);
+    if video_coasted || audio_coasted {
+        layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
+        ui.ctx().request_repaint();
+    }
+
     // Rotella: scroll verticale del riquadro sotto al puntatore (quello
     // orizzontale resta a Shift+rotella, come già faceva la ScrollArea).
     if let Some(pos) = ui.input(|i| i.pointer.hover_pos())
@@ -1353,9 +1381,11 @@ pub fn show_timeline(
         if wheel != 0.0 {
             let scrolled = if layout.video_pane.contains(local_y) && layout.video_max_scroll > 0.0 {
                 state.video_scroll += wheel;
+                state.video_scroll_vel = if dt > 0.0 { wheel / dt } else { 0.0 };
                 true
             } else if layout.audio_pane.contains(local_y) && layout.audio_max_scroll > 0.0 {
                 state.audio_scroll -= wheel;
+                state.audio_scroll_vel = if dt > 0.0 { -wheel / dt } else { 0.0 };
                 true
             } else {
                 false
@@ -1394,6 +1424,7 @@ pub fn show_timeline(
             scroll_viewport_width,
             content_width,
             playback_active,
+            panel_rect,
         );
 
         draw_track_headers(
@@ -2596,8 +2627,34 @@ fn finish_drag(
     }
 }
 
+/// Applica un passo di scroll cinetico a `scroll_val`: smorza `vel` (px/s)
+/// con la stessa fisica ad attrito del drag-to-scroll nativo di egui, e
+/// azzera la velocità se lo scroll risultante sbatte contro un limite.
+/// Ritorna `true` se `scroll_val` è stato aggiornato (serve un repaint).
+fn apply_kinetic_scroll(scroll_val: &mut f32, vel: &mut f32, max_scroll: f32, dt: f32) -> bool {
+    if *vel == 0.0 {
+        return false;
+    }
+    let friction = KINETIC_FRICTION * dt;
+    if friction > vel.abs() || vel.abs() < KINETIC_STOP_SPEED {
+        *vel = 0.0;
+        return false;
+    }
+    *vel -= friction * vel.signum();
+    let raw = *scroll_val + *vel * dt;
+    let clamped = raw.clamp(0.0, max_scroll);
+    if clamped != raw {
+        *vel = 0.0;
+    }
+    *scroll_val = clamped;
+    true
+}
+
 /// Corregge lo scroll salvato della ScrollArea `scroll_id` prima del suo `show`:
-/// allo zoom la testina resta ferma a schermo, in riproduzione resta visibile.
+/// allo zoom la testina resta ferma a schermo, in riproduzione resta visibile;
+/// gestisce anche lo scroll orizzontale cinetico da touchpad (swipe + inerzia
+/// dopo il rilascio), dato che lo scroll a rotella verticale è già consumato
+/// altrove per i riquadri Video/Audio.
 fn sync_timeline_scroll(
     ctx: &egui::Context,
     scroll_id: egui::Id,
@@ -2607,6 +2664,7 @@ fn sync_timeline_scroll(
     viewport_width: f32,
     content_width: f32,
     playback_active: bool,
+    panel_rect: egui::Rect,
 ) {
     // Zoom cambiato in questo frame: si corregge lo scroll salvato della
     // ScrollArea (stesso id) prima del `show`, così la testina resta ferma a
@@ -2643,6 +2701,38 @@ fn sync_timeline_scroll(
                 scroll_state.offset.x = target;
                 scroll_state.store(ctx, scroll_id);
             }
+        }
+    }
+
+    let max_offset_x = (content_width - viewport_width).max(0.0);
+    let dt = ctx.input(|i| i.stable_dt).min(0.1);
+    let hovering_panel = ctx
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| panel_rect.contains(p));
+    // Swipe orizzontale in corso: applicato subito (come farebbe la
+    // ScrollArea), e la sua velocità istantanea diventa l'inerzia da
+    // smorzare quando il gesto finisce.
+    let wheel_x = if hovering_panel {
+        ctx.input(|i| i.smooth_scroll_delta.x)
+    } else {
+        0.0
+    };
+    if wheel_x != 0.0 {
+        if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
+        {
+            scroll_state.offset.x = (scroll_state.offset.x - wheel_x).clamp(0.0, max_offset_x);
+            scroll_state.store(ctx, scroll_id);
+        }
+        state.hscroll_vel = if dt > 0.0 { -wheel_x / dt } else { 0.0 };
+        // Consumata qui: la ScrollArea non deve riapplicarla nel suo `show`.
+        ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
+    } else if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
+    {
+        let mut offset_x = scroll_state.offset.x;
+        if apply_kinetic_scroll(&mut offset_x, &mut state.hscroll_vel, max_offset_x, dt) {
+            scroll_state.offset.x = offset_x;
+            scroll_state.store(ctx, scroll_id);
+            ctx.request_repaint();
         }
     }
 }
