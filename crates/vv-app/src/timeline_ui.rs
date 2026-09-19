@@ -182,11 +182,14 @@ const MIN_FADE_CLIP_WIDTH_PX: f32 = 20.0;
 const MIN_PIXELS_PER_SEC: f32 = 0.1;
 const MAX_PIXELS_PER_SEC: f32 = 800.0;
 
-/// Stessa fisica del drag-to-scroll nativo di egui (`ScrollArea`): sotto
-/// questa velocità lo scroll cinetico si ferma invece di strisciare
-/// all'infinito.
-const KINETIC_STOP_SPEED: f32 = 20.0; // px/s
-const KINETIC_FRICTION: f32 = 1000.0; // px/s^2
+/// Sotto questa velocità lo scroll cinetico si ferma invece di strisciare
+/// all'infinito. Attrito più basso di quello nativo di egui (1000 px/s²):
+/// a quel valore lo swipe si sentiva a malapena, qui scivola più a lungo.
+const KINETIC_STOP_SPEED: f32 = 15.0; // px/s
+const KINETIC_FRICTION: f32 = 500.0; // px/s^2
+/// Amplifica la velocità catturata dallo swipe: la sensibilità nativa
+/// risultava fiacca, un gesto normale a malapena metteva in moto l'inerzia.
+const KINETIC_VELOCITY_GAIN: f32 = 1.6;
 
 impl Default for TimelineState {
     fn default() -> Self {
@@ -1386,11 +1389,13 @@ pub fn show_timeline(
         if wheel != 0.0 {
             let scrolled = if layout.video_pane.contains(local_y) && layout.video_max_scroll > 0.0 {
                 state.video_scroll += wheel;
-                state.video_scroll_vel = if kinetic_scroll_enabled && dt > 0.0 { wheel / dt } else { 0.0 };
+                state.video_scroll_vel =
+                    if kinetic_scroll_enabled && dt > 0.0 { KINETIC_VELOCITY_GAIN * wheel / dt } else { 0.0 };
                 true
             } else if layout.audio_pane.contains(local_y) && layout.audio_max_scroll > 0.0 {
                 state.audio_scroll -= wheel;
-                state.audio_scroll_vel = if kinetic_scroll_enabled && dt > 0.0 { -wheel / dt } else { 0.0 };
+                state.audio_scroll_vel =
+                    if kinetic_scroll_enabled && dt > 0.0 { -KINETIC_VELOCITY_GAIN * wheel / dt } else { 0.0 };
                 true
             } else {
                 false
@@ -2733,7 +2738,8 @@ fn sync_timeline_scroll(
             scroll_state.offset.x = (scroll_state.offset.x - wheel_x).clamp(0.0, max_offset_x);
             scroll_state.store(ctx, scroll_id);
         }
-        state.hscroll_vel = if kinetic_scroll_enabled && dt > 0.0 { -wheel_x / dt } else { 0.0 };
+        state.hscroll_vel =
+            if kinetic_scroll_enabled && dt > 0.0 { -KINETIC_VELOCITY_GAIN * wheel_x / dt } else { 0.0 };
         // Consumata qui: la ScrollArea non deve riapplicarla nel suo `show`.
         ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
     } else if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
