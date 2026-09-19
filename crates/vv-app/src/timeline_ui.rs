@@ -1006,6 +1006,16 @@ pub struct MediaDrag {
     pub media_id: vv_core::MediaId,
     pub source_in: FrameIdx,
     pub source_out: FrameIdx,
+    pub streams: DragStreams,
+}
+
+/// Quali stream del media finiscono in timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DragStreams {
+    #[default]
+    All,
+    VideoOnly,
+    AudioOnly,
 }
 
 impl MediaDrag {
@@ -1023,7 +1033,16 @@ impl MediaDrag {
             media_id,
             source_in: 0,
             source_out,
+            streams: DragStreams::All,
         }
+    }
+
+    pub fn takes_video(&self, meta: &vv_core::MediaMeta) -> bool {
+        meta.has_video && self.streams != DragStreams::AudioOnly
+    }
+
+    pub fn takes_audio(&self, meta: &vv_core::MediaMeta) -> bool {
+        meta.has_audio && self.streams != DragStreams::VideoOnly
     }
 
     /// Durata in frame *sorgente* (fps del media): i marker in/out
@@ -1174,8 +1193,8 @@ fn drag_set_segments(
             let seg = DragSegment {
                 offset,
                 len,
-                has_video: project.media_pool[d.media_id].meta.has_video,
-                has_audio: project.media_pool[d.media_id].meta.has_audio,
+                has_video: d.takes_video(&project.media_pool[d.media_id].meta),
+                has_audio: d.takes_audio(&project.media_pool[d.media_id].meta),
             };
             offset += len;
             seg
@@ -1475,7 +1494,7 @@ pub fn show_timeline(
                         TimelineDrag::Media(set) => set
                             .items
                             .iter()
-                            .any(|d| project.media_pool[d.media_id].meta.has_video),
+                            .any(|d| d.takes_video(&project.media_pool[d.media_id].meta)),
                     };
                     media_pool_drop_target(track, has_video, track_kinds[track], track_locked(track))
                 };

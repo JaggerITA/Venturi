@@ -1284,11 +1284,11 @@ impl VibeVideoApp {
         if drops.is_empty() {
             return;
         }
-        let any_video = drops.iter().any(|(_, meta)| meta.has_video);
-        let any_audio = drops.iter().any(|(_, meta)| meta.has_audio);
+        let any_video = drops.iter().any(|(d, meta)| d.takes_video(meta));
+        let any_audio = drops.iter().any(|(d, meta)| d.takes_audio(meta));
         // fps e risoluzione dal primo media *video* del set: un audio in testa
         // non ha una risoluzione da dare alla timeline.
-        let timeline_id = match drops.iter().find(|(_, meta)| meta.has_video) {
+        let timeline_id = match drops.iter().find(|(d, meta)| d.takes_video(meta)) {
             Some((_, video_meta)) => self.ensure_timeline_for(video_meta),
             None => self.ensure_timeline_audio_only(),
         };
@@ -1383,9 +1383,12 @@ impl VibeVideoApp {
             audio_track_indices.insert(0, extra);
         }
 
-        // Senza track audio l'audio di un video si scarta, ma un media solo
-        // audio se ne crea una. Se sono tutte bloccate se ne creano di nuove.
-        let num_audio_streams = if has_audio_tracks || !meta.has_video {
+        // Senza track audio l'audio di un video si scarta, ma un media o un
+        // drag solo audio se ne crea una. Se sono tutte bloccate se ne creano di nuove.
+        let takes_video = drag.takes_video(meta);
+        let num_audio_streams = if !drag.takes_audio(meta) {
+            0
+        } else if has_audio_tracks || !takes_video {
             meta.audio_stream_count()
         } else {
             0
@@ -1400,7 +1403,7 @@ impl VibeVideoApp {
             .collect();
 
         let mut new_clips: Vec<(usize, vv_core::Clip, Option<u64>)> = Vec::new();
-        if meta.has_video {
+        if takes_video {
             let video_clip = vv_core::Clip::from_source_range(
                 self.project.alloc_clip_id(),
                 vv_core::ClipSource::Media(media_id),
@@ -2201,6 +2204,65 @@ fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Resp
     response
 }
 
+/// Icone pellicola e waveform in basso sul viewer: trascinandole si porta in
+/// timeline solo il video o solo l'audio.
+fn show_stream_drag_handles(
+    ui: &egui::Ui,
+    viewer: egui::Rect,
+) -> [(egui::Response, timeline_ui::DragStreams); 2] {
+    const SIZE: egui::Vec2 = egui::vec2(30.0, 26.0);
+    const GAP: f32 = 6.0;
+    let center = egui::pos2(viewer.center().x, viewer.bottom() - 12.0 - SIZE.y / 2.0);
+    let offset = egui::vec2((SIZE.x + GAP) / 2.0, 0.0);
+    let video_rect = egui::Rect::from_center_size(center - offset, SIZE);
+    let audio_rect = egui::Rect::from_center_size(center + offset, SIZE);
+
+    let video = ui
+        .interact(video_rect, ui.id().with("viewer_drag_video_only"), egui::Sense::drag())
+        .on_hover_text("Trascina sulla timeline per aggiungere solo il video");
+    let audio = ui
+        .interact(audio_rect, ui.id().with("viewer_drag_audio_only"), egui::Sense::drag())
+        .on_hover_text("Trascina sulla timeline per aggiungere solo l'audio");
+
+    let visible = ui.rect_contains_pointer(viewer) || video.dragged() || audio.dragged();
+    if visible {
+        let painter = ui.painter();
+        for resp in [&video, &audio] {
+            let alpha = if resp.hovered() || resp.dragged() { 220 } else { 150 };
+            painter.rect_filled(resp.rect, 4.0, egui::Color32::from_black_alpha(alpha));
+        }
+        let color = egui::Color32::from_gray(230);
+
+        let film = egui::Rect::from_center_size(video_rect.center(), egui::vec2(18.0, 14.0));
+        painter.rect_stroke(film, 1.0, egui::Stroke::new(1.3, color), egui::StrokeKind::Middle);
+        for i in 0..4 {
+            let x = film.left() + 3.0 + i as f32 * 4.0;
+            for y in [film.top() + 2.0, film.bottom() - 2.0] {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(2.0, 2.0)),
+                    0.0,
+                    color,
+                );
+            }
+        }
+
+        let heights = [4.0, 9.0, 14.0, 7.0, 12.0, 5.0, 8.0];
+        let c = audio_rect.center();
+        for (i, h) in heights.iter().enumerate() {
+            let x = c.x + (i as f32 - 3.0) * 2.8;
+            painter.line_segment(
+                [egui::pos2(x, c.y - h / 2.0), egui::pos2(x, c.y + h / 2.0)],
+                egui::Stroke::new(1.6, color),
+            );
+        }
+    }
+
+    [
+        (video, timeline_ui::DragStreams::VideoOnly),
+        (audio, timeline_ui::DragStreams::AudioOnly),
+    ]
+}
+
 /// Su Wayland winit manda `Started` per lo scroll ad alta risoluzione ma
 /// quasi mai `Ended`: egui tiene Alt premuto e lo zoom resta bloccato.
 /// Trattato come `Move`, ogni evento usa i modificatori correnti.
@@ -2633,17 +2695,29 @@ impl eframe::App for VibeVideoApp {
                 let resp = ui
                     .interact(rect, drag_id, egui::Sense::drag())
                     .on_hover_text("Trascina sulla timeline per aggiungere la porzione tra in e out");
-                resp.dnd_set_drag_payload(timeline_ui::MediaDragSet::one(
-                    timeline_ui::MediaDrag {
-                        media_id,
-                        source_in,
-                        source_out,
-                    },
-                ));
-                if resp.dragged()
-                    && let Some(item) = self.project.media_pool.get(media_id)
-                {
-                    show_drag_ghost(ui, drag_id, &file_label(&item.path));
+                let mut drags = vec![(resp, timeline_ui::DragStreams::All)];
+                if self.preview_meta.as_ref().is_some_and(|m| m.has_video && m.has_audio) {
+                    drags.extend(show_stream_drag_handles(ui, rect));
+                }
+                for (resp, streams) in drags {
+                    resp.dnd_set_drag_payload(timeline_ui::MediaDragSet::one(
+                        timeline_ui::MediaDrag {
+                            media_id,
+                            source_in,
+                            source_out,
+                            streams,
+                        },
+                    ));
+                    if resp.dragged()
+                        && let Some(item) = self.project.media_pool.get(media_id)
+                    {
+                        let suffix = match streams {
+                            timeline_ui::DragStreams::All => "",
+                            timeline_ui::DragStreams::VideoOnly => " (solo video)",
+                            timeline_ui::DragStreams::AudioOnly => " (solo audio)",
+                        };
+                        show_drag_ghost(ui, resp.id, &format!("{}{suffix}", file_label(&item.path)));
+                    }
                 }
             }
         });
@@ -5516,6 +5590,7 @@ mod tests {
                 media_id,
                 source_in,
                 source_out,
+                streams: timeline_ui::DragStreams::All,
             },
             5,
             timeline_ui::MediaDropTarget::Default,
@@ -5525,6 +5600,32 @@ mod tests {
         assert_eq!(clips.len(), 2, "video + audio");
         for clip in clips {
             assert_eq!((clip.source_in(), clip.source_out(), clip.timeline_start), (10, 30, 5));
+        }
+    }
+
+    #[test]
+    fn video_only_and_audio_only_drags_insert_just_that_stream() {
+        for (streams, kind) in [
+            (timeline_ui::DragStreams::VideoOnly, TrackKind::Video),
+            (timeline_ui::DragStreams::AudioOnly, TrackKind::Audio),
+        ] {
+            let (mut app, media_id) = browse_fixture("streams.mp4");
+            let meta = app.project.media_pool[media_id].meta.clone();
+            app.add_media_to_timeline_at(
+                timeline_ui::MediaDrag {
+                    streams,
+                    ..timeline_ui::MediaDrag::whole(media_id, &meta)
+                },
+                0,
+                timeline_ui::MediaDropTarget::Default,
+            );
+            let timeline = &app.project.timelines[app.timeline_id.unwrap()];
+            let kinds: Vec<TrackKind> = timeline
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter().map(|_| t.kind))
+                .collect();
+            assert_eq!(kinds, vec![kind], "{streams:?}");
         }
     }
 
