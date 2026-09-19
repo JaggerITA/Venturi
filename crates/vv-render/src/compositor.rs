@@ -221,6 +221,15 @@ pub struct Compositor {
 struct TexturePool {
     planes: Vec<wgpu::Texture>,
     outputs: Vec<wgpu::Texture>,
+    i420: Option<I420Buffers>,
+}
+
+/// Buffer della conversione I420, per la dimensione dell'ultimo frame.
+struct I420Buffers {
+    size: wgpu::BufferAddress,
+    storage: wgpu::Buffer,
+    params: wgpu::Buffer,
+    readback: wgpu::Buffer,
 }
 
 /// Oltre, le texture di dimensioni non più usate vengono lasciate andare.
@@ -390,25 +399,32 @@ impl Compositor {
         let params: [u32; 8] = [w, h, cw, ch, groups_x * WORKGROUP, total_words, 0, 0];
 
         let buffer_size = total_words as wgpu::BufferAddress * 4;
-        let storage = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vv-render i420 storage"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let params_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vv-render i420 params"),
-                contents: bytemuck::cast_slice(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
+        let mut pool = self.pool.lock().unwrap();
+        if pool.i420.as_ref().is_none_or(|b| b.size != buffer_size) {
+            pool.i420 = Some(I420Buffers {
+                size: buffer_size,
+                storage: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vv-render i420 storage"),
+                    size: buffer_size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                params: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vv-render i420 params"),
+                    size: std::mem::size_of_val(&params) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                readback: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vv-render i420 readback"),
+                    size: buffer_size,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
             });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vv-render i420 readback"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        }
+        let I420Buffers { storage, params: params_buffer, readback, .. } = pool.i420.as_ref().unwrap();
+        self.queue.write_buffer(params_buffer, 0, bytemuck::cast_slice(&params));
         let texture_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vv-render i420 bind group"),
@@ -443,10 +459,10 @@ impl Compositor {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(groups_x, groups_y, 1);
         }
-        encoder.copy_buffer_to_buffer(&storage, 0, &readback, 0, buffer_size);
+        encoder.copy_buffer_to_buffer(storage, 0, readback, 0, buffer_size);
         self.queue.submit(Some(encoder.finish()));
 
-        self.map_read(&readback, |data| data[..len].to_vec())
+        self.map_read(readback, |data| data[..len].to_vec())
     }
 
     /// Versione multi-layer di [`Compositor::render_frame_to_texture`]
@@ -1500,6 +1516,25 @@ mod tests {
         expected.extend([102; 6]);
         expected.extend([240; 6]);
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn render_layers_i420_reuses_its_buffers_across_frames_and_sizes() {
+        let compositor = Compositor::new_headless();
+        let solid = |color| {
+            [Layer::Solid {
+                color,
+                transform: Transform::default(),
+            }]
+        };
+        let fresh = |color, w, h| {
+            Compositor::new_headless().render_layers_i420(&solid(color), OutputFrame::exact(w, h))
+        };
+        let blue = vv_core::Rgba::from([0.0, 0.0, 1.0, 1.0]);
+        for (color, w, h) in [(RED, 5, 3), (blue, 5, 3), (RED, 8, 6), (RED, 5, 3)] {
+            let out = compositor.render_layers_i420(&solid(color), OutputFrame::exact(w, h));
+            assert_eq!(out, fresh(color, w, h), "{w}x{h}");
+        }
     }
 
     #[test]
