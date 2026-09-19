@@ -17,6 +17,9 @@ RUN dnf install -y \
         wayland-devel libxkbcommon-devel libxkbcommon-x11 libX11-devel \
         vulkan-loader-devel mesa-vulkan-drivers vulkan-tools \
         alsa-lib-devel \
+        patchelf \
+        git nasm \
+        file \
         xorg-x11-server-Xvfb xdpyinfo \
         xdotool \
         ImageMagick \
