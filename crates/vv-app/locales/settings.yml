@@ -15,6 +15,9 @@ settings.language:
 settings.language_system:
   en: System default
   it: Predefinita di sistema
+settings.kinetic_scroll:
+  en: Kinetic scrolling on the timeline
+  it: Scrolling cinetico sulla timeline
 settings.shortcuts_hint:
   en: Click a shortcut and press the new keys (Esc cancels).
   it: Clicca una scorciatoia e premi i tasti nuovi (Esc annulla).

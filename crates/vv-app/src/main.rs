@@ -2470,6 +2470,7 @@ impl eframe::App for VibeVideoApp {
                         &|id| labels.get(&id).cloned().unwrap_or_default(),
                         &mut self.timeline_state,
                         self.snapping_enabled,
+                        self.settings.kinetic_scroll,
                         &buffered_ranges,
                         &proxy_ranges,
                         &self.waveform_cache,

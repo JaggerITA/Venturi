@@ -200,5 +200,6 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     if changed {
         settings.language.apply();
     }
+    changed |= ui.checkbox(&mut settings.kinetic_scroll, t!("settings.kinetic_scroll")).changed();
     changed
 }

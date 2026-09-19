@@ -382,10 +382,18 @@ impl Keymap {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub keymap: Keymap,
     pub language: Language,
+    /// Scrolling cinetico (inerzia dopo lo swipe da touchpad) sulla timeline.
+    pub kinetic_scroll: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { keymap: Keymap::default(), language: Language::default(), kinetic_scroll: true }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -394,6 +402,8 @@ struct SettingsFile {
     shortcuts: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    kinetic_scroll: Option<bool>,
 }
 
 impl Settings {
@@ -420,6 +430,7 @@ impl Settings {
         };
         let mut settings = Self::default();
         settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
+        settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
         for (id, shortcuts) in file.shortcuts {
             let Some(action) = Action::from_id(&id) else {
                 continue;
@@ -441,6 +452,7 @@ impl Settings {
                 })
                 .collect(),
             language: Some(self.language.id().to_owned()),
+            kinetic_scroll: Some(self.kinetic_scroll),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

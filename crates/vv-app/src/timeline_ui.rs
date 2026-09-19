@@ -1272,6 +1272,7 @@ pub fn show_timeline(
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
     state: &mut TimelineState,
     snapping_enabled: bool,
+    kinetic_scroll_enabled: bool,
     // Intervalli di timeline già in cache: striscia "buffered" nel righello.
     buffered_ranges: &[(FrameIdx, FrameIdx)],
     // Intervalli di timeline delle clip servite dal proxy: striscia sulla clip.
@@ -1359,6 +1360,10 @@ pub fn show_timeline(
     let avail_below_ruler = (panel_rect.height() - RULER_HEIGHT).max(0.0);
     let mut layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
     let dt = ui.input(|i| i.stable_dt).min(0.1);
+    if !kinetic_scroll_enabled {
+        state.video_scroll_vel = 0.0;
+        state.audio_scroll_vel = 0.0;
+    }
 
     // Inerzia residua da uno swipe da touchpad appena finito: continua a
     // scorrere e frena, anche se nel frattempo il puntatore si è spostato.
@@ -1381,11 +1386,11 @@ pub fn show_timeline(
         if wheel != 0.0 {
             let scrolled = if layout.video_pane.contains(local_y) && layout.video_max_scroll > 0.0 {
                 state.video_scroll += wheel;
-                state.video_scroll_vel = if dt > 0.0 { wheel / dt } else { 0.0 };
+                state.video_scroll_vel = if kinetic_scroll_enabled && dt > 0.0 { wheel / dt } else { 0.0 };
                 true
             } else if layout.audio_pane.contains(local_y) && layout.audio_max_scroll > 0.0 {
                 state.audio_scroll -= wheel;
-                state.audio_scroll_vel = if dt > 0.0 { -wheel / dt } else { 0.0 };
+                state.audio_scroll_vel = if kinetic_scroll_enabled && dt > 0.0 { -wheel / dt } else { 0.0 };
                 true
             } else {
                 false
@@ -1425,6 +1430,7 @@ pub fn show_timeline(
             content_width,
             playback_active,
             panel_rect,
+            kinetic_scroll_enabled,
         );
 
         draw_track_headers(
@@ -2665,6 +2671,7 @@ fn sync_timeline_scroll(
     content_width: f32,
     playback_active: bool,
     panel_rect: egui::Rect,
+    kinetic_scroll_enabled: bool,
 ) {
     // Zoom cambiato in questo frame: si corregge lo scroll salvato della
     // ScrollArea (stesso id) prima del `show`, così la testina resta ferma a
@@ -2706,6 +2713,9 @@ fn sync_timeline_scroll(
 
     let max_offset_x = (content_width - viewport_width).max(0.0);
     let dt = ctx.input(|i| i.stable_dt).min(0.1);
+    if !kinetic_scroll_enabled {
+        state.hscroll_vel = 0.0;
+    }
     let hovering_panel = ctx
         .input(|i| i.pointer.hover_pos())
         .is_some_and(|p| panel_rect.contains(p));
@@ -2723,7 +2733,7 @@ fn sync_timeline_scroll(
             scroll_state.offset.x = (scroll_state.offset.x - wheel_x).clamp(0.0, max_offset_x);
             scroll_state.store(ctx, scroll_id);
         }
-        state.hscroll_vel = if dt > 0.0 { -wheel_x / dt } else { 0.0 };
+        state.hscroll_vel = if kinetic_scroll_enabled && dt > 0.0 { -wheel_x / dt } else { 0.0 };
         // Consumata qui: la ScrollArea non deve riapplicarla nel suo `show`.
         ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
     } else if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
@@ -5055,6 +5065,7 @@ mod tests {
                     &|_id| "media".to_string(),
                     &mut state,
                     true,
+                    true,
                     &[],
                     &[],
                     &std::collections::HashMap::new(),
@@ -5099,6 +5110,7 @@ mod tests {
                     timeline_id,
                     &|_id| "media".to_string(),
                     &mut state,
+                    true,
                     true,
                     &[],
                     &[],
@@ -5176,6 +5188,7 @@ mod tests {
                         timeline_id,
                         &|_id| "media".to_string(),
                         state,
+                        true,
                         true,
                         &[],
                         &[],
@@ -5291,6 +5304,7 @@ mod tests {
                             timeline_id,
                             &|_id| "media".to_string(),
                             &mut state,
+                            true,
                             true,
                             &[],
                             &[],
