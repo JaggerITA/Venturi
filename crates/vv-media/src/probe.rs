@@ -1,4 +1,4 @@
-//! Apertura di un media e lettura dei metadata (milestone 1).
+//! Lettura dei metadata di un media.
 
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
@@ -18,11 +18,8 @@ pub(crate) fn ensure_init() {
 /// frame sorgente.
 pub const AUDIO_ONLY_FPS: Rational = Rational::new(30, 1);
 
-/// Fps nominale di un'immagine ferma: come `AUDIO_ONLY_FPS`, non ha un
-/// framerate proprio ma serve comunque un'unità per contare
-/// `source_in`/`source_out` — un valore qualunque va bene, l'importante
-/// è restare coerenti con se stessi ovunque lo si usi per quel media
-/// (vedi `probe_image`, `MediaDrag::whole`).
+/// Fps nominale di un'immagine: serve solo un'unità coerente per
+/// `source_in`/`source_out`.
 pub const IMAGE_FPS: Rational = Rational::new(25, 1);
 
 pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
@@ -56,6 +53,10 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         return Err(crate::MediaError::NoStream(path.display().to_string()));
     }
 
+    let audio_streams = input
+        .streams()
+        .filter(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
+        .count() as u16;
     let (fps, width, height) = video.unwrap_or((AUDIO_ONLY_FPS, 0, 0));
     let duration_secs = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
     Ok(MediaMeta {
@@ -67,14 +68,12 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         has_audio,
         sample_rate,
         channels,
+        audio_streams,
     })
 }
 
-/// Come `probe`, ma per un'immagine ferma (jpg/png/bmp/webp/tiff...):
-/// niente durata reale da leggere (un'immagine non ne ha una), quindi
-/// `duration_frames` è il sentinel `vv_core::IMAGE_DURATION_FRAMES` —
-/// enorme apposta, vedi la sua doc su perché sostituisce un campo
-/// "è un'immagine" a parte in `MediaMeta`.
+/// Come `probe` per un'immagine: `duration_frames` è il sentinel
+/// `vv_core::IMAGE_DURATION_FRAMES`.
 pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
@@ -94,6 +93,7 @@ pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         has_audio: false,
         sample_rate: 0,
         channels: 0,
+        audio_streams: 0,
     })
 }
 
@@ -104,17 +104,9 @@ pub struct AudioStreamInfo {
     pub channels: u16,
 }
 
-/// Enumera *tutti* gli stream audio del contenitore, nell'ordine in cui
-/// compaiono (non l'euristica "best" di ffmpeg, che ne sceglie uno solo):
-/// questo è l'ordine che `Clip::audio_stream_index` e i parametri
-/// `stream_index` di `decode_audio_track`/`generate_waveform` si
-/// aspettano — l'indice N-esimo in questo vettore è lo stream audio
-/// N-esimo del file, a prescindere da quale sia "il migliore".
-///
-/// Un file con più tracce audio (es. un mix stereo *e* un 5.1 separato,
-/// come capita con sorgenti broadcast) va importato con una clip audio
-/// per ogni stream — vedi `VibeVideoApp::insert_media_clip` — invece di
-/// tenerne una sola (quella "best") e perdere silenziosamente le altre.
+/// Tutti gli stream audio nell'ordine del contenitore (non il "best" di
+/// ffmpeg): è l'indice di `Clip::audio_stream_index`. Un file multi-audio si
+/// importa con una clip per stream.
 pub fn audio_streams(path: &Path) -> Result<Vec<AudioStreamInfo>, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
@@ -134,20 +126,11 @@ pub fn audio_streams(path: &Path) -> Result<Vec<AudioStreamInfo>, crate::MediaEr
     Ok(out)
 }
 
-/// Fingerprint economico di un file (path canonico + dimensione + data
-/// di modifica, FNV-1a), usato come `MediaItem::content_hash` — chiave
-/// dei proxy (`proxy.rs`) e di qualunque altra cache derivata dal
-/// contenuto. Non un vero hash dei byte: leggere l'intero file
-/// rallenterebbe ogni import su sorgenti da GB, e qui basta un
-/// fingerprint "stesso file della volta scorsa", non una garanzia
-/// crittografica — un file sovrascritto con la stessa dimensione e la
-/// stessa mtime per coincidenza (raro: capita solo con strumenti di
-/// copia che preservano i metadata alla lettera) userebbe una cache
-/// stantia, un compromesso accettato esplicitamente per restare
-/// istantaneo anche su file grandi. Stabile tra un riavvio dell'app e
-/// l'altro (a differenza di un hash randomizzato per-processo come
-/// `DefaultHasher`), non implementato su hardware/versioni rustc
-/// diverse.
+/// Fingerprint (path canonico + dimensione + mtime, FNV-1a) usato come
+/// `content_hash` per le cache derivate. Non legge i byte: un file
+/// sovrascritto con stessa dimensione e mtime userebbe una cache stantia,
+/// compromesso accettato per import istantanei. Stabile tra riavvii, a
+/// differenza di `DefaultHasher`.
 pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
     let metadata = std::fs::metadata(path)?;
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -174,7 +157,6 @@ pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// Genera un vero file x264 (con audio AAC) via ffmpeg CLI e verifica
     /// che il probe legga metadata coerenti. Questo è il caso d'uso
@@ -185,9 +167,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.mp4");
 
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -202,11 +183,9 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success(), "generazione del file di test fallita");
+            ],
+            &path,
+        );
 
         let meta = probe(&path).expect("probe fallito");
         assert_eq!(meta.width, 640);
@@ -214,6 +193,7 @@ mod tests {
         assert_eq!(meta.fps, Rational::new(25, 1));
         assert!(meta.has_audio);
         assert_eq!(meta.sample_rate, 48000);
+        assert_eq!(meta.audio_streams, 1);
         // ~2s a 25fps: tollera qualche frame di arrotondamento sul container.
         assert!((meta.duration_frames - 50).abs() <= 2);
     }
@@ -223,12 +203,15 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tono.wav");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2"])
-            .arg(&path)
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=2",
+            ],
+            &path,
+        );
 
         let meta = probe(&path).expect("probe fallito");
         assert!(!meta.has_video);
@@ -244,12 +227,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("still.png");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=1:duration=1"])
-            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x360:rate=1:duration=1",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &path,
+        );
 
         let meta = probe_image(&path).expect("probe_image fallito");
         assert_eq!((meta.width, meta.height), (640, 360));

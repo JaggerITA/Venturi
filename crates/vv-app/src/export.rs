@@ -1,37 +1,23 @@
-//! Pipeline di export (milestone 9): cammina l'intera timeline e produce un
-//! file H.264+AAC (`vv_media::Encoder`), applicando lo stesso stack effetti
-//! (crop/zoom/gain keyframeati, colore per le clip SolidColor) già valutato
-//! dall'anteprima in `main.rs` (`active_clip_effects`,
-//! `EffectStack::*.value_at`). Nessun audio device, nessuna finestra: pensata
-//! per girare su un thread dedicato a partire da uno snapshot di `Project`
-//! clonato al click di "Esporta" (vedi `VibeVideoApp::start_export` in `main.rs`),
-//! non sul `Project` live della UI.
-//!
-//! Limiti v1, coerenti con lo stato attuale del progetto (ARCHITECTURE.md):
-//! N track video (compositate
-//! bottom->top in alpha-over, `Timeline::active_video_clips_at` — nessuna
-//! opacità per-clip ancora, quindi un layer che copre tutto il frame
-//! occlude quelli sotto) e N track audio (sommate,
-//! REFACTOR_PIPELINE.md B4); `EffectStack::speed` non applicato (nessun
-//! time-remap: milestone 7 non ancora fatta).
+//! Export: cammina la timeline e scrive H.264+AAC con gli stessi layer e
+//! lo stesso mix dell'anteprima. Gira su un thread dedicato, su uno
+//! snapshot del progetto. `EffectStack::speed` non è ancora applicato.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    Clip, ClipId, ClipSource, FrameIdx, Project, Rgba, Timeline, TimelineId, TrackKind,
+    Clip, ClipId, ClipSource, FrameIdx, Project, Timeline, TimelineId, TrackKind,
 };
 
 use vv_audio::mixer::{
-    MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, prepare_mix_buffer, timeline_frame_to_sample,
+    MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into, timeline_frame_to_sample,
 };
 
-use crate::frame_provider::{
-    FrameProvider, as_render_yuv_frame, clip_source_size, media_source_frame,
-};
+use crate::frame_provider::{FrameProvider, OwnedLayer, clip_layer, media_source_frame};
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
@@ -98,19 +84,14 @@ pub struct ExportProgress {
 /// ogni seek è un flush a keyframe, troppo lento fatto ad ogni frame).
 struct ActiveClipDecoder {
     decoder: vv_media::Decoder,
-    /// Ultimo frame decodificato, tenuto per poterlo restituire di nuovo:
-    /// una clip conformata (`Clip::rate`) chiede lo stesso frame sorgente
-    /// su due frame di timeline consecutivi, e il decoder non sa tornare
-    /// indietro di uno.
+    /// Una clip conformata chiede lo stesso frame sorgente su frame di
+    /// timeline consecutivi, e il decoder non torna indietro.
     last: Option<(FrameIdx, Arc<vv_media::FrameYuv420>)>,
 }
 
 impl ActiveClipDecoder {
     fn open_for(path: &Path, target_source_frame: FrameIdx, is_image: bool) -> Result<Self, String> {
-        // Un'immagine ferma va aperta con `open_image` (vedi la sua doc):
-        // un vero `Decoder::open` si comporterebbe come un video a un
-        // frame solo, andando in EOF (quindi `advance_to` restituirebbe
-        // `None`, un frame nero) oltre la primissima posizione chiesta.
+        // `Decoder::open` su un'immagine andrebbe in EOF dopo il primo frame.
         let mut decoder = if is_image {
             vv_media::Decoder::open_image(path)
         } else {
@@ -127,10 +108,8 @@ impl ActiveClipDecoder {
         Ok(me)
     }
 
-    /// Decodifica in avanti fino a raggiungere (o superare) `target`,
-    /// scartando i frame intermedi; un `target` già raggiunto restituisce
-    /// di nuovo l'ultimo frame invece di avanzare. `None` a fine stream
-    /// (capita se `source_out` va oltre la fine reale del file).
+    /// Decodifica in avanti fino a `target`; se già raggiunto ridà l'ultimo
+    /// frame. `None` a fine stream.
     fn advance_to(
         &mut self,
         target: FrameIdx,
@@ -154,20 +133,12 @@ impl ActiveClipDecoder {
     }
 }
 
-/// Implementazione di `FrameProvider` per l'export: streaming sincrono,
-/// un `ActiveClipDecoder` tenuto aperto per la clip Media attiva
-/// (riaperto solo al cambio di clip — mai un decoder nuovo per ogni
-/// frame). A differenza della cache dell'anteprima, un errore di
-/// decodifica qui è un vero `Err`, non un `Ok(None)`: l'export non deve
-/// mai trasformare in silenzio un file che non si apre in un frame nero
-/// (REFACTOR_PIPELINE.md B1, doc di `FrameProvider`).
+/// Decoder tenuti aperti tra un frame e l'altro, riaperti solo al cambio
+/// di clip.
 #[derive(Default)]
 struct StreamingFrameProvider {
-    /// Un decoder per clip, non uno solo: a un dato frame di timeline
-    /// possono essere attive più track video sovrapposte (vedi
-    /// `Timeline::active_video_clips_at`) e tenerne aperto uno solo
-    /// significherebbe riaprire e riseekare tutti gli altri a ogni frame.
-    /// Potato da `retain_clips` appena una clip esce di scena.
+    /// Uno per clip: più track possono essere attive allo stesso frame.
+    /// Potato da `retain_clips`.
     active: HashMap<ClipId, ActiveClipDecoder>,
 }
 
@@ -203,11 +174,7 @@ impl FrameProvider for StreamingFrameProvider {
     }
 }
 
-/// Cammina i frame `range` della timeline (l'intervallo in/out) e produce
-/// `output_path`. Bloccante: il chiamante (`main.rs`) lo gira su un thread
-/// dedicato. `project` è uno snapshot clonato al momento del click, non
-/// condiviso con la UI — modificare il progetto durante l'export non lo
-/// tocca.
+/// Esporta i frame `range` in `output_path`. Bloccante.
 pub fn export_timeline(
     project: &Project,
     timeline_id: TimelineId,
@@ -250,7 +217,7 @@ pub fn export_timeline(
     // Decode, composizione GPU ed encode su tre thread: in serie ognuno
     // aspettava gli altri e nessuno saturava la macchina.
     let (decoded_tx, decoded_rx) =
-        std::sync::mpsc::sync_channel::<Result<DecodedLayers, String>>(RENDER_AHEAD_FRAMES);
+        std::sync::mpsc::sync_channel::<Result<Vec<OwnedLayer>, String>>(RENDER_AHEAD_FRAMES);
     let (composed_tx, composed_rx) =
         std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(RENDER_AHEAD_FRAMES);
     let resolution = timeline.resolution;
@@ -278,15 +245,13 @@ pub fn export_timeline(
             }
         });
 
-        let compose_range = range.clone();
         scope.spawn(move || {
             // Compositor indipendente: evita qualunque contesa GPU col
             // device della UI (che ha il suo, in `main.rs`).
             let compositor = vv_render::Compositor::new_headless();
-            for (frame, decoded) in compose_range.zip(decoded_rx) {
-                let composed = decoded.map(|decoded| {
-                    compose_video_frame(timeline, &compositor, frame, &decoded, output)
-                });
+            for decoded in decoded_rx {
+                let composed =
+                    decoded.map(|layers| compose_video_frame(&compositor, &layers, output));
                 let failed = composed.is_err();
                 if composed_tx.send(composed).is_err() || failed {
                     return;
@@ -330,21 +295,6 @@ pub fn export_timeline(
     Ok(())
 }
 
-/// Per ogni clip attiva (stesso ordine di `active_video_clips_at`): il
-/// frame decodificato e, per le clip Media, transform e dimensione nativa.
-type DecodedLayers = Vec<(
-    Option<Arc<vv_media::FrameYuv420>>,
-    Option<(vv_core::Transform, (u32, u32))>,
-)>;
-
-fn active_clips(timeline: &Timeline, frame: FrameIdx) -> Vec<&Clip> {
-    timeline
-        .active_video_clips_at(frame)
-        .into_iter()
-        .map(|(_, c)| c)
-        .collect()
-}
-
 #[cfg(test)]
 fn render_video_frame(
     project: &Project,
@@ -354,86 +304,35 @@ fn render_video_frame(
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
-    let decoded = decode_video_frame(project, timeline, provider, frame, resolution)?;
+    let layers = decode_video_frame(project, timeline, provider, frame, resolution)?;
     let output = vv_render::OutputFrame::exact(resolution.0, resolution.1);
-    Ok(compose_video_frame(timeline, compositor, frame, &decoded, output))
+    Ok(compose_video_frame(compositor, &layers, output))
 }
 
+/// I layer del frame, dal basso verso l'alto. Un frame media assente
+/// (oltre la fine reale del file) lascia fuori solo quel layer.
 fn decode_video_frame(
     project: &Project,
     timeline: &Timeline,
     provider: &mut StreamingFrameProvider,
     frame: FrameIdx,
     resolution: (u32, u32),
-) -> Result<DecodedLayers, String> {
-    let clips = active_clips(timeline, frame);
-    provider.retain_clips(&clips.iter().map(|c| c.id).collect::<Vec<_>>());
-
-    let mut decoded = Vec::with_capacity(clips.len());
-    for clip in &clips {
-        match &clip.source {
-            ClipSource::Media(_) => {
-                // Mappatura clip→frame-sorgente condivisa con l'anteprima
-                // via `FrameProvider` (REFACTOR_PIPELINE.md B1) — solo il
-                // transform la ricalcola qui perché serve indipendentemente
-                // da `provider` avere restituito un frame o `None`.
-                let transform = clip.effects.transform.value_at(clip.source_frame_at(frame));
-                // `None` = source_out oltre la fine reale del file: quel
-                // layer semplicemente non c'è (nero se è l'unico), meglio
-                // che un panic o il congelamento dell'ultimo frame valido.
-                decoded.push((
-                    provider.frame_for(project, clip, frame)?,
-                    Some((transform, clip_source_size(project, clip, resolution))),
-                ));
-            }
-            ClipSource::SolidColor | ClipSource::Text => decoded.push((None, None)),
-        }
+) -> Result<Vec<OwnedLayer>, String> {
+    let clips = timeline.active_video_clips_at(frame);
+    provider.retain_clips(&clips.iter().map(|(_, c)| c.id).collect::<Vec<_>>());
+    let mut layers = Vec::with_capacity(clips.len());
+    for (_, clip) in clips {
+        layers.extend(clip_layer(project, clip, frame, resolution, provider)?);
     }
-    Ok(decoded)
+    Ok(layers)
 }
 
 fn compose_video_frame(
-    timeline: &Timeline,
     compositor: &vv_render::Compositor,
-    frame: FrameIdx,
-    decoded: &DecodedLayers,
+    layers: &[OwnedLayer],
     output: vv_render::OutputFrame,
 ) -> Vec<u8> {
-    let clips = active_clips(timeline, frame);
-    let layers: Vec<vv_render::Layer> = clips
-        .iter()
-        .zip(decoded)
-        .filter_map(|(clip, (frame_yuv, transform))| match (frame_yuv, transform) {
-            (Some(f), Some((transform, source_size))) => Some(vv_render::Layer::Video {
-                frame: as_render_yuv_frame(f),
-                transform: *transform,
-                source_size: *source_size,
-            }),
-            (None, Some(_)) => None,
-            _ if matches!(clip.source, ClipSource::Text) => Some(vv_render::Layer::Text {
-                title: clip.effects.title.as_ref()?,
-                transform: clip.effects.transform.value_at(clip.source_frame_at(frame)),
-            }),
-            _ => {
-                let source_frame = clip.source_frame_at(frame);
-                Some(vv_render::Layer::Solid {
-                    color: clip
-                        .effects
-                        .color
-                        .as_ref()
-                        .map(|k| k.value_at(source_frame))
-                        .unwrap_or(Rgba {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                    transform: clip.effects.transform.value_at(source_frame),
-                })
-            }
-        })
-        .collect();
-
+    let layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
     compositor.render_layers_i420(&layers, output)
 }
 
@@ -495,7 +394,9 @@ fn mix_audio_track(
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, String> {
-    let mut buffers: HashMap<(PathBuf, usize), Option<Arc<Vec<f32>>>> = HashMap::new();
+    // Stessa decodifica dell'anteprima (`mix_buffers`): swresample a
+    // `PROJECT_SAMPLE_RATE`, tutti gli stream di un file in una passata.
+    let mut streams_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     for (_, track) in timeline.audible_tracks() {
         for clip in track.clips.iter().filter(|c| !c.disabled) {
             let ClipSource::Media(media_id) = &clip.source else {
@@ -504,22 +405,29 @@ fn mix_audio_track(
             let Some(item) = project.media_pool.get(*media_id) else {
                 continue;
             };
-            let key = (item.path.clone(), clip.audio_stream_index);
-            if buffers.contains_key(&key) {
-                continue;
+            let streams = streams_by_path.entry(item.path.clone()).or_default();
+            if !streams.contains(&clip.audio_stream_index) {
+                streams.push(clip.audio_stream_index);
             }
-            let buffer = vv_media::decode_audio_track(&item.path, clip.audio_stream_index)
-                .map_err(|e| e.to_string())?
-                .map(|audio| {
-                    Arc::new(prepare_mix_buffer(
-                        &audio.samples,
-                        audio.sample_rate,
-                        audio.channels,
-                        PROJECT_SAMPLE_RATE,
-                        PROJECT_CHANNELS,
-                    ))
-                });
-            buffers.insert(key, buffer);
+        }
+    }
+    let mut buffers: HashMap<(PathBuf, usize), Arc<Vec<f32>>> = HashMap::new();
+    for (path, streams) in streams_by_path {
+        let mut decoded = vec![Vec::new(); streams.len()];
+        let formats = vv_media::decode_audio_streams_streaming(
+            &path,
+            &streams,
+            Some(PROJECT_SAMPLE_RATE),
+            |slot, channels, chunk| {
+                remix_channels_into(chunk, channels, PROJECT_CHANNELS, &mut decoded[slot]);
+                ControlFlow::Continue(())
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        for ((stream, samples), format) in streams.into_iter().zip(decoded).zip(formats) {
+            if format.is_some() {
+                buffers.insert((path.clone(), stream), Arc::new(samples));
+            }
         }
     }
 
@@ -528,7 +436,7 @@ fn mix_audio_track(
         timeline,
         PROJECT_SAMPLE_RATE,
         PROJECT_CHANNELS,
-        |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned().flatten(),
+        |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
     );
     let fps = timeline.fps.as_f64();
     let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
@@ -542,7 +450,7 @@ fn mix_audio_track(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vv_core::{Clip, Keyframed, Track, TrackKind};
+    use vv_core::{Clip, Keyframed, Rgba, Track, TrackKind};
 
     fn solid_color_clip(id: u64, start: FrameIdx, len: FrameIdx, color: Rgba) -> Clip {
         let mut clip = Clip::from_source_range(
@@ -564,56 +472,6 @@ mod tests {
             resolution: (4, 2),
             tracks,
         }
-    }
-
-    #[test]
-    fn timeline_total_frames_is_the_furthest_clip_end_across_tracks() {
-        let tl = timeline_with(vec![
-            Track {
-                kind: TrackKind::Video,
-                clips: vec![solid_color_clip(1, 0, 10, red())],
-                muted: false,
-                solo: false,
-                locked: false,
-            },
-            Track {
-                kind: TrackKind::Audio,
-                clips: vec![solid_color_clip(2, 5, 20, red())], // finisce a 25, più avanti
-                muted: false,
-                solo: false,
-                locked: false,
-            },
-        ]);
-        assert_eq!(tl.total_frames(), 25);
-    }
-
-    #[test]
-    fn timeline_total_frames_is_zero_for_an_empty_timeline() {
-        let tl = timeline_with(vec![Track {
-            kind: TrackKind::Video,
-            clips: vec![],
-            muted: false,
-            solo: false,
-            locked: false,
-        }]);
-        assert_eq!(tl.total_frames(), 0);
-    }
-
-    #[test]
-    fn active_clip_at_finds_the_covering_clip_and_none_in_a_gap() {
-        let tl = timeline_with(vec![Track {
-            kind: TrackKind::Video,
-            clips: vec![
-                solid_color_clip(1, 0, 10, red()),
-                solid_color_clip(2, 20, 10, red()),
-            ],
-            muted: false,
-            solo: false,
-            locked: false,
-        }]);
-        assert_eq!(tl.active_clip_at(0, 5).map(|c| c.id), Some(ClipId(1)));
-        assert!(tl.active_clip_at(0, 15).is_none(), "buco tra le due clip");
-        assert_eq!(tl.active_clip_at(0, 25).map(|c| c.id), Some(ClipId(2)));
     }
 
     // BT.709 range limitato, come `Compositor::render_layers_i420`.
@@ -705,17 +563,10 @@ mod tests {
         assert_eq!(frame[3], BLACK_I420[0]);
     }
 
-    /// `FrameProvider::frame_for` (REFACTOR_PIPELINE.md B1, doc lì): un
-    /// vero fallimento durante l'export deve restituire `Err`, mai
-    /// scivolare in silenzio verso un `Ok` con un frame nero — quello è
-    /// riservato al caso "oltre la fine reale del file", non a "il
-    /// media referenziato dalla clip non esiste nel pool".
+    /// Un media assente dal pool è un `Err`, non un frame nero.
     #[test]
     fn render_video_frame_fails_loudly_when_the_clip_references_a_missing_media() {
         let missing_media_id = {
-            // Un MediaId "orfano": mai inserito nel progetto usato dal
-            // test, quindi `media_pool.get` restituirà `None` — esattamente
-            // il caso "media non trovato nel pool" da verificare.
             let mut other_project = Project::default();
             other_project.media_pool.insert(vv_core::MediaItem {
                 path: "dummy.mp4".into(),
@@ -728,6 +579,7 @@ mod tests {
                     has_audio: false,
                     sample_rate: 0,
                     channels: 0,
+                    audio_streams: 0,
                 },
                 content_hash: 0,
             })
@@ -754,11 +606,7 @@ mod tests {
         assert!(err.contains("media non trovato"), "err={err}");
     }
 
-    /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): dove la
-    /// track più in alto (seconda nel vettore) non ha una clip, si vede
-    /// quella sotto; dove ce l'ha, vince lei — stesso comportamento del
-    /// viewer live in `main.rs`, generalizzato via
-    /// `Timeline::active_video_clip_at`.
+    /// Dove la track in alto non ha clip si vede quella sotto.
     #[test]
     fn render_video_frame_prefers_the_topmost_video_track() {
         let project = Project::default();
@@ -817,27 +665,6 @@ mod tests {
         assert!(mixed.iter().all(|&s| s == 0.0));
     }
 
-    #[test]
-    fn active_clip_at_ignores_other_tracks() {
-        let tl = timeline_with(vec![
-            Track {
-                kind: TrackKind::Video,
-                clips: vec![solid_color_clip(1, 0, 10, red())],
-                muted: false,
-                solo: false,
-                locked: false,
-            },
-            Track {
-                kind: TrackKind::Audio,
-                clips: vec![],
-                muted: false,
-                solo: false,
-                locked: false,
-            },
-        ]);
-        assert!(tl.active_clip_at(1, 5).is_none(), "track audio vuota");
-    }
-
     /// End-to-end: costruisce una timeline vera (via `VibeVideoApp`, non
     /// `Clip`/`Track` a mano) con un vero file video+audio generato da
     /// ffmpeg CLI (stesso pattern dei test in `main.rs`), esporta, e
@@ -848,9 +675,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-export-test");
         std::fs::create_dir_all(&dir).unwrap();
         let source_path = dir.join("source.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -865,11 +691,9 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
-                source_path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &source_path,
+        );
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(source_path);
@@ -925,12 +749,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-export-image-test");
         std::fs::create_dir_all(&dir).unwrap();
         let source_path = dir.join("still.png");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "color=c=yellow:size=64x48:rate=1:duration=1"])
-            .args(["-frames:v", "1", "-update", "1", source_path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=yellow:size=64x48:rate=1:duration=1",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &source_path,
+        );
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(source_path);
@@ -979,25 +810,49 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let mute_25 = dir.join("mute25.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=1"])
-            .args(["-f", "lavfi", "-i", "anullsrc=sample_rate=48000:channel_layout=stereo"])
-            .args(["-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
-            .arg(mute_25.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=25:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=sample_rate=48000:channel_layout=stereo",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+            &mute_25,
+        );
 
         // 24000/1001 = 23,976 fps: 48 frame sorgente per 2 s reali.
         let sine_23976 = dir.join("sine23976.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=24000/1001:duration=2"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
-            .arg(sine_23976.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=24000/1001:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+            &sine_23976,
+        );
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(mute_25);
@@ -1097,14 +952,25 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-export-scale-test");
         std::fs::create_dir_all(&dir).unwrap();
         let source_path = dir.join("source.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=1"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
-            .arg(source_path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=25:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+            &source_path,
+        );
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(source_path);
@@ -1136,13 +1002,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-export-range-test");
         std::fs::create_dir_all(&dir).unwrap();
         let source_path = dir.join("source.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=1"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
-            .arg(source_path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &source_path,
+        );
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(source_path);

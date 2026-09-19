@@ -11,17 +11,13 @@ new_key_type! {
     pub struct TimelineId;
 }
 
-/// Id di un gruppo di clip collegate (vedi `Clip::linked_group`): un
-/// contatore semplice come `ClipId`, non una chiave slotmap (nessuna arena
-/// dedicata — l'appartenenza al gruppo è solo questo campo su ogni `Clip`,
-/// niente registro separato da tenere sincronizzato).
+/// Id di un gruppo di clip collegate: un contatore, l'appartenenza è solo
+/// il campo `Clip::linked_group`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LinkGroupId(pub u64);
 
-/// Le Clip vivono in `Vec<Clip>` dentro ogni Track (non in un'arena
-/// slotmap): l'ordine è significativo (tempo sulla track) e l'iterazione
-/// sequenziale per il compositing beneficia della località in memoria.
-/// L'ID è quindi un contatore semplice, non una chiave slotmap.
+/// Contatore: le clip vivono in `Vec` ordinati dentro le track, non in
+/// un'arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClipId(pub u64);
 
@@ -122,20 +118,23 @@ fn gcd(a: i64, b: i64) -> i64 {
     a.max(1)
 }
 
+/// Matrice YUV→RGB di un frame decodificato. BT.2020 solo se il sorgente
+/// la segnala: mai indovinata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMatrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
 /// Indice di frame, sempre relativo al contesto in cui è usato: frame
 /// sorgente di un media (fps nativo) oppure frame di Timeline (fps della
 /// Timeline che lo contiene). I due spazi non vanno mai confusi.
 pub type FrameIdx = i64;
 
-/// `duration_frames` di un'immagine ferma: enormemente più lungo di
-/// qualunque editing reale (a `vv_media::IMAGE_FPS` sono ~463 giorni),
-/// così un'immagine si accorcia/allunga a piacimento come un video
-/// qualunque senza mai sbattere contro un tetto di durata del sorgente —
-/// senza introdurre un campo "è un'immagine" a parte in `MediaMeta` (che
-/// avrebbe richiesto toccare ogni sito che costruisce un `MediaMeta`,
-/// nei test compresi). Il valore *non è mai* la durata reale (un file
-/// video così lungo non esiste), quindi `MediaMeta::is_image` può
-/// riconoscerlo con sicurezza pratica.
+/// `duration_frames` di un'immagine: ~463 giorni a `IMAGE_FPS`, nessuna
+/// durata reale lo raggiunge, così fa da segno "è un'immagine" senza un
+/// campo in più e non limita il trim.
 pub const IMAGE_DURATION_FRAMES: FrameIdx = 1_000_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,9 +149,22 @@ pub struct MediaMeta {
     pub has_audio: bool,
     pub sample_rate: u32,
     pub channels: u16,
+    /// Stream audio nel contenitore. 0 nei progetti salvati prima che il
+    /// campo esistesse: l'app lo ricalcola all'apertura.
+    #[serde(default)]
+    pub audio_streams: u16,
 }
 
 impl MediaMeta {
+    /// Stream audio da usare: almeno uno se il media ha audio.
+    pub fn audio_stream_count(&self) -> usize {
+        if self.has_audio {
+            usize::from(self.audio_streams).max(1)
+        } else {
+            0
+        }
+    }
+
     /// Un'immagine ferma importata nel pool: ha video ma non audio, e
     /// `duration_frames` è il sentinel `IMAGE_DURATION_FRAMES` (vedi la
     /// sua doc sul perché non serve un campo dedicato).
@@ -220,6 +232,16 @@ impl<T: Clone> Keyframed<T> {
         Some((value, interp))
     }
 
+    /// Frame del keyframe più vicino prima di `frame`.
+    pub fn keyframe_before(&self, frame: FrameIdx) -> Option<FrameIdx> {
+        self.keyframes.iter().rev().map(|k| k.0).find(|&f| f < frame)
+    }
+
+    /// Frame del keyframe più vicino dopo `frame`.
+    pub fn keyframe_after(&self, frame: FrameIdx) -> Option<FrameIdx> {
+        self.keyframes.iter().map(|k| k.0).find(|&f| f > frame)
+    }
+
     /// Il keyframe esattamente a `frame`, se esiste.
     pub fn keyframe_at(&self, frame: FrameIdx) -> Option<(T, Interpolation)> {
         let idx = self
@@ -277,10 +299,8 @@ fn smoothstep(t: f32) -> f32 {
 }
 
 impl<T: Lerp + Clone> Keyframed<T> {
-    /// Valore del parametro al frame dato: `default` se non ci sono
-    /// keyframe; prima del primo/dopo l'ultimo tiene il valore estremo;
-    /// altrimenti interpola tra i due keyframe che lo racchiudono secondo
-    /// l'`Interpolation` del keyframe di partenza.
+    /// `default` senza keyframe; prima del primo e dopo l'ultimo il valore
+    /// estremo; in mezzo l'interpolazione del keyframe di partenza.
     pub fn value_at(&self, frame: FrameIdx) -> T {
         if self.keyframes.is_empty() {
             return self.default.clone();
@@ -344,27 +364,15 @@ impl<T: Lerp + Clone> Keyframed<T> {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transform {
-    /// Quanto tagliare da ciascun lato (sinistra, alto, destra, basso), in
-    /// pixel del media alla sua risoluzione *nativa* (non del proxy): `0` =
-    /// quel lato non è tagliato. Il crop
-    /// taglia e basta — quel che resta non viene ricentrato né ingrandito,
-    /// continua a cadere dov'era nel frame di output (dietro la parte
-    /// tagliata si vede il layer sotto).
+    /// Pixel tagliati per lato (sinistra, alto, destra, basso) alla risoluzione
+    /// nativa del media, non del proxy. Il resto non si ricentra.
     pub crop: [f32; 4], // left, top, right, bottom
-    /// Sfumatura del bordo di crop, in pixel del media:
-    /// negativa la sfuma verso l'interno del crop, positiva verso l'esterno
-    /// (quindi si vede solo dove qualcosa è stato tagliato), `0` taglio
-    /// netto.
+    /// Sfumatura del bordo di crop in pixel del media: negativa verso l'interno,
+    /// positiva verso l'esterno, 0 netto.
     pub crop_softness: f32,
-    /// Ingrandimento della clip *rispetto al frame di output*, per asse
-    /// (X, Y), attorno all'`anchor`: con abbastanza zoom una clip di aspect
-    /// ratio diverso da quello della timeline arriva a coprirlo tutto,
-    /// bande comprese.
+    /// Ingrandimento per asse attorno all'`anchor`, rispetto al frame di output.
     pub zoom: [f32; 2],
-    /// Spostamento della clip dentro il frame di output, in pixel di
-    /// timeline (X positivo = verso destra, Y positivo = verso l'alto): su
-    /// una timeline 1920x1080, `X = 960` la sposta di mezzo frame. Non
-    /// sposta il contenuto dentro la clip.
+    /// Spostamento in pixel di timeline, Y verso l'alto.
     pub position: [f32; 2],
     /// Rotazione in gradi, oraria, attorno all'`anchor`.
     pub rotation: f32,
@@ -390,10 +398,8 @@ impl Default for Transform {
     }
 }
 
-/// Un parametro scalare del transform: ognuno ha i propri keyframe, come
-/// nell'inspector di un NLE (il `Transform` a un dato frame è la
-/// valutazione di tutti insieme, vedi [`TransformTracks::value_at`]).
-/// `flip` non è qui: non ha valori intermedi da interpolare.
+/// Un parametro del transform, ognuno con i suoi keyframe. `flip` no: non
+/// si interpola.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransformParam {
     ZoomX,
@@ -426,9 +432,10 @@ impl TransformParam {
         Self::CropSoftness,
     ];
 
-    /// Posizione in `TransformTracks::params` — l'ordine di `ALL`.
+    /// Posizione in `TransformTracks::params` — l'ordine di `ALL`, che è
+    /// quello di dichiarazione.
     pub fn index(self) -> usize {
-        Self::ALL.iter().position(|p| *p == self).expect("ALL li elenca tutti")
+        self as usize
     }
 
     /// Il valore che ha in un `Transform` già valutato.
@@ -521,14 +528,7 @@ impl TransformTracks {
     pub fn previous_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
         params
             .iter()
-            .filter_map(|p| {
-                self.track(*p)
-                    .keyframes()
-                    .iter()
-                    .rev()
-                    .find(|(f, _, _)| *f < frame)
-                    .map(|(f, _, _)| *f)
-            })
+            .filter_map(|p| self.track(*p).keyframe_before(frame))
             .max()
     }
 
@@ -536,13 +536,7 @@ impl TransformTracks {
     pub fn next_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
         params
             .iter()
-            .filter_map(|p| {
-                self.track(*p)
-                    .keyframes()
-                    .iter()
-                    .find(|(f, _, _)| *f > frame)
-                    .map(|(f, _, _)| *f)
-            })
+            .filter_map(|p| self.track(*p).keyframe_after(frame))
             .min()
     }
 }
@@ -553,6 +547,33 @@ pub struct Rgba {
     pub g: f32,
     pub b: f32,
     pub a: f32,
+}
+
+impl Rgba {
+    pub const BLACK: Self = Self::gray(0.0);
+    pub const WHITE: Self = Self::gray(1.0);
+
+    /// Grigio opaco.
+    pub const fn gray(v: f32) -> Self {
+        Self {
+            r: v,
+            g: v,
+            b: v,
+            a: 1.0,
+        }
+    }
+}
+
+impl From<[f32; 4]> for Rgba {
+    fn from([r, g, b, a]: [f32; 4]) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+impl From<Rgba> for [f32; 4] {
+    fn from(c: Rgba) -> Self {
+        [c.r, c.g, c.b, c.a]
+    }
 }
 
 impl Lerp for Rgba {
@@ -643,12 +664,7 @@ impl Default for TitleShadow {
     fn default() -> Self {
         Self {
             enabled: false,
-            color: Rgba {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
+            color: Rgba::BLACK,
             offset: [8.0, -8.0],
             blur: 6.0,
             opacity: 75.0,
@@ -679,18 +695,8 @@ impl Default for TitleBackground {
     fn default() -> Self {
         Self {
             enabled: false,
-            color: Rgba {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
-            outline_color: Rgba {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            },
+            color: Rgba::BLACK,
+            outline_color: Rgba::WHITE,
             outline_width: 0.0,
             width: 0.0,
             height: 0.0,
@@ -708,12 +714,7 @@ impl Default for TitleParams {
             font_family: String::new(),
             font_weight: 400,
             italic: false,
-            color: Rgba {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            },
+            color: Rgba::WHITE,
             size: 96.0,
             tracking: 0.0,
             line_spacing: 0.0,
@@ -825,46 +826,22 @@ impl EffectStack {
 pub struct Clip {
     pub id: ClipId,
     pub source: ClipSource,
-    /// Inizio della clip nel media, in frame di *timeline* contati dal
-    /// frame sorgente 0 (lo spazio di `Rational::scale_round`). Non un
-    /// frame sorgente: una clip conformata può cominciare a metà di un
-    /// frame sorgente (dopo uno split o un trim), e un indice di frame
-    /// sorgente perderebbe quella fase.
+    /// Inizio nel media in frame di *timeline* dal frame sorgente 0: una clip
+    /// conformata può cominciare a metà di un frame sorgente.
     pub source_offset: FrameIdx,
     /// Posizione nello spazio della Timeline che contiene questa clip.
     pub timeline_start: FrameIdx,
     pub timeline_len: FrameIdx,
     pub effects: EffectStack,
-    /// Gruppo di clip collegate (tipicamente video + tutti gli stream
-    /// audio dello stesso media, collegate di default all'import — un
-    /// media può averne più di uno, vedi `audio_stream_index`): selezione,
-    /// drag e cancellazione trattano l'intero gruppo come un'unità, non
-    /// solo una coppia. `None` per una clip indipendente. "Scollega"
-    /// scioglie l'intero gruppo (tutti i membri a `None`), non solo la
-    /// clip su cui è stato invocato (vedi `UnlinkClip`).
-    /// `#[serde(default)]`: i progetti salvati prima di questo campo
-    /// (quando il collegamento era una coppia `Option<ClipId>`) caricano
-    /// tutte le clip come indipendenti — nessun modo di ricostruire i
-    /// vecchi collegamenti da un formato diverso, ma comunque un
-    /// downgrade "sicuro" (l'utente può ricollegarle a mano).
+    /// Gruppo collegato (di solito video e tutti gli stream audio di un
+    /// import): selezione, drag e cancellazione lo trattano come un'unità.
     #[serde(default)]
     pub linked_group: Option<LinkGroupId>,
-    /// Per una clip audio (`source: ClipSource::Media`, su una track
-    /// `TrackKind::Audio`): indice dello stream audio nel contenitore del
-    /// media (0 = primo stream audio, stesso ordine di
-    /// `vv_media::probe::audio_streams`). Ignorato per le clip video. Un
-    /// media con un solo stream audio (il caso comune) usa sempre 0; un
-    /// media con più stream audio (es. mix stereo *e* 5.1 separato) viene
-    /// importato con una clip per stream, ciascuna col proprio indice —
-    /// vedi `VibeVideoApp::insert_media_clip`. Default 0 per i progetti
-    /// salvati prima che questo campo esistesse (un solo stream audio per
-    /// clip, stesso comportamento di oggi).
+    /// Clip audio: quale stream del contenitore (ordine di
+    /// `vv_media::audio_streams`).
     #[serde(default)]
     pub audio_stream_index: usize,
-    /// Frame di timeline per frame sorgente: `fps timeline / fps media`
-    /// (`Rational::conform_rate`). `1/1` per SolidColor e per un media
-    /// allo stesso fps della timeline. Serve solo a tradurre
-    /// `source_offset`/`timeline_len` in frame sorgente.
+    /// Frame di timeline per frame sorgente (`Rational::conform_rate`).
     #[serde(default = "Rational::one")]
     pub rate: Rational,
     /// Esclusa da compositing e mix, ma resta in timeline.
@@ -918,27 +895,21 @@ impl Clip {
         self.timeline_start + self.timeline_len
     }
 
-    /// Mappa una posizione di *timeline* (deve cadere dentro l'intervallo
-    /// di questa clip, `timeline_start..timeline_end()` — il chiamante lo
-    /// garantisce risolvendo `Timeline::active_clip_at` prima di
-    /// chiamare) al frame *sorgente* corrispondente (fps nativo del
-    /// media). Unica funzione per questa mappatura: prima era scritta
-    /// separatamente nel walker di prefetch dell'anteprima
-    /// (`vv-app::render_ahead::collect_media_segments`) e nel loop di
-    /// export (`vv-app::export::render_video_frame`), identiche solo
-    /// perché coincidono quando `effects.speed == 1` — al primo
-    /// time-remap reale (milestone 7, `EffectStack::speed` non ancora
-    /// applicato qui) sarebbero divergenti senza un posto unico da
-    /// cambiare. Quel cambio va qui, non ai due chiamanti.
+    /// `frame` (di timeline) cade dentro la clip.
+    pub fn contains(&self, frame: FrameIdx) -> bool {
+        frame >= self.timeline_start && frame < self.timeline_end()
+    }
+
+    /// Frame sorgente mostrato alla posizione di timeline `timeline_frame`
+    /// (dentro la clip). Unico punto della mappatura, condiviso da anteprima
+    /// ed export: un futuro time-remap va applicato qui.
     pub fn source_frame_at(&self, timeline_frame: FrameIdx) -> FrameIdx {
         self.rate
             .unscale_round(timeline_frame - self.timeline_start + self.source_offset)
     }
 
-    /// Inverso di `source_frame_at`: dove cade `source_frame` sulla
-    /// timeline. Accetta anche frame fuori dal trim della clip (serve ai
-    /// limiti di trim: dove cadrebbe il frame 0, o l'ultimo frame reale
-    /// del media, se la clip fosse allungata fin lì).
+    /// Inverso di `source_frame_at`, anche fuori dal trim (serve ai limiti di
+    /// trim).
     pub fn timeline_frame_at(&self, source_frame: FrameIdx) -> FrameIdx {
         self.timeline_start + self.rate.scale_round(source_frame) - self.source_offset
     }
@@ -1003,6 +974,27 @@ impl Track {
             locked: false,
         }
     }
+
+    pub fn clip(&self, id: ClipId) -> Option<&Clip> {
+        self.clips.iter().find(|c| c.id == id)
+    }
+
+    pub fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
+        self.clips.iter_mut().find(|c| c.id == id)
+    }
+
+    pub fn remove_clip(&mut self, id: ClipId) -> Option<Clip> {
+        let pos = self.clips.iter().position(|c| c.id == id)?;
+        Some(self.clips.remove(pos))
+    }
+
+    /// Inserisce mantenendo l'ordine per `timeline_start`.
+    pub fn insert_sorted(&mut self, clip: Clip) {
+        let pos = self
+            .clips
+            .partition_point(|c| c.timeline_start < clip.timeline_start);
+        self.clips.insert(pos, clip);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1015,13 +1007,12 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    /// La clip attiva su `track_index` al frame `frame`, se c'è.
-    pub fn active_clip_at(&self, track_index: usize, frame: FrameIdx) -> Option<&Clip> {
-        self.tracks
-            .get(track_index)?
-            .clips
-            .iter()
-            .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+    pub fn clip(&self, track_index: usize, id: ClipId) -> Option<&Clip> {
+        self.tracks.get(track_index)?.clip(id)
+    }
+
+    pub fn clip_mut(&mut self, track_index: usize, id: ClipId) -> Option<&mut Clip> {
+        self.tracks.get_mut(track_index)?.clip_mut(id)
     }
 
     /// Ultimo frame (esclusivo) coperto da una qualunque clip della
@@ -1035,9 +1026,17 @@ impl Timeline {
             .unwrap_or(0)
     }
 
-    /// Le track di tipo `kind`, con il loro indice in `tracks` — l'indice
-    /// è quello che il resto dell'API (`active_clip_at`, i comandi) si
-    /// aspetta, non una posizione "solo tra le track di questo tipo".
+    /// Nome della track come in un NLE: V1, V2… A1, A2…, per tipo.
+    pub fn track_label(&self, track_index: usize) -> String {
+        let kind = self.tracks[track_index].kind;
+        let number = self.tracks[..=track_index].iter().filter(|t| t.kind == kind).count();
+        match kind {
+            TrackKind::Video => format!("V{number}"),
+            TrackKind::Audio => format!("A{number}"),
+        }
+    }
+
+    /// Le track di tipo `kind`, con il loro indice assoluto in `tracks`.
     pub fn tracks_of_kind(
         &self,
         kind: TrackKind,
@@ -1048,37 +1047,20 @@ impl Timeline {
             .filter(move |(_, t)| t.kind == kind)
     }
 
-    /// Indice della prima (bottom-most) track di tipo `kind`, o `None` se
-    /// non ce n'è nessuna — dove atterra di default una clip nuova (media
-    /// trascinato dal pool, SolidColor), finché l'utente non aggiunge altre
-    /// track a mano (REFACTOR_PIPELINE.md B4).
+    /// Prima track di tipo `kind`.
     pub fn first_track_index(&self, kind: TrackKind) -> Option<usize> {
         self.tracks_of_kind(kind).map(|(i, _)| i).next()
     }
 
-    /// La clip Video attiva al frame `frame`, sulla track video più in alto
-    /// (indice più alto: l'ordine di `tracks` è bottom->top) tra quelle che
-    /// ne hanno una in quel punto. Con una sola track video (caso comune)
-    /// coincide con `active_clip_at` su quella track; con più track video
-    /// generalizza "quale si vede": senza un'opacità per-clip (non ancora
-    /// modellata in `EffectStack`), un vero accumulo alpha su più layer
-    /// opachi collassa esattamente in "il più in alto che c'è in quel
-    /// punto" — REFACTOR_PIPELINE.md B4, vedi anche
-    /// `vv_render::Compositor` (ancora un solo frame in ingresso: qui è
-    /// dove si sceglie *quale*, non nel compositor).
-    /// Tutte le clip video che coprono `frame`, una per track, dal basso
-    /// verso l'alto: l'ordine di compositing (l'ultima è quella in cima).
-    /// Con una clip che non riempie il frame di output — aspect ratio
-    /// diverso da quello della timeline, vedi il letterbox in
-    /// `vv_render` — sotto le sue bande si vedono i layer precedenti.
-    /// Le clip disattivate e le track video disattivate non ci sono.
+    /// Le clip video che coprono `frame`, una per track, dal basso verso
+    /// l'alto (ordine di compositing). Esclude clip e track disattivate.
     pub fn active_video_clips_at(&self, frame: FrameIdx) -> Vec<(usize, &Clip)> {
         self.tracks_of_kind(TrackKind::Video)
             .filter(|(_, t)| !t.muted)
             .filter_map(|(i, t)| {
                 t.clips
                     .iter()
-                    .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+                    .find(|c| c.contains(frame))
                     .filter(|c| !c.disabled)
                     .map(|c| (i, c))
             })
@@ -1108,54 +1090,13 @@ impl Timeline {
             .find_map(|(i, t)| {
                 t.clips
                     .iter()
-                    .find(|c| frame >= c.timeline_start && frame < c.timeline_end())
+                    .find(|c| c.contains(frame))
                     .map(|c| (i, c))
             })
     }
 
-    /// Il `timeline_start` più vicino, a `frame` o dopo, tra tutte le clip
-    /// di tutte le track Video — "quando ricompare qualcosa da mostrare"
-    /// dopo un vuoto, a prescindere da su quale track video sia.
-    pub fn next_video_clip_start_from(&self, frame: FrameIdx) -> Option<FrameIdx> {
-        self.tracks_of_kind(TrackKind::Video)
-            .flat_map(|(_, t)| t.clips.iter())
-            .filter(|c| c.timeline_start >= frame)
-            .map(|c| c.timeline_start)
-            .min()
-    }
-
-    /// Il `timeline_end()` più vicino, a `frame` o prima, tra tutte le
-    /// clip di tutte le track Video — simmetrico a
-    /// `next_video_clip_start_from`, usato per camminare *all'indietro*
-    /// (buffer dietro la testina, REFACTOR_PIPELINE.md, vedi
-    /// `render_ahead::collect_media_segments_behind`): "dov'è la fine
-    /// della clip più vicina saltando all'indietro un vuoto".
-    pub fn previous_video_clip_end_before(&self, frame: FrameIdx) -> Option<FrameIdx> {
-        self.tracks_of_kind(TrackKind::Video)
-            .flat_map(|(_, t)| t.clips.iter())
-            .map(Clip::timeline_end)
-            .filter(|&end| end <= frame)
-            .max()
-    }
-
-    /// La clip con questo id, su una qualunque track, insieme all'indice
-    /// della sua track — permette di ritrovare una clip nota per id senza
-    /// dover tenere traccia (letteralmente) di quale track la contiene, che
-    /// con più track video può cambiare da un frame all'altro
-    /// (`active_video_clip_at`).
-    pub fn find_clip(&self, clip_id: ClipId) -> Option<(usize, &Clip)> {
-        self.tracks
-            .iter()
-            .enumerate()
-            .find_map(|(i, t)| t.clips.iter().find(|c| c.id == clip_id).map(|c| (i, c)))
-    }
-
-    /// Tutte le clip (con il loro indice di track) che condividono
-    /// `group`, su qualunque track — un semplice scan, non un indice
-    /// secondario da tenere sincronizzato (vedi doc di `LinkGroupId`): la
-    /// timeline è dell'ordine di decine/centinaia di clip, e questo si
-    /// chiama solo da un'interazione utente (click, inizio drag), mai per
-    /// frame.
+    /// Le clip di `group` su tutte le track. Uno scan: si chiama solo su
+    /// interazioni utente.
     pub fn clips_in_group(&self, group: LinkGroupId) -> Vec<(usize, ClipId)> {
         self.tracks
             .iter()
@@ -1166,6 +1107,17 @@ impl Timeline {
                     .filter(move |c| c.linked_group == Some(group))
                     .map(move |c| (i, c.id))
             })
+            .collect()
+    }
+
+    /// Gli altri membri del gruppo collegato di una clip, lei esclusa.
+    pub fn linked_members(&self, track_index: usize, clip_id: ClipId) -> Vec<(usize, ClipId)> {
+        let Some(group) = self.clip(track_index, clip_id).and_then(|c| c.linked_group) else {
+            return Vec::new();
+        };
+        self.clips_in_group(group)
+            .into_iter()
+            .filter(|&(_, id)| id != clip_id)
             .collect()
     }
 }
@@ -1192,10 +1144,8 @@ impl Project {
         id
     }
 
-    /// Ricalcola `Clip::rate` di ogni clip Media dall'fps del suo media e
-    /// da quello della timeline che la contiene. Chiamata al caricamento
-    /// (`load_project`). `source_offset`/`timeline_len` restano: sono in
-    /// frame di timeline, cioè secondi, e non dipendono dall'fps del media.
+    /// Ricalcola `Clip::rate` dagli fps. `source_offset`/`timeline_len` sono
+    /// in frame di timeline e non cambiano.
     pub fn refresh_clip_rates(&mut self) {
         let media_pool = &self.media_pool;
         for timeline in self.timelines.values_mut() {
@@ -1304,6 +1254,13 @@ mod keyframe_tests {
     }
 
     #[test]
+    fn transform_param_index_follows_all() {
+        for (i, p) in TransformParam::ALL.iter().enumerate() {
+            assert_eq!(p.index(), i);
+        }
+    }
+
+    #[test]
     fn transform_tracks_animate_each_param_on_its_own() {
         let mut tracks = TransformTracks::default();
         tracks
@@ -1397,29 +1354,6 @@ mod timeline_tests {
             timeline_start,
             Rational::one(),
         )
-    }
-
-    #[test]
-    fn active_clip_at_finds_the_covering_clip_and_none_in_a_gap() {
-        let tl = Timeline {
-            name: "T".into(),
-            fps: Rational::new(25, 1),
-            resolution: (1920, 1080),
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                clips: vec![clip_at(0, 10, 1), clip_at(20, 5, 2)],
-                muted: false,
-                solo: false,
-                locked: false,
-            }],
-        };
-        assert_eq!(tl.active_clip_at(0, 5).map(|c| c.id), Some(ClipId(1)));
-        assert!(tl.active_clip_at(0, 15).is_none(), "buco tra le due clip");
-        assert_eq!(tl.active_clip_at(0, 20).map(|c| c.id), Some(ClipId(2)));
-        assert!(
-            tl.active_clip_at(0, 25).is_none(),
-            "oltre la fine dell'ultima clip"
-        );
     }
 
     #[test]
@@ -1539,92 +1473,6 @@ mod timeline_tests {
     }
 
     #[test]
-    fn next_video_clip_start_from_finds_the_closest_across_video_tracks() {
-        let tl = Timeline {
-            name: "T".into(),
-            fps: Rational::new(25, 1),
-            resolution: (1920, 1080),
-            tracks: vec![
-                Track {
-                    kind: TrackKind::Video,
-                    clips: vec![clip_at(50, 10, 1)],
-                    muted: false,
-                    solo: false,
-                    locked: false,
-                },
-                Track {
-                    kind: TrackKind::Video,
-                    clips: vec![clip_at(20, 10, 2)],
-                    muted: false,
-                    solo: false,
-                    locked: false,
-                },
-            ],
-        };
-        assert_eq!(tl.next_video_clip_start_from(0), Some(20));
-        assert_eq!(tl.next_video_clip_start_from(25), Some(50));
-        assert_eq!(tl.next_video_clip_start_from(61), None);
-    }
-
-    #[test]
-    fn previous_video_clip_end_before_finds_the_closest_across_video_tracks() {
-        // clip_at(20,10,2) -> [20,30), clip_at(50,10,1) -> [50,60).
-        let tl = Timeline {
-            name: "T".into(),
-            fps: Rational::new(25, 1),
-            resolution: (1920, 1080),
-            tracks: vec![
-                Track {
-                    kind: TrackKind::Video,
-                    clips: vec![clip_at(50, 10, 1)],
-                    muted: false,
-                    solo: false,
-                    locked: false,
-                },
-                Track {
-                    kind: TrackKind::Video,
-                    clips: vec![clip_at(20, 10, 2)],
-                    muted: false,
-                    solo: false,
-                    locked: false,
-                },
-            ],
-        };
-        assert_eq!(tl.previous_video_clip_end_before(100), Some(60));
-        assert_eq!(tl.previous_video_clip_end_before(60), Some(60));
-        assert_eq!(tl.previous_video_clip_end_before(59), Some(30));
-        assert_eq!(tl.previous_video_clip_end_before(19), None);
-    }
-
-    #[test]
-    fn find_clip_locates_a_clip_by_id_on_any_track() {
-        let tl = Timeline {
-            name: "T".into(),
-            fps: Rational::new(25, 1),
-            resolution: (1920, 1080),
-            tracks: vec![
-                Track {
-                    kind: TrackKind::Video,
-                    clips: vec![clip_at(0, 10, 1)],
-                    muted: false,
-                    solo: false,
-                    locked: false,
-                },
-                Track {
-                    kind: TrackKind::Audio,
-                    clips: vec![clip_at(0, 10, 2)],
-                    muted: false,
-                    solo: false,
-                    locked: false,
-                },
-            ],
-        };
-        assert_eq!(tl.find_clip(ClipId(1)).map(|(t, _)| t), Some(0));
-        assert_eq!(tl.find_clip(ClipId(2)).map(|(t, _)| t), Some(1));
-        assert!(tl.find_clip(ClipId(99)).is_none());
-    }
-
-    #[test]
     fn first_track_index_finds_the_bottom_most_track_of_a_kind() {
         let tl = Timeline {
             name: "T".into(),
@@ -1652,23 +1500,6 @@ mod timeline_tests {
         );
         assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");
         assert_eq!(clip.source_frame_at(75), 215);
-    }
-
-    #[test]
-    fn active_clip_at_ignores_other_tracks_and_out_of_range_indices() {
-        let tl = Timeline {
-            name: "T".into(),
-            fps: Rational::new(25, 1),
-            resolution: (1920, 1080),
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                clips: vec![clip_at(0, 10, 1)],
-                muted: false,
-                solo: false,
-                locked: false,
-            }],
-        };
-        assert!(tl.active_clip_at(1, 5).is_none(), "track inesistente");
     }
 
     #[test]
@@ -1810,6 +1641,7 @@ mod timeline_tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });

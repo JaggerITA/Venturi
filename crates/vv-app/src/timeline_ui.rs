@@ -1,18 +1,8 @@
-//! Widget timeline multi-traccia: disegna tracce/clip, gestisce
-//! multi-selezione (click semplice, ctrl+click per aggiungere/togglere,
-//! shift+click per un range, rettangolo di selezione trascinando da
-//! un'area vuota — ognuna espande sempre alla chiusura dei gruppi
-//! collegati, vedi `expand_to_linked_groups`), drag orizzontale (l'intera
-//! selezione si muove insieme, vedi `drag_group_for`/`Clip::linked_group`),
-//! menu contestuale per collegare/scollegare, e il playhead. Ogni mutazione
-//! del progetto passa da
-//! `History::do_command`, mai da una modifica diretta del `Project`; i
-//! cambi di sola selezione invece mutano `TimelineState` direttamente,
-//! visto che non toccano `project`/`history`.
-//!
-//! Disegno "immediate mode" a basso livello (painter diretto, non widget
-//! egui nidificati): per una griglia densa di rettangoli come una timeline
-//! dà più controllo e meno overhead dei container annidati.
+//! Widget timeline multi-traccia: clip, selezione (click, ctrl, shift,
+//! rettangolo, sempre estesa ai gruppi collegati), drag, trim, playhead.
+//! Le modifiche al progetto passano da `History::do_command`; la sola
+//! selezione muta `TimelineState`. Disegnato col painter: per una griglia
+//! densa di rettangoli costa meno dei widget annidati.
 
 use std::collections::BTreeSet;
 
@@ -36,10 +26,7 @@ const MIN_PANE_HEIGHT: f32 = 20.0;
 const NEW_TRACK_ZONE_HEIGHT: f32 = 24.0;
 const PANE_SCROLLBAR_WIDTH: f32 = 8.0;
 
-/// (indice track, id clip): coppia usata ovunque per identificare univocamente
-/// una clip nella timeline (l'id da solo non basta, la stessa clip non può
-/// stare su più track ma l'id è comunque solo un contatore globale, non scoped
-/// per track).
+/// (track, id): l'id è un contatore globale, la track serve a trovarla.
 type ClipKey = (usize, ClipId);
 
 pub struct TimelineState {
@@ -47,33 +34,20 @@ pub struct TimelineState {
     /// essere confuso con "nessuna timeline": qui è solo lo stato della
     /// selezione dentro una timeline esistente).
     pub selected: BTreeSet<ClipKey>,
-    /// Ultima clip toccata da un click semplice o da un ctrl+click: origine
-    /// del range per il prossimo shift+click. Uno shift+click *non* sposta
-    /// l'ancora, così shift+click ripetuti restano relativi alla stessa
-    /// origine (come nei file manager).
+    /// Origine dello shift+click. Uno shift+click non la sposta, come nei
+    /// file manager.
     selection_anchor: Option<ClipKey>,
     pub playhead: FrameIdx,
     pixels_per_sec: f32,
-    /// `pixels_per_sec` usato nell'ultimo passaggio di disegno della
-    /// timeline: il confronto col valore corrente in `show_timeline`
-    /// rileva lo zoom avvenuto *in questo frame* (da tastiera/menu — che
-    /// mutano `pixels_per_sec` prima del disegno — o da Alt+scroll) e
-    /// permette di correggere l'offset di scroll per ancorare lo zoom alla
-    /// testina.
+    /// `pixels_per_sec` dell'ultimo disegno: se è cambiato c'è stato uno zoom
+    /// in questo frame, e lo scroll va corretto per ancorarlo alla testina.
     last_rendered_pps: f32,
     drag: Option<DragState>,
-    /// Rettangolo di selezione in corso, in coordinate locali al contenuto
-    /// scrollabile (senza l'offset di `origin`, così resta valido anche se
-    /// lo scroll cambia): un drag avviato da un'area vuota della timeline
-    /// (non su una clip, non sul righello) lo popola.
+    /// Rettangolo di selezione in corso, in coordinate del contenuto (resta
+    /// valido se lo scroll cambia).
     marquee: Option<MarqueeDrag>,
-    /// Vuoto selezionato con un click su uno spazio vuoto *preceduto* da
-    /// una clip successiva sulla stessa track — (track_index, inizio,
-    /// fine), nello spazio frame della timeline. Mutuamente esclusivo con
-    /// `selected` (selezionare l'uno svuota l'altro): serve a dare a un
-    /// vuoto un'identità cliccabile/cancellabile con ripple delete, come in
-    /// DaVinci Resolve. Uno spazio vuoto in coda (nessuna clip dopo) non è
-    /// un "vuoto" selezionabile: non c'è nulla da ravvicinare shiftandolo.
+    /// Vuoto selezionato (track, inizio, fine), alternativo a `selected`:
+    /// si chiude con ripple delete. Lo spazio in coda non è un vuoto.
     pub selected_gap: Option<(usize, FrameIdx, FrameIdx)>,
     /// Clip copiate (Ctrl+C in `main.rs`), pronte per essere incollate
     /// (Ctrl+V) alla posizione del playhead. Vuoto se non è ancora mai
@@ -91,12 +65,8 @@ pub struct TimelineState {
     pub export_marks: crate::transport::MarkRange,
 }
 
-/// Una clip copiata: né l'id né il `timeline_start` assoluto sopravvivono
-/// al copia/incolla — l'id va riallocato al paste (i vecchi potrebbero non
-/// esistere più, o esistere ma riferirsi a un'altra clip), e la posizione
-/// è relativa all'inizio più a sinistra tra le clip copiate insieme (così
-/// incollare un gruppo ne preserva la disposizione relativa, ancorata al
-/// playhead al momento dell'incolla).
+/// Una clip copiata. Id e gruppo si riassegnano all'incolla; la posizione
+/// è relativa alla più a sinistra delle clip copiate.
 #[derive(Clone)]
 pub struct ClipboardEntry {
     pub track_index: usize,
@@ -107,11 +77,7 @@ pub struct ClipboardEntry {
     /// Fps della timeline di origine, in cui sono espressi `clip` e
     /// `relative_start`.
     pub timeline_fps: vv_core::Rational,
-    /// Tag locale all'operazione di copia (non un vero `LinkGroupId`, che
-    /// va riallocato al paste): entry con lo stesso tag `Some(_)` erano nel
-    /// gruppo collegato al momento della copia — permette di ricollegare
-    /// le nuove clip incollate tra loro, dato che i `ClipId`/`LinkGroupId`
-    /// originali non si riportano al paste.
+    /// Clip con lo stesso tag erano nello stesso gruppo alla copia.
     pub link_tag: Option<u64>,
 }
 
@@ -121,34 +87,23 @@ struct MarqueeDrag {
 }
 
 struct DragState {
-    /// La clip su cui l'utente ha effettivamente premuto per iniziare il
-    /// drag: la sua posizione pilota lo snap (vedi
-    /// `dragged_primary_new_start`), le altre in `followers` la seguono
-    /// mantenendo l'offset relativo catturato a inizio drag.
+    /// La clip premuta: la sua posizione pilota la calamita, le altre la
+    /// seguono con l'offset iniziale.
     clip_id: ClipId,
     /// Track di partenza: la track candidata (vedi `track_drag_target`)
     /// può differire durante il drag, i bound si ricalcolano ogni frame.
     track_index: usize,
     original_start: FrameIdx,
     accum_px: f32,
-    /// (clip_id, track_index, offset) di ogni altra clip che si muove
-    /// insieme alla primaria in questo drag — l'intera selezione corrente
-    /// al momento in cui il drag è iniziato (che contiene sempre un intero
-    /// gruppo collegato, mai una parte, vedi doc del modulo) più il gruppo
-    /// della clip cliccata se non era già selezionata. `offset` è la
-    /// distanza fissa `quella.timeline_start - primaria.timeline_start`
-    /// catturata all'inizio del drag.
+    /// (clip_id, track_index, offset) delle clip che seguono la primaria:
+    /// la selezione all'inizio del drag, gruppi collegati compresi.
     followers: Vec<(ClipId, usize, FrameIdx)>,
     /// Drag iniziato con ALT: al rilascio si inseriscono delle copie, gli
     /// originali restano dove sono.
     duplicate: bool,
 }
 
-/// Trim di un bordo, tenuto separato da `DragState` (mossa vera e propria)
-/// invece di forzarlo nello stesso stato: le due interazioni sono comunque
-/// mutuamente esclusive (un drag comincia o come Move o come trim, mai
-/// entrambi), ma tenerle distinte evita di dover sovraccaricare i campi di
-/// `DragState` con significati diversi a seconda del `kind`.
+/// Trim di un bordo, separato dal drag vero e proprio.
 struct TrimState {
     clip_id: ClipId,
     track_index: usize,
@@ -162,11 +117,8 @@ struct TrimState {
     /// `combined_trim_range`).
     min_value: FrameIdx,
     max_value: FrameIdx,
-    /// (clip_id, track_index, offset, bordo) delle altre clip trimmate
-    /// insieme (selezione o gruppo collegato, come per
-    /// `DragState::followers`; nel roll anche la vicina, col bordo
-    /// opposto): ogni bordo si sposta dello stesso delta, `offset` è la
-    /// distanza fra il loro bordo e quello della primaria.
+    /// (clip_id, track_index, offset, bordo) delle altre clip trimmate insieme;
+    /// nel roll anche la vicina, col bordo opposto.
     followers: Vec<(ClipId, usize, FrameIdx, TrimEdge)>,
     /// Roll edit fra due clip adiacenti (solo per il cursore).
     roll: bool,
@@ -197,10 +149,7 @@ const TRIM_HANDLE_PX: f32 = 8.0;
 /// clip adiacenti; la zona di trim comincia subito dopo, verso l'interno.
 const ROLL_HANDLE_PX: f32 = 4.0;
 
-/// Limiti di zoom orizzontale della timeline (`pixels_per_sec`).
-/// Estremo minimo di zoom: abbastanza basso da poter vedere per intero
-/// almeno un'ora di contenuto (3600s) anche in un pannello timeline non
-/// enorme — a 0.1px/sec, un'ora sta in 360px.
+/// A 0,1 px/s un'ora sta in 360 px.
 const MIN_PIXELS_PER_SEC: f32 = 0.1;
 const MAX_PIXELS_PER_SEC: f32 = 800.0;
 
@@ -228,22 +177,14 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
-    /// Imposta selezione e ancora esplicitamente: usato da `main.rs`
-    /// quando deve costruire una selezione (anche multipla) derivata da un
-    /// comando — es. "selection follows playhead" dopo un taglio, che
-    /// seleziona la clip video appena tagliata *e* la sua gemella audio
-    /// collegata — non da un'interazione diretta con la timeline (quella
-    /// passa dai rami `Click`/marquee dentro `show_timeline`).
+    /// Imposta selezione e ancora da fuori (es. dopo un taglio).
     pub fn set_selection(&mut self, selected: BTreeSet<ClipKey>, anchor: Option<ClipKey>) {
         self.selected = selected;
         self.selection_anchor = anchor;
         self.selected_gap = None;
     }
 
-    /// Imposta la selezione a una singola clip (o a nessuna), aggiornando
-    /// anche l'ancora di conseguenza: usato da "selection follows
-    /// playhead" (in `main.rs`), che deve sempre collassare a una clip
-    /// sola anche se la selezione precedente era multipla.
+    /// Una clip sola (o nessuna), per "selection follows playhead".
     pub fn set_single_selection(&mut self, clip: Option<ClipKey>) {
         self.set_selection(clip.into_iter().collect(), clip);
     }
@@ -272,12 +213,7 @@ impl TimelineState {
         self.selected_gap = None;
     }
 
-    /// Zoom orizzontale della timeline (moltiplica `pixels_per_sec` per un
-    /// fattore fisso a ogni passo): usato dalla shortcut da tastiera in
-    /// `main.rs`, oltre a Alt+scroll/pinch gestito dentro `show_timeline`.
-    /// Lo zoom è ancorato alla testina: `show_timeline` corregge l'offset
-    /// di scroll orizzontale così la testina resta alla stessa posizione a
-    /// schermo (non "cresce" dal bordo sinistro visibile).
+    /// Zoom orizzontale ancorato alla testina.
     pub fn zoom_in(&mut self) {
         self.set_pixels_per_sec(self.pixels_per_sec * ZOOM_STEP);
     }
@@ -294,9 +230,10 @@ impl TimelineState {
 /// Fattore di zoom per passo di `zoom_in`/`zoom_out`.
 const ZOOM_STEP: f32 = 1.25;
 
-struct ClipVisual {
+struct ClipVisual<'a> {
     track_index: usize,
-    clip: Clip,
+    /// In prestito dal progetto; `Owned` solo nei test.
+    clip: std::borrow::Cow<'a, Clip>,
     label: String,
     color: egui::Color32,
     /// La track è bloccata: la clip non si tocca.
@@ -305,28 +242,19 @@ struct ClipVisual {
     muted: bool,
 }
 
-/// Comando differito: raccolto durante il disegno (che prende in prestito
-/// `project` immutabilmente) e applicato subito dopo, per evitare un
-/// conflitto di borrow con `history.do_command(project, ...)`. I cambi di
-/// sola selezione non passano di qui: mutano `state` direttamente, dato
-/// che non serve né `project` né `history`.
+/// Comando raccolto durante il disegno (che tiene `project` in prestito) e
+/// applicato dopo.
 enum PendingAction {
-    /// Sposta un intero gruppo di clip trascinato (vedi `show_timeline`,
-    /// `drag_group_row_targets`). `new_video_tracks`/`new_audio_tracks`
-    /// vanno create *prima* di risolvere le eventuali `TrackDestination::New`
-    /// in `moves` (una per clip del gruppo: clip_id, from_track,
-    /// destinazione, new_start) — più di una clip può richiedere una nuova
-    /// track dello stesso tipo, a `depth` diverse (vedi `EffectiveTrack`).
+    /// Sposta un gruppo trascinato. Le track nuove vanno create prima di
+    /// risolvere gli `EffectiveTrack::New` di `moves`.
     Move {
         new_video_tracks: usize,
         new_audio_tracks: usize,
-        moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)>,
+        moves: Vec<(ClipId, usize, EffectiveTrack, FrameIdx)>,
         duplicate: bool,
     },
-    /// (clip_id, track_index, edge, nuova posizione del bordo) per ogni
-    /// clip del gruppo collegato, più il tratto di timeline che ciascuna
-    /// si è appena presa allungandosi (`(track_index, start, end)`): quel
-    /// che c'era lì viene sovrascritto, come in un vero NLE.
+    /// (clip_id, track, bordo, nuova posizione) per ogni clip, più i tratti
+    /// che si prendono allungandosi: quel che c'era lì viene sovrascritto.
     Trim {
         trims: Vec<(ClipId, usize, TrimEdge, FrameIdx)>,
         overwritten: Vec<(usize, FrameIdx, FrameIdx)>,
@@ -347,11 +275,8 @@ struct TrackFlags {
     locked: bool,
 }
 
-/// Ordine di disegno: gruppo Video (decrescente per `track_index` — la
-/// track appena aggiunta trascinando sopra finisce in cima, come V2 sopra
-/// V1 in un NLE) seguito dal gruppo Audio (crescente, dove appendere basta
-/// già a mettere la nuova track in fondo). Indipendente da come le track
-/// sono intercalate in `Track::tracks`, che conta solo per il compositing.
+/// Ordine di disegno: Video dall'indice più alto (la nuova sta in cima),
+/// poi Audio in ordine. Indipendente dall'ordine in `tracks`.
 fn track_row_order(track_kinds: &[TrackKind]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..track_kinds.len())
         .filter(|&i| track_kinds[i] == TrackKind::Video)
@@ -501,35 +426,18 @@ enum TrackDragTarget {
     NewTrack,
 }
 
-/// Track candidata per un drag in corso: `Existing` è sempre risolta a un
-/// `track_index` reale (la track di partenza se il puntatore non è in
-/// nessuna zona valida, vedi `track_drag_target`); `New(depth)` significa
-/// che va creata al rilascio, `depth` (1-based) conta quante nuove track
-/// dello stesso tipo servono prima di questa — un follower può aver
-/// bisogno di più di una nuova track se, per mantenere la spaziatura
-/// relativa del gruppo, deve andare oltre quella su cui atterra la
-/// primaria (sempre a `depth` 1, vedi `drag_group_row_targets`).
+/// Track candidata di un drag: una esistente, o `New(depth)` da creare al
+/// rilascio (`depth` 1-based: un follower può aver bisogno di più track
+/// nuove per tenere la spaziatura del gruppo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffectiveTrack {
     Existing(usize),
     New(usize),
 }
 
-/// Come `EffectiveTrack`, ma con il `TrackKind` portato esplicitamente:
-/// serve a `PendingAction::Move` per sapere quale contatore
-/// (`new_video_tracks`/`new_audio_tracks`) usare per un target `New`.
-#[derive(Clone, Copy)]
-enum TrackDestination {
-    Existing(usize),
-    New(TrackKind, usize),
-}
-
-/// Dove atterrerebbe una clip di tipo `kind` trascinata a `local_y`: su una
-/// track esistente, o in una nuova track se `local_y` cade nella zona vuota
-/// sopra al gruppo Video/sotto al gruppo Audio. Oltre il bordo esterno del
-/// proprio riquadro conta come il bordo stesso. `None` nel riquadro
-/// dell'altro tipo o sul separatore: il chiamante resta sulla track di
-/// partenza.
+/// Dove atterrerebbe una clip `kind` trascinata a `local_y`: una track o
+/// una nuova (zona sopra le Video / sotto le Audio). `None` nel riquadro
+/// dell'altro tipo o sul separatore.
 fn track_drag_target(
     local_y: f32,
     kind: TrackKind,
@@ -566,18 +474,9 @@ fn track_drag_target(
     }
 }
 
-/// Dove atterra un drop dal media pool o dal pannello Effects quando il
-/// puntatore è sopra una track *esistente* (le zone "nuova track" nei
-/// margini sono gestite a parte dal chiamante): se quel che si sta
-/// trascinando ha video e la track lì sotto è video, atterra esattamente
-/// lì — altrimenti la track di sempre (`Default`, risolta da
-/// `VibeVideoApp::resolve_drop_tracks`). Stesso criterio per un
-/// generatore (SolidColor/Text, sempre video) e per un media dal pool
-/// con video (inclusa un'immagine): prima li si trattava diversamente,
-/// e solo un generatore rispettava la track sotto al puntatore (bug
-/// segnalato: un media/immagine trascinato ignorava sempre la track
-/// sotto al puntatore, atterrando sempre sulla prima libera). `None` se
-/// la track è bloccata.
+/// Drop su una track esistente: se si trascina del video su una track
+/// video si atterra lì, altrimenti sulla track di sempre. `None` se è
+/// bloccata.
 fn media_pool_drop_target(
     track: usize,
     has_video: bool,
@@ -593,19 +492,11 @@ fn media_pool_drop_target(
     }
 }
 
-/// Track target di ogni clip di un gruppo in trascinamento verticale
-/// (primaria in testa, poi un elemento per ogni `followers`, stesso
-/// ordine): la primaria atterra su `primary_target` (già risolto da
-/// `track_drag_target`), i follower si spostano dello stesso numero di
-/// righe — invertito se di tipo diverso dalla primaria, dato che video e
-/// audio numerano le track in direzioni opposte (vedi `track_row_order`).
-/// Un follower può finire oltre l'ultima track esistente del proprio tipo
-/// (per mantenere la spaziatura relativa del gruppo, se la primaria non
-/// era la più vicina al bordo): in quel caso il target è `New(depth)`
-/// invece di essere bloccato all'ultima track, esattamente come farebbe
-/// da sé trascinato singolarmente fin lì. Nella direzione opposta (dove
-/// non esiste alcuna zona "nuova track", vedi `track_drag_target`) resta
-/// invece bloccato alla track più vicina.
+/// Track target di ogni clip di un gruppo trascinato: i follower si
+/// spostano dello stesso numero di righe della primaria (al contrario se
+/// di tipo diverso: video e audio crescono in versi opposti). Oltre
+/// l'ultima track del proprio tipo diventano `New(depth)`, nel verso
+/// opposto si fermano alla più vicina.
 fn drag_group_row_targets(
     primary_id: ClipId,
     primary_track: usize,
@@ -654,15 +545,12 @@ fn drag_group_row_targets(
     targets
 }
 
-/// Colonna fissa a sinistra: etichetta e "×" di ogni track, alle stesse
-/// `row_y` del contenuto scrollabile, più il timestamp della testina.
-/// Disegnata a mano (painter + `ui.interact`, non widget in flow): un
-/// `ui.add_space` legato all'altezza del pannello qui dentro farebbe
-/// crescere `Panel::bottom` all'infinito (vedi bug "il pannello prende
-/// tutto lo spazio all'apertura").
+/// Colonna fissa delle intestazioni. Disegnata a mano: un `add_space`
+/// legato all'altezza farebbe crescere il pannello all'infinito.
 fn draw_track_headers(
     ui: &mut egui::Ui,
     track_kinds: &[TrackKind],
+    track_labels: &[String],
     track_flags: &[TrackFlags],
     row_order: &[usize],
     row_y: &[f32],
@@ -700,15 +588,10 @@ fn draw_track_headers(
             egui::pos2(origin.x, origin.y + row_y[track_index]),
             egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
         );
-        let number = track_kinds[..=track_index].iter().filter(|k| **k == kind).count();
-        let label = match kind {
-            TrackKind::Video => format!("V{number}"),
-            TrackKind::Audio => format!("A{number}"),
-        };
         ui.painter().text(
             row_rect.left_center() + egui::vec2(6.0, 0.0),
             egui::Align2::LEFT_CENTER,
-            label,
+            &track_labels[track_index],
             egui::FontId::proportional(14.0),
             text_color,
         );
@@ -973,13 +856,8 @@ fn paint_letter_button(
     );
 }
 
-/// Intervallo (in secondi) tra due tacche *maggiori* del righello, scelto
-/// dalla sequenza "1-2-5" (stessa usata dai grafici per assi leggibili) —
-/// il primo valore che tiene le tacche ad almeno `MIN_MAJOR_TICK_PX`
-/// l'una dall'altra alla scala corrente. Necessario perché
-/// `pixels_per_sec` copre un range enorme (0.1-800, vedi
-/// `MIN_PIXELS_PER_SEC`/`MAX_PIXELS_PER_SEC`): un intervallo fisso
-/// sarebbe illeggibile a un estremo o inutilmente denso all'altro.
+/// Intervallo tra tacche maggiori dalla sequenza 1-2-5, il primo che le
+/// tiene ad almeno `MIN_MAJOR_TICK_PX`.
 fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
     const MIN_MAJOR_TICK_PX: f32 = 70.0;
     const CANDIDATES: &[f64] = &[
@@ -993,31 +871,19 @@ fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
         .unwrap_or(*CANDIDATES.last().unwrap())
 }
 
-/// Timecode HH:MM:SS:FRAME per le etichette del righello. Il frame è
-/// calcolato dalla frazione di secondo residua moltiplicata per l'fps della
-/// timeline (arrotondato all'intero più vicino, clampato a [0, fps-1]).
+/// Timecode HH:MM:SS:FF non drop-frame: con fps non interi (29,97) i
+/// secondi si contano sull'fps nominale arrotondato, come negli NLE.
 fn format_timecode(total_secs: f64, fps: f64) -> String {
-    let total_secs = total_secs.max(0.0);
-    let frame_f = (total_secs * fps).round() as i64;
-    let h = frame_f / (fps as i64 * 3600);
-    let m = (frame_f / (fps as i64 * 60)) % 60;
-    let s = (frame_f / (fps as i64)) % 60;
-    let f = frame_f % (fps as i64);
+    let nominal = (fps.round() as i64).max(1);
+    let frame = (total_secs.max(0.0) * fps).round() as i64;
+    let (h, m) = (frame / (nominal * 3600), frame / (nominal * 60) % 60);
+    let (s, f) = (frame / nominal % 60, frame % nominal);
     format!("{h:02}:{m:02}:{s:02}:{f:02}")
 }
 
-/// Sistema di tacche a 3 altezze che si adatta allo zoom:
-/// - Livello 0 (corto): ogni frame — visibile solo quando lo zoom è alto
-///   abbastanza da non farle toccare.
-/// - Livello 1 (medio): ogni N frames (N calcolato dinamicamente) — appare
-///   quando il livello 0 diventa troppo denso, scompare quando anche lui
-///   diventerebbe illeggibile.
-/// - Livello 2 (alto + etichetta HH:MM:SS:FF): intervallo adattivo "pulito"
-///   (sequenza 1-2-5) — sempre visibile, è il riferimento temporale.
-///
-/// Le soglie di visibilità sono in pixel: se due tacche successive dello
-/// stesso livello sarebbero più vicine di `MIN_TICK_SPACING_PX`, quel
-/// livello non si disegna (sarebbe solo un addensamento illeggibile).
+/// Tacche su tre livelli: maggiori con timecode, medie ogni N frame,
+/// un frame ciascuna; un livello più fitto di `MIN_TICK_SPACING_PX` non si
+/// disegna.
 fn draw_ruler_ticks(
     painter: &egui::Painter,
     origin: egui::Pos2,
@@ -1069,10 +935,7 @@ fn draw_ruler_ticks(
         );
     }
 
-    // Livello 1: tacche medie — intervalli "puliti" tra i frame, ad esempio
-    // ogni 5 o 10 frames a seconda dello zoom (calcolato dinamicamente).
-    // Visibili solo se non si sovrappongono alle maggiori e non sono troppo
-    // vicine tra loro.
+    // Tacche medie, solo se più fitte delle maggiori.
     let px_per_frame = pixels_per_sec / fps.max(1e-9) as f32;
 
     // Calcola l'intervallo in frame per le tacche medie: il più piccolo
@@ -1146,12 +1009,8 @@ pub struct MediaDrag {
 }
 
 impl MediaDrag {
-    /// Durata di default di un'immagine trascinata "intera" dal pool:
-    /// `meta.duration_frames` per un'immagine è il sentinel enorme di
-    /// `IMAGE_DURATION_FRAMES` (vedi la sua doc), non una durata reale da
-    /// cui partire — 5s è la stessa scelta di `Generator::DEFAULT_SECS`
-    /// per Solid Color/Text, accorciabile/allungabile a piacimento come
-    /// una clip qualunque una volta in timeline.
+    /// Durata iniziale di un'immagine dal pool (la sua `duration_frames` è un
+    /// sentinel), come i generatori.
     const DEFAULT_IMAGE_SECS: f64 = 5.0;
 
     pub fn whole(media_id: vv_core::MediaId, meta: &vv_core::MediaMeta) -> Self {
@@ -1281,10 +1140,8 @@ fn drag_set_timeline_len(
     }
 }
 
-/// Un segmento del ghost di drop: offset dall'inizio del drop, lunghezza e
-/// quali stream porta il media. I media vengono accodati uno dopo l'altro
-/// (vedi `insert_media_clip`), quindi il ghost li mostra separati e non come
-/// un unico blocco lungo quanto la somma.
+/// Un segmento del ghost di drop: i media si accodano, quindi il ghost li
+/// mostra separati.
 struct DragSegment {
     offset: FrameIdx,
     len: FrameIdx,
@@ -1326,10 +1183,8 @@ fn drag_set_segments(
         .collect()
 }
 
-/// Dove piazzare un media rilasciato dal media pool. `Default`: track di
-/// sempre (vedi `insert_media_clip`). `NewVideoTrack`/`NewAudioTrack`:
-/// rilasciato nella fascia vuota sopra al gruppo Video o sotto al gruppo
-/// Audio, crea al volo quella track e la usa.
+/// Dove va un drop: la track di sempre, una nuova (fascia sopra le Video o
+/// sotto le Audio) o una track video precisa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaDropTarget {
     Default,
@@ -1352,33 +1207,11 @@ pub fn show_timeline(
     media_labels: &dyn Fn(vv_core::MediaId) -> String,
     state: &mut TimelineState,
     snapping_enabled: bool,
-    // Intervalli (in frame di timeline) già decodificati/in cache in
-    // `RenderAhead` — disegnati come una sottile
-    // striscia "buffered" nel righello (richiesta: "visualizzare durante
-    // la riproduzione come viene fatto il buffer"), stesso principio dei
-    // player video comuni (es. la barra grigia sotto la barra di
-    // avanzamento di YouTube).
+    // Intervalli di timeline già in cache: striscia "buffered" nel righello.
     buffered_ranges: &[(FrameIdx, FrameIdx)],
-    // Intervalli (in frame di timeline) delle clip attualmente servite
-    // dal proxy invece che dal sorgente (REFACTOR_PIPELINE.md proxy) —
-    // disegnati come una striscia sulla clip stessa, non sul righello:
-    // il proxy è una proprietà *per clip* (o meglio: per intera clip, si
-    // veda `VibeVideoApp::proxy_timeline_ranges`), non di un punto della
-    // timeline come invece lo è "buffered" — indica *da dove*
-    // arriverebbe il frame quando viene bufferizzato, non se è già
-    // pronto ora (le due cose sono indipendenti: una clip proxy-backed
-    // può avere solo una parte già in cache, o viceversa una clip non
-    // proxy-backed può comunque essere già bufferizzata dal sorgente
-    // pieno).
+    // Intervalli di timeline delle clip servite dal proxy: striscia sulla clip.
     proxy_ranges: &[(FrameIdx, FrameIdx)],
-    // Picchi audio già in memoria, a chiave `(content_hash, stream_index)`
-    // del media/clip (caricati dal file di cache dal chiamante, vedi
-    // `VibeVideoApp::ensure_waveforms_loaded`): disegnati come waveform
-    // dentro le clip audio. `None` per un media la cui waveform non è
-    // ancora pronta (il worker la sta ancora generando) — la clip si
-    // disegna come prima, senza waveform. Ogni voce porta anche la
-    // durata della traccia audio, base temporale dei picchi (vedi
-    // `draw_clip_waveform`).
+    // Waveform caricate, per `(content_hash, stream_index)`.
     waveform_cache: &std::collections::HashMap<(u64, usize), vv_media::Waveform>,
     // La timeline è in riproduzione: durante la riproduzione la testina deve
     // sempre restare visibile, quindi la vista "volta pagina" per
@@ -1387,13 +1220,7 @@ pub fn show_timeline(
 ) -> Option<(TimelineDrag, FrameIdx, MediaDropTarget)> {
     let mut media_drop = None;
 
-    // Zoom orizzontale (Alt+scroll, vedi `zoom_modifier` in `main`, o
-    // pinch): solo se il puntatore è sopra il pannello, altrimenti
-    // scrollare con Alt premuto altrove (es. media pool) zoomerebbe la
-    // timeline per sbaglio. Le scorciatoie da tastiera/menu (zoom_in/
-    // zoom_out in main.rs) mutano `pixels_per_sec` ancora prima di qui:
-    // il confronto con `last_rendered_pps` sotto le cattura entrambe le
-    // origini.
+    // Alt+scroll/pinch zooma solo col puntatore sulla timeline.
     let panel_rect = ui.available_rect_before_wrap();
     let pointer_over_panel = ui
         .input(|i| i.pointer.hover_pos())
@@ -1424,7 +1251,7 @@ pub fn show_timeline(
                 let (label, color) = clip_label_and_color(clip, track, offline, media_labels);
                 visuals.push(ClipVisual {
                     track_index,
-                    clip: clip.clone(),
+                    clip: std::borrow::Cow::Borrowed(clip),
                     label,
                     color,
                     locked: track.locked,
@@ -1435,6 +1262,9 @@ pub fn show_timeline(
         let track_kinds: Vec<TrackKind> = tl.tracks.iter().map(|t| t.kind).collect();
         (tl.tracks.len(), track_kinds, visuals, max_end)
     };
+    let track_labels: Vec<String> = (0..track_count)
+        .map(|i| project.timelines[timeline_id].track_label(i))
+        .collect();
     let track_flags: Vec<TrackFlags> = project.timelines[timeline_id]
         .tracks
         .iter()
@@ -1506,23 +1336,12 @@ pub fn show_timeline(
             // `ScrollArea::show` di sotto (che prende `ui` in mutabile),
             // quindi tutto l'uso pre-`show` di `ctx` sta in questo blocco.
             let ctx = ui.ctx();
-            // Attenzione: `Id::with(IdSalt)` e `Id::with(&str)` producono id
-            // *diversi* per la stessa stringa — qui serve la forma IdSalt,
-            // identica a quella che la ScrollArea usa in `begin` (il builder
-            // `.id_salt(...)` converte in `IdSalt`).
+            // `Id::with(IdSalt)` e `Id::with(&str)` danno id diversi: serve la forma
+            // che la ScrollArea usa in `begin`.
 
-            // Zoom ancorato alla testina: se `pixels_per_sec` è cambiato in
-            // questo frame (scorciatoie da tastiera/menu — che lo mutano prima
-            // del disegno — o Alt+scroll/pinch), correggiamo l'offset di
-            // scroll orizzontale perché la testina resti alla stessa posizione
-            // a schermo (senza di che lo zoom crescerebbe dal bordo sinistro
-            // *visibile*, non da dove l'utente sta guardando). L'offset si
-            // legge dallo stato persistito della ScrollArea qui sotto — stesso
-            // id, dato che `make_persistent_id` usa l'id stabile dell'Ui (non
-            // il contatore auto-id) — e si riscrive prima del `show`, che lo
-            // rilegge in `begin`; il clamp ai limiti di contenuto resta a
-            // carico di egui. (Nessun `scroll_to*` animato è usato sulla
-            // timeline, quindi nessun target in corso da contrastare.)
+            // Zoom cambiato in questo frame: si corregge lo scroll salvato della
+            // ScrollArea (stesso id) prima del `show`, così la testina resta ferma a
+            // schermo.
             if state.pixels_per_sec != state.last_rendered_pps {
                 if let Some(mut scroll_state) =
                     egui::containers::scroll_area::State::load(&ctx, scroll_id)
@@ -1535,15 +1354,8 @@ pub fn show_timeline(
             }
             state.last_rendered_pps = state.pixels_per_sec;
 
-            // "Voltare pagina": durante la riproduzione la testina deve sempre
-            // restare visibile — se è uscita dall'area visibile orizzontale,
-            // sposta lo scroll per rimetterla in vista, posizionandola a un
-            // terzo del bordo sinistro (come in un NLE). Lo scroll manuale
-            // non compete: al frame successivo la vista torna a seguire la
-            // testina (in riproduzione ha sempre la precedenza). Il clamp ai
-            // limiti di contenuto è fatto qui con la stessa formula che egui
-            // usa in `begin` (`max(0, content - available)`), così il valore
-            // scritto è quello che egui manterrà.
+            // In riproduzione la testina resta visibile: se esce si "volta pagina"
+            // portandola a un terzo da sinistra. Clamp come quello di egui in `begin`.
             if playback_active {
                 let viewport_width =
                     (ui.available_rect_before_wrap().width() - TRACK_HEADER_WIDTH).max(1.0);
@@ -1571,6 +1383,7 @@ pub fn show_timeline(
         draw_track_headers(
             ui,
             &track_kinds,
+            &track_labels,
             &track_flags,
             &row_order,
             &row_y,
@@ -1583,16 +1396,8 @@ pub fn show_timeline(
 
         egui::ScrollArea::horizontal()
             .id_salt("timeline_scroll")
-            // `auto_shrink` di default è true su entrambi gli assi: una
-            // ScrollArea si restringe al contenuto anziché riempire lo spazio
-            // assegnato. Quando il contenuto (poche track corte) è più basso
-            // dell'altezza a cui l'utente ha trascinato il pannello, questo fa
-            // sì che il pannello *stesso* si richiuda al contenuto ogni frame
-            // successivo al drag — è la causa reale del bug "il resize della
-            // timeline torna indietro al rilascio del mouse": durante il drag
-            // l'interazione forza la dimensione, ma al frame successivo lo
-            // shrink-to-content la sovrascrive di nuovo. `false` su entrambi
-            // gli assi fa riempire sempre lo spazio assegnato dal Panel.
+            // `auto_shrink` spento: altrimenti il pannello si richiude al contenuto e
+            // il suo resize torna indietro.
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let (rect, _resp) = ui.allocate_exact_size(
@@ -1665,26 +1470,12 @@ pub fn show_timeline(
                         snap_frame(raw_frame, 0, &visuals, &[], &[], px_per_frame, snapping_enabled);
                 }
 
-                // Marker temporali (tipici di un NLE: tacche maggiori con
-                // etichetta mm:ss/h:mm:ss a intervallo "pulito" adattivo
-                // allo zoom, più tacche minori per singolo frame quando
-                // lo zoom le rende leggibili) — richiesti per correlare a
-                // vista un fenomeno sulla timeline con quanti secondi/
-                // frame corrisponde, invece di dover stimare a occhio
-                // dalla sola larghezza delle clip.
-                // Limitata al rettangolo di clip *visibile* (la ScrollArea
-                // orizzontale ne ritaglia uno più stretto del content_width
-                // reale): senza, una timeline lunga zoomata al livello del
-                // singolo frame itererebbe migliaia di tacche fuori
-                // schermo a ogni repaint.
+                // Solo le tacche visibili: una timeline lunga zoomata al frame ne avrebbe
+                // migliaia fuori schermo.
                 let visible_x = ui.clip_rect().intersect(ruler_rect);
                 draw_ruler_ticks(&painter, origin, visible_x, state.pixels_per_sec, fps);
 
-                // Striscia "buffered": una sottile fascia sul bordo inferiore
-                // del righello, colorata dove ci sono già frame in cache
-                // (vedi doc del parametro `buffered_ranges`). Sotto alla linea
-                // della playhead (disegnata più avanti) così resta visibile
-                // anche quando la playhead ci passa sopra.
+                // Sotto la linea della playhead, così resta visibile.
                 const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
                 let buffered_color = egui::Color32::from_rgba_unmultiplied(120, 190, 255, 140);
                 for &(start, end) in buffered_ranges {
@@ -1720,16 +1511,8 @@ pub fn show_timeline(
                     }
                 }
 
-                // Sfondo delle track (alternato per leggibilità), e sopra,
-                // un'unica regione interagibile per tutta l'area sotto al
-                // righello: cattura click/drag partiti da uno spazio vuoto
-                // (marquee-select o "svuota selezione"). Le clip, interagite
-                // più avanti nel loop, sono "sopra" a questa nell'hit-test di
-                // egui (un rettangolo grande sotto + rettangoli piccoli sopra
-                // è un pattern che risolve correttamente da solo), e in più il
-                // controllo `press_over_a_clip` la rende no-op se il punto di
-                // partenza è comunque dentro una clip: doppia sicurezza contro
-                // un click che "ruba" l'interazione a una clip.
+                // Sfondi delle track e, sopra, un'area interagibile per click e
+                // rettangolo dal vuoto. Le clip sono interagite dopo e vincono l'hit-test.
                 for (row, &track_index) in row_order.iter().enumerate() {
                     let y = origin.y + row_y[track_index];
                     let track_rect = egui::Rect::from_min_size(
@@ -1778,22 +1561,9 @@ pub fn show_timeline(
                     );
                 }
 
-                // Drag&drop dal media pool: `dnd_hover_payload`/`dnd_release_payload`
-                // guardano `contains_pointer` invece di `hovered` (che sarebbe
-                // sempre false qui: il widget "attivo" durante un drag è quello
-                // del media pool, non `marquee_resp`), quindi funzionano anche
-                // se il drag è partito da un altro widget — vedi i loro doc in
-                // egui. La posizione del rilascio va letta da `i.pointer`
-                // direttamente per lo stesso motivo (`interact_pointer_pos()` è
-                // legato a chi ha "vinto" l'interazione, non a questo drop).
-                // Nei margini il drop spetta alle zone "nuova track" sotto.
-                // Un effetto o un media con video vanno sulla track video
-                // sotto al puntatore, se ce n'è una lì (altrimenti sulla
-                // track di sempre, vedi `insert_media_clip`) — stesso
-                // criterio per entrambi, non solo per gli effetti (bug
-                // segnalato: un media/immagine trascinato ignorava la
-                // track sotto al puntatore e finiva sempre sulla prima
-                // libera). `None`: il puntatore è su una track bloccata.
+                // `dnd_*_payload` guardano `contains_pointer`: funzionano anche se il
+                // drag è partito da un altro widget. Il media con video o l'effetto
+                // atterrano sulla track video sotto al puntatore.
                 let drop_target = |drag: &TimelineDrag, pos: egui::Pos2| {
                     let track = track_at_y(pos.y - origin.y);
                     let has_video = match drag {
@@ -1804,6 +1574,21 @@ pub fn show_timeline(
                             .any(|d| project.media_pool[d.media_id].meta.has_video),
                     };
                     media_pool_drop_target(track, has_video, track_kinds[track], track_locked(track))
+                };
+                // Dove cade un drop: frame sotto al puntatore, con la calamita.
+                let playhead = state.playhead;
+                let drop_frame = |drag: &TimelineDrag, pos: egui::Pos2| {
+                    let raw = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+                    snap_frame(
+                        raw,
+                        drag_set_timeline_len(project, timeline_fps, drag),
+                        &visuals,
+                        &[],
+                        &[playhead],
+                        px_per_frame,
+                        snapping_enabled,
+                    )
+                    .max(0)
                 };
                 // Layer sopra alle clip, dipinte più avanti.
                 let ghost_painter = painter.clone().with_layer_id(egui::LayerId::new(
@@ -1816,18 +1601,7 @@ pub fn show_timeline(
                     && let Some(target) = drop_target(&drag, pos)
                     && !drag_set_segments(project, timeline_fps, &drag).is_empty()
                 {
-                    let raw_frame =
-                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let frame = snap_frame(
-                        raw_frame,
-                        drag_set_timeline_len(project, timeline_fps, &drag),
-                        &visuals,
-                        &[],
-                        &[state.playhead],
-                        px_per_frame,
-                        snapping_enabled,
-                    )
-                    .max(0);
+                    let frame = drop_frame(&drag, pos);
                     // Le track dove `insert_media_clip` mette video e audio.
                     let first_row = |kind| {
                         (0..track_count)
@@ -1876,18 +1650,7 @@ pub fn show_timeline(
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                     && let Some(target) = drop_target(&drag, pos)
                 {
-                    let raw_frame =
-                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let frame = snap_frame(
-                        raw_frame,
-                        drag_set_timeline_len(project, timeline_fps, &drag),
-                        &visuals,
-                        &[],
-                        &[state.playhead],
-                        px_per_frame,
-                        snapping_enabled,
-                    )
-                    .max(0);
+                    let frame = drop_frame(&drag, pos);
                     media_drop = Some((drag, frame, target));
                 }
 
@@ -1906,40 +1669,12 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if TimelineDrag::hovered(&above_video_resp).is_some() {
-                    painter.rect_filled(
-                        above_video_rect,
-                        4.0,
-                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60),
-                    );
-                    painter.rect_stroke(
-                        above_video_rect,
-                        4.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
-                        egui::StrokeKind::Inside,
-                    );
-                    painter.text(
-                        above_video_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "+ nuova track Video",
-                        egui::FontId::proportional(13.0),
-                        egui::Color32::from_rgb(200, 255, 200),
-                    );
+                    paint_drop_zone(&painter, above_video_rect, Some("+ nuova track Video"));
                 }
                 if let Some(drag) = TimelineDrag::released(&above_video_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
-                    let raw_frame =
-                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let frame = snap_frame(
-                        raw_frame,
-                        drag_set_timeline_len(project, timeline_fps, &drag),
-                        &visuals,
-                        &[],
-                        &[state.playhead],
-                        px_per_frame,
-                        snapping_enabled,
-                    )
-                    .max(0);
+                    let frame = drop_frame(&drag, pos);
                     media_drop = Some((drag, frame, MediaDropTarget::NewVideoTrack));
                 }
 
@@ -1956,41 +1691,13 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if TimelineDrag::hovered(&below_audio_resp).is_some_and(|d| d.is_media()) {
-                    painter.rect_filled(
-                        below_audio_rect,
-                        4.0,
-                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60),
-                    );
-                    painter.rect_stroke(
-                        below_audio_rect,
-                        4.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
-                        egui::StrokeKind::Inside,
-                    );
-                    painter.text(
-                        below_audio_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "+ nuova track Audio",
-                        egui::FontId::proportional(13.0),
-                        egui::Color32::from_rgb(200, 255, 200),
-                    );
+                    paint_drop_zone(&painter, below_audio_rect, Some("+ nuova track Audio"));
                 }
                 if let Some(drag) = TimelineDrag::released(&below_audio_resp)
                     && drag.is_media()
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
                 {
-                    let raw_frame =
-                        (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-                    let frame = snap_frame(
-                        raw_frame,
-                        drag_set_timeline_len(project, timeline_fps, &drag),
-                        &visuals,
-                        &[],
-                        &[state.playhead],
-                        px_per_frame,
-                        snapping_enabled,
-                    )
-                    .max(0);
+                    let frame = drop_frame(&drag, pos);
                     media_drop = Some((drag, frame, MediaDropTarget::NewAudioTrack));
                 }
 
@@ -2029,11 +1736,7 @@ pub fn show_timeline(
                     if row_order.is_empty() || !over_rows(pos) {
                         state.clear_selection();
                     } else {
-                        // Click su uno spazio vuoto: se è un vuoto "vero" (seguito
-                        // da un'altra clip sulla stessa track, non lo spazio in
-                        // coda dopo l'ultima), lo si seleziona — comportamento alla
-                        // DaVinci Resolve, dà al vuoto un'identità cliccabile e
-                        // cancellabile con ripple delete (vedi `TimelineState::selected_gap`).
+                        // Click su un vuoto seguito da una clip: lo si seleziona.
                         let local = to_local(pos);
                         let frame = ((local.x / px_per_frame).round() as FrameIdx).max(0);
                         let track_index = track_at_y(local.y);
@@ -2067,10 +1770,7 @@ pub fn show_timeline(
                     );
                 }
 
-                // Vuoto selezionato: stessa cornice bianca usata per una clip
-                // selezionata (vedi `is_selected` più sotto), ma su un
-                // rettangolo vuoto — dà al vuoto un feedback visivo di essere
-                // "selezionato" come richiesto.
+                // Vuoto selezionato: stessa cornice di una clip selezionata.
                 if let Some((track_index, gap_start, gap_end)) = state.selected_gap
                     && let Some(&row_y_val) = row_y.get(track_index)
                 {
@@ -2096,10 +1796,7 @@ pub fn show_timeline(
                     );
                 }
 
-                // Track candidata per il drag in corso, dalla posizione
-                // *corrente* del puntatore (vedi `track_drag_target`):
-                // decide dove disegnare l'anteprima e, al rilascio, su
-                // quale track atterrare.
+                // Track candidata del drag, dalla posizione attuale del puntatore.
                 let drag_effective_track = state.drag.as_ref().map(|d| {
                     let kind = track_kinds[d.track_index];
                     let target = ui.input(|i| i.pointer.interact_pos()).and_then(|pos| {
@@ -2123,17 +1820,7 @@ pub fn show_timeline(
                         TrackKind::Video => above_video_rect,
                         TrackKind::Audio => below_audio_rect,
                     };
-                    painter.rect_filled(
-                        rect,
-                        4.0,
-                        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60),
-                    );
-                    painter.rect_stroke(
-                        rect,
-                        4.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
-                        egui::StrokeKind::Inside,
-                    );
+                    paint_drop_zone(&painter, rect, None);
                 }
 
                 // Vedi `drag_group_row_targets`.
@@ -2164,14 +1851,8 @@ pub fn show_timeline(
                         }
                     });
 
-                // Posizione (clampata, e agganciata alla calamita se attiva)
-                // della clip primaria in trascinamento, calcolata una sola
-                // volta e riusata per lei e per tutto il gruppo — e per
-                // l'anteprima in tempo reale durante il drag (non solo al
-                // rilascio), così l'utente vede scattare le clip mentre
-                // trascina. I confini si ricalcolano ogni frame sulle track
-                // target correnti (vedi `drag_group_targets`), non solo
-                // all'inizio del drag.
+                // Posizione della primaria trascinata (clampata e agganciata), una volta
+                // sola per tutto il gruppo e per l'anteprima durante il drag.
                 let dragged_primary_new_start = state.drag.as_ref().map(|d| {
                     let raw = d.original_start as f32 + d.accum_px / px_per_frame;
                     let raw_rounded = raw.round() as FrameIdx;
@@ -2201,20 +1882,15 @@ pub fn show_timeline(
                     .clamp(min_start, max_start)
                 });
 
-                // Stessa idea di `dragged_primary_new_start` ma per il trim di
-                // un bordo: qui cambia anche la *lunghezza* visualizzata, non
-                // solo la posizione, quindi non basta un nuovo `timeline_start`
-                // da solo (vedi il calcolo di `display_start`/`display_len`
-                // più sotto). Il bordo trascinato si aggancia ai bordi delle
-                // altre clip come il drag di una clip intera, prima del
-                // clamp di `combined_trim_range`.
+                // Come sopra per il bordo di un trim, che cambia anche la lunghezza.
                 let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
                     let raw = t.original_value as f32 + t.accum_px / px_per_frame;
                     let exclude: Vec<ClipId> = std::iter::once(t.clip_id)
                         .chain(t.followers.iter().map(|&(id, _, _, _)| id))
                         .collect();
-                    let snapped = snap_edge(
+                    let snapped = snap_frame(
                         raw.round() as FrameIdx,
+                        0,
                         &visuals,
                         &exclude,
                         &[state.playhead],
@@ -2224,24 +1900,14 @@ pub fn show_timeline(
                     snapped.clamp(t.min_value, t.max_value)
                 });
 
-                // Impostati quando il drag/trim finisce, durante il loop
-                // qui sotto: `state.drag`/`state.trim` restano `Some` fino
-                // a *dopo* il loop (azzerati subito sotto, non con un
-                // `.take()` a metà) — altrimenti, per questo stesso frame,
-                // le clip del gruppo disegnate *dopo* la primaria (le
-                // successive nell'iterazione, cioè le track sottostanti)
-                // leggerebbero `state.drag` già `None` e ricadrebbero un
-                // istante sulla posizione pre-drag, un flash visibile
-                // esattamente sulle track sotto quella trascinata (bug
-                // segnalato).
+                // `drag`/`trim` si azzerano solo dopo il loop: le clip del gruppo
+                // disegnate dopo la primaria tornerebbero per un frame alla posizione
+                // iniziale.
                 let mut drag_finished = false;
                 let mut trim_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
 
-                // Clip. Quelle in movimento (trascinate o in trim, con le
-                // loro gemelle) si disegnano per ultime: sono loro a
-                // invadere le altre — e a sovrascriverle al rilascio —
-                // quindi devono passarci sopra, non finirci sotto.
+                // Le clip in movimento si disegnano per ultime: invadono le altre.
                 let trimmed_keys: Vec<ClipKey> = state
                     .trim
                     .as_ref()
@@ -2377,10 +2043,6 @@ pub fn show_timeline(
                         sense,
                     );
 
-                    // La selezione contiene sempre un gruppo collegato per
-                    // intero (vedi `expand_to_linked_groups`), quindi non
-                    // serve più evidenziare separatamente le gemelle non
-                    // formalmente selezionate.
                     let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
                     let stroke = if is_selected {
                         egui::Stroke::new(2.0, egui::Color32::WHITE)
@@ -2395,13 +2057,7 @@ pub fn show_timeline(
                     painter.rect_filled(clip_rect, 4.0, fill);
                     painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
 
-                    // Waveform audio: dentro la clip, solo per le clip
-                    // audio di un media la cui waveform è già pronta
-                    // (il worker l'ha generata e il chiamante l'ha caricata
-                    // in `waveform_cache`). Il picco per ogni colonna
-                    // pixel è il massimo assoluto dei bin che quella
-                    // colonna copre — indipendente dallo zoom, così la
-                    // forma resta la stessa a qualunque livello.
+                    // Waveform: massimo dei bin per colonna, forma indipendente dallo zoom.
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && let ClipSource::Media(media_id) = &visual.clip.source
                         && let Some(item) = project.media_pool.get(*media_id)
@@ -2430,11 +2086,6 @@ pub fn show_timeline(
                         );
                     }
 
-                    // Striscia "proxy": sulla clip stessa (non sul righello
-                    // della timeline, dove viveva prima) — il proxy è una
-                    // proprietà *per clip*, non di un punto della timeline,
-                    // quindi la sua indicazione appartiene alla clip.
-                    // Etichetta spostata più in basso per non finirci sotto.
                     let is_proxy_backed = proxy_ranges.iter().any(|&(s, e)| {
                         s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
                     });
@@ -2461,10 +2112,8 @@ pub fn show_timeline(
                         },
                     );
                     if visual.clip.linked_group.is_some() {
-                        // Due anelli disegnati a mano invece del glifo Unicode
-                        // "🔗": su alcune combinazioni piattaforma/driver (es.
-                        // Asahi Linux) i font bundled di egui non lo
-                        // renderizzano — appare come un quadratino vuoto.
+                        // Due anelli a mano: su alcune piattaforme (Asahi) i font di egui non
+                        // hanno 🔗.
                         let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
                         let ring_color = if visual.muted {
                             egui::Color32::from_gray(185)
@@ -2516,18 +2165,9 @@ pub fn show_timeline(
                     }
 
                     if resp.drag_started() {
-                        // `press_origin` (il punto dove il tasto è stato
-                        // premuto) invece di `interact_pointer_pos()` (dove si
-                        // trova *ora*): egui richiede un piccolo movimento
-                        // prima di dichiarare ufficialmente iniziato un drag su
-                        // un widget che sente anche il click, quindi per il
-                        // primo movimento verso l'*interno* della clip (bordo
-                        // sinistro trascinato a destra, o viceversa per quello
-                        // destro — il trim che "restringe") la posizione
-                        // corrente a quel punto è già uscita dalla zona
-                        // maniglia, mentre muoversi verso l'*esterno* (il trim
-                        // che "allarga") no: da qui l'asimmetria se si usa
-                        // `interact_pointer_pos()`.
+                        // `press_origin` e non la posizione attuale: egui dichiara il drag dopo un
+                        // piccolo movimento, e verso l'interno si sarebbe già usciti dalla zona
+                        // del bordo.
                         let press_pos = ui.input(|i| i.pointer.press_origin());
                         match press_pos.and_then(edge_at) {
                             Some(zone) => {
@@ -2649,10 +2289,7 @@ pub fn show_timeline(
                         } else if let Some(d) = &state.drag
                             && d.clip_id == visual.clip.id
                         {
-                            // Stessa posizione/track (già clampata e
-                            // agganciata alla calamita) mostrata
-                            // nell'anteprima durante il drag: quel che si
-                            // vedeva è quel che si ottiene.
+                            // La stessa posizione mostrata durante il drag.
                             let new_start = dragged_primary_new_start.unwrap_or(d.original_start);
                             let targets = drag_group_targets.as_deref().unwrap();
                             let original_tracks =
@@ -2662,27 +2299,19 @@ pub fn show_timeline(
 
                             let mut new_video_tracks = 0usize;
                             let mut new_audio_tracks = 0usize;
-                            let moves: Vec<(ClipId, usize, TrackDestination, FrameIdx)> = targets
+                            let moves: Vec<(ClipId, usize, EffectiveTrack, FrameIdx)> = targets
                                 .iter()
                                 .zip(original_tracks)
                                 .zip(starts)
                                 .map(|(((id, target), from_track), start)| {
-                                    let dest = match *target {
-                                        EffectiveTrack::Existing(track) => TrackDestination::Existing(track),
-                                        EffectiveTrack::New(depth) => {
-                                            let kind = track_kinds[from_track];
-                                            match kind {
-                                                TrackKind::Video => {
-                                                    new_video_tracks = new_video_tracks.max(depth)
-                                                }
-                                                TrackKind::Audio => {
-                                                    new_audio_tracks = new_audio_tracks.max(depth)
-                                                }
-                                            }
-                                            TrackDestination::New(kind, depth)
-                                        }
-                                    };
-                                    (*id, from_track, dest, start)
+                                    if let EffectiveTrack::New(depth) = *target {
+                                        let count = match track_kinds[from_track] {
+                                            TrackKind::Video => &mut new_video_tracks,
+                                            TrackKind::Audio => &mut new_audio_tracks,
+                                        };
+                                        *count = (*count).max(depth);
+                                    }
+                                    (*id, from_track, *target, start)
                                 })
                                 .collect();
                             pending = Some(PendingAction::Move {
@@ -2749,10 +2378,7 @@ pub fn show_timeline(
                     paint_edge_cursor(ui.ctx(), pos, cursor);
                 }
 
-                // Playhead: linea verticale su tutta l'altezza, più una
-                // "testina" triangolare rivolta in basso nel righello (senza,
-                // la playhead era solo una linea sottile priva di un punto
-                // di riferimento visivo, come in un vero NLE).
+                // Playhead: linea più una testina triangolare nel righello.
                 let px = origin.x + state.playhead as f32 * px_per_frame;
                 let playhead_color = egui::Color32::from_rgb(220, 50, 50);
                 painter.line_segment(
@@ -2810,154 +2436,157 @@ pub fn show_timeline(
         });
 
     if let Some(action) = pending {
-        match action {
-            PendingAction::Move {
-                new_video_tracks,
-                new_audio_tracks,
-                moves,
-                duplicate,
-            } => {
-                // Creare in ordine di depth crescente basta: sia per
-                // video sia per audio, la depth-esima creata finisce da
-                // sé alla riga giusta (vedi `EffectiveTrack::New`).
-                let mut video_tracks = Vec::with_capacity(new_video_tracks);
-                for _ in 0..new_video_tracks {
-                    video_tracks.push(project.timelines[timeline_id].tracks.len());
-                    history.do_command(
-                        project,
-                        Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
-                    );
-                }
-                let mut audio_tracks = Vec::with_capacity(new_audio_tracks);
-                for _ in 0..new_audio_tracks {
-                    audio_tracks.push(project.timelines[timeline_id].tracks.len());
-                    history.do_command(
-                        project,
-                        Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
-                    );
-                }
-                let moves: Vec<(ClipId, usize, usize, FrameIdx)> = moves
-                    .into_iter()
-                    .map(|(id, from_track, dest, start)| {
-                        let to_track = match dest {
-                            TrackDestination::Existing(track) => track,
-                            TrackDestination::New(TrackKind::Video, depth) => video_tracks[depth - 1],
-                            TrackDestination::New(TrackKind::Audio, depth) => audio_tracks[depth - 1],
-                        };
-                        (id, from_track, to_track, start)
-                    })
-                    .collect();
-                if duplicate {
-                    duplicate_clips(project, history, state, timeline_id, &moves);
-                    return media_drop;
-                }
-                // Dove atterrano se lo prendono: quel che c'era lì viene
-                // accorciato, diviso o rimosso, come per un incolla o per
-                // un bordo allungato sopra la vicina. Le clip che si
-                // stanno spostando restano fuori (`exclude`) — anche alla
-                // loro posizione di partenza, che può cadere dentro la
-                // destinazione di un'altra clip dello stesso gruppo.
-                let ranges: Vec<(usize, FrameIdx, FrameIdx)> = moves
-                    .iter()
-                    .filter_map(|&(id, from_track, to_track, start)| {
-                        let len = project.timelines[timeline_id]
-                            .tracks
-                            .get(from_track)?
-                            .clips
-                            .iter()
-                            .find(|c| c.id == id)?
-                            .timeline_len;
-                        Some((to_track, start, start + len))
-                    })
-                    .collect();
-                let exclude: Vec<(usize, ClipId)> = moves
-                    .iter()
-                    .flat_map(|&(id, from_track, to_track, _)| [(from_track, id), (to_track, id)])
-                    .collect();
-                let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-                vv_core::make_room_for_ranges(
-                    project,
-                    timeline_id,
-                    &ranges,
-                    &exclude,
-                    &mut commands,
-                );
-                commands.push(Box::new(vv_core::MoveClips::new(timeline_id, moves)));
-                history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
-            }
-            PendingAction::Trim { trims, overwritten } => {
-                // Il tratto guadagnato allungando la clip se lo prende lei:
-                // le clip che stavano lì vengono accorciate, divise o
-                // rimosse prima di applicare il trim vero e proprio. Le
-                // clip trimmate stesse restano fuori (`exclude`), o si
-                // taglierebbero da sole.
-                let exclude: Vec<(usize, ClipId)> = trims
-                    .iter()
-                    .map(|&(clip_id, track_index, _, _)| (track_index, clip_id))
-                    .collect();
-                let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-                vv_core::make_room_for_ranges(
-                    project,
-                    timeline_id,
-                    &overwritten,
-                    &exclude,
-                    &mut commands,
-                );
-                commands.extend(trims.into_iter().map(
-                    |(clip_id, track_index, edge, new_value)| {
-                        Box::new(vv_core::TrimClip::new(
-                            timeline_id,
-                            track_index,
-                            clip_id,
-                            edge,
-                            new_value,
-                        )) as Box<dyn vv_core::Command>
-                    },
-                ));
-                history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
-            }
-            PendingAction::Unlink(track_index, clip_id) => {
-                history.do_command(
-                    project,
-                    Box::new(vv_core::UnlinkClip::new(timeline_id, track_index, clip_id)),
-                );
-            }
-            PendingAction::Link(targets) => {
-                history.do_command(
-                    project,
-                    Box::new(vv_core::LinkClips::new(timeline_id, targets)),
-                );
-            }
-            PendingAction::SetTrackFlag(track_index, flag, value) => {
-                history.do_command(
-                    project,
-                    Box::new(vv_core::SetTrackFlag::new(timeline_id, track_index, flag, value)),
-                );
-                if flag == TrackFlag::Locked && value {
-                    state.drop_locked(&project.timelines[timeline_id]);
-                }
-            }
-            PendingAction::RemoveTrack(track_index) => {
-                history.do_command(
-                    project,
-                    Box::new(vv_core::RemoveTrack::new(timeline_id, track_index)),
-                );
-                // Gli indici di track memorizzati nella selezione (e nel
-                // vuoto eventualmente selezionato) possono essere shiftati
-                // o non esistere più: più semplice e sicuro azzerare che
-                // provare a rimapparli uno per uno.
-                state.clear_selection();
-            }
-        }
+        apply_pending_action(project, history, state, timeline_id, action);
     }
 
     media_drop
 }
 
-/// Inserisce una copia di ogni clip di `moves` (clip_id, from_track,
-/// to_track, start) alla sua destinazione, con le stesse regole di
-/// sovrascrittura di uno spostamento. Le copie di clip collegate fra loro
-/// formano un gruppo nuovo, e diventano la selezione.
+fn apply_pending_action(
+    project: &mut Project,
+    history: &mut History,
+    state: &mut TimelineState,
+    timeline_id: TimelineId,
+    action: PendingAction,
+) {
+    match action {
+        PendingAction::Move {
+            new_video_tracks,
+            new_audio_tracks,
+            moves,
+            duplicate,
+        } => {
+            // Creare in ordine di depth crescente basta: sia per
+            // video sia per audio, la depth-esima creata finisce da
+            // sé alla riga giusta (vedi `EffectiveTrack::New`).
+            let mut video_tracks = Vec::with_capacity(new_video_tracks);
+            for _ in 0..new_video_tracks {
+                video_tracks.push(add_track(project, history, timeline_id, TrackKind::Video));
+            }
+            let mut audio_tracks = Vec::with_capacity(new_audio_tracks);
+            for _ in 0..new_audio_tracks {
+                audio_tracks.push(add_track(project, history, timeline_id, TrackKind::Audio));
+            }
+            let moves: Vec<(ClipId, usize, usize, FrameIdx)> = moves
+                .into_iter()
+                .map(|(id, from_track, dest, start)| {
+                    let to_track = match dest {
+                        EffectiveTrack::Existing(track) => track,
+                        // Il tipo della track nuova è quello di partenza.
+                        EffectiveTrack::New(depth) => {
+                            match project.timelines[timeline_id].tracks[from_track].kind {
+                                TrackKind::Video => video_tracks[depth - 1],
+                                TrackKind::Audio => audio_tracks[depth - 1],
+                            }
+                        }
+                    };
+                    (id, from_track, to_track, start)
+                })
+                .collect();
+            if duplicate {
+                duplicate_clips(project, history, state, timeline_id, &moves);
+                return;
+            }
+            // Le destinazioni sovrascrivono quel che c'era; le clip spostate restano
+            // fuori, anche nella posizione di partenza.
+            let ranges: Vec<(usize, FrameIdx, FrameIdx)> = moves
+                .iter()
+                .filter_map(|&(id, from_track, to_track, start)| {
+                    let len = project.timelines[timeline_id]
+                        .clip(from_track, id)?
+                        .timeline_len;
+                    Some((to_track, start, start + len))
+                })
+                .collect();
+            let exclude: Vec<(usize, ClipId)> = moves
+                .iter()
+                .flat_map(|&(id, from_track, to_track, _)| [(from_track, id), (to_track, id)])
+                .collect();
+            let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+            vv_core::make_room_for_ranges(
+                project,
+                timeline_id,
+                &ranges,
+                &exclude,
+                &mut commands,
+            );
+            commands.push(Box::new(vv_core::MoveClips::new(timeline_id, moves)));
+            history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
+        }
+        PendingAction::Trim { trims, overwritten } => {
+            // Il tratto guadagnato allungando sovrascrive quel che c'era; le clip
+            // trimmate restano fuori, o si taglierebbero da sole.
+            let exclude: Vec<(usize, ClipId)> = trims
+                .iter()
+                .map(|&(clip_id, track_index, _, _)| (track_index, clip_id))
+                .collect();
+            let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+            vv_core::make_room_for_ranges(
+                project,
+                timeline_id,
+                &overwritten,
+                &exclude,
+                &mut commands,
+            );
+            commands.extend(trims.into_iter().map(
+                |(clip_id, track_index, edge, new_value)| {
+                    Box::new(vv_core::TrimClip::new(
+                        timeline_id,
+                        track_index,
+                        clip_id,
+                        edge,
+                        new_value,
+                    )) as Box<dyn vv_core::Command>
+                },
+            ));
+            history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
+        }
+        PendingAction::Unlink(track_index, clip_id) => {
+            history.do_command(
+                project,
+                Box::new(vv_core::UnlinkClip::new(timeline_id, track_index, clip_id)),
+            );
+        }
+        PendingAction::Link(targets) => {
+            history.do_command(
+                project,
+                Box::new(vv_core::LinkClips::new(timeline_id, targets)),
+            );
+        }
+        PendingAction::SetTrackFlag(track_index, flag, value) => {
+            history.do_command(
+                project,
+                Box::new(vv_core::SetTrackFlag::new(timeline_id, track_index, flag, value)),
+            );
+            if flag == TrackFlag::Locked && value {
+                state.drop_locked(&project.timelines[timeline_id]);
+            }
+        }
+        PendingAction::RemoveTrack(track_index) => {
+            history.do_command(
+                project,
+                Box::new(vv_core::RemoveTrack::new(timeline_id, track_index)),
+            );
+            // Gli indici di track della selezione non valgono più: si azzera.
+            state.clear_selection();
+        }
+    }
+}
+
+/// Aggiunge una track in coda e ne restituisce l'indice.
+pub fn add_track(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    kind: TrackKind,
+) -> usize {
+    let index = project.timelines[timeline_id].tracks.len();
+    history.do_command(project, Box::new(vv_core::AddTrack::new(timeline_id, kind)));
+    index
+}
+
+/// Inserisce una copia di ogni clip di `moves` alla destinazione,
+/// sovrascrivendo come uno spostamento. Le copie diventano la selezione.
 fn duplicate_clips(
     project: &mut Project,
     history: &mut History,
@@ -2968,12 +2597,7 @@ fn duplicate_clips(
     let copies: Vec<(usize, Clip, Option<vv_core::LinkGroupId>)> = moves
         .iter()
         .filter_map(|&(id, from_track, to_track, start)| {
-            let original = project.timelines[timeline_id]
-                .tracks
-                .get(from_track)?
-                .clips
-                .iter()
-                .find(|c| c.id == id)?;
+            let original = project.timelines[timeline_id].clip(from_track, id)?;
             let mut clip = original.clone();
             clip.timeline_start = start;
             clip.linked_group = None;
@@ -2987,33 +2611,9 @@ fn duplicate_clips(
             (track, clip, group)
         })
         .collect();
-
-    let ranges: Vec<(usize, FrameIdx, FrameIdx)> = copies
-        .iter()
-        .map(|(track, clip, _)| (*track, clip.timeline_start, clip.timeline_end()))
-        .collect();
-    let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-    vv_core::make_room_for_ranges(project, timeline_id, &ranges, &[], &mut commands);
-
-    let mut by_group: Vec<(vv_core::LinkGroupId, Vec<ClipKey>)> = Vec::new();
-    let mut new_selection = BTreeSet::new();
-    for (track, clip, group) in copies {
-        new_selection.insert((track, clip.id));
-        if let Some(group) = group {
-            match by_group.iter_mut().find(|(g, _)| *g == group) {
-                Some((_, members)) => members.push((track, clip.id)),
-                None => by_group.push((group, vec![(track, clip.id)])),
-            }
-        }
-        commands.push(Box::new(vv_core::InsertClip {
-            timeline: timeline_id,
-            track_index: track,
-            clip,
-        }));
-    }
-    for (_, targets) in by_group.into_iter().filter(|(_, t)| t.len() >= 2) {
-        commands.push(Box::new(vv_core::LinkClips::new(timeline_id, targets)));
-    }
+    let new_selection: BTreeSet<ClipKey> =
+        copies.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
+    let commands = vv_core::insert_overwriting(project, timeline_id, copies);
     history.do_command(project, Box::new(vv_core::CompositeCommand::new(commands)));
 
     let anchor = new_selection.iter().next().copied();
@@ -3088,12 +2688,8 @@ fn paint_disabled_badge(painter: &egui::Painter, top_left: egui::Pos2) {
     );
 }
 
-/// Rettangolo occupato da una clip nel disegno della timeline, in
-/// coordinate locali al contenuto scrollabile (senza l'offset di
-/// `origin`): condiviso dal disegno vero e proprio e dai test di
-/// intersezione (marquee-select, shift+click), così i due usano
-/// esattamente la stessa geometria. `row_y[visual.track_index]` dà la `y`
-/// locale della riga.
+/// Rettangolo di una clip in coordinate locali al contenuto: stessa
+/// geometria per disegno, rettangolo di selezione e shift+click.
 fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32, row_y: &[f32]) -> egui::Rect {
     let x = visual.clip.timeline_start as f32 * px_per_frame;
     let y = row_y[visual.track_index];
@@ -3101,24 +2697,9 @@ fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32, row_y: &[f32]) -> egu
     egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0))
 }
 
-/// Disegna la waveform di una clip audio dentro `clip_rect`: per ogni
-/// colonna pixel della porzione *visibile* della clip, una linea verticale
-/// centrata sull'altezza della clip, con altezza proporzionale al picco nel
-/// bin corrispondente a quella colonna. `peaks` sono i picchi di *tutto* il
-/// media (normalizzati in [0,1]); `clip_start_secs`/`clip_end_secs`
-/// (secondi nel media) selezionano la sotto-fascia
-/// temporale della clip, mappata sull'asse temporale dell'audio
-/// (`audio_duration_secs`) — la stessa base temporale usata per
-/// dimensionare i bin in `vv_media::waveform::generate_waveform`, così la
-/// forma d'onda resta allineata al suono (e non stirata rispetto al video,
-/// che può avere una durata leggermente diversa dalla traccia audio). Il bin
-/// di ogni colonna è calcolato dalla sua posizione *assoluta* nel tempo
-/// audio (non da un bordo di clip arrotondato e poi interpolato
-/// localmente): la stessa posizione temporale mappa sempre allo stesso bin
-/// a prescindere da dove cade il bordo della clip che la contiene, quindi
-/// dividere una clip (`SplitClip`) non sposta la forma d'onda disegnata.
-/// `visible_rect` limita il disegno alla porzione a schermo (una clip lunga
-/// fuori dal viewport non viene iterata colonna per colonna).
+/// Waveform di una clip audio, una linea per colonna visibile. Il bin di
+/// ogni colonna viene dal tempo assoluto nell'audio: dividere la clip non
+/// sposta la forma d'onda.
 fn draw_clip_waveform(
     painter: &egui::Painter,
     clip_rect: egui::Rect,
@@ -3164,7 +2745,7 @@ fn draw_clip_waveform(
         // disegnata è quella che si sentirà davvero, clipping compreso.
         let secs = clip_start_secs + frac * (clip_end_secs - clip_start_secs);
         let source_frame = (secs * media_fps).floor() as FrameIdx;
-        let amplified = peaks[bin] * db_to_linear(gain_db.value_at(source_frame));
+        let amplified = peaks[bin] * vv_audio::mixer::db_to_linear(gain_db.value_at(source_frame));
         let h = (half_height * amplified.min(1.0)).max(0.5);
         painter.line_segment(
             [egui::pos2(x, center_y - h), egui::pos2(x, center_y + h)],
@@ -3174,19 +2755,7 @@ fn draw_clip_waveform(
     }
 }
 
-fn db_to_linear(db: f32) -> f32 {
-    10f32.powf(db / 20.0)
-}
-
-/// Indice del bin per una colonna a `frac` (0..1 della larghezza della
-/// *clip*, non dell'intero media): calcolato dalla posizione assoluta nel
-/// tempo audio (`clip_start_secs + frac*(clip_end_secs-clip_start_secs)`,
-/// poi diviso per `audio_duration_secs` del media intero), non da un bordo
-/// di clip arrotondato e poi interpolato localmente — vedi doc di
-/// `draw_clip_waveform` sul perché: la stessa posizione temporale deve
-/// mappare sempre allo stesso bin a prescindere da dove cade il bordo della
-/// clip che la contiene, altrimenti dividere una clip (`SplitClip`) sposta
-/// visibilmente la forma d'onda esattamente nel punto di taglio.
+/// Bin della colonna a `frac` della clip, dal tempo assoluto nell'audio.
 fn waveform_bin_for_column(
     frac: f64,
     clip_start_secs: f64,
@@ -3214,11 +2783,7 @@ fn clips_intersecting_rect(
         .collect()
 }
 
-/// Il vuoto sulla track `track_index` che copre `frame` (spazio frame della
-/// timeline), se `frame` cade in uno spazio vuoto seguito da un'altra clip
-/// sulla stessa track. Un vuoto in coda (nessuna clip dopo `frame` su quella
-/// track) non conta: non c'è nulla da riavvicinare shiftandolo, quindi non
-/// ha senso selezionarlo — vedi doc di `TimelineState::selected_gap`.
+/// Il vuoto che copre `frame` sulla track, se seguito da un'altra clip.
 fn gap_at(
     visuals: &[ClipVisual],
     track_index: usize,
@@ -3227,13 +2792,13 @@ fn gap_at(
     let mut track_clips: Vec<&Clip> = visuals
         .iter()
         .filter(|v| v.track_index == track_index)
-        .map(|v| &v.clip)
+        .map(|v| v.clip.as_ref())
         .collect();
     track_clips.sort_by_key(|c| c.timeline_start);
 
     if track_clips
         .iter()
-        .any(|c| frame >= c.timeline_start && frame < c.timeline_end())
+        .any(|c| c.contains(frame))
     {
         return None; // `frame` è dentro a una clip, non in un vuoto.
     }
@@ -3247,12 +2812,8 @@ fn gap_at(
     Some((gap_start, next.timeline_start))
 }
 
-/// I due comportamenti richiesti per il click con modificatori: `Toggle`
-/// (ctrl+click) aggiunge/rimuove *solo* la clip cliccata dalla selezione
-/// corrente; `Range` (shift+click) seleziona tutte le clip nel rettangolo
-/// che unisce l'ancora e la clip cliccata, sostituendo la selezione
-/// corrente. `Plain` (nessun modificatore) sostituisce la selezione con la
-/// sola clip cliccata.
+/// Click semplice, ctrl (aggiunge/toglie), shift (range col rettangolo
+/// tra ancora e clip).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClickModifiers {
     Plain,
@@ -3347,10 +2908,8 @@ fn max_start_in_slot(lower: FrameIdx, upper: FrameIdx, len: FrameIdx) -> FrameId
     upper.saturating_sub(len).max(lower)
 }
 
-/// Come `drag_range`, ma per una clip lunga `len` valutata a
-/// `reference_start` su `track_index` senza doverci già essere, e
-/// ignorando `exclude` invece del solo `clip_id` (usato per un intero
-/// gruppo in trascinamento, vedi `group_drag_bounds`).
+/// Come `drag_range`, per una clip lunga `len` valutata a `reference_start`
+/// su `track_index` (anche se non ci sta ancora) ignorando `exclude`.
 fn drag_range_at(
     visuals: &[ClipVisual],
     track_index: usize,
@@ -3381,13 +2940,8 @@ fn drag_range(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId) -> (F
     )
 }
 
-/// Espande un insieme di clip alla chiusura dei loro gruppi collegati
-/// (`Clip::linked_group`): se una clip è collegata, l'intero gruppo entra
-/// nel risultato, non solo lei. Selezione, drag e cancellazione trattano un
-/// gruppo come un'unità (vedi doc del modulo) — questa è l'unica funzione
-/// che materializza quell'invariante, chiamata da ogni punto che scrive
-/// `TimelineState::selected` a partire da un'interazione diretta con la
-/// timeline (click, ctrl+click, shift+click, rettangolo).
+/// Estende le clip ai loro gruppi collegati. Unico punto che lo fa per le
+/// selezioni fatte in timeline.
 fn expand_to_linked_groups(
     visuals: &[ClipVisual],
     keys: impl IntoIterator<Item = ClipKey>,
@@ -3413,16 +2967,8 @@ fn expand_to_linked_groups(
     result
 }
 
-/// L'insieme di clip che deve muoversi insieme quando si inizia un drag su
-/// `clicked` (bug segnalato: trascinare una clip dentro una multi-selezione
-/// non spostava le altre). Se `clicked` fa già parte di `selected`, il drag
-/// segue *l'intera selezione corrente* — che contiene sempre un gruppo
-/// collegato per intero, vedi `expand_to_linked_groups`, quindi non serve
-/// unirla esplicitamente al gruppo qui. Se `clicked` non è selezionata,
-/// trascinarla sostituisce la selezione con lei (+ il suo gruppo
-/// collegato) — comportamento standard da NLE: un drag su una clip fuori
-/// dalla selezione corrente non deve trascinarsi dietro una selezione
-/// precedente e scorrelata.
+/// Clip che si muovono con `clicked`: la selezione se la contiene,
+/// altrimenti lei e il suo gruppo.
 fn drag_group_for(
     selected: &BTreeSet<ClipKey>,
     visuals: &[ClipVisual],
@@ -3435,11 +2981,8 @@ fn drag_group_for(
     }
 }
 
-/// Range valido per il `timeline_start` di `clip_id`, combinato con quello
-/// di ogni altra clip in `others` (tipicamente l'intera selezione corrente,
-/// vedi il chiamante): il drag deve rispettare i vincoli di *tutte*,
-/// tradotti nello spazio della clip primaria. Restituisce anche (id, track,
-/// offset) di ognuna, pronti per essere salvati in `DragState::followers`.
+/// Range del `timeline_start` di `clip_id` che rispetta i vincoli di tutte
+/// le `others`, e i loro offset per `DragState::followers`.
 fn combined_drag_range(
     visuals: &[ClipVisual],
     track_index: usize,
@@ -3476,14 +3019,9 @@ fn combined_drag_range(
     (min_start, max_start, followers)
 }
 
-/// Come `combined_drag_range`, ma ogni clip del gruppo (primaria in
-/// `targets[0]`, poi un elemento di `targets` per ogni `followers`, stesso
-/// ordine) può atterrare su una track diversa dalla propria — vedi
-/// `EffectiveTrack` e il calcolo dei target in `show_timeline` (spostamento
-/// di gruppo fra track, non solo orizzontale). I vicini considerati per
-/// ciascuna escludono sempre l'intero gruppo, non solo la clip valutata,
-/// altrimenti due clip del gruppo destinate alla stessa track si
-/// bloccherebbero a vicenda.
+/// Come `combined_drag_range`, con ogni clip sulla propria track target.
+/// I vicini escludono tutto il gruppo, o due clip dirette sulla stessa
+/// track si bloccherebbero a vicenda.
 fn group_drag_bounds(
     visuals: &[ClipVisual],
     reference_start: FrameIdx,
@@ -3517,11 +3055,8 @@ fn group_drag_bounds(
     (min_start, max_start.max(min_start))
 }
 
-/// Range valido (in frame timeline) per il nuovo valore del bordo `edge`
-/// della primaria, combinato con quello di ogni clip in `others` (col
-/// proprio bordo) tradotto nello spazio della primaria — stesso principio
-/// di `combined_drag_range`. Ritorna anche (clip_id, track_index, offset,
-/// bordo) di ognuna, pronti per `TrimState::followers`.
+/// Range del bordo trimmato combinato con quello delle `others`, e i loro
+/// offset per `TrimState::followers`.
 fn combined_trim_range(
     visuals: &[ClipVisual],
     project: &Project,
@@ -3691,10 +3226,8 @@ fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
     }
 }
 
-/// I vicini sulla track non limitano il trim: allungando un bordo oltre
-/// un'altra clip la si sovrascrive (`make_room_for_ranges` al rilascio),
-/// come in un vero NLE. I soli limiti sono il sorgente e il bordo opposto
-/// della clip stessa.
+/// I vicini non limitano il trim (li si sovrascrive al rilascio): solo il
+/// sorgente e il bordo opposto.
 fn single_trim_range(project: &Project, clip: &Clip, edge: TrimEdge) -> (FrameIdx, FrameIdx) {
     match edge {
         TrimEdge::Start => {
@@ -3765,39 +3298,8 @@ fn snap_targets<'a>(
         .chain(extra_targets.iter().copied())
 }
 
-/// Come `snap_frame`, ma per il singolo bordo trascinato in un trim: non
-/// c'è una clip da allineare per intero, solo il punto che si sta
-/// spostando, che si aggancia al bordo di clip più vicino entro soglia.
-fn snap_edge(
-    candidate: FrameIdx,
-    visuals: &[ClipVisual],
-    exclude: &[ClipId],
-    extra_targets: &[FrameIdx],
-    px_per_frame: f32,
-    enabled: bool,
-) -> FrameIdx {
-    if !enabled {
-        return candidate;
-    }
-    let threshold = (SNAP_THRESHOLD_PX / px_per_frame).round() as FrameIdx;
-    if threshold <= 0 {
-        return candidate;
-    }
-    snap_targets(visuals, exclude, extra_targets)
-        .map(|edge| ((candidate - edge).abs(), edge))
-        .filter(|&(delta, _)| delta <= threshold)
-        .min_by_key(|&(delta, _)| delta)
-        .map_or(candidate, |(_, edge)| edge)
-}
-
-/// Se la calamita è attiva, aggancia `candidate_start` (una clip lunga
-/// `len` frame) al bordo più vicino — inizio o fine — di un'altra clip
-/// della timeline, se entro `SNAP_THRESHOLD_PX` pixel: allinea o l'inizio
-/// o la fine della clip trascinata, qualunque dei due richieda lo scarto
-/// minore. Le clip in `exclude` (la clip trascinata stessa e l'eventuale
-/// gemella collegata, o nessuna per una clip nuova dal media pool) non
-/// sono bordi validi. No-op se `enabled` è `false` o se nulla è entro
-/// soglia.
+/// Con la calamita attiva aggancia l'inizio o la fine della clip lunga
+/// `len` al bordo più vicino entro `SNAP_THRESHOLD_PX`. `exclude` non conta.
 fn snap_frame(
     candidate_start: FrameIdx,
     len: FrameIdx,
@@ -3833,11 +3335,27 @@ fn snap_frame(
     best.map_or(candidate_start, |(_, new_start)| new_start)
 }
 
+/// Evidenzia una zona "nuova track" sotto un drag in corso.
+fn paint_drop_zone(painter: &egui::Painter, rect: egui::Rect, label: Option<&str>) {
+    let green = egui::Color32::from_rgb(120, 220, 120);
+    painter.rect_filled(rect, 4.0, egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60));
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(2.0, green), egui::StrokeKind::Inside);
+    if let Some(label) = label {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(13.0),
+            egui::Color32::from_rgb(200, 255, 200),
+        );
+    }
+}
+
 const PROXY_STRIP_HEIGHT: f32 = 4.0;
-/// Colore dell'indicatore "proxy disponibile", condiviso col media pool.
 /// Clip il cui media non è più nel media pool.
 pub const OFFLINE_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 50, 50);
 
+/// Indicatore "proxy disponibile", condiviso col media pool.
 pub const PROXY_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(220, 151, 52, 220);
 
 fn paint_proxy_strip(painter: &egui::Painter, rect: egui::Rect) {
@@ -3930,6 +3448,8 @@ mod tests {
         assert_eq!(format_timecode(3665.0, 25.0), "01:01:05:00");
         // Con frazione di secondo: 0.4s a 25fps = frame 10
         assert_eq!(format_timecode(5.4, 25.0), "00:00:05:10");
+        // 29,97: 30 frame per secondo nominale, non 29.
+        assert_eq!(format_timecode(1799.0 / (30_000.0 / 1001.0), 30_000.0 / 1001.0), "00:00:59:29");
     }
 
     /// `row_y` "identità" (nessun raggruppamento/margine) per i test.
@@ -3937,17 +3457,17 @@ mod tests {
         (0..n).map(|i| RULER_HEIGHT + i as f32 * ROW_HEIGHT).collect()
     }
 
-    fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual {
+    fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual<'static> {
         ClipVisual {
             track_index,
-            clip: Clip::from_source_range(
+            clip: std::borrow::Cow::Owned(Clip::from_source_range(
                 ClipId(id),
                 vv_core::ClipSource::SolidColor,
                 0,
                 len,
                 start,
                 vv_core::Rational::one(),
-            ),
+            )),
             label: String::new(),
             color: egui::Color32::WHITE,
             locked: false,
@@ -3961,9 +3481,9 @@ mod tests {
         start: FrameIdx,
         len: FrameIdx,
         group: u64,
-    ) -> ClipVisual {
+    ) -> ClipVisual<'static> {
         let mut v = visual(track_index, id, start, len);
-        v.clip.linked_group = Some(vv_core::LinkGroupId(group));
+        v.clip.to_mut().linked_group = Some(vv_core::LinkGroupId(group));
         v
     }
 
@@ -4581,17 +4101,17 @@ mod tests {
         source_in: FrameIdx,
         source_out: FrameIdx,
         media_id: vv_core::MediaId,
-    ) -> ClipVisual {
+    ) -> ClipVisual<'static> {
         ClipVisual {
             track_index,
-            clip: Clip::from_source_range(
+            clip: std::borrow::Cow::Owned(Clip::from_source_range(
                 ClipId(id),
                 ClipSource::Media(media_id),
                 source_in,
                 source_out,
                 start,
                 vv_core::Rational::one(),
-            ),
+            )),
             label: String::new(),
             color: egui::Color32::WHITE,
             locked: false,
@@ -4612,6 +4132,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -4632,6 +4153,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: 48000,
                 channels: 2,
+                audio_streams: 1,
             },
             content_hash: 1,
         });
@@ -4719,7 +4241,7 @@ mod tests {
     fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
         let (project, media_id) = project_with_media(4000);
         let mut visuals = vec![media_clip_visual(0, 1, 3000, 2000, 2400, media_id)];
-        visuals[0].clip = Clip::from_source_range(
+        visuals[0].clip = std::borrow::Cow::Owned(Clip::from_source_range(
             visuals[0].clip.id,
             visuals[0].clip.source.clone(),
             2000,
@@ -4729,7 +4251,7 @@ mod tests {
                 vv_core::Rational::new(30, 1),
                 vv_core::Rational::new(30_000, 1001),
             ),
-        );
+        ));
 
         let (min_value, _) =
             single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
@@ -4763,9 +4285,9 @@ mod tests {
         let (project, media_id) = project_with_media(25);
         let group = Some(vv_core::LinkGroupId(9));
         let mut video = visual(0, 1, 10, 20);
-        video.clip.linked_group = group;
+        video.clip.to_mut().linked_group = group;
         let mut audio = media_clip_visual(1, 2, 10, 0, 20, media_id);
-        audio.clip.linked_group = group;
+        audio.clip.to_mut().linked_group = group;
         let visuals = vec![video, audio];
 
         let (_, max_value, followers) = combined_trim_range(
@@ -4821,14 +4343,14 @@ mod tests {
         // seconda resta lunga almeno 1).
         let project = Project::default();
         let mut second = visual(0, 2, 10, 15);
-        second.clip = Clip::from_source_range(
+        second.clip = std::borrow::Cow::Owned(Clip::from_source_range(
             ClipId(2),
             vv_core::ClipSource::SolidColor,
             5,
             20,
             10,
             vv_core::Rational::one(),
-        );
+        ));
         let visuals = vec![visual(0, 1, 0, 10), second];
         let (min_value, max_value, followers) = combined_trim_range(
             &visuals,
@@ -4857,29 +4379,29 @@ mod tests {
     /// Bug segnalato: con la calamita il bordo si fermava un frame prima
     /// o dopo la testina, che non era un punto di aggancio.
     #[test]
-    fn snap_edge_snaps_to_the_playhead() {
+    fn snap_frame_of_an_edge_snaps_to_the_playhead() {
         let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
-        assert_eq!(snap_edge(14, &visuals, &[ClipId(1)], &[15], 5.0, true), 15);
+        assert_eq!(snap_frame(14, 0, &visuals, &[ClipId(1)], &[15], 5.0, true), 15);
         assert_eq!(snap_frame(4, 10, &visuals, &[ClipId(1)], &[15], 5.0, true), 5);
     }
 
     #[test]
-    fn snap_edge_snaps_the_trimmed_edge_to_a_nearby_clip_edge() {
+    fn snap_frame_of_an_edge_snaps_the_trimmed_edge_to_a_nearby_clip_edge() {
         // Clip vicina [20,30): il bordo trascinato a 18, entro soglia
         // (10px / 5px per frame = 2 frame), si aggancia a 20.
         let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
-        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], &[], 5.0, true), 20);
+        assert_eq!(snap_frame(18, 0, &visuals, &[ClipId(1)], &[], 5.0, true), 20);
     }
 
     #[test]
-    fn snap_edge_ignores_the_clip_being_trimmed_and_far_edges() {
+    fn snap_frame_of_an_edge_ignores_the_clip_being_trimmed_and_far_edges() {
         let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
         // Il proprio bordo (10) non è un aggancio valido.
-        assert_eq!(snap_edge(11, &visuals, &[ClipId(1)], &[], 5.0, true), 11);
+        assert_eq!(snap_frame(11, 0, &visuals, &[ClipId(1)], &[], 5.0, true), 11);
         // Fuori soglia: nessun aggancio.
-        assert_eq!(snap_edge(15, &visuals, &[ClipId(1)], &[], 5.0, true), 15);
+        assert_eq!(snap_frame(15, 0, &visuals, &[ClipId(1)], &[], 5.0, true), 15);
         // Calamita spenta: nessun aggancio nemmeno entro soglia.
-        assert_eq!(snap_edge(18, &visuals, &[ClipId(1)], &[], 5.0, false), 18);
+        assert_eq!(snap_frame(18, 0, &visuals, &[ClipId(1)], &[], 5.0, false), 18);
     }
 
     #[test]
@@ -5188,13 +4710,14 @@ mod tests {
             // usare la forma `IdSalt` e non la stringa: `Id::with(IdSalt)` e
             // `Id::with(&str)` danno id diversi per la stessa stringa.
             let mut captured = None;
-            ctx.run_ui(frame_input(), |ui| {
+            let mut output = ctx.run_ui(frame_input(), |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     ui.horizontal_top(|ui| {
                         captured = Some(ui.make_persistent_id(egui::IdSalt::new("timeline_scroll")));
                     });
                 });
             });
+            output.textures_delta.clear();
             captured.expect("id della ScrollArea")
         };
 

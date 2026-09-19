@@ -40,10 +40,8 @@ impl MixSnapshot {
         }
     }
 
-    /// `buffer_for(path, audio_stream_index)` restituisce il buffer già
-    /// preparato con `prepare_mix_buffer` a `sample_rate`/`channels`; `None`
-    /// (non ancora decodificato, o senza audio) esclude la clip: suona
-    /// silenzio.
+    /// `buffer_for` dà il buffer già a `sample_rate`/`channels`; `None`
+    /// (non ancora decodificato o senza audio) rende la clip muta.
     pub fn from_timeline(
         project: &Project,
         timeline: &Timeline,
@@ -105,17 +103,6 @@ pub fn sample_to_timeline_frame(sample: u64, fps: f64, sample_rate: u32) -> Fram
     (sample as f64 / sample_rate as f64 * fps).floor() as FrameIdx
 }
 
-/// Converte un buffer decodificato al formato del mix.
-pub fn prepare_mix_buffer(
-    samples: &[f32],
-    src_rate: u32,
-    src_channels: u16,
-    sample_rate: u32,
-    channels: u16,
-) -> Vec<f32> {
-    resample_and_remix(samples, src_channels, src_rate, channels, sample_rate)
-}
-
 /// Scrive in `out` (interleaved, `snapshot.channels` canali) il mix a
 /// partire dal frame audio di timeline `start`. Niente allocazioni: gira
 /// nel callback realtime.
@@ -161,99 +148,38 @@ fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
     db_to_linear(clip.gain_db.value_at(source_frame))
 }
 
-fn db_to_linear(db: f32) -> f32 {
+pub fn db_to_linear(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
-/// Converte campioni interleaved da `from` a `to` canali senza semantica di
-/// layout: non un downmix broadcast-accurate, solo simmetrico e
-/// intelligibile.
-/// - `to == 1`: media di tutti i canali.
-/// - `from > to`: canale sorgente `i` mediato sul canale `i % to`; con
-///   l'ordine ffmpeg del 5.1 (L,R,C,LFE,Ls,Rs) raggruppa L,C,Ls e R,LFE,Rs.
-/// - `from < to`: canale destinazione `i` copiato dal sorgente `i % from`.
-fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
-    if from == to || from == 0 || to == 0 {
-        return samples.to_vec();
+/// Da `from` a `to` canali, accodando a `out`. Simmetrico, non un downmix
+/// da broadcast: scendendo il canale `i` va mediato su `i % to` (sul 5.1
+/// ffmpeg raggruppa L,C,Ls e R,LFE,Rs), salendo il canale `i` copia
+/// `i % from`.
+pub fn remix_channels_into(samples: &[f32], from: u16, to: u16, out: &mut Vec<f32>) {
+    if from == 0 || to == 0 {
+        return;
     }
-    let from = from as usize;
-    let to = to as usize;
-    let frames = samples.len() / from;
-    let mut out = vec![0.0f32; frames * to];
-
-    if to == 1 {
-        for f in 0..frames {
-            let src = &samples[f * from..f * from + from];
-            out[f] = src.iter().sum::<f32>() / from as f32;
-        }
-        return out;
+    if from == to {
+        out.extend_from_slice(samples);
+        return;
     }
-
-    if from > to {
-        let mut sums = vec![0.0f32; to];
-        let mut counts = vec![0u32; to];
-        for f in 0..frames {
-            sums.fill(0.0);
-            counts.fill(0);
-            let src = &samples[f * from..f * from + from];
-            for (i, &s) in src.iter().enumerate() {
-                let bucket = i % to;
-                sums[bucket] += s;
-                counts[bucket] += 1;
-            }
-            let dst = &mut out[f * to..f * to + to];
+    let (from, to) = (from as usize, to as usize);
+    out.reserve(samples.len() / from * to);
+    for frame in samples.chunks_exact(from) {
+        if from > to {
             for c in 0..to {
-                dst[c] = if counts[c] > 0 { sums[c] / counts[c] as f32 } else { 0.0 };
+                let (sum, n) = frame
+                    .iter()
+                    .skip(c)
+                    .step_by(to)
+                    .fold((0.0, 0u32), |(sum, n), &v| (sum + v, n + 1));
+                out.push(sum / n as f32);
             }
-        }
-    } else {
-        for f in 0..frames {
-            let src = &samples[f * from..f * from + from];
-            let dst = &mut out[f * to..f * to + to];
-            for c in 0..to {
-                dst[c] = src[c % from];
-            }
+        } else {
+            out.extend((0..to).map(|c| frame[c % from]));
         }
     }
-    out
-}
-
-/// Ricampiona (interpolazione lineare, senza filtro anti-aliasing) e
-/// converte i canali di un buffer interleaved.
-pub fn resample_and_remix(
-    samples: &[f32],
-    src_channels: u16,
-    src_rate: u32,
-    dst_channels: u16,
-    dst_rate: u32,
-) -> Vec<f32> {
-    if src_channels == 0 || dst_channels == 0 {
-        return Vec::new();
-    }
-    let remixed = downmix_interleaved(samples, src_channels, dst_channels);
-    if src_rate == dst_rate {
-        return remixed;
-    }
-
-    let ch = dst_channels as usize;
-    let src_frames = remixed.len() / ch;
-    if src_frames == 0 {
-        return Vec::new();
-    }
-    let dst_frames = (src_frames as f64 * dst_rate as f64 / src_rate as f64).round() as usize;
-    let mut out = Vec::with_capacity(dst_frames * ch);
-    for i in 0..dst_frames {
-        let src_pos = i as f64 * src_rate as f64 / dst_rate as f64;
-        let i0 = (src_pos.floor() as usize).min(src_frames - 1);
-        let i1 = (i0 + 1).min(src_frames - 1);
-        let t = (src_pos - i0 as f64) as f32;
-        for c in 0..ch {
-            let a = remixed[i0 * ch + c];
-            let b = remixed[i1 * ch + c];
-            out.push(a + (b - a) * t);
-        }
-    }
-    out
 }
 
 /// Audio già stretchato a `tempo` (fast forward): il frame `i` della
@@ -511,6 +437,7 @@ mod tests {
             has_audio: true,
             sample_rate: RATE,
             channels: 1,
+            audio_streams: 1,
         };
         let a = project.media_pool.insert(MediaItem {
             path: PathBuf::from("a.wav"),
@@ -667,6 +594,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: RATE,
                 channels: 1,
+                audio_streams: 1,
             },
             content_hash: 7,
         });
@@ -714,6 +642,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: RATE,
                 channels: 1,
+                audio_streams: 1,
             },
             content_hash: 7,
         });
@@ -906,6 +835,12 @@ mod tests {
         }
     }
 
+    fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
+        let mut out = Vec::new();
+        remix_channels_into(samples, from, to, &mut out);
+        out
+    }
+
     #[test]
     fn downmix_interleaved_is_a_noop_when_channel_counts_match() {
         let samples = vec![0.1, 0.2, 0.3, 0.4];
@@ -958,28 +893,4 @@ mod tests {
         assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
     }
 
-    #[test]
-    fn resample_and_remix_is_a_no_op_when_rate_and_channels_already_match() {
-        let samples = vec![0.1, 0.2, 0.3, 0.4];
-        assert_eq!(resample_and_remix(&samples, 2, 48000, 2, 48000), samples);
-    }
-
-    #[test]
-    fn resample_and_remix_duplicates_mono_to_stereo() {
-        let out = resample_and_remix(&[0.5, -0.5], 1, 48000, 2, 48000);
-        assert_eq!(out, vec![0.5, 0.5, -0.5, -0.5]);
-    }
-
-    #[test]
-    fn resample_and_remix_averages_stereo_to_mono() {
-        let out = resample_and_remix(&[1.0, 0.0, 0.0, 1.0], 2, 48000, 1, 48000);
-        assert_eq!(out, vec![0.5, 0.5]);
-    }
-
-    #[test]
-    fn resample_and_remix_changes_frame_count_proportionally_to_rate() {
-        let samples: Vec<f32> = (0..100).map(|i| i as f32).collect();
-        let out = resample_and_remix(&samples, 1, 100, 1, 50);
-        assert!((45..=55).contains(&out.len()), "len={}", out.len());
-    }
 }

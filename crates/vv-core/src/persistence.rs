@@ -1,11 +1,5 @@
-//! Salvataggio/caricamento del progetto (milestone 10): serializzazione
-//! RON di `Project`. Ogni tipo del modello deriva già `Serialize`/
-//! `Deserialize` (vedi `model.rs`), quindi non c'è nulla da adattare lì:
-//! qui solo lettura/scrittura su file e la (de)serializzazione stessa,
-//! senza altra logica di progetto. `SlotMap` (usata per `media_pool` e
-//! `timelines`) round-trippa le chiavi esattamente (stessa versione/indice
-//! interni), quindi `MediaId`/`TimelineId` restano validi dopo un
-//! caricamento — non serve rimappare nulla lato chiamante.
+//! Salvataggio e caricamento del progetto in RON. Le chiavi `SlotMap`
+//! sopravvivono intatte al round-trip.
 
 use crate::model::Project;
 use std::path::Path;
@@ -61,6 +55,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: 48000,
                 channels: 2,
+                audio_streams: 1,
             },
             content_hash: 42,
         });

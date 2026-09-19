@@ -357,19 +357,45 @@ fn blur(mask: &mut TextMask, radius: f32) {
         return;
     }
     let (w, h) = (mask.width as usize, mask.height as usize);
+    // Fuori dal riquadro coperto, allargato di quanto i tre passaggi
+    // spargono, è tutto zero e resta zero: si sfuma solo lì dentro.
+    let Some((x0, y0, x1, y1)) = coverage_bounds(mask) else {
+        return;
+    };
+    let spread = 3 * box_radius;
+    let xs = x0.saturating_sub(spread)..(x1 + spread + 1).min(w);
+    let ys = y0.saturating_sub(spread)..(y1 + spread + 1).min(h);
     let mut line = Vec::new();
     for _ in 0..3 {
-        for y in 0..h {
+        for y in ys.clone() {
             line.clear();
-            line.extend((0..w).map(|x| mask.data[y * w + x]));
-            box_blur_line(&line, box_radius, |x, v| mask.data[y * w + x] = v);
+            line.extend_from_slice(&mask.data[y * w + xs.start..y * w + xs.end]);
+            box_blur_line(&line, box_radius, |x, v| mask.data[y * w + xs.start + x] = v);
         }
-        for x in 0..w {
+        for x in xs.clone() {
             line.clear();
-            line.extend((0..h).map(|y| mask.data[y * w + x]));
-            box_blur_line(&line, box_radius, |y, v| mask.data[y * w + x] = v);
+            line.extend(ys.clone().map(|y| mask.data[y * w + x]));
+            box_blur_line(&line, box_radius, |y, v| mask.data[(ys.start + y) * w + x] = v);
         }
     }
+}
+
+/// `(x0, y0, x1, y1)` inclusivi dei pixel non nulli.
+fn coverage_bounds(mask: &TextMask) -> Option<(usize, usize, usize, usize)> {
+    let w = mask.width as usize;
+    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    for (y, row) in mask.data.chunks_exact(w.max(1)).enumerate() {
+        let (Some(first), Some(last)) =
+            (row.iter().position(|&v| v > 0), row.iter().rposition(|&v| v > 0))
+        else {
+            continue;
+        };
+        let b = bounds.get_or_insert((first, y, last, y));
+        b.0 = b.0.min(first);
+        b.2 = b.2.max(last);
+        b.3 = y;
+    }
+    bounds
 }
 
 /// Media mobile su `2 * radius + 1` campioni, con zeri oltre i bordi.
@@ -447,6 +473,38 @@ mod tests {
         let (cx, cy) = ((bx0 + bx1) / 2, (by0 + by1) / 2);
         assert_eq!(ring.data[(cy * ring.width + cx) as usize], 0);
         assert!(ring.data[(cy * ring.width + bx0 + 1) as usize] > 0);
+    }
+
+    #[test]
+    fn blur_limited_to_the_covered_area_matches_a_full_frame_blur() {
+        let (w, h) = (64usize, 40usize);
+        let mut data = vec![0u8; w * h];
+        for y in 15..20 {
+            for x in 20..30 {
+                data[y * w + x] = 255;
+            }
+        }
+        let mut mask = TextMask {
+            width: w as u32,
+            height: h as u32,
+            data: data.clone(),
+        };
+        blur(&mut mask, 9.0);
+
+        let mut line = Vec::new();
+        for _ in 0..3 {
+            for y in 0..h {
+                line.clear();
+                line.extend_from_slice(&data[y * w..(y + 1) * w]);
+                box_blur_line(&line, 3, |x, v| data[y * w + x] = v);
+            }
+            for x in 0..w {
+                line.clear();
+                line.extend((0..h).map(|y| data[y * w + x]));
+                box_blur_line(&line, 3, |y, v| data[y * w + x] = v);
+            }
+        }
+        assert_eq!(mask.data, data);
     }
 
     #[test]

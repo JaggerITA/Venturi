@@ -1,17 +1,12 @@
-//! Generazione proxy in background (REFACTOR_PIPELINE.md proxy):
-//! thread dedicato che riceve `(path, content_hash)` da generare e li
-//! processa uno alla volta — separato dal worker di `render_ahead` (che
-//! bufferizza per il playback, non deve competere con un encode
-//! potenzialmente lungo) e dal thread UI (l'encode di un intero file può
-//! richiedere secondi, inaccettabile bloccando i frame). Coda seriale,
-//! non un pool: come `render_ahead`, un thread solo si è mostrato
-//! sufficiente finora, e più thread in concorrenza sulla stessa CPU
-//! rallenterebbero anche il decode "vero" per il playback.
+//! Generazione proxy su un thread dedicato, una alla volta: separata dal
+//! worker di `render_ahead` per non rallentare il decode del playback.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+use crate::worker::Worker;
 
 struct Job {
     path: PathBuf,
@@ -61,17 +56,15 @@ pub struct ProxyProgress {
 }
 
 pub struct ProxyWorker {
-    tx: Option<mpsc::Sender<Job>>,
-    handle: Option<std::thread::JoinHandle<()>>,
     shared: Arc<Shared>,
+    worker: Worker<Job>,
 }
 
 impl ProxyWorker {
     pub fn spawn() -> Self {
-        let (tx, rx) = mpsc::channel::<Job>();
         let shared = Arc::new(Shared::default());
         let worker_shared = Arc::clone(&shared);
-        let handle = std::thread::spawn(move || {
+        let worker = Worker::spawn(move |rx: mpsc::Receiver<Job>| {
             let shared = worker_shared;
             while let Ok(job) = rx.recv() {
                 if !shared.wait_while_paused() {
@@ -84,7 +77,7 @@ impl ProxyWorker {
                 shared.set_state(job.content_hash, ProxyState::Generating(0.0));
                 let total = job.duration_frames.max(1) as f32;
                 let mut last_reported = 0.0f32;
-                let result = vv_media::proxy::generate_proxy_with_progress(
+                let result = vv_media::proxy::generate_proxy(
                     &job.path,
                     job.content_hash,
                     |frames| {
@@ -110,20 +103,13 @@ impl ProxyWorker {
                 }
             }
         });
-        Self {
-            tx: Some(tx),
-            handle: Some(handle),
-            shared,
-        }
+        Self { shared, worker }
     }
 
     /// Accoda `path` (chiave `content_hash`) per la generazione del
     /// proxy — non bloccante, ritorna subito. Un media già accodato in
     /// questa sessione non viene riaccodato.
     pub fn enqueue(&self, path: PathBuf, content_hash: u64, duration_frames: u64) {
-        let Some(tx) = &self.tx else {
-            return;
-        };
         {
             let mut states = self.shared.states.lock().unwrap();
             if matches!(
@@ -142,7 +128,7 @@ impl ProxyWorker {
                 return;
             }
         }
-        let _ = tx.send(Job {
+        self.worker.send(Job {
             path,
             content_hash,
             duration_frames,
@@ -189,15 +175,10 @@ impl ProxyWorker {
 
 impl Drop for ProxyWorker {
     fn drop(&mut self) {
-        // Interrompe anche un encode lungo in corso (o in pausa): senza,
-        // `join` aspetterebbe la fine dell'intero file.
+        // Interrompe anche un encode in corso o in pausa prima che `worker`
+        // aspetti il thread: altrimenti aspetterebbe la fine del file.
         self.shared.shutdown.store(true, Ordering::Relaxed);
         self.set_paused(false);
-        // `tx` va droppato prima di `join`, o `rx.recv()` non esce mai.
-        self.tx.take();
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
     }
 }
 
@@ -219,12 +200,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-proxy-worker-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &path,
+        );
         let content_hash = 0x5EED_0001;
         let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash));
 

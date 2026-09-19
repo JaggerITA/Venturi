@@ -18,23 +18,11 @@ pub fn export_otio(project: &Project, timeline: TimelineId, path: &Path) -> Resu
 pub fn timeline_to_otio(project: &Project, timeline_id: TimelineId) -> Value {
     let timeline = &project.timelines[timeline_id];
     let fps = timeline.fps;
-    let (mut video, mut audio) = (0, 0);
     let tracks: Vec<Value> = timeline
         .tracks
         .iter()
-        .map(|track| {
-            let name = match track.kind {
-                TrackKind::Video => {
-                    video += 1;
-                    format!("V{video}")
-                }
-                TrackKind::Audio => {
-                    audio += 1;
-                    format!("A{audio}")
-                }
-            };
-            track_to_otio(project, track, name, fps)
-        })
+        .enumerate()
+        .map(|(i, track)| track_to_otio(project, track, timeline.track_label(i), fps))
         .collect();
 
     json!({
@@ -221,6 +209,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: 48_000,
                 channels: 2,
+                audio_streams: 1,
             },
             content_hash: 1,
         });

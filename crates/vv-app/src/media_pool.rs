@@ -144,6 +144,7 @@ mod tests {
                         has_audio: false,
                         sample_rate: 0,
                         channels: 0,
+                        audio_streams: 0,
                     },
                     content_hash: 0,
                 })

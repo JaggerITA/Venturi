@@ -1,9 +1,6 @@
-//! Decodifica dell'intera traccia audio di un media in un buffer
-//! interleaved f32.
-//!
-//! La traccia intera finisce in RAM (il mixer ne tiene una copia a 48 kHz per
-//! stream usato); `decode_audio_streams_streaming` la consegna a blocchi, così
-//! il mixer può suonarne l'inizio prima che la decodifica finisca.
+//! Decodifica di tracce audio intere in f32 interleaved. La traccia sta
+//! tutta in RAM; la versione streaming la consegna a blocchi così il mixer
+//! può suonarne l'inizio prima della fine del decode.
 
 use ffmpeg::ChannelLayout;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
@@ -20,11 +17,8 @@ pub struct AudioBuffer {
     pub samples: Vec<f32>,
 }
 
-/// Decodifica lo stream audio N-esimo del contenitore (`stream_index`,
-/// stesso ordine di `probe::audio_streams` — non l'euristica "best" di
-/// ffmpeg, che ne sceglierebbe uno solo ignorando le altre tracce di un
-/// media multi-audio, vedi doc di `Clip::audio_stream_index`).
-/// `Ok(None)` se il media non ha uno stream audio a quell'indice.
+/// Decodifica lo stream audio N-esimo (ordine di `probe::audio_streams`).
+/// `Ok(None)` se non esiste.
 pub fn decode_audio_track(
     path: &Path,
     stream_index: usize,
@@ -139,14 +133,11 @@ fn emit(
     }
 }
 
-/// Come `decode_audio_track`, ma per più stream audio in una sola lettura
-/// del file, consegnando i campioni a blocchi man mano che li decodifica:
-/// `on_chunk(i, canali, campioni interleaved)` con `i` posizione in
-/// `stream_indices`; `Break` interrompe tutto. Una passata sola fa arrivare
-/// l'inizio di ogni stream subito, invece di uno stream intero dopo l'altro.
-/// `out_rate`: ricampiona con un contesto swresample per stream, quindi
-/// senza discontinuità tra i blocchi. Ritorna `(sample_rate di uscita,
-/// canali)` per ogni stream, `None` se non esiste.
+/// Più stream in una sola lettura, a blocchi: `on_chunk(i, canali,
+/// campioni)` con `i` indice in `stream_indices`; `Break` interrompe.
+/// `out_rate` ricampiona con un contesto swresample per stream, senza
+/// discontinuità tra blocchi. Ritorna `(rate, canali)` per stream, `None`
+/// se non esiste.
 pub fn decode_audio_streams_streaming(
     path: &Path,
     stream_indices: &[usize],
@@ -255,7 +246,6 @@ fn append_f32(frame: &ffmpeg::frame::Audio, out: &mut Vec<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// PCM stereo in MKV ha layout canali "unknown": falliva con
     /// "Input changed".
@@ -265,9 +255,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pcm_unknown_layout.mkv");
 
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -276,11 +265,9 @@ mod tests {
                 "2",
                 "-c:a",
                 "pcm_s16le",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let audio = decode_audio_track(&path, 0).unwrap().expect("audio atteso");
         assert_eq!(audio.channels, 2);
@@ -293,20 +280,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.mp4");
 
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
                 "sine=frequency=440:sample_rate=48000:duration=1",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let audio = decode_audio_track(&path, 0).unwrap().expect("audio atteso");
         assert_eq!(audio.sample_rate, 48000);
@@ -329,12 +313,15 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-audio-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("streaming_44k.wav");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2"])
-            .arg(path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=2",
+            ],
+            &path,
+        );
 
         let mut chunks = 0;
         let mut samples = Vec::new();
@@ -358,12 +345,15 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-audio-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("streaming_break.wav");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-            .arg(path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=2",
+            ],
+            &path,
+        );
 
         let mut chunks = 0;
         decode_audio_streams_streaming(&path, &[0], None, |_, _, _| {
@@ -379,16 +369,31 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-audio-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("streaming_three.mkv");
-        let status = Command::new("ffmpeg")
-            .args(["-y"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=660:sample_rate=44100:duration=3"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=3"])
-            .args(["-map", "0:a", "-map", "1:a", "-map", "2:a", "-c:a", "aac"])
-            .arg(path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=660:sample_rate=44100:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=3",
+                "-map",
+                "0:a",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:a",
+                "aac",
+            ],
+            &path,
+        );
 
         let mut order = Vec::new();
         let mut lengths = [0usize; 3];
@@ -419,9 +424,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("two_streams.mp4");
 
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -436,11 +440,9 @@ mod tests {
                 "1:a",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let first = decode_audio_track(&path, 0).unwrap().expect("stream 0 atteso");
         assert_eq!(first.sample_rate, 44100);

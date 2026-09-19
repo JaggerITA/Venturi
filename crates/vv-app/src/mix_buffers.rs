@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 
+use crate::worker::Worker;
+
 type Key = (PathBuf, usize);
 
 struct Ready {
@@ -25,16 +27,14 @@ pub struct MixBufferCache {
     /// `None` = nessun campione ancora, oppure senza audio a quell'indice.
     entries: HashMap<Key, Option<Arc<Vec<f32>>>>,
     in_progress: HashSet<Key>,
-    job_tx: Option<mpsc::Sender<(Key, bool)>>,
+    worker: Worker<(Key, bool)>,
     ready_rx: mpsc::Receiver<Ready>,
-    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl MixBufferCache {
     pub fn spawn(sample_rate: u32, channels: u16) -> Self {
-        let (job_tx, job_rx) = mpsc::channel::<(Key, bool)>();
         let (ready_tx, ready_rx) = mpsc::channel::<Ready>();
-        let handle = std::thread::spawn(move || {
+        let worker = Worker::spawn(move |job_rx: mpsc::Receiver<(Key, bool)>| {
             let mut queue = VecDeque::new();
             let mut done = HashSet::new();
             loop {
@@ -73,9 +73,8 @@ impl MixBufferCache {
         Self {
             entries: HashMap::new(),
             in_progress: HashSet::new(),
-            job_tx: Some(job_tx),
+            worker,
             ready_rx,
-            handle: Some(handle),
         }
     }
 
@@ -95,18 +94,12 @@ impl MixBufferCache {
         let key = (path.to_path_buf(), stream);
         if let Some(entry) = self.entries.get(&key) {
             // Già in coda: ripetuta davanti, il worker scarta il duplicato.
-            if first
-                && entry.is_none()
-                && self.in_progress.contains(&key)
-                && let Some(tx) = &self.job_tx
-            {
-                let _ = tx.send((key.clone(), true));
+            if first && entry.is_none() && self.in_progress.contains(&key) {
+                self.worker.send((key.clone(), true));
             }
             return entry.clone();
         }
-        if let Some(tx) = &self.job_tx {
-            let _ = tx.send((key.clone(), first));
-        }
+        self.worker.send((key.clone(), first));
         self.in_progress.insert(key.clone());
         self.entries.insert(key, None);
         None
@@ -162,13 +155,7 @@ fn decode_progressively(
         Some(sample_rate),
         |slot, src_channels, chunk| {
             let buffer = &mut buffers[slot];
-            buffer.extend(vv_audio::mixer::prepare_mix_buffer(
-                chunk,
-                sample_rate,
-                src_channels,
-                sample_rate,
-                channels,
-            ));
+            vv_audio::mixer::remix_channels_into(chunk, src_channels, channels, buffer);
             if buffer.len() < next_publish[slot] {
                 return ControlFlow::Continue(());
             }
@@ -206,16 +193,6 @@ fn decode_progressively(
     true
 }
 
-impl Drop for MixBufferCache {
-    fn drop(&mut self) {
-        // Senza mittente il worker esce da `recv`, altrimenti `join` resta appeso.
-        self.job_tx.take();
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,9 +211,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("two_streams.mkv");
         // Stream 0 mono 44.1 kHz da 1s, stream 1 stereo 48 kHz da 0.5s.
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -253,11 +229,9 @@ mod tests {
                 "2",
                 "-c:a",
                 "pcm_f32le",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let mut cache = MixBufferCache::spawn(48_000, 2);
         assert!(cache.get_or_request(&path, 0).is_none());
@@ -277,12 +251,15 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("long.wav");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=20"])
-            .arg(path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=20",
+            ],
+            &path,
+        );
 
         let mut cache = MixBufferCache::spawn(48_000, 2);
         cache.get_or_request(&path, 0);
@@ -313,12 +290,15 @@ mod tests {
             .iter()
             .map(|name| {
                 let path = dir.join(name);
-                let status = std::process::Command::new("ffmpeg")
-                    .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=30"])
-                    .arg(path.to_str().unwrap())
-                    .status()
-                    .expect("ffmpeg CLI non trovato");
-                assert!(status.success());
+                vv_media::test_support::ffmpeg(
+                    &[
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "sine=frequency=440:sample_rate=48000:duration=30",
+                    ],
+                    &path,
+                );
                 path
             })
             .collect();
@@ -347,16 +327,31 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("three_streams_long.mkv");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=120"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000:duration=120"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=120"])
-            .args(["-map", "0:a", "-map", "1:a", "-map", "2:a", "-c:a", "aac"])
-            .arg(path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=120",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=660:sample_rate=48000:duration=120",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=120",
+                "-map",
+                "0:a",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:a",
+                "aac",
+            ],
+            &path,
+        );
 
         let mut cache = MixBufferCache::spawn(48_000, 2);
         for stream in 0..3 {

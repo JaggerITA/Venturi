@@ -1,18 +1,7 @@
-//! Time-stretch con pitch preservato per lo speed change, via il filtro
-//! `rubberband` di libavfilter (ffmpeg-next::filter) — già linkato nel
-//! ffmpeg di sistema (`--enable-librubberband`), nessun binding extra.
-//!
-//! Elabora un buffer per volta in un colpo solo (non è un filtro
-//! streaming a bassa latenza per campione, ma nemmeno pensato per
-//! l'intera traccia): il chiamante (`vv-app::timeline_audio`, vedi
-//! `WINDOW_FRAMES`) gli passa una *finestra* di qualche secondo di
-//! mix alla volta invece dell'intera traccia — su una
-//! clip lunga, stretchare tutti i minuti in un colpo solo prima di poter
-//! sentire qualunque cosa introduce un ritardo percepibile (anche
-//! diversi secondi) alla pressione del tasto velocità; una finestra
-//! piccola torna in ~100-200ms (misurato, vedi test `bench_window`) e la
-//! finestra successiva viene calcolata in background mentre la corrente
-//! sta ancora suonando.
+//! Time-stretch a pitch preservato col filtro `rubberband` di
+//! libavfilter. Lavora su finestre di qualche secondo
+//! (`vv-app::timeline_audio`), non sull'intera traccia: stretchare tutto
+//! ritarderebbe di secondi il primo suono.
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg::channel_layout::ChannelLayout;
@@ -29,11 +18,8 @@ fn ensure_init() {
 
 const CHUNK_FRAMES: usize = 4096;
 
-/// Applica il filtro `rubberband` a un buffer audio interleaved f32,
-/// restituendo il buffer risultante allo stesso `sample_rate`/`channels`
-/// ma con durata moltiplicata per `1/tempo` e pitch preservato:
-/// `tempo=2.0` dimezza la durata (l'audio suona 2x più veloce), `tempo=4.0`
-/// la riduce a un quarto.
+/// Durata moltiplicata per `1/tempo`, stesso rate e canali, pitch
+/// preservato.
 pub fn stretch_samples(
     samples: &[f32],
     sample_rate: u32,
@@ -69,11 +55,9 @@ pub fn stretch_samples(
         )
         .map_err(|e| e.to_string())?;
 
-    // `rubberband` negozia liberamente il formato interno e può restituire
-    // planar anche se l'input è packed: `aformat` dopo di lui forza di
-    // nuovo packed, altrimenti `drain_filtered` (che assume sempre un
-    // singolo piano interleaved) legge oltre la fine del primo piano non
-    // appena i canali sono più di uno (panic riprodotto con audio stereo).
+    // `rubberband` può uscire planar anche con input packed: `aformat` forza
+    // packed, altrimenti `drain_filtered` legge oltre il primo piano (panic
+    // con audio stereo).
     graph
         .output("in", 0)
         .and_then(|p| p.input("out", 0))

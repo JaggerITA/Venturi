@@ -6,6 +6,7 @@ use vv_core::{FrameIdx, Rational};
 use vv_media::{AudioCodec, VideoCodec};
 
 use crate::export::ExportSettings;
+use crate::format_duration;
 
 /// Dati della timeline che la finestra mostra ma non modifica.
 pub struct TimelineInfo {
@@ -32,6 +33,9 @@ pub struct ExportDialog {
     whole_timeline: bool,
     /// Tenute da parte mentre "Includi audio" è spento, per ritrovarle.
     audio_settings: vv_media::AudioSettings,
+    /// File dialog aperto in un thread a parte (su quello dell'event loop
+    /// GNOME/Wayland segnala l'app come bloccata).
+    browsing: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl ExportDialog {
@@ -41,6 +45,7 @@ impl ExportDialog {
             audio_settings: settings.audio.clone().unwrap_or_default(),
             settings,
             whole_timeline: false,
+            browsing: None,
         }
     }
 
@@ -73,17 +78,36 @@ impl ExportDialog {
         ui.strong("Destinazione");
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.path_text).desired_width(340.0));
-            if ui.button("Sfoglia...").clicked() {
+            if ui
+                .add_enabled(self.browsing.is_none(), egui::Button::new("Sfoglia..."))
+                .clicked()
+            {
                 let current = PathBuf::from(&self.path_text);
-                let mut dialog = rfd::FileDialog::new().add_filter("mp4", &["mp4"]);
-                if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(name) = current.file_name() {
-                    dialog = dialog.set_file_name(name.to_string_lossy());
-                }
-                if let Some(path) = dialog.save_file() {
-                    self.path_text = path.display().to_string();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut dialog = rfd::FileDialog::new().add_filter("mp4", &["mp4"]);
+                    if let Some(dir) = current.parent().filter(|d| d.is_dir()) {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(name) = current.file_name() {
+                        dialog = dialog.set_file_name(name.to_string_lossy());
+                    }
+                    let _ = tx.send(dialog.save_file());
+                });
+                self.browsing = Some(rx);
+            }
+            if let Some(rx) = &self.browsing {
+                match rx.try_recv() {
+                    Ok(chosen) => {
+                        if let Some(path) = chosen {
+                            self.path_text = path.display().to_string();
+                        }
+                        self.browsing = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => self.browsing = None,
                 }
             }
         });
@@ -359,16 +383,6 @@ fn aac_coder_label(fast: bool) -> &'static str {
     if fast { "Più veloce" } else { "Qualità" }
 }
 
-fn format_duration(frames: FrameIdx, fps: f64) -> String {
-    let secs = (frames as f64 / fps.max(1e-9)).round() as i64;
-    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,9 +436,10 @@ mod tests {
         let ctx = egui::Context::default();
         for _ in 0..3 {
             let mut action = None;
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 action = Some(dialog.show(ui.ctx(), &info));
             });
+            output.textures_delta.clear();
             assert!(matches!(action, Some(ExportDialogAction::None)));
         }
     }

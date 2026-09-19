@@ -1,20 +1,8 @@
-//! Buffer video a livello di *timeline*, non di singola clip: un thread
-//! dedicato cammina in avanti dal playhead per `lookahead_secs`,
-//! attraversando quante clip servono (tagli netti, vuoti, stesso media o
-//! diverso — nessun caso speciale), e riempie una `SharedFrameCache`
-//! *unica*, condivisa da tutti i media della finestra, a budget globale
-//! in byte con sfratto per priorità-distanza-dalla-testina (vedi
-//! `vv_media::cache` e REFACTOR_PIPELINE.md §2).
-//!
-//! Il rendering (compositing crop/zoom via `vv_render::Compositor`) resta
-//! sul thread UI, invariato: qui si bufferizza solo il decode — il passo
-//! costoso — non il compositing, che è già economico (vedi doc di
-//! `vv_render::Compositor`).
-//!
-//! Stesso stile di `vv_media::playback::DecodeAhead` (thread singolo,
-//! target atomico, canale di comandi) ma generalizzato per camminare la
-//! timeline invece di un solo file. Solo il VIDEO: l'audio della timeline
-//! lo suona il mixer (`timeline_audio`).
+//! Buffer video a livello di timeline: un thread cammina dal playhead in
+//! avanti (e un po' indietro) attraversando tagli, vuoti e track senza casi
+//! speciali, e riempie una `SharedFrameCache` unica a budget globale (vedi
+//! REFACTOR_PIPELINE.md §2). Solo decode: il compositing resta sul thread UI,
+//! l'audio lo suona il mixer.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -28,79 +16,27 @@ use std::time::Duration;
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
-/// Valore di default/iniziale per `RenderAhead::set_lookahead_secs` —
-/// quanti secondi di timeline tenere bufferizzati avanti dal playhead,
-/// attraversando quante clip servono per coprirli. Configurabile
-/// dall'utente (menu Playback > Proxy), non più un valore fisso.
+/// Secondi bufferizzati avanti dal playhead, di default.
 pub const DEFAULT_LOOKAHEAD_SECS: f64 = 3.0;
 
-/// Valore di default/iniziale per `RenderAhead::set_behind_secs` —
-/// quanti secondi di timeline tenere bufferizzati anche *dietro* la
-/// testina, oltre alla finestra in avanti sopra — deliberatamente molto
-/// più piccola: la priorità resta sempre in avanti (vedi l'ordine di
-/// fill in `walk_and_fill`, dietro riempito solo con quel che resta del
-/// budget). Serve solo a rendere economico uno scrub avanti-indietro
-/// ravvicinato (es. confrontare due punti vicini, o un piccolo
-/// tentennamento della mano) senza forzare una ridecodifica completa a
-/// ogni piccolo passo indietro — non è un buffer di "rewind" per uno
-/// scrub lontano, quello resta correttamente costoso quanto un seek in
-/// avanti verso una zona mai visitata.
+/// Secondi bufferizzati dietro la testina, di default. Pochi apposta:
+/// servono solo a uno scrub avanti-indietro ravvicinato; la finestra in
+/// avanti ha sempre la precedenza sul budget.
 pub const DEFAULT_BEHIND_SECS: f64 = 2.0;
 
-/// Pavimento (in frame) applicato a `lookahead_secs`/`behind_secs`
-/// qualunque sia il valore configurato dall'utente, anche `0` — non
-/// zero: un margine letteralmente nullo (un solo frame, "decodifica
-/// esattamente quel che serve ora") è strutturalmente fragile anche
-/// svegliando il worker subito a ogni cambio di target (`Command::Wake`),
-/// perché resta comunque un design senza alcun cuscinetto contro la
-/// normale variabilità di timing (contesa CPU, scheduling del SO) — bug
-/// segnalato dall'utente: playback a scatti anche a 1x, indipendente dal
-/// proxy. Volutamente piccolo (pochi frame, non i secondi di default):
-/// serve solo da rete di sicurezza per chi configura un anticipo troppo
-/// aggressivo, non da anticipo vero e proprio.
+/// Margine minimo di lookahead/behind anche se configurati a 0: senza
+/// cuscinetto il playback va a scatti per la normale variabilità di timing.
 const MIN_MARGIN_FRAMES: FrameIdx = 4;
 
-/// Dimensione (in frame) dei blocchi in cui viene spezzata la finestra
-/// *dietro* la testina prima di decodificarla (vedi
-/// `chunk_behind_segments_near_to_far`): un segmento dietro copre
-/// `[source_start, source_end]` con `source_end` adiacente alla testina
-/// e `source_start` sul bordo lontano — decodificarlo in un solo seek,
-/// come per la finestra in avanti, produrrebbe i frame più vicini alla
-/// testina *per ultimi* (ffmpeg decodifica solo in avanti, non può
-/// "andare indietro" da `source_end`), e durante uno scrub all'indietro
-/// *sostenuto* (ogni ciclo interrotto dal successivo prima di finire)
-/// quel frame vicino non arriva mai: ogni tentativo spreca il suo lavoro
-/// sulla parte lontana, meno preziosa, lasciando un buco proprio accanto
-/// alla testina (osservato dall'utente). Spezzare in blocchi piccoli e
-/// riseekare a ognuno, dal più vicino al più lontano, limita quel buco a
-/// al più un blocco, qualunque sia la frequenza di interruzione.
-///
-/// Non frame-per-frame: ogni blocco *potenzialmente* costa un seek
-/// reale (quasi gratis su un proxy tutto-intra, ~1-2ms misurati; su
-/// sorgente long-GOP il seek stesso resta economico — un lookup
-/// nell'indice del container, non una scansione). In pratica il costo è
-/// spesso più basso di "un seek per blocco": se un blocco condivide il
-/// keyframe con quello appena elaborato (GOP più largo del blocco, il
-/// caso comune su sorgente reale), la sua decodifica lo produce già
-/// come sottoprodotto — vedi `without_already_cached_chunks`, che lo
-/// salta senza toccare il decoder. Il costo pieno (un seek per blocco)
-/// si paga solo quando i keyframe sono davvero così ravvicinati da non
-/// poter condividere nulla (proxy/GOP corto) — esattamente il caso in
-/// cui un seek costa quasi niente.
+/// Blocchi in cui si spezza la finestra dietro la testina. Decodificarla in
+/// un solo seek produrrebbe per ultimi i frame vicini alla testina, e uno
+/// scrub all'indietro continuo non li raggiungerebbe mai: dal blocco più
+/// vicino al più lontano il buco resta al più di un blocco.
 const BEHIND_CHUNK_FRAMES: FrameIdx = 15;
 
-/// Tetto di sicurezza sul transito (vedi il commento sopra
-/// `transit_bytes` in `fill_segments`), in *frame*, non in byte legati
-/// al budget condiviso — un budget stretto (l'utente può configurare
-/// "Cache video" molto in basso) non ha alcuna relazione con quanto sia
-/// lungo il GOP del sorgente: un tetto proporzionale al budget
-/// bloccherebbe il transito ben prima di un GOP anche solo moderatamente
-/// lungo, vanificando l'intero scopo del riuso. Volutamente generoso
-/// (50s a 60fps, più di qualunque keyint reale ragionevole) — serve solo
-/// contro un GOP patologico (es. un intero file con un unico keyframe),
-/// non come limite di memoria vero: quello resta il controllo sul
-/// tratto richiesto sopra, il transito è comunque sfrattato dal
-/// `reconcile` del prossimo ciclo se non serve più a nessuno.
+/// Tetto al transito (frame decodificati prima del tratto voluto) in frame,
+/// non in byte del budget: un budget stretto non dice nulla sulla lunghezza
+/// del GOP. Generoso: serve solo contro GOP patologici.
 const TRANSIT_SAFETY_CAP_FRAMES: FrameIdx = 3000;
 
 fn store_secs(atomic: &AtomicU64, secs: f64) {
@@ -111,122 +47,55 @@ fn load_secs(atomic: &AtomicU64) -> f64 {
     f64::from_bits(atomic.load(Ordering::Relaxed))
 }
 
-/// Intervallo di poll del thread: ogni ciclo rivaluta il target corrente
-/// e completa quel che manca fino all'orizzonte di lookahead — una volta
-/// raggiunto, i cicli successivi trovano tutto già in cache e tornano
-/// subito, quindi un intervallo breve non ha un costo significativo.
+/// Un ciclo che trova tutto in cache torna subito: un poll breve costa poco.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Soglia di fallback per "oltre quanti frame di distanza in avanti
-/// conviene un seek reale invece di continuare a decodificare in
-/// sequenza", finché non c'è ancora nessuna osservazione reale del GOP
-/// per quel media (vedi `OpenDecoder::seek_threshold_frames` — un numero
-/// fisso uguale per un 4K long-GOP e un 1080p intra-friendly può sbagliare
-/// di un ordine di grandezza in entrambe le direzioni, REFACTOR_PIPELINE.md
-/// §1 A3). Basso e conservativo di proposito: sbagliare per eccesso (un
-/// seek in più del necessario) costa poco, un seek riusa sempre il
-/// decoder già aperto (`seek_to_time`), mai una riapertura.
+/// Soglia di seek finché il GOP del media non è stato osservato. Bassa: un
+/// seek di troppo costa poco, riusa il decoder aperto.
 const DEFAULT_SEEK_THRESHOLD_FRAMES: FrameIdx = 30;
 
-/// Limite superiore per la stima del GOP osservato (vedi
-/// `OpenDecoder::record_keyframe_landing`): due atterraggi da seek
-/// consecutivi possono capitare per caso a più GOP di distanza (es. due
-/// seek lontani, senza che nel mezzo sia mai capitato un atterraggio più
-/// ravvicinato) — la stima è comunque un minimo che si stringe nel tempo,
-/// questo limite serve solo a non lasciarla esplodere prima che arrivi
-/// un'osservazione più stretta.
+/// Tetto alla stima del GOP, finché non arriva un'osservazione più stretta.
 const MAX_SEEK_THRESHOLD_FRAMES: FrameIdx = 300;
 
-/// Soglia usata al posto di quella imparata/di fallback quando il
-/// decoder è aperto su un proxy (REFACTOR_PIPELINE.md proxy): i proxy
-/// sono generati apposta interamente da keyframe (`g=1 keyint_min=1`,
-/// vedi `vv_media::proxy::generate_proxy`), quindi *ogni* frame è
-/// seekabile a costo pressoché nullo (osservato: seek riusati in
-/// microsecondi, non millisecondi) — non c'è alcun GOP da imparare a
-/// runtime, e usare comunque la stima adattiva (pensata per il sorgente
-/// reale, dove un seek deve ripartire da un keyframe lontano) è
-/// controproducente: durante uno scrub veloce e monotono i salti
-/// osservati tra due seek reali sono sempre ampi (mai un atterraggio
-/// ravvicinato che stringa la stima), quindi `estimated_gop` resta
-/// bloccato su valori grandi (decine/centinaia di frame) e
-/// `position_decoder` preferisce continuare a decodificare in sequenza
-/// invece di seekare — proprio l'inverso di quel che conviene per
-/// contenuto all-intra. Diagnosticato con un test di scrub aggressivo
-/// (`VV_DEBUG_RENDER_AHEAD=1`): ogni ciclo del worker restava bloccato
-/// 15-60ms a decodificare 30-75 frame "di troppo" prima di accorgersi
-/// che la testina era già altrove, più del tempo tra due tick di uno
-/// scrub veloce (quindi il worker non riusciva mai a recuperare mentre
-/// lo scrub proseguiva). Piccola ma non nulla (non `0`): un frame di
-/// margine evita un seek quando la testina è già esattamente lì.
+/// Soglia di seek sui proxy: sono tutto-intra, seekare costa quasi nulla.
+/// La stima adattiva lì resterebbe alta durante uno scrub veloce e farebbe
+/// decodificare in sequenza decine di frame inutili.
 const PROXY_SEEK_THRESHOLD_FRAMES: FrameIdx = 1;
 
 enum Command {
     UpdateProject(Box<Project>, TimelineId),
-    /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy): passa dal
-    /// canale comandi, non da un atomico come `target`/`cache_budget_bytes`,
-    /// perché il worker deve reagire alla *transizione* — svuotare la
-    /// cache condivisa (vedi `SharedFrameCache::clear`, i frame già
-    /// cachati sotto le stesse chiavi potrebbero venire dalla
-    /// risoluzione sbagliata) e i decoder aperti — non solo leggere un
-    /// valore aggiornato al prossimo ciclo.
+    /// Passa dai comandi e non da un atomico: il worker deve reagire al cambio
+    /// svuotando cache e decoder (i frame hanno la risoluzione sbagliata).
     SetProxyEnabled(bool),
-    /// Nessun payload: fa uscire subito il worker dall'attesa su
-    /// `recv_timeout` invece di aspettare fino a `POLL_INTERVAL` — vedi
-    /// `RenderAhead::set_target`. Non richiede alcuna gestione speciale
-    /// nei punti in cui i comandi vengono letti: riceverlo e basta fa
-    /// proseguire il loop, che rilegge `target` come farebbe comunque
-    /// al timeout naturale.
+    /// Sveglia il worker subito invece di aspettare `POLL_INTERVAL`.
     Wake,
     Stop,
 }
 
-/// Log diagnostico opzionale su stderr, attivo solo con la variabile
-/// d'ambiente `VV_DEBUG_RENDER_AHEAD=1`: per capire da rapporti utente
-/// cosa succede davvero su una macchina/file che non riesco a
-/// riprodurre qui (apertura/seek di un decoder, stato della finestra ad
-/// ogni ciclo di poll) senza appesantire l'uso normale.
+/// Log diagnostico su stderr con `VV_DEBUG_RENDER_AHEAD=1`.
 fn debug_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("VV_DEBUG_RENDER_AHEAD").is_ok())
 }
 
-/// Handle `Arc` condivisi tra `RenderAhead` (thread UI) e il worker
-/// (thread dedicato) — raggruppati per non far crescere il numero di
-/// argomenti di `worker_loop` a ogni nuovo stato condiviso.
+/// Stato condiviso tra `RenderAhead` (thread UI) e il worker.
 struct SharedState {
-    caches: Arc<SharedFrameCache>,
-    target: Arc<AtomicI64>,
-    cache_budget_bytes: Arc<AtomicUsize>,
-    caught_up: Arc<AtomicBool>,
-    lookahead_secs: Arc<AtomicU64>,
-    behind_secs: Arc<AtomicU64>,
+    caches: SharedFrameCache,
+    target: AtomicI64,
+    cache_budget_bytes: AtomicUsize,
+    /// L'ultimo ciclo del worker ha trovato tutta la finestra in cache: la
+    /// UI smette di chiedere repaint per la striscia "buffered".
+    caught_up: AtomicBool,
+    /// Secondi (bit di un `f64`, vedi `store_secs`) da bufferizzare avanti
+    /// e dietro la testina. Atomici e non `Command`: il worker li rilegge a
+    /// ogni ciclo, non c'è una transizione a cui reagire.
+    lookahead_secs: AtomicU64,
+    behind_secs: AtomicU64,
 }
 
-/// Vedi il doc del modulo. Uno per `VibeVideoApp` (non uno per clip: la
-/// differenza chiave rispetto al sistema precedente).
+/// Vedi il doc del modulo. Uno per `VibeVideoApp`.
 pub struct RenderAhead {
-    caches: Arc<SharedFrameCache>,
-    target: Arc<AtomicI64>,
-    cache_budget_bytes: Arc<AtomicUsize>,
-    /// `true` quando l'ultimo ciclo del worker ha trovato l'intera
-    /// finestra di lookahead già in cache — vedi `WalkOutcome::caught_up`
-    /// e `is_caught_up`. Parte da `false`: prima che il worker abbia
-    /// completato almeno un ciclo non si sa ancora se c'è lavoro da fare.
-    caught_up: Arc<AtomicBool>,
-    /// Quanti secondi avanti/dietro la testina bufferizzare
-    /// (`DEFAULT_LOOKAHEAD_SECS`/`DEFAULT_BEHIND_SECS` all'avvio,
-    /// configurabile dall'utente — menu Playback > Proxy) — vedi
-    /// `set_lookahead_secs`/`set_behind_secs`. Un semplice atomico come
-    /// `target`, non un `Command`: a differenza del toggle proxy non
-    /// serve reagire alla transizione con un effetto collaterale
-    /// sincrono (svuotare la cache) — una finestra che si restringe
-    /// lascia comunque scartare il resto al prossimo `reconcile`, una
-    /// che si allarga lo riempie di nuovo da sé. Memorizzati come bit di
-    /// un `f64` in un `AtomicU64` (`store_secs`/`load_secs`): niente
-    /// atomic float nella std, e la precisione di un `f32`/frazione di
-    /// frame non serve qui.
-    lookahead_secs: Arc<AtomicU64>,
-    behind_secs: Arc<AtomicU64>,
+    shared: Arc<SharedState>,
     tx: mpsc::Sender<Command>,
     handle: Option<JoinHandle<()>>,
 }
@@ -240,106 +109,59 @@ impl RenderAhead {
         lookahead_secs: f64,
         behind_secs: f64,
     ) -> Self {
-        let caches = Arc::new(SharedFrameCache::new());
-        let target = Arc::new(AtomicI64::new(0));
-        let budget = Arc::new(AtomicUsize::new(cache_budget_bytes));
-        let caught_up = Arc::new(AtomicBool::new(false));
-        let lookahead = Arc::new(AtomicU64::new(0));
-        store_secs(&lookahead, lookahead_secs);
-        let behind = Arc::new(AtomicU64::new(0));
-        store_secs(&behind, behind_secs);
-        let (tx, rx) = mpsc::channel();
-
-        let thread_shared = SharedState {
-            caches: caches.clone(),
-            target: target.clone(),
-            cache_budget_bytes: budget.clone(),
-            caught_up: caught_up.clone(),
-            lookahead_secs: lookahead.clone(),
-            behind_secs: behind.clone(),
-        };
-        let handle = std::thread::spawn(move || {
-            worker_loop(rx, thread_shared, project, timeline_id, proxy_enabled);
+        let shared = Arc::new(SharedState {
+            caches: SharedFrameCache::new(),
+            target: AtomicI64::new(0),
+            cache_budget_bytes: AtomicUsize::new(cache_budget_bytes),
+            caught_up: AtomicBool::new(false),
+            lookahead_secs: AtomicU64::new(lookahead_secs.max(0.0).to_bits()),
+            behind_secs: AtomicU64::new(behind_secs.max(0.0).to_bits()),
         });
-
+        let (tx, rx) = mpsc::channel();
+        let thread_shared = shared.clone();
+        let handle = std::thread::spawn(move || {
+            worker_loop(rx, &thread_shared, project, timeline_id, proxy_enabled);
+        });
         Self {
-            caches,
-            target,
-            cache_budget_bytes: budget,
-            caught_up,
-            lookahead_secs: lookahead,
-            behind_secs: behind,
+            shared,
             tx,
             handle: Some(handle),
         }
     }
 
-    /// Aggiorna solo il target (playhead di timeline, in frame): chiamata
-    /// economica da fare a ogni frame UI durante lo scrub/playback, sia
-    /// per un avanzamento continuo sia per un salto — il worker rivaluta
-    /// da zero la finestra a ogni ciclo, quindi non serve distinguere i
-    /// due casi (a differenza di `DecodeAhead::set_target`/`seek`). Se il
-    /// target è realmente cambiato (non la chiamata ridondante che
-    /// `sync_render_ahead` fa comunque a ogni frame UI):
-    ///
-    /// - segna subito "non ancora bufferizzato": il worker lo
-    ///   confermerà/correggerà al suo prossimo ciclo, ma senza questo
-    ///   aggiornamento *immediato* la UI potrebbe leggere
-    ///   `is_caught_up()` ancora `true` (stantio, da prima del cambio)
-    ///   nell'unico repaint che segue subito l'interazione e smettere
-    ///   di richiederne altri;
-    /// - manda `Command::Wake` per far reagire il worker subito invece
-    ///   di aspettare fino a `POLL_INTERVAL` (50ms) — con una finestra
-    ///   ampia (`lookahead_secs` alto) quei 50ms sono invisibili, ma con
-    ///   una finestra stretta (`lookahead_secs`/`behind_secs` bassi,
-    ///   pavimentati a `MIN_MARGIN_FRAMES`) diventavano un tetto reale
-    ///   alla fluidità del playback: il worker non produceva più di un
-    ///   frame nuovo ogni 50ms, sotto qualunque framerate video comune
-    ///   (bug segnalato dall'utente, playback a scatti anche a 1x con
-    ///   una finestra ridotta al margine minimo, indipendente dal proxy).
+    /// Nuovo playhead. Se cambia segna subito "non bufferizzato" (o la UI
+    /// smetterebbe di chiedere repaint su uno stato vecchio) e sveglia il
+    /// worker: con finestre strette 50 ms di attesa limitano il playback.
     pub fn set_target(&self, frame: FrameIdx) {
-        let previous = self.target.swap(frame, Ordering::Relaxed);
+        let previous = self.shared.target.swap(frame, Ordering::Relaxed);
         if previous != frame {
-            self.caught_up.store(false, Ordering::Relaxed);
+            self.shared.caught_up.store(false, Ordering::Relaxed);
             let _ = self.tx.send(Command::Wake);
         }
     }
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
-        self.cache_budget_bytes.store(bytes, Ordering::Relaxed);
+        self.shared.cache_budget_bytes.store(bytes, Ordering::Relaxed);
     }
 
-    /// Quanti secondi di timeline bufferizzare in avanti dal playhead
-    /// (menu Playback > Proxy) — vedi doc di `DEFAULT_LOOKAHEAD_SECS`.
-    /// Qualunque valore, anche `0`, resta comunque pavimentato a
-    /// `MIN_MARGIN_FRAMES` da `walk_and_fill`: vedi la sua doc sul
-    /// perché un margine letteralmente nullo è strutturalmente fragile
-    /// anche con la sveglia immediata (`set_target` → `Command::Wake`).
-    /// Segna subito "non ancora bufferizzato": la finestra sta per
-    /// cambiare dimensione, l'utente deve vedere la UI reagire.
+    /// Secondi bufferizzati avanti (menu Playback > Proxy), mai sotto
+    /// `MIN_MARGIN_FRAMES`.
     pub fn set_lookahead_secs(&self, secs: f64) {
-        store_secs(&self.lookahead_secs, secs);
-        self.caught_up.store(false, Ordering::Relaxed);
+        store_secs(&self.shared.lookahead_secs, secs);
+        self.shared.caught_up.store(false, Ordering::Relaxed);
     }
 
     /// Quanti secondi di timeline bufferizzare anche *dietro* la testina
     /// (menu Playback > Proxy) — vedi doc di `DEFAULT_BEHIND_SECS`.
     pub fn set_behind_secs(&self, secs: f64) {
-        store_secs(&self.behind_secs, secs);
-        self.caught_up.store(false, Ordering::Relaxed);
+        store_secs(&self.shared.behind_secs, secs);
+        self.shared.caught_up.store(false, Ordering::Relaxed);
     }
 
-    /// Da chiamare dopo ogni comando che cambia la disposizione delle
-    /// clip (ogni `history.do_command`): il worker lavora su una propria
-    /// copia del progetto, non condivisa con la UI (`Project` è già
-    /// `Clone`, stesso principio dello snapshot per l'export). Segna
-    /// subito "non ancora bufferizzato" — stesso motivo di `set_target`,
-    /// qui incondizionato perché ogni chiamata rappresenta per
-    /// costruzione un cambio reale (il chiamante la fa solo a
-    /// generazione della history diversa dall'ultima notificata, vedi
-    /// `sync_render_ahead`).
+    /// Il worker lavora su una copia del progetto: va aggiornata a ogni
+    /// cambio della history.
     pub fn update_project(&self, project: &Project, timeline_id: TimelineId) {
-        self.caught_up.store(false, Ordering::Relaxed);
+        self.shared.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::UpdateProject(
             Box::new(project.clone()),
             timeline_id,
@@ -350,32 +172,25 @@ impl RenderAhead {
     /// svuota la cache condivisa e riapre da zero ogni decoder sul path
     /// giusto per il nuovo stato — vedi doc di `Command::SetProxyEnabled`.
     pub fn set_proxy_enabled(&self, enabled: bool) {
-        self.caught_up.store(false, Ordering::Relaxed);
+        self.shared.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::SetProxyEnabled(enabled));
     }
 
     /// Il frame decodificato per `(media_id, source_frame)`, se già in
     /// cache.
     pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameYuv420>> {
-        self.caches.get(media_id, source_frame)
+        self.shared.caches.get(media_id, source_frame)
     }
 
-    /// `false` finché il worker ha ancora lavoro da fare per soddisfare
-    /// la finestra di lookahead corrente (budget saturo, o semplicemente
-    /// non ha ancora finito di decodificarla) — la UI lo usa per sapere
-    /// se vale la pena richiedere un altro repaint pur di mostrare
-    /// l'indicatore "buffered" avanzare, invece di aspettare che qualcos'
-    /// altro lo faccia comunque (vedi il repaint in `VibeVideoApp::ui`).
+    /// `false` finché resta lavoro per la finestra corrente: la UI continua a
+    /// chiedere repaint per far avanzare la striscia "buffered".
     pub fn is_caught_up(&self) -> bool {
-        self.caught_up.load(Ordering::Relaxed)
+        self.shared.caught_up.load(Ordering::Relaxed)
     }
 
-    /// Intervalli (in frame *sorgente*) attualmente in cache per un
-    /// media — per l'indicatore visivo "buffered" sulla timeline (il
-    /// chiamante li traduce in spazio timeline per la clip in questione,
-    /// vedi `map_source_ranges_to_timeline` in main.rs).
+    /// Intervalli in cache di un media, in frame sorgente.
     pub fn cached_ranges_for(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
-        self.caches.cached_ranges(media_id)
+        self.shared.caches.cached_ranges(media_id)
     }
 }
 
@@ -388,10 +203,8 @@ impl Drop for RenderAhead {
     }
 }
 
-/// L'anteprima procura il frame dalla `SharedFrameCache` già riempita
-/// in background dal worker — non bloccante, mai un errore reale (un
-/// media che non decodifica viene semplicemente saltato dal worker, non
-/// propagato qui: vedi `position_decoder`), quindi sempre `Ok`.
+/// Non bloccante e mai un errore: un media che non si decodifica il
+/// worker lo salta.
 impl crate::frame_provider::FrameProvider for RenderAhead {
     fn frame_for(
         &mut self,
@@ -408,42 +221,23 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
     }
 }
 
-/// Decoder tenuto aperto per un media, con la posizione (frame sorgente)
-/// che produrrà al prossimo `next_frame()`: permette di decidere se
-/// conviene continuare a decodificare in sequenza o fare un seek reale
-/// (vedi `position_decoder`). Uno per media (non uno slot condiviso): se
-/// la finestra di lookahead attraversa un taglio tra due media diversi,
-/// entrambi restano posizionati da un ciclo di poll all'altro invece di
-/// essere riaperti ogni volta che il segmento "torna" al primo.
+/// Decoder aperto per un media, con il prossimo frame che produrrà: dice se
+/// conviene decodificare in sequenza o seekare. Uno per media, così un
+/// taglio tra due media non li fa riaprire.
 struct OpenDecoder {
     decoder: Decoder,
-    /// Il path da cui questo decoder è stato aperto — confrontato a ogni
-    /// ciclo (`position_decoder`) contro quello appena risolto per lo
-    /// stesso media: se diverso (un proxy è appena diventato disponibile
-    /// in background, o il toggle "usa proxy" è cambiato — REFACTOR_PIPELINE.md
-    /// proxy), il decoder aperto sul path vecchio non ha alcun senso da
-    /// riusare/seekare, va riaperto da zero sul nuovo indipendentemente
-    /// da `needs_seek`.
+    /// Path aperto: se il proxy diventa disponibile o cambia il toggle, il
+    /// decoder va riaperto sul nuovo.
     resolved_path: std::path::PathBuf,
     /// `true` quando `resolved_path` è un proxy (REFACTOR_PIPELINE.md
     /// proxy) — vedi `PROXY_SEEK_THRESHOLD_FRAMES` sul perché bypassa la
     /// stima adattiva del GOP invece di limitarsi a inizializzarla.
     is_all_intra: bool,
     next_frame: FrameIdx,
-    /// `true` subito dopo un seek reale o la primissima apertura: il
-    /// prossimo frame decodificato è per costruzione un keyframe (un
-    /// seek/apertura atterra sempre lì, mai su un frame intermedio) —
-    /// usato per imparare il GOP reale del media (vedi
-    /// `record_keyframe_landing`), non solo per correggere il
-    /// placeholder di `next_frame`. Azzerato non appena quel frame viene
-    /// consumato, così non si scambia un frame qualunque nel mezzo del
-    /// decode sequenziale per un keyframe.
+    /// Dopo un seek o un'apertura il primo frame è un keyframe: serve a
+    /// imparare il GOP del media.
     just_repositioned: bool,
-    /// Ultimo atterraggio da seek osservato, e la stima del GOP derivata
-    /// dalla distanza tra atterraggi consecutivi (vedi
-    /// `record_keyframe_landing`). `None` finché non c'è ancora almeno
-    /// un'osservazione — `seek_threshold_frames` usa un fallback in quel
-    /// caso.
+    /// Ultimo atterraggio da seek e GOP stimato dalla distanza tra atterraggi.
     last_keyframe_landed: Option<FrameIdx>,
     estimated_gop: Option<FrameIdx>,
 }
@@ -461,12 +255,7 @@ impl OpenDecoder {
         }
     }
 
-    /// Soglia oltre cui conviene un seek reale invece di continuare a
-    /// decodificare in sequenza (REFACTOR_PIPELINE.md §3.3): circa un GOP
-    /// del media *osservato*, non un numero fisso uguale per tutti i
-    /// media — con un fallback conservativo finché non c'è ancora
-    /// un'osservazione reale. Per un proxy (`is_all_intra`) niente stima
-    /// da imparare: vedi doc di `PROXY_SEEK_THRESHOLD_FRAMES`.
+    /// Circa un GOP osservato, un fallback finché non c'è; fisso sui proxy.
     fn seek_threshold_frames(&self) -> FrameIdx {
         if self.is_all_intra {
             return PROXY_SEEK_THRESHOLD_FRAMES;
@@ -474,16 +263,8 @@ impl OpenDecoder {
         self.estimated_gop.unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
     }
 
-    /// Da chiamare con l'indice del primo frame decodificato dopo un
-    /// seek/apertura reale (`just_repositioned`, azzerato dal
-    /// chiamante subito dopo): aggiorna la stima del GOP dalla distanza
-    /// rispetto all'ultimo atterraggio osservato. La stima è un
-    /// *minimo* (mai più ampia di quella attuale, tranne alla prima
-    /// osservazione) — un singolo salto accidentale di più GOP alla
-    /// volta sovrastimerebbe, il minimo resta un limite superiore sicuro
-    /// alla vera dimensione del GOP e si stringe man mano che arrivano
-    /// atterraggi più ravvicinati; `MAX_SEEK_THRESHOLD_FRAMES` evita che
-    /// nel frattempo resti sproporzionata.
+    /// Aggiorna la stima del GOP con un nuovo atterraggio. Tiene il minimo:
+    /// un salto di più GOP la sovrastimerebbe.
     fn record_keyframe_landing(&mut self, idx: FrameIdx) {
         if let Some(prev) = self.last_keyframe_landed
             && idx > prev
@@ -506,80 +287,36 @@ impl OpenDecoder {
 
 fn worker_loop(
     rx: mpsc::Receiver<Command>,
-    shared: SharedState,
+    shared: &SharedState,
     mut project: Project,
     mut timeline_id: TimelineId,
     mut proxy_enabled: bool,
 ) {
-    let SharedState {
-        caches,
-        target,
-        cache_budget_bytes,
-        caught_up,
-        lookahead_secs,
-        behind_secs,
-    } = shared;
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    // Decoder aperti per la finestra *dietro* la testina, separati da
-    // `open`: vedi doc di `walk_and_fill` sul perché condividere lo
-    // stesso decoder tra le due direzioni non funzionerebbe.
+    // Decoder separati per la finestra dietro la testina: vedi `walk_and_fill`.
     let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    // Ultimo `from` visto, confrontato una sola volta per ciclo (non per
-    // media/segmento, vedi doc di `walk_and_fill`) per sapere se la
-    // testina è tornata indietro dall'ultimo ciclo — qualunque sia
-    // l'ampiezza. Aggiornato per semplice assegnazione a ogni ciclo, mai
-    // un min/max con lo storico: deve riflettere solo il ciclo
-    // *precedente*, altrimenti (bug osservato in precedenza) può restare
-    // bloccato su un valore vecchio e smettere di rilevare scrub reali.
+    // `from` del ciclo precedente (solo quello, mai un min/max storico):
+    // dice se la testina è tornata indietro.
     let mut last_from_frame: Option<FrameIdx> = None;
-    // `true` quando l'ultimo `walk_and_fill` è stato interrotto perché la
-    // testina si è spostata abbastanza da rendere il lavoro in corso
-    // obsoleto (vedi `walk_and_fill`): in quel caso non ha senso aspettare
-    // fino al prossimo `POLL_INTERVAL`, il target fresco va riletto subito.
+    // Ciclo precedente interrotto da un salto della testina: si riparte
+    // subito invece di aspettare `POLL_INTERVAL`.
     let mut retry_immediately = false;
     loop {
-        if retry_immediately {
+        let first = if retry_immediately {
             match rx.try_recv() {
-                Ok(Command::Stop) => return,
-                Ok(Command::UpdateProject(p, id)) => {
-                    project = *p;
-                    timeline_id = id;
-                    open.clear();
-                    open_behind.clear();
-                }
-                Ok(Command::SetProxyEnabled(v)) => {
-                    proxy_enabled = v;
-                    caches.clear();
-                    open.clear();
-                    open_behind.clear();
-                }
-                Ok(Command::Wake) => {}
-                Err(TryRecvError::Empty) => {}
+                Ok(cmd) => Some(cmd),
+                Err(TryRecvError::Empty) => None,
                 Err(TryRecvError::Disconnected) => return,
             }
         } else {
             match rx.recv_timeout(POLL_INTERVAL) {
-                Ok(Command::Stop) => return,
-                Ok(Command::UpdateProject(p, id)) => {
-                    project = *p;
-                    timeline_id = id;
-                    open.clear();
-                    open_behind.clear();
-                }
-                Ok(Command::SetProxyEnabled(v)) => {
-                    proxy_enabled = v;
-                    caches.clear();
-                    open.clear();
-                    open_behind.clear();
-                }
-                Ok(Command::Wake) => {}
+                Ok(cmd) => Some(cmd),
+                Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
-                Err(RecvTimeoutError::Timeout) => {}
             }
-        }
-        // Drena eventuali altri comandi già in coda (non bloccante): solo
-        // l'ultimo conta, i precedenti sono superati.
-        while let Ok(cmd) = rx.try_recv() {
+        };
+        // Anche i comandi già in coda: conta solo lo stato finale.
+        for cmd in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             match cmd {
                 Command::Stop => return,
                 Command::UpdateProject(p, id) => {
@@ -590,7 +327,7 @@ fn worker_loop(
                 }
                 Command::SetProxyEnabled(v) => {
                     proxy_enabled = v;
-                    caches.clear();
+                    shared.caches.clear();
                     open.clear();
                     open_behind.clear();
                 }
@@ -598,28 +335,25 @@ fn worker_loop(
             }
         }
 
-        let from = target.load(Ordering::Relaxed);
+        let from = shared.target.load(Ordering::Relaxed);
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
-        let budget = cache_budget_bytes.load(Ordering::Relaxed);
-        let lookahead = load_secs(&lookahead_secs);
-        let behind = load_secs(&behind_secs);
         let outcome = walk_and_fill(
             &project,
             timeline_id,
-            &caches,
+            &shared.caches,
             &mut open,
             &mut open_behind,
             from,
-            budget,
+            shared.cache_budget_bytes.load(Ordering::Relaxed),
             went_backward,
             proxy_enabled,
-            lookahead,
-            behind,
-            &target,
+            load_secs(&shared.lookahead_secs),
+            load_secs(&shared.behind_secs),
+            &shared.target,
         );
         retry_immediately = outcome.interrupted;
-        caught_up.store(outcome.caught_up, Ordering::Relaxed);
+        shared.caught_up.store(outcome.caught_up, Ordering::Relaxed);
     }
 }
 
@@ -638,11 +372,8 @@ enum Positioned {
     Failed,
 }
 
-/// Un tratto contiguo di timeline coperto da una singola clip Media, in
-/// spazio frame *sorgente*, con la posizione timeline corrispondente
-/// (`timeline_start`, dove cade `source_start`) — necessaria per
-/// costruire i `WantedRange` passati a `SharedFrameCache::reconcile`,
-/// che ne ha bisogno per calcolare la distanza dalla testina.
+/// Tratto di una clip Media nella finestra, in frame sorgente, con la sua
+/// posizione in timeline (serve a misurare la distanza dalla testina).
 #[derive(Clone, Copy, Debug)]
 struct MediaSegment {
     media_id: MediaId,
@@ -655,16 +386,9 @@ struct MediaSegment {
     rate: vv_core::Rational,
 }
 
-/// Divide `[from_frame, end_frame)` di timeline in segmenti, uno per ogni
-/// clip Media attraversata su *ciascuna* track video: non solo quella in
-/// cima, perché il compositing (`Timeline::active_video_clips_at`) mostra
-/// anche i layer sotto dove quello sopra non copre il frame intero
-/// (bande di letterbox). Le clip SolidColor non hanno nulla da decodificare
-/// e i vuoti non producono segmenti, senza casi speciali. I segmenti
-/// escono ordinati dal più vicino alla testina al più lontano — e, a pari
-/// posizione, dalla track più in alto in giù (è quella che si vede per
-/// prima): `walk_and_fill` li elabora in quest'ordine, che è l'ordine di
-/// priorità. Funzione pura, testabile senza ffmpeg.
+/// Segmenti di `[from_frame, end_frame)`, uno per clip Media di ogni track
+/// video (anche quelle sotto: si vedono nelle bande di letterbox),
+/// dal più vicino alla testina e, a pari posizione, dalla track più alta.
 fn collect_media_segments(
     timeline: &Timeline,
     from_frame: FrameIdx,
@@ -675,14 +399,8 @@ fn collect_media_segments(
     segments.into_iter().map(|(_, s)| s).collect()
 }
 
-/// Simmetrico a `collect_media_segments`, ma per la finestra *dietro* la
-/// testina: stessi segmenti, ordinati dal più vicino alla testina (quindi
-/// dal più avanti nella timeline) al più lontano. La decodifica vera e
-/// propria resta comunque in avanti nello spazio *sorgente* (ffmpeg
-/// decodifica solo in avanti): "all'indietro" qui si riferisce solo a
-/// *dove* cade il segmento nello spazio timeline, non a come viene
-/// prodotto — vedi il loop di fill in `walk_and_fill`, identico per i
-/// segmenti in avanti e quelli dietro.
+/// Come `collect_media_segments` per la finestra dietro: dal più vicino
+/// alla testina, cioè dal più avanti in timeline.
 fn collect_media_segments_behind(
     timeline: &Timeline,
     from_frame: FrameIdx,
@@ -735,19 +453,8 @@ fn clipped_media_segments(
     segments
 }
 
-/// Spezza ogni segmento dietro la testina (`collect_media_segments_behind`,
-/// già ordinati dal più vicino al più lontano) in blocchi da al più
-/// `BEHIND_CHUNK_FRAMES`, ordinati anch'essi dal più vicino alla testina
-/// al più lontano — vedi la doc di `BEHIND_CHUNK_FRAMES` sul perché.
-/// `source_end` di un segmento è sempre il bordo adiacente alla testina
-/// (`collect_media_segments_behind`, sia per il primo segmento che per
-/// quelli oltre un taglio), quindi si parte da lì e si procede a ritroso
-/// verso `source_start`. Mappatura `timeline_start` per offset (stesso
-/// principio di `Clip::source_frame_at`: un clip non a velocità variabile
-/// ha una corrispondenza 1:1 tra spostamento in spazio sorgente e in
-/// spazio timeline, quindi il bordo sorgente di un blocco e il suo
-/// corrispondente in timeline si spostano della quantità omologa rispetto
-/// al segmento originale, conformato dal `rate` della clip).
+/// Spezza i segmenti dietro la testina in blocchi di `BEHIND_CHUNK_FRAMES`,
+/// dal bordo vicino alla testina (`source_end`) verso quello lontano.
 fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
     let mut chunks = Vec::new();
     for segment in segments {
@@ -772,23 +479,9 @@ fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegm
     chunks
 }
 
-/// Filtra dai blocchi (`chunk_behind_segments_near_to_far`) quelli già
-/// interamente coperti da un singolo intervallo in cache — necessario
-/// *solo* per la finestra dietro, non per quella in avanti: lì il
-/// decoder resta naturalmente posizionato oltre un segmento già
-/// completato (`next_frame > source_end`, zero lavoro il ciclo
-/// successivo — vedi doc di `position_decoder`), ma qui l'ordine dal
-/// blocco più vicino al più lontano fa sì che, a inizio di un nuovo
-/// ciclo, il decoder sia fermo dove si era fermato il blocco più
-/// *lontano* del ciclo precedente — cioè dietro rispetto al primo
-/// blocco (il più vicino) richiesto ora. Senza questo filtro,
-/// `position_decoder` vedrebbe ogni blocco come "da riseekare" e
-/// ributterebbe via almeno un frame per blocco *a ogni singolo ciclo*,
-/// anche a testina ferma — la stessa classe di bug ("non si stabilizza
-/// mai", playback a scatti) già corretta altrove in questo file.
-/// Un blocco solo *parzialmente* coperto non viene filtrato: la
-/// riverifica in quel caso è già economica grazie al controllo
-/// "resumed && contains" dentro al loop di decodifica di `fill_segments`.
+/// Toglie i blocchi già in cache. Nella finestra dietro il decoder resta
+/// fermo sul blocco più lontano del ciclo prima: senza filtro ogni blocco
+/// sembrerebbe da riseekare a ogni ciclo, anche a testina ferma.
 fn without_already_cached_chunks(
     caches: &SharedFrameCache,
     chunks: Vec<MediaSegment>,
@@ -796,95 +489,18 @@ fn without_already_cached_chunks(
     chunks
         .into_iter()
         .filter(|chunk| {
-            !range_fully_cached(caches, chunk.media_id, chunk.source_start, chunk.source_end)
+            !caches.covers(chunk.media_id, chunk.source_start, chunk.source_end)
         })
         .collect()
 }
 
-/// `true` se un singolo intervallo contiguo in cache copre già per intero
-/// `[start, end]` — usato per decidere se un segmento (dietro o avanti)
-/// può essere saltato del tutto, senza toccare il decoder. Necessario
-/// non solo per i blocchi dietro (vedi `without_already_cached_chunks`)
-/// ma per *qualunque* segmento: `OpenDecoder::next_frame` può restare
-/// "indietro" rispetto a `segment.source_start` anche per la finestra
-/// avanti, non solo per quella dietro — es. un riaggancio anticipato con
-/// una porzione già in cache (il ramo "resumed && contains" più sotto)
-/// lascia `next_frame` fermo a quel punto di raccordo, che può restare
-/// più indietro di `source_start` di quanto la soglia adattiva
-/// consideri normale: il ciclo successivo vedrebbe di nuovo un seek
-/// come necessario, decodificherebbe di nuovo la stessa porzione già in
-/// cache (innocuo ma sprecato) e si riaggancerebbe allo stesso punto,
-/// da capo — un loop stabile e permanente (osservato dall'utente:
-/// "loop continuo... non si ferma mai", isolato con
-/// VV_DEBUG_RENDER_AHEAD confrontando bytes_used/soglia/GOP fino a
-/// escludere sfratto per budget e stima del GOP collassata). Questo
-/// controllo, fatto *prima* di interpellare il decoder, evita di
-/// fidarsi della posizione che il decoder *crede* di avere quando la
-/// cache stessa può già rispondere alla domanda "serve altro lavoro
-/// qui?" in modo più affidabile.
-fn range_fully_cached(
-    caches: &SharedFrameCache,
-    media_id: MediaId,
-    start: FrameIdx,
-    end: FrameIdx,
-) -> bool {
-    caches
-        .cached_ranges(media_id)
-        .iter()
-        .any(|&(s, e)| s <= start && e >= end)
-}
-
-/// Assicura che `open[media_id]` sia un decoder posizionato in modo da
-/// poter coprire `segment_start` decodificando in avanti in modo
-/// efficiente. Un decoder già aperto per questo media viene riusato —
-/// anche se è *oltre* `segment_start`, incluso il caso in cui abbia già
-/// superato `segment_end` — perché non c'è nulla che un riapertura
-/// potrebbe migliorare in quel caso: se la cache copre già il segmento va
-/// tutto bene così, se non lo copre (limite di capacità, non di
-/// posizione) rifare lo stesso seek produce esattamente lo stesso
-/// risultato all'infinito. Essere avanti rispetto all'inizio del
-/// segmento è lo stato **sano e atteso** di un buffer che lavora bene —
-/// trattarlo come motivo di un seek è il bug che causava un seek reale
-/// (e quindi una nuova decodifica completa della finestra) ogni ciclo di
-/// poll, sia quando il decoder era leggermente avanti sia appena il giro
-/// precedente si era concluso esattamente al termine del segmento.
-///
-/// Un seek reale serve in due casi, indipendenti tra loro:
-/// - `segment_start` è troppo avanti per continuare a decodificare in
-///   sequenza fino a lì (costa meno un seek);
-/// - la testina di *timeline* è tornata indietro dal ciclo di poll
-///   precedente (`went_backward`, deciso *una sola volta per ciclo* dal
-///   chiamante — vedi `worker_loop`/`walk_and_fill` — confrontando il
-///   target globale, non per-media/per-segmento) **e** questo decoder è
-///   fisicamente già oltre `segment_start`: essere avanti è sano quando
-///   la testina è ferma o avanza (il decoder ha bufferizzato bene), ma
-///   se la testina è appena tornata indietro non può significare altro
-///   che "questo decoder ha superato la nuova posizione e non potrà mai
-///   tornarci decodificando solo in avanti" (`walk_and_fill` scarta ad
-///   ogni ciclo, via `SharedFrameCache::reconcile`, tutto ciò che è
-///   fuori dalla finestra corrente — anche un passo indietro di un solo
-///   frame cade subito fuori finestra e viene scartato).
-///
-/// `went_backward` è deciso una volta per l'intero ciclo, non per media:
-/// un taglio produce più segmenti per lo stesso media nella stessa
-/// finestra, e uno stato per-media aggiornato mentre si itera sui
-/// segmenti verrebbe sporcato dall'ordine di elaborazione.
-///
-/// Quando serve un seek per lo stesso media già aperto, va fatto sul
-/// decoder *esistente* (`seek_to_time`), non riaprendo il file da
-/// `Decoder::open`: per un file grande/non ottimizzato per lo
-/// streaming, riaprire vuol dire riparsare l'intero container/indice
-/// ogni volta, un costo che può arrivare a secondi — se supera la
-/// tolleranza (`OpenDecoder::seek_threshold_frames`) il target avanza oltre durante
-/// l'apertura stessa, scatenandone un'altra al giro successivo, in un
-/// loop che non recupera mai (osservato: riproduzione a scatti, un
-/// frame ogni pochi secondi). `Decoder::open` va usato solo per la
-/// primissima apertura di un media (nessun decoder ancora in `open`) o
-/// per uno diverso da quello aperto. Ritorna `Positioned::Failed` se
-/// l'apertura del media fallisce (il chiamante salta quel segmento);
-/// altrimenti riporta cosa è stato fatto per arrivarci — usato dai test
-/// per verificare che un seek reale scatti solo quando davvero serve,
-/// non ad ogni ciclo.
+/// Porta `open[media_id]` dove può coprire `segment_start` decodificando in
+/// avanti. Un decoder già oltre il segmento è lo stato normale e si riusa.
+/// Si seeka (sul decoder aperto, mai riaprendo: riparsare il container può
+/// costare secondi) solo se il segmento è troppo avanti, se la testina è
+/// tornata indietro e il decoder l'ha superata, o se la cache ha un buco
+/// dove il decoder crede di essere già passato. `went_backward` è deciso
+/// una volta per ciclo: per media lo sporcherebbe l'ordine dei segmenti.
 fn position_decoder(
     caches: &SharedFrameCache,
     open: &mut HashMap<MediaId, OpenDecoder>,
@@ -895,46 +511,19 @@ fn position_decoder(
     is_all_intra: bool,
     is_image: bool,
 ) -> Positioned {
-    // Un proxy appena diventato disponibile (o il toggle "usa proxy"
-    // cambiato) fa risolvere un path diverso per lo stesso media: il
-    // decoder aperto sul path vecchio va scartato, non riposizionato —
-    // vedi doc di `OpenDecoder::resolved_path`.
     if open.get(&media_id).is_some_and(|o| o.resolved_path != path) {
         open.remove(&media_id);
     }
     if let Some(o) = open.get_mut(&media_id) {
         let needs_seek = segment_start > o.next_frame + o.seek_threshold_frames()
             || (went_backward && segment_start < o.next_frame)
-            // `next_frame` è solo quel che il decoder *crede* di aver
-            // già prodotto — non garantisce che sia ancora davvero in
-            // cache: uno sfratto tra un ciclo e l'altro (`reconcile`,
-            // Tier B, o un budget stretto durante un fill precedente)
-            // può aver rimosso proprio la coda che il decoder pensa di
-            // avere già dietro di sé, senza che nulla nel decoder stesso
-            // se ne accorga. Qui si riverifica *sempre* (anche quando
-            // `next_frame` sembrerebbe già a posto) che `[segment_start,
-            // next_frame)` sia davvero coperto da un unico intervallo
-            // contiguo in cache — bug reale, confermato dall'utente: un
-            // "Reused" silenzioso su un buco lasciato da uno sfratto
-            // faceva restare quel buco scoperto per sempre, il primo
-            // controllo del ciclo (`next_frame > source_end`) bastava a
-            // convincere il resto della funzione che non c'era altro da
-            // fare.
+            // Uno sfratto può aver tolto la coda che il decoder crede di aver già
+            // prodotto: si verifica sulla cache.
             || (o.next_frame > segment_start
-                && !range_fully_cached(caches, media_id, segment_start, o.next_frame - 1));
+                && !caches.covers(media_id, segment_start, o.next_frame - 1));
         if !needs_seek {
             return Positioned::Reused;
         }
-        // Stesso media già aperto, serve solo tornare/saltare a un altro
-        // punto: un `seek_to_time` sul decoder esistente riusa il file
-        // già aperto e il container/indice già parsato — aprire di
-        // nuovo da `Decoder::open` per un semplice seek è il bug che
-        // rendeva ogni riposizionamento costoso quanto la primissima
-        // apertura del file (per un file grande, anche secondi): se
-        // quel costo supera la soglia (`seek_threshold_frames`), il
-        // target avanza oltre *durante* l'apertura stessa, scatenando
-        // un'altra apertura completa al giro successivo — un loop che
-        // non recupera mai (osservato: "1 frame ogni pochi secondi").
         let secs = segment_start as f64 / o.decoder.fps().as_f64().max(1e-9);
         let debug_start = debug_enabled().then(std::time::Instant::now);
         let _ = o.decoder.seek_to_time(secs);
@@ -944,12 +533,7 @@ fn position_decoder(
                 t.elapsed()
             );
         }
-        // Placeholder: il prossimo `next_frame()` restituisce l'idx
-        // *reale* del keyframe da cui riparte (può essere <
-        // segment_start), che aggiorna subito questo campo nel loop di
-        // decodifica sotto — che userà anche `just_repositioned` per
-        // imparare il GOP reale da questo atterraggio (vedi
-        // `OpenDecoder::record_keyframe_landing`).
+        // Placeholder: il prossimo frame dirà dove il seek è atterrato davvero.
         o.next_frame = 0;
         o.just_repositioned = true;
         return Positioned::Seeked;
@@ -957,11 +541,8 @@ fn position_decoder(
     // Nessun decoder aperto per questo media: qui l'apertura reale è
     // inevitabile (prima volta, o media diverso da quello aperto finora).
     let debug_start = debug_enabled().then(std::time::Instant::now);
-    // Un'immagine ferma va aperta con `open_image` (un solo frame,
-    // restituito per qualunque posizione richiesta — vedi la sua doc):
-    // un vero `Decoder::open` su di lei si comporterebbe come un video a
-    // un frame solo, andando in EOF non appena la timeline chiede una
-    // posizione oltre la primissima.
+    // Un'immagine va aperta con `open_image`, o andrebbe in EOF dopo il
+    // primo frame.
     let opened = if is_image { Decoder::open_image(path) } else { Decoder::open(path) };
     let Ok(mut decoder) = opened else {
         return Positioned::Failed;
@@ -982,43 +563,13 @@ fn position_decoder(
     Positioned::Opened
 }
 
-/// Cammina `lookahead_secs` avanti da `from_frame` e riempie la
-/// `SharedFrameCache` (REFACTOR_PIPELINE.md §2) in ordine di priorità:
-/// i segmenti restituiti da `collect_media_segments` sono già ordinati
-/// dal più vicino alla testina al più lontano (si cammina la timeline in
-/// avanti da `from_frame`), quindi elaborarli in quest'ordine — fermandosi
-/// non appena il budget globale è saturo — significa che il frame che
-/// serve ORA (sotto la testina, qualunque sia il suo media) è sempre il
-/// primo a essere bufferizzato, senza bisogno di un vero scheduler
-/// multi-thread (REFACTOR_PIPELINE.md §3.4, non ancora fatto).
-///
-/// `went_backward`: se la testina di timeline è tornata indietro dal
-/// ciclo di poll precedente, decisa una sola volta dal chiamante
-/// (confrontando `from_frame` globale, non per-media/per-segmento —
-/// vedi `position_decoder`) prima di iterare sui segmenti.
-///
-/// Esito di un ciclo di `walk_and_fill`, letto da `worker_loop`.
+/// Esito di un ciclo di `walk_and_fill`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalkOutcome {
-    /// La testina *live* (`target`) si è spostata abbastanza, mentre si
-    /// decodificava, da rendere obsoleto il lavoro rimasto in questo
-    /// ciclo — in quel caso il chiamante non aspetta il prossimo
-    /// `POLL_INTERVAL`, rilegge subito il target fresco e ricomincia: un
-    /// prefetch lontano non deve mai far aspettare la testina che si
-    /// sposta nel frattempo (REFACTOR_PIPELINE.md §3.1).
+    /// La testina si è spostata abbastanza da rendere obsoleto il lavoro
+    /// rimasto: si riparte subito col target nuovo.
     interrupted: bool,
-    /// La finestra di lookahead richiesta in questo ciclo è ora
-    /// interamente in cache (o non c'era nulla da bufferizzare):
-    /// `false` se il budget globale ha fermato il fill a metà, o se
-    /// `interrupted` ha troncato il giro — in entrambi i casi c'è ancora
-    /// lavoro potenzialmente utile da fare al prossimo ciclo. Esposto
-    /// alla UI via `RenderAhead::is_caught_up`: senza questo segnale, la
-    /// UI non ha modo di sapere quando può smettere di richiedere
-    /// repaint continui in attesa di vedere avanzare l'indicatore
-    /// "buffered" (bug osservato: restava fermo finché non arrivava un
-    /// repaint per qualche altro motivo, es. muovere il mouse — il
-    /// worker bufferizza comunque, a un ritmo suo indipendente dalla UI,
-    /// ma senza repaint quel progresso non veniva mai ridisegnato).
+    /// Tutta la finestra è in cache: la UI può smettere di chiedere repaint.
     caught_up: bool,
 }
 
@@ -1026,6 +577,11 @@ impl WalkOutcome {
     const SETTLED: Self = Self {
         interrupted: false,
         caught_up: true,
+    };
+    /// Fermato da budget o transito: c'è ancora lavoro, ma non subito.
+    const UNFINISHED: Self = Self {
+        interrupted: false,
+        caught_up: false,
     };
 }
 
@@ -1047,14 +603,6 @@ fn walk_and_fill(
         return WalkOutcome::SETTLED;
     };
     let fps = timeline.fps.as_f64().max(1e-9);
-    // `lookahead_secs`/`behind_secs` sono configurabili dall'utente
-    // (menu Playback > Proxy, anche `0`) ma restano sempre pavimentati a
-    // `MIN_MARGIN_FRAMES` — vedi la sua doc sul perché un margine
-    // letteralmente nullo è strutturalmente fragile anche con la
-    // sveglia immediata su cambio target. Nessun caso speciale in più
-    // nel resto della funzione, sono ancora `collect_media_segments`/
-    // `collect_media_segments_behind` a decidere cosa c'è da fare, solo
-    // con una finestra diversa in ingresso.
     let lookahead_frames = ((lookahead_secs * fps).round() as FrameIdx).max(MIN_MARGIN_FRAMES);
     let behind_frames = ((behind_secs * fps).round() as FrameIdx).max(MIN_MARGIN_FRAMES);
     let end_frame = from_frame + lookahead_frames;
@@ -1078,16 +626,11 @@ fn walk_and_fill(
             source_start: s.source_start,
             source_end: s.source_end,
             timeline_start: s.timeline_start,
+            rate: s.rate,
         })
         .collect();
-    // Un solo pass di riconciliazione (vedi doc di `SharedFrameCache::
-    // reconcile`): scarta ciò che è uscito da *entrambe* le finestre
-    // (qualunque sia il motivo — media non più presente, oltre l'una o
-    // l'altra estremità) e, se il budget globale condiviso non basta per
-    // tutto ciò che è rimasto, sfratta il contenuto più lontano dalla
-    // testina (che sia in avanti o dietro, la distanza è simmetrica).
-    // Sostituisce insieme retain/evict_before/sfratto-per-capacità di
-    // prima.
+    // Scarta ciò che è fuori da entrambe le finestre e, oltre il budget, il
+    // più lontano dalla testina.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
     if debug_enabled() {
         for id in forward_media
@@ -1111,43 +654,13 @@ fn walk_and_fill(
         proxy_enabled,
         target,
     };
-    // In avanti prima, sempre: il frame che serve ORA per non fermare la
-    // riproduzione ha sempre priorità sul buffer dietro la testina, che è
-    // solo una comodità per uno scrub avanti-indietro ravvicinato (vedi
-    // doc di `DEFAULT_BEHIND_SECS`) — se il budget si esaurisce già qui, dietro
-    // non riceve nulla in questo ciclo, correttamente.
+    // Prima la finestra in avanti: dietro riceve solo il budget che avanza.
     if let ControlFlow::Break(outcome) = fill_segments(&forward_segments, &ctx, open) {
         return outcome;
     }
-    // Decoder *separato* da quello della finestra in avanti (vedi
-    // `open_behind`, mappa a parte passata dal chiamante): usare lo
-    // stesso decoder per entrambe le direzioni lo lascerebbe posizionato
-    // in avanti dopo il fill sopra, facendo scattare
-    // `od.next_frame > segment.source_end` qui sotto per *qualunque*
-    // segmento dietro la testina dello stesso media — saltandolo sempre
-    // in silenzio, anche la primissima volta che quella zona va davvero
-    // decodificata (non è mai stato un problema di posizionamento, è che
-    // le due finestre vogliono il decoder in due punti diversi nello
-    // stesso momento).
-    //
-    // Spezzata in blocchi dal più vicino al più lontano
-    // (`chunk_behind_segments_near_to_far`, vedi doc di
-    // `BEHIND_CHUNK_FRAMES`) e filtrata di quelli già interamente in
-    // cache (`without_already_cached_chunks`, vedi la sua doc sul perché
-    // è necessario per restare stabile a testina ferma). Un blocco
-    // lontano ha sempre `source_start` *dietro* a dove il decoder è
-    // appena arrivato (il blocco appena prima, più vicino) — un seek
-    // reale ci vuole sempre per i blocchi rimasti dopo il filtro, a
-    // prescindere da quanto la testina *globale* si sia mossa
-    // (`went_backward` del ciclo intero non c'entra qui), quindi
-    // `went_backward: true` forzato solo per questa chiamata:
-    // `position_decoder` lo richiede per riconoscere "questo decoder ha
-    // superato la nuova posizione" quando la distanza rientra comunque
-    // nella soglia adattiva (vedi la sua doc). Il primo blocco rimasto
-    // resta comunque `Reused` quando il decoder era già lì da un ciclo
-    // precedente: la condizione in `position_decoder` scatta solo se il
-    // decoder è *già oltre* l'inizio del blocco richiesto, mai per un
-    // decoder ancora dietro.
+    // Decoder separati da quelli in avanti: uno stesso decoder resterebbe
+    // oltre ogni segmento dietro e li salterebbe tutti. Per i blocchi rimasti
+    // un seek serve sempre, quindi `went_backward` è forzato.
     let all_behind_chunks = chunk_behind_segments_near_to_far(&behind_segments);
     let behind_chunks = without_already_cached_chunks(caches, all_behind_chunks.clone());
     if debug_enabled() {
@@ -1181,32 +694,13 @@ fn walk_and_fill(
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
         return outcome;
     }
-    // Un giro che arriva fin qui (nessun Break) ha finito tutto il lavoro
-    // utile per questa finestra, ma può aver inserito frame di puro
-    // transito (vedi doc di `transit_bytes` in `fill_segments`) che non
-    // appartengono a `window` — normalmente scartati dal prossimo
-    // `reconcile`, a inizio del prossimo giro, 50ms dopo. Nel frattempo
-    // però questo giro sta per restituire `caught_up: true`, che secondo
-    // `RenderAhead::is_caught_up` dice alla UI "puoi smettere di chiedere
-    // repaint" — e senza un altro repaint la UI resta bloccata proprio su
-    // quel fotogramma con il transito ancora dentro, mostrando una
-    // striscia "buffered" più larga del vero finché qualcos'altro (es.
-    // muovere il mouse) non forza per caso un repaint che rilegge lo
-    // stato nel frattempo già scartato (bug osservato dall'utente: la
-    // striscia si "ridimensiona" solo muovendo il mouse). Riconciliando
-    // subito, prima di dichiararsi `caught_up`, lo stato che la UI legge
-    // in quel momento è già quello vero — il riuso del transito *tra* i
-    // segmenti processati in questo stesso giro (il vero motivo per cui
-    // viene inserito, vedi sopra) è già avvenuto e resta intatto, si
-    // perde solo la sua eventuale sopravvivenza *oltre* la fine del giro.
+    // Toglie subito i frame di transito rimasti: la UI legge lo stato appena
+    // dichiarato `caught_up` e non deve vedere una striscia più larga del vero.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
     WalkOutcome::SETTLED
 }
 
-/// Parametri di `fill_segments` che non cambiano tra la chiamata per la
-/// finestra in avanti e quella per la finestra dietro la testina —
-/// raggruppati per non far crescere il numero di argomenti della
-/// funzione a ogni nuovo parametro condiviso.
+/// Parametri di `fill_segments` comuni alle due finestre.
 struct FillContext<'a> {
     project: &'a Project,
     caches: &'a SharedFrameCache,
@@ -1220,14 +714,9 @@ struct FillContext<'a> {
     target: &'a AtomicI64,
 }
 
-/// Nucleo del fill condiviso da finestra in avanti e finestra dietro la
-/// testina (vedi doc di `walk_and_fill`): decodifica quanto serve per
-/// coprire `segments`, usando/aggiornando i decoder aperti in `open`,
-/// fermandosi se il budget globale è saturo o se la testina *live* si è
-/// spostata troppo per rendere utile continuare. `ControlFlow::Continue`
-/// se ha processato tutti i segmenti senza interruzioni; `Break` porta
-/// già l'esito finale che `walk_and_fill` deve restituire al suo
-/// chiamante.
+/// Decodifica quanto serve a coprire `segments`, fermandosi se il budget è
+/// saturo o se la testina live si è spostata troppo. `Break` porta l'esito
+/// finale.
 fn fill_segments(
     segments: &[MediaSegment],
     ctx: &FillContext,
@@ -1237,43 +726,15 @@ fn fill_segments(
         let Some(item) = ctx.project.media_pool.get(segment.media_id) else {
             continue;
         };
-        // Salta del tutto un segmento già interamente in cache, prima
-        // ancora di guardare dove il decoder *crede* di essere — vedi
-        // doc di `range_fully_cached` sul perché non ci si può fidare
-        // solo di `OpenDecoder::next_frame` qui (un riaggancio anticipato
-        // può lasciarlo "indietro" rispetto a `source_start` in modo
-        // permanente, altrimenti un loop di riseek-ridecodifica-riaggancio
-        // stabile e infinito, mai risolto da solo).
-        if range_fully_cached(
-            ctx.caches,
-            segment.media_id,
-            segment.source_start,
-            segment.source_end,
-        ) {
+        // Già tutto in cache: non ci si fida della posizione che il decoder crede
+        // di avere.
+        if ctx.caches.covers(segment.media_id, segment.source_start, segment.source_end) {
             continue;
         }
-        // Stima (risoluzione del media, YUV420 planare senza
-        // l'arrotondamento per dimensioni dispari del decoder reale —
-        // un margine di sicurezza volutamente semplice, non un conteggio
-        // byte-esatto) di quanto pesa UN frame di questo media. Se non
-        // c'è nemmeno spazio per un frame in più, non ha senso nemmeno
-        // tentare: il primo frame *voluto* fallirebbe comunque il
-        // controllo di budget più sotto, dopo aver già pagato il
-        // transito per arrivarci (costo CPU reale, non solo contabile —
-        // bug reale, confermato dall'utente con `behind_secs` alto su
-        // un GOP da 250 frame: loop infinito che rifaceva la stessa
-        // decodifica da 625MB ogni ~50ms, sempre respinta). Qui si
-        // guarda solo `bytes_used()`, mai una stima del transito
-        // necessario per arrivarci: un tentativo del genere (provato e
-        // poi tolto — bug reale, confermato dall'utente: bloccava il
-        // playback normale per secondi ogni volta che il transito
-        // stimato appariva grande, anche con budget ampiamente
-        // disponibile) viola la stessa regola che il controllo più
-        // sotto rispetta apposta — il transito non conta *mai* contro
-        // il budget del proprio tratto voluto, quindi non ha senso
-        // scartare un segmento sulla sola base di quanto transito
-        // servirebbe.
-        let estimated_frame_bytes = (item.meta.width as usize * item.meta.height as usize * 3) / 2;
+        // Senza spazio nemmeno per un frame non si comincia: si pagherebbe il
+        // transito per un frame poi rifiutato, ciclo dopo ciclo. Il transito non
+        // conta mai contro il budget del tratto voluto.
+        let estimated_frame_bytes = vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
         if ctx.caches.bytes_used() + estimated_frame_bytes > ctx.cache_budget_bytes {
             if debug_enabled() {
                 eprintln!(
@@ -1285,18 +746,10 @@ fn fill_segments(
                     ctx.cache_budget_bytes
                 );
             }
-            return ControlFlow::Break(WalkOutcome {
-                interrupted: false,
-                caught_up: false,
-            });
+            return ControlFlow::Break(WalkOutcome::UNFINISHED);
         }
-        // Proxy solo se il toggle è attivo *e* quello per questo media
-        // è già pronto (REFACTOR_PIPELINE.md proxy) — il caso "toggle
-        // attivo ma proxy non ancora generato in background" ricade sul
-        // sorgente originale senza bisogno di un caso a parte: appena
-        // `generate_proxy` finisce (thread separato, vedi `main.rs`),
-        // il prossimo ciclo lo trova su disco e ci passa da sé (il
-        // confronto path in `position_decoder` se ne accorge).
+        // Proxy solo se attivo e già generato; altrimenti il sorgente, finché il
+        // proxy non compare su disco.
         let is_proxy = ctx.proxy_enabled && vv_media::proxy::proxy_exists(item.content_hash);
         let path = if is_proxy {
             vv_media::proxy::proxy_path_for(item.content_hash)
@@ -1317,25 +770,11 @@ fn fill_segments(
             continue;
         }
 
-        // Diventa `true` dopo il primo frame realmente decodificato in
-        // questo giro: prima di allora `od.next_frame` può essere solo
-        // il placeholder `0` impostato da `position_decoder` dopo un
-        // (ri)apertura/seek, non ancora corretto al vero indice del
-        // keyframe da cui il decoder riparte — controllare la cache
-        // prima di quel momento potrebbe far fermare il ciclo per un
-        // falso positivo (0 per coincidenza già in cache) senza aver mai
-        // scoperto la vera posizione del decoder.
+        // `next_frame` è un placeholder finché il primo frame dopo il seek non
+        // dice la posizione vera.
         let mut resumed = false;
-        // Byte inseriti in questo giro per puro transito (`idx <
-        // segment.source_start`, vedi sotto) — sottratti dal controllo
-        // di budget per il tratto richiesto, così il proprio transito
-        // non può mai impedire a un segmento di raggiungere sé stesso
-        // (bug reale, confermato dall'utente: un budget stretto
-        // lasciava scoperto per sempre un segmento lontano dal keyframe
-        // più vicino). Il conteggio in frame (`transit_frames`, non
-        // derivato da questo) ha comunque un tetto di sicurezza
-        // indipendente (`TRANSIT_SAFETY_CAP_FRAMES`) per non esplodere
-        // senza limite su un GOP patologicamente lungo.
+        // Byte di transito di questo giro: non devono impedire al segmento di
+        // raggiungere sé stesso con un budget stretto.
         let mut transit_bytes: usize = 0;
         let mut transit_frames: FrameIdx = 0;
         loop {
@@ -1343,31 +782,11 @@ fn fill_segments(
             if od.next_frame > segment.source_end {
                 break;
             }
-            // Ci siamo ricongiunti con una porzione già bufferizzata (non
-            // sfrattata perché dentro alla finestra corrente, vedi
-            // `SharedFrameCache::reconcile`) che arriva *fino alla fine
-            // di questo segmento*: da qui in avanti dovrebbe già esserci
-            // tutto, quindi continuare a decodificare sarebbe lavoro
-            // sprecato — un piccolo scrub all'indietro deve ridecodificare
-            // solo il nuovo tratto scoperto prima del punto di
-            // riconnessione, non l'intera finestra. Serve un *unico*
-            // intervallo contiguo che copra `[next_frame, source_end]`
-            // (`range_fully_cached`), non due `contains` indipendenti:
-            // due punti entrambi presenti ma su isole di cache separate
-            // (es. un buco lasciato da un fill precedente saturo di
-            // budget) soddisfacevano comunque `contains(next_frame) &&
-            // contains(source_end)` senza che ci fosse continuità tra i
-            // due — un riaggancio "falso positivo" che lasciava scoperto
-            // per sempre proprio il buco in mezzo, mai più raggiunto
-            // dopo (bug reale, confermato dall'utente: un blocco restava
-            // "da processare" a ogni ciclo, stabile, mai completato).
+            // Ricongiunti con una parte già in cache fino in fondo al segmento: il
+            // resto c'è già. Serve un unico intervallo contiguo, non due punti
+            // presenti su isole diverse.
             if resumed
-                && range_fully_cached(
-                    ctx.caches,
-                    segment.media_id,
-                    od.next_frame,
-                    segment.source_end,
-                )
+                && ctx.caches.covers(segment.media_id, od.next_frame, segment.source_end)
             {
                 if debug_enabled() {
                     eprintln!(
@@ -1380,31 +799,13 @@ fn fill_segments(
             let mut threshold_frames = od.seek_threshold_frames();
             match od.decoder.next_frame() {
                 Ok(Some((idx, frame))) => {
-                    // Primo frame dopo un seek/apertura reale: è per
-                    // costruzione un keyframe, registra l'atterraggio per
-                    // affinare la stima del GOP di questo media (vedi
-                    // `OpenDecoder::record_keyframe_landing`) prima che il
-                    // resto del loop possa scambiarlo per un frame
-                    // qualunque nel mezzo del decode sequenziale.
                     if od.just_repositioned {
                         od.record_keyframe_landing(idx);
                         od.just_repositioned = false;
                         threshold_frames = od.seek_threshold_frames();
                     }
-                    // `insert` sovrascrive innocuamente se `idx` è già
-                    // presente (decoder ripartito da un keyframe
-                    // precedente al punto richiesto): evita solo un ramo
-                    // che avanzi `next_frame` senza consumare davvero un
-                    // frame dal decoder (in passato causa di un
-                    // disallineamento tra la posizione tracciata e
-                    // quella reale).
-                    let frame_bytes = frame.y.len() + frame.u.len() + frame.v.len();
+                    let frame_bytes = frame.byte_len();
                     if idx >= segment.source_start {
-                        // Il controllo ignora `transit_bytes`: il
-                        // transito che *questo* giro ha già speso per
-                        // arrivare fin qui non deve mai poter impedire
-                        // al segmento di raggiungere sé stesso (vedi doc
-                        // di `transit_bytes`).
                         if ctx.caches.bytes_used().saturating_sub(transit_bytes)
                             >= ctx.cache_budget_bytes
                         {
@@ -1419,31 +820,11 @@ fn fill_segments(
                                     ctx.cache_budget_bytes
                                 );
                             }
-                            return ControlFlow::Break(WalkOutcome {
-                                interrupted: false,
-                                caught_up: false,
-                            });
+                            return ControlFlow::Break(WalkOutcome::UNFINISHED);
                         }
                     } else {
-                        // Frame di puro transito verso il keyframe più
-                        // vicino, prima ancora di `segment.source_start`
-                        // (un GOP lungo può costringere il decoder a
-                        // riattraversarne parecchi per raggiungere un
-                        // segmento lontano dal proprio keyframe).
-                        // Inserito comunque (non solo decodificato e
-                        // scartato): se un altro segmento vicino, non
-                        // ancora processato in questo stesso giro, cade
-                        // nello stesso tratto di transito, lo trova già
-                        // pronto invece di dover riattraversare lo
-                        // stesso GOP da capo — lo scrub all'indietro su
-                        // sorgente a GOP lungo dipende da questo riuso
-                        // per restare comparabile in velocità allo
-                        // scrub in avanti (osservato dall'utente: senza,
-                        // visibilmente più lento). Il tetto di sicurezza
-                        // sotto (in frame, non nel budget condiviso —
-                        // vedi doc di `TRANSIT_SAFETY_CAP_FRAMES`) evita
-                        // comunque un'esplosione senza limite su un GOP
-                        // patologicamente lungo.
+                        // Transito prima del segmento: si tiene comunque, un segmento vicino in
+                        // questo stesso giro lo riusa invece di riattraversare il GOP.
                         if transit_frames >= TRANSIT_SAFETY_CAP_FRAMES {
                             if debug_enabled() {
                                 eprintln!(
@@ -1454,10 +835,7 @@ fn fill_segments(
                                     od.next_frame,
                                 );
                             }
-                            return ControlFlow::Break(WalkOutcome {
-                                interrupted: false,
-                                caught_up: false,
-                            });
+                            return ControlFlow::Break(WalkOutcome::UNFINISHED);
                         }
                         transit_bytes += frame_bytes;
                         transit_frames += 1;
@@ -1491,18 +869,8 @@ fn fill_segments(
                     break;
                 }
             }
-            // Rilettura economica (atomica) del target *live*, non solo
-            // quello letto a inizio ciclo: se nel frattempo la testina si
-            // è spostata abbastanza da rendere questo prefetch obsoleto,
-            // interrompe subito invece di finire di decodificare un
-            // segmento che non serve più — il chiamante (`worker_loop`)
-            // ricomincia immediatamente con il target fresco, senza
-            // aspettare fino al prossimo `POLL_INTERVAL`. Soglia condivisa
-            // con `position_decoder` (`OpenDecoder::seek_threshold_frames`,
-            // adattiva sul GOP osservato — REFACTOR_PIPELINE.md §3.3):
-            // sotto quella distanza il lavoro in corso è ancora utile
-            // (drift normale di riproduzione), sopra è uno scrub/salto
-            // che rende la finestra corrente stale.
+            // Target live: se la testina si è spostata oltre la soglia il prefetch è
+            // obsoleto e si ricomincia subito.
             let live = ctx.target.load(Ordering::Relaxed);
             if (live - ctx.from_frame).abs() > threshold_frames {
                 if debug_enabled() {
@@ -1542,16 +910,14 @@ fn fill_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as OsCommand;
     use vv_core::{Clip, ClipId, MediaItem, MediaMeta, Rational, Track, TrackKind};
 
     fn make_test_clip(dir_name: &str, file_name: &str, duration_secs: u32) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(dir_name);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(file_name);
-        let status = OsCommand::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -1560,11 +926,9 @@ mod tests {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
         path
     }
 
@@ -1572,12 +936,19 @@ mod tests {
         let dir = std::env::temp_dir().join(dir_name);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(file_name);
-        let status = OsCommand::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "color=c=green:size=320x240:rate=1:duration=1"])
-            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=green:size=320x240:rate=1:duration=1",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &path,
+        );
         path
     }
 
@@ -1603,6 +974,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -1665,9 +1037,8 @@ mod tests {
         let dir = std::env::temp_dir().join(dir_name);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(file_name);
-        let status = OsCommand::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -1680,11 +1051,9 @@ mod tests {
                 &gop.to_string(),
                 "-keyint_min",
                 &gop.to_string(),
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
         path
     }
 
@@ -1703,6 +1072,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         }
@@ -2079,6 +1449,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2093,6 +1464,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2164,6 +1536,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2440,12 +1813,14 @@ mod tests {
                 source_start: 0,
                 source_end: gap_at - 1,
                 timeline_start: 0,
+                rate: vv_core::Rational::one(),
             },
             WantedRange {
                 media_id: media_a,
                 source_start: gap_at + 1,
                 source_end: advanced_next_frame - 1,
                 timeline_start: gap_at + 1,
+                rate: vv_core::Rational::one(),
             },
         ];
         caches.reconcile(0, &window, usize::MAX);
@@ -2530,6 +1905,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2587,6 +1963,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2670,6 +2047,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2753,6 +2131,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2847,6 +2226,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2927,6 +2307,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -2998,6 +2379,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3075,6 +2457,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3162,6 +2545,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3297,6 +2681,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3311,6 +2696,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3409,6 +2795,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3493,6 +2880,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3589,6 +2977,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3660,6 +3049,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3741,7 +3131,7 @@ mod tests {
     /// all'indietro, la porzione già bufferizzata che ricade ancora
     /// nella *nuova* finestra (avanti + dietro, vedi `behind_secs`) non
     /// deve essere ridecodificata — anzi, il decoder non va toccato per
-    /// niente (`range_fully_cached`, controllato *prima* di interpellarlo:
+    /// niente (`SharedFrameCache::covers`, controllato *prima* di interpellarlo:
     /// vedi la sua doc su un bug reale, confermato in produzione, causato
     /// dal fidarsi della posizione che il decoder *crede* di avere invece
     /// di chiedere alla cache). Con la finestra di retention dietro la
@@ -3779,6 +3169,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3870,7 +3261,7 @@ mod tests {
     /// (la posizione del decoder non viene mai aggiornata da un ciclo
     /// che lo salta), quindi riseekava, ridecodificava lo stesso tratto
     /// già in cache fino a riagganciarsi allo stesso punto di prima — un
-    /// loop stabile e infinito, mai autolimitantesi. `range_fully_cached`
+    /// loop stabile e infinito, mai autolimitantesi. `SharedFrameCache::covers`
     /// lo previene chiedendo alla cache *prima* di guardare la posizione
     /// (presunta) del decoder.
     #[test]
@@ -3888,6 +3279,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -3995,6 +3387,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -4069,6 +3462,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -4144,6 +3538,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });
@@ -4236,6 +3631,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         });

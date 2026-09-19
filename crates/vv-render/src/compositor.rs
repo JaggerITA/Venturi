@@ -1,33 +1,14 @@
-//! Pipeline di compositing per-frame (vedi ARCHITECTURE.md § Compositing
-//! GPU): input in YUV420 planare ([`YuvFrame`], REFACTOR_PIPELINE.md B3
-//! — la conversione a RGB avviene qui, nello shader, non più su CPU in
-//! vv-media), crop + zoom via shader wgpu.
+//! Compositing GPU: input YUV420 planare convertito a RGB nello shader,
+//! layer composti in alpha-over dal basso verso l'alto.
 //!
-//! Lo stack di track video viene composto in alpha-over, un pass per
-//! layer ([`Compositor::render_layers`]/[`Layer`]): dove il layer sopra
-//! non copre il frame di output — aspect ratio diverso da quello della
-//! timeline, vedi `fit_factors` — si vede quello sotto.
-//!
-//! Due modi di ottenere il risultato, che condividono gli stessi pass:
-//! - [`Compositor::render_layers`] fa un round-trip CPU→GPU→CPU (upload,
-//!   render, readback) in RGBA; [`Compositor::render_layers_i420`] fa lo
-//!   stesso ma converte in I420 sulla GPU — usato dall'export, che passa
-//!   i piani direttamente all'encoder (`vv_media::Encoder::write_video_frame`).
-//! - [`Compositor::render_layers_to_texture`] resta sulla GPU, nessun
-//!   readback: usato dall'anteprima (`vv-app::main`), che registra la
-//!   texture direttamente in `egui-wgpu` (`Renderer::register_native_texture`
-//!   / `update_egui_texture_from_wgpu_texture`) ed evita sia il readback
-//!   sia il re-upload che `egui::ColorImage` avrebbe comunque richiesto —
-//!   il round-trip che questo secondo metodo elimina (REFACTOR_PIPELINE.md
-//!   B2). Richiede che il `Compositor` sia stato costruito con
-//!   [`Compositor::new`] condividendo il device/queue di `egui-wgpu`
-//!   ([`Compositor::new_headless`] resta per l'export e per i test, che
-//!   non hanno bisogno di mostrare nulla in una finestra egui): una
-//!   texture creata su un device diverso da quello del renderer egui non
-//!   può essere condivisa con lui.
+//! - `render_layers` / `render_layers_i420`: readback in RGBA o I420
+//!   (export).
+//! - `render_layers_to_texture`: resta sulla GPU, per l'anteprima che
+//!   registra la texture in egui-wgpu. Richiede `Compositor::new` sullo
+//!   stesso device di egui.
 
-use std::sync::Arc;
-use vv_core::Transform;
+use std::sync::{Arc, Mutex};
+use vv_core::{ColorMatrix, Transform};
 use wgpu::util::DeviceExt;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -52,36 +33,17 @@ const SOLID_PLACEHOLDER: YuvFrame<'static> = YuvFrame {
 /// come `.r` nello shader.
 const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
-/// Matrice di conversione YUV→RGB (REFACTOR_PIPELINE.md B3) — stessi tre
-/// casi di `vv_media::ColorMatrix`, ridefinita qui invece di dipendere
-/// da vv-media: vv-render non sa cos'è un media decodificato, prende
-/// solo piani di byte grezzi (stessa convenzione già in uso per il
-/// resto di questo modulo — vedi `YuvFrame`, non un
-/// `vv_media::FrameYuv420`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorMatrix {
-    Bt601,
-    Bt709,
-    Bt2020,
-}
-
-impl ColorMatrix {
-    /// Selettore passato allo shader (`transform.wgsl`, funzione
-    /// `kr_kb`): deve restare sincronizzato con quella funzione.
-    fn shader_id(self) -> f32 {
-        match self {
-            Self::Bt601 => 0.0,
-            Self::Bt709 => 1.0,
-            Self::Bt2020 => 2.0,
-        }
+/// Selettore della matrice per lo shader: deve restare allineato a
+/// `kr_kb` in `transform.wgsl`.
+fn shader_matrix_id(matrix: ColorMatrix) -> f32 {
+    match matrix {
+        ColorMatrix::Bt601 => 0.0,
+        ColorMatrix::Bt709 => 1.0,
+        ColorMatrix::Bt2020 => 2.0,
     }
 }
 
-/// Un frame video decodificato in YUV420 planare 8 bit, con i metadati
-/// colore necessari a convertirlo in RGB correttamente — l'input di
-/// [`Compositor::render_frame`]/[`Compositor::render_frame_to_texture`].
-/// I piani devono essere densi (nessun padding di riga, vedi
-/// `vv_media::FrameYuv420` per come vengono prodotti dal decoder).
+/// Frame YUV420 8 bit con i metadati colore. Piani densi, senza padding.
 pub struct YuvFrame<'a> {
     pub y: &'a [u8],
     pub width: u32,
@@ -98,16 +60,8 @@ pub struct YuvFrame<'a> {
     pub full_range: bool,
 }
 
-impl<'a> YuvFrame<'a> {
-    fn borrowed(&self) -> YuvFrame<'a> {
-        YuvFrame { ..*self }
-    }
-}
-
-/// Un livello dello stack di compositing, dal basso verso l'alto (vedi
-/// [`Compositor::render_layers`]): una track video con una clip Media
-/// (`Video`) o con una clip generatore a colore pieno (`Solid`, trattata
-/// come un sorgente grande quanto la timeline: stesso transform/crop).
+/// Un layer dello stack. `Solid` e `Text` si trattano come sorgenti grandi
+/// quanto la timeline: stesso transform/crop.
 pub enum Layer<'a> {
     Video {
         frame: YuvFrame<'a>,
@@ -138,11 +92,9 @@ enum Fill {
     Mask(vv_core::Rgba),
 }
 
-/// Il frame di output di una composizione: la risoluzione in pixel della
-/// texture prodotta e quella *logica* della timeline, in cui sono espressi
-/// posizione e anchor point del `Transform`. Le due coincidono nell'export;
-/// l'anteprima compone alla risoluzione del frame decodificato (proxy
-/// compreso, vedi `fit_output_size`), quindi più piccola.
+/// Risoluzione in pixel della texture prodotta e quella logica della
+/// timeline, in cui sono espressi posizione e anchor. Coincidono
+/// nell'export; l'anteprima compone alla risoluzione del frame decodificato.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputFrame {
     pub width: u32,
@@ -236,7 +188,7 @@ impl TransformUniform {
                 if t.flip[1] { 1.0 } else { 0.0 },
             ],
             color: [
-                matrix.shader_id(),
+                shader_matrix_id(matrix),
                 if full_range { 1.0 } else { 0.0 },
                 output.width as f32 / output.height.max(1) as f32,
                 mode,
@@ -260,6 +212,31 @@ pub struct Compositor {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     i420_pipeline: wgpu::ComputePipeline,
+    /// Texture riusate da un frame all'altro, per dimensione: allocarne di
+    /// nuove a ogni frame costa più del disegno stesso.
+    pool: Mutex<TexturePool>,
+}
+
+#[derive(Default)]
+struct TexturePool {
+    planes: Vec<wgpu::Texture>,
+    outputs: Vec<wgpu::Texture>,
+}
+
+/// Oltre, le texture di dimensioni non più usate vengono lasciate andare.
+const MAX_POOLED: usize = 32;
+
+fn take_sized(pool: &mut Vec<wgpu::Texture>, width: u32, height: u32) -> Option<wgpu::Texture> {
+    let i = pool
+        .iter()
+        .position(|t| t.width() == width && t.height() == height)?;
+    Some(pool.swap_remove(i))
+}
+
+fn give_back(pool: &mut Vec<wgpu::Texture>, textures: impl IntoIterator<Item = wgpu::Texture>) {
+    pool.extend(textures);
+    let excess = pool.len().saturating_sub(MAX_POOLED);
+    pool.drain(..excess);
 }
 
 impl Compositor {
@@ -327,10 +304,8 @@ impl Compositor {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: OUTPUT_FORMAT,
-                    // Alpha blending, non REPLACE: le zone scoperte di un
-                    // layer (letterbox, vedi `fit_factors`) escono dallo
-                    // shader con alpha 0 e devono lasciar vedere il layer
-                    // sotto, non coprirlo di nero.
+                    // Non REPLACE: le zone scoperte (letterbox) escono con alpha 0 e devono
+                    // mostrare il layer sotto.
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -373,6 +348,7 @@ impl Compositor {
             bind_group_layout,
             sampler,
             i420_pipeline,
+            pool: Mutex::default(),
         }
     }
 
@@ -397,103 +373,8 @@ impl Compositor {
         Self::new(Arc::new(device), Arc::new(queue))
     }
 
-    /// Applica `transform` a un frame YUV420 e restituisce il risultato
-    /// come RGBA8 denso (`output.width * output.height * 4` byte). Fa un
-    /// readback GPU→CPU: per il path
-    /// zero-copy verso l'anteprima egui vedi
-    /// [`Compositor::render_frame_to_texture`].
-    pub fn render_frame(
-        &self,
-        frame: &YuvFrame,
-        transform: &Transform,
-        output: OutputFrame,
-    ) -> Vec<u8> {
-        self.render_layers(
-            &[Layer::Video {
-                frame: frame.borrowed(),
-                transform: *transform,
-                source_size: (frame.width, frame.height),
-            }],
-            output,
-        )
-    }
-
-    /// Come [`Compositor::render_frame`] ma per uno stack di layer
-    /// (track video dal basso verso l'alto): ogni layer viene composto
-    /// sopra il precedente in alpha-over, così le zone scoperte di quello
-    /// in cima (bande di letterbox, vedi `fit_factors`) mostrano quello
-    /// sotto invece del nero.
-    pub fn render_layers(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
-        let output_texture = self.render_layers_to_texture(layers, output);
-        let (output_w, output_h) = (output.width, output.height);
-
-        // wgpu richiede che ogni riga del buffer di destinazione sia
-        // allineata a COPY_BYTES_PER_ROW_ALIGNMENT: il buffer può quindi
-        // avere padding a fine riga che va rimosso in fase di lettura.
-        let unpadded_bytes_per_row = output_w * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vv-render readback buffer"),
-            size: (padded_bytes_per_row * output_h) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("vv-render readback encoder"),
-            });
-        encoder.copy_texture_to_buffer(
-            output_texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(output_h),
-                },
-            },
-            wgpu::Extent3d {
-                width: output_w,
-                height: output_h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = output_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll del device wgpu fallito");
-        rx.recv()
-            .expect("il callback di map_async non ha risposto")
-            .expect("map_async fallita");
-
-        let mut out = Vec::with_capacity((unpadded_bytes_per_row * output_h) as usize);
-        {
-            let data = slice.get_mapped_range().expect("get_mapped_range fallita");
-            for row in 0..output_h {
-                let start = (row * padded_bytes_per_row) as usize;
-                let end = start + unpadded_bytes_per_row as usize;
-                out.extend_from_slice(&data[start..end]);
-            }
-        }
-        output_buffer.unmap();
-
-        out
-    }
-
-    /// Come [`Compositor::render_layers`], ma restituisce I420 denso
-    /// (piano Y, poi U, poi V, croma `(w+1)/2 x (h+1)/2`) in BT.709 range
-    /// limitato: la conversione su GPU evita quella su CPU nell'encoder e
-    /// dimezza abbondantemente il readback.
+    /// Come `render_layers`, ma I420 denso BT.709 limited: la conversione su
+    /// GPU risparmia quella su CPU e dimezza il readback.
     pub fn render_layers_i420(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
         const WORKGROUP: u32 = 256;
         const MAX_GROUPS_PER_DIM: u32 = 65535;
@@ -565,45 +446,7 @@ impl Compositor {
         encoder.copy_buffer_to_buffer(&storage, 0, &readback, 0, buffer_size);
         self.queue.submit(Some(encoder.finish()));
 
-        let slice = readback.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll del device wgpu fallito");
-        rx.recv()
-            .expect("il callback di map_async non ha risposto")
-            .expect("map_async fallita");
-        let out = slice.get_mapped_range().expect("get_mapped_range fallita")[..len].to_vec();
-        readback.unmap();
-        out
-    }
-
-    /// Come [`Compositor::render_frame`], ma resta sulla GPU: nessun
-    /// readback, restituisce la texture di output direttamente (già
-    /// utilizzabile da `egui_wgpu::Renderer::register_native_texture` /
-    /// `update_egui_texture_from_wgpu_texture`, dato che il `Compositor`
-    /// condivide il device con `egui-wgpu` — vedi doc di modulo). La
-    /// chiamata a `self.queue.submit` dentro `render_layers_to_texture` è
-    /// sufficiente: non serve attendere il completamento, il pass che
-    /// campiona questa texture (quello di egui) verrà sottomesso *dopo*
-    /// sulla stessa coda, quindi la GPU la esegue comunque in ordine.
-    pub fn render_frame_to_texture(
-        &self,
-        frame: &YuvFrame,
-        transform: &Transform,
-        output: OutputFrame,
-    ) -> wgpu::Texture {
-        self.render_layers_to_texture(
-            &[Layer::Video {
-                frame: frame.borrowed(),
-                transform: *transform,
-                source_size: (frame.width, frame.height),
-            }],
-            output,
-        )
+        self.map_read(&readback, |data| data[..len].to_vec())
     }
 
     /// Versione multi-layer di [`Compositor::render_frame_to_texture`]
@@ -615,6 +458,7 @@ impl Compositor {
     ) -> wgpu::Texture {
         let output_texture = self.output_texture(output.width, output.height);
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut planes = Vec::new();
 
         let mut encoder = self
             .device
@@ -634,6 +478,7 @@ impl Compositor {
                     transform,
                     source_size,
                 } => vec![self.layer_bind_group(
+                    &mut planes,
                     frame,
                     transform,
                     output,
@@ -643,6 +488,7 @@ impl Compositor {
                 )],
                 // Il colore arriva dall'uniform: i piani sono solo segnaposto.
                 Layer::Solid { color, transform } => vec![self.layer_bind_group(
+                    &mut planes,
                     &SOLID_PLACEHOLDER,
                     transform,
                     output,
@@ -667,6 +513,7 @@ impl Compositor {
                                 ..SOLID_PLACEHOLDER
                             };
                             self.layer_bind_group(
+                                &mut planes,
                                 &frame,
                                 transform,
                                 output,
@@ -690,7 +537,31 @@ impl Compositor {
         }
 
         self.queue.submit(Some(encoder.finish()));
+        let mut pool = self.pool.lock().unwrap();
+        give_back(&mut pool.planes, planes);
+        // Una copia resta nel pool: il prossimo frame della stessa
+        // dimensione ci ridisegna sopra, dopo che la GPU ha finito con
+        // questo (stessa coda).
+        give_back(&mut pool.outputs, [output_texture.clone()]);
         output_texture
+    }
+
+    /// Mappa `buffer` in lettura (aspettando la GPU) e passa i byte a `read`.
+    fn map_read<R>(&self, buffer: &wgpu::Buffer, read: impl FnOnce(&[u8]) -> R) -> R {
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll del device wgpu fallito");
+        rx.recv()
+            .expect("il callback di map_async non ha risposto")
+            .expect("map_async fallita");
+        let out = read(&slice.get_mapped_range().expect("get_mapped_range fallita"));
+        buffer.unmap();
+        out
     }
 
     /// Upload dei tre piani del layer e bind group pronto per il pass:
@@ -698,6 +569,7 @@ impl Compositor {
     /// shader, qui si preparano solo i suoi input.
     fn layer_bind_group(
         &self,
+        planes: &mut Vec<wgpu::Texture>,
         frame: &YuvFrame,
         transform: &Transform,
         output: OutputFrame,
@@ -705,40 +577,9 @@ impl Compositor {
         fit_size: (u32, u32),
         fill: Fill,
     ) -> wgpu::BindGroup {
-        let plane_texture = |label: &str, data: &[u8], w: u32, h: u32| {
-            self.device.create_texture_with_data(
-                &self.queue,
-                &wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: PLANE_FORMAT,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                },
-                wgpu::util::TextureDataOrder::LayerMajor,
-                data,
-            )
-        };
-        let y_texture = plane_texture("vv-render Y plane", frame.y, frame.width, frame.height);
-        let u_texture = plane_texture(
-            "vv-render U plane",
-            frame.u,
-            frame.chroma_width,
-            frame.chroma_height,
-        );
-        let v_texture = plane_texture(
-            "vv-render V plane",
-            frame.v,
-            frame.chroma_width,
-            frame.chroma_height,
-        );
+        let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
+        let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
+        let v_texture = self.plane_texture(frame.v, frame.chroma_width, frame.chroma_height);
         let y_view = y_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -763,7 +604,7 @@ impl Compositor {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vv-render transform bind group"),
             layout: &self.bind_group_layout,
             entries: &[
@@ -788,10 +629,49 @@ impl Compositor {
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
-        })
+        });
+        planes.extend([y_texture, u_texture, v_texture]);
+        bind_group
+    }
+
+    /// Un piano R8 con `data`, preso dal pool se ce n'è uno della stessa
+    /// dimensione.
+    fn plane_texture(&self, data: &[u8], width: u32, height: u32) -> wgpu::Texture {
+        let pooled = take_sized(&mut self.pool.lock().unwrap().planes, width, height);
+        let texture = pooled.unwrap_or_else(|| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("vv-render plane"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: PLANE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
+            },
+            texture.size(),
+        );
+        texture
     }
 
     fn output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
+        if let Some(texture) = take_sized(&mut self.pool.lock().unwrap().outputs, output_w, output_h)
+        {
+            return texture;
+        }
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vv-render output frame"),
             size: wgpu::Extent3d {
@@ -803,12 +683,7 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OUTPUT_FORMAT,
-            // TEXTURE_BINDING oltre a RENDER_ATTACHMENT/COPY_SRC: serve al
-            // path zero-copy (`render_frame_to_texture`), che registra
-            // questa stessa texture come input campionabile dal renderer
-            // di egui-wgpu — senza, wgpu rifiuterebbe la bind group creata
-            // da `register_native_texture`. Nessun costo per il path con
-            // readback (`render_frame`), che non la usa.
+            // TEXTURE_BINDING serve al path zero-copy: egui-wgpu la campiona.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -861,11 +736,8 @@ fn fit_factors(source: (f32, f32), output: (f32, f32)) -> [f32; 2] {
     }
 }
 
-/// Dimensioni di output con l'aspect ratio di `aspect` che contengono
-/// `source` alla sua risoluzione nativa: il contenuto non viene né
-/// scalato né deformato, si aggiungono solo le bande. Usata
-/// dall'anteprima, che compone alla risoluzione del frame decodificato
-/// (proxy compreso) e non a quella della timeline.
+/// Dimensioni con l'aspect ratio di `aspect` che contengono `source` senza
+/// scalarlo: si aggiungono solo le bande.
 pub fn fit_output_size(source: (u32, u32), aspect: (u32, u32)) -> (u32, u32) {
     let (sw, sh) = (source.0.max(1) as f64, source.1.max(1) as f64);
     let (aw, ah) = (aspect.0.max(1) as f64, aspect.1.max(1) as f64);
@@ -873,6 +745,102 @@ pub fn fit_output_size(source: (u32, u32), aspect: (u32, u32)) -> (u32, u32) {
         (source.0.max(1), ((sw * ah / aw).round() as u32).max(1))
     } else {
         (((sh * aw / ah).round() as u32).max(1), source.1.max(1))
+    }
+}
+
+#[cfg(test)]
+impl<'a> YuvFrame<'a> {
+    fn borrowed(&self) -> YuvFrame<'a> {
+        YuvFrame { ..*self }
+    }
+}
+
+#[cfg(test)]
+impl Compositor {
+    /// Compone lo stack in alpha-over e legge il risultato in RGBA.
+    pub fn render_layers(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
+        let output_texture = self.render_layers_to_texture(layers, output);
+        let (output_w, output_h) = (output.width, output.height);
+
+        // wgpu richiede che ogni riga del buffer di destinazione sia
+        // allineata a COPY_BYTES_PER_ROW_ALIGNMENT: il buffer può quindi
+        // avere padding a fine riga che va rimosso in fase di lettura.
+        let unpadded_bytes_per_row = output_w * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vv-render readback buffer"),
+            size: (padded_bytes_per_row * output_h) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vv-render readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            output_texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(output_h),
+                },
+            },
+            wgpu::Extent3d {
+                width: output_w,
+                height: output_h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        self.map_read(&output_buffer, |data| {
+            let mut out = Vec::with_capacity((unpadded_bytes_per_row * output_h) as usize);
+            for row in 0..output_h {
+                let start = (row * padded_bytes_per_row) as usize;
+                out.extend_from_slice(&data[start..start + unpadded_bytes_per_row as usize]);
+            }
+            out
+        })
+    }
+
+    /// Un solo frame con `transform`, letto in RGBA8.
+    pub fn render_frame(
+        &self,
+        frame: &YuvFrame,
+        transform: &Transform,
+        output: OutputFrame,
+    ) -> Vec<u8> {
+        self.render_layers(
+            &[Layer::Video {
+                frame: frame.borrowed(),
+                transform: *transform,
+                source_size: (frame.width, frame.height),
+            }],
+            output,
+        )
+    }
+    /// Come `render_frame` ma resta sulla GPU. Nessuna attesa: il pass di egui
+    /// che la campiona è sottomesso dopo sulla stessa coda.
+    pub fn render_frame_to_texture(
+        &self,
+        frame: &YuvFrame,
+        transform: &Transform,
+        output: OutputFrame,
+    ) -> wgpu::Texture {
+        self.render_layers_to_texture(
+            &[Layer::Video {
+                frame: frame.borrowed(),
+                transform: *transform,
+                source_size: (frame.width, frame.height),
+            }],
+            output,
+        )
     }
 }
 

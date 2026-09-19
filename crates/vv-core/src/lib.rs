@@ -5,13 +5,11 @@ pub mod persistence;
 
 pub use command::{
     AddTrack, Command, CompositeCommand, GroupMark, History, InsertClip, KeyframeTarget,
-    KeyframeValue,
-    LiftDelete, LinkClips, MoveClip, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
-    RippleDeleteAllTracks,
-    cut_overlaps, make_room_for_ranges, ResetClipGain, ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFlip, SetClipGain, SetClipTitle,
-    SetClipTransformParam, SetClipsDisabled, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag,
-    TrimClip, TrimEdge,
-    UnlinkClip, UpsertKeyframe,
+    KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
+    ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipValue, SetClipsDisabled,
+    SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
+    UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_flip,
+    set_clip_gain, set_clip_title, set_clip_transform_param,
 };
 pub use model::*;
 pub use otio::{OtioError, OtioImport, export_otio, import_otio};
@@ -55,6 +53,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 7,
         })
@@ -166,71 +165,6 @@ mod tests {
     }
 
     #[test]
-    fn ripple_delete_shifts_all_tracks_and_undo_restores() {
-        let (mut project, timeline) = make_project_with_two_tracks();
-        let mut history = History::default();
-
-        let a = make_clip(&mut project, 0, 10);
-        let b = make_clip(&mut project, 10, 10);
-        let a_audio = make_clip(&mut project, 0, 10);
-        let b_audio = make_clip(&mut project, 10, 10);
-        let b_id = b.id;
-
-        history.do_command(
-            &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 0,
-                clip: a,
-            }),
-        );
-        history.do_command(
-            &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 0,
-                clip: b,
-            }),
-        );
-        history.do_command(
-            &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 1,
-                clip: a_audio,
-            }),
-        );
-        history.do_command(
-            &mut project,
-            Box::new(command::InsertClip {
-                timeline,
-                track_index: 1,
-                clip: b_audio,
-            }),
-        );
-
-        history.do_command(
-            &mut project,
-            Box::new(command::RippleDeleteAllTracks::new(timeline, 0, b_id)),
-        );
-
-        // La clip "b" video è sparita, e la clip audio corrispondente
-        // (che parte allo stesso tempo) si è spostata a 0 anche se sta su
-        // un'altra track: questo è il comportamento "ripple all tracks".
-        let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips.len(), 1);
-        assert_eq!(tl.tracks[1].clips.len(), 2);
-        assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
-        assert_eq!(tl.tracks[1].clips[1].timeline_start, 0);
-
-        history.undo(&mut project);
-        let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips.len(), 2);
-        assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
-        assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
-    }
-
-    #[test]
     fn move_clip_between_tracks_and_undo_restores() {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
@@ -248,7 +182,7 @@ mod tests {
 
         history.do_command(
             &mut project,
-            Box::new(command::MoveClip::new(timeline, a_id, 0, 1, 25)),
+            Box::new(command::MoveClips::new(timeline, vec![(a_id, 0, 1, 25)])),
         );
 
         let tl = &project.timelines[timeline];
@@ -638,7 +572,7 @@ mod tests {
 
         history.do_command(
             &mut project,
-            Box::new(command::SetClipTransformParam::new(
+            Box::new(command::set_clip_transform_param(
                 timeline,
                 0,
                 a_id,
@@ -648,7 +582,7 @@ mod tests {
         );
         history.do_command(
             &mut project,
-            Box::new(command::SetClipGain::new(timeline, 0, a_id, -6.0)),
+            Box::new(command::set_clip_gain(timeline, 0, a_id, -6.0)),
         );
 
         let zoom_x = |p: &Project| {
@@ -711,7 +645,7 @@ mod tests {
         );
         history.do_command(
             &mut project,
-            Box::new(command::SetClipFlip::new(timeline, 0, a_id, [true, false])),
+            Box::new(command::set_clip_flip(timeline, 0, a_id, [true, false])),
         );
         history.do_command(
             &mut project,
@@ -1292,68 +1226,6 @@ mod tests {
         let tl = &project.timelines[timeline];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips.len(), 1);
-    }
-
-    #[test]
-    fn ripple_delete_with_also_remove_removes_linked_clip_without_double_shift() {
-        let (mut project, timeline) = make_project_with_two_tracks();
-        let mut history = History::default();
-
-        let video_a = make_clip(&mut project, 0, 10);
-        let video_b = make_clip(&mut project, 10, 10); // da rimuovere
-        let video_c = make_clip(&mut project, 20, 10);
-        let (video_a_id, video_b_id, video_c_id) = (video_a.id, video_b.id, video_c.id);
-
-        let audio_a = make_clip(&mut project, 0, 10);
-        let audio_b = make_clip(&mut project, 10, 10); // gemella di video_b, anche lei da rimuovere
-        let audio_c = make_clip(&mut project, 20, 10);
-        let audio_b_id = audio_b.id;
-
-        for (track_index, clip) in [
-            (0, video_a),
-            (0, video_b),
-            (0, video_c),
-            (1, audio_a),
-            (1, audio_b),
-            (1, audio_c),
-        ] {
-            history.do_command(
-                &mut project,
-                Box::new(command::InsertClip {
-                    timeline,
-                    track_index,
-                    clip,
-                }),
-            );
-        }
-
-        history.do_command(
-            &mut project,
-            Box::new(
-                command::RippleDeleteAllTracks::new(timeline, 0, video_b_id)
-                    .with_also_remove(vec![(1, audio_b_id)]),
-            ),
-        );
-
-        let tl = &project.timelines[timeline];
-        // Entrambe le clip "b" sono sparite, non solo shiftate.
-        assert_eq!(tl.tracks[0].clips.len(), 2);
-        assert_eq!(tl.tracks[1].clips.len(), 2);
-        // Lo shift è di UNA sola lunghezza di gap (10), non doppio (20):
-        // altrimenti "c" finirebbe a 10 invece che a 20-10=10... la prova
-        // vera è che "c" atterra esattamente dove stava "b" (gap chiuso
-        // una volta sola), su entrambe le track.
-        assert_eq!(tl.tracks[0].clips[0].id, video_a_id);
-        assert_eq!(tl.tracks[0].clips[1].id, video_c_id);
-        assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
-        assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
-
-        history.undo(&mut project);
-        let tl = &project.timelines[timeline];
-        assert_eq!(tl.tracks[0].clips.len(), 3);
-        assert_eq!(tl.tracks[1].clips.len(), 3);
-        assert_eq!(tl.tracks[0].clips[2].timeline_start, 20);
-        assert_eq!(tl.tracks[1].clips[2].timeline_start, 20);
     }
 
     #[test]

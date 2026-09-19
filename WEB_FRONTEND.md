@@ -19,8 +19,8 @@ egui:
 | Crate | Cosa fa | Riusabile as-is? |
 |---|---|---|
 | `vv-core` | modello dati (`Project`/`Timeline`/`Clip`), command pattern, `History` | sì, al 100% |
-| `vv-media` | probe/decode ffmpeg, `DecodeAhead` | sì, al 100% |
-| `vv-render` | compositor GPU headless (wgpu), generatori (solid color) | sì, al 100% |
+| `vv-media` | probe/decode ffmpeg, `SharedFrameCache` | sì, al 100% |
+| `vv-render` | compositor GPU headless (wgpu), testo | sì, al 100% |
 | `vv-audio` | mixer delle track audio, output via cpal | sì per il monitoring locale sul PC (vedi § Audio) |
 | `vv-app` | UI egui/eframe, `TimelineAudio`, orchestrazione (`main.rs`), disegno timeline (`timeline_ui.rs`) | **solo in parte**: `TimelineAudio`, `History`, `drive_playback`, `ensure_active_clip_matches_playhead`, `sync_selection_to_playhead` sono Rust puro non legato a egui e si spostano quasi invariati in un nuovo host; il disegno (`timeline_ui.rs`) e i pannelli egui in `main.rs` no, si riscrivono nel client web |
 
@@ -36,7 +36,7 @@ client web che rifà solo la parte di presentazione.
 - Il modello dati e il command pattern restano quelli di `vv-core`: è
   esattamente il motivo per cui questo passaggio è fattibile a basso
   rischio. Ogni `Command` esistente (`InsertClip`, `SplitClip`,
-  `RippleDeleteAllTracks`, `MoveClips`, `LinkClips`, `CompositeCommand`,
+  `MoveClips`, `LinkClips`, `CompositeCommand`,
   ...) diventa un messaggio RPC quasi sena modifiche.
 
 ## Nuovo componente: `vv-server`
@@ -115,7 +115,7 @@ La parte davvero nuova e delicata, da costruire in due stadi separati.
 
 Endpoint HTTP `GET /frame?playhead=1200` che il backend risolve
 esattamente come fa oggi il viewer interno (compositing del frame corrente
-via `vv-render::Compositor`, eventuale generatore SolidColor) e restituisce
+via `vv-render::Compositor`, layer SolidColor e Text compresi) e restituisce
 come singolo JPEG. Il client web lo mostra in un semplice `<img>`. Nessun
 concetto di streaming: un frame per richiesta, la stessa identica pipeline
 di composizione che gira già in `vv-app` oggi, solo esposta via HTTP invece

@@ -1,0 +1,772 @@
+//! Import dei media, file dialog, salvataggio/apertura del progetto, OTIO,
+//! export e relink.
+
+use super::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectSwitch {
+    Open,
+    ImportOtio,
+    Quit,
+}
+
+pub(crate) enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// Cosa fare del risultato di un file dialog in background. `RelinkMedia`
+/// porta la selezione del pool com'era all'apertura.
+pub(crate) enum DialogKind {
+    ImportMedia,
+    SaveProjectAs,
+    ExportOtio(TimelineId),
+    ImportOtio,
+    OpenProject,
+    RelinkMedia(Vec<MediaId>),
+}
+
+pub(crate) enum DialogOutcome {
+    File(Option<PathBuf>),
+    Files(Option<Vec<PathBuf>>),
+}
+
+pub(crate) struct PendingDialog {
+    pub(crate) kind: DialogKind,
+    pub(crate) rx: mpsc::Receiver<DialogOutcome>,
+}
+
+/// Stato UI di un export in corso: progresso/cancellazione condivisi col
+/// thread che sta effettivamente esportando (`export::export_timeline`),
+/// più l'handle per recuperarne l'esito a fine corsa.
+pub(crate) struct ExportUiState {
+    pub(crate) progress: std::sync::Arc<Mutex<export::ExportProgress>>,
+    pub(crate) cancel: std::sync::Arc<AtomicBool>,
+    pub(crate) handle: std::thread::JoinHandle<Result<(), String>>,
+}
+
+/// Tutti i file sotto `base_dir` per nome, in ampiezza: a parità di nome
+/// vince il meno annidato. Le cartelle illeggibili si saltano.
+pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
+    let mut index = HashMap::new();
+    let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
+    while let Some(dir) = dirs.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                dirs.push_back(path);
+            } else if file_type.is_file() {
+                index.entry(entry.file_name()).or_insert(path);
+            }
+        }
+    }
+    index
+}
+
+impl VibeVideoApp {
+    pub(crate) fn import_media(&mut self, path: PathBuf) {
+        match self.add_media_to_pool(path) {
+            Ok(media_id) => {
+                self.import_warnings.clear();
+                self.preview_media(media_id);
+            }
+            Err(e) => self.import_warnings = vec![e],
+        }
+    }
+
+    /// Import multiplo: anteprima solo dell'ultimo media importato, errori
+    /// raccolti invece che sovrascritti a vicenda.
+    pub(crate) fn import_media_files(&mut self, paths: Vec<PathBuf>) {
+        let mut errors = Vec::new();
+        let mut last_imported = None;
+        for path in paths {
+            let label = file_label(&path);
+            match self.add_media_to_pool(path) {
+                Ok(media_id) => last_imported = Some(media_id),
+                Err(e) => errors.push(format!("{label}: {e}")),
+            }
+        }
+        self.import_warnings = errors;
+        if let Some(media_id) = last_imported {
+            self.preview_media(media_id);
+        }
+    }
+
+    pub(crate) fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
+        let probed = if is_image_path(&path) {
+            vv_media::probe_image(&path)
+        } else {
+            vv_media::probe(&path)
+        };
+        match probed {
+            Ok(meta) => {
+                if meta.has_video {
+                    self.ensure_timeline_for(&meta);
+                } else {
+                    self.ensure_timeline_audio_only();
+                }
+                // `0` solo se il file è sparito nel frattempo: al più si rigenera un
+                // proxy.
+                let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
+                let media_id = self.project.media_pool.insert(vv_core::MediaItem {
+                    path: path.clone(),
+                    meta,
+                    content_hash,
+                });
+                self.unsaved_media = true;
+                self.enqueue_media_background_jobs(media_id);
+                Ok(media_id)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Proxy, miniatura e waveform di un media del pool, sia appena
+    /// importato sia da un progetto aperto: quel che è già in cache su
+    /// disco viene saltato dai worker.
+    pub(crate) fn enqueue_media_background_jobs(&mut self, media_id: MediaId) {
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
+        // Un'immagine non ha nulla da guadagnare da un proxy, e la sua durata è
+        // il sentinel `IMAGE_DURATION_FRAMES`.
+        if item.meta.has_video && !item.meta.is_image() {
+            let frames = item.meta.duration_frames.max(0) as u64;
+            self.proxy_worker
+                .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
+                .enqueue(item.path.clone(), item.content_hash, frames);
+        }
+        if item.meta.has_video && !self.thumbnails.contains_key(&item.content_hash) {
+            self.thumbnails.insert(item.content_hash, None);
+            self.thumbnail_worker
+                .get_or_insert_with(thumbnail_worker::ThumbnailWorker::spawn)
+                .enqueue(
+                    item.path.clone(),
+                    item.content_hash,
+                    item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
+                );
+        }
+        // Solo i media con audio: la timeline disegna la waveform solo
+        // sulle clip audio.
+        if item.meta.has_audio {
+            let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
+            let num_peaks = vv_media::recommended_num_peaks(secs);
+            self.waveform_worker
+                .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
+                .enqueue(
+                    item.path.clone(),
+                    item.content_hash,
+                    item.meta.audio_stream_count(),
+                    num_peaks,
+                );
+        }
+    }
+
+    pub(crate) fn poll_thumbnails(&mut self, ctx: &egui::Context) {
+        let Some(worker) = &mut self.thumbnail_worker else {
+            return;
+        };
+        for (content_hash, thumb) in worker.drain() {
+            let texture = thumb.map(|t| {
+                ctx.load_texture(
+                    format!("thumbnail-{content_hash:016x}"),
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [t.width as usize, t.height as usize],
+                        &t.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            self.thumbnails.insert(content_hash, texture);
+        }
+    }
+
+    /// Apre il file dialog nativo in un thread a parte: sul thread
+    /// dell'event loop GNOME/Wayland segnala l'app come bloccata. Uno alla
+    /// volta.
+    pub(crate) fn spawn_dialog(
+        &mut self,
+        kind: DialogKind,
+        run: impl FnOnce(rfd::FileDialog) -> DialogOutcome + Send + 'static,
+    ) {
+        if self.pending_dialog.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run(rfd::FileDialog::new()));
+        });
+        self.pending_dialog = Some(PendingDialog { kind, rx });
+    }
+
+    pub(crate) fn spawn_file_dialog(
+        &mut self,
+        kind: DialogKind,
+        build: impl FnOnce(rfd::FileDialog) -> Option<PathBuf> + Send + 'static,
+    ) {
+        self.spawn_dialog(kind, |dlg| DialogOutcome::File(build(dlg)));
+    }
+
+    /// Applica il risultato del dialog in background, se è arrivato.
+    pub(crate) fn poll_pending_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.pending_dialog else {
+            return;
+        };
+        let Ok(outcome) = pending.rx.try_recv() else {
+            // Ancora in attesa: senza un nuovo evento (mouse, tastiera)
+            // egui non ridisegnerebbe, quindi il risultato arriverebbe
+            // solo al prossimo input dell'utente.
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        let Some(PendingDialog { kind, .. }) = self.pending_dialog.take() else {
+            return;
+        };
+        match (kind, outcome) {
+            (DialogKind::ImportMedia, DialogOutcome::Files(Some(paths))) => {
+                self.import_media_files(paths);
+            }
+            (DialogKind::SaveProjectAs, DialogOutcome::File(Some(path))) => {
+                self.save_project_to(&path);
+            }
+            (DialogKind::ExportOtio(timeline_id), DialogOutcome::File(Some(path))) => {
+                self.export_otio_to(timeline_id, &path);
+            }
+            (DialogKind::ImportOtio, DialogOutcome::File(Some(path))) => {
+                self.import_otio_from(&path);
+            }
+            (DialogKind::OpenProject, DialogOutcome::File(Some(path))) => {
+                self.load_project_from(path);
+            }
+            (DialogKind::RelinkMedia(targets), DialogOutcome::File(Some(base_dir))) => {
+                self.relink_media(&base_dir, &targets);
+            }
+            _ => {} // dialog annullato dall'utente
+        }
+    }
+
+    /// File rilasciati dal file manager sulla finestra: si importano nel pool,
+    /// ovunque cadano.
+    pub(crate) fn poll_dropped_files(&mut self, ctx: &egui::Context) {
+        let paths: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
+        });
+        if !paths.is_empty() {
+            self.import_media_files(paths);
+        }
+    }
+
+    // Apre il file dialog e importa i file scelti (usato dal pulsante
+    // toolbar e dalla shortcut Ctrl+I).
+    pub(crate) fn import_media_dialog(&mut self) {
+        self.spawn_dialog(DialogKind::ImportMedia, |dlg| {
+            DialogOutcome::Files(
+            dlg.add_filter(
+                "media",
+                &[
+                    "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg", "opus",
+                    "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
+                ],
+            )
+            .add_filter("video", &["mp4", "mov", "mkv", "avi"])
+            .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
+            .add_filter("immagini", IMAGE_EXTENSIONS)
+            .pick_files(),
+            )
+        });
+    }
+
+    /// Salva nel file corrente (`current_project_path`), o come "salva con
+    /// nome" se il progetto non è ancora stato salvato/aperto.
+    pub(crate) fn save_project(&mut self) {
+        match self.current_project_path.clone() {
+            Some(path) => self.save_project_to(&path),
+            None => self.save_project_as(),
+        }
+    }
+
+    /// Apre sempre il file dialog di salvataggio, anche se il progetto ha
+    /// già un file corrente (usato dal pulsante "Salva con nome..." e da
+    /// Ctrl+Shift+S).
+    pub(crate) fn save_project_as(&mut self) {
+        self.spawn_file_dialog(DialogKind::SaveProjectAs, |dlg| {
+            dlg.set_file_name("progetto.vvproj")
+                .add_filter("progetto vibevideo", &["vvproj"])
+                .save_file()
+        });
+    }
+
+    pub(crate) fn save_project_to(&mut self, path: &Path) {
+        match vv_core::save_project(&self.project, path) {
+            Ok(()) => {
+                self.current_project_path = Some(path.to_path_buf());
+                self.project_error = None;
+                self.mark_saved();
+            }
+            Err(e) => self.project_error = Some(format!("Salvataggio fallito: {e}")),
+        }
+    }
+
+    pub(crate) fn export_otio_dialog(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let file_name = format!("{}.otio", self.project.timelines[timeline_id].name);
+        self.spawn_file_dialog(DialogKind::ExportOtio(timeline_id), move |dlg| {
+            dlg.set_file_name(file_name)
+                .add_filter("OpenTimelineIO", &["otio"])
+                .save_file()
+        });
+    }
+
+    pub(crate) fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
+        self.project_error = vv_core::export_otio(&self.project, timeline_id, path)
+            .err()
+            .map(|e| format!("Esportazione OTIO fallita: {e}"));
+    }
+
+    pub(crate) fn mark_saved(&mut self) {
+        self.saved_generation = self.history.generation();
+        self.unsaved_media = false;
+    }
+
+    pub(crate) fn has_unsaved_changes(&self) -> bool {
+        self.unsaved_media || self.history.generation() != self.saved_generation
+    }
+
+    /// Apre o importa un progetto, chiedendo prima se salvare le modifiche.
+    pub(crate) fn request_project_switch(&mut self, switch: ProjectSwitch) {
+        if self.has_unsaved_changes() {
+            self.pending_project_switch = Some(switch);
+        } else {
+            self.run_project_switch(switch);
+        }
+    }
+
+    pub(crate) fn run_project_switch(&mut self, switch: ProjectSwitch) {
+        match switch {
+            ProjectSwitch::Open => self.open_project_dialog(),
+            ProjectSwitch::ImportOtio => self.import_otio_dialog(),
+            ProjectSwitch::Quit => self.quit_confirmed = true,
+        }
+    }
+
+    /// La chiusura della finestra si sospende finché l'utente non risponde
+    /// a "salvare le modifiche?"; poi la si richiede di nuovo.
+    pub(crate) fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if self.quit_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_changes() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_project_switch = Some(ProjectSwitch::Quit);
+            ctx.request_repaint();
+        }
+    }
+
+    pub(crate) fn show_unsaved_changes_dialog(&mut self, ui: &mut egui::Ui) {
+        let Some(switch) = self.pending_project_switch else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ui.ctx(), |ui| {
+            ui.heading(if switch == ProjectSwitch::Quit {
+                "Salvare le modifiche prima di uscire?"
+            } else {
+                "Salvare le modifiche?"
+            });
+            ui.label("Il progetto corrente ha modifiche non salvate.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Salva").clicked() {
+                    choice = Some(UnsavedChoice::Save);
+                }
+                if ui.button("Non salvare").clicked() {
+                    choice = Some(UnsavedChoice::Discard);
+                }
+                if ui.button("Annulla").clicked() {
+                    choice = Some(UnsavedChoice::Cancel);
+                }
+            });
+        });
+        if choice.is_none() && modal.should_close() {
+            choice = Some(UnsavedChoice::Cancel);
+        }
+        if let Some(choice) = choice {
+            self.resolve_unsaved_changes(choice);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    pub(crate) fn resolve_unsaved_changes(&mut self, choice: UnsavedChoice) {
+        let Some(switch) = self.pending_project_switch.take() else {
+            return;
+        };
+        match choice {
+            UnsavedChoice::Save => {
+                self.save_project();
+                // Salvataggio annullato o fallito: meglio non perdere nulla.
+                if !self.has_unsaved_changes() {
+                    self.run_project_switch(switch);
+                }
+            }
+            UnsavedChoice::Discard => self.run_project_switch(switch),
+            UnsavedChoice::Cancel => {}
+        }
+    }
+
+    pub(crate) fn import_otio_dialog(&mut self) {
+        self.spawn_file_dialog(DialogKind::ImportOtio, |dlg| {
+            dlg.add_filter("OpenTimelineIO", &["otio"]).pick_file()
+        });
+    }
+
+    /// Come "Apri progetto", ma da un `.otio`: Ctrl+S chiederà dove
+    /// salvare invece di sovrascrivere il file importato. Quel che non è
+    /// stato importato finisce in `import_warnings`.
+    pub(crate) fn import_otio_from(&mut self, path: &Path) {
+        let imported = vv_core::import_otio(path, |media_path| {
+            let meta = vv_media::probe(media_path).map_err(|e| e.to_string())?;
+            Ok((meta, vv_media::content_fingerprint(media_path).unwrap_or(0)))
+        });
+        match imported {
+            Ok(imported) => {
+                self.replace_project(imported.project, None);
+                self.import_warnings = imported.warnings;
+            }
+            Err(e) => self.project_error = Some(format!("Importazione OTIO fallita: {e}")),
+        }
+    }
+
+    pub(crate) fn open_project_dialog(&mut self) {
+        self.spawn_file_dialog(DialogKind::OpenProject, |dlg| {
+            dlg.add_filter("progetto vibevideo", &["vvproj"]).pick_file()
+        });
+    }
+
+    /// Sostituisce il progetto e azzera lo stato UI legato al vecchio.
+    pub(crate) fn load_project_from(&mut self, path: PathBuf) {
+        match vv_core::load_project(&path) {
+            Ok(project) => self.replace_project(project, Some(path)),
+            Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
+        }
+    }
+
+    /// `path` è il file su cui salverà Ctrl+S: `None` per un progetto che
+    /// non viene da un `.vvproj` (import OTIO).
+    pub(crate) fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
+        self.timeline_id = project.timelines.keys().next();
+        self.project = project;
+        self.history = vv_core::History::default();
+        self.timeline_state = timeline_ui::TimelineState::default();
+        self.import_warnings.clear();
+        self.preview_meta = None;
+        self.preview_error = None;
+        self.last_viewer_frame_kind = None;
+        self.browsing_render_ahead = None;
+        self.active_clip = None;
+        self.last_synced_playhead = 0;
+        self.browsing_media = None;
+        if let Some(audio) = &mut self.timeline_audio {
+            audio.pause();
+            audio.invalidate();
+        }
+        self.reset_playback_speed_to_normal();
+        if let Some(fps) = self.timeline_id.map(|id| self.project.timelines[id].fps.as_f64()) {
+            self.timeline_audio().seek_frame(0, fps);
+        }
+        self.current_project_path = path;
+        self.project_error = None;
+        self.mark_saved();
+        // Progetto sostituito fuori dalla history: `sync_render_ahead` non se ne
+        // accorgerebbe.
+        if let Some(timeline_id) = self.timeline_id {
+            self.spawn_render_ahead_if_needed(timeline_id);
+            if let Some(render_ahead) = &self.render_ahead {
+                render_ahead.update_project(&self.project, timeline_id);
+            }
+        }
+        self.render_ahead_generation = self.history.generation();
+        for item in self.project.media_pool.values_mut() {
+            // Progetti salvati prima di `MediaMeta::audio_streams`.
+            if item.meta.has_audio && item.meta.audio_streams == 0 {
+                item.meta.audio_streams =
+                    vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
+            }
+        }
+        let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
+        for media_id in media_ids {
+            self.enqueue_media_background_jobs(media_id);
+        }
+    }
+
+    /// Apre la finestra delle impostazioni: l'export parte solo da lì
+    /// (`run_export`).
+    pub(crate) fn start_export(&mut self) {
+        // Il pulsante è disabilitato durante un export, ma Ctrl+Shift+E no.
+        if self.timeline_id.is_none() || self.export.is_some() || self.export_dialog.is_some() {
+            return;
+        }
+        let settings = self.last_export_settings.clone().unwrap_or_else(|| {
+            export::ExportSettings::preferred(export_dialog::default_output_path(
+                self.current_project_path.as_deref(),
+            ))
+        });
+        self.export_dialog = Some(export_dialog::ExportDialog::new(settings));
+    }
+
+    pub(crate) fn show_export_dialog(&mut self, ui: &mut egui::Ui) {
+        let (Some(dialog), Some(timeline_id)) = (&mut self.export_dialog, self.timeline_id) else {
+            return;
+        };
+        let timeline = &self.project.timelines[timeline_id];
+        let total_frames = timeline.total_frames();
+        let marks = &self.timeline_state.export_marks;
+        let info = export_dialog::TimelineInfo {
+            resolution: timeline.resolution,
+            fps: timeline.fps,
+            total_frames,
+            marks: (!marks.is_full(total_frames)).then(|| marks.resolve(total_frames)),
+            has_audio: timeline
+                .tracks_of_kind(TrackKind::Audio)
+                .any(|(_, t)| !t.clips.is_empty()),
+        };
+        match dialog.show(ui.ctx(), &info) {
+            export_dialog::ExportDialogAction::None => {}
+            export_dialog::ExportDialogAction::Cancel => self.export_dialog = None,
+            export_dialog::ExportDialogAction::Export { settings, range } => {
+                self.export_dialog = None;
+                self.last_export_settings = Some(settings.clone());
+                self.run_export(timeline_id, settings, range);
+            }
+        }
+    }
+
+    /// Esporta in un thread su una copia del progetto: si può continuare a
+    /// editare.
+    pub(crate) fn run_export(
+        &mut self,
+        timeline_id: TimelineId,
+        settings: export::ExportSettings,
+        range: std::ops::Range<FrameIdx>,
+    ) {
+        self.pause_proxies_for_export();
+
+        let project = self.project.clone();
+        let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+
+        let thread_progress = progress.clone();
+        let thread_cancel = cancel.clone();
+        let handle = std::thread::spawn(move || {
+            let result = export::export_timeline(
+                &project,
+                timeline_id,
+                &settings,
+                range,
+                &thread_progress,
+                &thread_cancel,
+            );
+            // Anche errore e annullamento chiudono `progress`: la UI legge solo quello.
+            if let Err(e) = &result {
+                let mut p = thread_progress.lock().unwrap();
+                p.error = Some(e.clone());
+                p.done = true;
+            }
+            result
+        });
+
+        self.export = Some(ExportUiState {
+            progress,
+            cancel,
+            handle,
+        });
+    }
+
+    pub(crate) fn show_import_warnings(&mut self, ui: &mut egui::Ui) {
+        if self.import_warnings.is_empty() {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new(format!("Avvisi di importazione ({})", self.import_warnings.len()))
+            .collapsible(true)
+            .default_width(480.0)
+            .show(ui.ctx(), |ui| {
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for warning in &self.import_warnings {
+                        ui.label(warning);
+                    }
+                });
+                ui.separator();
+                close = ui.button("Chiudi").clicked();
+            });
+        if close {
+            self.import_warnings.clear();
+        }
+    }
+
+    pub(crate) fn show_relink_message(&mut self, ui: &mut egui::Ui) {
+        let Some(message) = &self.relink_message else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new("Relink media")
+            .collapsible(false)
+            .default_width(360.0)
+            .show(ui.ctx(), |ui| {
+                ui.label(message.as_str());
+                ui.separator();
+                close = ui.button("Chiudi").clicked();
+            });
+        if close {
+            self.relink_message = None;
+        }
+    }
+
+    pub(crate) fn show_export_progress(&mut self, ui: &mut egui::Ui) {
+        let Some(state) = &self.export else {
+            return;
+        };
+
+        let (current, total, done, error) = {
+            let p = state.progress.lock().unwrap();
+            (p.current_frame, p.total_frames, p.done, p.error.clone())
+        };
+
+        let mut should_close = false;
+        egui::Window::new("Export")
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                let fraction = if total > 0 {
+                    (current as f32 / total as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .text(format!("{current}/{total} frame"))
+                        .animate(!done),
+                );
+                if let Some(err) = &error {
+                    ui.colored_label(egui::Color32::RED, err);
+                } else if done {
+                    ui.label("Export completato.");
+                }
+                ui.horizontal(|ui| {
+                    if !done && ui.button("Annulla").clicked() {
+                        state.cancel.store(true, Ordering::Relaxed);
+                    }
+                    if done && ui.button("Chiudi").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        // Senza input egui non ridisegna: la barra resterebbe ferma.
+        if !done {
+            ui.ctx().request_repaint();
+        }
+
+        if done {
+            self.resume_proxies_after_export();
+        }
+
+        if should_close && let Some(state) = self.export.take() {
+            let _ = state.handle.join();
+        }
+    }
+
+    /// Pausa i proxy durante l'export: l'encode di un proxy lo rallenta molto.
+    /// Una pausa già scelta dall'utente non va annullata a fine export.
+    pub(crate) fn pause_proxies_for_export(&mut self) {
+        let Some(worker) = &self.proxy_worker else {
+            return;
+        };
+        if worker.is_paused() {
+            return;
+        }
+        worker.set_paused(true);
+        self.proxy_paused_for_export = true;
+    }
+
+    /// Riprende i proxy se li aveva messi in pausa l'export. Idempotente.
+    pub(crate) fn resume_proxies_after_export(&mut self) {
+        if !self.proxy_paused_for_export {
+            return;
+        }
+        self.proxy_paused_for_export = false;
+        if let Some(worker) = &self.proxy_worker {
+            worker.set_paused(false);
+        }
+    }
+
+    /// Chiede una cartella base e ricollega i media selezionati. La selezione
+    /// si fissa ora: il dialog torna quando vuole.
+    pub(crate) fn relink_media_dialog(&mut self) {
+        if self.media_pool_state.selected.is_empty() {
+            return;
+        }
+        let targets: Vec<MediaId> = self.media_pool_state.selected.iter().copied().collect();
+        self.spawn_file_dialog(DialogKind::RelinkMedia(targets), |dlg| dlg.pick_folder());
+    }
+
+    /// Ricollega i media di `targets` che non esistono più al loro percorso a
+    /// un file con lo stesso nome sotto `base_dir`.
+    pub(crate) fn relink_media(&mut self, base_dir: &Path, targets: &[MediaId]) {
+        let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
+        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+        let mut relinked_ids: Vec<MediaId> = Vec::new();
+        let mut missing = 0usize;
+        for &media_id in targets {
+            let Some(item) = self.project.media_pool.get(media_id) else {
+                continue;
+            };
+            if item.path.exists() {
+                continue;
+            }
+            let Some(file_name) = item.path.file_name() else {
+                continue;
+            };
+            let found = index
+                .get_or_insert_with(|| index_media_by_filename(base_dir))
+                .get(file_name)
+                .cloned();
+            let Some(found) = found else {
+                missing += 1;
+                continue;
+            };
+            let content_hash = vv_media::content_fingerprint(&found).unwrap_or(0);
+            commands.push(Box::new(vv_core::SetMediaPath::new(media_id, found, content_hash))
+                as Box<dyn vv_core::Command>);
+            relinked_ids.push(media_id);
+        }
+        self.relink_message = Some(if commands.is_empty() {
+            "Nessun media ricollegato: nessun file corrispondente trovato nella cartella scelta."
+                .to_string()
+        } else if missing == 0 {
+            format!("Ricollegati {} media.", commands.len())
+        } else {
+            format!("Ricollegati {} media, {missing} non trovati.", commands.len())
+        });
+        if commands.is_empty() {
+            return;
+        }
+        self.history.do_command(
+            &mut self.project,
+            Box::new(vv_core::CompositeCommand::new(commands)),
+        );
+        self.unsaved_media = true;
+        for media_id in relinked_ids {
+            self.enqueue_media_background_jobs(media_id);
+        }
+    }
+}

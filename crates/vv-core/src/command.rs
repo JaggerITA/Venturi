@@ -15,10 +15,7 @@ pub trait Command: std::fmt::Debug {
     fn undo(&self, project: &mut Project);
 }
 
-/// Raggruppa più comandi in un solo passo di history: un solo undo li
-/// riporta tutti indietro insieme. Usato per operazioni che toccano più
-/// clip in una volta sola dal punto di vista dell'utente (es. "taglia al
-/// playhead" su tutte le track).
+/// Più comandi in un solo passo di history.
 #[derive(Debug)]
 pub struct CompositeCommand {
     commands: Vec<Box<dyn Command>>,
@@ -63,11 +60,8 @@ impl History {
         self.generation += 1;
     }
 
-    /// Inizio di un gruppo: i comandi eseguiti da qui fino a `end_group`
-    /// diventeranno un unico passo di undo. Serve quando una sola azione
-    /// dell'utente si scompone in più comandi (es. il drop di più media,
-    /// che inserisce una clip per stream audio e crea le track mancanti):
-    /// senza, ogni pezzo richiederebbe il suo Ctrl+Z.
+    /// Da qui a `end_group` i comandi diventano un unico passo di undo: per
+    /// un'azione che si scompone in più comandi (es. un drop di più media).
     pub fn begin_group(&mut self) -> GroupMark {
         GroupMark(self.undo_stack.len())
     }
@@ -98,26 +92,15 @@ impl History {
         }
     }
 
-    /// Incrementato a ogni modifica effettiva del progetto
-    /// (`do_command`/`undo`/`redo` che hanno davvero fatto qualcosa, non
-    /// una `redo`/`undo` a vuoto su uno stack esaurito): permette di
-    /// rilevare "il progetto è cambiato da quando l'ho controllato
-    /// l'ultima volta" con un semplice confronto di interi, invece di
-    /// dover clonare/diffare l'intero `Project` a ogni frame UI — usato
-    /// da `VibeVideoApp` per sapere quando notificare il worker di
-    /// render-ahead di una nuova disposizione delle clip.
+    /// Cambia a ogni modifica effettiva: basta confrontarla per sapere se il
+    /// progetto è cambiato, senza diffarlo.
     pub fn generation(&self) -> u64 {
         self.generation
     }
 }
 
-/// Aggiunge una track vuota in coda a `tracks` (REFACTOR_PIPELINE.md B4).
-/// Sempre in coda, mai in una posizione "intelligente" in base al tipo:
-/// l'ordine dei `tracks` conta solo per il compositing video
-/// (bottom->top, vedi `Timeline::active_video_clip_at`), e lì contano solo
-/// le posizioni *relative* tra track Video — un'eventuale track Audio
-/// interposta non cambia quale track Video è la più in alto. Appendere e
-/// basta evita qualunque caso speciale su "dove va inserita".
+/// Aggiunge una track vuota in coda: per il compositing conta solo
+/// l'ordine relativo tra track video.
 #[derive(Debug)]
 pub struct AddTrack {
     pub timeline: TimelineId,
@@ -160,11 +143,8 @@ impl Command for AddTrack {
     }
 }
 
-/// Rimuove una track (con tutte le sue clip). Non fa da sé la verifica "non
-/// è l'ultima del suo tipo": quella è una regola della UI (mantenere sempre
-/// almeno una track Video e una Audio), non un invariante del modello dati
-/// — un progetto caricato da un file esterno potrebbe legittimamente non
-/// averne.
+/// Rimuove una track con le sue clip. Tenerne almeno una per tipo è una
+/// regola della UI, non del modello.
 #[derive(Debug)]
 pub struct RemoveTrack {
     pub timeline: TimelineId,
@@ -285,11 +265,7 @@ impl Command for SetClipsDisabled {
         let tl = &mut project.timelines[self.timeline];
         self.old.clear();
         for &(track_index, clip_id) in &self.clips {
-            if let Some(clip) = tl
-                .tracks
-                .get_mut(track_index)
-                .and_then(|t| t.clips.iter_mut().find(|c| c.id == clip_id))
-            {
+            if let Some(clip) = tl.clip_mut(track_index, clip_id) {
                 self.old.push((track_index, clip_id, clip.disabled));
                 clip.disabled = self.disabled;
             }
@@ -299,11 +275,7 @@ impl Command for SetClipsDisabled {
     fn undo(&self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         for &(track_index, clip_id, old) in &self.old {
-            if let Some(clip) = tl
-                .tracks
-                .get_mut(track_index)
-                .and_then(|t| t.clips.iter_mut().find(|c| c.id == clip_id))
-            {
+            if let Some(clip) = tl.clip_mut(track_index, clip_id) {
                 clip.disabled = old;
             }
         }
@@ -321,11 +293,7 @@ pub struct InsertClip {
 
 impl Command for InsertClip {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let pos = track
-            .clips
-            .partition_point(|c| c.timeline_start < self.clip.timeline_start);
-        track.clips.insert(pos, self.clip.clone());
+        project.timelines[self.timeline].tracks[self.track_index].insert_sorted(self.clip.clone());
     }
 
     fn undo(&self, project: &mut Project) {
@@ -356,138 +324,24 @@ impl LiftDelete {
 
 impl Command for LiftDelete {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(pos) = track.clips.iter().position(|c| c.id == self.clip_id) {
-            self.removed = Some(track.clips.remove(pos));
-        }
+        self.removed =
+            project.timelines[self.timeline].tracks[self.track_index].remove_clip(self.clip_id);
     }
 
     fn undo(&self, project: &mut Project) {
         if let Some(clip) = &self.removed {
-            let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-            let pos = track
-                .clips
-                .partition_point(|c| c.timeline_start < clip.timeline_start);
-            track.clips.insert(pos, clip.clone());
+            project.timelines[self.timeline].tracks[self.track_index].insert_sorted(clip.clone());
         }
     }
 }
 
-/// Ripple delete globale: rimuove la clip (ed eventuali altre indicate in
-/// `also_remove`, tipicamente la gemella collegata) e chiude il gap su
-/// *tutte* le track della Timeline, mantenendo il sync audio/video. Le
-/// dimensioni del gap sono sempre quelle della clip primaria: le clip in
-/// `also_remove` vengono semplicemente rimosse (non shiftate) insieme a
-/// lei, non allargano il gap.
-#[derive(Debug)]
-struct RippleState {
-    // (track_index, clip) per ciascuna clip rimossa (primaria + also_remove).
-    removed: Vec<(usize, Clip)>,
-    // Posizione originale (prima dello shift) di ogni clip *non* rimossa ma
-    // toccata su ogni track, per un undo esatto: non si può ricostruire lo
-    // shift da una sola soglia perché, dopo aver sottratto `gap_len`, un
-    // valore shiftato può risultare identico o minore di uno non toccato
-    // (vedi test).
-    shifted: Vec<(usize, ClipId, FrameIdx)>, // (track_index, clip_id, original_start)
-}
-
-#[derive(Debug)]
-pub struct RippleDeleteAllTracks {
-    pub timeline: TimelineId,
-    pub track_index: usize,
-    pub clip_id: ClipId,
-    pub also_remove: Vec<(usize, ClipId)>,
-    removed: Option<RippleState>,
-}
-
-impl RippleDeleteAllTracks {
-    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId) -> Self {
-        Self {
-            timeline,
-            track_index,
-            clip_id,
-            also_remove: Vec::new(),
-            removed: None,
-        }
-    }
-
-    /// Altre clip da rimuovere insieme (tipicamente la gemella collegata
-    /// della clip primaria), come parte dello stesso "buco".
-    pub fn with_also_remove(mut self, also_remove: Vec<(usize, ClipId)>) -> Self {
-        self.also_remove = also_remove;
-        self
-    }
-}
-
-fn resort(track: &mut crate::model::Track) {
+fn resort(track: &mut Track) {
     track.clips.sort_by_key(|c| c.timeline_start);
-}
-
-impl Command for RippleDeleteAllTracks {
-    fn apply(&mut self, project: &mut Project) {
-        let tl = &mut project.timelines[self.timeline];
-        let track = &mut tl.tracks[self.track_index];
-        let Some(pos) = track.clips.iter().position(|c| c.id == self.clip_id) else {
-            return;
-        };
-        let primary = track.clips.remove(pos);
-        let gap_start = primary.timeline_start;
-        let gap_len = primary.timeline_len;
-
-        let mut removed = vec![(self.track_index, primary)];
-        for &(also_track, also_id) in &self.also_remove {
-            if let Some(p) = tl.tracks[also_track]
-                .clips
-                .iter()
-                .position(|c| c.id == also_id)
-            {
-                removed.push((also_track, tl.tracks[also_track].clips.remove(p)));
-            }
-        }
-
-        let mut shifted = Vec::new();
-        for (track_index, track) in tl.tracks.iter_mut().enumerate() {
-            if track.locked {
-                continue;
-            }
-            for c in &mut track.clips {
-                if c.timeline_start >= gap_start {
-                    shifted.push((track_index, c.id, c.timeline_start));
-                    c.timeline_start -= gap_len;
-                }
-            }
-            resort(track);
-        }
-        self.removed = Some(RippleState { removed, shifted });
-    }
-
-    fn undo(&self, project: &mut Project) {
-        let Some(state) = &self.removed else {
-            return;
-        };
-        let tl = &mut project.timelines[self.timeline];
-
-        for (track_index, clip_id, original_start) in &state.shifted {
-            let track = &mut tl.tracks[*track_index];
-            if let Some(c) = track.clips.iter_mut().find(|c| c.id == *clip_id) {
-                c.timeline_start = *original_start;
-            }
-        }
-        for (track_index, clip) in &state.removed {
-            tl.tracks[*track_index].clips.push(clip.clone());
-        }
-        for track in &mut tl.tracks {
-            resort(track);
-        }
-    }
 }
 
 /// Chiude uno spazio vuoto (nessuna clip da rimuovere) su tutte le track,
 /// shiftando indietro di `gap_len` ogni clip che inizia a `gap_start` o
-/// dopo — stessa identica meccanica di shift di `RippleDeleteAllTracks`
-/// (mantiene il sync A/V globale), ma senza rimuovere alcuna clip: usato
-/// per il ripple delete su un vuoto selezionato (comportamento "seleziona
-/// il vuoto, ripple delete" di DaVinci Resolve).
+/// dopo — mantiene il sync A/V globale.
 #[derive(Debug)]
 pub struct RippleDeleteGap {
     pub timeline: TimelineId,
@@ -529,8 +383,7 @@ impl Command for RippleDeleteGap {
     fn undo(&self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
         for (track_index, clip_id, original_start) in &self.shifted {
-            let track = &mut tl.tracks[*track_index];
-            if let Some(c) = track.clips.iter_mut().find(|c| c.id == *clip_id) {
+            if let Some(c) = tl.clip_mut(*track_index, *clip_id) {
                 c.timeline_start = *original_start;
             }
         }
@@ -540,82 +393,7 @@ impl Command for RippleDeleteGap {
     }
 }
 
-/// Sposta una clip a una nuova posizione, eventualmente su un'altra track
-/// (drag nella timeline). Non fa collision-avoidance da sé: il chiamante
-/// (la UI) deve clampare `new_start` prima di emettere il comando, per
-/// mantenere l'invariante "clip mai sovrapposte sulla stessa track".
-#[derive(Debug)]
-pub struct MoveClip {
-    pub timeline: TimelineId,
-    pub clip_id: ClipId,
-    pub from_track: usize,
-    pub to_track: usize,
-    pub new_start: FrameIdx,
-    old_start: Option<FrameIdx>,
-}
-
-impl MoveClip {
-    pub fn new(
-        timeline: TimelineId,
-        clip_id: ClipId,
-        from_track: usize,
-        to_track: usize,
-        new_start: FrameIdx,
-    ) -> Self {
-        Self {
-            timeline,
-            clip_id,
-            from_track,
-            to_track,
-            new_start,
-            old_start: None,
-        }
-    }
-}
-
-impl Command for MoveClip {
-    fn apply(&mut self, project: &mut Project) {
-        let tl = &mut project.timelines[self.timeline];
-        let from = &mut tl.tracks[self.from_track];
-        let Some(pos) = from.clips.iter().position(|c| c.id == self.clip_id) else {
-            return;
-        };
-        let mut clip = from.clips.remove(pos);
-        self.old_start = Some(clip.timeline_start);
-        clip.timeline_start = self.new_start;
-
-        let to = &mut tl.tracks[self.to_track];
-        let insert_at = to
-            .clips
-            .partition_point(|c| c.timeline_start < clip.timeline_start);
-        to.clips.insert(insert_at, clip);
-    }
-
-    fn undo(&self, project: &mut Project) {
-        let Some(old_start) = self.old_start else {
-            return;
-        };
-        let tl = &mut project.timelines[self.timeline];
-        let to = &mut tl.tracks[self.to_track];
-        let Some(pos) = to.clips.iter().position(|c| c.id == self.clip_id) else {
-            return;
-        };
-        let mut clip = to.clips.remove(pos);
-        clip.timeline_start = old_start;
-
-        let from = &mut tl.tracks[self.from_track];
-        let insert_at = from
-            .clips
-            .partition_point(|c| c.timeline_start < clip.timeline_start);
-        from.clips.insert(insert_at, clip);
-    }
-}
-
-/// Sposta più clip in un unico passo di history (un solo undo le riporta
-/// indietro tutte insieme): serve per trascinare la selezione corrente,
-/// che contiene sempre un gruppo collegato per intero se ce n'è uno
-/// (`Clip::linked_group`, tipicamente audio+video della stessa sorgente),
-/// che deve muoversi come una singola unità agli occhi dell'utente.
+/// Sposta più clip in un solo passo di history (es. un gruppo trascinato).
 #[derive(Debug)]
 pub struct MoveClips {
     pub timeline: TimelineId,
@@ -639,20 +417,13 @@ impl Command for MoveClips {
         self.old_starts.clear();
         for &(clip_id, from_track, to_track, new_start) in &self.moves {
             let tl = &mut project.timelines[self.timeline];
-            let from = &mut tl.tracks[from_track];
-            let Some(pos) = from.clips.iter().position(|c| c.id == clip_id) else {
+            let Some(mut clip) = tl.tracks[from_track].remove_clip(clip_id) else {
                 self.old_starts.push(None);
                 continue;
             };
-            let mut clip = from.clips.remove(pos);
             self.old_starts.push(Some(clip.timeline_start));
             clip.timeline_start = new_start;
-
-            let to = &mut tl.tracks[to_track];
-            let insert_at = to
-                .clips
-                .partition_point(|c| c.timeline_start < clip.timeline_start);
-            to.clips.insert(insert_at, clip);
+            tl.tracks[to_track].insert_sorted(clip);
         }
     }
 
@@ -664,18 +435,11 @@ impl Command for MoveClips {
                 continue;
             };
             let tl = &mut project.timelines[self.timeline];
-            let to = &mut tl.tracks[to_track];
-            let Some(pos) = to.clips.iter().position(|c| c.id == clip_id) else {
+            let Some(mut clip) = tl.tracks[to_track].remove_clip(clip_id) else {
                 continue;
             };
-            let mut clip = to.clips.remove(pos);
             clip.timeline_start = *old_start;
-
-            let from = &mut tl.tracks[from_track];
-            let insert_at = from
-                .clips
-                .partition_point(|c| c.timeline_start < clip.timeline_start);
-            from.clips.insert(insert_at, clip);
+            tl.tracks[from_track].insert_sorted(clip);
         }
     }
 }
@@ -689,12 +453,8 @@ pub enum TrimEdge {
     End,
 }
 
-/// Trim di un bordo di una clip (drag di una maniglia sul bordo sinistro/
-/// destro nella timeline), distinto da un semplice spostamento
-/// (`MoveClip`): cambia la *durata* della clip, non solo la sua
-/// posizione. Come `MoveClip`, non fa collision-avoidance né clamp ai
-/// limiti del sorgente da sé: il chiamante calcola `new_value` prima di
-/// emettere il comando.
+/// Trim di un bordo di una clip. Nessun clamp né collision-avoidance: il
+/// chiamante calcola `new_value`.
 #[derive(Debug)]
 pub struct TrimClip {
     pub timeline: TimelineId,
@@ -729,7 +489,7 @@ impl TrimClip {
 impl Command for TrimClip {
     fn apply(&mut self, project: &mut Project) {
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = track.clip_mut(self.clip_id) else {
             return;
         };
         self.old = Some((clip.timeline_start, clip.source_offset, clip.timeline_len));
@@ -753,7 +513,7 @@ impl Command for TrimClip {
             return;
         };
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+        if let Some(clip) = track.clip_mut(self.clip_id) {
             clip.timeline_start = timeline_start;
             clip.source_offset = source_offset;
             clip.timeline_len = timeline_len;
@@ -762,20 +522,14 @@ impl Command for TrimClip {
     }
 }
 
-/// Scioglie l'*intero gruppo collegato* (`Clip::linked_group`) di una clip,
-/// se ne ha uno: ogni membro del gruppo esce, non solo la clip su cui è
-/// stato invocato — "scollega" rompe il collegamento, non rimuove un
-/// singolo membro da un gruppo che continuerebbe a esistere per gli altri
-/// (comportamento segnalato come bug: cliccare "Scollega" su una clip di
-/// un gruppo da 3 lasciava le altre due ancora collegate tra loro).
+/// Scioglie l'intero gruppo collegato della clip, non solo lei.
 #[derive(Debug)]
 pub struct UnlinkClip {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
-    /// Ogni clip del gruppo sciolto, col suo `linked_group` *precedente*
-    /// (sempre lo stesso `Some(group)` per tutte), per l'undo.
-    affected: Option<Vec<(usize, ClipId, Option<LinkGroupId>)>>,
+    /// Gruppo sciolto e suoi membri, per l'undo.
+    dissolved: Option<(LinkGroupId, Vec<(usize, ClipId)>)>,
 }
 
 impl UnlinkClip {
@@ -784,56 +538,42 @@ impl UnlinkClip {
             timeline,
             track_index,
             clip_id,
-            affected: None,
+            dissolved: None,
         }
     }
 }
 
 impl Command for UnlinkClip {
     fn apply(&mut self, project: &mut Project) {
-        let tl = &project.timelines[self.timeline];
-        let Some(group) = tl
-            .tracks
-            .get(self.track_index)
-            .and_then(|t| t.clips.iter().find(|c| c.id == self.clip_id))
-            .and_then(|c| c.linked_group)
+        let tl = &mut project.timelines[self.timeline];
+        let Some(group) = tl.clip(self.track_index, self.clip_id).and_then(|c| c.linked_group)
         else {
             return;
         };
-        let affected: Vec<(usize, ClipId, Option<LinkGroupId>)> = tl
-            .clips_in_group(group)
-            .into_iter()
-            .map(|(track_index, clip_id)| (track_index, clip_id, Some(group)))
-            .collect();
-        self.affected = Some(affected);
-
-        let tl = &mut project.timelines[self.timeline];
-        for (track_index, clip_id, _) in self.affected.as_ref().unwrap() {
-            if let Some(c) = tl.tracks[*track_index].clips.iter_mut().find(|c| c.id == *clip_id) {
+        let members = tl.clips_in_group(group);
+        for &(track_index, clip_id) in &members {
+            if let Some(c) = tl.clip_mut(track_index, clip_id) {
                 c.linked_group = None;
             }
         }
+        self.dissolved = Some((group, members));
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(affected) = &self.affected else {
+        let Some((group, members)) = &self.dissolved else {
             return;
         };
         let tl = &mut project.timelines[self.timeline];
-        for (track_index, clip_id, old_group) in affected {
-            if let Some(c) = tl.tracks[*track_index].clips.iter_mut().find(|c| c.id == *clip_id) {
-                c.linked_group = *old_group;
+        for &(track_index, clip_id) in members {
+            if let Some(c) = tl.clip_mut(track_index, clip_id) {
+                c.linked_group = Some(*group);
             }
         }
     }
 }
 
-/// Collega un insieme di clip nello stesso gruppo (`Clip::linked_group`):
-/// selezione, drag e cancellazione trattano un gruppo come un'unità.
-/// Qualunque gruppo precedente delle clip coinvolte viene sovrascritto (non
-/// unito) — collegare è una scelta esplicita di un insieme esatto, non
-/// un'unione di gruppi preesistenti. No-op se `targets` ha meno di 2 clip
-/// (niente da collegare).
+/// Collega le clip in un gruppo nuovo, sovrascrivendo quelli precedenti.
+/// No-op con meno di 2 clip.
 #[derive(Debug)]
 pub struct LinkClips {
     pub timeline: TimelineId,
@@ -870,21 +610,14 @@ impl Command for LinkClips {
             .targets
             .iter()
             .map(|(track_index, clip_id)| {
-                tl.tracks
-                    .get(*track_index)
-                    .and_then(|t| t.clips.iter().find(|c| c.id == *clip_id))
-                    .and_then(|c| c.linked_group)
+                tl.clip(*track_index, *clip_id).and_then(|c| c.linked_group)
             })
             .collect();
         self.previous = Some(previous);
 
         let tl = &mut project.timelines[self.timeline];
         for (track_index, clip_id) in &self.targets {
-            if let Some(c) = tl
-                .tracks
-                .get_mut(*track_index)
-                .and_then(|t| t.clips.iter_mut().find(|c| c.id == *clip_id))
-            {
+            if let Some(c) = tl.clip_mut(*track_index, *clip_id) {
                 c.linked_group = Some(group_id);
             }
         }
@@ -896,22 +629,16 @@ impl Command for LinkClips {
         };
         let tl = &mut project.timelines[self.timeline];
         for ((track_index, clip_id), old) in self.targets.iter().zip(previous.iter()) {
-            if let Some(c) = tl
-                .tracks
-                .get_mut(*track_index)
-                .and_then(|t| t.clips.iter_mut().find(|c| c.id == *clip_id))
-            {
+            if let Some(c) = tl.clip_mut(*track_index, *clip_id) {
                 c.linked_group = *old;
             }
         }
     }
 }
 
-/// Divide una clip in due al tempo di timeline `split_at`. La seconda metà
-/// riceve un nuovo `ClipId`. Su una clip conformata (`Clip::rate`) le due
-/// metà possono condividere il frame sorgente a cavallo del taglio,
-/// mostrato per una parte del suo tempo a sinistra e per il resto a
-/// destra.
+/// Divide una clip a `split_at`; la metà destra ha un id nuovo. Su una clip
+/// conformata le due metà possono condividere il frame sorgente a cavallo
+/// del taglio.
 #[derive(Debug)]
 pub struct SplitClip {
     pub timeline: TimelineId,
@@ -921,10 +648,8 @@ pub struct SplitClip {
     original_len: Option<FrameIdx>,
     original_effects: Option<EffectStack>,
     new_clip_id: Option<ClipId>,
-    /// Se impostato (`with_new_clip_id`), l'id della metà destra è questo
-    /// invece di uno allocato al volo: serve a chi orchestra più split
-    /// collegati (vedi `split_at_playhead`) per conoscere in anticipo
-    /// gli id delle metà e poterle ricollegare con un comando successivo.
+    /// Id della metà destra deciso dal chiamante, per ricollegare le metà di
+    /// più split con un comando successivo.
     preallocated_new_clip_id: Option<ClipId>,
 }
 
@@ -964,7 +689,7 @@ impl Command for SplitClip {
             .preallocated_new_clip_id
             .unwrap_or_else(|| project.alloc_clip_id());
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = track.clip_mut(self.clip_id) else {
             return;
         };
         if self.split_at <= clip.timeline_start || self.split_at >= clip.timeline_end() {
@@ -975,12 +700,8 @@ impl Command for SplitClip {
         let mut second_half = clip.clone();
         let left_len = self.split_at - clip.timeline_start;
         clip.timeline_len = left_len;
-        // `clip` (la metà sinistra) mantiene il suo `linked_group`
-        // invariato: è la stessa clip di prima, solo accorciata, e resta
-        // collegata a chiunque altro condivida quel gruppo (che sia stato
-        // diviso insieme o no). La metà destra è una clip nuova, che parte
-        // scollegata — chi orchestra più split insieme (`split_at_playhead`)
-        // ricollega le metà destre tra loro con un `LinkClips` a parte.
+        // La metà sinistra è la stessa clip e resta nel suo gruppo; la destra è
+        // nuova e parte scollegata.
         second_half.id = new_id;
         second_half.timeline_start = self.split_at;
         second_half.source_offset += left_len;
@@ -994,10 +715,7 @@ impl Command for SplitClip {
         clip.effects.drop_keyframes_from(clip.source_out());
         second_half.effects.drop_keyframes_before(second_half.source_in());
 
-        let insert_at = track
-            .clips
-            .partition_point(|c| c.timeline_start < second_half.timeline_start);
-        track.clips.insert(insert_at, second_half);
+        track.insert_sorted(second_half);
     }
 
     fn undo(&self, project: &mut Project) {
@@ -1007,7 +725,7 @@ impl Command for SplitClip {
         };
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         track.clips.retain(|c| c.id != new_clip_id);
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+        if let Some(clip) = track.clip_mut(self.clip_id) {
             clip.timeline_len = original_len;
             if let Some(effects) = &self.original_effects {
                 clip.effects = effects.clone();
@@ -1016,58 +734,112 @@ impl Command for SplitClip {
     }
 }
 
-/// Imposta il valore *statico* di un parametro del transform, cioè il
-/// `default` del suo `Keyframed` (ogni parametro ha i suoi keyframe, vedi
-/// `TransformTracks`).
-#[derive(Debug)]
-pub struct SetClipTransformParam {
+/// Sostituisce un valore di una clip (scelto da `access`) ricordando il
+/// precedente per l'undo.
+pub struct SetClipValue<T> {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
-    pub param: TransformParam,
-    pub new_value: f32,
-    old_value: Option<f32>,
+    value: T,
+    access: Box<dyn Fn(&mut Clip) -> &mut T>,
+    old: Option<T>,
 }
 
-impl SetClipTransformParam {
+impl<T> SetClipValue<T> {
     pub fn new(
         timeline: TimelineId,
         track_index: usize,
         clip_id: ClipId,
-        param: TransformParam,
-        new_value: f32,
+        value: T,
+        access: impl Fn(&mut Clip) -> &mut T + 'static,
     ) -> Self {
         Self {
             timeline,
             track_index,
             clip_id,
-            param,
-            new_value,
-            old_value: None,
+            value,
+            access: Box::new(access),
+            old: None,
         }
     }
 }
 
-impl Command for SetClipTransformParam {
+impl<T> std::fmt::Debug for SetClipValue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetClipValue")
+            .field("track_index", &self.track_index)
+            .field("clip_id", &self.clip_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Clone> Command for SetClipValue<T> {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
-            return;
-        };
-        let track = clip.effects.transform.track_mut(self.param);
-        self.old_value = Some(track.default);
-        track.default = self.new_value;
+        if let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) {
+            self.old = Some(std::mem::replace((self.access)(clip), self.value.clone()));
+        }
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(old_value) = self.old_value else {
-            return;
-        };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.effects.transform.track_mut(self.param).default = old_value;
+        if let (Some(old), Some(clip)) = (
+            &self.old,
+            project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id),
+        ) {
+            *(self.access)(clip) = old.clone();
         }
     }
+}
+
+/// Valore statico (il `default`) di un parametro del transform.
+pub fn set_clip_transform_param(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    param: TransformParam,
+    value: f32,
+) -> SetClipValue<f32> {
+    SetClipValue::new(timeline, track_index, clip_id, value, move |c| {
+        &mut c.effects.transform.track_mut(param).default
+    })
+}
+
+pub fn set_clip_flip(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    value: [bool; 2],
+) -> SetClipValue<[bool; 2]> {
+    SetClipValue::new(timeline, track_index, clip_id, value, |c| &mut c.effects.transform.flip)
+}
+
+/// Gain statico (dB).
+pub fn set_clip_gain(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    value: f32,
+) -> SetClipValue<f32> {
+    SetClipValue::new(timeline, track_index, clip_id, value, |c| &mut c.effects.gain_db.default)
+}
+
+/// Gain a 0 dB, keyframe compresi.
+pub fn reset_clip_gain(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+) -> SetClipValue<Keyframed<f32>> {
+    SetClipValue::new(timeline, track_index, clip_id, Keyframed::constant(0.0), |c| {
+        &mut c.effects.gain_db
+    })
+}
+
+pub fn set_clip_title(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    value: TitleParams,
+) -> SetClipValue<Option<TitleParams>> {
+    SetClipValue::new(timeline, track_index, clip_id, Some(value), |c| &mut c.effects.title)
 }
 
 /// Riporta un gruppo di parametri del transform al valore di default,
@@ -1105,8 +877,7 @@ impl ResetTransformParams {
 
 impl Command for ResetTransformParams {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         let defaults = Transform::default();
@@ -1128,8 +899,7 @@ impl Command for ResetTransformParams {
         let Some((previous, flip)) = &self.previous else {
             return;
         };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         for (param, track) in self.params.iter().zip(previous) {
@@ -1141,149 +911,8 @@ impl Command for ResetTransformParams {
     }
 }
 
-/// Specchiatura della clip: non è un parametro animabile (nessun valore
-/// intermedio tra specchiato e no), quindi ha il suo comando invece di
-/// passare da `SetClipTransformParam`.
-#[derive(Debug)]
-pub struct SetClipFlip {
-    pub timeline: TimelineId,
-    pub track_index: usize,
-    pub clip_id: ClipId,
-    pub new_value: [bool; 2],
-    old_value: Option<[bool; 2]>,
-}
-
-impl SetClipFlip {
-    pub fn new(
-        timeline: TimelineId,
-        track_index: usize,
-        clip_id: ClipId,
-        new_value: [bool; 2],
-    ) -> Self {
-        Self {
-            timeline,
-            track_index,
-            clip_id,
-            new_value,
-            old_value: None,
-        }
-    }
-}
-
-impl Command for SetClipFlip {
-    fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
-            return;
-        };
-        self.old_value = Some(clip.effects.transform.flip);
-        clip.effects.transform.flip = self.new_value;
-    }
-
-    fn undo(&self, project: &mut Project) {
-        let Some(old_value) = self.old_value else {
-            return;
-        };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.effects.transform.flip = old_value;
-        }
-    }
-}
-
-/// Imposta il gain audio *statico* di una clip (dB), stesso schema di
-/// `SetClipTransform`.
-#[derive(Debug)]
-pub struct SetClipGain {
-    pub timeline: TimelineId,
-    pub track_index: usize,
-    pub clip_id: ClipId,
-    pub new_value: f32,
-    old_value: Option<f32>,
-}
-
-impl SetClipGain {
-    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, new_value: f32) -> Self {
-        Self {
-            timeline,
-            track_index,
-            clip_id,
-            new_value,
-            old_value: None,
-        }
-    }
-}
-
-impl Command for SetClipGain {
-    fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
-            return;
-        };
-        self.old_value = Some(clip.effects.gain_db.default);
-        clip.effects.gain_db.default = self.new_value;
-    }
-
-    fn undo(&self, project: &mut Project) {
-        let Some(old_value) = self.old_value else {
-            return;
-        };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.effects.gain_db.default = old_value;
-        }
-    }
-}
-
-/// Riporta il gain di una clip al default (0 dB), keyframe compresi:
-/// il "↺" della riga Volume nel pannello.
-#[derive(Debug)]
-pub struct ResetClipGain {
-    pub timeline: TimelineId,
-    pub track_index: usize,
-    pub clip_id: ClipId,
-    previous: Option<Keyframed<f32>>,
-}
-
-impl ResetClipGain {
-    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId) -> Self {
-        Self {
-            timeline,
-            track_index,
-            clip_id,
-            previous: None,
-        }
-    }
-}
-
-impl Command for ResetClipGain {
-    fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
-            return;
-        };
-        self.previous = Some(clip.effects.gain_db.clone());
-        clip.effects.gain_db = Keyframed::constant(0.0);
-    }
-
-    fn undo(&self, project: &mut Project) {
-        let Some(previous) = &self.previous else {
-            return;
-        };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.effects.gain_db = previous.clone();
-        }
-    }
-}
-
-/// Imposta il colore *statico* (`effects.color.default`) di una clip
-/// SolidColor. A differenza di transform/gain, `effects.color` parte
-/// `None`: il primo `SetClipColor` lo inizializza. I comandi keyframe
-/// (`UpsertKeyframe`/`RemoveKeyframe`, sotto) assumono invece che sia già
-/// inizializzato e non fanno nulla altrimenti — in pratica non è un
-/// problema perché una clip SolidColor riceve sempre un colore alla
-/// creazione (vedi vv-app).
+/// Colore statico di una clip SolidColor; il primo lo inizializza. I
+/// comandi keyframe presuppongono un colore già presente.
 #[derive(Debug)]
 pub struct SetClipColor {
     pub timeline: TimelineId,
@@ -1307,8 +936,7 @@ impl SetClipColor {
 
 impl Command for SetClipColor {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         self.old_value = Some(clip.effects.color.as_ref().map(|k| k.default));
@@ -1322,8 +950,7 @@ impl Command for SetClipColor {
         let Some(old) = self.old_value else {
             return;
         };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         match old {
@@ -1337,52 +964,7 @@ impl Command for SetClipColor {
     }
 }
 
-/// Sostituisce i parametri di una clip di testo.
-#[derive(Debug)]
-pub struct SetClipTitle {
-    pub timeline: TimelineId,
-    pub track_index: usize,
-    pub clip_id: ClipId,
-    pub new_value: TitleParams,
-    old_value: Option<Option<TitleParams>>,
-}
-
-impl SetClipTitle {
-    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, new_value: TitleParams) -> Self {
-        Self {
-            timeline,
-            track_index,
-            clip_id,
-            new_value,
-            old_value: None,
-        }
-    }
-}
-
-impl Command for SetClipTitle {
-    fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
-            return;
-        };
-        self.old_value = Some(clip.effects.title.replace(self.new_value.clone()));
-    }
-
-    fn undo(&self, project: &mut Project) {
-        let Some(old) = &self.old_value else {
-            return;
-        };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            clip.effects.title = old.clone();
-        }
-    }
-}
-
-/// Il parametro animabile a cui si applica un `UpsertKeyframe`/
-/// `RemoveKeyframe`. Comandi parametrizzati su un enum invece di uno per
-/// parametro: quando arriveranno altri parametri keyframeable (es. speed)
-/// basterà aggiungere una variante qui, non un'altra coppia di comandi.
+/// Parametro animabile di `UpsertKeyframe`/`RemoveKeyframe`.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyframeValue {
     TransformParam(TransformParam, f32),
@@ -1390,8 +972,7 @@ pub enum KeyframeValue {
     Color(Rgba),
 }
 
-/// Inserisce o sostituisce un keyframe di `effects.transform` o
-/// `effects.gain_db` al frame indicato (milestone 5, seconda parte).
+/// Inserisce o sostituisce un keyframe di un parametro animabile.
 #[derive(Debug)]
 pub struct UpsertKeyframe {
     pub timeline: TimelineId,
@@ -1429,8 +1010,7 @@ impl UpsertKeyframe {
 
 impl Command for UpsertKeyframe {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         match self.value {
@@ -1464,8 +1044,7 @@ impl Command for UpsertKeyframe {
     }
 
     fn undo(&self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         match &self.previous {
@@ -1539,8 +1118,7 @@ impl RemoveKeyframe {
 
 impl Command for RemoveKeyframe {
     fn apply(&mut self, project: &mut Project) {
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         self.removed = match self.target {
@@ -1568,8 +1146,7 @@ impl Command for RemoveKeyframe {
         let Some((value, interp)) = self.removed else {
             return;
         };
-        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
-        let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
         match value {
@@ -1588,13 +1165,9 @@ impl Command for RemoveKeyframe {
     }
 }
 
-/// Rimuove un media dal media pool. Le clip che lo usano restano in
-/// timeline e diventano "offline" (la loro `MediaId` non risolve più).
-///
-/// `slotmap` non permette di reinserire con la stessa chiave, quindi
-/// l'undo ottiene una `MediaId` nuova e deve riscrivere i riferimenti in
-/// tutte le clip; per lo stesso motivo lo stato (item rimosso e id
-/// corrente) sta dietro a `Cell`/`RefCell`: `Command::undo` prende `&self`.
+/// Rimuove un media dal pool; le sue clip restano offline. `slotmap` non
+/// reinserisce con la stessa chiave: l'undo riscrive le clip col nuovo id,
+/// da cui `Cell`/`RefCell` (`undo` prende `&self`).
 #[derive(Debug)]
 pub struct RemoveMedia {
     media: Cell<MediaId>,
@@ -1634,10 +1207,7 @@ impl Command for RemoveMedia {
     }
 }
 
-/// "Relink": punta un media del pool a un nuovo percorso su disco (es.
-/// dopo aver ritrovato il file sotto un'altra cartella base). Il
-/// chiamante ricalcola anche `content_hash` per il nuovo percorso: le
-/// clip in timeline restano quelle, solo la sorgente su disco cambia.
+/// Relink: nuovo percorso (e `content_hash`) per un media del pool.
 #[derive(Debug)]
 pub struct SetMediaPath {
     media: MediaId,
@@ -1685,27 +1255,13 @@ fn clip_bounds(
     track_index: usize,
     clip_id: ClipId,
 ) -> Option<(FrameIdx, FrameIdx)> {
-    let clip = project.timelines[timeline_id]
-        .tracks
-        .get(track_index)?
-        .clips
-        .iter()
-        .find(|c| c.id == clip_id)?;
+    let clip = project.timelines[timeline_id].clip(track_index, clip_id)?;
     Some((clip.timeline_start, clip.timeline_end()))
 }
 
-/// Applica la modifica necessaria a *una* clip esistente che si
-/// sovrappone a `[new_start, new_end)`: rimossa se completamente
-/// coperta, accorciata da un bordo se sporge solo da un lato, divisa
-/// in due se il nuovo intervallo cade nel suo mezzo (il pezzo
-/// centrale, quello coperto, sparisce — comportamento "overwrite" di
-/// un vero NLE). `old_start`/`old_end` sono lo stato
-/// *attuale* della clip (letto dal chiamante prima di accodare
-/// comandi, mai da uno stato immaginato). Ritorna `Some((id_sinistra,
-/// id_destra))` solo nel caso di uno split, per permettere al
-/// chiamante di ricollegare le due metà alla gemella coinvolta dalla
-/// stessa operazione (vedi `make_room_for_ranges`). I comandi vengono
-/// accodati a `commands`, non eseguiti subito.
+/// Accoda i comandi che liberano `[new_start, new_end)` da una clip che lo
+/// invade: rimossa se coperta, accorciata se sporge da un lato, divisa se
+/// il tratto cade nel mezzo (restituisce la metà destra).
 #[allow(clippy::too_many_arguments)]
 fn resolve_overlap(
     project: &mut Project,
@@ -1717,7 +1273,7 @@ fn resolve_overlap(
     new_start: FrameIdx,
     new_end: FrameIdx,
     commands: &mut Vec<Box<dyn Command>>,
-) -> Option<(ClipId, ClipId)> {
+) -> Option<ClipId> {
     if old_start >= new_start && old_end <= new_end {
         commands.push(Box::new(LiftDelete::new(
             timeline_id,
@@ -1741,7 +1297,7 @@ fn resolve_overlap(
             TrimEdge::Start,
             new_end,
         )));
-        Some((clip_id, right_id))
+        Some(right_id)
     } else if old_start < new_start {
         // La coda sporge oltre `new_start`: accorcia il bordo destro
         // (fine) fin lì.
@@ -1767,28 +1323,10 @@ fn resolve_overlap(
     }
 }
 
-/// Libera `[start, end)` di ciascuna `(track_index, start, end)` in
-/// `ranges`, per far posto a nuove clip che stanno per essere inserite
-/// lì (paste): le clip già presenti che si sovrappongono vengono
-/// accorciate, divise o rimosse — mai lasciate sovrapposte con la
-/// nuova clip sopra (bug segnalato: l'anteprima riproduceva la clip
-/// sottostante invece di quella appena incollata).
-///
-/// Dividere una clip non tocca il `linked_group` della metà sinistra
-/// (`SplitClip`, vedi doc): resta collegata a chiunque altro condivida
-/// il gruppo, split o no. La metà *destra* invece è nuova e parte
-/// scollegata — se altri membri del gruppo sono *anche loro* tra le
-/// track coinvolte in `ranges` (il caso comune: si incolla sempre
-/// l'intero gruppo video+audio insieme, vedi `copy_selected_clips`) e
-/// vengono divisi dallo stesso taglio, le loro metà destre vengono
-/// ricollegate tra loro subito dopo — stesso principio di
-/// `split_at_playhead`. Un membro del gruppo fuori da `ranges` (si
-/// sta incollando solo una parte del gruppo) resta semplicemente
-/// intoccato, ancora nel gruppo originale.
-///
-/// I comandi vengono accodati a `commands`, non eseguiti subito: il
-/// chiamante li unisce in un'unica `CompositeCommand` insieme
-/// all'inserimento vero e proprio, per un solo passo di undo.
+/// Accoda i comandi che liberano i tratti `ranges` (track, inizio, fine):
+/// le clip sotto vengono accorciate, divise o rimosse, mai lasciate
+/// sovrapposte. Se un taglio divide più membri di uno stesso gruppo tra le
+/// track coinvolte, le loro metà destre vengono ricollegate.
 pub fn make_room_for_ranges(
     project: &mut Project,
     timeline_id: TimelineId,
@@ -1844,13 +1382,13 @@ pub fn make_room_for_ranges(
                 commands,
             );
 
-            let Some(_group) = group else { continue };
-            let mut new_rights: Vec<(usize, ClipId)> = split_halves
-                .map(|(_left, right)| (track_index, right))
-                .into_iter()
-                .collect();
+            if group.is_none() {
+                continue;
+            }
+            let mut new_rights: Vec<(usize, ClipId)> =
+                split_halves.map(|right| (track_index, right)).into_iter().collect();
 
-            for (member_track, member_id) in group_members(project, timeline_id, track_index, clip_id) {
+            for (member_track, member_id) in project.timelines[timeline_id].linked_members(track_index, clip_id) {
                 if !range_tracks.contains(&member_track)
                     || !processed.insert((member_track, member_id))
                 {
@@ -1871,7 +1409,7 @@ pub fn make_room_for_ranges(
                     new_end,
                     commands,
                 );
-                if let Some((_, right)) = member_split {
+                if let Some(right) = member_split {
                     new_rights.push((member_track, right));
                 }
             }
@@ -1884,15 +1422,44 @@ pub fn make_room_for_ranges(
 }
 
 
-/// Taglia le sovrapposizioni rimaste su ogni track: dove due clip si
-/// accavallano vince quella che comincia dopo (è quella appena arrivata
-/// lì), e quella sotto viene accorciata fino al suo bordo, o rimossa se ne
-/// resta coperta del tutto. Rete di sicurezza generale dopo le operazioni
-/// che spostano clip in blocco (il ripple delete): una sovrapposizione
-/// lasciata lì si vedrebbe e si *sentirebbe* — entrambe le tracce audio
-/// insieme, il video di quella sotto.
-///
-/// I comandi vengono accodati a `commands`, non eseguiti subito.
+/// Comandi che inseriscono `clips` (track, clip, gruppo) sovrascrivendo
+/// quel che c'è sotto; le clip con la stessa chiave di gruppo finiscono in
+/// un gruppo collegato nuovo.
+pub fn insert_overwriting<K: PartialEq>(
+    project: &mut Project,
+    timeline_id: TimelineId,
+    clips: Vec<(usize, Clip, Option<K>)>,
+) -> Vec<Box<dyn Command>> {
+    let ranges: Vec<(usize, FrameIdx, FrameIdx)> = clips
+        .iter()
+        .map(|(track, clip, _)| (*track, clip.timeline_start, clip.timeline_end()))
+        .collect();
+    let mut commands: Vec<Box<dyn Command>> = Vec::new();
+    make_room_for_ranges(project, timeline_id, &ranges, &[], &mut commands);
+    let mut groups: Vec<(K, Vec<(usize, ClipId)>)> = Vec::new();
+    for (track_index, clip, key) in clips {
+        if let Some(key) = key {
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, members)) => members.push((track_index, clip.id)),
+                None => groups.push((key, vec![(track_index, clip.id)])),
+            }
+        }
+        commands.push(Box::new(InsertClip {
+            timeline: timeline_id,
+            track_index,
+            clip,
+        }));
+    }
+    for (_, members) in groups {
+        if members.len() >= 2 {
+            commands.push(Box::new(LinkClips::new(timeline_id, members)));
+        }
+    }
+    commands
+}
+
+/// Accoda i tagli per le sovrapposizioni rimaste: vince la clip che
+/// comincia dopo. Rete di sicurezza dopo gli spostamenti in blocco.
 pub fn cut_overlaps(
     project: &mut Project,
     timeline_id: TimelineId,
@@ -1937,24 +1504,3 @@ pub fn cut_overlaps(
     }
 }
 
-/// Gli altri membri del gruppo collegato di una clip, se ne ha uno.
-fn group_members(
-    project: &Project,
-    timeline_id: TimelineId,
-    track_index: usize,
-    clip_id: ClipId,
-) -> Vec<(usize, ClipId)> {
-    let Some(group) = project.timelines[timeline_id]
-        .tracks
-        .get(track_index)
-        .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
-        .and_then(|c| c.linked_group)
-    else {
-        return Vec::new();
-    };
-    project.timelines[timeline_id]
-        .clips_in_group(group)
-        .into_iter()
-        .filter(|&(_, id)| id != clip_id)
-        .collect()
-}

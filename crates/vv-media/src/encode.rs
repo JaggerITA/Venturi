@@ -1,13 +1,6 @@
-//! Encoding + muxing verso file (H.264 via x264 o NVENC + AAC in MP4), via `ffmpeg-next` —
-//! simmetrico a `decode.rs` ma nella direzione opposta: chi chiama fornisce
-//! frame I420 già compositati (BT.709 range limitato, convertiti su GPU dal
-//! compositor) e campioni PCM già mixati (vedi la pipeline di export in
-//! `vv-app`), `Encoder` converte l'audio nel formato nativo dell'encoder
-//! AAC (tipicamente FLTP) e scrive il file. Pattern di invio
-//! pacchetti/flush preso dagli esempi ufficiali di `ffmpeg-next`
-//! (`examples/transcode-x264.rs`, `examples/transcode-audio.rs`):
-//! `send_frame`/`receive_packet`/`write_interleaved`, `send_eof` per il
-//! flush finale.
+//! Encoding + mux in MP4 (H.264 x264/NVENC + AAC). Riceve frame I420 già
+//! compositati (BT.709 limited) e PCM già mixato; converte solo l'audio nel
+//! formato nativo dell'encoder AAC.
 
 use ffmpeg::codec::{self, encoder};
 use ffmpeg::format::sample::{Sample, Type as SampleType};
@@ -159,11 +152,8 @@ struct VideoState {
 
 struct AudioState {
     encoder: encoder::Audio,
-    /// F32 packed (formato/layout con cui arrivano i campioni da chi
-    /// chiama) -> formato/layout richiesto dall'encoder AAC, stesso sample
-    /// rate (nessuna conversione di frequenza qui: quella è già stata
-    /// fatta a monte, in `vv-app`, per mixare più clip a un unico rate di
-    /// progetto).
+    /// F32 packed -> formato dell'encoder AAC, stesso rate (il ricampionamento
+    /// è già fatto a monte).
     resampler: Resampler,
     input_layout: ChannelLayout,
     stream_index: usize,
@@ -180,10 +170,8 @@ struct AudioState {
     next_pts: i64,
 }
 
-/// Apre un file di output e incapsula encoder video (H.264) + encoder audio
-/// (AAC, opzionale) + muxer in un'unica interfaccia a "scrivi un frame alla
-/// volta". Non `Sync`: un'istanza per export, come `Decoder` per la
-/// decodifica.
+/// Encoder video + audio opzionale + muxer, un frame alla volta. Uno per
+/// export.
 pub struct Encoder {
     octx: format::context::Output,
     video: VideoState,
@@ -314,23 +302,20 @@ impl Encoder {
                 )?;
                 let frame_size = (audio_encoder.frame_size() as usize).max(1);
 
-                Some((
-                    audio_stream_index,
-                    audio_time_base,
-                    AudioState {
+                Some(AudioState {
                         encoder: audio_encoder,
                         resampler,
                         input_layout,
                         stream_index: audio_stream_index,
                         time_base: audio_time_base,
-                        ost_time_base: audio_time_base, // aggiornato sotto, dopo write_header
+                        // Aggiornato dopo `write_header`.
+                        ost_time_base: audio_time_base,
                         frame_size,
                         channels,
                         rate: sample_rate,
                         pending: Vec::new(),
                         next_pts: 0,
-                    },
-                ))
+                    })
             }
             None => None,
         };
@@ -349,8 +334,8 @@ impl Encoder {
             next_pts: 0,
         };
 
-        let audio = audio_state.map(|(idx, _, mut state)| {
-            state.ost_time_base = octx.stream(idx).unwrap().time_base();
+        let audio = audio_state.map(|mut state| {
+            state.ost_time_base = octx.stream(state.stream_index).unwrap().time_base();
             state
         });
 
@@ -361,10 +346,29 @@ impl Encoder {
     /// (formato di `vv_render::Compositor::render_layers_i420`) — un
     /// avanzamento di un frame video in output.
     pub fn write_video_frame(&mut self, i420: &[u8]) -> Result<(), crate::MediaError> {
-        let Self { octx, video, .. } = self;
-        write_video_frame_impl(octx, video, i420)
-    }
+        let video = &mut self.video;
+        let width = video.encoder.width() as usize;
+        let height = video.encoder.height() as usize;
+        let chroma_width = width.div_ceil(2);
+        let mut yuv = ffmpeg::frame::Video::new(Pixel::YUV420P, width as u32, height as u32);
+        let (luma, chroma) = i420.split_at(width * height);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        fill_plane(&mut yuv, 0, luma, width);
+        fill_plane(&mut yuv, 1, u, chroma_width);
+        fill_plane(&mut yuv, 2, v, chroma_width);
+        yuv.set_pts(Some(video.next_pts));
+        yuv.set_kind(ffmpeg::picture::Type::None);
+        video.next_pts += 1;
 
+        video.encoder.send_frame(&yuv)?;
+        drain_packets(
+            &mut self.octx,
+            &mut video.encoder,
+            video.stream_index,
+            video.time_base,
+            video.ost_time_base,
+        )
+    }
     /// `samples`: PCM f32 interleaved, già al sample rate/canali dichiarati
     /// in `new`. Bufferizza internamente ai confini di frame AAC
     /// (`frame_size`); no-op se il progetto non ha audio.
@@ -386,13 +390,18 @@ impl Encoder {
         Ok(())
     }
 
-    /// Flush di entrambi gli encoder (`send_eof` + drain, con l'ultimo
-    /// blocco audio parziale imbottito di silenzio fino a `frame_size` —
-    /// l'encoder AAC nativo non accetta frame di dimensione diversa da
-    /// quella dichiarata) e `write_trailer`.
+    /// Flush degli encoder e `write_trailer`. L'ultimo blocco audio va
+    /// imbottito di silenzio: l'AAC nativo accetta solo frame di `frame_size`.
     pub fn finish(mut self) -> Result<(), crate::MediaError> {
         self.video.encoder.send_eof()?;
-        drain_video_packets(&mut self.octx, &mut self.video)?;
+        let video = &mut self.video;
+        drain_packets(
+            &mut self.octx,
+            &mut video.encoder,
+            video.stream_index,
+            video.time_base,
+            video.ost_time_base,
+        )?;
 
         if let Some(mut audio) = self.audio.take() {
             if !audio.pending.is_empty() {
@@ -402,54 +411,18 @@ impl Encoder {
                 write_audio_chunk(&mut self.octx, &mut audio, &chunk)?;
             }
             audio.encoder.send_eof()?;
-            drain_audio_packets(&mut self.octx, &mut audio)?;
+            drain_packets(
+                &mut self.octx,
+                &mut audio.encoder,
+                audio.stream_index,
+                audio.time_base,
+                audio.ost_time_base,
+            )?;
         }
 
         self.octx.write_trailer()?;
         Ok(())
     }
-}
-
-fn write_video_frame_impl(
-    octx: &mut format::context::Output,
-    video: &mut VideoState,
-    i420: &[u8],
-) -> Result<(), crate::MediaError> {
-    let width = video.encoder.width() as usize;
-    let height = video.encoder.height() as usize;
-    let chroma_width = width.div_ceil(2);
-    let mut yuv = ffmpeg::frame::Video::new(Pixel::YUV420P, width as u32, height as u32);
-    let (luma, chroma) = i420.split_at(width * height);
-    let (u, v) = chroma.split_at(chroma.len() / 2);
-    for (plane, (src, row_bytes)) in [(luma, width), (u, chroma_width), (v, chroma_width)]
-        .into_iter()
-        .enumerate()
-    {
-        let stride = yuv.stride(plane);
-        let data = yuv.data_mut(plane);
-        for (y, row) in src.chunks_exact(row_bytes).enumerate() {
-            data[y * stride..y * stride + row_bytes].copy_from_slice(row);
-        }
-    }
-    yuv.set_pts(Some(video.next_pts));
-    yuv.set_kind(ffmpeg::picture::Type::None);
-    video.next_pts += 1;
-
-    video.encoder.send_frame(&yuv)?;
-    drain_video_packets(octx, video)
-}
-
-fn drain_video_packets(
-    octx: &mut format::context::Output,
-    video: &mut VideoState,
-) -> Result<(), crate::MediaError> {
-    let mut packet = ffmpeg::Packet::empty();
-    while video.encoder.receive_packet(&mut packet).is_ok() {
-        packet.set_stream(video.stream_index);
-        packet.rescale_ts(video.time_base, video.ost_time_base);
-        packet.write_interleaved(octx)?;
-    }
-    Ok(())
 }
 
 fn write_audio_chunk(
@@ -478,20 +451,40 @@ fn write_audio_chunk(
     audio.next_pts += frame_len as i64;
 
     audio.encoder.send_frame(&resampled)?;
-    drain_audio_packets(octx, audio)
+    drain_packets(
+        octx,
+        &mut audio.encoder,
+        audio.stream_index,
+        audio.time_base,
+        audio.ost_time_base,
+    )
 }
 
-fn drain_audio_packets(
+/// Scrive nel muxer i pacchetti già pronti di `encoder`.
+pub(crate) fn drain_packets(
     octx: &mut format::context::Output,
-    audio: &mut AudioState,
+    encoder: &mut encoder::Encoder,
+    stream_index: usize,
+    time_base: ffmpeg::Rational,
+    ost_time_base: ffmpeg::Rational,
 ) -> Result<(), crate::MediaError> {
     let mut packet = ffmpeg::Packet::empty();
-    while audio.encoder.receive_packet(&mut packet).is_ok() {
-        packet.set_stream(audio.stream_index);
-        packet.rescale_ts(audio.time_base, audio.ost_time_base);
+    while encoder.receive_packet(&mut packet).is_ok() {
+        packet.set_stream(stream_index);
+        packet.rescale_ts(time_base, ost_time_base);
         packet.write_interleaved(octx)?;
     }
     Ok(())
+}
+
+/// Copia un piano denso (righe di `row_width` byte) in un piano di `frame`,
+/// che può avere uno stride più largo.
+pub(crate) fn fill_plane(frame: &mut ffmpeg::frame::Video, plane: usize, src: &[u8], row_width: usize) {
+    let stride = frame.stride(plane);
+    let data = frame.data_mut(plane);
+    for (y, row) in src.chunks_exact(row_width.max(1)).enumerate() {
+        data[y * stride..y * stride + row.len()].copy_from_slice(row);
+    }
 }
 
 #[cfg(test)]

@@ -1,35 +1,15 @@
-//! Estrazione dei picchi (peak) della traccia audio per il disegno della
-//! waveform sulla track audio della timeline (milestone 8).
+//! Picchi audio per disegnare la waveform in timeline. Cache globale su
+//! disco a chiave `content_hash` + stream, come i proxy; generata da
+//! `vv-app::waveform_worker`, mai sul thread UI.
 //!
-//! Stesso modello di `proxy.rs`: cache globale su disco chiave
-//! `content_hash` del `MediaItem` (indipendente dal progetto — una
-//! waveform generata in una sessione resta riusabile da un altro progetto
-//! che referenzia lo stesso file), generata in background da un worker
-//! dedicato (vedi `vv-app::waveform_worker`) e mai sul thread UI.
-//!
-//! I picchi sono un vettore di `f32` in [0,1] (massimo assoluto per
-//! "bin" di campioni), uno per bin di durata fissa: disegnare la waveform
-//! è poi solo un max-per-colonna-pixel su questo vettore, indipendente
-//! dallo zoom. La decodifica è *streaming* (un frame alla volta, mai il
-//! buffer intero in RAM) così anche un file da un'ora non gonfia la
-//! memoria — i picchi finali pesano ~4 byte × numero di bin, non i
-//! campioni.
-//!
-//! **Allineamento al suono.** I bin sono dimensionati sulla durata della
-//! *traccia audio* (non del container/video): la traccia audio può essere
-//! più corta o più lunga del video (es. il video finisce prima dell'audio,
-//! o viceversa), e dimensionare i bin sulla durata del container
-//! stirerebbe/comprimerebbe la waveform rispetto al suono reale — ogni
-//! evento audio cadrebbe in un bin sbagliato, spostando la forma d'onda
-//! rispetto al playback (bug segnalato: "la waveform è anticipata di mezzo
-//! secondo"). La durata audio viene salvata nel file di cache e usata
-//! anche dal disegno (vedi `draw_clip_waveform` in `timeline_ui`), così
-//! generazione e disegno usano la stessa base temporale.
+//! I bin coprono la durata della *traccia audio*, non del container: la
+//! durata è salvata nel file e il disegno usa la stessa base, altrimenti la
+//! waveform scivola rispetto al suono quando audio e video hanno durate
+//! diverse.
 
-use ffmpeg::format::sample::{Sample, Type as SampleType};
 use ffmpeg::media::Type;
-use ffmpeg::software::resampling::context::Context as Resampler;
 use ffmpeg_next as ffmpeg;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 /// Numero di picchi per secondo di audio: abbastanza da rendere la
@@ -49,37 +29,18 @@ pub fn recommended_num_peaks(duration_secs: f64) -> usize {
     raw.clamp(MIN_PEAKS, MAX_PEAKS)
 }
 
-/// Cartella cache globale delle waveform: `$XDG_CACHE_HOME/vibevideo/
-/// waveforms/`, o `~/.cache/vibevideo/waveforms/` se `XDG_CACHE_HOME` non è
-/// impostata (stesso fallback di `proxy::proxies_dir`).
 pub fn waveforms_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("vibevideo").join("waveforms")
+    crate::cache_dir("waveforms")
 }
 
-/// Path del file di picchi per questo `content_hash`/`stream_index`, che
-/// esista o no ancora — vedi `waveform_exists`. Un media può avere più
-/// stream audio (vedi `probe::audio_streams`/`Clip::audio_stream_index`):
-/// ciascuno ha la propria waveform, chiave `content_hash` *e* indice dello
-/// stream, non solo `content_hash` (che identifica il file, non lo stream
-/// al suo interno).
+/// Path del file di picchi di uno stream, che esista o no.
 pub fn waveform_path_for(content_hash: u64, stream_index: usize) -> PathBuf {
     waveforms_dir().join(format!("{content_hash:016x}_{stream_index}.peaks"))
 }
 
-/// Il file di picchi per questo `content_hash`/`stream_index` è già stato
-/// generato *con il formato corrente*? Non un semplice `is_file()` (a
-/// differenza di `proxy::proxy_exists`): un file scritto da una versione
-/// precedente del formato (`PEAKS_VERSION` diverso) esiste ma
-/// `load_waveform` lo scarterebbe comunque, quindi va trattato come "da
-/// rigenerare" — altrimenti il worker lo salterebbe per sempre credendolo
-/// già pronto (bug osservato: dopo un bump di versione la waveform smette
-/// di comparire per ogni media importato in una sessione precedente,
-/// perché il file vecchio resta lì bloccando la rigenerazione). Legge solo
-/// l'header (12 byte), non l'intero file.
+/// Il file esiste *nel formato corrente*? Un file di un `PEAKS_VERSION`
+/// precedente verrebbe scartato da `load_waveform`, ma con un semplice
+/// `is_file()` il worker non lo rigenererebbe mai. Legge solo l'header.
 pub fn waveform_exists(content_hash: u64, stream_index: usize) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(waveform_path_for(content_hash, stream_index)) else {
@@ -101,142 +62,143 @@ pub struct Waveform {
     pub audio_duration_secs: f64,
 }
 
-/// Estrae i picchi della traccia audio di `source_path` in `num_peaks`
-/// bin (massimo assoluto per bin, in [0,1]) e li scrive **atomicamente** a
-/// `waveform_path_for(content_hash, stream_index)`: prima un file temporaneo nella stessa
-/// cartella, poi `rename` (atomico sullo stesso filesystem) — mai un file
-/// a metà scritto visibile a un lettore concorrente (la timeline, su un
-/// altro thread, potrebbe controllarlo in qualunque istante mentre questa
-/// funzione è ancora in corso).
-///
-/// `stream_index` seleziona quale stream audio del contenitore (stesso
-/// ordine di `probe::audio_streams`, non l'euristica "best" di ffmpeg —
-/// vedi doc di `Clip::audio_stream_index`). `Ok(None)` se il media non ha
-/// uno stream audio a quell'indice (niente da disegnare).
-pub fn generate_waveform(
+/// Picchi degli stream `stream_indices` in una sola lettura del file,
+/// `num_peaks` bin ciascuno in [0,1], scritti atomicamente (tmp +
+/// `rename`). `None` per uno stream inesistente.
+pub fn generate_waveforms(
+    source_path: &Path,
+    content_hash: u64,
+    stream_indices: &[usize],
+    num_peaks: usize,
+) -> Result<Vec<Option<Waveform>>, crate::MediaError> {
+    crate::probe::ensure_init();
+    let mut bins: Vec<Option<PeakBins>> = audio_stream_timing(source_path, stream_indices)?
+        .into_iter()
+        .map(|timing| timing.map(|(secs, rate)| PeakBins::new(secs, rate, num_peaks)))
+        .collect();
+    crate::audio::decode_audio_streams_streaming(
+        source_path,
+        stream_indices,
+        None,
+        |slot, channels, chunk| {
+            if let Some(bins) = &mut bins[slot] {
+                bins.push(chunk, channels as usize);
+            }
+            ControlFlow::Continue(())
+        },
+    )?;
+
+    let dir = waveforms_dir();
+    std::fs::create_dir_all(&dir)?;
+    let mut out = Vec::with_capacity(bins.len());
+    for (&stream_index, bins) in stream_indices.iter().zip(bins) {
+        let Some(bins) = bins else {
+            out.push(None);
+            continue;
+        };
+        let waveform = bins.finish();
+        let tmp_path = dir.join(format!(
+            "{content_hash:016x}_{stream_index}.tmp-{}.peaks",
+            std::process::id()
+        ));
+        write_peaks_file(&tmp_path, &waveform.peaks, waveform.audio_duration_secs)?;
+        std::fs::rename(&tmp_path, waveform_path_for(content_hash, stream_index))?;
+        out.push(Some(waveform));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+fn generate_waveform(
     source_path: &Path,
     content_hash: u64,
     stream_index: usize,
     num_peaks: usize,
 ) -> Result<Option<Waveform>, crate::MediaError> {
-    crate::probe::ensure_init();
-
-    let mut ictx = ffmpeg::format::input(source_path)?;
-    let Some(audio_stream) = ictx
-        .streams()
-        .filter(|s| s.parameters().medium() == Type::Audio)
-        .nth(stream_index)
-    else {
-        return Ok(None);
-    };
-    let audio_stream_index = audio_stream.index();
-
-    let mut decoder = ffmpeg::codec::context::Context::from_parameters(audio_stream.parameters())?
-        .decoder()
-        .audio()?;
-
-    let channel_layout = crate::audio::decoder_channel_layout(&decoder);
-    let sample_rate = decoder.rate();
-
-    let mut resampler = Resampler::get(
-        decoder.format(),
-        channel_layout,
-        sample_rate,
-        Sample::F32(SampleType::Packed),
-        channel_layout,
-        sample_rate,
-    )?;
-
-    // Durata della *traccia audio* (non del container): la base temporale
-    // sui cui dimensionare i bin. `audio_stream.duration()` è espresso nel
-    // time_base della *stream* (per l'audio ≈ 1/sample_rate), NON in
-    // AV_TIME_BASE: va riscalata con `duration * tb.num / tb.den` per
-    // ottenere i secondi. Se è 0/assente (alcuni formati non la segnalano,
-    // o la danno come sconosciuta, -1) ricade sulla durata del container.
-    let audio_duration_secs = {
-        let tb = audio_stream.time_base();
-        let d = audio_stream.duration() as f64 * tb.0 as f64 / tb.1 as f64;
-        if d > 0.0 {
-            d
-        } else {
-            // Alcuni formati non segnalano la durata della traccia audio:
-            // ricade sulla durata del container (stima ragionevole).
-            ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE)
-        }
-    };
-
-    // Frazionario: il disegno colloca il bin `i` a `i * durata / num_peaks`,
-    // e un troncamento qui accumulerebbe ritardo lungo tutto il file.
-    let samples_per_bin = (audio_duration_secs * sample_rate as f64 / num_peaks as f64).max(1.0);
-
-    let mut peaks = vec![0.0_f32; num_peaks];
-    let mut global_sample = 0usize;
-
-    let mut decoded = ffmpeg::frame::Audio::empty();
-    let mut packet = ffmpeg::Packet::empty();
-
-    loop {
-        match packet.read(&mut ictx) {
-            Ok(()) => {
-                if packet.stream() != audio_stream_index {
-                    continue;
-                }
-                decoder.send_packet(&packet)?;
-                while decoder.receive_frame(&mut decoded).is_ok() {
-                    push_resampled_peaks(
-                        &mut resampler,
-                        &mut decoded,
-                        &mut peaks,
-                        &mut global_sample,
-                        samples_per_bin,
-                        num_peaks,
-                    )?;
-                }
-            }
-            Err(ffmpeg::Error::Eof) => {
-                decoder.send_eof()?;
-                while decoder.receive_frame(&mut decoded).is_ok() {
-                    push_resampled_peaks(
-                        &mut resampler,
-                        &mut decoded,
-                        &mut peaks,
-                        &mut global_sample,
-                        samples_per_bin,
-                        num_peaks,
-                    )?;
-                }
-                break;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    // Normalizza sul picco globale così la waveform usa l'intera altezza
-    // della clip (come nei player): un file quieto non si disegna
-    // invisibilmente piccolo. Se il picco è 0 (silenzio totale) resta 0.
-    let global_peak = peaks.iter().cloned().fold(0.0_f32, f32::max);
-    if global_peak > 0.0 {
-        for p in &mut peaks {
-            *p /= global_peak;
-        }
-    }
-
-    let dir = waveforms_dir();
-    std::fs::create_dir_all(&dir).map_err(io_err)?;
-    let final_path = waveform_path_for(content_hash, stream_index);
-    let tmp_path = dir.join(format!(
-        "{content_hash:016x}_{stream_index}.tmp-{}.peaks",
-        std::process::id()
-    ));
-    write_peaks_file(&tmp_path, &peaks, audio_duration_secs)?;
-    std::fs::rename(&tmp_path, &final_path).map_err(io_err)?;
-
-    Ok(Some(Waveform {
-        peaks,
-        audio_duration_secs,
-    }))
+    Ok(generate_waveforms(source_path, content_hash, &[stream_index], num_peaks)?
+        .pop()
+        .flatten())
 }
 
+/// `(durata in secondi, sample rate)` di ciascuno stream audio richiesto.
+/// La durata è quella della traccia (nel suo time_base); se il formato non
+/// la segnala, quella del container.
+fn audio_stream_timing(
+    path: &Path,
+    stream_indices: &[usize],
+) -> Result<Vec<Option<(f64, u32)>>, crate::MediaError> {
+    let ictx = ffmpeg::format::input(path)?;
+    let container_secs = ictx.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
+    let streams: Vec<_> = ictx
+        .streams()
+        .filter(|s| s.parameters().medium() == Type::Audio)
+        .collect();
+    stream_indices
+        .iter()
+        .map(|&i| {
+            let Some(stream) = streams.get(i) else {
+                return Ok(None);
+            };
+            let rate = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
+                .decoder()
+                .audio()?
+                .rate();
+            let tb = stream.time_base();
+            let secs = stream.duration() as f64 * tb.0 as f64 / tb.1 as f64;
+            Ok(Some((if secs > 0.0 { secs } else { container_secs }, rate)))
+        })
+        .collect()
+}
+
+/// Picchi in costruzione per uno stream.
+struct PeakBins {
+    peaks: Vec<f32>,
+    /// Frazionario: troncarlo accumulerebbe ritardo lungo il file.
+    samples_per_bin: f64,
+    /// Frame audio (un campione per canale) visti finora.
+    frames_seen: usize,
+    audio_duration_secs: f64,
+}
+
+impl PeakBins {
+    fn new(audio_duration_secs: f64, sample_rate: u32, num_peaks: usize) -> Self {
+        let num_peaks = num_peaks.max(1);
+        Self {
+            peaks: vec![0.0; num_peaks],
+            samples_per_bin: (audio_duration_secs * sample_rate as f64 / num_peaks as f64)
+                .max(1.0),
+            frames_seen: 0,
+            audio_duration_secs,
+        }
+    }
+
+    /// `chunk` interleaved: il bin avanza di un frame per volta, non di un
+    /// campione, o l'audio multicanale finirebbe compresso nei primi bin.
+    fn push(&mut self, chunk: &[f32], channels: usize) {
+        let last = self.peaks.len() - 1;
+        for frame in chunk.chunks_exact(channels.max(1)) {
+            let bin = ((self.frames_seen as f64 / self.samples_per_bin) as usize).min(last);
+            let peak = frame.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            self.peaks[bin] = self.peaks[bin].max(peak);
+            self.frames_seen += 1;
+        }
+    }
+
+    /// Normalizza sul picco globale: un file quieto usa comunque tutta
+    /// l'altezza della clip.
+    fn finish(mut self) -> Waveform {
+        let global_peak = self.peaks.iter().copied().fold(0.0f32, f32::max);
+        if global_peak > 0.0 {
+            for p in &mut self.peaks {
+                *p /= global_peak;
+            }
+        }
+        Waveform {
+            peaks: self.peaks,
+            audio_duration_secs: self.audio_duration_secs,
+        }
+    }
+}
 /// Carica i picchi già generati per `content_hash`/`stream_index` dal file
 /// di cache, se esiste. `Ok(None)` se il file non c'è (da generare) o è
 /// corrotto.
@@ -246,16 +208,11 @@ pub fn load_waveform(content_hash: u64, stream_index: usize) -> Option<Waveform>
     read_peaks_file(&bytes)
 }
 
-/// Formato del file di picchi: magic (4 byte) + versione (u32 LE) +
-/// numero di picchi (u32 LE) + durata audio (f64 LE) + i picchi (f32 LE
-/// ciascuno). La versione permette di scartare i file generati da una
-/// versione precedente del formato senza doverli rigenerare a mano.
+/// Magic, versione (u32), numero di picchi (u32), durata audio (f64),
+/// picchi (f32), tutto LE.
 const PEAKS_MAGIC: &[u8; 4] = b"vbwf";
-// v3: la durata audio è riscalata dal time_base della stream (v2 la
-// divideva per AV_TIME_BASE, sbagliando di ~sample_rate volte e
-// comprimendo i picchi nei primi bin — waveform desincronizzata).
-// v4: bin di `total_samples / num_peaks` campioni *frazionari* (v3 li
-// troncava all'intero: la waveform scivolava in ritardo lungo il file).
+// v3: durata audio dal time_base dello stream.
+// v4: bin di campioni frazionari (troncarli faceva scivolare la waveform).
 const PEAKS_VERSION: u32 = 4;
 
 fn write_peaks_file(path: &Path, peaks: &[f32], audio_duration_secs: f64) -> Result<(), crate::MediaError> {
@@ -267,7 +224,7 @@ fn write_peaks_file(path: &Path, peaks: &[f32], audio_duration_secs: f64) -> Res
     for p in peaks {
         bytes.extend_from_slice(&p.to_le_bytes());
     }
-    std::fs::write(path, bytes).map_err(io_err)
+    Ok(std::fs::write(path, bytes)?)
 }
 
 fn read_peaks_file(bytes: &[u8]) -> Option<Waveform> {
@@ -293,57 +250,9 @@ fn read_peaks_file(bytes: &[u8]) -> Option<Waveform> {
     })
 }
 
-fn io_err(e: std::io::Error) -> crate::MediaError {
-    crate::MediaError::NoStream(e.to_string())
-}
-
-/// Risample un frame audio in f32 packed e aggiorna i picchi: per ogni
-/// *frame* audio (un campione per canale, es. L+R per lo stereo), il bin
-/// `global_sample / samples_per_bin` prende il massimo assoluto tra i
-/// canali di quel frame. `global_sample` avanza di un frame alla volta —
-/// non di un campione scalare alla volta: `samples_per_bin` è calcolato
-/// sulla durata audio in frame/secondo (`sample_rate`, indipendente dal
-/// numero di canali, vedi `generate_waveform`), quindi contare ogni
-/// campione interleaved (L *e* R separatamente) farebbe avanzare
-/// `global_sample` 2 volte più in fretta per l'audio stereo, comprimendo
-/// l'intera waveform nella prima metà dei bin — la forma d'onda sembrava
-/// sempre "disegnata in anticipo" rispetto al suono reale (bug non preso
-/// dai test perché usavano un segnale mono, dove il bug è invisibile per
-/// coincidenza: 1 canale = 1 incremento per frame).
-fn push_resampled_peaks(
-    resampler: &mut Resampler,
-    decoded: &mut ffmpeg::frame::Audio,
-    peaks: &mut [f32],
-    global_sample: &mut usize,
-    samples_per_bin: f64,
-    num_peaks: usize,
-) -> Result<(), crate::MediaError> {
-    let mut resampled = ffmpeg::frame::Audio::empty();
-    crate::audio::run_resampler(resampler, decoded, &mut resampled)?;
-    let channels = resampled.channels() as usize;
-    let byte_len = resampled.samples() * channels * 4;
-    let bytes = &resampled.data(0)[..byte_len];
-    // Stesso pattern di `audio::push_resampled`: `as_chunks::<4>` (stabilizzata)
-    // dà i 4 byte di ogni campione f32 senza copie; raggruppati poi a
-    // `channels` alla volta (un frame interleaved L,R,L,R,...).
-    for frame in bytes.as_chunks::<4>().0.chunks_exact(channels.max(1)) {
-        let bin = ((*global_sample as f64 / samples_per_bin) as usize).min(num_peaks - 1);
-        for chunk in frame {
-            let value = f32::from_ne_bytes(*chunk);
-            let abs = value.abs();
-            if abs > peaks[bin] {
-                peaks[bin] = abs;
-            }
-        }
-        *global_sample += 1;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// Genera un vero file x264 con audio AAC (un seno) via ffmpeg CLI —
     /// il caso d'uso primario (compressed x264 + audio), non un mock.
@@ -351,9 +260,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(file_name);
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -368,11 +276,9 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
         path
     }
 
@@ -461,20 +367,17 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("stereo_half_silent.mp4");
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
                 "aevalsrc=exprs='if(lt(t,2),0,sin(2*PI*440*t))':s=48000:d=4:c=stereo",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let content_hash = 0x51DE7357;
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
@@ -514,13 +417,15 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tono_a_8s.wav");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi"])
-            .args(["-i", "aevalsrc=exprs='if(lt(t,8),0,sin(2*PI*440*t))':s=48000:d=10"])
-            .arg(&path)
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc=exprs='if(lt(t,8),0,sin(2*PI*440*t))':s=48000:d=10",
+            ],
+            &path,
+        );
 
         let content_hash = 0xF4AC7;
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
@@ -545,20 +450,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("six_channel_half_silent.mp4");
         let tone = "if(lt(t,2),0,sin(2*PI*440*t))";
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
                 &format!("aevalsrc=exprs='{tone}|{tone}|{tone}|{tone}|{tone}|{tone}':s=48000:d=4:c=5.1"),
                 "-c:a",
                 "ac3",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let content_hash = 0x51DE7357_6C6C6C6C;
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
@@ -582,9 +484,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("silent.mp4");
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -593,11 +494,9 @@ mod tests {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let result = generate_waveform(&path, 0xDEADBEEF, 0, 200).expect("generazione fallita");
         assert!(result.is_none(), "nessuna traccia audio: nessun picco");
@@ -611,9 +510,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("two_streams.mp4");
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
+        crate::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -628,11 +526,9 @@ mod tests {
                 "1:a",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let content_hash = 0x57EA2001;
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));

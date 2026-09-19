@@ -1,31 +1,22 @@
-// Crop + zoom + position su un frame video (milestone 5), più la
-// conversione YUV420->RGB (REFACTOR_PIPELINE.md B3): il frame arriva in
-// ingresso come tre piani (Y/U/V) invece di RGBA già espanso, la
-// conversione avviene qui nello shader invece che su CPU in vv-media.
-// Un solo triangolo fullscreen (nessun vertex buffer) campiona le tre
-// texture sorgente con le coordinate rimappate secondo il Transform.
+// Transform (crop, zoom, rotazione, posizione) e conversione YUV420->RGB
+// in un triangolo fullscreen, senza vertex buffer.
 
 struct TransformUniform {
     // left, top, right, bottom in coordinate normalizzate [0,1] sul source.
     crop: vec4<f32>,
     // zoom.x, zoom.y, position.x, position.y
     zoom_pos: vec4<f32>,
-    // x/y: fattori di letterbox (>1 sull'asse che resta scoperto): il
-    // frame sorgente viene inscritto nell'output mantenendo il suo
-    // aspect ratio invece di essere deformato. z: rotazione in radianti
-    // (positiva = oraria). w: sfumatura dei bordi di crop, in frazioni
-    // del frame sorgente: negativa verso l'interno del crop, positiva
-    // verso l'esterno.
+    // x/y: fattori di letterbox (>1 sull'asse scoperto). z: rotazione in
+    // radianti, oraria. w: sfumatura del crop in frazioni del sorgente
+    // (negativa verso l'interno).
     fit_rot: vec4<f32>,
     // anchor.x, anchor.y (pivot di zoom e rotazione, in frazioni del
     // frame di output dal centro della clip), flip.x, flip.y (0 o 1).
     anchor_flip: vec4<f32>,
-    // x: matrice colore (0=BT.601, 1=BT.709, 2=BT.2020, vedi
-    //    vv_media::ColorMatrix). y: 1.0 se range full (JPEG), 0.0 se
-    //    limited (MPEG) — vedi vv_media::FrameYuv420::full_range.
-    //    z: aspect ratio dell'output (w/h), serve a far ruotare senza
-    //    deformare. w: 1.0 se il layer è un colore pieno (`solid`), 2.0
-    //    se è un colore pieno con la copertura nel piano Y (testo).
+    // x: matrice (0=BT.601, 1=BT.709, 2=BT.2020). y: 1 se full range.
+    // z: aspect dell'output, per ruotare senza deformare.
+    // w: 0 video, 1 colore pieno, 2 colore pieno con copertura nel piano Y
+    // (testo).
     color: vec4<f32>,
     // RGBA del layer a colore pieno, al posto dei piani Y/U/V.
     solid: vec4<f32>,
@@ -103,12 +94,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let angle = transform.fit_rot.z;
     let aspect = max(transform.color.z, 0.0001);
 
-    // Dallo spazio dell'output a quello del sorgente, l'inverso di come si
-    // ragiona sulla clip: `position` la sposta dentro il frame, rotazione e
-    // `zoom` la girano e la ingrandiscono attorno all'anchor point (quindi
-    // lo zoom può arrivare a coprire tutto il frame, anche partendo da un
-    // aspect ratio diverso), `fit` la inscrive senza deformarla (vedi
-    // Compositor::fit_factors).
+    // Dall'output al sorgente: inverso di position, poi di rotazione e zoom
+    // attorno all'anchor, poi del fit.
     var q = in.uv - vec2<f32>(0.5, 0.5) - position - anchor;
     // La rotazione va fatta in uno spazio isotropo, altrimenti un frame non
     // quadrato la trasformerebbe in una deformazione a taglio.
@@ -135,11 +122,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Quanto si è dentro il rettangolo di crop, sul lato più vicino:
-    // negativo fuori. La sfumatura è una rampa di alpha attorno a quel
-    // bordo — verso l'interno per valori negativi, verso l'esterno (oltre
-    // il crop, quindi visibile solo dove qualcosa è stato tagliato) per
-    // valori positivi.
+    // Distanza dal bordo di crop più vicino, negativa fuori: la sfumatura è
+    // una rampa di alpha attorno a quel bordo.
     let inside = min(source_uv - crop_min, crop_max - source_uv);
     let edge_distance = min(inside.x, inside.y);
     var alpha = 1.0;
@@ -161,18 +145,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // U/V sono a metà risoluzione (4:2:0): campionarli alla stessa uv
     // del piano Y con un sampler bilineare fa anche l'upsampling della
     // croma, gratis.
-    let y_sample = textureSample(y_tex, input_sampler, source_uv).r;
-    let u_sample = textureSample(u_tex, input_sampler, source_uv).r;
-    let v_sample = textureSample(v_tex, input_sampler, source_uv).r;
-
-    let matrix_id = i32(transform.color.x);
-    let full_range = transform.color.y > 0.5;
-    let rgb = yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range);
-    if (transform.color.w > 1.5) {
-        return vec4<f32>(transform.solid.rgb, alpha * transform.solid.a * y_sample);
-    }
-    if (transform.color.w > 0.5) {
+    let mode = transform.color.w;
+    if (mode > 0.5 && mode < 1.5) {
         return vec4<f32>(transform.solid.rgb, alpha * transform.solid.a);
     }
-    return vec4<f32>(rgb, alpha);
+    let y_sample = textureSample(y_tex, input_sampler, source_uv).r;
+    if (mode > 1.5) {
+        return vec4<f32>(transform.solid.rgb, alpha * transform.solid.a * y_sample);
+    }
+    let u_sample = textureSample(u_tex, input_sampler, source_uv).r;
+    let v_sample = textureSample(v_tex, input_sampler, source_uv).r;
+    let matrix_id = i32(transform.color.x);
+    let full_range = transform.color.y > 0.5;
+    return vec4<f32>(yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range), alpha);
 }

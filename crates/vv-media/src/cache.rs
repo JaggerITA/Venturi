@@ -1,135 +1,22 @@
-//! Frame cache LRU (`FrameCache`, singolo media — usata da
-//! `playback::DecodeAhead` per l'anteprima "grezza" dal media pool) e
-//! cache condivisa multi-media a budget globale (`SharedFrameCache`,
-//! usata da `render_ahead::RenderAhead` per il buffer a livello di
-//! timeline — vedi REFACTOR_PIPELINE.md §2).
+//! `SharedFrameCache`: cache dei frame decodificati di tutti i media della
+//! finestra, a budget globale, vedi REFACTOR_PIPELINE.md §2.
 
 use crate::decode::FrameYuv420;
-use lru::LruCache;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use vv_core::{FrameIdx, MediaId};
 
-/// Byte totali occupati da un frame YUV420 (somma dei tre piani densi):
-/// helper condiviso da `FrameCache` (implicito, via `lru`, che conta solo
-/// il *numero* di elementi, vedi `capacity`/`resize`) e da
-/// `SharedFrameCache` (che invece conta byte reali, vedi `bytes_used`).
-fn frame_bytes(frame: &FrameYuv420) -> usize {
-    frame.y.len() + frame.u.len() + frame.v.len()
-}
-
-pub struct FrameCache {
-    inner: Mutex<LruCache<FrameIdx, Arc<FrameYuv420>>>,
-}
-
-impl FrameCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            inner: Mutex::new(LruCache::new(NonZeroUsize::new(capacity.max(1)).unwrap())),
-        }
-    }
-
-    pub fn get(&self, idx: FrameIdx) -> Option<Arc<FrameYuv420>> {
-        self.inner.lock().unwrap().get(&idx).cloned()
-    }
-
-    pub fn insert(&self, idx: FrameIdx, frame: Arc<FrameYuv420>) {
-        self.inner.lock().unwrap().put(idx, frame);
-    }
-
-    pub fn contains(&self, idx: FrameIdx) -> bool {
-        self.inner.lock().unwrap().contains(&idx)
-    }
-
-    /// Capacità attuale (numero massimo di frame), non necessariamente
-    /// quella passata a `new`: vedi `resize`.
-    pub fn capacity(&self) -> usize {
-        self.inner.lock().unwrap().cap().get()
-    }
-
-    /// Cambia la capacità a caldo, sfrattando gli elementi meno usati di
-    /// recente se si restringe. Serve perché il budget di memoria per
-    /// media è ricalcolato ad ogni ciclo (dipende da quanti media
-    /// distinti sono nella finestra corrente, vedi `render_ahead`): senza
-    /// questo, una cache creata quando il budget per-media era più
-    /// piccolo (es. due media distinti nella finestra) restava bloccata
-    /// a quella capacità anche dopo che il budget per-media era tornato
-    /// più ampio (es. di nuovo un solo media) — chi decide quanto
-    /// bufferizzare in avanti calcolava sulla capacità *nuova* (più
-    /// ampia) mentre la cache reale ne aveva ancora una più piccola,
-    /// risultando in uno sfratto dei frame più vicini alla testina più
-    /// aggressivo del previsto (bug segnalato: il buffer inizia sempre
-    /// qualche frame dopo la testina).
-    pub fn resize(&self, capacity: usize) {
-        self.inner
-            .lock()
-            .unwrap()
-            .resize(NonZeroUsize::new(capacity.max(1)).unwrap());
-    }
-
-    /// Rimuove ogni frame con indice `< idx`: non più raggiungibile
-    /// tornando indietro dalla testina corrente, quindi non più utile a
-    /// bufferizzare in avanti. Senza questo, lo sfratto della LRU standard
-    /// avviene solo quando si *inserisce* un nuovo frame oltre la
-    /// capacità — proporzionale a quanti frame nuovi arrivano, non a
-    /// quanto la testina si è mossa. Se la testina avanza a piccoli
-    /// passi (mai abbastanza per un seek reale, vedi
-    /// `seek_threshold_frames` in `render_ahead`) e il decoder resta
-    /// comodamente avanti, il "fronte" del buffer può restare bloccato
-    /// molto indietro rispetto alla testina per un tempo indefinito,
-    /// mentre la coda si allunga di pochi frame ad ogni ciclo — lo
-    /// scarto fisso tra testina e inizio del buffer segnalato
-    /// dall'utente. Con questo, ad ogni ciclo il fronte è sempre la
-    /// testina corrente (o il primo frame disponibile dopo di essa).
-    pub fn evict_before(&self, idx: FrameIdx) {
-        let mut cache = self.inner.lock().unwrap();
-        let stale: Vec<FrameIdx> = cache.iter().map(|(&k, _)| k).filter(|&k| k < idx).collect();
-        for k in stale {
-            cache.pop(&k);
-        }
-    }
-
-    /// Intervalli contigui (inclusivi) di frame attualmente in cache,
-    /// ordinati per inizio crescente — per un indicatore visivo "buffered"
-    /// nella UI (mostrare quali porzioni sono già decodificate durante la
-    /// riproduzione). `lru::LruCache::iter` non è ordinato per chiave,
-    /// quindi le chiavi vanno raccolte e ordinate prima di unire quelle
-    /// adiacenti.
-    pub fn cached_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
-        let cache = self.inner.lock().unwrap();
-        let mut indices: Vec<FrameIdx> = cache.iter().map(|(&k, _)| k).collect();
-        indices.sort_unstable();
-
-        let mut ranges: Vec<(FrameIdx, FrameIdx)> = Vec::new();
-        for idx in indices {
-            match ranges.last_mut() {
-                Some((_, end)) if idx == *end + 1 => *end = idx,
-                _ => ranges.push((idx, idx)),
-            }
-        }
-        ranges
-    }
-}
-
-/// Un intervallo di frame *sorgente* di un media attualmente "voluto"
-/// dalla finestra di lookahead corrente, con la posizione in spazio
-/// *timeline* del suo primo frame — necessaria per calcolare quanto un
-/// frame in cache è distante dalla testina (vedi
-/// `SharedFrameCache::reconcile`). Costruito da
-/// `render_ahead::collect_media_segments` a ogni ciclo di poll, un
-/// `WantedRange` per `MediaSegment`.
+/// Tratto di frame sorgente voluto dalla finestra corrente, con la sua
+/// posizione in timeline: serve a misurare la distanza dalla testina.
 #[derive(Debug, Clone, Copy)]
 pub struct WantedRange {
     pub media_id: MediaId,
     pub source_start: FrameIdx,
     pub source_end: FrameIdx,
-    /// Dove `source_start` cade in spazio timeline: un frame sorgente
-    /// `idx` dentro questo intervallo corrisponde alla posizione timeline
-    /// `timeline_start + (idx - source_start)` (mappatura lineare, valida
-    /// finché non esiste time-remap/speed ≠ 1 — vedi REFACTOR_PIPELINE.md
-    /// B1).
+    /// Dove `source_start` cade in spazio timeline.
     pub timeline_start: FrameIdx,
+    /// `Clip::rate` della clip: frame di timeline per frame sorgente.
+    pub rate: vv_core::Rational,
 }
 
 impl WantedRange {
@@ -138,7 +25,7 @@ impl WantedRange {
     }
 
     fn timeline_position_of(&self, idx: FrameIdx) -> FrameIdx {
-        self.timeline_start + (idx - self.source_start)
+        self.timeline_start + self.rate.scale_round(idx) - self.rate.scale_round(self.source_start)
     }
 }
 
@@ -147,18 +34,9 @@ struct SharedInner {
     bytes_used: usize,
 }
 
-/// Cache dei frame decodificati condivisa tra TUTTI i media della
-/// finestra di lookahead corrente, a chiave composita `(MediaId,
-/// FrameIdx sorgente)` e budget in **byte** (non in numero di frame:
-/// media di risoluzioni diverse nella stessa timeline pesano
-/// diversamente sulla stessa RAM). Sostituisce N `FrameCache`
-/// indipendenti (una per media, con budget diviso a monte tra media
-/// distinti e poi di nuovo tra segmenti dello stesso media) — quella
-/// divisione arbitraria e il suo sfratto per capacità, indipendente da
-/// dove fosse la testina, erano la radice di due bug distinti (vedi
-/// REFACTOR_PIPELINE.md §1, A1/A2): qui la domanda "cosa tenere in
-/// cache" ha una sola risposta (`reconcile`, sotto), non due che possono
-/// contraddirsi.
+/// Cache dei frame di tutti i media della finestra, a chiave
+/// `(MediaId, frame sorgente)` e budget in byte (risoluzioni diverse
+/// pesano diversamente). Cosa tenere lo decide solo `reconcile`.
 pub struct SharedFrameCache {
     inner: Mutex<SharedInner>,
 }
@@ -196,64 +74,35 @@ impl SharedFrameCache {
             .contains_key(&(media_id, idx))
     }
 
-    /// Byte totali attualmente occupati da frame decodificati, sommati
-    /// sulla dimensione *reale* di ciascun frame (i tre piani YUV420,
-    /// non una stima uniforme): media di risoluzioni diverse pesano
-    /// quanto pesano davvero. Il chiamante (il loop di fill in
-    /// `render_ahead`) lo confronta con il budget per sapere quando
-    /// fermarsi.
+    /// Byte occupati, sulla dimensione reale di ogni frame.
     pub fn bytes_used(&self) -> usize {
         self.inner.lock().unwrap().bytes_used
     }
 
-    /// Inserisce un frame appena decodificato. Non applica da solo il
-    /// budget — sta al chiamante fermarsi quando `bytes_used()` raggiunge
-    /// il budget: inserendo sempre in ordine di priorità (più vicino alla
-    /// testina prima, vedi doc di `reconcile`) questo basta, senza
-    /// bisogno di sfrattare durante il fill.
+    /// Non applica il budget: il chiamante inserisce in ordine di priorità e
+    /// si ferma da sé.
     pub fn insert(&self, media_id: MediaId, idx: FrameIdx, frame: Arc<FrameYuv420>) {
         let mut inner = self.inner.lock().unwrap();
-        let bytes = frame_bytes(&frame);
+        let bytes = frame.byte_len();
         if let Some(old) = inner.entries.insert((media_id, idx), frame) {
-            inner.bytes_used -= frame_bytes(&old);
+            inner.bytes_used -= old.byte_len();
         }
         inner.bytes_used += bytes;
     }
 
-    /// Svuota l'intera cache: da chiamare quando ciò che è già in cache
-    /// non è più affidabile a prescindere da finestra/budget — es. il
-    /// toggle "usa proxy" cambia (i frame già cachati sotto le stesse
-    /// chiavi `(media_id, idx)` potrebbero venire da una risoluzione
-    /// diversa da quella che si vuole adesso, e `reconcile` da solo non
-    /// lo scoprirebbe mai: la sua unica nozione di "scartare" è
-    /// finestra/budget, non provenienza).
+    /// Svuota tutto: per quando i frame vengono da una sorgente sbagliata (es.
+    /// cambia il toggle proxy), che `reconcile` non saprebbe riconoscere.
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.entries.clear();
         inner.bytes_used = 0;
     }
 
-    /// Un solo pass di riconciliazione, chiamato una volta a ogni ciclo
-    /// di poll (prima del fill) dopo aver aggiornato playhead e i
-    /// segmenti della finestra corrente. Sostituisce con un'unica
-    /// politica ciò che prima erano tre meccanismi separati capaci di
-    /// contraddirsi (`retain` dei media usciti dalla finestra,
-    /// `evict_before` posizionale, sfratto LRU per capacità).
-    ///
-    /// **Tier A — appartenenza alla finestra.** Scarta ogni frame il cui
-    /// `(media_id, idx)` non cade in *nessuno* degli intervalli di
-    /// `window` per quel media: copre insieme "dietro la testina",
-    /// "media uscito dalla finestra" e "oltre l'orizzonte di lookahead".
-    ///
-    /// **Tier B — budget globale.** Se il totale supera `budget_bytes`,
-    /// sfratta i frame *ancora nella finestra* più LONTANI dalla testina
-    /// finché si rientra nel budget. **Mai per recency**: durante un
-    /// fill in avanti il frame proprio alla testina è il primo inserito —
-    /// il "meno recente" — e una LRU classica lo sfratterebbe per primo,
-    /// l'esatto opposto di quel che serve. La distanza è calcolata in
-    /// spazio *timeline* via `WantedRange::timeline_position_of`, non in
-    /// spazio sorgente: due frame ugualmente lontani in indice sorgente
-    /// possono corrispondere a distanze timeline molto diverse.
+    /// Unica politica di sfratto, a ogni ciclo prima del fill.
+    /// Tier A: via ciò che non cade in nessun intervallo di `window`.
+    /// Tier B: oltre `budget_bytes`, via i frame più lontani dalla testina in
+    /// frame di timeline. Mai per recency: durante il fill il frame alla
+    /// testina è il meno recente.
     pub fn reconcile(&self, playhead: FrameIdx, window: &[WantedRange], budget_bytes: usize) {
         let mut inner = self.inner.lock().unwrap();
         let inner = &mut *inner;
@@ -266,7 +115,7 @@ impl SharedFrameCache {
                 .iter()
                 .any(|w| w.media_id == media_id && w.contains(idx));
             if !keep {
-                *bytes_used -= frame_bytes(frame);
+                *bytes_used -= frame.byte_len();
             }
             keep
         });
@@ -287,10 +136,17 @@ impl SharedFrameCache {
                     break;
                 }
                 if let Some(frame) = inner.entries.remove(&key) {
-                    inner.bytes_used -= frame_bytes(&frame);
+                    inner.bytes_used -= frame.byte_len();
                 }
             }
         }
+    }
+
+    /// Tutti i frame `start..=end` del media sono in cache. Si ferma al
+    /// primo mancante, senza costruire gli intervalli.
+    pub fn covers(&self, media_id: MediaId, start: FrameIdx, end: FrameIdx) -> bool {
+        let inner = self.inner.lock().unwrap();
+        (start..=end).all(|idx| inner.entries.contains_key(&(media_id, idx)))
     }
 
     /// Intervalli contigui (inclusivi) attualmente in cache per un
@@ -316,11 +172,7 @@ impl SharedFrameCache {
     }
 }
 
-/// Distanza (in frame di *timeline*) di `(media_id, idx)` dalla testina,
-/// mappando via il primo `WantedRange` di `window` che lo contiene —
-/// `FrameIdx::MAX` se nessuno lo contiene (non dovrebbe succedere per un
-/// frame sopravvissuto al Tier A nello stesso pass, ma resta un
-/// fallback sicuro anziché un panic).
+/// Distanza in frame di timeline dalla testina; `MAX` se fuori finestra.
 fn distance(
     media_id: MediaId,
     idx: FrameIdx,
@@ -339,44 +191,6 @@ fn distance(
 mod tests {
     use super::*;
 
-    fn dummy_frame() -> Arc<FrameYuv420> {
-        Arc::new(FrameYuv420 {
-            width: 1,
-            height: 1,
-            y: vec![0],
-            u: vec![0],
-            v: vec![0],
-            u_width: 1,
-            u_height: 1,
-            matrix: crate::decode::ColorMatrix::Bt601,
-            full_range: false,
-        })
-    }
-
-    #[test]
-    fn cached_ranges_is_empty_for_an_empty_cache() {
-        let cache = FrameCache::new(4);
-        assert!(cache.cached_ranges().is_empty());
-    }
-
-    #[test]
-    fn cached_ranges_merges_contiguous_indices_into_one_range() {
-        let cache = FrameCache::new(8);
-        for idx in [5, 6, 7, 8] {
-            cache.insert(idx, dummy_frame());
-        }
-        assert_eq!(cache.cached_ranges(), vec![(5, 8)]);
-    }
-
-    #[test]
-    fn cached_ranges_keeps_gaps_as_separate_ranges_in_order() {
-        let cache = FrameCache::new(8);
-        for idx in [20, 1, 2, 10, 11, 12] {
-            cache.insert(idx, dummy_frame());
-        }
-        assert_eq!(cache.cached_ranges(), vec![(1, 2), (10, 12), (20, 20)]);
-    }
-
     fn two_media_ids() -> (MediaId, MediaId) {
         use vv_core::{MediaItem, MediaMeta, Project, Rational};
         let mut project = Project::default();
@@ -391,6 +205,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 0,
         };
@@ -429,6 +244,7 @@ mod tests {
             source_start: 40,
             source_end: 60,
             timeline_start: 40,
+            rate: vv_core::Rational::one(),
         }];
         cache.reconcile(50, &window, 1_000_000);
 
@@ -463,6 +279,7 @@ mod tests {
             source_start: 0,
             source_end: 20,
             timeline_start: 0,
+            rate: vv_core::Rational::one(),
         }];
         cache.reconcile(10, &window, 1_000_000);
 
@@ -485,6 +302,7 @@ mod tests {
             source_start: 0,
             source_end: 99,
             timeline_start: 0,
+            rate: vv_core::Rational::one(),
         }];
         // Inserito per primo (il "meno recente"), ma è il frame alla
         // testina: deve sopravvivere.
@@ -503,6 +321,36 @@ mod tests {
         assert!(!cache.contains(media_a, 90));
     }
 
+    /// Su una clip conformata (25 fps su timeline a 50) un frame sorgente
+    /// vale due frame di timeline: la distanza va misurata lì.
+    #[test]
+    fn shared_cache_reconcile_measures_distance_in_timeline_frames() {
+        let (media_a, media_b) = two_media_ids();
+        let cache = SharedFrameCache::new();
+        let window = [
+            WantedRange {
+                media_id: media_a,
+                source_start: 0,
+                source_end: 99,
+                timeline_start: 0,
+                rate: vv_core::Rational::new(2, 1),
+            },
+            WantedRange {
+                media_id: media_b,
+                source_start: 0,
+                source_end: 99,
+                timeline_start: 0,
+                rate: vv_core::Rational::one(),
+            },
+        ];
+        // Frame 30 di A = timeline 60; frame 50 di B = timeline 50.
+        cache.insert(media_a, 30, frame_of_size(4));
+        cache.insert(media_b, 50, frame_of_size(4));
+        cache.reconcile(0, &window, 4);
+        assert!(cache.contains(media_b, 50));
+        assert!(!cache.contains(media_a, 30));
+    }
+
     #[test]
     fn shared_cache_insert_overwrite_updates_bytes_used_correctly() {
         let (media_a, _) = two_media_ids();
@@ -515,6 +363,18 @@ mod tests {
             40,
             "sovrascrivere lo stesso (media, idx) non deve sommare le due dimensioni"
         );
+    }
+
+    #[test]
+    fn shared_cache_covers_only_contiguous_ranges() {
+        let (media_a, media_b) = two_media_ids();
+        let cache = SharedFrameCache::new();
+        for idx in [5, 6, 7, 9] {
+            cache.insert(media_a, idx, frame_of_size(4));
+        }
+        assert!(cache.covers(media_a, 5, 7));
+        assert!(!cache.covers(media_a, 5, 9), "buco a 8");
+        assert!(!cache.covers(media_b, 5, 5));
     }
 
     #[test]

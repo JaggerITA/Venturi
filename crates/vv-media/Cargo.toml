@@ -4,8 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-crossbeam-channel = "0.5.17"
 ffmpeg-next = "9.0.0"
-lru = "0.18.4"
 thiserror = "2.0.20"
 vv-core = { version = "0.1.0", path = "../vv-core" }

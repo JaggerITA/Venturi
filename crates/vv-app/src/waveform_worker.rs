@@ -1,100 +1,78 @@
-//! Generazione delle waveform in background: thread dedicato che riceve
-//! `(path, content_hash, num_peaks)` da generare e li
-//! processa uno alla volta — stesso modello di `proxy_worker` (coda
-//! seriale, un thread solo, mai sul thread UI: la decodifica audio di un
-//! file lungo può richiedere secondi, inaccettabile bloccando i frame). Il
-//! file di picchi finisce nella cache globale su disco (`vv_media::waveform`,
-//! chiave `content_hash` + `stream_index` — un media può avere più stream
-//! audio, ciascuno con la propria waveform, vedi `Clip::audio_stream_index`),
-//! quindi è riusabile da un altro progetto che referenzia lo stesso file e
-//! sopravvive al riavvio dell'app.
+//! Generazione waveform su un thread dedicato, una alla volta: decodificare
+//! l'audio di un file lungo richiede secondi.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use crate::worker::Worker;
+
 struct Job {
     path: PathBuf,
     content_hash: u64,
+    audio_streams: usize,
     num_peaks: usize,
 }
 
 pub struct WaveformWorker {
-    tx: Option<mpsc::Sender<Job>>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    worker: Worker<Job>,
+    /// `(content_hash, stream_index)` delle waveform pronte su disco.
+    ready_rx: mpsc::Receiver<(u64, usize)>,
 }
 
 impl WaveformWorker {
     pub fn spawn() -> Self {
-        let (tx, rx) = mpsc::channel::<Job>();
-        let handle = std::thread::spawn(move || {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = Worker::spawn(move |rx: mpsc::Receiver<Job>| {
             while let Ok(job) = rx.recv() {
-                // Contare gli stream apre il file: qui e non sul thread UI.
-                let num_streams =
-                    vv_media::audio_streams(&job.path).map(|s| s.len().max(1)).unwrap_or(1);
-                for stream_index in 0..num_streams {
-                    generate(&job, stream_index);
+                for key in generate(&job) {
+                    if ready_tx.send(key).is_err() {
+                        return;
+                    }
                 }
             }
         });
-        Self {
-            tx: Some(tx),
-            handle: Some(handle),
-        }
+        Self { worker, ready_rx }
+    }
+
+    /// Waveform completate dall'ultima chiamata.
+    pub fn drain_ready(&self) -> Vec<(u64, usize)> {
+        self.ready_rx.try_iter().collect()
     }
 
     /// Accoda la generazione delle waveform di tutti gli stream audio di
     /// `path` che non sono già su disco — non bloccante, ritorna subito.
-    pub fn enqueue(&self, path: PathBuf, content_hash: u64, num_peaks: usize) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Job {
-                path,
-                content_hash,
-                num_peaks,
-            });
-        }
+    pub fn enqueue(&self, path: PathBuf, content_hash: u64, audio_streams: usize, num_peaks: usize) {
+        self.worker.send(Job {
+            path,
+            content_hash,
+            audio_streams,
+            num_peaks,
+        });
     }
 }
 
-impl Drop for WaveformWorker {
-    fn drop(&mut self) {
-        // `tx` va droppato *prima* di `join`: il thread esce dal suo
-        // `while let Ok(...) = rx.recv()` solo quando l'ultimo mittente
-        // sparisce — se aspettassimo che accadesse da sé alla fine di
-        // questo scope (ordine di drop dei campi), `join()` bloccherebbe
-        // per sempre aspettando un thread che a sua volta aspetta un
-        // `tx` non ancora droppato.
-        self.tx.take();
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
 
-fn generate(job: &Job, stream_index: usize) {
-    // Già generato (es. stesso file importato in due progetti diversi
-    // nella stessa sessione, o rimasto da una sessione precedente): salta,
-    // non c'è nulla da rifare — `generate_waveform` non fa questo
-    // controllo da sé.
-    if vv_media::waveform::waveform_exists(job.content_hash, stream_index) {
-        return;
+/// Genera in una passata le waveform mancanti di `job`; restituisce le
+/// chiavi di quelle pronte su disco.
+fn generate(job: &Job) -> Vec<(u64, usize)> {
+    let (ready, missing): (Vec<usize>, Vec<usize>) = (0..job.audio_streams)
+        .partition(|&i| vv_media::waveform::waveform_exists(job.content_hash, i));
+    let mut ready: Vec<(u64, usize)> = ready.into_iter().map(|i| (job.content_hash, i)).collect();
+    if missing.is_empty() {
+        return ready;
     }
-    match vv_media::waveform::generate_waveform(
-        &job.path,
-        job.content_hash,
-        stream_index,
-        job.num_peaks,
-    ) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            // Nessuna traccia audio: nessun picco da disegnare, e niente
-            // da scrivere — la timeline non chiede mai una waveform per un
-            // media senza audio.
-        }
-        Err(e) => {
-            eprintln!(
-                "[waveform_worker] generazione fallita per {}: {e}",
-                job.path.display()
-            );
-        }
+    match vv_media::generate_waveforms(&job.path, job.content_hash, &missing, job.num_peaks) {
+        Ok(waveforms) => ready.extend(
+            missing
+                .iter()
+                .zip(waveforms)
+                .filter(|(_, w)| w.is_some())
+                .map(|(&i, _)| (job.content_hash, i)),
+        ),
+        Err(e) => eprintln!(
+            "[waveform_worker] generazione fallita per {}: {e}",
+            job.path.display()
+        ),
     }
+    ready
 }

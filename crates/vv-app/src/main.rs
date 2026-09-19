@@ -1,20 +1,16 @@
-//! Finestra egui: media pool (sinistra), viewer (centro), timeline
-//! multi-traccia (basso), toolbar con play/pause/seek per l'anteprima.
-//!
-//! Il viewer mostra, per ogni frame, le clip attive su tutte le track
-//! video (`vv_core::Timeline::active_video_clips_at`, REFACTOR_PIPELINE.md
-//! B4) composte dal basso verso l'alto in alpha-over dal compositor GPU di
-//! `vv-render`, con crop/zoom (milestone 5) e le bande di letterbox dove
-//! una clip ha un aspect ratio diverso da quello della timeline: lì si
-//! vede il layer sotto. La texture GPU va direttamente a egui-wgpu senza
-//! round-trip CPU (REFACTOR_PIPELINE.md B2). Non c'è ancora un'opacità
-//! per-clip: un layer opaco che copre tutto il frame occlude quelli sotto.
+//! Finestra egui: media pool, viewer, pannello proprietà, timeline. Il
+//! viewer compone sulla GPU le clip attive di tutte le track video e passa
+//! la texture a egui-wgpu senza readback (REFACTOR_PIPELINE.md B2).
 
+mod app_menu;
 mod export;
 mod export_dialog;
 mod frame_provider;
 mod media_pool;
+mod media_pool_ui;
 mod mix_buffers;
+mod project_io;
+mod properties_panel;
 mod proxy_worker;
 mod render_ahead;
 mod settings;
@@ -24,12 +20,13 @@ mod timeline_audio;
 mod timeline_ui;
 mod transport;
 mod viewer_overlay;
-
-
 mod waveform_worker;
+mod worker;
 
 use eframe::wgpu;
-use frame_provider::FrameProvider;
+use media_pool_ui::*;
+use project_io::*;
+use properties_panel::*;
 use settings::Action;
 use timeline_audio::TimelineAudio;
 use std::collections::{BTreeSet, HashMap};
@@ -39,11 +36,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
-/// Default di `VibeVideoApp::cache_budget_bytes`: ~151 frame (~6s) di
-/// margine a 1080p, ~38 (~1,5s) a 4K, ~340 (~13,6s) a 720p — vedi doc del
-/// campo per il perché è un budget di memoria e non un conteggio fisso di
-/// frame.
+/// ~6 s di margine a 1080p, ~1,5 s a 4K.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
+
+/// Colore di una clip Solid Color appena creata.
+const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba::gray(0.6);
 
 /// Dopo quanto (s) una freccia tenuta premuta smette di fare il passo
 /// singolo e inizia a scorrere a `ARROW_HOLD_SPEED`.
@@ -105,31 +102,17 @@ impl SpeedTier {
     }
 }
 
-/// Snapshot dei campi della clip selezionata che servono al pannello
-/// proprietà, valutati al `source_frame` corrente. Una struct invece di
-/// una tupla perché i campi hanno continuato a crescere con ogni nuova
-/// proprietà keyframeable (transform, gain, ora color).
-/// Una clip bersaglio del pannello proprietà: quelle selezionate, divise
-/// per tipo di track (vedi `ui`). `source_frame` è il playhead tradotto
-/// nello spazio frame sorgente di *questa* clip — ogni clip ha il suo.
+/// Una clip selezionata, bersaglio del pannello proprietà. `source_frame`
+/// è il playhead nello spazio sorgente di *questa* clip.
 #[derive(Debug, Clone, Copy)]
 struct PanelTarget {
+    timeline: TimelineId,
     track_index: usize,
     clip_id: ClipId,
     source_frame: FrameIdx,
     timeline_start: FrameIdx,
     is_solid_color: bool,
     is_text: bool,
-}
-
-/// Lo stato dei keyframe di un parametro, per il suo diamante nel
-/// pannello: `prev`/`next` sono i keyframe più vicini in frame *sorgente*,
-/// quelli a cui portano le frecce di navigazione.
-#[derive(Debug, Clone, Copy)]
-struct ParamKeyframeState {
-    on_keyframe: bool,
-    prev: Option<FrameIdx>,
-    next: Option<FrameIdx>,
 }
 
 /// Scheda del pannello proprietà: i parametri di una clip video, quelli
@@ -177,7 +160,7 @@ struct ClipPanelInfo {
     timeline_size: (u32, u32),
     /// Stato dei keyframe di ogni parametro, indicizzato da
     /// `TransformParam::index`.
-    params: Vec<ParamKeyframeState>,
+    params: Vec<RowKeyframe>,
     transform: vv_core::Transform,
     gain_kf_here: bool,
     gain: f32,
@@ -190,64 +173,18 @@ struct ClipPanelInfo {
     title: Option<vv_core::TitleParams>,
 }
 
-/// Azione differita sugli effetti di una clip, raccolta durante il disegno
-/// del pannello proprietà (che prende in prestito `self` immutabilmente) e
-/// applicata subito dopo — stesso schema di `timeline_ui::PendingAction`.
-enum PendingEffectChange {
-    SetTransformParamDefault(usize, ClipId, vv_core::TransformParam, f32),
-    SetFlip(usize, ClipId, [bool; 2]),
-    ResetTransformParams(usize, ClipId, Vec<vv_core::TransformParam>, bool),
-    SetGainDefault(usize, ClipId, f32),
-    ResetGain(usize, ClipId),
-    SetColorDefault(usize, ClipId, vv_core::Rgba),
-    UpsertTransformKeyframe(usize, ClipId, FrameIdx, vv_core::TransformParam, f32),
-    UpsertGainKeyframe(usize, ClipId, FrameIdx, f32),
-    UpsertColorKeyframe(usize, ClipId, FrameIdx, vv_core::Rgba),
-    RemoveTransformKeyframe(usize, ClipId, FrameIdx, vv_core::TransformParam),
-    RemoveGainKeyframe(usize, ClipId, FrameIdx),
-    RemoveColorKeyframe(usize, ClipId, FrameIdx),
-    SetTitle(usize, ClipId, vv_core::TitleParams),
-}
-
 /// Dove atterrano le clip di un drop dal media pool, risolto una volta per
 /// l'intero drop (vedi `resolve_drop_tracks`): `extra_audio` è la track
 /// audio creata al volo, che ha la precedenza sulle esistenti.
 #[derive(Debug, Clone, Copy)]
 struct DropTracks {
-    /// `None` se il set rilasciato non ha nessun media video: niente
-    /// track video va risolta né creata per un drop di solo audio (bug
-    /// segnalato: trascinare un audio-only creava comunque una track
-    /// video vuota).
+    /// `None` se nel drop non c'è video: nessuna track video da creare.
     video: Option<usize>,
     extra_audio: Option<usize>,
 }
 
-/// Un layer dello stack di compositing del viewer (vedi
-/// `VibeVideoApp::timeline_video_layers`), pronto da tradurre in
-/// `vv_render::Layer` — che non può essere costruito prima perché presta i
-/// piani del frame decodificato, che qui va tenuto vivo.
-enum PreviewLayer {
-    Video {
-        frame: std::sync::Arc<vv_media::FrameYuv420>,
-        transform: vv_core::Transform,
-        /// Risoluzione nativa del media (non del proxy): le unità del crop.
-        source_size: (u32, u32),
-    },
-    Solid {
-        color: vv_core::Rgba,
-        transform: vv_core::Transform,
-    },
-    Text {
-        title: vv_core::TitleParams,
-        transform: vv_core::Transform,
-    },
-}
-
-/// Quale rappresentazione di texture del viewer è quella corrente — vedi
-/// doc di `VibeVideoApp::last_viewer_frame_kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewerFrameKind {
-    SolidColor,
     Video,
     /// La clip sotto la testina punta a un media non più nel media pool.
     Offline,
@@ -265,116 +202,48 @@ struct VibeVideoApp {
 
     preview_meta: Option<vv_core::MediaMeta>,
     preview_error: Option<String>,
-    /// Texture per il frame nero di un vuoto sulla track video:
-    /// gestita da egui (`ctx.load_texture`/`TextureHandle::set`) — non fa
-    /// parte del round-trip GPU eliminato dal path video sotto, è
-    /// un'immagine sintetica generata su CPU, niente da guadagnare a
-    /// tenerla sulla GPU (REFACTOR_PIPELINE.md B2).
-    frame_texture: Option<egui::TextureHandle>,
-    /// Id stabile della texture video registrata in `egui-wgpu`
-    /// (REFACTOR_PIPELINE.md B2): creato una volta al primo frame video
-    /// (`register_native_texture`), poi solo aggiornato in-place
-    /// (`update_egui_texture_from_wgpu_texture`) — mai una nuova
-    /// registrazione a ogni frame, che perderebbe il riferimento alla
-    /// precedente (bind group + texture GPU, mai liberata) invece di
-    /// riusarlo. `None` se l'app non ha un device wgpu condiviso con
-    /// egui (`egui_render_state`, es. nei test) — in quel caso il video
-    /// non può essere mostrato zero-copy.
+    /// Texture del viewer registrata in egui-wgpu una volta sola, poi
+    /// aggiornata: registrarne una nuova a ogni frame perderebbe la precedente.
+    /// `None` senza device condiviso (test).
     video_texture_id: Option<egui::TextureId>,
     video_display_size: Option<egui::Vec2>,
-    /// Quale delle due rappresentazioni sopra (`frame_texture` per il
-    /// colore solido, `video_texture_id`+`video_display_size` per il
-    /// video) è quella da mostrare adesso — nessuna delle due viene
-    /// azzerata quando non si aggiorna in un dato frame (per continuare a
-    /// mostrare l'ultimo frame valido invece di un flash a vuoto, vedi
-    /// `preview_media`), quindi il viewer deve sapere quale delle due è
-    /// la più recente.
+    /// Cosa mostra il viewer: l'ultima composizione, anche se in questo
+    /// frame non se n'è fatta una nuova (niente flash a vuoto).
     last_viewer_frame_kind: Option<ViewerFrameKind>,
-    /// Device/queue/renderer condivisi con `egui-wgpu`, se l'app è stata
-    /// avviata da `main()` con un contesto eframe reale (sempre, tranne
-    /// nei test che costruiscono `VibeVideoApp` con `Default` senza una
-    /// finestra) — necessari per registrare/aggiornare
-    /// `video_texture_id` (REFACTOR_PIPELINE.md B2). Anche
-    /// `self.compositor` viene costruito condividendo questo stesso
-    /// device quando presente (vedi `main()`), altrimenti resta il
-    /// device headless indipendente di prima.
+    /// Device/queue di egui-wgpu, condivisi col compositor: una texture di un
+    /// altro device non si può registrare in egui. `None` nei test.
     egui_render_state: Option<eframe::egui_wgpu::RenderState>,
-    /// Decode-ahead video per l'anteprima "grezza" di un media dal media
-    /// pool (`browsing_media`), non legata a nessuna clip/posizione di
-    /// timeline a cui `render_ahead` potrebbe agganciarsi. Il video delle
-    /// clip *sulla* timeline viene invece da `render_ahead`, sempre.
-    browsing_decode_ahead: Option<vv_media::DecodeAhead>,
+    /// Buffer video dell'anteprima del media pool: un `RenderAhead` su una
+    /// timeline con la sola clip del media, e l'id del media lì dentro.
+    browsing_render_ahead: Option<(render_ahead::RenderAhead, MediaId)>,
 
-    /// Budget di memoria (byte) per la cache dei frame decodificati di
-    /// *ogni* decode-ahead aperto (vedi doc di `DecodeAhead::spawn`):
-    /// configurabile dall'utente nel menu "Visualizza" invece di una
-    /// costante fissa nel codice, perché quanta RAM vale la pena dedicare
-    /// a un margine di riproduzione fluida contro OOM dipende
-    /// dall'hardware/uso dell'utente, non da una scelta valida per tutti.
+    /// Budget di memoria (byte) per la cache dei frame decodificati di ogni
+    /// `RenderAhead`, configurabile dal menu.
     cache_budget_bytes: usize,
 
-    /// Toggle "usa proxy" (menu "Visualizza", REFACTOR_PIPELINE.md
-    /// proxy): quando attivo, l'anteprima/editing decodifica dal proxy
-    /// tutto-intra a bassa risoluzione invece che dal sorgente, se già
-    /// generato — elimina il costo "cammina dal keyframe più vicino" che
-    /// rende lo scrub veloce impossibile su sorgenti long-GOP (misurato:
-    /// 0 frame esatti disponibili durante uno scrub veloce a 1080p,
-    /// senza proxy). L'export ignora sempre questo toggle: usa solo i
-    /// sorgenti originali, mai il proxy. Attivo di default; da
-    /// disattivare per lavori che richiedono la qualità piena (color
-    /// grading — non ancora implementato — o verificare dettagli fini).
-    /// Non persiste tra un riavvio e l'altro, come ogni altra
-    /// impostazione in vibevideo oggi.
+    /// Anteprima dal proxy tutto-intra quando pronto: scrub fluido su sorgenti
+    /// long-GOP. L'export usa sempre i sorgenti.
     proxy_enabled: bool,
-    /// Genera in background il proxy di ogni media importato (vedi
-    /// `vv_media::proxy`): sempre attivo indipendentemente da
-    /// `proxy_enabled`, così un proxy è già pronto appena l'utente
-    /// riattiva il toggle, invece di aspettare la prima volta che serve
-    /// davvero. `None` finché non è mai stato importato nulla (spawnato
-    /// alla prima `import_media`, non subito: niente thread in più per
-    /// una sessione che non importa mai media).
+    /// Genera i proxy anche col toggle spento, così sono pronti quando lo si
+    /// riattiva. Creato al primo import.
     proxy_worker: Option<proxy_worker::ProxyWorker>,
-    /// L'export ha messo in pausa il worker dei proxy, e va ripreso alla
-    /// fine. `false` se era già in pausa quando l'export è partito: in
-    /// quel caso la pausa è una scelta dell'utente, e l'export non deve
-    /// annullarla riprendendo da sé.
+    /// L'export ha messo in pausa i proxy e deve riprenderli; `false` se la
+    /// pausa era dell'utente.
     proxy_paused_for_export: bool,
-    /// Genera in background la waveform (picchi audio) di ogni media
-    /// importato con audio (vedi `vv_media::waveform`): sempre attivo,
-    /// come il proxy, così la waveform è già pronta appena la timeline
-    /// la disegna. `None` finché non è mai stato importato nulla (stesso
-    /// principio di `proxy_worker`).
+    /// Genera in background le waveform dei media con audio. Creato al primo
+    /// import.
     waveform_worker: Option<waveform_worker::WaveformWorker>,
     thumbnail_worker: Option<thumbnail_worker::ThumbnailWorker>,
     /// Miniature del media pool per `content_hash`; `None` = richiesta in
     /// corso o fallita (evita di riaccodarla a ogni frame).
     thumbnails: HashMap<u64, Option<egui::TextureHandle>>,
-    /// Waveform audio già caricata in memoria, a chiave `content_hash` del
-    /// media: la timeline la legge a ogni frame per disegnare la waveform
-    /// delle clip audio, e il primo disegno di un media la carica dal
-    /// file di cache (`vv_media::waveform::load_waveform`) se il worker
-    /// l'ha già generata. In memoria (non riletta da disco a ogni frame)
-    /// perché la timeline si ridisegna a ogni repaint e un `read` di un
-    /// file da qualche MB a ogni frame sarebbe un I/O inutile; il file
-    /// resta la fonte di verità (sopravvive al riavvio), la mappa è solo
-    /// una cache della sessione. Il `Waveform` porta anche la durata della
-    /// traccia audio: il disegno mappa i bin della clip sulla stessa base
-    /// temporale dei picchi (vedi `draw_clip_waveform`). Chiave
-    /// `(content_hash, stream_index)`: un media può avere più stream audio
-    /// (vedi `Clip::audio_stream_index`), ciascuno con la propria waveform.
+    /// Waveform lette dai file di cache, per `(content_hash, stream_index)`:
+    /// la timeline le disegna a ogni frame, rileggerle da disco no.
     waveform_cache: HashMap<(u64, usize), vv_media::Waveform>,
-    /// Quanti secondi di timeline bufferizzare in anticipo avanti/dietro
-    /// la testina (menu Playback > Proxy, dove vive anche il toggle
-    /// proxy) — vedi doc di `render_ahead::DEFAULT_LOOKAHEAD_SECS`/
-    /// `DEFAULT_BEHIND_SECS`. Configurabile perché il bilanciamento
-    /// giusto dipende da quanto è pesante il sorgente/proxy e da quanta
-    /// RAM l'utente vuole dedicarci — un valore fisso per tutti
-    /// avrebbe sempre sbagliato in una direzione o nell'altra. Restano
-    /// comunque pavimentati a `render_ahead::MIN_MARGIN_FRAMES` anche se
-    /// l'utente li porta a `0` (vedi la sua doc sul perché un margine
-    /// letteralmente nullo è strutturalmente fragile). Non persistono
-    /// tra un riavvio e l'altro, come ogni altra impostazione in
-    /// vibevideo oggi.
+    /// Waveform cercate su disco e non trovate: si riprova solo quando il
+    /// worker le segnala pronte, non a ogni frame.
+    waveform_missing: std::collections::HashSet<(u64, usize)>,
+    /// Secondi bufferizzati avanti/dietro la testina (menu Playback > Proxy).
     lookahead_secs: f64,
     behind_secs: f64,
 
@@ -387,34 +256,21 @@ struct VibeVideoApp {
     /// rilascio: un trascinamento è un solo passo di undo.
     edit_drag_group: Option<vv_core::GroupMark>,
 
-    /// Ultimo `timeline_state.playhead` già gestito da
-    /// `ensure_active_clip_matches_playhead`: distingue il playhead mosso
-    /// dal clock audio durante il playback (nessun seek) da uno spostato
-    /// dall'utente (seek del clock).
+    /// Ultimo playhead gestito: distingue quello mosso dal clock (nessun seek)
+    /// da quello spostato dall'utente.
     last_synced_playhead: FrameIdx,
 
-    /// Media aperto tramite il pulsante "Anteprima" del media pool (non
-    /// ancora/non necessariamente sulla timeline): mentre è `Some`, il
-    /// viewer mostra quel media al posto di quello guidato dal playhead, e
-    /// `active_clip` resta `None` (nessun transform/gain di una clip si
-    /// applica a un'anteprima "grezza"). Si esce da questa modalità
-    /// interagendo con la timeline (selezione o playhead).
+    /// Media in anteprima dal pool: il viewer mostra lui invece della timeline,
+    /// finché non si interagisce con la timeline.
     browsing_media: Option<MediaId>,
     browse_playhead: FrameIdx,
     /// In/out dell'anteprima: la porzione trascinata dal viewer sulla timeline.
     browse_marks: transport::MarkRange,
     browse_audio_streams: usize,
 
-    /// Buffer video a livello di timeline: bufferizza N secondi avanti
-    /// dal playhead attraversando quante clip servono (vedi doc del
-    /// modulo `render_ahead`), invece di un preload per singola clip.
-    /// `None` finché non esiste ancora una timeline (stesso principio di
-    /// `timeline_id`), spawnato la prima volta in `ensure_timeline`.
+    /// Buffer video della timeline. `None` finché non c'è una timeline.
     render_ahead: Option<render_ahead::RenderAhead>,
-    /// `history.generation()` all'ultima notifica a `render_ahead` di una
-    /// nuova disposizione delle clip: un confronto di interi a ogni frame
-    /// UI basta a sapere se serve rimandargli una copia del progetto,
-    /// senza dover clonare/diffare `Project` a ogni frame per scoprirlo.
+    /// `history.generation()` all'ultimo aggiornamento di `render_ahead`.
     render_ahead_generation: u64,
 
     /// Mixer delle track audio e clock del playback della timeline.
@@ -425,12 +281,8 @@ struct VibeVideoApp {
     /// barra spaziatrice mette in pausa e lo riporta a 1x.
     playback_speed: f64,
 
-    /// "Selection follows playhead": attiva di default, disattivabile
-    /// dalle impostazioni. Quando attiva, spostare il playhead (scrub o
-    /// click sul righello) o tagliare/eliminare seleziona automaticamente
-    /// la clip sulla track video sotto al playhead — comodo per fare più
-    /// tagli/ripple-delete in rapida successione senza dover ricliccare
-    /// ogni volta la clip.
+    /// Spostando il playhead, tagliando o cancellando si seleziona la clip
+    /// video sotto al playhead.
     selection_follows_playhead: bool,
 
     /// Audio durante lo scrub (menu Timeline): attivo di default.
@@ -438,18 +290,9 @@ struct VibeVideoApp {
 
     arrow_hold: Option<ArrowHold>,
 
-    /// Il pannello proprietà (a destra del viewer) è visibile? Attivo di
-    /// default; l'utente può nasconderlo (✕ nel pannello, o la checkbox in
-    /// toolbar) e farlo ricomparire al bisogno. Da non confondere con "non
-    /// c'è nulla di selezionato": in quel caso il pannello resta visibile
-    /// ma mostra informazioni sulla timeline invece che su una clip.
     properties_panel_open: bool,
 
-    /// Calamita (toggle nella barra sotto il player): attiva di default,
-    /// come nella maggior parte degli NLE. Quando attiva, trascinare una
-    /// clip sulla timeline (o piazzarne una nuova dal media pool) scatta
-    /// sui bordi delle clip vicine entro una piccola soglia in pixel — vedi
-    /// `timeline_ui::snap_frame`.
+    /// Calamita: nei drag le clip si agganciano ai bordi vicini.
     snapping_enabled: bool,
     /// Handle di transform sopra il viewer (pulsante sotto al viewer).
     show_transform_overlay: bool,
@@ -464,17 +307,12 @@ struct VibeVideoApp {
     video_subtab: VideoSubTab,
     fonts: FontCatalog,
 
-    /// Export in corso (milestone 9), se c'è: `None` quando nessun export
-    /// è attivo. Il thread lavora su uno snapshot di `Project` clonato al
-    /// click di "Esporta", non sul progetto live — vedi `export.rs`.
     export: Option<ExportUiState>,
     export_dialog: Option<export_dialog::ExportDialog>,
     /// Riproposte al prossimo export della sessione.
     last_export_settings: Option<export::ExportSettings>,
 
-    /// File del progetto corrente (milestone 10), se già salvato/aperto
-    /// almeno una volta: "Salva" scrive lì direttamente, altrimenti si
-    /// comporta come "Salva con nome...".
+    /// `None` finché non salvato: "Salva" si comporta come "Salva con nome".
     current_project_path: Option<PathBuf>,
     /// `history.generation()` all'ultimo salvataggio o apertura.
     saved_generation: u64,
@@ -494,11 +332,8 @@ struct VibeVideoApp {
     /// Esito dell'ultimo relink dal menu contestuale del media pool,
     /// mostrato in una finestrella a parte (vedi `show_relink_message`).
     relink_message: Option<String>,
-    /// File dialog nativo aperto in un thread a parte, in attesa del
-    /// risultato (vedi `spawn_file_dialog`) — mai bloccante sul thread
-    /// dell'event loop: farlo su GNOME/Wayland fa credere al compositor
-    /// che l'app sia bloccata (bug segnalato: dialog "Applicazione non
-    /// risponde" ogni volta che si importa un media).
+    /// File dialog aperto in un thread a parte: sul thread dell'event loop
+    /// GNOME/Wayland segnala l'app come bloccata.
     pending_dialog: Option<PendingDialog>,
 
     /// Audiometer (toggle in Visualizza): una fascia stretta a destra
@@ -508,27 +343,14 @@ struct VibeVideoApp {
     /// Sezioni visibili nella colonna di sinistra (toggle in toolbar).
     show_media_pool: bool,
     show_effects: bool,
-    /// Valori (sinistra, destra) mostrati dal meter stereo, con un
-    /// decadimento applicato qui (non nel callback audio): il picco letto
-    /// da `TimelineAudio::peak_linear_stereo` è istantaneo, senza smorzamento
-    /// scenderebbe a zero non appena il buffer corrente non contiene
-    /// picchi, con un effetto "a scatti" invece di due barre che scendono
-    /// dolcemente.
+    /// Livelli del meter, con un decadimento: il picco istantaneo farebbe
+    /// scendere le barre a scatti.
     audiometer_level: (f32, f32),
     viewer_fullscreen: bool,
     settings: settings::Settings,
     /// `None` nei test: le impostazioni non vengono mai scritte su disco.
     settings_path: Option<PathBuf>,
     settings_dialog: Option<settings_dialog::SettingsDialog>,
-}
-
-/// Stato UI di un export in corso: progresso/cancellazione condivisi col
-/// thread che sta effettivamente esportando (`export::export_timeline`),
-/// più l'handle per recuperarne l'esito a fine corsa.
-struct ExportUiState {
-    progress: std::sync::Arc<Mutex<export::ExportProgress>>,
-    cancel: std::sync::Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<Result<(), String>>,
 }
 
 impl Default for VibeVideoApp {
@@ -542,12 +364,11 @@ impl Default for VibeVideoApp {
             import_warnings: Vec::new(),
             preview_meta: None,
             preview_error: None,
-            frame_texture: None,
             video_texture_id: None,
             video_display_size: None,
             last_viewer_frame_kind: None,
             egui_render_state: None,
-            browsing_decode_ahead: None,
+            browsing_render_ahead: None,
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             proxy_enabled: true,
             proxy_worker: None,
@@ -556,6 +377,7 @@ impl Default for VibeVideoApp {
             thumbnail_worker: None,
             thumbnails: HashMap::new(),
             waveform_cache: HashMap::new(),
+            waveform_missing: Default::default(),
             lookahead_secs: render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
             active_clip: None,
@@ -604,734 +426,9 @@ impl Default for VibeVideoApp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectSwitch {
-    Open,
-    ImportOtio,
-    Quit,
-}
-
-enum UnsavedChoice {
-    Save,
-    Discard,
-    Cancel,
-}
-
-/// Cosa fare del risultato di un `rfd::FileDialog` aperto in background
-/// (vedi `VibeVideoApp::spawn_file_dialog`/`spawn_files_dialog`), una
-/// volta arrivato. `RelinkMedia` porta con sé la selezione del media pool
-/// congelata al momento dell'apertura del dialog, non riletta da
-/// `media_pool_state` al ritorno: potrebbe essere cambiata nel frattempo.
-enum DialogKind {
-    ImportMedia,
-    SaveProjectAs,
-    ExportOtio(TimelineId),
-    ImportOtio,
-    OpenProject,
-    RelinkMedia(Vec<MediaId>),
-}
-
-enum DialogOutcome {
-    File(Option<PathBuf>),
-    Files(Option<Vec<PathBuf>>),
-}
-
-struct PendingDialog {
-    kind: DialogKind,
-    rx: mpsc::Receiver<DialogOutcome>,
-}
-
 impl VibeVideoApp {
-    fn import_media(&mut self, path: PathBuf) {
-        match self.add_media_to_pool(path) {
-            Ok(media_id) => {
-                self.import_warnings.clear();
-                self.preview_media(media_id);
-            }
-            Err(e) => self.import_warnings = vec![e],
-        }
-    }
 
-    /// Import multiplo: anteprima solo dell'ultimo media importato, errori
-    /// raccolti invece che sovrascritti a vicenda.
-    fn import_media_files(&mut self, paths: Vec<PathBuf>) {
-        let mut errors = Vec::new();
-        let mut last_imported = None;
-        for path in paths {
-            let label = file_label(&path);
-            match self.add_media_to_pool(path) {
-                Ok(media_id) => last_imported = Some(media_id),
-                Err(e) => errors.push(format!("{label}: {e}")),
-            }
-        }
-        self.import_warnings = errors;
-        if let Some(media_id) = last_imported {
-            self.preview_media(media_id);
-        }
-    }
-
-    fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
-        let probed = if is_image_path(&path) {
-            vv_media::probe_image(&path)
-        } else {
-            vv_media::probe(&path)
-        };
-        match probed {
-            Ok(meta) => {
-                if meta.has_video {
-                    self.ensure_timeline_for(&meta);
-                } else {
-                    self.ensure_timeline_audio_only();
-                }
-                // Fingerprint economico (path+dimensione+mtime, non i
-                // byte del file: vedi doc di `content_fingerprint`),
-                // chiave dei proxy e di qualunque altra cache derivata
-                // dal contenuto — `0` solo se il file è già sparito tra
-                // l'import e qui (raro, non impedisce comunque
-                // l'import: un `content_hash` sbagliato al più fa
-                // rigenerare un proxy che poteva essere riusato).
-                let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-                let media_id = self.project.media_pool.insert(vv_core::MediaItem {
-                    path: path.clone(),
-                    meta,
-                    content_hash,
-                });
-                self.unsaved_media = true;
-                // Sempre accodato, a prescindere da `proxy_enabled`: il
-                // toggle controlla solo se l'anteprima *usa* il proxy
-                // già pronto, non se viene generato — così è già lì
-                // quando/se l'utente lo riattiva, invece di aspettare la
-                // prima volta che serve davvero.
-                self.enqueue_media_background_jobs(media_id);
-                Ok(media_id)
-            }
-            Err(e) => Err(e.to_string()),
-        }
-    }
-
-    /// Proxy, miniatura e waveform di un media del pool, sia appena
-    /// importato sia da un progetto aperto: quel che è già in cache su
-    /// disco viene saltato dai worker.
-    fn enqueue_media_background_jobs(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else {
-            return;
-        };
-        // Un'immagine ferma non guadagna nulla da un proxy (non c'è un
-        // transcode più leggero di "la stessa unica immagine"), e la sua
-        // `duration_frames` è il sentinel enorme di `IMAGE_DURATION_FRAMES`
-        // — passarlo al proxy worker sprecherebbe lavoro su un numero di
-        // frame che non esiste davvero.
-        if item.meta.has_video && !item.meta.is_image() {
-            let frames = item.meta.duration_frames.max(0) as u64;
-            self.proxy_worker
-                .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
-                .enqueue(item.path.clone(), item.content_hash, frames);
-        }
-        if item.meta.has_video && !self.thumbnails.contains_key(&item.content_hash) {
-            self.thumbnails.insert(item.content_hash, None);
-            self.thumbnail_worker
-                .get_or_insert_with(thumbnail_worker::ThumbnailWorker::spawn)
-                .enqueue(
-                    item.path.clone(),
-                    item.content_hash,
-                    item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
-                );
-        }
-        // Solo i media con audio: la timeline disegna la waveform solo
-        // sulle clip audio.
-        if item.meta.has_audio {
-            let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
-            let num_peaks = vv_media::recommended_num_peaks(secs);
-            self.waveform_worker
-                .get_or_insert_with(waveform_worker::WaveformWorker::spawn)
-                .enqueue(item.path.clone(), item.content_hash, num_peaks);
-        }
-    }
-
-    fn poll_thumbnails(&mut self, ctx: &egui::Context) {
-        let Some(worker) = &mut self.thumbnail_worker else {
-            return;
-        };
-        for (content_hash, thumb) in worker.drain() {
-            let texture = thumb.map(|t| {
-                ctx.load_texture(
-                    format!("thumbnail-{content_hash:016x}"),
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [t.width as usize, t.height as usize],
-                        &t.rgba,
-                    ),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
-            self.thumbnails.insert(content_hash, texture);
-        }
-    }
-
-    /// Apre in background il file dialog nativo per una scelta di file
-    /// multipla (`pick_files`) — mai sul thread dell'event loop, vedi
-    /// `pending_dialog`. Un dialog già aperto ne blocca un altro: ha
-    /// senso solo uno alla volta.
-    fn spawn_files_dialog(
-        &mut self,
-        kind: DialogKind,
-        build: impl FnOnce(rfd::FileDialog) -> Option<Vec<PathBuf>> + Send + 'static,
-    ) {
-        if self.pending_dialog.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(DialogOutcome::Files(build(rfd::FileDialog::new())));
-        });
-        self.pending_dialog = Some(PendingDialog { kind, rx });
-    }
-
-    /// Come `spawn_files_dialog`, per una scelta singola (file, cartella
-    /// o percorso di salvataggio).
-    fn spawn_file_dialog(
-        &mut self,
-        kind: DialogKind,
-        build: impl FnOnce(rfd::FileDialog) -> Option<PathBuf> + Send + 'static,
-    ) {
-        if self.pending_dialog.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(DialogOutcome::File(build(rfd::FileDialog::new())));
-        });
-        self.pending_dialog = Some(PendingDialog { kind, rx });
-    }
-
-    /// Controllato a ogni frame (vedi `ui()`): applica il risultato del
-    /// dialog pendente non appena il thread che lo tiene aperto risponde,
-    /// annullato compreso (nessun ramo per `None`: i gestori sotto sono
-    /// gli stessi già in uso prima di questo file dialog asincrono).
-    fn poll_pending_dialog(&mut self, ctx: &egui::Context) {
-        let Some(pending) = &self.pending_dialog else {
-            return;
-        };
-        let Ok(outcome) = pending.rx.try_recv() else {
-            // Ancora in attesa: senza un nuovo evento (mouse, tastiera)
-            // egui non ridisegnerebbe, quindi il risultato arriverebbe
-            // solo al prossimo input dell'utente.
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            return;
-        };
-        let Some(PendingDialog { kind, .. }) = self.pending_dialog.take() else {
-            return;
-        };
-        match (kind, outcome) {
-            (DialogKind::ImportMedia, DialogOutcome::Files(Some(paths))) => {
-                self.import_media_files(paths);
-            }
-            (DialogKind::SaveProjectAs, DialogOutcome::File(Some(path))) => {
-                self.save_project_to(&path);
-            }
-            (DialogKind::ExportOtio(timeline_id), DialogOutcome::File(Some(path))) => {
-                self.export_otio_to(timeline_id, &path);
-            }
-            (DialogKind::ImportOtio, DialogOutcome::File(Some(path))) => {
-                self.import_otio_from(&path);
-            }
-            (DialogKind::OpenProject, DialogOutcome::File(Some(path))) => {
-                self.load_project_from(path);
-            }
-            (DialogKind::RelinkMedia(targets), DialogOutcome::File(Some(base_dir))) => {
-                self.relink_media(&base_dir, &targets);
-            }
-            _ => {} // dialog annullato dall'utente
-        }
-    }
-
-    /// File trascinati dal file manager e rilasciati sulla finestra:
-    /// stesso percorso di import del file dialog/Ctrl+I. Non c'è ancora
-    /// nessun altro punto di rilascio OS (es. una posizione precisa sulla
-    /// timeline), quindi qualunque drop nella finestra vale come "importa
-    /// nel media pool" — niente da disambiguare in base a dove cade il
-    /// puntatore.
-    fn poll_dropped_files(&mut self, ctx: &egui::Context) {
-        let paths: Vec<PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
-        });
-        if !paths.is_empty() {
-            self.import_media_files(paths);
-        }
-    }
-
-    // Apre il file dialog e importa i file scelti (usato dal pulsante
-    // toolbar e dalla shortcut Ctrl+I).
-    fn import_media_dialog(&mut self) {
-        self.spawn_files_dialog(DialogKind::ImportMedia, |dlg| {
-            dlg.add_filter(
-                "media",
-                &[
-                    "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg", "opus",
-                    "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
-                ],
-            )
-            .add_filter("video", &["mp4", "mov", "mkv", "avi"])
-            .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
-            .add_filter("immagini", IMAGE_EXTENSIONS)
-            .pick_files()
-        });
-    }
-
-    /// Salva nel file corrente (`current_project_path`), o come "salva con
-    /// nome" se il progetto non è ancora stato salvato/aperto.
-    fn save_project(&mut self) {
-        match self.current_project_path.clone() {
-            Some(path) => self.save_project_to(&path),
-            None => self.save_project_as(),
-        }
-    }
-
-    /// Apre sempre il file dialog di salvataggio, anche se il progetto ha
-    /// già un file corrente (usato dal pulsante "Salva con nome..." e da
-    /// Ctrl+Shift+S).
-    fn save_project_as(&mut self) {
-        self.spawn_file_dialog(DialogKind::SaveProjectAs, |dlg| {
-            dlg.set_file_name("progetto.vvproj")
-                .add_filter("progetto vibevideo", &["vvproj"])
-                .save_file()
-        });
-    }
-
-    fn save_project_to(&mut self, path: &Path) {
-        match vv_core::save_project(&self.project, path) {
-            Ok(()) => {
-                self.current_project_path = Some(path.to_path_buf());
-                self.project_error = None;
-                self.mark_saved();
-            }
-            Err(e) => self.project_error = Some(format!("Salvataggio fallito: {e}")),
-        }
-    }
-
-    fn export_otio_dialog(&mut self) {
-        let Some(timeline_id) = self.timeline_id else {
-            return;
-        };
-        let file_name = format!("{}.otio", self.project.timelines[timeline_id].name);
-        self.spawn_file_dialog(DialogKind::ExportOtio(timeline_id), move |dlg| {
-            dlg.set_file_name(file_name)
-                .add_filter("OpenTimelineIO", &["otio"])
-                .save_file()
-        });
-    }
-
-    fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
-        self.project_error = vv_core::export_otio(&self.project, timeline_id, path)
-            .err()
-            .map(|e| format!("Esportazione OTIO fallita: {e}"));
-    }
-
-    fn mark_saved(&mut self) {
-        self.saved_generation = self.history.generation();
-        self.unsaved_media = false;
-    }
-
-    fn has_unsaved_changes(&self) -> bool {
-        self.unsaved_media || self.history.generation() != self.saved_generation
-    }
-
-    /// Apre o importa un progetto, chiedendo prima se salvare le modifiche.
-    fn request_project_switch(&mut self, switch: ProjectSwitch) {
-        if self.has_unsaved_changes() {
-            self.pending_project_switch = Some(switch);
-        } else {
-            self.run_project_switch(switch);
-        }
-    }
-
-    fn run_project_switch(&mut self, switch: ProjectSwitch) {
-        match switch {
-            ProjectSwitch::Open => self.open_project_dialog(),
-            ProjectSwitch::ImportOtio => self.import_otio_dialog(),
-            ProjectSwitch::Quit => self.quit_confirmed = true,
-        }
-    }
-
-    /// La chiusura della finestra si sospende finché l'utente non risponde
-    /// a "salvare le modifiche?"; poi la si richiede di nuovo.
-    fn handle_close_request(&mut self, ctx: &egui::Context) {
-        if self.quit_confirmed {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-        if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_changes() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending_project_switch = Some(ProjectSwitch::Quit);
-            ctx.request_repaint();
-        }
-    }
-
-    fn show_unsaved_changes_dialog(&mut self, ui: &mut egui::Ui) {
-        let Some(switch) = self.pending_project_switch else {
-            return;
-        };
-        let mut choice = None;
-        let modal = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ui.ctx(), |ui| {
-            ui.heading(if switch == ProjectSwitch::Quit {
-                "Salvare le modifiche prima di uscire?"
-            } else {
-                "Salvare le modifiche?"
-            });
-            ui.label("Il progetto corrente ha modifiche non salvate.");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Salva").clicked() {
-                    choice = Some(UnsavedChoice::Save);
-                }
-                if ui.button("Non salvare").clicked() {
-                    choice = Some(UnsavedChoice::Discard);
-                }
-                if ui.button("Annulla").clicked() {
-                    choice = Some(UnsavedChoice::Cancel);
-                }
-            });
-        });
-        if choice.is_none() && modal.should_close() {
-            choice = Some(UnsavedChoice::Cancel);
-        }
-        if let Some(choice) = choice {
-            self.resolve_unsaved_changes(choice);
-            ui.ctx().request_repaint();
-        }
-    }
-
-    fn resolve_unsaved_changes(&mut self, choice: UnsavedChoice) {
-        let Some(switch) = self.pending_project_switch.take() else {
-            return;
-        };
-        match choice {
-            UnsavedChoice::Save => {
-                self.save_project();
-                // Salvataggio annullato o fallito: meglio non perdere nulla.
-                if !self.has_unsaved_changes() {
-                    self.run_project_switch(switch);
-                }
-            }
-            UnsavedChoice::Discard => self.run_project_switch(switch),
-            UnsavedChoice::Cancel => {}
-        }
-    }
-
-    fn import_otio_dialog(&mut self) {
-        self.spawn_file_dialog(DialogKind::ImportOtio, |dlg| {
-            dlg.add_filter("OpenTimelineIO", &["otio"]).pick_file()
-        });
-    }
-
-    /// Come "Apri progetto", ma da un `.otio`: Ctrl+S chiederà dove
-    /// salvare invece di sovrascrivere il file importato. Quel che non è
-    /// stato importato finisce in `import_warnings`.
-    fn import_otio_from(&mut self, path: &Path) {
-        let imported = vv_core::import_otio(path, |media_path| {
-            let meta = vv_media::probe(media_path).map_err(|e| e.to_string())?;
-            Ok((meta, vv_media::content_fingerprint(media_path).unwrap_or(0)))
-        });
-        match imported {
-            Ok(imported) => {
-                self.replace_project(imported.project, None);
-                self.import_warnings = imported.warnings;
-            }
-            Err(e) => self.project_error = Some(format!("Importazione OTIO fallita: {e}")),
-        }
-    }
-
-    fn open_project_dialog(&mut self) {
-        self.spawn_file_dialog(DialogKind::OpenProject, |dlg| {
-            dlg.add_filter("progetto vibevideo", &["vvproj"]).pick_file()
-        });
-    }
-
-    /// Sostituisce il progetto corrente con quello caricato da `path`:
-    /// azzera tutto lo stato UI/di sessione legato al *vecchio* progetto
-    /// (selezione, playhead, history, audio/anteprima) — sarebbe
-    /// incoerente riferito al nuovo. `timeline_id` diventa la prima (e di
-    /// norma unica, con l'UI attuale) timeline del progetto caricato.
-    fn load_project_from(&mut self, path: PathBuf) {
-        match vv_core::load_project(&path) {
-            Ok(project) => self.replace_project(project, Some(path)),
-            Err(e) => self.project_error = Some(format!("Apertura fallita: {e}")),
-        }
-    }
-
-    /// `path` è il file su cui salverà Ctrl+S: `None` per un progetto che
-    /// non viene da un `.vvproj` (import OTIO).
-    fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
-        self.timeline_id = project.timelines.keys().next();
-        self.project = project;
-        self.history = vv_core::History::default();
-        self.timeline_state = timeline_ui::TimelineState::default();
-        self.import_warnings.clear();
-        self.preview_meta = None;
-        self.preview_error = None;
-        self.frame_texture = None;
-        self.last_viewer_frame_kind = None;
-        self.browsing_decode_ahead = None;
-        self.active_clip = None;
-        self.last_synced_playhead = 0;
-        self.browsing_media = None;
-        if let Some(audio) = &mut self.timeline_audio {
-            audio.pause();
-            audio.invalidate();
-        }
-        self.reset_playback_speed_to_normal();
-        if let Some(fps) = self.timeline_id.map(|id| self.project.timelines[id].fps.as_f64()) {
-            self.timeline_audio().seek_frame(0, fps);
-        }
-        self.current_project_path = path;
-        self.project_error = None;
-        self.mark_saved();
-        // Il progetto è stato sostituito senza passare da
-        // `history.do_command` (che è stata appena azzerata):
-        // `sync_render_ahead` non se ne accorgerebbe da sola
-        // confrontando la generazione, quindi lo si notifica
-        // esplicitamente qui.
-        if let Some(timeline_id) = self.timeline_id {
-            self.spawn_render_ahead_if_needed(timeline_id);
-            if let Some(render_ahead) = &self.render_ahead {
-                render_ahead.update_project(&self.project, timeline_id);
-            }
-        }
-        self.render_ahead_generation = self.history.generation();
-        let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
-        for media_id in media_ids {
-            self.enqueue_media_background_jobs(media_id);
-        }
-    }
-
-    /// Apre la finestra delle impostazioni: l'export parte solo da lì
-    /// (`run_export`).
-    fn start_export(&mut self) {
-        // Il pulsante è disabilitato durante un export, ma Ctrl+Shift+E no.
-        if self.timeline_id.is_none() || self.export.is_some() || self.export_dialog.is_some() {
-            return;
-        }
-        let settings = self.last_export_settings.clone().unwrap_or_else(|| {
-            export::ExportSettings::preferred(export_dialog::default_output_path(
-                self.current_project_path.as_deref(),
-            ))
-        });
-        self.export_dialog = Some(export_dialog::ExportDialog::new(settings));
-    }
-
-    fn show_export_dialog(&mut self, ui: &mut egui::Ui) {
-        let (Some(dialog), Some(timeline_id)) = (&mut self.export_dialog, self.timeline_id) else {
-            return;
-        };
-        let timeline = &self.project.timelines[timeline_id];
-        let total_frames = timeline.total_frames();
-        let marks = &self.timeline_state.export_marks;
-        let info = export_dialog::TimelineInfo {
-            resolution: timeline.resolution,
-            fps: timeline.fps,
-            total_frames,
-            marks: (!marks.is_full(total_frames)).then(|| marks.resolve(total_frames)),
-            has_audio: timeline
-                .tracks_of_kind(TrackKind::Audio)
-                .any(|(_, t)| !t.clips.is_empty()),
-        };
-        match dialog.show(ui.ctx(), &info) {
-            export_dialog::ExportDialogAction::None => {}
-            export_dialog::ExportDialogAction::Cancel => self.export_dialog = None,
-            export_dialog::ExportDialogAction::Export { settings, range } => {
-                self.export_dialog = None;
-                self.last_export_settings = Some(settings.clone());
-                self.run_export(timeline_id, settings, range);
-            }
-        }
-    }
-
-    /// Avvia l'export su un thread dedicato: clona `self.project` (l'export
-    /// lavora su questo snapshot, non sul progetto live — continuare a
-    /// editare durante l'export non lo tocca) e gira
-    /// `export::export_timeline` in background, aggiornando `self.export`
-    /// con progresso/cancellazione condivisi.
-    fn run_export(
-        &mut self,
-        timeline_id: TimelineId,
-        settings: export::ExportSettings,
-        range: std::ops::Range<FrameIdx>,
-    ) {
-        self.pause_proxies_for_export();
-
-        let project = self.project.clone();
-        let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
-        let cancel = std::sync::Arc::new(AtomicBool::new(false));
-
-        let thread_progress = progress.clone();
-        let thread_cancel = cancel.clone();
-        let handle = std::thread::spawn(move || {
-            let result = export::export_timeline(
-                &project,
-                timeline_id,
-                &settings,
-                range,
-                &thread_progress,
-                &thread_cancel,
-            );
-            // `export_timeline` aggiorna `progress.done` solo sul percorso
-            // di successo: qui si copre anche l'errore/l'annullamento, così
-            // la UI (che legge solo `progress`, non fa join per sapere se è
-            // finito) vede sempre uno stato coerente.
-            if let Err(e) = &result {
-                let mut p = thread_progress.lock().unwrap();
-                p.error = Some(e.clone());
-                p.done = true;
-            }
-            result
-        });
-
-        self.export = Some(ExportUiState {
-            progress,
-            cancel,
-            handle,
-        });
-    }
-
-    /// Piccola finestra di progresso mentre un export è in corso: barra
-    /// (letta da `ExportUiState::progress`, condiviso col thread di
-    /// export), "Annulla" finché non è finito, "Chiudi" quando lo è
-    /// (successo o errore, mostrato). No-op se nessun export è in corso.
-    fn show_import_warnings(&mut self, ui: &mut egui::Ui) {
-        if self.import_warnings.is_empty() {
-            return;
-        }
-        let mut close = false;
-        egui::Window::new(format!("Avvisi di importazione ({})", self.import_warnings.len()))
-            .collapsible(true)
-            .default_width(480.0)
-            .show(ui.ctx(), |ui| {
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for warning in &self.import_warnings {
-                        ui.label(warning);
-                    }
-                });
-                ui.separator();
-                close = ui.button("Chiudi").clicked();
-            });
-        if close {
-            self.import_warnings.clear();
-        }
-    }
-
-    fn show_relink_message(&mut self, ui: &mut egui::Ui) {
-        let Some(message) = &self.relink_message else {
-            return;
-        };
-        let mut close = false;
-        egui::Window::new("Relink media")
-            .collapsible(false)
-            .default_width(360.0)
-            .show(ui.ctx(), |ui| {
-                ui.label(message.as_str());
-                ui.separator();
-                close = ui.button("Chiudi").clicked();
-            });
-        if close {
-            self.relink_message = None;
-        }
-    }
-
-    fn show_export_progress(&mut self, ui: &mut egui::Ui) {
-        let Some(state) = &self.export else {
-            return;
-        };
-
-        let (current, total, done, error) = {
-            let p = state.progress.lock().unwrap();
-            (p.current_frame, p.total_frames, p.done, p.error.clone())
-        };
-
-        let mut should_close = false;
-        egui::Window::new("Export")
-            .collapsible(false)
-            .resizable(false)
-            .show(ui.ctx(), |ui| {
-                let fraction = if total > 0 {
-                    (current as f32 / total as f32).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .text(format!("{current}/{total} frame"))
-                        .animate(!done),
-                );
-                if let Some(err) = &error {
-                    ui.colored_label(egui::Color32::RED, err);
-                } else if done {
-                    ui.label("Export completato.");
-                }
-                ui.horizontal(|ui| {
-                    if !done && ui.button("Annulla").clicked() {
-                        state.cancel.store(true, Ordering::Relaxed);
-                    }
-                    if done && ui.button("Chiudi").clicked() {
-                        should_close = true;
-                    }
-                });
-            });
-
-        // Repaint continuo mentre è in corso, altrimenti la barra non
-        // avanzerebbe finché non arriva un altro input (stesso principio
-        // del repaint continuo durante il playback, più sotto in questo
-        // stesso metodo `update`).
-        if !done {
-            ui.ctx().request_repaint();
-        }
-
-        if done {
-            self.resume_proxies_after_export();
-        }
-
-        if should_close && let Some(state) = self.export.take() {
-            let _ = state.handle.join();
-        }
-    }
-
-    /// Mette in pausa la generazione dei proxy per la durata
-    /// dell'export: un encode di proxy in corso contende CPU e ffmpeg
-    /// all'encode dell'export, che resta praticamente fermo finché la
-    /// coda dei proxy non si svuota (bug segnalato). Se era già in pausa
-    /// non segna nulla, così `resume_proxies_after_export` non annulla
-    /// una pausa scelta dall'utente.
-    fn pause_proxies_for_export(&mut self) {
-        let Some(worker) = &self.proxy_worker else {
-            return;
-        };
-        if worker.is_paused() {
-            return;
-        }
-        worker.set_paused(true);
-        self.proxy_paused_for_export = true;
-    }
-
-    /// Riprende la generazione dei proxy messa in pausa da `start_export`
-    /// — solo se è stata lei a metterla in pausa (vedi
-    /// `proxy_paused_for_export`). Idempotente: chiamata a ogni frame
-    /// finché la finestra di export resta aperta.
-    fn resume_proxies_after_export(&mut self) {
-        if !self.proxy_paused_for_export {
-            return;
-        }
-        self.proxy_paused_for_export = false;
-        if let Some(worker) = &self.proxy_worker {
-            worker.set_paused(false);
-        }
-    }
-
-    /// Due barre verticali (sinistra/destra) col livello dell'audio in
-    /// uscita, disegnate in tutto lo spazio disponibile in `ui` (chi
-    /// chiama ne ha già ritagliato una fascia stretta, vedi il pannello
-    /// "audiometer" annidato in quello "timeline"). Non una misura
-    /// professionale: solo il picco assoluto per canale dell'ultimo
-    /// buffer audio (`TimelineAudio::peak_linear_stereo`), con un decadimento
-    /// applicato qui frame per frame perché il valore istantaneo da solo
-    /// farebbe scendere le barre a scatti invece che dolcemente.
+    /// Meter stereo del picco d'uscita, con decadimento.
     fn draw_audiometer(&mut self, ui: &mut egui::Ui) {
         const DECAY: f32 = 0.85;
         let (raw_l, raw_r) = self
@@ -1383,10 +480,7 @@ impl VibeVideoApp {
             }
         }
 
-        // Repaint continuo mentre il livello sta ancora decadendo verso lo
-        // zero, altrimenti le barre resterebbero "incollate" all'ultimo
-        // valore finché non arriva un altro input (stesso principio del
-        // repaint durante il playback/export altrove in questo file).
+        // Repaint finché le barre scendono.
         if level_l > 0.001 || level_r > 0.001 {
             ui.ctx().request_repaint();
         }
@@ -1395,8 +489,7 @@ impl VibeVideoApp {
     /// Anteprima "grezza" di un media dal media pool, non legata alla
     /// timeline: mostra il primo frame da un decode-ahead dedicato.
     fn preview_media(&mut self, media_id: MediaId) {
-        // `frame_texture` resta: niente flash a vuoto durante il cambio media.
-        self.browsing_decode_ahead = None;
+        self.browsing_render_ahead = None;
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
@@ -1405,11 +498,7 @@ impl VibeVideoApp {
             self.timeline_audio().pause();
         }
         self.reset_playback_speed_to_normal();
-        self.browse_audio_streams = if meta.has_audio {
-            vv_media::audio_streams(&path).map_or(1, |s| s.len().max(1))
-        } else {
-            0
-        };
+        self.browse_audio_streams = meta.audio_stream_count();
         let has_video = meta.has_video;
         self.preview_meta = Some(meta);
         self.preview_error = None;
@@ -1418,10 +507,53 @@ impl VibeVideoApp {
         if !has_video {
             return;
         }
-        match vv_media::DecodeAhead::spawn(path, self.cache_budget_bytes, 60) {
-            Ok(decode_ahead) => self.browsing_decode_ahead = Some(decode_ahead),
-            Err(e) => self.preview_error = Some(e.to_string()),
+        // Il buffer apre il file per conto suo e salta quelli che non si
+        // aprono: l'errore va visto qui.
+        if let Err(e) = vv_media::Decoder::open(&path) {
+            self.preview_error = Some(e.to_string());
+            return;
         }
+        self.browsing_render_ahead = Some(self.spawn_browsing_render_ahead(media_id));
+    }
+
+    /// Una timeline all'fps del media con solo lui sopra: i frame di
+    /// timeline coincidono con quelli sorgente.
+    fn spawn_browsing_render_ahead(&self, media_id: MediaId) -> (render_ahead::RenderAhead, MediaId) {
+        let item = self.project.media_pool[media_id].clone();
+        let meta = item.meta.clone();
+        let mut project = vv_core::Project::default();
+        let preview_media = project.media_pool.insert(item);
+        let mut track = Track::new(TrackKind::Video);
+        track.clips.push(vv_core::Clip::from_source_range(
+            project.alloc_clip_id(),
+            vv_core::ClipSource::Media(preview_media),
+            0,
+            meta.duration_frames.max(1),
+            0,
+            vv_core::Rational::one(),
+        ));
+        let timeline_id = project.timelines.insert(vv_core::Timeline {
+            name: "anteprima".into(),
+            fps: meta.fps,
+            resolution: (meta.width, meta.height),
+            tracks: vec![track],
+        });
+        let render_ahead = render_ahead::RenderAhead::spawn(
+            project,
+            timeline_id,
+            self.cache_budget_bytes,
+            self.proxy_enabled,
+            self.lookahead_secs,
+            self.behind_secs,
+        );
+        (render_ahead, preview_media)
+    }
+
+    /// Il buffer della timeline e quello dell'anteprima, se ci sono.
+    fn render_aheads(&self) -> impl Iterator<Item = &render_ahead::RenderAhead> {
+        self.render_ahead
+            .iter()
+            .chain(self.browsing_render_ahead.as_ref().map(|(r, _)| r))
     }
 
     /// La clip Video attiva (track più in alto tra quelle che ne hanno una
@@ -1434,10 +566,8 @@ impl VibeVideoApp {
             .map(|(t, c)| (t, c.id))
     }
 
-    /// Se "selection follows playhead" è attivo, allinea la selezione alla
-    /// clip video attiva sotto al playhead corrente più le clip collegate
-    /// (selezione vuota se il playhead è su un vuoto), scartando qualunque
-    /// selezione precedente. No-op se la funzionalità è disattivata.
+    /// Con "selection follows playhead" attivo, seleziona la clip video sotto
+    /// al playhead e il suo gruppo (niente su un vuoto).
     fn sync_selection_to_playhead(&mut self) {
         if !self.selection_follows_playhead {
             return;
@@ -1449,7 +579,7 @@ impl VibeVideoApp {
         };
         let mut selected = BTreeSet::from([(track_index, clip_id)]);
         if let Some(timeline_id) = self.timeline_id {
-            selected.extend(self.group_members(timeline_id, track_index, clip_id));
+            selected.extend(self.project.timelines[timeline_id].linked_members(track_index, clip_id));
         }
         self.timeline_state
             .set_selection(selected, Some((track_index, clip_id)));
@@ -1459,10 +589,8 @@ impl VibeVideoApp {
         }
     }
 
-    /// Allinea la clip video attiva (viewer) al playhead e, se il playhead
-    /// è stato spostato da fuori, anche il clock audio. `force_seek`: lo
-    /// spostamento viene dall'utente e va seguito anche in riproduzione;
-    /// quando è `drive_playback` a muovere il playhead il clock è già lì.
+    /// Allinea la clip del viewer al playhead e, se l'ha mosso l'utente
+    /// (`force_seek` anche in riproduzione), il clock audio.
     fn ensure_active_clip_matches_playhead(&mut self, force_seek: bool) {
         if self.browsing_media.is_some() {
             return;
@@ -1511,7 +639,7 @@ impl VibeVideoApp {
             self.reset_playback_speed_to_normal();
         }
         self.browsing_media = None;
-        self.browsing_decode_ahead = None;
+        self.browsing_render_ahead = None;
         self.preview_meta = None;
         // Il clock è rimasto alla posizione dell'anteprima: forza il seek al
         // playhead della timeline.
@@ -1554,10 +682,8 @@ impl VibeVideoApp {
         if let Some(audio) = &mut self.timeline_audio {
             audio.seek_frame(frame, fps);
         }
-        if let Some(decode_ahead) = &self.browsing_decode_ahead
-            && !decode_ahead.cache().contains(frame)
-        {
-            decode_ahead.seek(frame, frame as f64 / self.browse_fps());
+        if let Some((render_ahead, _)) = &self.browsing_render_ahead {
+            render_ahead.set_target(frame);
         }
     }
 
@@ -1735,15 +861,7 @@ impl VibeVideoApp {
         }
     }
 
-    /// Intervalli (in frame di *timeline*) attualmente bufferizzati per
-    /// ogni clip Media di ogni track video, per l'indicatore visivo
-    /// "buffered" sulla timeline (richiesta: "visualizzare durante la
-    /// riproduzione come viene fatto il buffer"). Interroga direttamente
-    /// `render_ahead`, che bufferizza a livello di timeline (non più un
-    /// caso a parte per la clip attiva/il preload della successiva): una
-    /// clip su una track video occlusa da un'altra in quel punto
-    /// (`active_video_clip_at`) risulterà correttamente "non
-    /// bufferizzata", perché non è lei a essere mostrata né decodificata.
+    /// Intervalli di timeline già decodificati, per la striscia "buffered".
     fn buffered_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
@@ -1751,30 +869,23 @@ impl VibeVideoApp {
         let Some(render_ahead) = &self.render_ahead else {
             return Vec::new();
         };
+        let mut cached: HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>> = HashMap::new();
         let mut ranges = Vec::new();
         for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Video) {
             for clip in &track.clips {
                 if let vv_core::ClipSource::Media(media_id) = &clip.source {
-                    ranges.extend(map_source_ranges_to_timeline(
-                        clip,
-                        &render_ahead.cached_ranges_for(*media_id),
-                    ));
+                    let source_ranges = cached
+                        .entry(*media_id)
+                        .or_insert_with(|| render_ahead.cached_ranges_for(*media_id));
+                    ranges.extend(map_source_ranges_to_timeline(clip, source_ranges));
                 }
             }
         }
         ranges
     }
 
-    /// Intervalli (in frame di *timeline*) delle clip Media attualmente
-    /// servite dal proxy invece che dal sorgente — indicatore visivo
-    /// separato da quello "buffered" (colore diverso in
-    /// `timeline_ui::show_timeline`): dice *da dove* arriverebbe il
-    /// frame quando viene bufferizzato, non se è già pronto ora. Copre
-    /// l'intera estensione di ogni clip proxy-backed, non solo la parte
-    /// già decodificata: a differenza della cache, "proxy o sorgente"
-    /// è deciso dal toggle + dalla disponibilità del file su disco, non
-    /// da cosa è già stato effettivamente decodificato finora (vedi
-    /// `render_ahead::fill_segments`, la stessa condizione).
+    /// Intervalli di timeline delle clip Media servite dal proxy (tutta la
+    /// clip, non solo la parte già decodificata).
     fn proxy_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
@@ -1782,12 +893,15 @@ impl VibeVideoApp {
         if !self.proxy_enabled {
             return Vec::new();
         }
+        let Some(proxy_worker) = &self.proxy_worker else {
+            return Vec::new();
+        };
         let mut ranges = Vec::new();
         for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Video) {
             for clip in &track.clips {
                 if let vv_core::ClipSource::Media(media_id) = &clip.source
                     && let Some(item) = self.project.media_pool.get(*media_id)
-                    && vv_media::proxy::proxy_exists(item.content_hash)
+                    && proxy_worker.state(item.content_hash) == Some(proxy_worker::ProxyState::Ready)
                 {
                     ranges.push((clip.timeline_start, clip.timeline_end() - 1));
                 }
@@ -1796,32 +910,38 @@ impl VibeVideoApp {
         ranges
     }
 
-    /// Carica in memoria la waveform (picchi audio) di ogni media audio
-    /// presente sulla timeline, se il file di cache esiste ma non è ancora
-    /// nella mappa della sessione: la timeline la disegna a ogni frame, e
-    /// un `read` di un file da qualche MB a ogni repaint sarebbe un I/O
-    /// inutile. Il file resta la fonte di verità (sopravvive al riavvio,
-    /// generato dal `waveform_worker`); la mappa è solo una cache della
-    /// sessione. Chiamato prima di `show_timeline`, che riceve la mappa.
+    /// Carica in `waveform_cache` le waveform delle clip audio in timeline,
+    /// leggendo il file di cache una volta sola per chiave.
     fn ensure_waveforms_loaded(&mut self) {
+        if let Some(worker) = &self.waveform_worker {
+            for key in worker.drain_ready() {
+                self.waveform_missing.remove(&key);
+            }
+        }
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Audio) {
             for clip in &track.clips {
-                if let vv_core::ClipSource::Media(media_id) = &clip.source
-                    && let Some(item) = self.project.media_pool.get(*media_id)
-                    && item.meta.has_audio
-                    && !self
-                        .waveform_cache
-                        .contains_key(&(item.content_hash, clip.audio_stream_index))
-                    && vv_media::waveform::waveform_exists(item.content_hash, clip.audio_stream_index)
+                let vv_core::ClipSource::Media(media_id) = &clip.source else {
+                    continue;
+                };
+                let Some(item) = self.project.media_pool.get(*media_id) else {
+                    continue;
+                };
+                let key = (item.content_hash, clip.audio_stream_index);
+                if !item.meta.has_audio
+                    || self.waveform_cache.contains_key(&key)
+                    || self.waveform_missing.contains(&key)
                 {
-                    if let Some(peaks) =
-                        vv_media::waveform::load_waveform(item.content_hash, clip.audio_stream_index)
-                    {
-                        self.waveform_cache
-                            .insert((item.content_hash, clip.audio_stream_index), peaks);
+                    continue;
+                }
+                match vv_media::waveform::load_waveform(key.0, key.1) {
+                    Some(waveform) => {
+                        self.waveform_cache.insert(key, waveform);
+                    }
+                    None => {
+                        self.waveform_missing.insert(key);
                     }
                 }
             }
@@ -1832,22 +952,14 @@ impl VibeVideoApp {
         self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), true)
     }
 
-    /// Come `ensure_timeline`, ma se la timeline va creata al volo (import,
-    /// o trascinamento di un media dal media pool sull'area timeline)
-    /// eredita framerate e risoluzione da `meta` invece dei default fissi
-    /// di `ensure_timeline` (che non ha un media da cui derivarli, es. per
-    /// Solid Color). Solo per un media con video: per uno solo audio vedi
-    /// `ensure_timeline_audio_only`.
+    /// Come `ensure_timeline`, ma una timeline nuova prende fps e risoluzione
+    /// da `meta` (solo media con video).
     fn ensure_timeline_for(&mut self, meta: &vv_core::MediaMeta) -> TimelineId {
         self.ensure_timeline_with(meta.fps, (meta.width, meta.height), true)
     }
 
-    /// Come `ensure_timeline`, ma senza track video: un media solo audio
-    /// non ha una risoluzione da cui derivarne una (a differenza di
-    /// `ensure_timeline_for`), e non deve comunque trovarsi una track
-    /// video vuota solo perché la timeline è stata creata da un drop
-    /// audio (bug segnalato: "trascinare un audio-only crea una traccia
-    /// video fittizia").
+    /// Come `ensure_timeline`, ma senza track video: un drop di solo audio non
+    /// deve crearne una vuota.
     fn ensure_timeline_audio_only(&mut self) -> TimelineId {
         self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), false)
     }
@@ -1894,11 +1006,8 @@ impl VibeVideoApp {
         }
     }
 
-    /// Da chiamare a ogni frame UI: se il progetto è cambiato dall'ultima
-    /// volta (confronto economico su `History::generation`, vedi doc del
-    /// campo `render_ahead_generation`), manda a `render_ahead` una nuova
-    /// copia — non un clone/diff a ogni frame incondizionatamente, solo
-    /// quando serve davvero.
+    /// Manda a `render_ahead` una copia del progetto solo quando la history è
+    /// cambiata.
     fn sync_render_ahead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1922,353 +1031,17 @@ impl VibeVideoApp {
         render_ahead.set_target(self.timeline_state.playhead);
     }
 
-    /// `lookahead_secs` (base configurata dall'utente) scalato per
-    /// `self.playback_speed`, clampato a quanto entra nel budget di
-    /// memoria configurato (`cache_budget_bytes`) lasciando spazio anche
-    /// per `behind_secs` — oltre quel limite scalare ulteriormente
-    /// sarebbe comunque vanificato dagli sfratti Tier B di `render_ahead`
-    /// (budget insufficiente per la finestra richiesta). Non scende mai
-    /// sotto il valore base configurato dall'utente, anche a budget
-    /// strettissimo.
+    /// `lookahead_secs` scalato per la velocità di riproduzione, entro quanto
+    /// sta nel budget di cache (tolto `behind_secs`), mai sotto la base.
     fn effective_lookahead_secs(&self, timeline_id: TimelineId) -> f64 {
         let scaled = self.lookahead_secs * self.playback_speed;
         let timeline = &self.project.timelines[timeline_id];
         let fps = timeline.fps.as_f64().max(1e-9);
         let (w, h) = timeline.resolution;
-        let frame_bytes = ((w as usize * h as usize * 3) / 2).max(1);
+        let frame_bytes = vv_media::yuv420_frame_bytes(w, h).max(1);
         let max_frames = self.cache_budget_bytes / frame_bytes;
         let max_secs = (max_frames as f64 / fps - self.behind_secs).max(self.lookahead_secs);
         scaled.min(max_secs)
-    }
-
-    /// Contenuto della sezione Media pool nella colonna di sinistra.
-    fn show_media_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
-        if let Some(worker) = &self.proxy_worker {
-            let progress = worker.progress();
-            let paused = worker.is_paused();
-            if progress.finished < progress.total {
-                ui.horizontal(|ui| {
-                    let label = if paused { "Riprendi" } else { "Pausa" };
-                    if ui
-                        .small_button(label)
-                        .on_hover_text("Generazione proxy in background")
-                        .clicked()
-                    {
-                        worker.set_paused(!paused);
-                    }
-                    ui.add(
-                        egui::ProgressBar::new(progress.fraction)
-                            .text(format!("Proxy {}/{}", progress.finished, progress.total)),
-                    );
-                });
-                if !paused {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                }
-            }
-        }
-        media_pool_header(ui, &mut self.media_pool_state);
-        // auto_shrink([false, false]): senza, la ScrollArea (e
-        // quindi il pannello stesso) si restringe alla larghezza
-        // del contenuto invece di riempire quella assegnata dal
-        // Panel — stessa causa del bug "il resize del pannello
-        // torna indietro al rilascio", vedi il commento identico
-        // in timeline_ui::show_timeline.
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let items: Vec<(MediaId, String, vv_core::MediaMeta, u64)> = self
-                    .project
-                    .media_pool
-                    .iter()
-                    .map(|(id, item)| {
-                        (id, file_label(&item.path), item.meta.clone(), item.content_hash)
-                    })
-                    .collect();
-                let mut items = items;
-                media_pool::sort_items(
-                    &mut items,
-                    self.media_pool_state.sort,
-                    |(_, label, ..)| label.as_str(),
-                    |(_, _, meta, _)| {
-                        meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9)
-                    },
-                );
-                let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
-                let drags: Vec<timeline_ui::MediaDrag> = items
-                    .iter()
-                    .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
-                    .collect();
-                // Sfondo interagibile per il rettangolo di selezione,
-                // richiesto *prima* degli elementi: nell'hit-test di
-                // egui vince l'ultimo, quindi cliccare un elemento non
-                // fa partire il rettangolo (stesso schema del marquee
-                // in `timeline_ui::show_timeline`).
-                let bg = ui.interact(
-                    ui.available_rect_before_wrap(),
-                    ui.id().with("media_pool_bg"),
-                    egui::Sense::click_and_drag(),
-                );
-                let mut item_rects: Vec<(MediaId, egui::Rect)> = Vec::new();
-                for (id, label, meta, content_hash) in items {
-                    let proxy_state = self
-                        .proxy_worker
-                        .as_ref()
-                        .and_then(|w| w.state(content_hash));
-                    let thumbnail = self.thumbnails.get(&content_hash).cloned().flatten();
-                    let group_resp = ui
-                        .group(|ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                let thumb_size = egui::vec2(64.0, 36.0);
-                                match &thumbnail {
-                                    Some(texture) => {
-                                        let tex_size = texture.size_vec2();
-                                        let scale = (thumb_size.x / tex_size.x)
-                                            .min(thumb_size.y / tex_size.y);
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            thumb_size,
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
-                                        egui::Image::new(texture)
-                                            .fit_to_exact_size(tex_size * scale)
-                                            .paint_at(
-                                                ui,
-                                                egui::Rect::from_center_size(
-                                                    rect.center(),
-                                                    tex_size * scale,
-                                                ),
-                                            );
-                                    }
-                                    None => {
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            thumb_size,
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            2.0,
-                                            ui.visuals().extreme_bg_color,
-                                        );
-                                        if !meta.has_video {
-                                            ui.painter().text(
-                                                rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "🔊",
-                                                egui::FontId::proportional(18.0),
-                                                ui.visuals().weak_text_color(),
-                                            );
-                                        }
-                                    }
-                                }
-                                ui.vertical(|ui| {
-                                    ui.label(&label);
-                                    ui.small(if meta.is_image() {
-                                        format!("immagine · {}x{}", meta.width, meta.height)
-                                    } else if meta.has_video {
-                                        format!(
-                                            "{}x{} · {:.2}fps · {}",
-                                            meta.width,
-                                            meta.height,
-                                            meta.fps.as_f64(),
-                                            if meta.has_audio { "audio" } else { "muto" }
-                                        )
-                                    } else {
-                                        format!(
-                                            "solo audio · {} Hz · {} ch",
-                                            meta.sample_rate, meta.channels
-                                        )
-                                    });
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        // Un'immagine non ha una durata reale (vedi
-                                        // `IMAGE_DURATION_FRAMES`): mostrarla in
-                                        // MM:SS come un video sarebbe un numero
-                                        // enorme e privo di senso.
-                                        let duration_label = if meta.is_image() {
-                                            "—".to_string()
-                                        } else {
-                                            format_duration(meta.duration_frames, meta.fps.as_f64())
-                                        };
-                                        ui.add_sized(
-                                            egui::vec2(DURATION_COL_W, ui.available_height()),
-                                            egui::Label::new(
-                                                egui::RichText::new(duration_label).monospace(),
-                                            ),
-                                        );
-                                        match proxy_state {
-                                        Some(proxy_worker::ProxyState::Generating(f)) => {
-                                            proxy_progress_ring(ui, Some(f))
-                                                .on_hover_text(format!("Generazione proxy {:.0}%", f * 100.0));
-                                        }
-                                        Some(proxy_worker::ProxyState::Queued) => {
-                                            proxy_progress_ring(ui, None)
-                                                .on_hover_text("Proxy in coda");
-                                        }
-                                        Some(proxy_worker::ProxyState::Failed) => {
-                                            ui.colored_label(egui::Color32::RED, "!")
-                                                .on_hover_text("Proxy non generato");
-                                        }
-                                        _ => {}
-                                        }
-                                    },
-                                );
-                            });
-                        })
-                        .response;
-                    if proxy_state == Some(proxy_worker::ProxyState::Ready) {
-                        let rect = group_resp.rect.shrink(1.0);
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-                            1.0,
-                            timeline_ui::PROXY_COLOR,
-                        );
-                    }
-                    // Doppio click: anteprima nel player (sostituisce
-                    // il vecchio pulsante "Anteprima"). Trascinamento:
-                    // droppato sulla timeline aggiunge il media
-                    // (sostituisce il vecchio pulsante "Aggiungi"),
-                    // vedi `dnd_release_payload` in show_timeline.
-                    let interact_id = ui.id().with("media_pool_item").with(id);
-                    let resp = ui
-                        .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
-                        .on_hover_text(
-                            "Click: seleziona (ctrl/shift per più elementi) · doppio click: anteprima · trascina sulla timeline per aggiungere",
-                        );
-                    item_rects.push((id, group_resp.rect));
-                    if self.media_pool_state.selected.contains(&id) {
-                        ui.painter().rect_stroke(
-                            group_resp.rect,
-                            4.0,
-                            egui::Stroke::new(2.0, egui::Color32::WHITE),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.painter().rect_filled(
-                            group_resp.rect,
-                            4.0,
-                            egui::Color32::from_white_alpha(18),
-                        );
-                    }
-                    if resp.clicked() {
-                        let modifiers = ui.input(|i| i.modifiers);
-                        self.media_pool_state.click(id, modifiers, &order);
-                    }
-                    // Tasto destro fuori dalla selezione la sostituisce
-                    // con lui, come il drag qui sotto: il menu contestuale
-                    // agisce sempre su una selezione sensata, non su
-                    // quella precedente lasciata da un altro elemento.
-                    if resp.secondary_clicked() && !self.media_pool_state.selected.contains(&id) {
-                        self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
-                    }
-                    resp.context_menu(|ui| {
-                        let count = self.media_pool_state.selected.len().max(1);
-                        let label = if count > 1 {
-                            format!("Relink {count} clip selezionate...")
-                        } else {
-                            "Relink clip...".to_string()
-                        };
-                        if ui.button(label).clicked() {
-                            self.relink_media_dialog();
-                            ui.close();
-                        }
-                    });
-                    // Trascinare un elemento fuori dalla selezione la
-                    // sostituisce con lui (come in timeline, vedi
-                    // `timeline_ui::drag_group_for`).
-                    if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
-                        self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
-                    }
-                    // Trascinare un elemento della selezione trascina
-                    // l'intera selezione, nell'ordine del pannello: la
-                    // timeline le accoda una dopo l'altra.
-                    let payload = if self.media_pool_state.selected.len() > 1
-                        && self.media_pool_state.selected.contains(&id)
-                    {
-                        timeline_ui::MediaDragSet {
-                            items: drags
-                                .iter()
-                                .filter(|d| {
-                                    self.media_pool_state.selected.contains(&d.media_id)
-                                })
-                                .copied()
-                                .collect(),
-                        }
-                    } else {
-                        timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
-                            id, &meta,
-                        ))
-                    };
-                    let dragged_count = payload.items.len();
-                    resp.dnd_set_drag_payload(payload);
-                    if resp.double_clicked() {
-                        *preview_action = Some(id);
-                    }
-                    // "Ghost" che segue il cursore durante il
-                    // trascinamento: senza, non c'era alcun feedback
-                    // visivo che il drag fosse partito (l'elemento
-                    // del media pool resta al suo posto, invariato).
-                    if resp.dragged() {
-                        let ghost = if dragged_count > 1 {
-                            format!("{dragged_count} elementi")
-                        } else {
-                            label.clone()
-                        };
-                        show_drag_ghost(ui, interact_id, &ghost);
-                    }
-                }
-
-                if bg.drag_started() {
-                    if let Some(pos) = bg.interact_pointer_pos() {
-                        self.media_pool_state.marquee = Some((pos, pos));
-                    }
-                } else if bg.dragged() {
-                    if let (Some((_, end)), Some(pos)) =
-                        (&mut self.media_pool_state.marquee, bg.interact_pointer_pos())
-                    {
-                        *end = pos;
-                    }
-                } else if bg.drag_stopped() {
-                    if let Some((start, end)) = self.media_pool_state.marquee.take() {
-                        let rect = egui::Rect::from_two_pos(start, end);
-                        let hits = item_rects
-                            .iter()
-                            .filter(|(_, r)| r.intersects(rect))
-                            .map(|(id, _)| *id);
-                        self.media_pool_state.set_marquee_selection(hits);
-                    }
-                } else if bg.clicked() {
-                    self.media_pool_state.clear();
-                }
-                if let Some((start, end)) = self.media_pool_state.marquee {
-                    let rect = egui::Rect::from_two_pos(start, end);
-                    ui.painter().rect_filled(
-                        rect,
-                        0.0,
-                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
-                    );
-                    ui.painter().rect_stroke(
-                        rect,
-                        0.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-            });
-    }
-
-    /// Sezione Effects: effetti da trascinare sulla timeline.
-    fn show_effects_list(ui: &mut egui::Ui) {
-        effects_section_header(ui, "Generators");
-        egui::ScrollArea::vertical()
-            .id_salt("effects_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for generator in timeline_ui::Generator::ALL {
-                    effect_item(ui, generator);
-                }
-            });
     }
 
     /// Drop di un effetto dal pannello Effects: la clip generatore va sulla
@@ -2320,12 +1093,7 @@ impl VibeVideoApp {
             timeline_ui::Generator::SolidColor.default_len(self.project.timelines[timeline_id].fps);
 
         let effects = vv_core::EffectStack {
-            color: Some(vv_core::Keyframed::constant(vv_core::Rgba {
-                r: 0.6,
-                g: 0.6,
-                b: 0.6,
-                a: 1.0,
-            })),
+            color: Some(vv_core::Keyframed::constant(DEFAULT_SOLID_COLOR)),
             ..Default::default()
         };
 
@@ -2338,7 +1106,7 @@ impl VibeVideoApp {
             vv_core::Rational::one(),
         );
         clip.effects = effects;
-        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip)]);
+        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)]);
     }
 
     fn insert_text_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
@@ -2352,39 +1120,25 @@ impl VibeVideoApp {
             vv_core::Rational::one(),
         );
         clip.effects.title = Some(vv_core::TitleParams::default());
-        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip)]);
+        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)]);
     }
 
     /// Come un vero NLE, le clip già presenti sotto a quelle nuove vengono
     /// accorciate, divise o rimosse invece di restare sovrapposte.
-    fn insert_clips_overwriting(&mut self, timeline_id: TimelineId, clips: Vec<(usize, vv_core::Clip)>) {
-        let ranges: Vec<(usize, FrameIdx, FrameIdx)> = clips
-            .iter()
-            .map(|(track, clip)| (*track, clip.timeline_start, clip.timeline_end()))
-            .collect();
-        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-        vv_core::make_room_for_ranges(&mut self.project, timeline_id, &ranges, &[], &mut commands);
-        for (track_index, clip) in clips {
-            commands.push(Box::new(vv_core::InsertClip {
-                timeline: timeline_id,
-                track_index,
-                clip,
-            }));
-        }
+    fn insert_clips_overwriting(
+        &mut self,
+        timeline_id: TimelineId,
+        clips: Vec<(usize, vv_core::Clip, Option<u64>)>,
+    ) {
+        let commands = vv_core::insert_overwriting(&mut self.project, timeline_id, clips);
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
     }
 
-    /// Compone `layers` e mostra il risultato nel viewer. Zero-copy
-    /// (REFACTOR_PIPELINE.md B2): la texture di output resta sulla GPU,
-    /// registrata/aggiornata direttamente nel renderer di egui-wgpu —
-    /// nessun readback CPU né re-upload via `egui::ColorImage`. Richiede
-    /// il device condiviso con egui-wgpu (`egui_render_state`, sempre
-    /// presente nell'app reale — vedi `main()`; `None` solo nei test che
-    /// costruiscono `VibeVideoApp` con `Default` senza una finestra, dove
-    /// semplicemente non c'è nulla da mostrare per questo frame).
+    /// Compone `layers` e mostra la texture risultante nel viewer, senza
+    /// readback. Non fa nulla senza device condiviso (test).
     fn show_composited(&mut self, layers: &[vv_render::Layer], output: vv_render::OutputFrame) {
         let Some(render_state) = self.egui_render_state.clone() else {
             return;
@@ -2413,269 +1167,55 @@ impl VibeVideoApp {
         self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
     }
 
-    /// I layer video da comporre nel viewer al playhead, dal basso verso
-    /// l'alto (`Timeline::active_video_clips_at`). `None` = il frame
-    /// della clip *in cima* non è ancora bufferizzato: si tiene quello già
-    /// mostrato invece di sfarfallare. Un layer sotto non ancora pronto
-    /// viene invece saltato, il resto dello stack si vede lo stesso.
-    fn timeline_video_layers(&mut self) -> Option<Vec<PreviewLayer>> {
-        let timeline_id = self.timeline_id?;
+    /// I layer da comporre al playhead, dal basso verso l'alto. `None` se il
+    /// frame media in cima non è pronto: si tiene quello mostrato; un layer
+    /// sotto non pronto si salta.
+    fn timeline_video_layers(&mut self) -> Option<Vec<frame_provider::OwnedLayer>> {
+        let timeline = &self.project.timelines[self.timeline_id?];
+        let render_ahead = self.render_ahead.as_mut()?;
         let playhead = self.timeline_state.playhead;
-        let timeline_size = self.project.timelines[timeline_id].resolution;
-        let clips: Vec<vv_core::Clip> = self.project.timelines[timeline_id]
-            .active_video_clips_at(playhead)
-            .into_iter()
-            .map(|(_, c)| c.clone())
-            .collect();
+        let clips = timeline.active_video_clips_at(playhead);
         let topmost = clips.len().saturating_sub(1);
-
         let mut layers = Vec::with_capacity(clips.len());
-        for (i, clip) in clips.iter().enumerate() {
-            match &clip.source {
-                vv_core::ClipSource::SolidColor => {
-                    let source_frame = clip.source_frame_at(playhead.max(clip.timeline_start));
-                    layers.push(PreviewLayer::Solid {
-                        color: clip
-                            .effects
-                            .color
-                            .as_ref()
-                            .map(|k| k.value_at(source_frame))
-                            .unwrap_or(vv_core::Rgba {
-                                r: 0.0,
-                                g: 0.0,
-                                b: 0.0,
-                                a: 1.0,
-                            }),
-                        transform: clip.effects.transform.value_at(source_frame),
-                    });
+        for (i, (_, clip)) in clips.iter().enumerate() {
+            let frame = playhead.max(clip.timeline_start);
+            let layer = frame_provider::clip_layer(
+                &self.project,
+                clip,
+                frame,
+                timeline.resolution,
+                render_ahead,
+            )
+            .ok()?;
+            match layer {
+                Some(layer) => layers.push(layer),
+                None if i == topmost && matches!(clip.source, vv_core::ClipSource::Media(_)) => {
+                    return None;
                 }
-                vv_core::ClipSource::Text => {
-                    let Some(title) = &clip.effects.title else { continue };
-                    let timeline_frame = playhead.max(clip.timeline_start);
-                    layers.push(PreviewLayer::Text {
-                        title: title.clone(),
-                        transform: clip
-                            .effects
-                            .transform
-                            .value_at(clip.source_frame_at(timeline_frame)),
-                    });
-                }
-                vv_core::ClipSource::Media(_) => {
-                    // Stessa interfaccia dell'export per procurare il frame
-                    // (`FrameProvider`, REFACTOR_PIPELINE.md B1) — qui backed
-                    // dalla cache di `render_ahead`, non bloccante. Il clamp
-                    // preserva il comportamento precedente per il breve istante
-                    // in cui il playhead può essere appena uscito dalla clip.
-                    let timeline_frame = playhead.max(clip.timeline_start);
-                    let transform = clip.effects.transform.value_at(clip.source_frame_at(timeline_frame));
-                    let frame = self
-                        .render_ahead
-                        .as_mut()?
-                        .frame_for(&self.project, clip, timeline_frame)
-                        .ok()?;
-                    match frame {
-                        Some(frame) => layers.push(PreviewLayer::Video {
-                            frame,
-                            transform,
-                            source_size: frame_provider::clip_source_size(
-                                &self.project,
-                                clip,
-                                timeline_size,
-                            ),
-                        }),
-                        None if i == topmost => return None,
-                        None => {}
-                    }
-                }
+                None => {}
             }
         }
         Some(layers)
     }
 
-    /// La scheda "Selezione": tutto quel che è selezionato, video e audio
-    /// insieme, con i dati che prima stavano in cima al pannello dei
-    /// parametri (track, start, durata, frame corrente).
-    fn show_selection_list(
-        &self,
-        ui: &mut egui::Ui,
-        video_targets: &[PanelTarget],
-        audio_targets: &[PanelTarget],
-    ) {
-        let rows: Vec<(&str, &PanelTarget)> = video_targets
-            .iter()
-            .map(|t| ("Video", t))
-            .chain(audio_targets.iter().map(|t| ("Audio", t)))
-            .collect();
-        ui.label(format!("{} clip selezionate", rows.len()));
-        ui.add_space(4.0);
-        egui::Grid::new("selection_list")
-            .num_columns(6)
-            .striped(true)
-            .spacing(egui::vec2(10.0, 4.0))
-            .show(ui, |ui| {
-                for header in ["Tipo", "Track", "Nome", "Start", "Durata", "Frame"] {
-                    ui.label(egui::RichText::new(header).strong());
-                }
-                ui.end_row();
-                for (kind, target) in rows {
-                    let clip = self.timeline_id.and_then(|tid| {
-                        self.project.timelines[tid]
-                            .tracks
-                            .get(target.track_index)?
-                            .clips
-                            .iter()
-                            .find(|c| c.id == target.clip_id)
-                    });
-                    let (name, len) = match clip {
-                        Some(clip) => (
-                            match &clip.source {
-                                vv_core::ClipSource::Media(id) => self
-                                    .project
-                                    .media_pool
-                                    .get(*id)
-                                    .map(|item| file_label(&item.path))
-                                    .unwrap_or_else(|| "⚠ offline".to_string()),
-                                vv_core::ClipSource::SolidColor => "Solid Color".to_string(),
-                                vv_core::ClipSource::Text => "Text".to_string(),
-                            },
-                            clip.timeline_len,
-                        ),
-                        None => ("?".to_string(), 0),
-                    };
-                    ui.label(kind);
-                    ui.label(target.track_index.to_string());
-                    ui.label(name);
-                    ui.label(target.timeline_start.to_string());
-                    ui.label(len.to_string());
-                    ui.label(target.source_frame.to_string());
-                    ui.end_row();
-                }
-            });
-    }
-
-    /// I valori da mostrare nel pannello proprietà per una clip bersaglio,
-    /// valutati al suo `source_frame`.
-    fn clip_panel_info(&self, target: PanelTarget) -> Option<ClipPanelInfo> {
-        let timeline_id = self.timeline_id?;
-        let timeline_size = self.project.timelines[timeline_id].resolution;
-        let clip = self.project.timelines[timeline_id]
-            .tracks
-            .get(target.track_index)?
-            .clips
-            .iter()
-            .find(|c| c.id == target.clip_id)?;
-        let frame = target.source_frame;
-        // Un keyframe fuori dal trim porterebbe la testina fuori dalla clip.
-        let in_clip = |f: &FrameIdx| (clip.source_in()..clip.source_out()).contains(f);
-        Some(ClipPanelInfo {
-            is_solid_color: target.is_solid_color,
-            source_size: frame_provider::clip_source_size(&self.project, clip, timeline_size),
-            timeline_size,
-            params: vv_core::TransformParam::ALL
-                .iter()
-                .map(|p| {
-                    let track = clip.effects.transform.track(*p);
-                    ParamKeyframeState {
-                        on_keyframe: track.keyframe_at(frame).is_some(),
-                        prev: clip.effects.transform.previous_keyframe(&[*p], frame).filter(in_clip),
-                        next: clip.effects.transform.next_keyframe(&[*p], frame).filter(in_clip),
-                    }
-                })
-                .collect(),
-            transform: clip.effects.transform.value_at(frame),
-            gain_kf_here: clip.effects.gain_db.keyframe_at(frame).is_some(),
-            gain: clip.effects.gain_db.value_at(frame),
-            gain_prev: clip
-                .effects
-                .gain_db
-                .keyframes()
-                .iter()
-                .rev()
-                .find(|(f, _, _)| *f < frame)
-                .map(|(f, _, _)| *f)
-                .filter(in_clip),
-            gain_next: clip
-                .effects
-                .gain_db
-                .keyframes()
-                .iter()
-                .find(|(f, _, _)| *f > frame)
-                .map(|(f, _, _)| *f)
-                .filter(in_clip),
-            color_kf_here: clip
-                .effects
-                .color
-                .as_ref()
-                .and_then(|k| k.keyframe_at(frame))
-                .is_some(),
-            color: clip
-                .effects
-                .color
-                .as_ref()
-                .map(|k| k.value_at(frame))
-                .unwrap_or(vv_core::Rgba {
-                    r: 0.6,
-                    g: 0.6,
-                    b: 0.6,
-                    a: 1.0,
-                }),
-            title: clip.effects.title.clone(),
-        })
-    }
-
+    #[cfg(test)]
     fn active_clip_effects(&self) -> Option<&vv_core::EffectStack> {
         let (track_index, clip_id) = self.active_clip?;
         let timeline_id = self.timeline_id?;
         self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)?
-            .clips
-            .iter()
-            .find(|c| c.id == clip_id)
+            .clip(track_index, clip_id)
             .map(|c| &c.effects)
     }
 
-    /// Il frame grezzo (YUV420) dell'anteprima "grezza" di un media del
-    /// pool (`browsing_media`/`browsing_decode_ahead`), con l'indice a cui
-    /// corrisponde — `None` se non è ancora bufferizzato. Il viewer della
-    /// timeline non passa di qui: ha uno stack di layer, non un frame solo
-    /// (`timeline_video_layers`).
-    fn browsing_video_frame(&mut self) -> Option<(std::sync::Arc<vv_media::FrameYuv420>, FrameIdx)> {
-        let decode_ahead = self.browsing_decode_ahead.as_ref()?;
-        let idx = self.browse_playhead;
-        decode_ahead.set_target(idx);
-        decode_ahead.cache().get(idx).map(|f| (f, idx))
+    /// Il frame dell'anteprima del media pool alla sua testina, se già
+    /// decodificato.
+    fn browsing_video_frame(&mut self) -> Option<std::sync::Arc<vv_media::FrameYuv420>> {
+        let (render_ahead, media_id) = self.browsing_render_ahead.as_ref()?;
+        render_ahead.set_target(self.browse_playhead);
+        render_ahead.get_frame(*media_id, self.browse_playhead)
     }
 
-    /// Le altre clip del gruppo collegato (`Clip::linked_group`) di una
-    /// clip, esclusa lei stessa: vuoto se non è collegata a nulla. Cerca su
-    /// tutte le track perché un gruppo può estendersi su più track.
-    fn group_members(
-        &self,
-        timeline_id: TimelineId,
-        track_index: usize,
-        clip_id: ClipId,
-    ) -> Vec<(usize, ClipId)> {
-        let Some(group) = self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)
-            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
-            .and_then(|c| c.linked_group)
-        else {
-            return Vec::new();
-        };
-        self.project.timelines[timeline_id]
-            .clips_in_group(group)
-            .into_iter()
-            .filter(|&(_, id)| id != clip_id)
-            .collect()
-    }
-
-    /// Aggiunge il media in coda a ciascuna track (video e, se presente,
-    /// audio separatamente — comportamento storico, usato dai test e da
-    /// eventuali altri chiamanti che non hanno una posizione esplicita).
-    /// Per il drag&drop con posizionamento preciso vedi
-    /// `add_media_to_timeline_at`.
+    /// Aggiunge il media in coda alla track video (e le clip audio accanto).
     #[cfg(test)]
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
@@ -2718,11 +1258,8 @@ impl VibeVideoApp {
         );
     }
 
-    /// Drop di uno o più media dal media pool: vengono accodati a partire da
-    /// `start` nell'ordine del set (quello in cui compaiono nel media pool),
-    /// ognuno subito dopo il precedente. Le eventuali track nuove
-    /// (`MediaDropTarget::New*`) si creano una volta sola per l'intero drop,
-    /// non una per media.
+    /// Drop di uno o più media: accodati da `start` nell'ordine del pool. Le
+    /// track nuove si creano una volta per tutto il drop.
     fn add_media_set_to_timeline_at(
         &mut self,
         set: &timeline_ui::MediaDragSet,
@@ -2743,11 +1280,8 @@ impl VibeVideoApp {
         }
         let any_video = drops.iter().any(|(_, meta)| meta.has_video);
         let any_audio = drops.iter().any(|(_, meta)| meta.has_audio);
-        // fps/risoluzione dal primo media *video* del set, non da
-        // `drops[0]` a prescindere: un drop di solo audio non ha nessuna
-        // risoluzione sensata da cui derivarli (vedi
-        // `ensure_timeline_audio_only`), e in un set misto un audio in
-        // testa non deve dettare la risoluzione della timeline.
+        // fps e risoluzione dal primo media *video* del set: un audio in testa
+        // non ha una risoluzione da dare alla timeline.
         let timeline_id = match drops.iter().find(|(_, meta)| meta.has_video) {
             Some((_, video_meta)) => self.ensure_timeline_for(video_meta),
             None => self.ensure_timeline_audio_only(),
@@ -2784,12 +1318,7 @@ impl VibeVideoApp {
         } else {
             Some(match target {
                 timeline_ui::MediaDropTarget::NewVideoTrack => {
-                    let new_index = self.project.timelines[timeline_id].tracks.len();
-                    self.history.do_command(
-                        &mut self.project,
-                        Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
-                    );
-                    new_index
+                    timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Video)
                 }
                 timeline_ui::MediaDropTarget::Track(track) => {
                     if self.project.timelines[timeline_id].is_locked(track) {
@@ -2801,23 +1330,13 @@ impl VibeVideoApp {
                     Some(track) => track,
                     // Nessuna track video libera: se ne crea una.
                     None => {
-                        let new_index = self.project.timelines[timeline_id].tracks.len();
-                        self.history.do_command(
-                            &mut self.project,
-                            Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
-                        );
-                        new_index
+                        timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Video)
                     }
                 },
             })
         };
         let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
-            let new_index = self.project.timelines[timeline_id].tracks.len();
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
-            );
-            Some(new_index)
+            Some(timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Audio))
         } else {
             None
         };
@@ -2827,16 +1346,8 @@ impl VibeVideoApp {
         })
     }
 
-    /// Inserisce la clip video (e una clip audio per stream, vedi
-    /// `Clip::audio_stream_index`) a `start`. `target` (`MediaDropTarget`)
-    /// sceglie la track video/audio di destinazione: `Default` è quella di
-    /// sempre, `NewVideoTrack`/`NewAudioTrack` ne creano una al volo (solo
-    /// se il media ha davvero audio da piazzarci, per `NewAudioTrack`).
-    /// Se le track audio non bastano per il numero di stream, le mancanti
-    /// vengono comunque create.
-    ///
-    /// Video e clip audio finiscono nello stesso gruppo collegato
-    /// (`Clip::linked_group`).
+    /// Inserisce la clip video e una clip audio per stream a `start`, tutte
+    /// nello stesso gruppo collegato; crea le track audio che mancano.
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
@@ -2868,33 +1379,21 @@ impl VibeVideoApp {
 
         // Senza track audio l'audio di un video si scarta, ma un media solo
         // audio se ne crea una. Se sono tutte bloccate se ne creano di nuove.
-        let num_audio_streams = if meta.has_audio
-            && (has_audio_tracks || !meta.has_video)
-        {
-            self.project
-                .media_pool
-                .get(media_id)
-                .and_then(|item| vv_media::audio_streams(&item.path).ok())
-                .map(|streams| streams.len().max(1))
-                .unwrap_or(1) // probe fallito: ricade su un solo stream, comportamento di prima
+        let num_audio_streams = if has_audio_tracks || !meta.has_video {
+            meta.audio_stream_count()
         } else {
             0
         };
 
         while audio_track_indices.len() < num_audio_streams {
-            let new_index = self.project.timelines[timeline_id].tracks.len();
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Audio)),
-            );
-            audio_track_indices.push(new_index);
+            audio_track_indices.push(timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Audio));
         }
 
         let audio_clip_ids: Vec<ClipId> = (0..num_audio_streams)
             .map(|_| self.project.alloc_clip_id())
             .collect();
 
-        let mut new_clips: Vec<(usize, vv_core::Clip)> = Vec::new();
+        let mut new_clips: Vec<(usize, vv_core::Clip, Option<u64>)> = Vec::new();
         if meta.has_video {
             let video_clip = vv_core::Clip::from_source_range(
                 self.project.alloc_clip_id(),
@@ -2907,7 +1406,11 @@ impl VibeVideoApp {
             // `tracks.video` è `Some` di sicuro: `resolve_drop_tracks` lo
             // risolve solo se almeno un media del drop ha video, e questo
             // è uno di quelli.
-            new_clips.push((tracks.video.expect("drop con video ma nessuna track risolta"), video_clip));
+            new_clips.push((
+                tracks.video.expect("drop con video ma nessuna track risolta"),
+                video_clip,
+                Some(0),
+            ));
         }
         for (stream_index, (&track_index, &clip_id)) in
             audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
@@ -2921,18 +1424,9 @@ impl VibeVideoApp {
                 rate,
             );
             audio_clip.audio_stream_index = stream_index;
-            new_clips.push((track_index, audio_clip));
+            new_clips.push((track_index, audio_clip, Some(0)));
         }
-        let group_targets: Vec<(usize, ClipId)> =
-            new_clips.iter().map(|(track, clip)| (*track, clip.id)).collect();
         self.insert_clips_overwriting(timeline_id, new_clips);
-
-        if group_targets.len() >= 2 {
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::LinkClips::new(timeline_id, group_targets)),
-            );
-        }
     }
 
     /// Handle di transform della prima clip video selezionata, se è sotto
@@ -2992,10 +1486,6 @@ impl VibeVideoApp {
                     Some(ViewerFrameKind::Video) => self
                         .video_texture_id
                         .zip(self.video_display_size),
-                    Some(ViewerFrameKind::SolidColor) => self
-                        .frame_texture
-                        .as_ref()
-                        .map(|t| (t.id(), t.size_vec2())),
                     Some(ViewerFrameKind::Offline) | None => None,
                 };
                 if let Some((id, size)) = image {
@@ -3041,14 +1531,14 @@ impl VibeVideoApp {
         rect: egui::Rect,
         area: egui::Rect,
         video_targets: &[PanelTarget],
-        pending: &mut Vec<PendingEffectChange>,
+        pending: &mut Vec<BoxedCommand>,
     ) {
         let visible = self.show_transform_overlay
             && self.browsing_media.is_none()
             && !self.is_timeline_playing()
             && matches!(
                 self.last_viewer_frame_kind,
-                Some(ViewerFrameKind::Video | ViewerFrameKind::SolidColor)
+                Some(ViewerFrameKind::Video)
             );
         let Some((timeline_id, target)) = self.timeline_id.zip(video_targets.first().copied())
         else {
@@ -3057,10 +1547,8 @@ impl VibeVideoApp {
         };
         let playhead = self.timeline_state.playhead;
         let under_playhead = self.project.timelines[timeline_id]
-            .tracks
-            .get(target.track_index)
-            .and_then(|t| t.clips.iter().find(|c| c.id == target.clip_id))
-            .is_some_and(|c| playhead >= c.timeline_start && playhead < c.timeline_end());
+            .clip(target.track_index, target.clip_id)
+            .is_some_and(|c| c.contains(playhead));
         let Some(info) = self.clip_panel_info(target).filter(|_| visible && under_playhead) else {
             self.overlay_drag = None;
             return;
@@ -3086,29 +1574,6 @@ impl VibeVideoApp {
         );
     }
 
-    fn apply_effect_changes(&mut self, changes: Vec<PendingEffectChange>, pointer_down: bool) {
-        if let Some(timeline_id) = self.timeline_id
-            && !changes.is_empty()
-        {
-            if pointer_down && self.edit_drag_group.is_none() {
-                self.edit_drag_group = Some(self.history.begin_group());
-            }
-            let mut commands: Vec<Box<dyn vv_core::Command>> = changes
-                .into_iter()
-                .map(|change| build_effect_command(timeline_id, change))
-                .collect();
-            let cmd = if commands.len() == 1 {
-                commands.remove(0)
-            } else {
-                Box::new(vv_core::CompositeCommand::new(commands))
-            };
-            self.history.do_command(&mut self.project, cmd);
-        }
-        if !pointer_down && let Some(mark) = self.edit_drag_group.take() {
-            self.history.end_group(mark);
-        }
-    }
-
     /// D: disattiva le clip selezionate, o le riattiva se lo sono già tutte.
     fn toggle_disabled_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
@@ -3126,9 +1591,7 @@ impl VibeVideoApp {
             return;
         }
         let all_disabled = selected.iter().all(|&(track_index, clip_id)| {
-            tl.tracks
-                .get(track_index)
-                .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+            tl.clip(track_index, clip_id)
                 .is_some_and(|c| c.disabled)
         });
         self.history.do_command(
@@ -3155,12 +1618,7 @@ impl VibeVideoApp {
         self.select_clips(|clip| clip.timeline_end() > playhead);
     }
 
-    /// Normal delete: rimuove *tutte* le clip selezionate, lasciando un
-    /// vuoto al loro posto. Le altre track non si muovono. Un solo passo di
-    /// history per tutte insieme. L'ordine non conta: `LiftDelete` non
-    /// sposta nient'altro. Non serve tirare dentro esplicitamente i gruppi
-    /// collegati: selezionare una clip collegata seleziona già tutto il suo
-    /// gruppo (vedi `TimelineState::set_selection`/i punti dove si clicca).
+    /// Seleziona le clip delle track sbloccate per cui `keep` è vero.
     fn select_clips(&mut self, keep: impl Fn(&vv_core::Clip) -> bool) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -3234,75 +1692,6 @@ impl VibeVideoApp {
         self.media_pool_state.clear();
     }
 
-    /// Voce "Relink clip selezionate..." nel menu contestuale del media
-    /// pool: chiede una cartella base e delega a `relink_media` —
-    /// separata per poterla testare senza un file dialog vero (vedi i
-    /// test in fondo al file). La selezione va congelata *ora*: il
-    /// dialog gira in background (vedi `spawn_file_dialog`) e potrebbe
-    /// tornare dopo che l'utente ha cambiato selezione nel pool.
-    fn relink_media_dialog(&mut self) {
-        if self.media_pool_state.selected.is_empty() {
-            return;
-        }
-        let targets: Vec<MediaId> = self.media_pool_state.selected.iter().copied().collect();
-        self.spawn_file_dialog(DialogKind::RelinkMedia(targets), |dlg| dlg.pick_folder());
-    }
-
-    /// Ricollega a un file trovato sotto `base_dir` (per nome,
-    /// ricorsivamente) ogni media di `targets` il cui percorso salvato
-    /// non esiste più — tipicamente dopo aver riaperto lo stesso progetto
-    /// da un'altra postazione con percorsi diversi. I media già
-    /// raggiungibili al loro percorso, anche se in `targets`, restano
-    /// intoccati.
-    fn relink_media(&mut self, base_dir: &Path, targets: &[MediaId]) {
-        let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
-        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-        let mut relinked_ids: Vec<MediaId> = Vec::new();
-        let mut missing = 0usize;
-        for &media_id in targets {
-            let Some(item) = self.project.media_pool.get(media_id) else {
-                continue;
-            };
-            if item.path.exists() {
-                continue;
-            }
-            let Some(file_name) = item.path.file_name() else {
-                continue;
-            };
-            let found = index
-                .get_or_insert_with(|| index_media_by_filename(base_dir))
-                .get(file_name)
-                .cloned();
-            let Some(found) = found else {
-                missing += 1;
-                continue;
-            };
-            let content_hash = vv_media::content_fingerprint(&found).unwrap_or(0);
-            commands.push(Box::new(vv_core::SetMediaPath::new(media_id, found, content_hash))
-                as Box<dyn vv_core::Command>);
-            relinked_ids.push(media_id);
-        }
-        self.relink_message = Some(if commands.is_empty() {
-            "Nessun media ricollegato: nessun file corrispondente trovato nella cartella scelta."
-                .to_string()
-        } else if missing == 0 {
-            format!("Ricollegati {} media.", commands.len())
-        } else {
-            format!("Ricollegati {} media, {missing} non trovati.", commands.len())
-        });
-        if commands.is_empty() {
-            return;
-        }
-        self.history.do_command(
-            &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
-        );
-        self.unsaved_media = true;
-        for media_id in relinked_ids {
-            self.enqueue_media_background_jobs(media_id);
-        }
-    }
-
     /// La clip attiva punta a un media non piu' nel media pool.
     fn active_clip_media_offline(&self) -> bool {
         if self.browsing_media.is_some() {
@@ -3313,39 +1702,16 @@ impl VibeVideoApp {
             return false;
         };
         self.project.timelines[timeline_id]
-            .tracks
-            .get(track_index)
-            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+            .clip(track_index, clip_id)
             .is_some_and(|c| match &c.source {
                 vv_core::ClipSource::Media(id) => !self.project.media_pool.contains_key(*id),
                 vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => false,
             })
     }
 
-    /// Gestisce gli eventi Copy/Paste della tastiera per la clipboard della
-    /// timeline. Funzione isolata (non inline in `ui()`) apposta per poter
-    /// scrivere un test: `ui()` prende un `eframe::Frame` che non ha un
-    /// costruttore pubblico fuori da `eframe`, quindi non è testabile
-    /// direttamente, mentre questa può girare dentro un `egui::Context`
-    /// "nudo" in `run_ui` (stesso trucco già usato per `show_timeline` in
-    /// `timeline_ui.rs`).
-    ///
-    /// Bug segnalato: Ctrl+V da tastiera "funzionava solo dal menu".
-    /// Causa: `egui-winit` genera `Event::Paste` SOLO se la clipboard di
-    /// *sistema* contiene già del testo non vuoto (vedi `is_paste_command`
-    /// in egui-winit — se la legge vuota, non emette proprio l'evento). La
-    /// nostra clipboard vera (`timeline_state.clipboard`) è interna
-    /// all'app e non scrive nulla in quella di sistema, quindi Ctrl+V
-    /// restava silenziosamente muto ogni volta che la clipboard di sistema
-    /// era vuota (sessione appena avviata, mai copiato altro) — un caso
-    /// facile da non notare se per caso conteneva già del testo di
-    /// qualcos'altro. Il pulsante di menu funzionava comunque perché
-    /// chiama `paste_clipboard_at_playhead` direttamente, scavalcando
-    /// questo passaggio. Fix: dopo una copia riuscita, scrivere anche un
-    /// placeholder nella clipboard di sistema (`ctx.copy_text`), così ce
-    /// n'è sempre uno non vuoto quando c'è davvero qualcosa da incollare —
-    /// il contenuto della stringa non conta, `Event::Paste` viene gestito
-    /// a prescindere dal suo payload.
+    /// Copia/taglia/incolla da tastiera. Dopo una copia scrive un segnaposto
+    /// nella clipboard di sistema: egui-winit genera `Event::Paste` solo se
+    /// quella non è vuota.
     fn handle_clipboard_events(&mut self, ui: &egui::Ui, events: &[egui::Event]) {
         for event in events {
             match event {
@@ -3370,10 +1736,8 @@ impl VibeVideoApp {
         }
     }
 
-    /// Copia le clip selezionate in `timeline_state.clipboard`, pronte per
-    /// `paste_clipboard_at_playhead`. No-op se non c'è nulla di selezionato.
-    /// Non serve tirare dentro esplicitamente i gruppi collegati: selezionare
-    /// una clip collegata seleziona già tutto il suo gruppo.
+    /// Copia le clip selezionate (i gruppi collegati sono già tutti dentro la
+    /// selezione).
     fn copy_selected_clips(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -3383,21 +1747,14 @@ impl VibeVideoApp {
         }
 
         let tl = &self.project.timelines[timeline_id];
-        // Il `LinkGroupId` originale non sopravvive al paste (va
-        // riallocato), serve solo qui per capire quali entry erano nello
-        // stesso gruppo al momento della copia — rimappato sotto in
-        // `link_tag`, indici locali all'operazione di copia.
+        // I gruppi si rimappano su tag locali: al paste servono gruppi nuovi.
         let mut collected: Vec<(Option<vv_core::LinkGroupId>, timeline_ui::ClipboardEntry)> = self
             .timeline_state
             .selected
             .iter()
             .filter_map(|&(track_index, clip_id)| {
                 let clip = tl
-                    .tracks
-                    .get(track_index)?
-                    .clips
-                    .iter()
-                    .find(|c| c.id == clip_id)?;
+                    .clip(track_index, clip_id)?;
                 Some((
                     clip.linked_group,
                     timeline_ui::ClipboardEntry {
@@ -3436,14 +1793,8 @@ impl VibeVideoApp {
         self.timeline_state.clipboard = collected.into_iter().map(|(_, e)| e).collect();
     }
 
-    /// Incolla `timeline_state.clipboard` (Ctrl+C/Ctrl+V) alla posizione
-    /// del playhead, preservando la disposizione relativa se erano state
-    /// copiate più clip insieme, e ricollegando tra loro le coppie
-    /// collegate copiate insieme. Le clip incollate "vincono" per intero
-    /// il tratto che occupano: quel che già c'era lì viene accorciato,
-    /// diviso o rimosso da `make_room_for_ranges` invece di restare
-    /// sovrapposto sotto (bug segnalato). No-op se non c'è ancora nulla in
-    /// clipboard o nessuna timeline.
+    /// Incolla la clipboard al playhead mantenendo le distanze e i gruppi
+    /// collegati; le clip incollate sovrascrivono quel che c'era sotto.
     fn paste_clipboard_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -3464,23 +1815,14 @@ impl VibeVideoApp {
             return;
         }
 
-        // Pre-alloca gli id delle nuove clip: servono per risolvere i
-        // link tra loro (che devono riferire il *nuovo* id della gemella,
-        // non quello originale copiato, che potrebbe non esistere più).
-        let new_ids: Vec<ClipId> = entries
-            .iter()
-            .map(|_| self.project.alloc_clip_id())
-            .collect();
-
         let timeline_fps = self.project.timelines[timeline_id].fps;
-        let clips: Vec<vv_core::Clip> = entries
+        let clips: Vec<(usize, vv_core::Clip, Option<u64>)> = entries
             .iter()
-            .zip(&new_ids)
-            .map(|(entry, &id)| {
+            .map(|entry| {
                 let mut clip = entry.clip.clone();
-                clip.id = id;
+                clip.id = self.project.alloc_clip_id();
                 clip.timeline_start = entry.relative_start;
-                clip.linked_group = None; // ricollegate sotto, per link_tag
+                clip.linked_group = None;
                 if entry.timeline_fps != timeline_fps {
                     let rate = match &clip.source {
                         vv_core::ClipSource::Media(media_id) => {
@@ -3493,81 +1835,29 @@ impl VibeVideoApp {
                     clip.retime(entry.timeline_fps, timeline_fps, rate);
                 }
                 clip.timeline_start += playhead;
-                clip
+                (entry.track_index, clip, entry.link_tag)
             })
             .collect();
-
-        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-        let ranges: Vec<(usize, FrameIdx, FrameIdx)> = entries
-            .iter()
-            .zip(&clips)
-            .map(|(entry, clip)| (entry.track_index, clip.timeline_start, clip.timeline_end()))
-            .collect();
-        vv_core::make_room_for_ranges(&mut self.project, timeline_id, &ranges, &[], &mut commands);
-
-        let mut new_selection = BTreeSet::new();
-        for (i, (entry, clip)) in entries.iter().zip(clips).enumerate() {
-            new_selection.insert((entry.track_index, new_ids[i]));
-            commands.push(Box::new(vv_core::InsertClip {
-                timeline: timeline_id,
-                track_index: entry.track_index,
-                clip,
-            }));
-        }
-
-        // Ricollega le entry che condividevano un `link_tag` al momento
-        // della copia: un nuovo `LinkClips` (gruppo nuovo) per ogni tag con
-        // 2+ entry incollate.
-        let mut by_tag: std::collections::HashMap<u64, Vec<(usize, ClipId)>> =
-            std::collections::HashMap::new();
-        for (i, entry) in entries.iter().enumerate() {
-            if let Some(tag) = entry.link_tag {
-                by_tag
-                    .entry(tag)
-                    .or_default()
-                    .push((entry.track_index, new_ids[i]));
-            }
-        }
-        for targets in by_tag.into_values() {
-            if targets.len() >= 2 {
-                commands.push(Box::new(vv_core::LinkClips::new(timeline_id, targets)));
-            }
-        }
-
-        self.history.do_command(
-            &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(commands)),
-        );
+        let new_selection: BTreeSet<(usize, ClipId)> =
+            clips.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
+        let end = clips.iter().map(|(_, clip, _)| clip.timeline_end()).max();
+        self.insert_clips_overwriting(timeline_id, clips);
         let anchor = new_selection.iter().next().copied();
         self.timeline_state.set_selection(new_selection, anchor);
-        if let Some(end) = ranges.iter().map(|&(_, _, end)| end).max() {
+        if let Some(end) = end {
             self.timeline_state.playhead = end;
             self.ensure_active_clip_matches_playhead(true);
         }
     }
 
-    /// Ripple delete: rimuove *tutte* le clip selezionate (e la gemella
-    /// collegata di ciascuna, se c'è) e chiude i gap su *tutte* le track,
-    /// mantenendo il sync audio/video (vedi ARCHITECTURE.md § Ripple
-    /// delete — comportamento scelto: sempre globale, nessun toggle).
-    ///
-    /// Ogni clip selezionata (+ gemella, se non già anch'essa selezionata
-    /// esplicitamente) è un'"unità" rimossa con un proprio
-    /// `RippleDeleteAllTracks`; le unità vengono processate da destra a
-    /// sinistra (per `timeline_start` decrescente) così che rimuoverne una
-    /// non alteri la posizione — e quindi l'ordinamento già calcolato —
-    /// delle altre non ancora processate: stesso principio già usato in
-    /// `split_at_playhead` per evitare doppi spostamenti.
+    /// Ripple delete: rimuove le clip selezionate (e i loro gruppi
+    /// collegati) e chiude i buchi su tutte le track, mantenendo il sync A/V.
     fn ripple_delete_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         if self.timeline_state.selected.is_empty() {
-            // Nessuna clip selezionata: se invece è selezionato un vuoto
-            // (click su uno spazio vuoto seguito da una clip, vedi
-            // `TimelineState::selected_gap`), il ripple delete lo chiude
-            // shiftando tutte le track — stessa meccanica del ripple
-            // delete su una clip, ma senza nulla da rimuovere.
+            // Nessuna clip selezionata: si chiude il vuoto selezionato, se c'è.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
                 let mark = self.history.begin_group();
                 self.history.do_command(
@@ -3592,7 +1882,7 @@ impl VibeVideoApp {
         let mut removed: Vec<(usize, ClipId, FrameIdx, FrameIdx)> = Vec::new();
         for &(track_index, clip_id) in &selected {
             for (member_track, member_id) in std::iter::once((track_index, clip_id))
-                .chain(self.group_members(timeline_id, track_index, clip_id))
+                .chain(self.project.timelines[timeline_id].linked_members(track_index, clip_id))
             {
                 if self.project.timelines[timeline_id].is_locked(member_track)
                     || !processed.insert((member_track, member_id))
@@ -3600,9 +1890,7 @@ impl VibeVideoApp {
                     continue;
                 }
                 let Some(clip) = self.project.timelines[timeline_id]
-                    .tracks
-                    .get(member_track)
-                    .and_then(|t| t.clips.iter().find(|c| c.id == member_id))
+                    .clip(member_track, member_id)
                 else {
                     continue;
                 };
@@ -3615,12 +1903,8 @@ impl VibeVideoApp {
             }
         }
 
-        // I buchi lasciati dalle clip rimosse, uniti quando si
-        // sovrappongono: lo stesso tratto di timeline va chiuso *una volta
-        // sola*, anche se lì c'erano più clip su track diverse (video e
-        // audio non collegati, per esempio) — chiuderlo una volta per clip
-        // farebbe arretrare il resto del doppio, sovrapponendolo a quel che
-        // già c'era.
+        // Buchi uniti quando si sovrappongono: chiuderli una volta per clip
+        // farebbe arretrare il resto del doppio.
         let mut gaps: Vec<(FrameIdx, FrameIdx)> = removed
             .iter()
             .map(|&(_, _, start, end)| (start, end))
@@ -3682,11 +1966,8 @@ impl VibeVideoApp {
         );
     }
 
-    /// Dopo un ripple delete la testina va dove ora comincia la clip
-    /// scivolata indietro a chiudere il buco, cioè `position` (l'inizio di
-    /// quel che è stato tolto). Se lì non è arrivata nessuna clip — si era
-    /// tolto l'ultimo pezzo della timeline — la testina resta dov'è invece
-    /// di finire nel vuoto.
+    /// Porta la testina dove ora comincia la clip scivolata a chiudere il buco;
+    /// se non ne è arrivata nessuna resta dov'è.
     fn move_playhead_to_closed_gap(&mut self, timeline_id: vv_core::TimelineId, position: FrameIdx) {
         let landed = self.project.timelines[timeline_id]
             .tracks
@@ -3698,15 +1979,9 @@ impl VibeVideoApp {
         }
     }
 
-    /// Divide al playhead le clip selezionate che lo coprono o, senza
-    /// selezione, tutte quelle che lo coprono su ogni track (tasto T).
-    /// Un solo passo di history per l'intero taglio.
-    /// I gruppi collegati (`Clip::linked_group`) i cui membri vengono
-    /// tagliati insieme nello stesso punto restano collegati anche dopo:
-    /// `SplitClip` non tocca il `linked_group` della metà sinistra (resta
-    /// la stessa clip, solo accorciata), quindi serve solo ricollegare tra
-    /// loro le metà *destre* (clip nuove, che partono scollegate) — un
-    /// nuovo `LinkClips` per ogni gruppo originale con 2+ membri tagliati.
+    /// Taglia al playhead le clip selezionate che lo coprono o, senza
+    /// selezione, tutte. Le metà destre di un gruppo collegato vengono
+    /// ricollegate tra loro.
     fn split_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -3770,17 +2045,8 @@ impl VibeVideoApp {
             Box::new(vv_core::CompositeCommand::new(commands)),
         );
 
-        // "Selection follows playhead": seleziona la metà SINISTRA appena
-        // tagliata sulla track video attiva (il suo id è invariato, la
-        // metà che ha ottenuto un nuovo id è la destra — vedi sopra) *e*
-        // la sua gemella audio collegata, esplicitamente, non tramite il
-        // generico "clip sotto al playhead" (che per costruzione sarebbe
-        // la metà destra, dato che il playhead è esattamente al suo
-        // inizio: `active_clip_at` usa `start <= playhead < end`). L'intento più
-        // comune dopo un taglio è rivedere/eliminare ciò che sta *prima*
-        // del punto appena tagliato, non dopo. Con più track video, "la
-        // track video" del taglio è quella più in alto tra quelle tagliate
-        // — la stessa che il viewer mostrava un istante prima del taglio.
+        // Seleziona la metà *sinistra* (quella sotto il playhead sarebbe la
+        // destra): dopo un taglio di solito si lavora su ciò che sta prima.
         if self.selection_follows_playhead
             && let Some((video_track, video_clip_id, _)) = targets
                 .iter()
@@ -3791,20 +2057,15 @@ impl VibeVideoApp {
                 .max_by_key(|(track_index, _, _)| *track_index)
         {
             let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
-            selected.extend(self.group_members(timeline_id, *video_track, *video_clip_id));
+            selected.extend(self.project.timelines[timeline_id].linked_members(*video_track, *video_clip_id));
             self.timeline_state
                 .set_selection(selected, Some((*video_track, *video_clip_id)));
         }
     }
 }
 
-/// Mappa intervalli di frame *sorgente* (spazio nativo del media, quello
-/// di `RenderAhead::cached_ranges_for`) in intervalli di frame di
-/// *timeline*, per una clip: clampa al suo intervallo di trim
-/// (`source_in..source_out`) e trasla per il suo `timeline_start`. Un
-/// intervallo sorgente che cade fuori dal trim (o lo attraversa solo in
-/// parte) viene scartato o accorciato di conseguenza. Funzione pura per
-/// poterla testare senza un vero `RenderAhead`.
+/// Intervalli di cache in frame sorgente → frame di timeline di `clip`,
+/// limitati al suo trim.
 fn map_source_ranges_to_timeline(
     clip: &vv_core::Clip,
     source_ranges: &[(FrameIdx, FrameIdx)],
@@ -3828,190 +2089,9 @@ fn track_end(project: &vv_core::Project, timeline_id: TimelineId, track_index: u
         .unwrap_or(0)
 }
 
-/// Anello di avanzamento; `None` = in coda (solo l'anello di sfondo).
-fn proxy_progress_ring(ui: &mut egui::Ui, fraction: Option<f32>) -> egui::Response {
-    const SIZE: f32 = 34.0;
-    const STROKE: f32 = 3.0;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::hover());
-    let painter = ui.painter();
-    let center = rect.center();
-    let radius = (SIZE - STROKE) / 2.0;
-    let track_color = ui.visuals().widgets.inactive.bg_fill;
-    painter.circle_stroke(center, radius, egui::Stroke::new(STROKE, track_color));
-    if let Some(fraction) = fraction {
-        let fraction = fraction.clamp(0.0, 1.0);
-        let segments = ((fraction * 48.0).ceil() as usize).max(1);
-        let start = -std::f32::consts::FRAC_PI_2;
-        let points: Vec<egui::Pos2> = (0..=segments)
-            .map(|i| {
-                let angle = start + std::f32::consts::TAU * fraction * i as f32 / segments as f32;
-                center + radius * egui::vec2(angle.cos(), angle.sin())
-            })
-            .collect();
-        painter.add(egui::Shape::line(
-            points,
-            egui::Stroke::new(STROKE, ui.visuals().selection.bg_fill),
-        ));
-    }
-    response
-}
-
-/// Etichetta che segue il cursore mentre si trascina un media.
-fn show_drag_ghost(ui: &egui::Ui, id: egui::Id, label: &str) {
-    let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
-        return;
-    };
-    egui::Area::new(id.with("drag_ghost"))
-        .order(egui::Order::Tooltip)
-        .fixed_pos(pos + egui::vec2(12.0, 12.0))
-        .interactable(false)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.label(label);
-            });
-        });
-}
-
-fn effects_section_header(ui: &mut egui::Ui, title: &str) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.inactive.weak_bg_fill);
-    ui.painter().text(
-        rect.left_center() + egui::vec2(6.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        title,
-        egui::FontId::proportional(13.0),
-        ui.visuals().strong_text_color(),
-    );
-}
-
-/// Voce del pannello Effects: miniatura a sinistra e nome, trascinabile
-/// sulla timeline.
-fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    let id = ui.id().with(("effect_item", generator.label()));
-    let resp = ui
-        .interact(rect, id, egui::Sense::click_and_drag())
-        .on_hover_text("Trascina sulla timeline per aggiungere");
-    let visuals = ui.visuals();
-    let (bg, stroke) = if resp.hovered() || resp.dragged() {
-        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
-    } else {
-        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 3.0, bg);
-    let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
-    match generator {
-        timeline_ui::Generator::SolidColor => {
-            painter.rect_filled(thumb, 2.0, egui::Color32::from_rgb(106, 176, 204));
-        }
-        timeline_ui::Generator::Text => {
-            painter.rect_filled(thumb, 2.0, egui::Color32::BLACK);
-            painter.text(
-                thumb.center(),
-                egui::Align2::CENTER_CENTER,
-                "Title",
-                egui::FontId::proportional(11.0),
-                egui::Color32::WHITE,
-            );
-        }
-    }
-    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-    painter.text(
-        egui::pos2(thumb.right() + 14.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        generator.label(),
-        egui::FontId::proportional(13.0),
-        visuals.text_color(),
-    );
-    resp.dnd_set_drag_payload(generator);
-    if resp.dragged() {
-        show_drag_ghost(ui, id, generator.label());
-    }
-}
-
-/// Larghezza della colonna "Durata": la stessa nell'intestazione e nelle
-/// righe, così restano allineate.
-const DURATION_COL_W: f32 = 64.0;
-
-/// Altezza della barra di intestazione del media pool.
-const HEADER_HEIGHT: f32 = 22.0;
-
-/// Intestazione a colonne del media pool: ogni cella è cliccabile per
-/// intero (non solo la scritta), come nella lista di un file manager.
-fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::MediaPoolState) {
-    use media_pool::SortKey;
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width, HEADER_HEIGHT),
-        egui::Sense::hover(),
-    );
-    let duration_w = DURATION_COL_W.min(width);
-    let (name_rect, duration_rect) = (
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right() - duration_w, rect.bottom())),
-        egui::Rect::from_min_max(egui::pos2(rect.right() - duration_w, rect.top()), rect.right_bottom()),
-    );
-    let sort = state.sort;
-    for (key, label, cell) in [
-        (SortKey::Name, "Nome", name_rect),
-        (SortKey::Duration, "Durata", duration_rect),
-    ] {
-        let resp = ui.interact(
-            cell,
-            ui.id().with(("media_pool_header", label)),
-            egui::Sense::click(),
-        );
-        let active = sort.key == key;
-        let bg = if resp.hovered() {
-            ui.visuals().widgets.hovered.weak_bg_fill
-        } else if active {
-            ui.visuals().widgets.active.weak_bg_fill
-        } else {
-            ui.visuals().widgets.inactive.weak_bg_fill
-        };
-        ui.painter().rect_filled(cell, 0.0, bg);
-        let text_color = ui.visuals().strong_text_color();
-        ui.painter().text(
-            cell.left_center() + egui::vec2(6.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::FontId::proportional(13.0),
-            text_color,
-        );
-        if active {
-            // Triangolino disegnato a mano invece di un carattere: quelli
-            // dei font di sistema sono alti e appuntiti, questo è schiacciato.
-            let c = egui::pos2(cell.right() - 10.0, cell.center().y);
-            let (w, h) = (4.5, 2.5);
-            let points = if sort.ascending {
-                vec![
-                    egui::pos2(c.x - w, c.y + h),
-                    egui::pos2(c.x + w, c.y + h),
-                    egui::pos2(c.x, c.y - h),
-                ]
-            } else {
-                vec![
-                    egui::pos2(c.x - w, c.y - h),
-                    egui::pos2(c.x + w, c.y - h),
-                    egui::pos2(c.x, c.y + h),
-                ]
-            };
-            ui.painter().add(egui::Shape::convex_polygon(
-                points,
-                text_color,
-                egui::Stroke::NONE,
-            ));
-        }
-        if resp.clicked() {
-            state.toggle_sort(key);
-        }
-    }
-}
-
 /// Durata di un media per la colonna del pannello: MM:SS, con le ore solo
 /// quando ci sono.
-fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> String {
+pub(crate) fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> String {
     let secs = (duration_frames.max(0) as f64 / fps.max(1e-9)).round() as u64;
     let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
     if h > 0 {
@@ -4021,17 +2101,8 @@ fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> String {
     }
 }
 
-fn file_label(path: &std::path::Path) -> String {
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("?")
-        .to_string()
-}
-
-/// Estensioni immagine riconosciute all'import: decidere "è un'immagine"
-/// dall'estensione, non da un probe ambiguo (un container video/audio
-/// può avere zero frame validi per mille motivi, un file .png no) — vedi
-/// `vv_media::probe_image`/`vv_core::MediaMeta::is_image`.
+/// Estensioni trattate come immagini: il probe di un container non basta a
+/// distinguerle.
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
 
 fn is_image_path(path: &std::path::Path) -> bool {
@@ -4040,801 +2111,8 @@ fn is_image_path(path: &std::path::Path) -> bool {
         .is_some_and(|ext| IMAGE_EXTENSIONS.iter().any(|img| img.eq_ignore_ascii_case(ext)))
 }
 
-/// Indicizza per nome file tutti i file sotto `base_dir` (ricorsivo), per
-/// `relink_media`. A parità di nome vince il primo trovato in
-/// ordine di visita (breadth-first: le cartelle meno annidate hanno la
-/// precedenza su eventuali doppioni più in fondo all'albero). Le
-/// directory illeggibili (permessi, link rotti) vengono saltate in
-/// silenzio: è una ricerca "best effort", non deve interrompere il
-/// relink per una singola cartella problematica.
-fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
-    let mut index = HashMap::new();
-    let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
-    while let Some(dir) = dirs.pop_front() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                dirs.push_back(path);
-            } else if file_type.is_file() {
-                index.entry(entry.file_name()).or_insert(path);
-            }
-        }
-    }
-    index
-}
-
-/// Bottone diamante per il toggle keyframe di un parametro, allo stile
-/// standard delle NLE: vuoto se il parametro non è animato (click = crea il
-/// primo keyframe qui), pieno se c'è già un keyframe esattamente al frame
-/// corrente (click = rimuovilo), vuoto-ma-animato altrimenti (click =
-/// aggiungine uno qui).
-///
-/// Disegnato a mano (non i glifi Unicode "◇"/"◆") perché su alcune
-/// combinazioni piattaforma/driver (es. Asahi Linux) i font bundled di
-/// egui non li renderizzano — appaiono come quadratini vuoti.
-/// Le schede del pannello in stile NLE: etichette affiancate, la sola
-/// attiva sottolineata — non pulsanti.
-fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab) {
-    const TABS: [(PropertiesTab, &str); 3] = [
-        (PropertiesTab::Video, "Video"),
-        (PropertiesTab::Audio, "Audio"),
-        (PropertiesTab::Selection, "Selezione"),
-    ];
-    const TAB_HEIGHT: f32 = 26.0;
-    const UNDERLINE: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for (tab, label) in TABS {
-            let active = *current == tab;
-            let galley = ui.painter().layout_no_wrap(
-                label.to_string(),
-                egui::FontId::proportional(13.0),
-                egui::Color32::PLACEHOLDER,
-            );
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(galley.size().x + 24.0, TAB_HEIGHT),
-                egui::Sense::click(),
-            );
-            if response.clicked() {
-                *current = tab;
-            }
-            let color = if active {
-                ui.visuals().strong_text_color()
-            } else if response.hovered() {
-                ui.visuals().text_color()
-            } else {
-                ui.visuals().weak_text_color()
-            };
-            let text_pos = egui::pos2(
-                rect.center().x - galley.size().x / 2.0,
-                rect.center().y - galley.size().y / 2.0,
-            );
-            ui.painter().galley(text_pos, galley, color);
-            if active {
-                let y = rect.bottom() - 1.0;
-                ui.painter().line_segment(
-                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(2.0, UNDERLINE),
-                );
-            }
-        }
-    });
-}
-
-/// Title/Settings della scheda Video di una clip di testo: due metà a
-/// tutta larghezza.
-fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
-    ui.columns(2, |cols| {
-        for (col, (tab, label)) in cols
-            .iter_mut()
-            .zip([(VideoSubTab::Title, "Title"), (VideoSubTab::Settings, "Settings")])
-        {
-            let button = egui::Button::selectable(*current == tab, label)
-                .min_size(egui::vec2(col.available_width(), 22.0));
-            if col.add(button).clicked() {
-                *current = tab;
-            }
-        }
-    });
-}
-
-/// Pulsante di allineamento del testo: righe disegnate come l'icona
-/// classica, più corte dove il testo non arriva al margine.
-fn text_align_button(ui: &mut egui::Ui, selected: bool, align: vv_core::TextAlign) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 20.0), egui::Sense::click());
-    let visuals = ui.style().interact_selectable(&response, selected);
-    let painter = ui.painter();
-    if selected || response.hovered() {
-        painter.rect_filled(rect, 3.0, visuals.weak_bg_fill);
-    }
-    let area = rect.shrink2(egui::vec2(6.0, 5.0));
-    for (i, full) in [true, false, true, false].into_iter().enumerate() {
-        let y = area.top() + i as f32 * area.height() / 3.0;
-        let w = if full || align == vv_core::TextAlign::Justify {
-            area.width()
-        } else {
-            area.width() * 0.6
-        };
-        let x0 = match align {
-            vv_core::TextAlign::Left | vv_core::TextAlign::Justify => area.left(),
-            vv_core::TextAlign::Center => area.center().x - w / 2.0,
-            vv_core::TextAlign::Right => area.right() - w,
-        };
-        painter.line_segment(
-            [egui::pos2(x0, y), egui::pos2(x0 + w, y)],
-            egui::Stroke::new(1.5, visuals.fg_stroke.color),
-        );
-    }
-    response
-}
-
-/// Scheda Title: modifica `title` in place, `true` se è cambiato qualcosa.
-fn title_editor(
-    ui: &mut egui::Ui,
-    title: &mut vv_core::TitleParams,
-    timeline_size: (u32, u32),
-    fonts: &mut FontCatalog,
-) -> bool {
-    use vv_core::{FontCase, HAnchor, TextAlign, VAnchor};
-    let defaults = vv_core::TitleParams::default();
-    let before = title.clone();
-    let (frame_w, frame_h) = (timeline_size.0 as f32, timeline_size.1 as f32);
-
-    ui.label(egui::RichText::new("Testo").strong());
-    ui.add(
-        egui::TextEdit::multiline(&mut title.content)
-            .desired_rows(4)
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(4.0);
-
-    let row = param_row(ui, "Font", None, |ui| {
-        let shown = if title.font_family.is_empty() {
-            "Sans-serif"
-        } else {
-            title.font_family.as_str()
-        };
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("title_font_family")
-            .selected_text(shown)
-            .width(ui.available_width())
-            .height(320.0)
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(&mut title.font_family, String::new(), "Sans-serif")
-                    .changed();
-                for family in fonts.families() {
-                    changed |= ui
-                        .selectable_value(&mut title.font_family, family.clone(), family)
-                        .changed();
-                }
-            });
-        changed
-    });
-    if row.reset {
-        title.font_family = defaults.font_family.clone();
-    }
-
-    let row = param_row(ui, "Stile", None, |ui| {
-        let mut faces = fonts.faces(&title.font_family).to_vec();
-        if faces.is_empty() {
-            faces = [(400, false), (700, false), (400, true), (700, true)]
-                .into_iter()
-                .map(|(weight, italic)| vv_render::text::FontFace {
-                    weight,
-                    italic,
-                    name: vv_render::text::face_name(weight, italic),
-                })
-                .collect();
-        }
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("title_font_face")
-            .selected_text(vv_render::text::face_name(title.font_weight, title.italic))
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                for face in &faces {
-                    let selected = face.weight == title.font_weight && face.italic == title.italic;
-                    if ui.selectable_label(selected, &face.name).clicked() {
-                        title.font_weight = face.weight;
-                        title.italic = face.italic;
-                        changed = true;
-                    }
-                }
-            });
-        changed
-    });
-    if row.reset {
-        title.font_weight = defaults.font_weight;
-        title.italic = defaults.italic;
-    }
-
-    if color_row(ui, "Colore", &mut title.color).reset {
-        title.color = defaults.color;
-    }
-
-    for (label, value, default, range, speed) in [
-        ("Dimensione", &mut title.size, defaults.size, 1.0..=1000.0, 1.0),
-        ("Tracking", &mut title.tracking, defaults.tracking, -300.0..=1000.0, 1.0),
-        ("Interlinea", &mut title.line_spacing, defaults.line_spacing, -200.0..=500.0, 1.0),
-    ] {
-        let row = param_row(ui, label, None, |ui| slider_field(ui, value, range, speed, 0));
-        if row.reset {
-            *value = default;
-        }
-    }
-
-    let row = param_row(ui, "Decorazioni", None, |ui| {
-        let u = ui
-            .selectable_label(title.underline, egui::RichText::new("U").underline())
-            .on_hover_text("Sottolineato")
-            .clicked();
-        let s = ui
-            .selectable_label(title.strikethrough, egui::RichText::new("S").strikethrough())
-            .on_hover_text("Barrato")
-            .clicked();
-        title.underline ^= u;
-        title.strikethrough ^= s;
-        u || s
-    });
-    if row.reset {
-        title.underline = defaults.underline;
-        title.strikethrough = defaults.strikethrough;
-    }
-
-    let row = param_row(ui, "Maiuscole", None, |ui| {
-        let label = |case| match case {
-            FontCase::Mixed => "Come scritto",
-            FontCase::Upper => "MAIUSCOLO",
-            FontCase::Lower => "minuscolo",
-            FontCase::Title => "Iniziali Maiuscole",
-        };
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("title_font_case")
-            .selected_text(label(title.case))
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                for case in [FontCase::Mixed, FontCase::Upper, FontCase::Lower, FontCase::Title] {
-                    changed |= ui.selectable_value(&mut title.case, case, label(case)).changed();
-                }
-            });
-        changed
-    });
-    if row.reset {
-        title.case = defaults.case;
-    }
-
-    let row = param_row(ui, "Allineamento", None, |ui| {
-        let mut changed = false;
-        for (align, hint) in [
-            (TextAlign::Left, "A sinistra"),
-            (TextAlign::Center, "Al centro"),
-            (TextAlign::Right, "A destra"),
-            (TextAlign::Justify, "Giustificato"),
-        ] {
-            if text_align_button(ui, title.align == align, align).on_hover_text(hint).clicked() {
-                title.align = align;
-                changed = true;
-            }
-        }
-        changed
-    });
-    if row.reset {
-        title.align = defaults.align;
-    }
-
-    let row = param_row(ui, "Ancoraggio", None, |ui| {
-        let mut changed = false;
-        for (anchor, text, hint) in [
-            (HAnchor::Left, "⇤", "Il punto di posizione è il bordo sinistro"),
-            (HAnchor::Center, "↔", "Il punto di posizione è il centro"),
-            (HAnchor::Right, "⇥", "Il punto di posizione è il bordo destro"),
-        ] {
-            if ui.selectable_label(title.anchor.0 == anchor, text).on_hover_text(hint).clicked() {
-                title.anchor.0 = anchor;
-                changed = true;
-            }
-        }
-        ui.separator();
-        for (anchor, text, hint) in [
-            (VAnchor::Top, "⤒", "Il punto di posizione è il bordo alto"),
-            (VAnchor::Middle, "↕", "Il punto di posizione è il centro"),
-            (VAnchor::Bottom, "⤓", "Il punto di posizione è il bordo basso"),
-        ] {
-            if ui.selectable_label(title.anchor.1 == anchor, text).on_hover_text(hint).clicked() {
-                title.anchor.1 = anchor;
-                changed = true;
-            }
-        }
-        changed
-    });
-    if row.reset {
-        title.anchor = defaults.anchor;
-    }
-
-    // Mostrata dall'angolo in basso a sinistra, come nel riferimento
-    // (960x540 = centro di un frame 1080p); salvata dal centro.
-    let row = param_row(ui, "Posizione", None, |ui| {
-        let mut x = title.position[0] + frame_w / 2.0;
-        let mut y = title.position[1] + frame_h / 2.0;
-        let changed = axis_field(ui, "X", &mut x, 1.0, 1, -frame_w..=frame_w * 2.0)
-            | axis_field(ui, "Y", &mut y, 1.0, 1, -frame_h..=frame_h * 2.0);
-        title.position = [x - frame_w / 2.0, y - frame_h / 2.0];
-        changed
-    });
-    if row.reset {
-        title.position = defaults.position;
-    }
-
-    ui.add_space(8.0);
-    let shadow = &mut title.shadow;
-    if title_section_header(ui, "Drop Shadow", &mut shadow.enabled) {
-        *shadow = vv_core::TitleShadow {
-            enabled: shadow.enabled,
-            ..Default::default()
-        };
-    }
-    if shadow.enabled {
-        let d = vv_core::TitleShadow::default();
-        if color_row(ui, "Colore", &mut shadow.color).reset {
-            shadow.color = d.color;
-        }
-        let row = param_row(ui, "Offset", None, |ui| {
-            axis_field(ui, "X", &mut shadow.offset[0], 0.5, 1, -frame_w..=frame_w)
-                | axis_field(ui, "Y", &mut shadow.offset[1], 0.5, 1, -frame_h..=frame_h)
-        });
-        if row.reset {
-            shadow.offset = d.offset;
-        }
-        for (label, value, default, range) in [
-            ("Sfocatura", &mut shadow.blur, d.blur, 0.0..=200.0),
-            ("Opacità", &mut shadow.opacity, d.opacity, 0.0..=100.0),
-        ] {
-            if param_row(ui, label, None, |ui| slider_field(ui, value, range, 0.5, 0)).reset {
-                *value = default;
-            }
-        }
-    }
-
-    ui.add_space(8.0);
-    let bg = &mut title.background;
-    if title_section_header(ui, "Background", &mut bg.enabled) {
-        *bg = vv_core::TitleBackground {
-            enabled: bg.enabled,
-            ..Default::default()
-        };
-    }
-    if bg.enabled {
-        let d = vv_core::TitleBackground::default();
-        if color_row(ui, "Colore", &mut bg.color).reset {
-            bg.color = d.color;
-        }
-        if color_row(ui, "Colore bordo", &mut bg.outline_color).reset {
-            bg.outline_color = d.outline_color;
-        }
-        for (label, value, default, range, decimals) in [
-            ("Spessore bordo", &mut bg.outline_width, d.outline_width, 0.0..=100.0, 0),
-            ("Larghezza", &mut bg.width, d.width, 0.0..=1.0, 3),
-            ("Altezza", &mut bg.height, d.height, 0.0..=1.0, 3),
-            ("Raggio angoli", &mut bg.corner_radius, d.corner_radius, 0.0..=0.5, 3),
-        ] {
-            let speed = if decimals == 0 { 0.5 } else { 0.005 };
-            let row = param_row(ui, label, None, |ui| slider_field(ui, value, range, speed, decimals));
-            if row.reset {
-                *value = default;
-            }
-        }
-        let row = param_row(ui, "Centro", None, |ui| {
-            axis_field(ui, "X", &mut bg.center[0], 1.0, 1, -frame_w..=frame_w)
-                | axis_field(ui, "Y", &mut bg.center[1], 1.0, 1, -frame_h..=frame_h)
-        });
-        if row.reset {
-            bg.center = d.center;
-        }
-        let row = param_row(ui, "Opacità", None, |ui| {
-            slider_field(ui, &mut bg.opacity, 0.0..=100.0, 0.5, 0)
-        });
-        if row.reset {
-            bg.opacity = d.opacity;
-        }
-    }
-
-    *title != before
-}
-
-fn color_row(ui: &mut egui::Ui, label: &str, color: &mut vv_core::Rgba) -> RowResponse {
-    param_row(ui, label, None, |ui| {
-        let mut rgba = [color.r, color.g, color.b, color.a];
-        let changed = ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed();
-        *color = vv_core::Rgba {
-            r: rgba[0],
-            g: rgba[1],
-            b: rgba[2],
-            a: rgba[3],
-        };
-        changed
-    })
-}
-
-/// Intestazione di una sezione attivabile: interruttore, titolo e ripristino
-/// dell'intera sezione (`true` se cliccato).
-fn title_section_header(ui: &mut egui::Ui, title: &str, enabled: &mut bool) -> bool {
-    let mut reset = false;
-    ui.horizontal(|ui| {
-        toggle_switch(ui, enabled);
-        ui.label(egui::RichText::new(title).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            reset = ui
-                .small_button("↺")
-                .on_hover_text("Ripristina tutti i parametri di questa sezione")
-                .clicked();
-        });
-    });
-    reset
-}
-
-fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let size = egui::vec2(26.0, 14.0);
-    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
-    if response.clicked() {
-        *on = !*on;
-        response.mark_changed();
-    }
-    let t = ui.ctx().animate_bool(response.id, *on);
-    let painter = ui.painter();
-    let track = if *on {
-        egui::Color32::from_rgb(200, 60, 60)
-    } else {
-        ui.visuals().widgets.inactive.bg_fill
-    };
-    painter.rect_filled(rect, rect.height() / 2.0, track);
-    let r = rect.height() / 2.0 - 2.0;
-    let x = egui::lerp(rect.left() + r + 2.0..=rect.right() - r - 2.0, t);
-    painter.circle_filled(egui::pos2(x, rect.center().y), r, egui::Color32::WHITE);
-    response
-}
-
-/// Porta su `target` solo i campi che l'utente ha cambiato (`before` ->
-/// `after`, letti dalla clip primaria): con più titoli selezionati, cambiare
-/// il colore non deve sovrascrivere il testo degli altri.
-fn apply_title_edit(
-    target: &vv_core::TitleParams,
-    before: &vv_core::TitleParams,
-    after: &vv_core::TitleParams,
-) -> vv_core::TitleParams {
-    let mut out = target.clone();
-    macro_rules! copy_changed {
-        ($group:ident : $($name:ident),*) => {
-            $(if before.$group.$name != after.$group.$name {
-                out.$group.$name = after.$group.$name.clone();
-            })*
-        };
-        ($($field:ident),*) => {
-            $(if before.$field != after.$field {
-                out.$field = after.$field.clone();
-            })*
-        };
-    }
-    copy_changed!(shadow: enabled, color, offset, blur, opacity);
-    copy_changed!(
-        background: enabled,
-        color,
-        outline_color,
-        outline_width,
-        width,
-        height,
-        corner_radius,
-        center,
-        opacity
-    );
-    copy_changed!(
-        content,
-        font_family,
-        font_weight,
-        italic,
-        color,
-        size,
-        tracking,
-        line_spacing,
-        underline,
-        strikethrough,
-        case,
-        align,
-        anchor,
-        position
-    );
-    out
-}
-
-/// Larghezza della colonna delle etichette nel pannello dei parametri:
-/// tutte allineate a destra, come nell'inspector di un NLE.
-const PARAM_LABEL_WIDTH: f32 = 96.0;
-
-/// Lo stato di keyframe di una riga del pannello, per il suo diamante.
-#[derive(Debug, Clone, Copy)]
-struct RowKeyframe {
-    on_keyframe: bool,
-    /// Keyframe più vicini prima/dopo il frame corrente, in frame
-    /// sorgente: dove portano le frecce di navigazione.
-    prev: Option<FrameIdx>,
-    next: Option<FrameIdx>,
-}
-
-/// Cosa è successo in una riga del pannello durante questo frame di UI.
-#[derive(Debug, Clone, Copy, Default)]
-struct RowResponse {
-    changed: bool,
-    reset: bool,
-    toggled_keyframe: bool,
-    /// Frame sorgente a cui portare la testina (freccia cliccata).
-    goto: Option<FrameIdx>,
-}
-
-/// Una riga del pannello dei parametri: etichetta, controlli, il diamante
-/// di keyframe con le sue frecce di navigazione (assente per i parametri
-/// non animabili) e il ripristino di quella sola riga.
-fn param_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    keyframe: Option<RowKeyframe>,
-    contents: impl FnOnce(&mut egui::Ui) -> bool,
-) -> RowResponse {
-    let mut response = RowResponse::default();
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(PARAM_LABEL_WIDTH, 18.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.label(label);
-            },
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            response.reset = ui
-                .small_button("↺")
-                .on_hover_text("Ripristina questo parametro")
-                .clicked();
-            // Stacca i controlli dei keyframe dal ripristino, che sta subito
-            // a destra (siamo in un layout destra->sinistra).
-            ui.add_space(8.0);
-            if let Some(keyframe) = keyframe {
-                // Il gruppo freccia-diamante-freccia in un'area di larghezza
-                // fissa, con un layout suo: dentro un layout destra->sinistra
-                // le posizioni dipenderebbero da quali frecce ci sono, e il
-                // diamante ballerebbe a ogni spostamento della testina.
-                let spacing = ui.spacing().item_spacing.x;
-                let width =
-                    KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_DIAMOND_SIZE.x + spacing * 2.0;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(width, KEYFRAME_DIAMOND_SIZE.y),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let prev = keyframe_arrow(
-                            ui,
-                            "◀",
-                            keyframe.prev,
-                            "Vai al keyframe precedente",
-                        );
-                        response.toggled_keyframe =
-                            keyframe_button(ui, keyframe.on_keyframe).clicked();
-                        let next = keyframe_arrow(
-                            ui,
-                            "▶",
-                            keyframe.next,
-                            "Vai al keyframe successivo",
-                        );
-                        response.goto = prev.or(next);
-                    },
-                );
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                response.changed = contents(ui);
-            });
-        });
-    });
-    response
-}
-
-/// Gli effetti di una clip bersaglio del pannello.
-fn target_effects<'a>(
-    tl: Option<&'a vv_core::Timeline>,
-    t: &PanelTarget,
-) -> Option<&'a vv_core::EffectStack> {
-    tl?.tracks
-        .get(t.track_index)?
-        .clips
-        .iter()
-        .find(|c| c.id == t.clip_id)
-        .map(|c| &c.effects)
-}
-
-/// Le modifiche da accodare quando dei parametri cambiano valore: solo
-/// quelli diversi da `before`, così le altre clip selezionate tengono i
-/// propri valori per tutto il resto. Per ogni clip il nuovo valore va nel
-/// default se lì quel parametro non è animato, altrimenti in un keyframe al
-/// suo frame (scrivere il default non si vedrebbe nemmeno). La posizione
-/// si sposta dello stesso incremento su ogni clip, per muovere un gruppo
-/// tenendo le distanze tra le clip.
-fn push_param_changes(
-    pending: &mut Vec<PendingEffectChange>,
-    tl: Option<&vv_core::Timeline>,
-    targets: &[PanelTarget],
-    params: &[vv_core::TransformParam],
-    transform: &vv_core::Transform,
-    before: &vv_core::Transform,
-) {
-    let changed: Vec<_> = params
-        .iter()
-        .filter(|p| p.of(transform) != p.of(before))
-        .collect();
-    for t in targets {
-        let Some(effects) = target_effects(tl, t) else {
-            continue;
-        };
-        for &&param in &changed {
-            let value = match param {
-                vv_core::TransformParam::PositionX | vv_core::TransformParam::PositionY => {
-                    effects.transform.track(param).value_at(t.source_frame) + param.of(transform)
-                        - param.of(before)
-                }
-                _ => param.of(transform),
-            };
-            pending.push(if effects.transform.track(param).is_constant() {
-                PendingEffectChange::SetTransformParamDefault(t.track_index, t.clip_id, param, value)
-            } else {
-                PendingEffectChange::UpsertTransformKeyframe(
-                    t.track_index,
-                    t.clip_id,
-                    t.source_frame,
-                    param,
-                    value,
-                )
-            });
-        }
-    }
-}
-
-/// Un campo numerico di un parametro a due assi (X/Y).
-fn axis_field(
-    ui: &mut egui::Ui,
-    axis: &str,
-    value: &mut f32,
-    speed: f64,
-    decimals: usize,
-    range: std::ops::RangeInclusive<f32>,
-) -> bool {
-    ui.label(axis);
-    ui.add(
-        egui::DragValue::new(value)
-            .speed(speed)
-            .range(range)
-            .fixed_decimals(decimals)
-            .min_decimals(decimals),
-    )
-    .changed()
-}
-
-/// Un parametro a un valore solo: slider più campo numerico, come
-/// nell'inspector di riferimento.
-fn slider_field(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    speed: f64,
-    decimals: usize,
-) -> bool {
-    // La riga ha già speso la sua parte per etichetta, keyframe e reset:
-    // quel che resta (meno il campo numerico) va tutto allo slider.
-    ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(80.0, 260.0);
-    let slider = ui.add(
-        egui::Slider::new(value, range.clone())
-            .show_value(false)
-            .trailing_fill(false),
-    );
-    let drag = ui.add(
-        egui::DragValue::new(value)
-            .speed(speed)
-            .range(range)
-            .fixed_decimals(decimals)
-            .min_decimals(decimals),
-    );
-    slider.changed() || drag.changed()
-}
-
-/// Il lucchetto che tiene insieme i due assi dello zoom.
-fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Response {
-    let mut response = ui
-        .selectable_label(*linked, "🔗")
-        .on_hover_text("Tieni insieme zoom X e Y");
-    if response.clicked() {
-        *linked = !*linked;
-        response.mark_changed();
-    }
-    response
-}
-
-fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Response {
-    let tooltip = if on_keyframe {
-        "Rimuovi il keyframe qui"
-    } else {
-        "Aggiungi un keyframe qui"
-    };
-
-    let (rect, response) = ui.allocate_exact_size(KEYFRAME_DIAMOND_SIZE, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&response);
-        let painter = ui.painter();
-        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
-        let c = rect.center();
-        let r = 5.0;
-        let diamond = vec![
-            c + egui::vec2(0.0, -r),
-            c + egui::vec2(r, 0.0),
-            c + egui::vec2(0.0, r),
-            c + egui::vec2(-r, 0.0),
-        ];
-        if on_keyframe {
-            // Pieno e rosso quando la testina è *su* un keyframe, come
-            // nell'inspector di riferimento.
-            painter.add(egui::Shape::convex_polygon(
-                diamond,
-                KEYFRAME_HERE_COLOR,
-                egui::Stroke::NONE,
-            ));
-        } else {
-            painter.add(egui::Shape::closed_line(diamond, visuals.fg_stroke));
-        }
-    }
-    response.on_hover_text(tooltip)
-}
-
-/// Spazio di una freccia di navigazione tra keyframe: riservato anche
-/// quando la freccia non c'è, altrimenti il diamante si sposterebbe a ogni
-/// cambio di testina.
-const KEYFRAME_ARROW_SIZE: egui::Vec2 = egui::Vec2::new(16.0, 18.0);
-
-/// Una freccia di navigazione tra keyframe. `None` = nessun keyframe da
-/// quella parte: lo stesso bottone viene allocato ma non disegnato, così
-/// occupa esattamente lo spazio della freccia vera e il diamante non balla
-/// a ogni spostamento della testina.
-fn keyframe_arrow(
-    ui: &mut egui::Ui,
-    label: &str,
-    target: Option<FrameIdx>,
-    tooltip: &str,
-) -> Option<FrameIdx> {
-    let button = egui::Button::new(label)
-        .small()
-        .min_size(KEYFRAME_ARROW_SIZE);
-    match target {
-        Some(frame) => ui
-            .add(button)
-            .on_hover_text(tooltip)
-            .clicked()
-            .then_some(frame),
-        None => {
-            ui.add_visible(false, button);
-            None
-        }
-    }
-}
-
-/// Dimensione del diamante di keyframe.
-const KEYFRAME_DIAMOND_SIZE: egui::Vec2 = egui::Vec2::new(20.0, 20.0);
-
-/// Il rosso del diamante quando la testina è su un keyframe.
-const KEYFRAME_HERE_COLOR: egui::Color32 = egui::Color32::from_rgb(225, 70, 70);
-
-/// Toggle "calamita" (snapping) della barra sotto il player: un ferro di
-/// cavallo disegnato a mano (due gambe + arco inferiore + poli colorati),
-/// non il glifo Unicode "🧲" — su alcune combinazioni piattaforma/driver
-/// (es. Asahi Linux) i font bundled di egui non lo renderizzano (appare
-/// come un quadratino vuoto). Evidenziato (sfondo di selezione) quando
-/// `*enabled` è vero, sullo stile di `ui.toggle_value`.
+/// Calamita disegnata a mano: su alcune piattaforme (Asahi) i font di egui
+/// non hanno il glifo 🧲.
 fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     let size = egui::vec2(26.0, 22.0);
     let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -4917,111 +2195,9 @@ fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Resp
     response
 }
 
-/// Traduce un'azione differita del pannello proprietà nel comando
-/// `vv-core` corrispondente. Funzione libera (non un metodo) apposta:
-/// testabile senza passare da un `egui::Context`.
-fn build_effect_command(
-    timeline_id: TimelineId,
-    change: PendingEffectChange,
-) -> Box<dyn vv_core::Command> {
-    match change {
-        PendingEffectChange::SetTransformParamDefault(track_index, clip_id, param, v) => {
-            Box::new(vv_core::SetClipTransformParam::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                param,
-                v,
-            ))
-        }
-        PendingEffectChange::SetFlip(track_index, clip_id, v) => Box::new(
-            vv_core::SetClipFlip::new(timeline_id, track_index, clip_id, v),
-        ),
-        PendingEffectChange::ResetTransformParams(track_index, clip_id, params, reset_flip) => {
-            Box::new(vv_core::ResetTransformParams::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                params,
-                reset_flip,
-            ))
-        }
-        PendingEffectChange::SetGainDefault(track_index, clip_id, v) => Box::new(
-            vv_core::SetClipGain::new(timeline_id, track_index, clip_id, v),
-        ),
-        PendingEffectChange::ResetGain(track_index, clip_id) => Box::new(
-            vv_core::ResetClipGain::new(timeline_id, track_index, clip_id),
-        ),
-        PendingEffectChange::SetColorDefault(track_index, clip_id, v) => Box::new(
-            vv_core::SetClipColor::new(timeline_id, track_index, clip_id, v),
-        ),
-        PendingEffectChange::SetTitle(track_index, clip_id, v) => Box::new(
-            vv_core::SetClipTitle::new(timeline_id, track_index, clip_id, v),
-        ),
-        PendingEffectChange::UpsertTransformKeyframe(track_index, clip_id, frame, param, v) => {
-            Box::new(vv_core::UpsertKeyframe::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                frame,
-                vv_core::KeyframeValue::TransformParam(param, v),
-                vv_core::Interpolation::Linear,
-            ))
-        }
-        PendingEffectChange::UpsertGainKeyframe(track_index, clip_id, frame, v) => {
-            Box::new(vv_core::UpsertKeyframe::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                frame,
-                vv_core::KeyframeValue::Gain(v),
-                vv_core::Interpolation::Linear,
-            ))
-        }
-        PendingEffectChange::UpsertColorKeyframe(track_index, clip_id, frame, v) => {
-            Box::new(vv_core::UpsertKeyframe::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                frame,
-                vv_core::KeyframeValue::Color(v),
-                vv_core::Interpolation::Linear,
-            ))
-        }
-        PendingEffectChange::RemoveTransformKeyframe(track_index, clip_id, frame, param) => {
-            Box::new(vv_core::RemoveKeyframe::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                vv_core::KeyframeTarget::TransformParam(param),
-                frame,
-            ))
-        }
-        PendingEffectChange::RemoveGainKeyframe(track_index, clip_id, frame) => {
-            Box::new(vv_core::RemoveKeyframe::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                vv_core::KeyframeTarget::Gain,
-                frame,
-            ))
-        }
-        PendingEffectChange::RemoveColorKeyframe(track_index, clip_id, frame) => {
-            Box::new(vv_core::RemoveKeyframe::new(
-                timeline_id,
-                track_index,
-                clip_id,
-                vv_core::KeyframeTarget::Color,
-                frame,
-            ))
-        }
-    }
-}
-
 /// Su Wayland winit manda `Started` per lo scroll ad alta risoluzione ma
-/// quasi mai `Ended`: egui resta "in touch" e somma i modificatori in OR,
-/// quindi Alt rimane attivo (zoom bloccato) dopo il rilascio. Come `Move`
-/// ogni evento usa invece i modificatori correnti.
+/// quasi mai `Ended`: egui tiene Alt premuto e lo zoom resta bloccato.
+/// Trattato come `Move`, ogni evento usa i modificatori correnti.
 fn unstick_wheel_modifiers(raw_input: &mut egui::RawInput) {
     for event in &mut raw_input.events {
         if let egui::Event::MouseWheel { phase, .. } = event
@@ -5054,393 +2230,9 @@ impl eframe::App for VibeVideoApp {
         }
         self.sync_timeline_audio();
 
-        // Eventi Copy/Paste raccolti qui dentro (vedi sotto) ma gestiti
-        // *fuori* dalla chiusura di `ui.input`: `Context::input` tiene il
-        // lock in scrittura del contesto per tutta la sua durata, e
-        // `handle_clipboard_events` deve poter chiamare `ctx.copy_text`
-        // (che lo richiede anche lui) — farlo da dentro la chiusura
-        // rientrava sullo stesso lock non rientrante e faceva deadlockare
-        // l'intera UI al primo Ctrl+C (bug segnalato: "si blocca tutto
-        // appena premo Ctrl+C su una clip", panic "Failed to acquire
-        // RwLock write... Deadlock?").
-        let mut clipboard_events: Vec<egui::Event> = Vec::new();
-        let mut arrow_input = (None, 0.0);
-        let mut set_fullscreen = None;
-        // I tasti scritti in un campo di testo (es. il titolo) non sono
-        // scorciatoie: "T" taglierebbe le clip, Backspace le cancellerebbe.
-        let typing = ui.ctx().egui_wants_keyboard_input();
-        if let Some(timeline_id) = self.timeline_id {
-            self.timeline_state
-                .drop_locked(&self.project.timelines[timeline_id]);
-        }
-        let capturing_shortcut = self.settings_dialog.as_ref().is_some_and(|d| d.is_capturing());
-        let keymap = self.settings.keymap.clone();
-        ui.input(|i| {
-            arrow_input.1 = i.time;
-            if typing || capturing_shortcut {
-                return;
-            }
-            let pressed = |action| keymap.pressed(action, i);
-            arrow_input.0 = match (
-                keymap.down(Action::StepBackward, i),
-                keymap.down(Action::StepForward, i),
-            ) {
-                (true, false) => Some(-1),
-                (false, true) => Some(1),
-                _ => None,
-            };
-            if pressed(Action::Delete) {
-                // Il pannello che ha ricevuto l'ultimo click decide chi
-                // cancella: media pool o timeline.
-                if self.media_pool_state.focused {
-                    self.delete_selected_media();
-                } else {
-                    self.delete_selected();
-                }
-            }
-            if pressed(Action::RippleDelete) {
-                self.ripple_delete_selected();
-            }
-            if pressed(Action::Split) {
-                self.split_at_playhead();
-            }
-            if pressed(Action::ToggleDisabled) {
-                self.toggle_disabled_selected();
-            }
-            if pressed(Action::Undo) {
-                self.history.undo(&mut self.project);
-            }
-            if pressed(Action::Redo) {
-                self.history.redo(&mut self.project);
-            }
-            if pressed(Action::TogglePlayback) {
-                self.toggle_playback();
-            }
-            if pressed(Action::MarkIn) {
-                self.mark_at_playhead(true);
-            }
-            if pressed(Action::MarkOut) {
-                self.mark_at_playhead(false);
-            }
-            if pressed(Action::FastPlayback) {
-                self.handle_fast_playback_key();
-            }
-            if pressed(Action::SelectAll) {
-                // Stessa regola del Canc: il pannello con l'ultimo
-                // click decide cosa seleziona Ctrl+A.
-                if self.media_pool_state.focused {
-                    self.select_all_media();
-                } else {
-                    self.select_all_clips();
-                }
-            }
-            if pressed(Action::SelectFromPlayhead) {
-                self.select_clips_from_playhead();
-            }
-            if pressed(Action::ImportMedia) {
-                self.import_media_dialog();
-            }
-            if pressed(Action::SaveProject) {
-                self.save_project();
-            }
-            if pressed(Action::SaveProjectAs) {
-                self.save_project_as();
-            }
-            if pressed(Action::OpenProject) {
-                self.request_project_switch(ProjectSwitch::Open);
-            }
-            if pressed(Action::Export) {
-                self.start_export();
-            }
-            // Solo raccolti: gestiti fuori da qui, vedi sopra.
-            for (action, event) in [
-                (Action::Copy, egui::Event::Copy),
-                (Action::Cut, egui::Event::Cut),
-                (Action::Paste, egui::Event::Paste(String::new())),
-            ] {
-                if pressed(action) {
-                    clipboard_events.push(event);
-                }
-            }
-            if pressed(Action::ZoomIn) {
-                self.timeline_state.zoom_in();
-            }
-            if pressed(Action::ZoomOut) {
-                self.timeline_state.zoom_out();
-            }
-            if pressed(Action::FullscreenViewer) {
-                set_fullscreen = Some(!self.viewer_fullscreen);
-            }
-            if self.viewer_fullscreen && i.key_pressed(egui::Key::Escape) {
-                set_fullscreen = Some(false);
-            }
-        });
-        // Fuori da `ui.input`: `send_viewport_cmd` riprende lo stesso lock.
-        if let Some(on) = set_fullscreen.take() {
-            self.viewer_fullscreen = on;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
-        }
-        self.handle_clipboard_events(ui, &clipboard_events);
-        if self.step_playhead_with_arrows(arrow_input.0, arrow_input.1) {
-            ui.ctx().request_repaint();
-        }
+        self.handle_shortcuts(ui);
 
-        egui::Panel::top("menu_bar").show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                let export_disabled = self.timeline_id.is_none()
-                    || self.export.is_some()
-                    || self.export_dialog.is_some();
-
-                ui.menu_button("File", |ui| {
-                    if ui.button(keymap.menu_label("Apri progetto...", Action::OpenProject)).clicked() {
-                        self.request_project_switch(ProjectSwitch::Open);
-                        ui.close();
-                    }
-                    if ui.button(keymap.menu_label("Salva", Action::SaveProject)).clicked() {
-                        self.save_project();
-                        ui.close();
-                    }
-                    if ui.button(keymap.menu_label("Salva con nome...", Action::SaveProjectAs)).clicked() {
-                        self.save_project_as();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button(keymap.menu_label("Importa media...", Action::ImportMedia)).clicked() {
-                        self.import_media_dialog();
-                        ui.close();
-                    }
-                    if ui
-                        .button("Importa OTIO...")
-                        .on_hover_text("Apre una timeline OpenTimelineIO come nuovo progetto")
-                        .clicked()
-                    {
-                        self.request_project_switch(ProjectSwitch::ImportOtio);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(!export_disabled, egui::Button::new(keymap.menu_label("Esporta...", Action::Export)))
-                        .on_hover_text("Esporta la timeline tra in e out (tasti I/O) in un file MP4 (H.264 + AAC)")
-                        .clicked()
-                    {
-                        self.start_export();
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(self.timeline_id.is_some(), egui::Button::new("Esporta OTIO..."))
-                        .on_hover_text("Esporta la timeline in OpenTimelineIO, per aprirla in un altro editor")
-                        .clicked()
-                    {
-                        self.export_otio_dialog();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Impostazioni...").clicked() {
-                        self.settings_dialog = Some(settings_dialog::SettingsDialog::new());
-                        ui.close();
-                    }
-                });
-
-                ui.menu_button("Modifica", |ui| {
-                    if ui.button(keymap.menu_label("Undo", Action::Undo)).clicked() {
-                        self.history.undo(&mut self.project);
-                        ui.close();
-                    }
-                    if ui.button(keymap.menu_label("Redo", Action::Redo)).clicked() {
-                        self.history.redo(&mut self.project);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(
-                            !self.timeline_state.selected.is_empty(),
-                            egui::Button::new(keymap.menu_label("Copia", Action::Copy)),
-                        )
-                        .clicked()
-                    {
-                        // Passa anche da qui (non solo `copy_selected_clips`
-                        // diretto) per scrivere lo stesso placeholder nella
-                        // clipboard di sistema — vedi doc di
-                        // `handle_clipboard_events`: serve perché Ctrl+V da
-                        // tastiera dipende da quella, non dalla nostra.
-                        self.handle_clipboard_events(ui, &[egui::Event::Copy]);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.timeline_state.selected.is_empty(),
-                            egui::Button::new(keymap.menu_label("Taglia", Action::Cut)),
-                        )
-                        .clicked()
-                    {
-                        self.handle_clipboard_events(ui, &[egui::Event::Cut]);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.timeline_state.clipboard.is_empty(),
-                            egui::Button::new(keymap.menu_label("Incolla", Action::Paste)),
-                        )
-                        .on_hover_text("Incolla alla posizione del playhead")
-                        .clicked()
-                    {
-                        self.paste_clipboard_at_playhead();
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button(keymap.menu_label("Elimina", Action::Delete)).clicked() {
-                        self.delete_selected();
-                        ui.close();
-                    }
-                    if ui
-                        .button(keymap.menu_label("Ripple delete", Action::RippleDelete))
-                        .on_hover_text(
-                            "Rimuove la clip e chiude il gap su tutte le track, mantenendo il sync A/V",
-                        )
-                        .clicked()
-                    {
-                        self.ripple_delete_selected();
-                        ui.close();
-                    }
-                    if ui
-                        .button(keymap.menu_label("Dividi", Action::Split))
-                        .on_hover_text("Taglia al playhead le clip selezionate, o tutte se non c'è selezione")
-                        .clicked()
-                    {
-                        self.split_at_playhead();
-                        ui.close();
-                    }
-                });
-
-                ui.menu_button("Timeline", |ui| {
-                    // Checkbox: restano aperti al click, a differenza dei
-                    // pulsanti-azione altrove nei menu.
-                    ui.checkbox(
-                        &mut self.selection_follows_playhead,
-                        "Selection follows playhead",
-                    )
-                    .on_hover_text(
-                        "Sposta la selezione sulla clip video sotto al playhead a ogni scrub/taglio/ripple-delete",
-                    );
-                    ui.checkbox(&mut self.scrub_audio, "Audio durante lo scrub")
-                        .on_hover_text("Suona un breve frammento audio a ogni spostamento manuale del playhead");
-                    ui.separator();
-                    if ui.button(keymap.menu_label("Zoom avanti", Action::ZoomIn)).clicked() {
-                        self.timeline_state.zoom_in();
-                        ui.close();
-                    }
-                    if ui.button(keymap.menu_label("Zoom indietro", Action::ZoomOut)).clicked() {
-                        self.timeline_state.zoom_out();
-                        ui.close();
-                    }
-                    ui.label("Alt+scroll (o pinch) sopra la timeline zooma allo stesso modo.");
-                });
-
-                ui.menu_button("Playback", |ui| {
-                    ui.menu_button("Proxy", |ui| {
-                        if ui
-                            .checkbox(&mut self.proxy_enabled, "Usa proxy")
-                            .on_hover_text(
-                                "Anteprima/editing da una copia a bassa risoluzione generata in \
-                                 background invece che dal sorgente: scrub molto più fluido su \
-                                 sorgenti lunghi. L'export non è mai influenzato, usa sempre i \
-                                 sorgenti originali. Disattiva per lavori che richiedono la \
-                                 qualità piena.",
-                            )
-                            .changed()
-                            && let Some(render_ahead) = &self.render_ahead
-                        {
-                            render_ahead.set_proxy_enabled(self.proxy_enabled);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("Read-ahead avanti:");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut self.lookahead_secs)
-                                        .range(0.0..=30.0)
-                                        .speed(0.1)
-                                        .suffix(" s"),
-                                )
-                                .on_hover_text(
-                                    "Quanti secondi di timeline bufferizzare in anticipo avanti \
-                                     dalla testina. Di più = scrub/playback più fluidi ma più RAM \
-                                     e CPU spesi su frame che potrebbero non servire mai; di meno \
-                                     = più leggero ma più probabile una breve attesa durante uno \
-                                     scrub veloce. Resta comunque un margine minimo anche a 0.",
-                                )
-                                .changed()
-                                && let Some(render_ahead) = &self.render_ahead
-                            {
-                                render_ahead.set_lookahead_secs(self.lookahead_secs);
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Read-ahead dietro:");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut self.behind_secs)
-                                        .range(0.0..=30.0)
-                                        .speed(0.1)
-                                        .suffix(" s"),
-                                )
-                                .on_hover_text(
-                                    "Quanti secondi di timeline tenere bufferizzati anche dietro \
-                                     la testina, oltre alla finestra in avanti: rende economico \
-                                     uno scrub avanti-indietro ravvicinato senza dover \
-                                     ridecodificare ogni volta. Resta comunque un margine minimo \
-                                     anche a 0.",
-                                )
-                                .changed()
-                                && let Some(render_ahead) = &self.render_ahead
-                            {
-                                render_ahead.set_behind_secs(self.behind_secs);
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Cache video:");
-                            // Espresso in MB nella UI, `cache_budget_bytes` in byte.
-                            let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut budget_mb)
-                                        .range(100..=8000)
-                                        .suffix(" MB"),
-                                )
-                                .on_hover_text(
-                                    "Quanta RAM usare per i frame pre-decodificati: di più = \
-                                     scrub/playback più fluidi, di meno = meno rischio di esaurire \
-                                     la memoria (soprattutto con sorgenti 4K+).",
-                                )
-                                .changed()
-                            {
-                                self.cache_budget_bytes = budget_mb as usize * 1_000_000;
-                                if let Some(render_ahead) = &self.render_ahead {
-                                    render_ahead.set_cache_budget_bytes(self.cache_budget_bytes);
-                                }
-                            }
-                        });
-                    });
-                });
-
-                ui.menu_button("Visualizza", |ui| {
-                    ui.checkbox(&mut self.properties_panel_open, "Inspector");
-                    ui.checkbox(&mut self.audiometer_enabled, "Audiometer")
-                        .on_hover_text(
-                            "Livello del player attivo, in una fascia stretta a destra della timeline",
-                        );
-                    ui.separator();
-                    if ui.button(keymap.menu_label("Player a schermo intero", Action::FullscreenViewer)).clicked() {
-                        set_fullscreen = Some(true);
-                        ui.close();
-                    }
-                });
-            });
-        });
-
-        if let Some(true) = set_fullscreen.take() {
-            self.viewer_fullscreen = true;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-        }
+        self.show_menu_bar(ui);
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -5464,18 +2256,9 @@ impl eframe::App for VibeVideoApp {
         self.show_relink_message(ui);
         self.show_unsaved_changes_dialog(ui);
 
-        // Frame a cui vengono lette/scritte le proprietà nel pannello:
-        // sempre il playhead della timeline tradotto nello spazio frame
-        // sorgente di *ciascuna* clip selezionata (`source_frame_at` del
-        // playhead clampato dentro la clip) — indipendente da quale clip stia
-        // effettivamente mostrando il viewer, così modificare le
-        // proprietà di una clip diversa da quella attiva resta coerente
-        // con quello che si vede scorrendo la timeline fin lì.
-        //
-        // I bersagli del pannello: tutte le clip selezionate, divise per
-        // tipo di track, ordinate (track, inizio) così la prima è sempre la
-        // stessa a parità di selezione — è quella da cui il pannello legge i
-        // valori da mostrare, e le modifiche vanno a tutte.
+        // Bersagli del pannello: le clip selezionate per tipo di track, in ordine
+        // (track, inizio). Il frame di ciascuna è il playhead nel suo spazio
+        // sorgente; la prima dà i valori mostrati, le modifiche vanno a tutte.
         let mut video_targets: Vec<PanelTarget> = Vec::new();
         let mut audio_targets: Vec<PanelTarget> = Vec::new();
         if let Some(timeline_id) = self.timeline_id {
@@ -5484,12 +2267,13 @@ impl eframe::App for VibeVideoApp {
                 let Some(track) = tl.tracks.get(track_index) else {
                     continue;
                 };
-                let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) else {
+                let Some(clip) = track.clip(clip_id) else {
                     continue;
                 };
                 let local = (self.timeline_state.playhead - clip.timeline_start)
                     .clamp(0, clip.timeline_len.saturating_sub(1));
                 let target = PanelTarget {
+                    timeline: timeline_id,
                     track_index,
                     clip_id,
                     source_frame: clip.source_frame_at(clip.timeline_start + local),
@@ -5528,11 +2312,7 @@ impl eframe::App for VibeVideoApp {
                         }) {
                             self.media_pool_state.focused = pool.rect.contains(pos);
                         }
-                        // Feedback visivo mentre si trascina un file dal
-                        // file manager sopra la finestra (vedi
-                        // `poll_dropped_files`): tutta la finestra è un
-                        // bersaglio valido, ma il pannello che lo importa
-                        // davvero è questo.
+                        // Evidenzia il pool mentre si trascina un file dal file manager.
                         if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
                             ui.ctx()
                                 .layer_painter(egui::LayerId::new(
@@ -5558,13 +2338,8 @@ impl eframe::App for VibeVideoApp {
 
         let selected_before_timeline_ui = self.timeline_state.selected.clone();
         let playhead_before_timeline_ui = self.timeline_state.playhead;
-        // Se esiste già una timeline, la posizione esatta del rilascio (e
-        // l'anteprima mentre si trascina) è gestita da `show_timeline`
-        // stesso, che ha accesso a fps/scala per convertire pixel->frame.
-        // Se non esiste ancora, non c'è nessuna scala a cui ancorare una
-        // posizione: qui basta un semplice drop-ovunque che la crei al volo
-        // (`add_media_to_timeline` -> `ensure_timeline_for`) e appenda il
-        // media a frame 0.
+        // Senza timeline non c'è una scala per posizionare il drop: si crea la
+        // timeline e si accoda a 0.
         let mut media_drop: Option<(
             timeline_ui::TimelineDrag,
             FrameIdx,
@@ -5596,21 +2371,8 @@ impl eframe::App for VibeVideoApp {
                         .collect();
                     let buffered_ranges = self.buffered_timeline_ranges();
                     let proxy_ranges = self.proxy_timeline_ranges();
-                    // Il worker di `render_ahead` bufferizza su un thread
-                    // proprio, a un ritmo suo indipendente dai repaint
-                    // della UI (vedi doc del modulo `render_ahead`) — ma
-                    // egui/eframe non ridisegna da solo se non c'è un
-                    // input o una `request_repaint` esplicita: senza
-                    // questo, la barra "buffered" avanzava solo quando
-                    // *qualcos'altro* forzava comunque un repaint (es.
-                    // muovere il mouse, che genera eventi di input) anche
-                    // se il buffer stava davvero avanzando in background
-                    // (bug segnalato dall'utente). `is_caught_up` viene
-                    // dal worker stesso (vedi doc lì): stessa identica
-                    // logica del repaint continuo durante l'export
-                    // (`!done`, più sopra in questo file), si ferma da
-                    // sé un ciclo dopo che il worker si è davvero
-                    // stabilizzato.
+                    // Il buffer avanza su un altro thread: senza repaint la striscia
+                    // "buffered" non si aggiornerebbe.
                     if self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up()) {
                         ui.ctx().request_repaint();
                     }
@@ -5647,11 +2409,8 @@ impl eframe::App for VibeVideoApp {
             self.add_drop_to_timeline_at(&drag, start, target);
         }
 
-        // L'utente ha trascinato/cliccato il playhead in questo frame?
-        // Serve per forzare un seek anche se si sta riproducendo (bug:
-        // "durante il playback lo scrub veniva ignorato") — a differenza
-        // di quando è `drive_playback` stesso a spostare il playhead per
-        // seguire la riproduzione, che non deve innescare un seek.
+        // Uno scrub dell'utente va seguito anche durante la riproduzione, a
+        // differenza del playhead mosso da `drive_playback`.
         let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
         if user_scrubbed_playhead {
             self.sync_selection_to_playhead();
@@ -5671,16 +2430,8 @@ impl eframe::App for VibeVideoApp {
             if user_scrubbed_playhead {
                 self.play_scrub_audio();
             }
-            // `drive_playback` avanza il playhead da sé durante la
-            // riproduzione: senza questo confronto, "selection follows
-            // playhead" seguiva solo lo scrub manuale (già coperto sopra
-            // da `user_scrubbed_playhead`) e restava fermo durante il
-            // play normale (bug: "la selezione non segue durante la
-            // riproduzione"). Il confronto prima/dopo, anziché una sync
-            // incondizionata, lascia intatta un'eventuale selezione
-            // esplicita impostata nello stesso frame da altrove (es.
-            // `split_at_playhead`) quando il playhead in realtà non
-            // si muove (caso normale: taglio da fermo).
+            // La selezione segue anche il playhead mosso dalla riproduzione, ma solo
+            // se si è mosso davvero: non tocca una selezione fatta in questo frame.
             let playhead_before_playback = self.timeline_state.playhead;
             self.drive_playback();
             if self.timeline_state.playhead != playhead_before_playback {
@@ -5688,667 +2439,16 @@ impl eframe::App for VibeVideoApp {
             }
         }
         self.drive_browse_playback();
-        // Fuori dall'`if` sopra: il buffer a livello di timeline deve
-        // restare caldo anche mentre si sta sfogliando un'anteprima
-        // "grezza" dal media pool (`browsing_media`), non solo durante la
-        // riproduzione sulla timeline.
+        // Il buffer della timeline resta caldo anche durante l'anteprima del pool.
         self.sync_render_ahead();
 
-        let mut pending_effects: Vec<PendingEffectChange> = Vec::new();
-        // Le frecce di navigazione tra keyframe del pannello spostano la
-        // testina: applicato dopo il disegno, come le modifiche agli effetti.
-        let mut pending_playhead: Option<FrameIdx> = None;
-
-        if self.properties_panel_open {
-            egui::Panel::right("properties")
-                .resizable(true)
-                .default_size(300.0)
-                .show(ui, |ui| {
-                    // Senza, il pannello si restringerebbe alla larghezza
-                    // del contenuto (etichette/slider) invece di riempire
-                    // quella assegnata dal Panel — stessa causa del bug
-                    // "il resize del pannello torna indietro al rilascio",
-                    // vedi il commento in timeline_ui::show_timeline.
-                    ui.set_min_width(ui.available_width());
-
-                    // Barra fissa: quella flottante coprirebbe i ripristini a destra.
-                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                        )
-                        .show(ui, |ui| {
-                        let selected_count = self.timeline_state.selected.len();
-                        if selected_count > 0 {
-                            properties_tab_bar(ui, &mut self.properties_tab);
-                            ui.separator();
-
-                            // I valori mostrati sono quelli della prima clip del
-                            // gruppo; ogni modifica va a tutte quelle della
-                            // scheda (le clip dell'altro tipo di track restano
-                            // fuori: un transform su una clip audio non vuol
-                            // dire niente).
-                            if self.properties_tab == PropertiesTab::Selection {
-                                self.show_selection_list(ui, &video_targets, &audio_targets);
-                            } else {
-                            let targets = if self.properties_tab == PropertiesTab::Audio {
-                                &audio_targets
-                            } else {
-                                &video_targets
-                            };
-                            let primary = targets.first().copied();
-                            let info = primary.and_then(|t| self.clip_panel_info(t));
-
-                            match (primary, info) {
-                                (Some(primary), Some(info)) => {
-                                    let ClipPanelInfo {
-                                        is_solid_color,
-                                        source_size,
-                                        timeline_size,
-                                        mut transform,
-                                        gain_kf_here,
-                                        mut gain,
-                                        gain_prev,
-                                        gain_next,
-                                        color_kf_here,
-                                        mut color,
-                                        ..
-                                    } = info.clone();
-                                    if targets.len() > 1 {
-                                        ui.small(format!(
-                                            "Modifiche applicate a tutte le {} clip di questa scheda.",
-                                            targets.len()
-                                        ));
-                                    }
-                                    ui.separator();
-
-                                    let is_text = self.properties_tab == PropertiesTab::Video
-                                        && info.title.is_some();
-                                    if is_text {
-                                        video_subtab_bar(ui, &mut self.video_subtab);
-                                        ui.add_space(4.0);
-                                    }
-                                    match self.properties_tab {
-                                        // La scheda Selezione non arriva qui:
-                                        // è servita prima, senza clip primaria.
-                                        PropertiesTab::Selection => {}
-                                        PropertiesTab::Video
-                                            if is_text && self.video_subtab == VideoSubTab::Title =>
-                                        {
-                                            let before = info.title.clone().unwrap_or_default();
-                                            let mut title = before.clone();
-                                            if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
-                                                let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                                for t in targets.iter().filter(|t| t.is_text) {
-                                                    let Some(current) = tl
-                                                        .and_then(|tl| tl.tracks.get(t.track_index))
-                                                        .and_then(|tr| tr.clips.iter().find(|c| c.id == t.clip_id))
-                                                        .and_then(|c| c.effects.title.as_ref())
-                                                    else {
-                                                        continue;
-                                                    };
-                                                    pending_effects.push(PendingEffectChange::SetTitle(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        apply_title_edit(current, &before, &title),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        PropertiesTab::Video => {
-                                            use vv_core::TransformParam as P;
-                                            let (frame_w, frame_h) =
-                                                (timeline_size.0 as f32, timeline_size.1 as f32);
-                                            let (source_w, source_h) =
-                                                (source_size.0 as f32, source_size.1 as f32);
-
-                                            // Stato del diamante di una riga: su
-                                            // un keyframe solo se lo sono tutti i
-                                            // parametri della riga, frecce verso
-                                            // il keyframe più vicino di uno
-                                            // qualunque di essi.
-                                            let row_keyframe = |params: &[P]| RowKeyframe {
-                                                on_keyframe: params
-                                                    .iter()
-                                                    .all(|p| info.params[p.index()].on_keyframe),
-                                                prev: params
-                                                    .iter()
-                                                    .filter_map(|p| info.params[p.index()].prev)
-                                                    .max(),
-                                                next: params
-                                                    .iter()
-                                                    .filter_map(|p| info.params[p.index()].next)
-                                                    .min(),
-                                            };
-
-                                            let section_reset = |ui: &mut egui::Ui, title: &str| {
-                                                let mut clicked = false;
-                                                ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new(title).strong());
-                                                    ui.with_layout(
-                                                        egui::Layout::right_to_left(
-                                                            egui::Align::Center,
-                                                        ),
-                                                        |ui| {
-                                                            clicked = ui
-                                                                .small_button("↺")
-                                                                .on_hover_text(
-                                                                    "Ripristina tutti i parametri di questa sezione",
-                                                                )
-                                                                .clicked();
-                                                        },
-                                                    );
-                                                });
-                                                clicked
-                                            };
-
-                                            const TRANSFORM_PARAMS: [P; 7] = [
-                                                P::ZoomX,
-                                                P::ZoomY,
-                                                P::PositionX,
-                                                P::PositionY,
-                                                P::Rotation,
-                                                P::AnchorX,
-                                                P::AnchorY,
-                                            ];
-                                            const CROP_PARAMS: [P; 5] = [
-                                                P::CropLeft,
-                                                P::CropTop,
-                                                P::CropRight,
-                                                P::CropBottom,
-                                                P::CropSoftness,
-                                            ];
-
-                                            // Le righe, ognuna con i parametri che
-                                            // il suo diamante anima; il reset di
-                                            // una riga azzera quei parametri,
-                                            // keyframe compresi.
-                                            let mut rows: Vec<(Vec<P>, RowResponse)> = Vec::new();
-                                            let mut reset_groups: Vec<(Vec<P>, bool)> = Vec::new();
-
-                                            if section_reset(ui, "Transform") {
-                                                reset_groups.push((TRANSFORM_PARAMS.to_vec(), true));
-                                            }
-
-                                            let zoom_params = vec![P::ZoomX, P::ZoomY];
-                                            let row = param_row(
-                                                ui,
-                                                "Zoom",
-                                                Some(row_keyframe(&zoom_params)),
-                                                |ui| {
-                                                    let mut changed = axis_field(
-                                                        ui,
-                                                        "X",
-                                                        &mut transform.zoom[0],
-                                                        0.01,
-                                                        3,
-                                                        0.01..=20.0,
-                                                    );
-                                                    if link_button(ui, &mut self.zoom_link).changed()
-                                                        && self.zoom_link
-                                                    {
-                                                        transform.zoom[1] = transform.zoom[0];
-                                                        changed = true;
-                                                    }
-                                                    let y_changed = axis_field(
-                                                        ui,
-                                                        "Y",
-                                                        &mut transform.zoom[1],
-                                                        0.01,
-                                                        3,
-                                                        0.01..=20.0,
-                                                    );
-                                                    if self.zoom_link {
-                                                        // Il link vale in entrambi
-                                                        // i versi: chi è stato
-                                                        // mosso detta l'altro.
-                                                        if changed {
-                                                            transform.zoom[1] = transform.zoom[0];
-                                                        } else if y_changed {
-                                                            transform.zoom[0] = transform.zoom[1];
-                                                        }
-                                                    }
-                                                    changed || y_changed
-                                                },
-                                            );
-                                            rows.push((zoom_params, row));
-
-                                            let position_params = vec![P::PositionX, P::PositionY];
-                                            let row = param_row(
-                                                ui,
-                                                "Posizione",
-                                                Some(row_keyframe(&position_params)),
-                                                |ui| {
-                                                    let x = axis_field(
-                                                        ui,
-                                                        "X",
-                                                        &mut transform.position[0],
-                                                        1.0,
-                                                        1,
-                                                        -frame_w..=frame_w,
-                                                    );
-                                                    let y = axis_field(
-                                                        ui,
-                                                        "Y",
-                                                        &mut transform.position[1],
-                                                        1.0,
-                                                        1,
-                                                        -frame_h..=frame_h,
-                                                    );
-                                                    x || y
-                                                },
-                                            );
-                                            rows.push((position_params, row));
-
-                                            let rotation_params = vec![P::Rotation];
-                                            let row = param_row(
-                                                ui,
-                                                "Rotazione",
-                                                Some(row_keyframe(&rotation_params)),
-                                                |ui| {
-                                                    slider_field(
-                                                        ui,
-                                                        &mut transform.rotation,
-                                                        -180.0..=180.0,
-                                                        0.5,
-                                                        1,
-                                                    )
-                                                },
-                                            );
-                                            rows.push((rotation_params, row));
-
-                                            let anchor_params = vec![P::AnchorX, P::AnchorY];
-                                            let row = param_row(
-                                                ui,
-                                                "Anchor point",
-                                                Some(row_keyframe(&anchor_params)),
-                                                |ui| {
-                                                    let x = axis_field(
-                                                        ui,
-                                                        "X",
-                                                        &mut transform.anchor[0],
-                                                        1.0,
-                                                        1,
-                                                        -frame_w..=frame_w,
-                                                    );
-                                                    let y = axis_field(
-                                                        ui,
-                                                        "Y",
-                                                        &mut transform.anchor[1],
-                                                        1.0,
-                                                        1,
-                                                        -frame_h..=frame_h,
-                                                    );
-                                                    x || y
-                                                },
-                                            );
-                                            rows.push((anchor_params, row));
-
-                                            // Il flip non si anima: niente
-                                            // diamante, solo il ripristino.
-                                            let flip_row = param_row(ui, "Flip", None, |ui| {
-                                                let x = ui
-                                                    .selectable_label(transform.flip[0], "⬌")
-                                                    .on_hover_text("Specchia in orizzontale")
-                                                    .clicked();
-                                                let y = ui
-                                                    .selectable_label(transform.flip[1], "⬍")
-                                                    .on_hover_text("Specchia in verticale")
-                                                    .clicked();
-                                                transform.flip[0] ^= x;
-                                                transform.flip[1] ^= y;
-                                                x || y
-                                            });
-                                            if flip_row.changed {
-                                                let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                                for t in targets {
-                                                    let Some(effects) = target_effects(tl, t) else {
-                                                        continue;
-                                                    };
-                                                    // Solo l'asse cliccato.
-                                                    let mut flip = effects.transform.flip;
-                                                    for axis in 0..2 {
-                                                        if transform.flip[axis] != info.transform.flip[axis] {
-                                                            flip[axis] = transform.flip[axis];
-                                                        }
-                                                    }
-                                                    pending_effects.push(PendingEffectChange::SetFlip(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                        flip,
-                                                    ));
-                                                }
-                                            }
-                                            if flip_row.reset {
-                                                reset_groups.push((Vec::new(), true));
-                                            }
-
-                                            ui.add_space(6.0);
-                                            if section_reset(ui, "Cropping") {
-                                                reset_groups.push((CROP_PARAMS.to_vec(), false));
-                                            }
-
-                                            for (label, param, index, limit) in [
-                                                ("Crop sinistra", P::CropLeft, 0, source_w),
-                                                ("Crop destra", P::CropRight, 2, source_w),
-                                                ("Crop alto", P::CropTop, 1, source_h),
-                                                ("Crop basso", P::CropBottom, 3, source_h),
-                                            ] {
-                                                let params = vec![param];
-                                                let row = param_row(
-                                                    ui,
-                                                    label,
-                                                    Some(row_keyframe(&params)),
-                                                    |ui| {
-                                                        slider_field(
-                                                            ui,
-                                                            &mut transform.crop[index],
-                                                            0.0..=limit,
-                                                            1.0,
-                                                            1,
-                                                        )
-                                                    },
-                                                );
-                                                rows.push((params, row));
-                                            }
-                                            // I due tagli opposti non possono
-                                            // mangiarsi tutto il frame a vicenda:
-                                            // almeno un pixel resta.
-                                            transform.crop[0] =
-                                                transform.crop[0].min(source_w - 1.0 - transform.crop[2]);
-                                            transform.crop[1] =
-                                                transform.crop[1].min(source_h - 1.0 - transform.crop[3]);
-
-                                            let softness_params = vec![P::CropSoftness];
-                                            let row = param_row(
-                                                ui,
-                                                "Sfumatura",
-                                                Some(row_keyframe(&softness_params)),
-                                                |ui| {
-                                                    let limit = source_w.min(source_h) / 2.0;
-                                                    slider_field(
-                                                        ui,
-                                                        &mut transform.crop_softness,
-                                                        -limit..=limit,
-                                                        1.0,
-                                                        1,
-                                                    )
-                                                },
-                                            );
-                                            rows.push((softness_params, row));
-
-                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                            for (params, row) in &rows {
-                                                if row.changed {
-                                                    push_param_changes(
-                                                        &mut pending_effects,
-                                                        tl,
-                                                        targets,
-                                                        params,
-                                                        &transform,
-                                                        &info.transform,
-                                                    );
-                                                }
-                                                if row.toggled_keyframe {
-                                                    let on_keyframe = params
-                                                        .iter()
-                                                        .all(|p| info.params[p.index()].on_keyframe);
-                                                    for t in targets {
-                                                        // Il keyframe fissa il valore che
-                                                        // ha già ciascuna clip.
-                                                        let Some(effects) = target_effects(tl, t) else {
-                                                            continue;
-                                                        };
-                                                        for p in params {
-                                                            pending_effects.push(if on_keyframe {
-                                                                PendingEffectChange::RemoveTransformKeyframe(
-                                                                    t.track_index,
-                                                                    t.clip_id,
-                                                                    t.source_frame,
-                                                                    *p,
-                                                                )
-                                                            } else {
-                                                                PendingEffectChange::UpsertTransformKeyframe(
-                                                                    t.track_index,
-                                                                    t.clip_id,
-                                                                    t.source_frame,
-                                                                    *p,
-                                                                    effects
-                                                                        .transform
-                                                                        .track(*p)
-                                                                        .value_at(t.source_frame),
-                                                                )
-                                                            });
-                                                        }
-                                                    }
-                                                }
-                                                if row.reset {
-                                                    reset_groups.push((params.clone(), false));
-                                                }
-                                                // Le frecce portano la testina sul
-                                                // keyframe più vicino: il frame è
-                                                // sorgente, la testina vive in
-                                                // frame di timeline.
-                                                if let Some(source_frame) = row.goto {
-                                                    pending_playhead = self
-                                                        .timeline_id
-                                                        .and_then(|tid| {
-                                                            self.project.timelines[tid]
-                                                                .tracks
-                                                                .get(primary.track_index)?
-                                                                .clips
-                                                                .iter()
-                                                                .find(|c| c.id == primary.clip_id)
-                                                        })
-                                                        .map(|c| c.timeline_frame_at(source_frame));
-                                                }
-                                            }
-
-                                            for (params, reset_flip) in reset_groups {
-                                                for t in targets {
-                                                    pending_effects.push(
-                                                        PendingEffectChange::ResetTransformParams(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            params.clone(),
-                                                            reset_flip,
-                                                        ),
-                                                    );
-                                                }
-                                            }
-
-                                            // Il colore vale solo per le clip
-                                            // generatore: le altre clip video
-                                            // selezionate restano fuori.
-                                            if is_solid_color {
-                                                let solid: Vec<&PanelTarget> =
-                                                    targets.iter().filter(|t| t.is_solid_color).collect();
-                                                ui.add_space(6.0);
-                                                ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new("Colore").strong());
-                                                    if keyframe_button(ui, color_kf_here).clicked()
-                                                    {
-                                                        let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                                        for t in &solid {
-                                                            let own = target_effects(tl, t)
-                                                                .and_then(|e| e.color.as_ref())
-                                                                .map_or(color, |k| k.value_at(t.source_frame));
-                                                            pending_effects.push(if color_kf_here {
-                                                                PendingEffectChange::RemoveColorKeyframe(
-                                                                    t.track_index,
-                                                                    t.clip_id,
-                                                                    t.source_frame,
-                                                                )
-                                                            } else {
-                                                                PendingEffectChange::UpsertColorKeyframe(
-                                                                    t.track_index,
-                                                                    t.clip_id,
-                                                                    t.source_frame,
-                                                                    own,
-                                                                )
-                                                            });
-                                                        }
-                                                    }
-                                                });
-                                                let mut rgba = [color.r, color.g, color.b, color.a];
-                                                if ui
-                                                    .color_edit_button_rgba_unmultiplied(&mut rgba)
-                                                    .changed()
-                                                {
-                                                    color = vv_core::Rgba {
-                                                        r: rgba[0],
-                                                        g: rgba[1],
-                                                        b: rgba[2],
-                                                        a: rgba[3],
-                                                    };
-                                                    let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                                    for t in &solid {
-                                                        let constant = target_effects(tl, t)
-                                                            .is_none_or(|e| e.color.as_ref().is_none_or(|k| k.is_constant()));
-                                                        pending_effects.push(if constant {
-                                                            PendingEffectChange::SetColorDefault(
-                                                                t.track_index,
-                                                                t.clip_id,
-                                                                color,
-                                                            )
-                                                        } else {
-                                                            PendingEffectChange::UpsertColorKeyframe(
-                                                                t.track_index,
-                                                                t.clip_id,
-                                                                t.source_frame,
-                                                                color,
-                                                            )
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        PropertiesTab::Audio => {
-                                            let row = param_row(
-                                                ui,
-                                                "Volume",
-                                                Some(RowKeyframe {
-                                                    on_keyframe: gain_kf_here,
-                                                    prev: gain_prev,
-                                                    next: gain_next,
-                                                }),
-                                                |ui| {
-                                                    slider_field(
-                                                        ui,
-                                                        &mut gain,
-                                                        -100.0..=30.0,
-                                                        0.2,
-                                                        1,
-                                                    )
-                                                },
-                                            );
-                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
-                                            if row.changed {
-                                                for t in targets {
-                                                    let constant = target_effects(tl, t)
-                                                        .is_none_or(|e| e.gain_db.is_constant());
-                                                    pending_effects.push(if constant {
-                                                        PendingEffectChange::SetGainDefault(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            gain,
-                                                        )
-                                                    } else {
-                                                        PendingEffectChange::UpsertGainKeyframe(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            t.source_frame,
-                                                            gain,
-                                                        )
-                                                    });
-                                                }
-                                            }
-                                            if row.toggled_keyframe {
-                                                for t in targets {
-                                                    let Some(effects) = target_effects(tl, t) else {
-                                                        continue;
-                                                    };
-                                                    pending_effects.push(if gain_kf_here {
-                                                        PendingEffectChange::RemoveGainKeyframe(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            t.source_frame,
-                                                        )
-                                                    } else {
-                                                        PendingEffectChange::UpsertGainKeyframe(
-                                                            t.track_index,
-                                                            t.clip_id,
-                                                            t.source_frame,
-                                                            effects.gain_db.value_at(t.source_frame),
-                                                        )
-                                                    });
-                                                }
-                                            }
-                                            if row.reset {
-                                                for t in targets {
-                                                    pending_effects.push(PendingEffectChange::ResetGain(
-                                                        t.track_index,
-                                                        t.clip_id,
-                                                    ));
-                                                }
-                                            }
-                                            if let Some(source_frame) = row.goto {
-                                                pending_playhead = self
-                                                    .timeline_id
-                                                    .and_then(|tid| {
-                                                        self.project.timelines[tid]
-                                                            .tracks
-                                                            .get(primary.track_index)?
-                                                            .clips
-                                                            .iter()
-                                                            .find(|c| c.id == primary.clip_id)
-                                                    })
-                                                    .map(|c| c.timeline_frame_at(source_frame));
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    ui.small(if self.properties_tab == PropertiesTab::Audio {
-                                        "Nessuna clip audio selezionata."
-                                    } else {
-                                        "Nessuna clip video selezionata."
-                                    });
-                                }
-                            }
-                            }
-                        } else if let Some(timeline_id) = self.timeline_id {
-                            let tl = &self.project.timelines[timeline_id];
-                            ui.heading("Timeline");
-                            ui.label(tl.name.clone());
-                            ui.label(format!(
-                                "{}x{} · {:.2} fps",
-                                tl.resolution.0,
-                                tl.resolution.1,
-                                tl.fps.as_f64()
-                            ));
-                            ui.label(format!("{} track", tl.tracks.len()));
-                            let playhead_secs =
-                                self.timeline_state.playhead as f64 / tl.fps.as_f64().max(1.0);
-                            ui.label(format!(
-                                "Playhead: frame {} ({playhead_secs:.2}s)",
-                                self.timeline_state.playhead
-                            ));
-                            ui.small("Nessuna clip selezionata.");
-                        } else {
-                            ui.label("Importa un media per creare la timeline.");
-                        }
-                        });
-                });
-        }
+        let (pending_effects, pending_playhead) =
+            self.show_properties_panel(ui, &video_targets, &audio_targets);
 
         if let Some(id) = preview_action {
             self.preview_media(id);
-            // Anteprima "grezza" del media pool: non è (ancora) detto che
-            // sia sulla timeline, quindi non ha un transform/gain di clip
-            // da applicare, e il playhead non deve strapparcela via al
-            // frame successivo.
+            // Anteprima del pool: nessuna clip attiva, e il playhead non deve
+            // toglierla al frame dopo.
             self.active_clip = None;
             self.browsing_media = Some(id);
         }
@@ -6367,16 +2467,9 @@ impl eframe::App for VibeVideoApp {
         // Tutto il riquadro del player, bande comprese: gli handle vicini al
         // bordo del frame devono restare afferrabili anche fuori.
         let mut viewer_area = None;
-        let mut overlay_effects: Vec<PendingEffectChange> = Vec::new();
+        let mut overlay_effects: Vec<BoxedCommand> = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
-            // Barra di toggle subito sotto il player, alla DaVinci Resolve
-            // (la barra con gli strumenti sta sotto il viewer, larga
-            // quanto lui — non tutta la finestra): nidificata *dentro* la
-            // CentralPanel invece che come `Panel::bottom` di primo
-            // livello, così reclama una fetta solo di questa colonna
-            // centrale (che il pannello proprietà, a destra, non copre).
-            // Per ora solo la calamita dello snapping; altri toggle (es.
-            // in futuro "ripple" globale on/off) troverebbero posto qui.
+            // Dentro il CentralPanel: occupa solo la colonna del viewer.
             egui::Panel::bottom("view_toggles")
                 .default_size(28.0)
                 .resizable(false)
@@ -6408,14 +2501,10 @@ impl eframe::App for VibeVideoApp {
             } else if self.browsing_media.is_some() {
                 if self.preview_meta.as_ref().is_some_and(|m| !m.has_video) {
                     self.last_viewer_frame_kind = None;
-                } else if let Some((frame, source_frame)) = self.browsing_video_frame() {
-                    let transform = self
-                        .active_clip_effects()
-                        .map(|e| e.transform.value_at(source_frame))
-                        .unwrap_or_default();
+                } else if let Some(frame) = self.browsing_video_frame() {
                     let layer = vv_render::Layer::Video {
                         frame: frame_provider::as_render_yuv_frame(&frame),
-                        transform,
+                        transform: vv_core::Transform::default(),
                         source_size: (frame.width, frame.height),
                     };
                     self.show_composited(
@@ -6427,8 +2516,10 @@ impl eframe::App for VibeVideoApp {
                 let video_size = layers
                     .iter()
                     .filter_map(|l| match l {
-                        PreviewLayer::Video { frame, .. } => Some((frame.width, frame.height)),
-                        PreviewLayer::Solid { .. } | PreviewLayer::Text { .. } => None,
+                        frame_provider::OwnedLayer::Video { frame, .. } => {
+                            Some((frame.width, frame.height))
+                        }
+                        _ => None,
                     })
                     .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
                 let timeline_size = self
@@ -6440,96 +2531,35 @@ impl eframe::App for VibeVideoApp {
 
                 match composite_size {
                     Some(size) => {
-                        // Compositing alla risoluzione del frame decodificato
-                        // (proxy compreso) allargata all'aspect della
-                        // timeline: le bande si vedono già in editing senza
-                        // upscalare il contenuto.
+                        // Alla risoluzione del frame decodificato, allargata all'aspect della
+                        // timeline: le bande si vedono senza upscalare.
                         let timeline_size = timeline_size.unwrap_or(size);
                         let (out_w, out_h) = vv_render::fit_output_size(size, timeline_size);
-                        let render_layers: Vec<vv_render::Layer> = layers
-                            .iter()
-                            .map(|l| match l {
-                                PreviewLayer::Video {
-                                    frame,
-                                    transform,
-                                    source_size,
-                                } => vv_render::Layer::Video {
-                                    frame: frame_provider::as_render_yuv_frame(frame),
-                                    transform: *transform,
-                                    source_size: *source_size,
-                                },
-                                PreviewLayer::Solid { color, transform } => {
-                                    vv_render::Layer::Solid {
-                                        color: *color,
-                                        transform: *transform,
-                                    }
-                                }
-                                PreviewLayer::Text { title, transform } => {
-                                    vv_render::Layer::Text {
-                                        title,
-                                        transform: *transform,
-                                    }
-                                }
-                            })
-                            .collect();
+                        let render_layers: Vec<vv_render::Layer> =
+                            layers.iter().map(frame_provider::OwnedLayer::as_render).collect();
                         self.show_composited(
                             &render_layers,
                             vv_render::OutputFrame::scaled(out_w, out_h, timeline_size),
                         );
                     }
-                    // Vuoto sulla track video: come in un vero NLE si vede
-                    // nero, non l'ultimo frame rimasto.
+                    // Vuoto: nero, non l'ultimo frame rimasto. Basta una
+                    // texture minuscola con l'aspect della timeline.
                     None => {
-                        let rgba = vv_core::Rgba {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        };
-                        let (w, h) = self
-                            .timeline_id
-                            .map_or((16, 9), |id| self.project.timelines[id].resolution);
-                        let data = vv_render::solid_color_frame(rgba, w, h);
-                        let image = egui::ColorImage::from_rgba_unmultiplied(
-                            [w as usize, h as usize],
-                            &data,
+                        let (w, h) = timeline_size.unwrap_or((16, 9));
+                        let step = (w.max(h) / 64).max(1);
+                        self.show_composited(
+                            &[],
+                            vv_render::OutputFrame::scaled(
+                                (w / step).max(1),
+                                (h / step).max(1),
+                                (w, h),
+                            ),
                         );
-                        match &mut self.frame_texture {
-                            Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                            None => {
-                                self.frame_texture = Some(ui.ctx().load_texture(
-                                    "current-frame",
-                                    image,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                            }
-                        }
-                        self.last_viewer_frame_kind = Some(ViewerFrameKind::SolidColor);
                     }
                 }
             }
 
             match self.last_viewer_frame_kind {
-                Some(ViewerFrameKind::SolidColor) => {
-                    if let Some(texture) = &self.frame_texture {
-                        let available = ui.available_size();
-                        let tex_size = texture.size_vec2();
-                        let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
-                        let display_size = tex_size * scale.max(0.0);
-                        let area = ui
-                            .centered_and_justified(|ui| {
-                                ui.add(
-                                    egui::Image::from_texture(texture)
-                                        .fit_to_exact_size(display_size),
-                                )
-                            })
-                            .inner
-                            .rect;
-                        viewer_area = Some(area);
-                        viewer_rect =
-                            Some(egui::Rect::from_center_size(area.center(), display_size));
-                    }
-                }
                 Some(ViewerFrameKind::Video) => {
                     if let (Some(id), Some(tex_size)) =
                         (self.video_texture_id, self.video_display_size)
@@ -6634,16 +2664,7 @@ impl eframe::App for VibeVideoApp {
             ui.ctx().request_repaint();
         }
 
-        // Nota: la causa del bug "il resize di un pannello torna indietro
-        // al rilascio" era altrove (ScrollArea/contenuto che si restringe
-        // al contenuto invece di riempire lo spazio assegnato, vedi
-        // `auto_shrink` in timeline_ui::show_timeline e nel pannello
-        // media pool/proprietà qui in main.rs), non la mancanza di
-        // repaint. Questo repaint aggiuntivo resta comunque utile per
-        // tenere fluide le interazioni di drag in generale (clip nella
-        // timeline, resize dei pannelli) quando il player non sta
-        // riproducendo e quindi non ci sarebbe altrimenti un repaint
-        // continuo.
+        // Repaint durante i drag, altrimenti poco fluidi a player fermo.
         if ui
             .ctx()
             .input(|i| i.pointer.any_down() || i.pointer.any_released())
@@ -6682,14 +2703,6 @@ fn main() -> eframe::Result<()> {
             }
             // Aperto subito: aprire lo stream audio blocca per centinaia di ms.
             app.timeline_audio = Some(TimelineAudio::new());
-            // Condivide il device/queue wgpu di egui-wgpu invece del
-            // device headless indipendente di `Default`: necessario per
-            // il path zero-copy del viewer (REFACTOR_PIPELINE.md B2) —
-            // una texture creata su un device diverso da quello del
-            // renderer egui non può essergli registrata. `NativeOptions`
-            // sopra richiede sempre `Renderer::Wgpu`, quindi in pratica
-            // questo è sempre `Some`; il fallback al device headless
-            // resta solo per non fare panic se eframe cambiasse renderer.
             if let Some(render_state) = cc.wgpu_render_state.clone() {
                 app.compositor = vv_render::Compositor::new(
                     std::sync::Arc::new(render_state.device.clone()),
@@ -6766,6 +2779,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 1,
         });
@@ -6797,6 +2811,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 2,
         });
@@ -6843,6 +2858,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: 48000,
                 channels: 2,
+                audio_streams: 1,
             },
             content_hash: 2,
         });
@@ -6893,6 +2909,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 2,
         });
@@ -6962,6 +2979,7 @@ mod tests {
                 has_audio: false,
                 sample_rate: 0,
                 channels: 0,
+                audio_streams: 0,
             },
             content_hash: 2,
         });
@@ -6994,6 +3012,7 @@ mod tests {
             has_audio: false,
             sample_rate: 0,
             channels: 0,
+            audio_streams: 0,
         };
         let offline = app.project.media_pool.insert(vv_core::MediaItem {
             path: "/questo/percorso/non/esiste/piu/intervista.mp4".into(),
@@ -7063,6 +3082,7 @@ mod tests {
             has_audio: false,
             sample_rate: 0,
             channels: 0,
+            audio_streams: 0,
         };
         let selected = app.project.media_pool.insert(vv_core::MediaItem {
             path: "/mancante/a.mp4".into(),
@@ -7666,9 +3686,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-main-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -7683,11 +3702,9 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let mut app = VibeVideoApp::default();
         app.import_media(path);
@@ -7728,7 +3745,7 @@ mod tests {
     ) {
         app.history.do_command(
             &mut app.project,
-            Box::new(vv_core::SetClipGain::new(
+            Box::new(vv_core::set_clip_gain(
                 timeline_id,
                 track_index,
                 clip_id,
@@ -7737,7 +3754,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// Il diamante di keyframe deve stare sempre alla stessa distanza dal
     /// bordo della riga, che le frecce di navigazione ci siano o no
     /// (altrimenti balla a ogni spostamento della testina).
@@ -7776,6 +3792,7 @@ mod tests {
         zoom.upsert(10, 2.0, vv_core::Interpolation::Linear);
         zoom.upsert(40, 1.0, vv_core::Interpolation::Linear);
         let target = PanelTarget {
+            timeline: timeline_id,
             track_index: 0,
             clip_id: id,
             source_frame: 70,
@@ -7799,15 +3816,7 @@ mod tests {
         let commands: Vec<Box<dyn vv_core::Command>> = [first, second]
             .into_iter()
             .map(|clip_id| {
-                build_effect_command(
-                    timeline_id,
-                    PendingEffectChange::SetTransformParamDefault(
-                        0,
-                        clip_id,
-                        vv_core::TransformParam::PositionX,
-                        120.0,
-                    ),
-                )
+                set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::PositionX, 120.0)
             })
             .collect();
         app.history.do_command(
@@ -7841,6 +3850,7 @@ mod tests {
         let second = make_timeline_with_clip(&mut app, 0, 30, 20);
         let timeline_id = app.timeline_id.unwrap();
         let target = |clip_id, timeline_start| PanelTarget {
+            timeline: timeline_id,
             track_index: 0,
             clip_id,
             source_frame: 0,
@@ -7849,16 +3859,10 @@ mod tests {
             is_text: false,
         };
         let targets = [target(first, 0), target(second, 30)];
-        let cmd = build_effect_command(
-            timeline_id,
-            PendingEffectChange::SetTransformParamDefault(0, second, P::PositionX, 50.0),
-        );
+        let cmd = set_transform_param_default((timeline_id, 0, second), P::PositionX, 50.0);
         app.history.do_command(&mut app.project, cmd);
         // Il secondo ha Y animata: la modifica va in un keyframe.
-        let cmd = build_effect_command(
-            timeline_id,
-            PendingEffectChange::UpsertTransformKeyframe(0, second, 10, P::PositionY, 5.0),
-        );
+        let cmd = upsert_transform_keyframe((timeline_id, 0, second), 10, P::PositionY, 5.0);
         app.history.do_command(&mut app.project, cmd);
 
         let before = app.project.timelines[timeline_id].tracks[0].clips[0]
@@ -7908,12 +3912,7 @@ mod tests {
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
         let set_x = |v| {
-            vec![PendingEffectChange::SetTransformParamDefault(
-                0,
-                clip_id,
-                vv_core::TransformParam::PositionX,
-                v,
-            )]
+            vec![set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::PositionX, v)]
         };
         let x = |app: &VibeVideoApp| {
             app.project.timelines[timeline_id].tracks[0].clips[0]
@@ -7939,15 +3938,12 @@ mod tests {
     }
 
     #[test]
-    fn build_effect_command_upsert_gain_keyframe_applies_correctly() {
+    fn effect_command_upsert_gain_keyframe_applies_correctly() {
         let mut app = VibeVideoApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
-        let cmd = build_effect_command(
-            timeline_id,
-            PendingEffectChange::UpsertGainKeyframe(0, clip_id, 5, -9.0),
-        );
+        let cmd = upsert_gain_keyframe((timeline_id, 0, clip_id), 5, -9.0);
         app.history.do_command(&mut app.project, cmd);
 
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
@@ -7958,35 +3954,18 @@ mod tests {
     }
 
     #[test]
-    fn build_effect_command_remove_transform_keyframe_applies_correctly() {
+    fn effect_command_remove_transform_keyframe_applies_correctly() {
         let mut app = VibeVideoApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
         app.history.do_command(
             &mut app.project,
-            build_effect_command(
-                timeline_id,
-                PendingEffectChange::UpsertTransformKeyframe(
-                    0,
-                    clip_id,
-                    3,
-                    vv_core::TransformParam::ZoomX,
-                    2.5,
-                ),
-            ),
+            upsert_transform_keyframe((timeline_id, 0, clip_id), 3, vv_core::TransformParam::ZoomX, 2.5),
         );
         app.history.do_command(
             &mut app.project,
-            build_effect_command(
-                timeline_id,
-                PendingEffectChange::RemoveTransformKeyframe(
-                    0,
-                    clip_id,
-                    3,
-                    vv_core::TransformParam::ZoomX,
-                ),
-            ),
+            remove_transform_keyframe((timeline_id, 0, clip_id), 3, vv_core::TransformParam::ZoomX),
         );
 
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
@@ -7994,29 +3973,18 @@ mod tests {
     }
 
     #[test]
-    fn build_effect_command_set_defaults_applies_correctly() {
+    fn effect_command_set_defaults_applies_correctly() {
         let mut app = VibeVideoApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
         app.history.do_command(
             &mut app.project,
-            build_effect_command(
-                timeline_id,
-                PendingEffectChange::SetGainDefault(0, clip_id, -3.0),
-            ),
+            set_gain_default((timeline_id, 0, clip_id), -3.0),
         );
         app.history.do_command(
             &mut app.project,
-            build_effect_command(
-                timeline_id,
-                PendingEffectChange::SetTransformParamDefault(
-                    0,
-                    clip_id,
-                    vv_core::TransformParam::ZoomX,
-                    1.5,
-                ),
-            ),
+            set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::ZoomX, 1.5),
         );
 
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
@@ -8145,7 +4113,7 @@ mod tests {
     }
 
     #[test]
-    fn build_effect_command_color_upsert_and_remove_round_trip() {
+    fn effect_command_color_upsert_and_remove_round_trip() {
         let mut app = VibeVideoApp::default();
         app.add_generator_to_timeline_at(
             timeline_ui::Generator::SolidColor,
@@ -8163,10 +4131,7 @@ mod tests {
         };
         app.history.do_command(
             &mut app.project,
-            build_effect_command(
-                timeline_id,
-                PendingEffectChange::UpsertColorKeyframe(0, clip_id, 10, red),
-            ),
+            upsert_color_keyframe((timeline_id, 0, clip_id), 10, red),
         );
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert_eq!(
@@ -8183,10 +4148,7 @@ mod tests {
 
         app.history.do_command(
             &mut app.project,
-            build_effect_command(
-                timeline_id,
-                PendingEffectChange::RemoveColorKeyframe(0, clip_id, 10),
-            ),
+            remove_color_keyframe((timeline_id, 0, clip_id), 10),
         );
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert!(clip.effects.color.as_ref().unwrap().is_constant());
@@ -8415,9 +4377,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-preview-mix-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -8432,11 +4393,9 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let mut app = VibeVideoApp::default();
         app.import_media(path);
@@ -8472,7 +4431,7 @@ mod tests {
 
         app.history.do_command(
             &mut app.project,
-            Box::new(vv_core::MoveClip::new(timeline_id, audio_clip, audio_track, audio_track, 50)),
+            Box::new(vv_core::MoveClips::new(timeline_id, vec![(audio_clip, audio_track, audio_track, 50)])),
         );
         app.sync_timeline_audio();
         assert_eq!(peak(&app, 10), 0.0, "la vecchia posizione ora è silenzio");
@@ -8490,7 +4449,7 @@ mod tests {
         app.project.timelines[timeline_id].tracks[audio_track].muted = true;
         app.history.do_command(
             &mut app.project,
-            Box::new(vv_core::MoveClip::new(timeline_id, audio_clip, audio_track, audio_track, 55)),
+            Box::new(vv_core::MoveClips::new(timeline_id, vec![(audio_clip, audio_track, audio_track, 55)])),
         );
         app.sync_timeline_audio();
         assert_eq!(peak(&app, 60), 0.0, "track muted");
@@ -9238,9 +5197,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-buffered-ranges-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -9249,11 +5207,9 @@ mod tests {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let mut app = VibeVideoApp::default();
         app.import_media(path);
@@ -9298,9 +5254,8 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-proxy-ranges-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -9309,11 +5264,9 @@ mod tests {
                 "libx264",
                 "-pix_fmt",
                 "yuv420p",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         // Fingerprint calcolato prima dell'import vero e proprio, solo per
         // ripulire un eventuale proxy rimasto da un run precedente di
@@ -9369,12 +5322,19 @@ mod tests {
             .iter()
             .map(|name| {
                 let path = dir.join(name);
-                let status = std::process::Command::new("ffmpeg")
-                    .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1"])
-                    .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", path.to_str().unwrap()])
-                    .status()
-                    .expect("ffmpeg CLI non trovato");
-                assert!(status.success());
+                vv_media::test_support::ffmpeg(
+                    &[
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "testsrc=size=320x240:rate=25:duration=1",
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                    ],
+                    &path,
+                );
                 path
             })
             .collect();
@@ -9456,14 +5416,25 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-browse-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=2"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
-            .arg(path.to_str().unwrap())
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x120:rate=25:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+            &path,
+        );
         let mut app = VibeVideoApp::default();
         let media_id = app.add_media_to_pool(path).unwrap();
         app.preview_media(media_id);
@@ -9567,9 +5538,8 @@ mod tests {
         let path_a = dir.join("clip_a.mp4");
         let path_b = dir.join("clip_b.mp4");
         for (path, duration) in [(&path_a, 2), (&path_b, 1)] {
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
+            vv_media::test_support::ffmpeg(
+                &[
                     "-f",
                     "lavfi",
                     "-i",
@@ -9578,11 +5548,9 @@ mod tests {
                     "libx264",
                     "-pix_fmt",
                     "yuv420p",
-                    path.to_str().unwrap(),
-                ])
-                .status()
-                .expect("ffmpeg CLI non trovato");
-            assert!(status.success());
+                ],
+                &path,
+            );
         }
 
         let mut app = VibeVideoApp::default();
@@ -9706,12 +5674,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-otio-import-test");
         std::fs::create_dir_all(&dir).unwrap();
         let media = dir.join("clip.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=2"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", media.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &media,
+        );
         let range = |start: f64, duration: f64| {
             serde_json::json!({
                 "OTIO_SCHEMA": "TimeRange.1",
@@ -9799,14 +5774,26 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-waveform-on-load-test");
         std::fs::create_dir_all(&dir).unwrap();
         let media = dir.join("tono.mp4");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=1"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
-            .arg(&media)
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x120:rate=25:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ],
+            &media,
+        );
 
         // Hash mai visto: nessuna waveform in cache per questo media.
         let content_hash = std::time::SystemTime::now()
@@ -9837,12 +5824,15 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-audio-only-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-            .arg(&path)
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=2",
+            ],
+            &path,
+        );
         path
     }
 
@@ -9894,12 +5884,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-image-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "color=c=blue:size=640x360:rate=1:duration=1"])
-            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:size=640x360:rate=1:duration=1",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &path,
+        );
         path
     }
 
@@ -9959,6 +5956,7 @@ mod tests {
                 has_audio: true,
                 sample_rate: 48000,
                 channels: 2,
+                audio_streams: 1,
             },
             content_hash: 1,
         });
@@ -10034,9 +6032,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("two_audio_streams.mp4");
 
-        let status = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
+        vv_media::test_support::ffmpeg(
+            &[
                 "-f",
                 "lavfi",
                 "-i",
@@ -10061,11 +6058,9 @@ mod tests {
                 "yuv420p",
                 "-c:a",
                 "aac",
-                path.to_str().unwrap(),
-            ])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+            ],
+            &path,
+        );
 
         let mut app = VibeVideoApp::default();
         app.import_media(path.clone());

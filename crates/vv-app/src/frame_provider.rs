@@ -1,35 +1,16 @@
-//! Un'unica interfaccia per le due strategie di acquisizione del frame
-//! decodificato di una clip Media a una data posizione di timeline:
-//! cache asincrona già riempita in background (anteprima, vedi l'`impl
-//! FrameProvider for RenderAhead` in `render_ahead.rs`) o streaming
-//! sincrono un frame alla volta (export, vedi `StreamingFrameProvider`
-//! in `export.rs`). La mappatura clip→frame-sorgente
-//! (`vv_core::Clip::source_frame_at`) è la stessa per entrambe — qui
-//! cambia solo *come* il frame a quella posizione viene procurato, non
-//! *dove* si trova (REFACTOR_PIPELINE.md B1): il time-remap (milestone 7)
-//! andrà cambiato in un posto solo.
+//! Come si procura il frame decodificato di una clip: cache riempita in
+//! background (anteprima, `render_ahead.rs`) o decode sincrono (export,
+//! `export.rs`). La mappatura clip -> frame sorgente è una sola.
 
 use std::sync::Arc;
-use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project};
+use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project, Rgba, TitleParams, Transform};
 use vv_media::FrameYuv420;
 
-/// Procura il frame YUV420 decodificato (REFACTOR_PIPELINE.md B3: la
-/// conversione a RGB avviene nello shader del compositor)
-/// per una clip Media a una data posizione di timeline. `&mut self`
-/// perché l'implementazione per l'export tiene stato (il decoder aperto
-/// per la clip attiva) — quella per l'anteprima non ne ha bisogno, ma
-/// il trait resta uniforme per le due strategie.
+/// `&mut self`: l'export tiene aperti i decoder.
 pub trait FrameProvider {
-    /// `Err` solo per un fallimento reale (media non trovato, errore di
-    /// decodifica) — mai per "non disponibile ora", che è `Ok(None)`:
-    /// per la cache dell'anteprima significa "non ancora bufferizzato"
-    /// (il chiamante mostra l'ultimo frame già disegnato, non uno nero),
-    /// per lo streaming dell'export "oltre la fine reale del file" (il
-    /// chiamante mostra un frame nero). Collassare le due cose in un
-    /// solo `None` avrebbe trasformato un vero errore di decodifica
-    /// durante l'export in un silenzioso frame nero — la stessa
-    /// disciplina di "mai un frame approssimativo" vale anche per gli
-    /// errori, non solo per i frame.
+    /// `Ok(None)` = non disponibile ora (anteprima: non ancora in cache;
+    /// export: oltre la fine del file). Un errore di decode resta `Err`, così
+    /// l'export non lo trasforma in un frame nero silenzioso.
     fn frame_for(
         &mut self,
         project: &Project,
@@ -38,12 +19,8 @@ pub trait FrameProvider {
     ) -> Result<Option<Arc<FrameYuv420>>, String>;
 }
 
-/// `(media_id, frame_sorgente)` per `clip` alla posizione di timeline
-/// `timeline_frame`, oppure `None` se `clip` non è una clip Media
-/// (`SolidColor`) — helper condiviso dalle implementazioni di
-/// `FrameProvider`, che devono gestire il caso `SolidColor` a parte
-/// (non è "frame non disponibile", è "nessun frame da decodificare, il
-/// colore è calcolato altrove").
+/// `(media, frame sorgente)` di `clip` a `timeline_frame`; `None` se non è
+/// una clip Media.
 pub fn media_source_frame(clip: &Clip, timeline_frame: FrameIdx) -> Option<(MediaId, FrameIdx)> {
     let ClipSource::Media(media_id) = &clip.source else {
         return None;
@@ -51,10 +28,8 @@ pub fn media_source_frame(clip: &Clip, timeline_frame: FrameIdx) -> Option<(Medi
     Some((*media_id, clip.source_frame_at(timeline_frame)))
 }
 
-/// Risoluzione *nativa* del media di `clip` — le unità in cui il crop del
-/// `Transform` è espresso, che non sono quelle del frame decodificato
-/// quando si sta usando un proxy. Una clip SolidColor è grande quanto la
-/// timeline; `(1, 1)` per un media sparito dal pool.
+/// Risoluzione *nativa* del media, l'unità del crop anche quando si decoda
+/// il proxy. Generatori: quella della timeline; `(1, 1)` se il media manca.
 pub fn clip_source_size(project: &Project, clip: &Clip, timeline_size: (u32, u32)) -> (u32, u32) {
     match &clip.source {
         ClipSource::Media(id) => project
@@ -66,13 +41,7 @@ pub fn clip_source_size(project: &Project, clip: &Clip, timeline_size: (u32, u32
     }
 }
 
-/// `vv_render::YuvFrame` in prestito da un `vv_media::FrameYuv420` — il
-/// compositor (vv-render) non dipende da vv-media (stessa convenzione
-/// già in uso per il resto della sua API, prende piani di byte grezzi,
-/// non un tipo di vv-media), quindi entrambi i chiamanti di
-/// `FrameProvider` (anteprima in `main.rs`, export in `export.rs`)
-/// passano di qui prima di chiamare `Compositor::render_frame`/
-/// `render_frame_to_texture`.
+/// vv-render non dipende da vv-media: prende piani di byte grezzi.
 pub fn as_render_yuv_frame(frame: &FrameYuv420) -> vv_render::YuvFrame<'_> {
     vv_render::YuvFrame {
         y: &frame.y,
@@ -82,11 +51,84 @@ pub fn as_render_yuv_frame(frame: &FrameYuv420) -> vv_render::YuvFrame<'_> {
         v: &frame.v,
         chroma_width: frame.u_width,
         chroma_height: frame.u_height,
-        matrix: match frame.matrix {
-            vv_media::ColorMatrix::Bt601 => vv_render::ColorMatrix::Bt601,
-            vv_media::ColorMatrix::Bt709 => vv_render::ColorMatrix::Bt709,
-            vv_media::ColorMatrix::Bt2020 => vv_render::ColorMatrix::Bt2020,
-        },
+        matrix: frame.matrix,
         full_range: frame.full_range,
     }
+}
+
+/// Un layer di compositing che possiede ciò che `vv_render::Layer` presta.
+pub enum OwnedLayer {
+    Video {
+        frame: Arc<FrameYuv420>,
+        transform: Transform,
+        /// Risoluzione nativa del media (non del proxy): le unità del crop.
+        source_size: (u32, u32),
+    },
+    Solid {
+        color: Rgba,
+        transform: Transform,
+    },
+    Text {
+        title: TitleParams,
+        transform: Transform,
+    },
+}
+
+impl OwnedLayer {
+    pub fn as_render(&self) -> vv_render::Layer<'_> {
+        match self {
+            OwnedLayer::Video {
+                frame,
+                transform,
+                source_size,
+            } => vv_render::Layer::Video {
+                frame: as_render_yuv_frame(frame),
+                transform: *transform,
+                source_size: *source_size,
+            },
+            OwnedLayer::Solid { color, transform } => vv_render::Layer::Solid {
+                color: *color,
+                transform: *transform,
+            },
+            OwnedLayer::Text { title, transform } => vv_render::Layer::Text {
+                title,
+                transform: *transform,
+            },
+        }
+    }
+}
+
+/// Il layer di `clip` al frame di timeline `frame`, condiviso da anteprima
+/// ed export. `Ok(None)`: frame del media non disponibile.
+pub fn clip_layer(
+    project: &Project,
+    clip: &Clip,
+    frame: FrameIdx,
+    timeline_size: (u32, u32),
+    provider: &mut dyn FrameProvider,
+) -> Result<Option<OwnedLayer>, String> {
+    let source_frame = clip.source_frame_at(frame);
+    let transform = clip.effects.transform.value_at(source_frame);
+    Ok(match &clip.source {
+        ClipSource::SolidColor => Some(OwnedLayer::Solid {
+            color: clip
+                .effects
+                .color
+                .as_ref()
+                .map_or(Rgba::BLACK, |k| k.value_at(source_frame)),
+            transform,
+        }),
+        ClipSource::Text => clip
+            .effects
+            .title
+            .clone()
+            .map(|title| OwnedLayer::Text { title, transform }),
+        ClipSource::Media(_) => provider
+            .frame_for(project, clip, frame)?
+            .map(|frame| OwnedLayer::Video {
+                frame,
+                transform,
+                source_size: clip_source_size(project, clip, timeline_size),
+            }),
+    })
 }

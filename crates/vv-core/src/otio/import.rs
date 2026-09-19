@@ -238,12 +238,7 @@ impl Importer<'_> {
                         reference["parameters"]["color"].clone(),
                     )
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-                    effects.color = Some(Keyframed::constant(Rgba {
-                        r: color[0],
-                        g: color[1],
-                        b: color[2],
-                        a: color[3],
-                    }));
+                    effects.color = Some(Keyframed::constant(Rgba::from(color)));
                 }
                 (ClipSource::SolidColor, Rational::one(), 0, None)
             }
@@ -293,17 +288,15 @@ impl Importer<'_> {
             linked_group,
             audio_stream_index,
             rate,
-            disabled: item["enabled"] == false,
+            disabled: false,
         };
         (duration, Some((clip, is_foreign)))
     }
 
-    /// Porta in `effects` quel che si sa tradurre di un effetto OTIO; il
-    /// resto va in `ignored_effects`, tranne gli effetti spenti o ai valori
-    /// di default (Resolve li esporta tutti, per ogni clip).
-    /// `media_start` sono i secondi nel media all'inizio della clip e l'fps
-    /// del media; `rate` è quello dei keyframe di Resolve, in frame
-    /// dall'inizio della clip.
+    /// Porta in `effects` quel che si sa tradurre; il resto finisce in
+    /// `ignored_effects`, salvo effetti spenti o ai default (Resolve li
+    /// esporta tutti). `media_start`: secondi nel media e fps del media;
+    /// `rate`: fps dei keyframe di Resolve.
     fn effect(
         &mut self,
         effect: &Value,
@@ -539,6 +532,7 @@ mod tests {
             has_audio: true,
             sample_rate: 48_000,
             channels: 2,
+            audio_streams: 1,
         }
     }
 
@@ -831,6 +825,7 @@ mod tests {
             has_audio: true,
             sample_rate: 48_000,
             channels: 2,
+            audio_streams: 1,
         }
     }
 

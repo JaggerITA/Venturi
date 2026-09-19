@@ -65,7 +65,7 @@ struct Track {
 
 struct Clip {
     id: ClipId,
-    source: ClipSource,               // Media(MediaId) | SolidColor
+    source: ClipSource,               // Media(MediaId) | SolidColor | Text
     source_offset: FrameIdx,          // inizio nel media, in frame di Timeline
     timeline_start: FrameIdx,         // in frame di Timeline
     timeline_len: FrameIdx,           // in frame di Timeline
@@ -79,8 +79,8 @@ struct EffectStack {
     transform: TransformTracks,  // un Keyframed<f32> per parametro + flip
     speed: Keyframed<f32>,            // nel modello, non ancora applicato
     gain_db: Keyframed<f32>,
-    text: Vec<TextOverlay>,           // nel modello, non ancora applicato
-    color: Option<Keyframed<Rgba>>,   // solo per SolidColor
+    color: Option<Keyframed<Rgba>>,   // SolidColor e Text
+    title: Option<TitleParams>,       // solo per Text
 }
 
 struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
@@ -104,7 +104,7 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   frame di Timeline (come `source_range` di OTIO); `source_in()`/
   `source_out()` ne sono derivati. Split e trim cadono esattamente sulla
   posizione scelta anche a metà di un frame sorgente, senza perdere la
-  fase del contenuto (vedi `DURATA_CLIP_ESPLICITA.md`).
+  fase del contenuto.
 
 ## Pipeline di decode + cache
 
@@ -122,8 +122,8 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   testina. La soglia oltre cui conviene un seek reale invece di decodificare
   in avanti si adatta al GOP osservato. Lookahead e behind sono
   configurabili dal menu Playback > Proxy; a velocità > 1x il lookahead scala.
-- **Anteprima dal media pool** (`browsing_media`): `vv_media::DecodeAhead`
-  su un solo file con una `FrameCache` propria, seek dalla barra sotto al
+- **Anteprima dal media pool** (`browsing_media`): un secondo `RenderAhead`
+  su una timeline sintetica con il solo media, seek dalla barra sotto al
   viewer. L'audio passa dallo stesso `TimelineAudio` della timeline
   (`sync_media`: uno snapshot con tutti gli stream del media), il cui clock
   fa da testina.
@@ -162,8 +162,9 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    senza ricentrare né ridimensionare il resto.
 4. Un pass per layer sulla stessa texture, in alpha-over
    (`Compositor::render_layers`): le bande del layer sopra escono con alpha
-   0 e lasciano vedere quello sotto. Una clip SolidColor è il clear del
-   pass, non un draw.
+   0 e lasciano vedere quello sotto. SolidColor e Text sono layer come gli
+   altri: lo shader usa il colore del layer (per il testo con la copertura
+   dei glifi, rasterizzata da `vv-render/src/text.rs`, nel piano Y).
 5. Anteprima: compone alla risoluzione del frame decodificato allargata
    all'aspect della timeline (`vv_render::fit_output_size`), così le bande
    si vedono già in editing senza upscalare il contenuto;
@@ -173,19 +174,18 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    converte in I420 BT.709 su GPU (compute shader) e fa il readback dei
    piani per l'encoder. Decode, composizione ed encode girano su tre
    thread in pipeline.
-6. Senza clip video (vuoto su tutte le track): frame nero — in anteprima
-   generato su CPU (`vv-render/src/generator.rs`), che resta anche per il
-   caso "solo clip SolidColor".
+6. Senza clip video (vuoto su tutte le track): frame nero, la composizione
+   di uno stack vuoto.
 
 Non c'è ancora opacità né blend-mode per-clip: un layer opaco che copre
 tutto il frame occlude quelli sotto, l'alpha in gioco è solo quella delle
 bande di letterbox.
-Text overlay (`vv-render/src/text.rs`) non implementato.
 
 ## Pipeline audio
 
-- Decode (ffmpeg, `vv_media::decode_audio_track`) → resample lineare a
-  48 kHz e conversione ai canali del mix (`vv_audio::mixer::prepare_mix_buffer`)
+- Decode a blocchi (ffmpeg, `vv_media::decode_audio_streams_streaming`) con
+  resample swresample a 48 kHz → conversione ai canali del mix
+  (`vv_audio::remix_channels_into`)
   → mix delle track audio non muted con gain keyframeato valutato a blocchi
   da 800 campioni (`mix_range`) → output `cpal`.
 - Anteprima ed export usano la stessa `mix_range`: l'export mixa a 2 canali,
@@ -217,10 +217,13 @@ Project); }` in `vv-core/src/command.rs`. Ogni comando cattura lo stato
 "prima" al momento dell'esecuzione; `History` tiene gli stack undo/redo e una
 `generation` che cambia a ogni modifica (i worker la confrontano per sapere
 quando riallinearsi). Più comandi in un solo passo: `CompositeCommand`.
-Comandi: `InsertClip`, `LiftDelete`, `RippleDeleteAllTracks`,
-`RippleDeleteGap`, `MoveClip`, `MoveClips`, `TrimClip`, `SplitClip`,
-`LinkClips`, `UnlinkClip`, `AddTrack`, `RemoveTrack`, `SetClipTransform`,
-`SetClipGain`, `SetClipColor`, `UpsertKeyframe`, `RemoveKeyframe`.
+Comandi: `InsertClip`, `LiftDelete`, `RippleDeleteGap`, `MoveClips`,
+`TrimClip`, `SplitClip`, `LinkClips`, `UnlinkClip`, `AddTrack`,
+`RemoveTrack`, `SetClipColor`, `UpsertKeyframe`, `RemoveKeyframe`,
+`RemoveMedia`, `RelinkMedia`; i valori statici di una clip (parametri del
+transform, flip, gain, titolo) passano da `SetClipValue` (`set_clip_*`).
+`insert_overwriting` libera lo spazio sotto le clip inserite (incolla,
+duplica, drop dal media pool).
 
 ## Threading
 
@@ -245,7 +248,7 @@ vibevideo/
   crates/
     vv-core/     # modello dati, comandi, undo/redo, persistenza RON
     vv-media/    # probe, decode, cache frame, proxy, waveform, encode
-    vv-render/   # compositor wgpu, shader wgsl, generatori
+    vv-render/   # compositor wgpu, shader wgsl, testo
     vv-audio/    # mixer, resample, time-stretch, output cpal
     vv-app/      # egui UI (timeline, viewer, pannelli), playback, export
 ```
@@ -283,6 +286,8 @@ Fatto:
   un solo comando (`CompositeCommand`, quindi un solo undo).
 - Clip con fps diverso da quello della timeline conformate
   all'inserimento (`Clip::rate`), in anteprima e in export.
+- Clip di testo (`ClipSource::Text`): font, stile, colore, allineamento,
+  ombra e sfondo dal pannello proprietà.
 - Proxy e waveform in background.
 - Media solo audio (wav, mp3, flac…): fps nominale `AUDIO_ONLY_FPS`, niente
   proxy né miniatura, in timeline solo clip audio.
@@ -304,7 +309,6 @@ Fatto:
 
 Non ancora:
 - Speed change per-clip (`EffectStack::speed`) e time-remap.
-- Text overlay.
 - Opacità/blend per-clip.
 
 ## Setup ambiente

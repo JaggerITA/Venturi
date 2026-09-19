@@ -5,6 +5,8 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use crate::worker::Worker;
+
 /// Larghezza in pixel delle miniature generate.
 pub const THUMBNAIL_WIDTH: u32 = 96;
 
@@ -15,17 +17,15 @@ struct Job {
 }
 
 pub struct ThumbnailWorker {
-    tx: Option<mpsc::Sender<Job>>,
+    worker: Worker<Job>,
     rx: mpsc::Receiver<(u64, Option<vv_media::Thumbnail>)>,
     pending: usize,
-    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ThumbnailWorker {
     pub fn spawn() -> Self {
-        let (tx, job_rx) = mpsc::channel::<Job>();
         let (result_tx, rx) = mpsc::channel();
-        let handle = std::thread::spawn(move || {
+        let worker = Worker::spawn(move |job_rx: mpsc::Receiver<Job>| {
             while let Ok(job) = job_rx.recv() {
                 let thumb = vv_media::generate_thumbnail(&job.path, job.duration_secs, THUMBNAIL_WIDTH)
                     .inspect_err(|e| {
@@ -41,23 +41,18 @@ impl ThumbnailWorker {
             }
         });
         Self {
-            tx: Some(tx),
+            worker,
             rx,
             pending: 0,
-            handle: Some(handle),
         }
     }
 
     pub fn enqueue(&mut self, path: PathBuf, content_hash: u64, duration_secs: f64) {
-        if let Some(tx) = &self.tx
-            && tx
-                .send(Job {
-                    path,
-                    content_hash,
-                    duration_secs,
-                })
-                .is_ok()
-        {
+        if self.worker.send(Job {
+            path,
+            content_hash,
+            duration_secs,
+        }) {
             self.pending += 1;
         }
     }
@@ -71,14 +66,5 @@ impl ThumbnailWorker {
 
     pub fn has_pending(&self) -> bool {
         self.pending > 0
-    }
-}
-
-impl Drop for ThumbnailWorker {
-    fn drop(&mut self) {
-        self.tx.take();
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
     }
 }

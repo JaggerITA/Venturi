@@ -70,19 +70,25 @@ fn downscale_to_rgba(frame: &FrameYuv420, max_width: u32) -> Thumbnail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn generate_thumbnail_scales_down_preserving_aspect_ratio() {
         let dir = std::env::temp_dir().join("vv-media-thumbnail-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("red.mp4");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "color=c=red:size=640x360:rate=25:duration=2"])
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:size=640x360:rate=25:duration=2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &path,
+        );
 
         let thumb = generate_thumbnail(&path, 2.0, 96).unwrap();
         assert_eq!((thumb.width, thumb.height), (96, 54));
@@ -100,12 +106,19 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-thumbnail-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("red.png");
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-f", "lavfi", "-i", "color=c=red:size=640x360:rate=1:duration=1"])
-            .args(["-frames:v", "1", "-update", "1", path.to_str().unwrap()])
-            .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success());
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:size=640x360:rate=1:duration=1",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &path,
+        );
 
         let sentinel_secs = vv_core::IMAGE_DURATION_FRAMES as f64 / crate::probe::IMAGE_FPS.as_f64();
         let thumb = generate_thumbnail(&path, sentinel_secs, 96).unwrap();

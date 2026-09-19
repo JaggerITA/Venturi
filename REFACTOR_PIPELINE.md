@@ -18,7 +18,7 @@ originale sono nella git history.
 | A3 | Soglia di seek fissa, non adatta al GOP reale | Soglia adattiva sul GOP osservato (§3.3) |
 | A4 | Un solo worker seriale senza priorità tra "serve ora" e prefetch | Fill in ordine di distanza dalla testina; il pool multi-worker resta da fare (§3.4) |
 | B1 | Mappatura clip→frame sorgente duplicata tra anteprima ed export | `Clip::source_frame_at` + trait `FrameProvider` |
-| B2 | Round-trip CPU→GPU→CPU del compositor a ogni frame di anteprima | `Compositor::render_frame_to_texture` registrato in `egui-wgpu` |
+| B2 | Round-trip CPU→GPU→CPU del compositor a ogni frame di anteprima | `Compositor::render_layers_to_texture` registrato in `egui-wgpu` |
 | B3 | Frame in cache in RGBA convertiti su CPU | Frame YUV420 in cache, conversione nello shader |
 | B4 | Rendering limitato a una track video e una audio fisse | N track video (compositate bottom->top in alpha-over) e N track audio (sommate) |
 | B5 | Audio per-clip invece di un mixer continuo | `vv_audio::Mixer`: somma tutte le track ed è il clock del playback |
