@@ -16,3 +16,13 @@ Evitare in particolare:
 - Ripetere nel commento quello che il codice già dice (il *cosa* invece
   del *perché*).
 - Premesse/contesto storico lunghi quando basterebbe una riga secca.
+
+## Gestione dei task (Vikunja)
+
+La lista dei task di questo progetto è tenuta su Vikunja. Quando si
+completa una feature:
+
+1. Creare il commit relativo alla feature.
+2. Segnare il task corrispondente come completato su Vikunja.
+3. Lasciare un commento sul task completato con l'hash breve del commit
+   git relativo (es. `849a7f8`).
