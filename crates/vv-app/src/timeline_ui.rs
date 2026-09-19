@@ -2718,7 +2718,9 @@ fn sync_timeline_scroll(
 
     let max_offset_x = (content_width - viewport_width).max(0.0);
     let dt = ctx.input(|i| i.stable_dt).min(0.1);
-    if !kinetic_scroll_enabled {
+    // In riproduzione la vista segue la testina: un'inerzia residua la
+    // farebbe scivolare via dal punto in cui l'ha appena centrata sopra.
+    if !kinetic_scroll_enabled || playback_active {
         state.hscroll_vel = 0.0;
     }
     let hovering_panel = ctx
@@ -2738,8 +2740,11 @@ fn sync_timeline_scroll(
             scroll_state.offset.x = (scroll_state.offset.x - wheel_x).clamp(0.0, max_offset_x);
             scroll_state.store(ctx, scroll_id);
         }
-        state.hscroll_vel =
-            if kinetic_scroll_enabled && dt > 0.0 { -KINETIC_VELOCITY_GAIN * wheel_x / dt } else { 0.0 };
+        state.hscroll_vel = if kinetic_scroll_enabled && !playback_active && dt > 0.0 {
+            -KINETIC_VELOCITY_GAIN * wheel_x / dt
+        } else {
+            0.0
+        };
         // Consumata qui: la ScrollArea non deve riapplicarla nel suo `show`.
         ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
     } else if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
