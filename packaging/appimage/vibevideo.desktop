@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=VibeVideo
+Comment=Video editor
+Exec=vv-app
+Icon=vibevideo
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;

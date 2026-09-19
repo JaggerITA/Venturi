@@ -75,6 +75,39 @@ cargo build -p vv-app --release  # release (ottimizzato, molto più lento da com
 Il primo build è lento (bindgen di `ffmpeg-next` + compilazione di `wgpu`);
 i successivi sono incrementali.
 
+### AppImage
+
+```sh
+scripts/build-appimage.sh
+```
+
+Produce `target/appimage/VibeVideo-<arch>.AppImage` con dentro FFmpeg
+compilato da sorgente (librerie condivise, con libx264, zlib e NVENC) e
+libx264: sulla macchina di destinazione non servono né FFmpeg né RPM Fusion.
+glibc, ALSA, Vulkan e l'eventuale driver NVIDIA (NVENC richiede >= 550)
+restano quelli di sistema.
+
+Servono `git`, `nasm`, `make`, un compilatore C, `curl` e zlib (header),
+oltre alle dipendenze non FFmpeg elencate sopra. FFmpeg viene compilato una
+volta sola in `target/ffmpeg-shared`.
+
+L'AppImage richiede una glibc almeno pari a quella della macchina di build:
+per la massima compatibilità conviene compilarla in un container con una
+distro vecchia, es. Debian bookworm (glibc 2.36):
+
+```sh
+podman run --rm -it -v "$PWD:/workspace:Z" -w /workspace docker.io/library/debian:bookworm bash
+# dentro il container:
+apt-get update && apt-get install -y curl ca-certificates git nasm make gcc g++ \
+  pkg-config clang libclang-dev zlib1g-dev libwayland-dev libxkbcommon-dev \
+  libx11-dev libvulkan-dev libasound2-dev file
+curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . ~/.cargo/env
+scripts/build-appimage.sh
+```
+
+L'AppImage è GPL (include libx264) e non include FDK-AAC: l'export usa
+l'encoder AAC nativo di FFmpeg.
+
 ## Eseguire
 
 ```sh
