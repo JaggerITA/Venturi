@@ -1301,6 +1301,24 @@ pub fn show_timeline(
         }
     }
 
+    // Un tocco nuovo sulla timeline interrompe subito qualunque inerzia
+    // residua, come su un vero touchpad: un click/tap (1 dito) o l'inizio
+    // di un gesto di scroll (2 dita, `TouchPhase::Start`) prima ancora che
+    // produca un delta.
+    if pointer_over_panel {
+        let touch_started = ui.input(|i| {
+            i.pointer.any_pressed()
+                || i.events.iter().any(|e| {
+                    matches!(e, egui::Event::MouseWheel { phase: egui::TouchPhase::Start, .. })
+                })
+        });
+        if touch_started {
+            state.video_scroll_vel = 0.0;
+            state.audio_scroll_vel = 0.0;
+            state.hscroll_vel = 0.0;
+        }
+    }
+
     let timeline_fps = project.timelines[timeline_id].fps;
     let fps = timeline_fps.as_f64();
     let px_per_frame = state.pixels_per_sec / fps.max(1.0) as f32;
