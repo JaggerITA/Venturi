@@ -4,9 +4,9 @@ pub mod otio;
 pub mod persistence;
 
 pub use command::{
-    AddTrack, Command, CommandLabel, CompositeCommand, GroupMark, History, InsertClip, KeyframeTarget,
+    AddTrack, Command, CommandLabel, CompositeCommand, FadeEdge, GroupMark, History, InsertClip, KeyframeTarget,
     KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
-    ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipValue, SetClipsDisabled,
+    ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
     SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_flip,
     set_clip_gain, set_clip_title, set_clip_transform_param,
@@ -1331,5 +1331,56 @@ mod tests {
             project.timelines[timeline].active_video_clips_at(5).is_empty(),
             "track video disattivata"
         );
+    }
+
+    #[test]
+    fn set_clip_fade_is_undoable_and_clamped_to_clip_length() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let clip = make_clip(&mut project, 0, 10);
+        let id = clip.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 0, clip }),
+        );
+
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipFade::new(timeline, 0, id, command::FadeEdge::In, 4)),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipFade::new(timeline, 0, id, command::FadeEdge::Out, 999)),
+        );
+        fn find<'p>(p: &'p Project, timeline: TimelineId, id: ClipId) -> &'p Clip {
+            p.timelines[timeline].clip(0, id).unwrap()
+        }
+        assert_eq!(find(&project, timeline, id).fade_in, 4);
+        assert_eq!(find(&project, timeline, id).fade_out, 10, "oltre la durata della clip si clampa");
+
+        history.undo(&mut project);
+        assert_eq!(find(&project, timeline, id).fade_out, 0);
+        history.undo(&mut project);
+        assert_eq!(find(&project, timeline, id).fade_in, 0);
+    }
+
+    #[test]
+    fn fade_multiplier_ramps_in_then_plateaus_then_ramps_out() {
+        let mut clip = Clip::from_source_range(
+            ClipId(0),
+            ClipSource::Media(MediaId::default()),
+            0,
+            100,
+            0,
+            Rational::one(),
+        );
+        clip.fade_in = 20;
+        clip.fade_out = 20;
+        assert_eq!(clip.fade_multiplier_at(0), 0.0);
+        assert!((clip.fade_multiplier_at(10) - 0.5).abs() < 1e-6);
+        assert_eq!(clip.fade_multiplier_at(20), 1.0);
+        assert_eq!(clip.fade_multiplier_at(50), 1.0);
+        assert!((clip.fade_multiplier_at(90) - 0.5).abs() < 1e-6);
+        assert_eq!(clip.fade_multiplier_at(100), 0.0);
     }
 }

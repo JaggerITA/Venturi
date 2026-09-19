@@ -20,6 +20,8 @@ struct TransformUniform {
     color: vec4<f32>,
     // RGBA del layer a colore pieno, al posto dei piani Y/U/V.
     solid: vec4<f32>,
+    // x: opacità dell'intero layer (dissolvenze di clip). y/z/w inutilizzati.
+    extra: vec4<f32>,
 };
 
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
@@ -141,6 +143,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Crop netto: si vede il layer sotto.
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
+    alpha = alpha * transform.extra.x;
 
     // U/V sono a metà risoluzione (4:2:0): campionarli alla stessa uv
     // del piano Y con un sampler bilineare fa anche l'upsampling della

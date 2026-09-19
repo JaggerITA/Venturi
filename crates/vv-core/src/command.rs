@@ -635,6 +635,74 @@ impl Command for TrimClip {
     }
 }
 
+/// Quale dissolvenza tocca un `SetClipFade`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeEdge {
+    In,
+    Out,
+}
+
+/// Imposta la durata (in frame di timeline) della dissolvenza in entrata o
+/// uscita di una clip, trascinata dall'handle in timeline.
+#[derive(Debug)]
+pub struct SetClipFade {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub edge: FadeEdge,
+    pub new_value: FrameIdx,
+    old: Option<FrameIdx>,
+}
+
+impl SetClipFade {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        edge: FadeEdge,
+        new_value: FrameIdx,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            edge,
+            new_value,
+            old: None,
+        }
+    }
+
+    fn field(edge: FadeEdge, clip: &mut Clip) -> &mut FrameIdx {
+        match edge {
+            FadeEdge::In => &mut clip.fade_in,
+            FadeEdge::Out => &mut clip.fade_out,
+        }
+    }
+}
+
+impl Command for SetClipFade {
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        let Some(clip) = track.clip_mut(self.clip_id) else {
+            return;
+        };
+        let clamped = self.new_value.clamp(0, clip.timeline_len);
+        let field = Self::field(self.edge, clip);
+        self.old = Some(*field);
+        *field = clamped;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old) = self.old else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clip_mut(self.clip_id) {
+            *Self::field(self.edge, clip) = old;
+        }
+    }
+}
+
 /// Scioglie l'intero gruppo collegato della clip, non solo lei.
 #[derive(Debug)]
 pub struct UnlinkClip {

@@ -2587,6 +2587,7 @@ impl eframe::App for VibeVideoApp {
                         frame: frame_provider::as_render_yuv_frame(&frame),
                         transform: vv_core::Transform::default(),
                         source_size: (frame.width, frame.height),
+                        opacity: 1.0,
                     };
                     self.show_composited(
                         &[layer],

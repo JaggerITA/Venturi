@@ -847,6 +847,14 @@ pub struct Clip {
     /// Esclusa da compositing e mix, ma resta in timeline.
     #[serde(default)]
     pub disabled: bool,
+    /// Durata della dissolvenza in entrata, in frame di timeline dall'inizio
+    /// della clip. 0 = nessuna.
+    #[serde(default)]
+    pub fade_in: FrameIdx,
+    /// Durata della dissolvenza in uscita, in frame di timeline dalla fine
+    /// della clip. 0 = nessuna.
+    #[serde(default)]
+    pub fade_out: FrameIdx,
 }
 
 impl Clip {
@@ -872,6 +880,8 @@ impl Clip {
             audio_stream_index: 0,
             rate,
             disabled: false,
+            fade_in: 0,
+            fade_out: 0,
         }
     }
 
@@ -929,6 +939,28 @@ impl Clip {
         self.timeline_len = (end - self.timeline_start).max(1);
         self.source_offset = convert_frames(self.source_offset, from, to);
         self.rate = rate;
+    }
+
+    /// Moltiplicatore di opacità/volume a `timeline_frame` per le
+    /// dissolvenze: rampa lineare 0→1 su `fade_in` frame dall'inizio,
+    /// rampa 1→0 su `fade_out` frame dalla fine, prodotto delle due (se si
+    /// sovrappongono si sottraggono a vicenda, come in qualsiasi NLE).
+    pub fn fade_multiplier_at(&self, timeline_frame: FrameIdx) -> f32 {
+        let len = self.timeline_len.max(1);
+        let fade_in = self.fade_in.clamp(0, len);
+        let fade_out = self.fade_out.clamp(0, len);
+        let pos = (timeline_frame - self.timeline_start).clamp(0, len);
+        let in_ramp = if fade_in > 0 {
+            (pos as f32 / fade_in as f32).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let out_ramp = if fade_out > 0 {
+            ((len - pos) as f32 / fade_out as f32).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        in_ramp * out_ramp
     }
 }
 

@@ -70,16 +70,21 @@ pub enum Layer<'a> {
         /// pixel del `Transform`: non quella di `frame`, che può essere un
         /// proxy a risoluzione ridotta.
         source_size: (u32, u32),
+        /// Moltiplicatore di alpha di tutto il layer (dissolvenze di clip):
+        /// 1.0 = nessuna attenuazione.
+        opacity: f32,
     },
     Solid {
         color: vv_core::Rgba,
         transform: Transform,
+        opacity: f32,
     },
     /// Titolo: rasterizzato alla risoluzione di output (vedi `text`), poi
     /// trattato come un `Solid` grande quanto la timeline.
     Text {
         title: &'a vv_core::TitleParams,
         transform: Transform,
+        opacity: f32,
     },
 }
 
@@ -132,6 +137,8 @@ struct TransformUniform {
     anchor_flip: [f32; 4],
     color: [f32; 4],
     solid: [f32; 4],
+    /// x: opacità dell'intero layer (dissolvenze di clip). y/z/w inutilizzati.
+    extra: [f32; 4],
 }
 
 impl TransformUniform {
@@ -143,6 +150,7 @@ impl TransformUniform {
         output: OutputFrame,
         source_size: (u32, u32),
         fill: Fill,
+        opacity: f32,
     ) -> Self {
         let (mode, solid) = match fill {
             Fill::Video => (0.0, None),
@@ -201,6 +209,7 @@ impl TransformUniform {
                     c.a.clamp(0.0, 1.0),
                 ]
             }),
+            extra: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
         }
     }
 }
@@ -493,6 +502,7 @@ impl Compositor {
                     frame,
                     transform,
                     source_size,
+                    opacity,
                 } => vec![self.layer_bind_group(
                     &mut planes,
                     frame,
@@ -501,9 +511,10 @@ impl Compositor {
                     *source_size,
                     (frame.width, frame.height),
                     Fill::Video,
+                    *opacity,
                 )],
                 // Il colore arriva dall'uniform: i piani sono solo segnaposto.
-                Layer::Solid { color, transform } => vec![self.layer_bind_group(
+                Layer::Solid { color, transform, opacity } => vec![self.layer_bind_group(
                     &mut planes,
                     &SOLID_PLACEHOLDER,
                     transform,
@@ -511,8 +522,9 @@ impl Compositor {
                     output.timeline_size,
                     output.timeline_size,
                     Fill::Solid(*color),
+                    *opacity,
                 )],
-                Layer::Text { title, transform } => {
+                Layer::Text { title, transform, opacity } => {
                     let render = crate::text::render_title(
                         title,
                         output.timeline_size,
@@ -536,6 +548,7 @@ impl Compositor {
                                 output.timeline_size,
                                 output.timeline_size,
                                 Fill::Mask(*color),
+                                *opacity,
                             )
                         })
                         .collect()
@@ -592,6 +605,7 @@ impl Compositor {
         source_size: (u32, u32),
         fit_size: (u32, u32),
         fill: Fill,
+        opacity: f32,
     ) -> wgpu::BindGroup {
         let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
         let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
@@ -611,6 +625,7 @@ impl Compositor {
             output,
             source_size,
             fill,
+            opacity,
         );
         let uniform_buffer = self
             .device
@@ -837,6 +852,7 @@ impl Compositor {
                 frame: frame.borrowed(),
                 transform: *transform,
                 source_size: (frame.width, frame.height),
+                opacity: 1.0,
             }],
             output,
         )
@@ -854,6 +870,7 @@ impl Compositor {
                 frame: frame.borrowed(),
                 transform: *transform,
                 source_size: (frame.width, frame.height),
+                opacity: 1.0,
             }],
             output,
         )
@@ -1262,6 +1279,7 @@ mod tests {
                 frame: input.as_yuv_frame(),
                 transform,
                 source_size: (1920, 1080),
+                opacity: 1.0,
             }],
             OutputFrame::scaled(16, 16, (1920, 1080)),
         );
@@ -1379,11 +1397,13 @@ mod tests {
                     frame: below.as_yuv_frame(),
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
+                    opacity: 1.0,
                 },
                 Layer::Video {
                     frame: above.as_yuv_frame(),
                     transform: Transform::default(),
                     source_size: (above.width, above.height),
+                    opacity: 1.0,
                 },
             ],
             OutputFrame::exact(32, 16),
@@ -1408,10 +1428,12 @@ mod tests {
                     frame: below.as_yuv_frame(),
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
+                    opacity: 1.0,
                 },
                 Layer::Solid {
                     color: RED,
                     transform: Transform::default(),
+                    opacity: 1.0,
                 },
             ],
             OutputFrame::exact(16, 16),
@@ -1432,6 +1454,7 @@ mod tests {
             &[Layer::Text {
                 title: &title,
                 transform: Transform::default(),
+                opacity: 1.0,
             }],
             OutputFrame::exact(160, 90),
         );
@@ -1460,10 +1483,12 @@ mod tests {
                 Layer::Solid {
                     color: RED,
                     transform: Transform::default(),
+                    opacity: 1.0,
                 },
                 Layer::Text {
                     title: &title,
                     transform: Transform::default(),
+                    opacity: 1.0,
                 },
             ],
             OutputFrame::exact(160, 90),
@@ -1492,6 +1517,7 @@ mod tests {
                     position: [4.0, 0.0],
                     ..Transform::default()
                 },
+                opacity: 1.0,
             }],
             OutputFrame::scaled(8, 4, (16, 8)),
         );
@@ -1508,6 +1534,7 @@ mod tests {
             &[Layer::Solid {
                 color: RED,
                 transform: Transform::default(),
+                opacity: 1.0,
             }],
             OutputFrame::exact(5, 3),
         );
@@ -1525,6 +1552,7 @@ mod tests {
             [Layer::Solid {
                 color,
                 transform: Transform::default(),
+                opacity: 1.0,
             }]
         };
         let fresh = |color, w, h| {

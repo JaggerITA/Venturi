@@ -143,6 +143,8 @@ impl TimelineAudio {
                 buffer,
                 gain_db: Keyframed::constant(0.0),
                 clip_fps: fps,
+                fade_in: 0,
+                fade_out: 0,
             })
             .collect();
         self.mix = Arc::new(MixSnapshot {

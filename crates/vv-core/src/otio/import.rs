@@ -306,6 +306,8 @@ impl Importer<'_> {
             audio_stream_index,
             rate,
             disabled: false,
+            fade_in: 0,
+            fade_out: 0,
         };
         (duration, Some((clip, is_foreign)))
     }

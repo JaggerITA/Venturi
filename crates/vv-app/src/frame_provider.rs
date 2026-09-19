@@ -63,14 +63,17 @@ pub enum OwnedLayer {
         transform: Transform,
         /// Risoluzione nativa del media (non del proxy): le unità del crop.
         source_size: (u32, u32),
+        opacity: f32,
     },
     Solid {
         color: Rgba,
         transform: Transform,
+        opacity: f32,
     },
     Text {
         title: TitleParams,
         transform: Transform,
+        opacity: f32,
     },
 }
 
@@ -81,18 +84,22 @@ impl OwnedLayer {
                 frame,
                 transform,
                 source_size,
+                opacity,
             } => vv_render::Layer::Video {
                 frame: as_render_yuv_frame(frame),
                 transform: *transform,
                 source_size: *source_size,
+                opacity: *opacity,
             },
-            OwnedLayer::Solid { color, transform } => vv_render::Layer::Solid {
+            OwnedLayer::Solid { color, transform, opacity } => vv_render::Layer::Solid {
                 color: *color,
                 transform: *transform,
+                opacity: *opacity,
             },
-            OwnedLayer::Text { title, transform } => vv_render::Layer::Text {
+            OwnedLayer::Text { title, transform, opacity } => vv_render::Layer::Text {
                 title,
                 transform: *transform,
+                opacity: *opacity,
             },
         }
     }
@@ -109,6 +116,7 @@ pub fn clip_layer(
 ) -> Result<Option<OwnedLayer>, String> {
     let source_frame = clip.source_frame_at(frame);
     let transform = clip.effects.transform.value_at(source_frame);
+    let opacity = clip.fade_multiplier_at(frame);
     Ok(match &clip.source {
         ClipSource::SolidColor => Some(OwnedLayer::Solid {
             color: clip
@@ -117,18 +125,20 @@ pub fn clip_layer(
                 .as_ref()
                 .map_or(Rgba::BLACK, |k| k.value_at(source_frame)),
             transform,
+            opacity,
         }),
         ClipSource::Text => clip
             .effects
             .title
             .clone()
-            .map(|title| OwnedLayer::Text { title, transform }),
+            .map(|title| OwnedLayer::Text { title, transform, opacity }),
         ClipSource::Media(_) => provider
             .frame_for(project, clip, frame)?
             .map(|frame| OwnedLayer::Video {
                 frame,
                 transform,
                 source_size: clip_source_size(project, clip, timeline_size),
+                opacity,
             }),
     })
 }

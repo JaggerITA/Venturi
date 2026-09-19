@@ -23,6 +23,10 @@ pub struct MixClip {
     pub buffer: Arc<Vec<f32>>,
     pub gain_db: Keyframed<f32>,
     pub clip_fps: f64,
+    /// Dissolvenze, in frame audio di timeline dall'inizio/dalla fine di
+    /// `len` (vedi `Clip::fade_multiplier_at`, stessa semantica sui sample).
+    pub fade_in: u64,
+    pub fade_out: u64,
 }
 
 pub struct MixSnapshot {
@@ -73,6 +77,8 @@ impl MixSnapshot {
                 if len == 0 {
                     continue;
                 }
+                let fade_in = seconds_to_frames(clip.fade_in as f64 / fps, sample_rate).min(len);
+                let fade_out = seconds_to_frames(clip.fade_out as f64 / fps, sample_rate).min(len);
                 clips.push(MixClip {
                     start: timeline_frame_to_sample(clip.timeline_start, fps, sample_rate),
                     len,
@@ -80,6 +86,8 @@ impl MixSnapshot {
                     buffer,
                     gain_db: clip.effects.gain_db.clone(),
                     clip_fps,
+                    fade_in,
+                    fade_out,
                 });
             }
         }
@@ -121,7 +129,8 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
             let in_clip = f - clip.start;
             let block = in_clip / GAIN_BLOCK_FRAMES;
             let block_end = (clip.start + (block + 1) * GAIN_BLOCK_FRAMES).min(to);
-            let gain = block_gain_linear(clip, block, snapshot.sample_rate);
+            let gain = block_gain_linear(clip, block, snapshot.sample_rate)
+                * fade_multiplier(clip, in_clip);
 
             let src = ((clip.source_offset + in_clip) as usize) * ch;
             let dst = ((f - start) as usize) * ch;
@@ -135,6 +144,23 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
             f = block_end;
         }
     }
+}
+
+/// Rampa lineare delle dissolvenze a `in_clip` sample dall'inizio della
+/// clip, stessa semantica di `Clip::fade_multiplier_at` ma in sample audio.
+fn fade_multiplier(clip: &MixClip, in_clip: u64) -> f32 {
+    let in_ramp = if clip.fade_in > 0 {
+        (in_clip as f32 / clip.fade_in as f32).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let out_ramp = if clip.fade_out > 0 {
+        let from_end = clip.len.saturating_sub(in_clip);
+        (from_end as f32 / clip.fade_out as f32).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    in_ramp * out_ramp
 }
 
 fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
@@ -893,4 +919,65 @@ mod tests {
         assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
     }
 
+    fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
+        MixClip {
+            start: 0,
+            len: 1000,
+            source_offset: 0,
+            buffer: Arc::new(Vec::new()),
+            gain_db: Keyframed::constant(0.0),
+            clip_fps: 10.0,
+            fade_in,
+            fade_out,
+        }
+    }
+
+    #[test]
+    fn fade_multiplier_ramps_linearly_in_and_out() {
+        let clip = fade_test_clip(100, 200);
+        assert_eq!(fade_multiplier(&clip, 0), 0.0);
+        assert!((fade_multiplier(&clip, 50) - 0.5).abs() < 1e-6);
+        assert_eq!(fade_multiplier(&clip, 100), 1.0);
+        assert_eq!(fade_multiplier(&clip, 500), 1.0, "sul plateau resta a volume pieno");
+        assert!((fade_multiplier(&clip, 900) - 0.5).abs() < 1e-6, "200 sample dalla fine");
+        assert_eq!(fade_multiplier(&clip, 1000), 0.0);
+    }
+
+    #[test]
+    fn no_fade_stays_at_full_volume() {
+        let clip = fade_test_clip(0, 0);
+        assert_eq!(fade_multiplier(&clip, 0), 1.0);
+        assert_eq!(fade_multiplier(&clip, 500), 1.0);
+        assert_eq!(fade_multiplier(&clip, 1000), 1.0);
+    }
+
+    #[test]
+    fn overlapping_fades_multiply_instead_of_dipping_below_either_ramp_alone() {
+        // Fade in e out coprono tutta la clip: al centro ogni rampa vale
+        // 0.5, il prodotto (non il minimo) è quello che si vede.
+        let clip = fade_test_clip(1000, 1000);
+        assert!((fade_multiplier(&clip, 500) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
+        let (project, a, _) = project();
+        // 3 blocchi di GAIN_BLOCK_FRAMES: il fade copre esattamente il primo.
+        let blocks = 3;
+        let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
+        let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
+        clip.fade_in = (GAIN_BLOCK_FRAMES / 10) as FrameIdx;
+        let tl = timeline(vec![audio_track(vec![clip])]);
+        let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, |_, _| {
+            Some(Arc::new(vec![0.5; len_frames]))
+        });
+        let mut out = vec![9.0; len_frames];
+        mix_range(&snap, 0, &mut out);
+        let block = GAIN_BLOCK_FRAMES as usize;
+        assert!(out[..block].iter().all(|&s| s == 0.0), "primo blocco silenziato dal fade-in");
+        assert!(
+            out[block..].iter().all(|&s| s == 0.5),
+            "oltre il fade-in il gain resta invariato"
+        );
+    }
 }
