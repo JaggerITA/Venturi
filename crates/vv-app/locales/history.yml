@@ -68,6 +68,10 @@ history.split_clips:
   en: "Split clips"
   it: "Dividi clip"
 
+history.fade:
+  en: "Fade"
+  it: "Dissolvenza"
+
 history.transform:
   en: "Transform"
   it: "Trasformazione"

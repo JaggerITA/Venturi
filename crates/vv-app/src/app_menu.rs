@@ -447,6 +447,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::UnlinkClips => t!("history.unlink_clips"),
         L::LinkClips => t!("history.link_clips"),
         L::SplitClips => t!("history.split_clips"),
+        L::Fade => t!("history.fade"),
         L::Transform => t!("history.transform"),
         L::Flip => t!("history.flip"),
         L::Gain => t!("history.gain"),

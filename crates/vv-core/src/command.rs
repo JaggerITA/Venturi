@@ -35,6 +35,7 @@ pub enum CommandLabel {
     UnlinkClips,
     LinkClips,
     SplitClips,
+    Fade,
     Transform,
     Flip,
     Gain,
@@ -681,6 +682,10 @@ impl SetClipFade {
 }
 
 impl Command for SetClipFade {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::Fade
+    }
+
     fn apply(&mut self, project: &mut Project) {
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         let Some(clip) = track.clip_mut(self.clip_id) else {
