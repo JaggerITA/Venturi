@@ -358,6 +358,7 @@ struct VibeVideoApp {
     /// `None` nei test: le impostazioni non vengono mai scritte su disco.
     settings_path: Option<PathBuf>,
     settings_dialog: Option<settings_dialog::SettingsDialog>,
+    about_open: bool,
     #[cfg(target_os = "linux")]
     wayland_dnd: Option<wayland_dnd::WaylandDnd>,
 }
@@ -431,6 +432,7 @@ impl Default for VibeVideoApp {
             settings: settings::Settings::default(),
             settings_path: None,
             settings_dialog: None,
+            about_open: false,
             #[cfg(target_os = "linux")]
             wayland_dnd: None,
         }
@@ -2328,6 +2330,7 @@ impl eframe::App for VibeVideoApp {
 
         self.show_export_dialog(ui);
         self.show_settings_dialog(ui.ctx());
+        self.show_about_dialog(ui.ctx());
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
         self.show_relink_message(ui);

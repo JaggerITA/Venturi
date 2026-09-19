@@ -45,6 +45,24 @@ sudo apt install \
   libasound2-dev
 ```
 
+### Versione di libav
+
+Se il tuo sistema dispone di una versione differente rispetto a quella linkata, es:
+
+```
+error while loading shared libraries: libavutil.so.60: cannot open shared object file: No such file or directory
+```
+
+è possibile forzare una versione specifica di `libavutil` tramite la variabile `LD_LIBRARY_PATH`, es:
+
+```
+export LD_LIBRARY_PATH="/percorso/libreria/locale/:$LD_LIBRARY_PATH"
+./vv-app
+```
+
+per utilizzare una versione differente locale.
+
+
 ## Build
 
 Dalla root del workspace:

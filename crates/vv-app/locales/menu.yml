@@ -183,3 +183,23 @@ menu.audiometer_hint:
 menu.fullscreen_player:
   en: "Fullscreen player"
   it: "Player a schermo intero"
+
+menu.help:
+  en: "Help"
+  it: "Aiuto"
+
+menu.about:
+  en: "About VibeVideo..."
+  it: "Informazioni su VibeVideo..."
+
+about.title:
+  en: "About VibeVideo"
+  it: "Informazioni su VibeVideo"
+
+about.version:
+  en: "Version %{version}"
+  it: "Versione %{version}"
+
+about.author:
+  en: "Author: %{author}"
+  it: "Autore: %{author}"

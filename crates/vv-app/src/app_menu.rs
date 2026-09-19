@@ -367,6 +367,13 @@ impl VibeVideoApp {
                         ui.close();
                     }
                 });
+
+                ui.menu_button(t!("menu.help"), |ui| {
+                    if ui.button(t!("menu.about")).clicked() {
+                        self.about_open = true;
+                        ui.close();
+                    }
+                });
             });
         });
 
@@ -374,5 +381,21 @@ impl VibeVideoApp {
             self.viewer_fullscreen = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         }
+    }
+
+    pub(crate) fn show_about_dialog(&mut self, ctx: &egui::Context) {
+        egui::Window::new(t!("about.title"))
+            .open(&mut self.about_open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("VibeVideo");
+                    ui.label(t!("about.version", version = env!("VV_GIT_HASH")));
+                    ui.add_space(8.0);
+                    ui.label(t!("about.author", author = "Moreno Razzoli a.k.a. Morrolinux"));
+                });
+            });
     }
 }
