@@ -1664,6 +1664,14 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
+        if let Some((key, edge)) = self.timeline_state.selected_transition {
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::set_clip_transition(timeline_id, key.0, key.1, edge, None)),
+            );
+            self.timeline_state.selected_transition = None;
+            return;
+        }
         if self.timeline_state.selected.is_empty() {
             return;
         }

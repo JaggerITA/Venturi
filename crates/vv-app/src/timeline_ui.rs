@@ -61,6 +61,14 @@ pub struct TimelineState {
     trim: Option<TrimState>,
     fade_drag: Option<FadeDragState>,
     transition_drag: Option<TransitionDragState>,
+    /// Alt+drag sul corpo (non sulla maniglia) di un marker di transizione,
+    /// in corso: duplica invece di ridimensionare. Non muta nulla da sé — il
+    /// payload DnD (`vv_core::Transition`) parte già impostato da
+    /// `begin_transition_duplicate_drag` e da lì lo tiene vivo
+    /// `egui::DragAndDrop` finché dura il drag; questo campo serve solo a
+    /// sapere quando il gesto finisce (vedi il ramo `drag_stopped`), per la
+    /// clip di origine.
+    transition_duplicate_drag: Option<ClipId>,
     volume_drag: Option<VolumeDragState>,
     /// Altezza del riquadro Video se l'utente ha trascinato il separatore
     /// (vedi `GROUP_DIVIDER_HEIGHT`); `None` = gruppi centrati di default.
@@ -138,6 +146,7 @@ struct TransitionDragState {
     original_value: FrameIdx,
     accum_px: f32,
 }
+
 
 /// Trascinamento verticale della riga del volume su una clip audio: come
 /// `FadeDragState`, sempre locale alla singola clip, mai una selezione
@@ -260,6 +269,7 @@ impl Default for TimelineState {
             trim: None,
             fade_drag: None,
             transition_drag: None,
+            transition_duplicate_drag: None,
             volume_drag: None,
             video_pane_height: None,
             video_scroll: 0.0,
@@ -401,6 +411,16 @@ enum PendingAction {
         clip_id: ClipId,
         edge: FadeEdge,
         new_value: FrameIdx,
+    },
+    /// Una transizione esistente è stata duplicata (Alt+drag dal suo
+    /// corpo) e rilasciata vicino a un bordo: a differenza di
+    /// `ApplyTransition`, non riparte dai default — mantiene gli stessi
+    /// parametri dell'originale.
+    DuplicateTransition {
+        track_index: usize,
+        clip_id: ClipId,
+        edge: FadeEdge,
+        transition: vv_core::Transition,
     },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
@@ -1271,15 +1291,17 @@ impl TimelineDrag {
 
     pub fn released(resp: &egui::Response) -> Option<Self> {
         // `take_payload` scarta il payload anche se il tipo non combacia:
-        // va scelto il tipo giusto prima di prenderlo. Un `FilterKind` o una
-        // `TransitionKind` non sono mai un `TimelineDrag` (si rilasciano solo
-        // su una clip, gestito nel loop delle clip): se è uno di quelli in
+        // va scelto il tipo giusto prima di prenderlo. Un `FilterKind`, una
+        // `TransitionKind` o una `Transition` intera (duplicazione via
+        // Alt+drag) non sono mai un `TimelineDrag` (si rilasciano solo su
+        // una clip, gestito nel loop delle clip): se è uno di quelli in
         // corso, uscire subito, altrimenti il ramo `MediaDragSet` sotto lo
         // prenderebbe e distruggerebbe senza riuscire a interpretarlo, e il
         // rilascio sulla clip non vedrebbe più nulla (vedi la stessa svista
         // già commessa e riparata per `FilterKind`).
         if egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(&resp.ctx)
             || egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(&resp.ctx)
+            || egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(&resp.ctx)
         {
             return None;
         }
@@ -1822,10 +1844,12 @@ pub fn show_timeline(
                 }
 
                 // Stesso ghost a ingranaggio dei filtri: anche una
-                // transizione atterra solo su una clip esistente, mai su
-                // uno spazio vuoto.
+                // transizione (dal pannello o duplicata con Alt+drag)
+                // atterra solo su una clip esistente, mai su uno spazio
+                // vuoto.
                 if pointer_over_panel
-                    && egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(ui.ctx())
+                    && (egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(ui.ctx())
+                        || egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(ui.ctx()))
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 {
                     paint_gear_icon(&ghost_painter, pos + egui::vec2(14.0, 14.0), 10.0, egui::Color32::WHITE);
@@ -2240,15 +2264,8 @@ pub fn show_timeline(
                         && egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(ui.ctx())
                     {
                         let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
-                        let hover_edge = ui.input(|i| i.pointer.hover_pos()).and_then(|pos| {
-                            if pos.x - clip_rect.left() <= drop_zone_px {
-                                Some(FadeEdge::In)
-                            } else if clip_rect.right() - pos.x <= drop_zone_px {
-                                Some(FadeEdge::Out)
-                            } else {
-                                None
-                            }
-                        });
+                        let hover_edge = ui.input(|i| i.pointer.hover_pos())
+                            .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px));
                         if resp.dnd_hover_payload::<vv_core::TransitionKind>().is_some()
                             && let Some(edge) = hover_edge
                         {
@@ -2266,6 +2283,40 @@ pub fn show_timeline(
                                 clip_id: visual.clip.id,
                                 edge,
                                 kind: *kind,
+                            });
+                        }
+                    }
+
+                    // Alt+drag di una transizione esistente (duplicazione, vedi
+                    // `begin_transition_duplicate_drag`): stesso payload di un
+                    // drop dal pannello Effects ma con `vv_core::Transition`
+                    // intero invece di `TransitionKind`, per mantenerne i
+                    // parametri (durata, direzione, ease, curva) invece di
+                    // ripartire dai default. Stessa guardia, stesso motivo.
+                    if !visual.locked
+                        && track_kinds[visual.track_index] == TrackKind::Video
+                        && egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(ui.ctx())
+                    {
+                        let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
+                        let hover_edge = ui.input(|i| i.pointer.hover_pos())
+                            .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px));
+                        if resp.dnd_hover_payload::<vv_core::Transition>().is_some()
+                            && let Some(edge) = hover_edge
+                        {
+                            let x = match edge {
+                                FadeEdge::In => clip_rect.left() + drop_zone_px,
+                                FadeEdge::Out => clip_rect.right() - drop_zone_px,
+                            };
+                            paint_transition_marker(&painter, clip_rect, edge, x, false);
+                        }
+                        if let Some(transition) = resp.dnd_release_payload::<vv_core::Transition>()
+                            && let Some(edge) = hover_edge
+                        {
+                            pending = Some(PendingAction::DuplicateTransition {
+                                track_index: visual.track_index,
+                                clip_id: visual.clip.id,
+                                edge,
+                                transition: (*transition).clone(),
                             });
                         }
                     }
@@ -2448,6 +2499,24 @@ pub fn show_timeline(
                         let press_pos = ui.input(|i| i.pointer.press_origin());
                         let transition_handle =
                             press_pos.and_then(|p| transition_handle_at(p, clip_rect, transition_in_x, transition_out_x));
+                        // Alt+drag sul corpo (non sulla maniglia) di un marker già
+                        // presente duplica invece di ridimensionare — la maniglia
+                        // resta prioritaria, come il fade ignora Alt sulla sua.
+                        let transition_duplicate_edge = if ui.input(|i| i.modifiers.alt) {
+                            press_pos.and_then(|p| {
+                                if transition_in_x.is_some_and(|x| transition_body_hit(p, clip_rect, FadeEdge::In, x)) {
+                                    Some(FadeEdge::In)
+                                } else if transition_out_x
+                                    .is_some_and(|x| transition_body_hit(p, clip_rect, FadeEdge::Out, x))
+                                {
+                                    Some(FadeEdge::Out)
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
                         let fade_zone = if show_fades {
                             press_pos.and_then(|p| fade_zone_at(p, clip_rect, fade_in_x, fade_out_x))
                         } else {
@@ -2455,6 +2524,8 @@ pub fn show_timeline(
                         };
                         match transition_handle {
                             Some(edge) => begin_transition_drag(state, visual, edge),
+                            None => match transition_duplicate_edge {
+                            Some(edge) => begin_transition_duplicate_drag(state, &resp, visual, edge),
                             None => match fade_zone {
                             Some(edge) => begin_fade_drag(state, visual, edge),
                             None => match press_pos.and_then(edge_at) {
@@ -2465,6 +2536,7 @@ pub fn show_timeline(
                                 None => {
                                     begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt))
                                 }
+                            },
                             },
                             },
                         }
@@ -2508,6 +2580,11 @@ pub fn show_timeline(
                                 new_value: transition_drag_value(td, visual.clip.timeline_len, px_per_frame),
                             });
                             transition_drag_finished = true;
+                        } else if state.transition_duplicate_drag == Some(visual.clip.id) {
+                            // Il drop vero (se c'è stato, su un'altra clip) è già
+                            // gestito da `dnd_release_payload` in quella clip;
+                            // qui resta solo da chiudere lo stato locale.
+                            state.transition_duplicate_drag = None;
                         } else if let Some(fd) = &state.fade_drag
                             && fd.clip_id == visual.clip.id
                         {
@@ -2985,6 +3062,23 @@ fn begin_transition_drag(state: &mut TimelineState, visual: &ClipVisual, edge: F
     });
 }
 
+/// Comincia un Alt+drag di duplicazione dal corpo di un marker di
+/// transizione: il payload DnD va impostato proprio qui, non in
+/// `resp.dragged()` come si potrebbe pensare per analogia col resto del
+/// file — `Response::dnd_set_drag_payload` agisce solo se `drag_started()`,
+/// non ad ogni frame di drag (la libreria lo tiene poi vivo da sé finché
+/// dura il drag, vedi `egui::DragAndDrop`).
+fn begin_transition_duplicate_drag(state: &mut TimelineState, resp: &egui::Response, visual: &ClipVisual, edge: FadeEdge) {
+    let transition = match edge {
+        FadeEdge::In => visual.clip.effects.transition_in.clone(),
+        FadeEdge::Out => visual.clip.effects.transition_out.clone(),
+    };
+    if let Some(transition) = transition {
+        resp.dnd_set_drag_payload(transition);
+    }
+    state.transition_duplicate_drag = Some(visual.clip.id);
+}
+
 /// Valore (in frame, clampato a 1..=durata della clip) dell'anteprima di un
 /// drag di transizione in corso: stessa convenzione di segno di
 /// `fade_drag_value` (trascinare l'estremità verso l'interno della clip
@@ -3056,6 +3150,20 @@ fn transition_body_hit(pos: egui::Pos2, clip_rect: egui::Rect, edge: FadeEdge, x
     match edge {
         FadeEdge::In => pos.x >= clip_rect.left() && pos.x <= x,
         FadeEdge::Out => pos.x <= clip_rect.right() && pos.x >= x,
+    }
+}
+
+/// Bordo di `clip_rect` più vicino a `pos`, entro `drop_zone_px` — condiviso
+/// dal drop di una `TransitionKind` dal pannello Effects e dal drop di una
+/// `Transition` intera (duplicazione via Alt+drag): stessa regola "solo
+/// vicino a un bordo" in entrambi i casi.
+fn transition_drop_edge(pos: egui::Pos2, clip_rect: egui::Rect, drop_zone_px: f32) -> Option<FadeEdge> {
+    if pos.x - clip_rect.left() <= drop_zone_px {
+        Some(FadeEdge::In)
+    } else if clip_rect.right() - pos.x <= drop_zone_px {
+        Some(FadeEdge::Out)
+    } else {
+        None
     }
 }
 
@@ -3643,12 +3751,12 @@ fn apply_pending_action(
         PendingAction::ApplyTransition { track_index, clip_id, edge, kind } => {
             let timeline = &project.timelines[timeline_id];
             if let Some(clip) = timeline.clip(track_index, clip_id) {
-                let default_duration = (timeline.fps.as_f64().round() as FrameIdx).clamp(1, clip.timeline_len.max(1));
+                let default_duration = ((timeline.fps.as_f64() / 2.0).round() as FrameIdx).clamp(1, clip.timeline_len.max(1));
                 let transition = vv_core::Transition {
                     kind,
                     duration: default_duration,
                     direction: vv_core::PushDirection::Right,
-                    ease: vv_core::Ease::None,
+                    ease: vv_core::Ease::InOut,
                     curve: 0.5,
                 };
                 history.do_command(
@@ -3676,6 +3784,19 @@ fn apply_pending_action(
                         Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
                     );
                 }
+            }
+        }
+        PendingAction::DuplicateTransition { track_index, clip_id, edge, mut transition } => {
+            if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
+                transition.duration = transition.duration.clamp(1, clip.timeline_len.max(1));
+                history.do_command(
+                    project,
+                    Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
+                );
+                state.selected.clear();
+                state.selection_anchor = None;
+                state.selected_gap = None;
+                state.selected_transition = Some(((track_index, clip_id), edge));
             }
         }
         PendingAction::Unlink(track_index, clip_id) => {
