@@ -49,12 +49,18 @@ pub struct TimelineState {
     /// Vuoto selezionato (track, inizio, fine), alternativo a `selected`:
     /// si chiude con ripple delete. Lo spazio in coda non è un vuoto.
     pub selected_gap: Option<(usize, FrameIdx, FrameIdx)>,
+    /// Transizione selezionata (bordo di una clip), alternativa a
+    /// `selected`: un click su di lei sostituisce qualunque selezione di
+    /// clip, anche multipla — il pannello proprietà mostra i suoi
+    /// controlli al posto di quelli della clip.
+    pub selected_transition: Option<(ClipKey, FadeEdge)>,
     /// Clip copiate (Ctrl+C in `main.rs`), pronte per essere incollate
     /// (Ctrl+V) alla posizione del playhead. Vuoto se non è ancora mai
     /// stato copiato nulla in questa sessione.
     pub clipboard: Vec<ClipboardEntry>,
     trim: Option<TrimState>,
     fade_drag: Option<FadeDragState>,
+    transition_drag: Option<TransitionDragState>,
     volume_drag: Option<VolumeDragState>,
     /// Altezza del riquadro Video se l'utente ha trascinato il separatore
     /// (vedi `GROUP_DIVIDER_HEIGHT`); `None` = gruppi centrati di default.
@@ -118,6 +124,17 @@ struct FadeDragState {
     track_index: usize,
     edge: FadeEdge,
     /// Valore originale (frame) di `fade_in`/`fade_out` prima del drag.
+    original_value: FrameIdx,
+    accum_px: f32,
+}
+
+/// Trascinamento dell'estremità di una transizione (durata): stessa forma
+/// di `FadeDragState`, stessa unica clip coinvolta.
+struct TransitionDragState {
+    clip_id: ClipId,
+    track_index: usize,
+    edge: FadeEdge,
+    /// Durata (frame) prima del drag.
     original_value: FrameIdx,
     accum_px: f32,
 }
@@ -195,6 +212,19 @@ const FADE_HANDLE_ZONE_HEIGHT: f32 = 14.0;
 /// Sotto questa larghezza la clip non mostra handle di fade: non ci
 /// sarebbe spazio per afferrarli senza scontrarsi col trim.
 const MIN_FADE_CLIP_WIDTH_PX: f32 = 20.0;
+/// Banda in basso alla clip riservata al marker delle transizioni: speculare
+/// alla banda di fade in alto, così le due non si contendono lo stesso hover.
+const TRANSITION_HANDLE_ZONE_HEIGHT: f32 = 14.0;
+/// Semi-larghezza della zona cliccabile attorno all'estremità (durata)
+/// trascinabile di una transizione, come `FADE_HANDLE_HIT_RADIUS`.
+const TRANSITION_HANDLE_HIT_RADIUS: f32 = 9.0;
+/// Entro quanti pixel dal bordo di una clip un drop di transizione viene
+/// accettato; oltre, il rilascio in mezzo alla clip non fa nulla.
+const TRANSITION_DROP_ZONE_PX: f32 = 40.0;
+/// Colore del marker di una transizione: anche l'evidenziazione del bordo
+/// durante il drag, così il colore anticipa cosa comparirà al rilascio.
+const TRANSITION_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 130, 235);
+const TRANSITION_SELECTED_COLOR: egui::Color32 = egui::Color32::from_rgb(190, 197, 255);
 /// Distanza verticale (px) entro cui il puntatore afferra la riga del
 /// volume di una clip audio.
 const VOLUME_LINE_HIT_PX: f32 = 5.0;
@@ -225,9 +255,11 @@ impl Default for TimelineState {
             drag: None,
             marquee: None,
             selected_gap: None,
+            selected_transition: None,
             clipboard: Vec::new(),
             trim: None,
             fade_drag: None,
+            transition_drag: None,
             volume_drag: None,
             video_pane_height: None,
             video_scroll: 0.0,
@@ -246,6 +278,7 @@ impl TimelineState {
         self.selected = selected;
         self.selection_anchor = anchor;
         self.selected_gap = None;
+        self.selected_transition = None;
     }
 
     /// Una clip sola (o nessuna), per "selection follows playhead".
@@ -268,13 +301,20 @@ impl TimelineState {
         {
             self.selected_gap = None;
         }
+        if self
+            .selected_transition
+            .is_some_and(|((track_index, _), _)| timeline.is_locked(track_index))
+        {
+            self.selected_transition = None;
+        }
     }
 
-    /// Svuota la selezione (clip e vuoto).
+    /// Svuota la selezione (clip, vuoto e transizione).
     pub fn clear_selection(&mut self) {
         self.selected.clear();
         self.selection_anchor = None;
         self.selected_gap = None;
+        self.selected_transition = None;
     }
 
     /// Zoom orizzontale ancorato alla testina.
@@ -343,6 +383,24 @@ enum PendingAction {
         track_index: usize,
         clip_id: ClipId,
         filter: vv_core::FilterKind,
+    },
+    /// Una transizione del pannello Effects è stata rilasciata vicino a un
+    /// bordo di questa clip: sostituisce quella già presente su quel bordo
+    /// (ridroppare accorcia/ripristina la durata di default), mai in coda a
+    /// una lista come i filtri — un bordo ne ha al più una.
+    ApplyTransition {
+        track_index: usize,
+        clip_id: ClipId,
+        edge: FadeEdge,
+        kind: vv_core::TransitionKind,
+    },
+    /// Nuova durata (in frame) della transizione di un bordo, dal drag della
+    /// sua estremità in timeline.
+    SetTransitionDuration {
+        track_index: usize,
+        clip_id: ClipId,
+        edge: FadeEdge,
+        new_value: FrameIdx,
     },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
@@ -1213,13 +1271,16 @@ impl TimelineDrag {
 
     pub fn released(resp: &egui::Response) -> Option<Self> {
         // `take_payload` scarta il payload anche se il tipo non combacia:
-        // va scelto il tipo giusto prima di prenderlo. Un `FilterKind` non è
-        // mai un `TimelineDrag` (si rilascia solo su una clip, gestito nel
-        // loop delle clip): se è quello in corso, uscire subito, altrimenti
-        // il ramo `MediaDragSet` sotto lo prenderebbe e distruggerebbe senza
-        // riuscire a interpretarlo, e il rilascio sulla clip non vedrebbe
-        // più nulla.
-        if egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(&resp.ctx) {
+        // va scelto il tipo giusto prima di prenderlo. Un `FilterKind` o una
+        // `TransitionKind` non sono mai un `TimelineDrag` (si rilasciano solo
+        // su una clip, gestito nel loop delle clip): se è uno di quelli in
+        // corso, uscire subito, altrimenti il ramo `MediaDragSet` sotto lo
+        // prenderebbe e distruggerebbe senza riuscire a interpretarlo, e il
+        // rilascio sulla clip non vedrebbe più nulla (vedi la stessa svista
+        // già commessa e riparata per `FilterKind`).
+        if egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(&resp.ctx)
+            || egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(&resp.ctx)
+        {
             return None;
         }
         if egui::DragAndDrop::has_payload_of_type::<Generator>(&resp.ctx) {
@@ -1760,6 +1821,16 @@ pub fn show_timeline(
                     paint_gear_icon(&ghost_painter, pos + egui::vec2(14.0, 14.0), 10.0, egui::Color32::WHITE);
                 }
 
+                // Stesso ghost a ingranaggio dei filtri: anche una
+                // transizione atterra solo su una clip esistente, mai su
+                // uno spazio vuoto.
+                if pointer_over_panel
+                    && egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(ui.ctx())
+                    && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+                {
+                    paint_gear_icon(&ghost_painter, pos + egui::vec2(14.0, 14.0), 10.0, egui::Color32::WHITE);
+                }
+
                 // Zone "aggiungi una nuova track": margini sopra/sotto ai
                 // gruppi (altezza zero se non c'è margine, vedi sopra).
                 let above_video_rect = egui::Rect::from_min_max(
@@ -1834,6 +1905,7 @@ pub fn show_timeline(
                         state.selected = expand_to_linked_groups(&visuals, hits.iter().copied());
                         state.selection_anchor = hits.first().copied();
                         state.selected_gap = None;
+                        state.selected_transition = None;
                     }
                 } else if marquee_resp.clicked()
                     && let Some(pos) = marquee_resp.interact_pointer_pos()
@@ -1853,6 +1925,7 @@ pub fn show_timeline(
                                 state.selected.clear();
                                 state.selection_anchor = None;
                                 state.selected_gap = Some((track_index, gap_start, gap_end));
+                                state.selected_transition = None;
                             }
                             None => state.clear_selection(),
                         }
@@ -2012,6 +2085,7 @@ pub fn show_timeline(
                 let mut drag_finished = false;
                 let mut trim_finished = false;
                 let mut fade_drag_finished = false;
+                let mut transition_drag_finished = false;
                 let mut volume_drag_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
 
@@ -2127,8 +2201,17 @@ pub fn show_timeline(
 
                     // Filtro trascinato dal pannello Effects: solo le clip video,
                     // non bloccate, lo accettano (niente spazi vuoti o nuove
-                    // track, a differenza di Generator/Media).
-                    if !visual.locked && track_kinds[visual.track_index] == TrackKind::Video {
+                    // track, a differenza di Generator/Media). La guardia
+                    // `has_payload_of_type` prima di `dnd_release_payload` non è
+                    // ridondante: quest'ultimo scarta il payload globale anche
+                    // quando il tipo non combacia (side effect di egui, vedi
+                    // `TimelineDrag::released`) — senza, trascinare una
+                    // `TransitionKind` sulla stessa clip la perderebbe qui,
+                    // prima ancora che il blocco sotto la veda.
+                    if !visual.locked
+                        && track_kinds[visual.track_index] == TrackKind::Video
+                        && egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(ui.ctx())
+                    {
                         if resp.dnd_hover_payload::<vv_core::FilterKind>().is_some() {
                             painter.rect_stroke(
                                 clip_rect,
@@ -2142,6 +2225,47 @@ pub fn show_timeline(
                                 track_index: visual.track_index,
                                 clip_id: visual.clip.id,
                                 filter: *filter,
+                            });
+                        }
+                    }
+
+                    // Transizione trascinata dal pannello Effects: come i filtri,
+                    // solo clip video non bloccate — ma in più solo vicino a un
+                    // bordo (mai al centro, mai su uno spazio vuoto o una nuova
+                    // track): il lato più vicino al puntatore decide se diventa
+                    // `transition_in` o `transition_out`. Stessa guardia di
+                    // sopra, stesso motivo.
+                    if !visual.locked
+                        && track_kinds[visual.track_index] == TrackKind::Video
+                        && egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(ui.ctx())
+                    {
+                        let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
+                        let hover_edge = ui.input(|i| i.pointer.hover_pos()).and_then(|pos| {
+                            if pos.x - clip_rect.left() <= drop_zone_px {
+                                Some(FadeEdge::In)
+                            } else if clip_rect.right() - pos.x <= drop_zone_px {
+                                Some(FadeEdge::Out)
+                            } else {
+                                None
+                            }
+                        });
+                        if resp.dnd_hover_payload::<vv_core::TransitionKind>().is_some()
+                            && let Some(edge) = hover_edge
+                        {
+                            let x = match edge {
+                                FadeEdge::In => clip_rect.left() + drop_zone_px,
+                                FadeEdge::Out => clip_rect.right() - drop_zone_px,
+                            };
+                            paint_transition_marker(&painter, clip_rect, edge, x, false);
+                        }
+                        if let Some(kind) = resp.dnd_release_payload::<vv_core::TransitionKind>()
+                            && let Some(edge) = hover_edge
+                        {
+                            pending = Some(PendingAction::ApplyTransition {
+                                track_index: visual.track_index,
+                                clip_id: visual.clip.id,
+                                edge,
+                                kind: *kind,
                             });
                         }
                     }
@@ -2229,6 +2353,27 @@ pub fn show_timeline(
                         paint_fade_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
                     }
 
+                    // Marker delle transizioni push già impostate: il drop dal
+                    // pannello Effects (sopra) le rende persistenti, da qui in
+                    // poi vivono come l'handle di fade — sempre visibili,
+                    // l'estremità (durata) trascinabile.
+                    let (transition_in_duration, transition_out_duration) =
+                        transition_preview(state, visual, px_per_frame);
+                    let transition_in_x = transition_in_duration
+                        .map(|d| clip_rect.left() + (d as f32 * px_per_frame).min(clip_rect.width()));
+                    let transition_out_x = transition_out_duration
+                        .map(|d| clip_rect.right() - (d as f32 * px_per_frame).min(clip_rect.width()));
+                    if let Some(x) = transition_in_x {
+                        let selected = state.selected_transition
+                            == Some(((visual.track_index, visual.clip.id), FadeEdge::In));
+                        paint_transition_marker(&painter, clip_rect, FadeEdge::In, x, selected);
+                    }
+                    if let Some(x) = transition_out_x {
+                        let selected = state.selected_transition
+                            == Some(((visual.track_index, visual.clip.id), FadeEdge::Out));
+                        paint_transition_marker(&painter, clip_rect, FadeEdge::Out, x, selected);
+                    }
+
                     // Zone ridotte per le clip molto strette, altrimenti
                     // l'intera clip sarebbe "solo bordi" e non si potrebbe più
                     // spostare (Move) col drag normale dal centro.
@@ -2261,6 +2406,14 @@ pub fn show_timeline(
                             )
                     };
                     if resp.hovered()
+                        && state.drag.is_none()
+                        && state.trim.is_none()
+                        && state.transition_drag.is_none()
+                        && let Some(pos) = resp.hover_pos()
+                        && transition_handle_at(pos, clip_rect, transition_in_x, transition_out_x).is_some()
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    } else if resp.hovered()
                         && show_fades
                         && state.drag.is_none()
                         && state.trim.is_none()
@@ -2293,12 +2446,16 @@ pub fn show_timeline(
                         // piccolo movimento, e verso l'interno si sarebbe già usciti dalla zona
                         // del bordo.
                         let press_pos = ui.input(|i| i.pointer.press_origin());
+                        let transition_handle =
+                            press_pos.and_then(|p| transition_handle_at(p, clip_rect, transition_in_x, transition_out_x));
                         let fade_zone = if show_fades {
                             press_pos.and_then(|p| fade_zone_at(p, clip_rect, fade_in_x, fade_out_x))
                         } else {
                             None
                         };
-                        match fade_zone {
+                        match transition_handle {
+                            Some(edge) => begin_transition_drag(state, visual, edge),
+                            None => match fade_zone {
                             Some(edge) => begin_fade_drag(state, visual, edge),
                             None => match press_pos.and_then(edge_at) {
                                 Some(zone) => begin_trim(state, &visuals, project, visual, zone),
@@ -2309,9 +2466,14 @@ pub fn show_timeline(
                                     begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt))
                                 }
                             },
+                            },
                         }
                     } else if resp.dragged() {
-                        if let Some(fd) = &mut state.fade_drag
+                        if let Some(td) = &mut state.transition_drag
+                            && td.clip_id == visual.clip.id
+                        {
+                            td.accum_px += resp.drag_delta().x;
+                        } else if let Some(fd) = &mut state.fade_drag
                             && fd.clip_id == visual.clip.id
                         {
                             fd.accum_px += resp.drag_delta().x;
@@ -2336,7 +2498,17 @@ pub fn show_timeline(
                             d.accum_px += resp.drag_delta().x;
                         }
                     } else if resp.drag_stopped() {
-                        if let Some(fd) = &state.fade_drag
+                        if let Some(td) = &state.transition_drag
+                            && td.clip_id == visual.clip.id
+                        {
+                            pending = Some(PendingAction::SetTransitionDuration {
+                                track_index: td.track_index,
+                                clip_id: td.clip_id,
+                                edge: td.edge,
+                                new_value: transition_drag_value(td, visual.clip.timeline_len, px_per_frame),
+                            });
+                            transition_drag_finished = true;
+                        } else if let Some(fd) = &state.fade_drag
                             && fd.clip_id == visual.clip.id
                         {
                             pending = Some(PendingAction::SetFade {
@@ -2373,19 +2545,39 @@ pub fn show_timeline(
                             drag_finished = true;
                         }
                     } else if resp.clicked() {
-                        let modifiers = click_modifiers(ui.input(|i| i.modifiers));
-                        let (selected, anchor) = apply_click_selection(
-                            &state.selected,
-                            state.selection_anchor,
-                            (visual.track_index, visual.clip.id),
-                            modifiers,
-                            &visuals,
-                            px_per_frame,
-                            &row_y,
-                        );
-                        state.selected = expand_to_linked_groups(&visuals, selected);
-                        state.selection_anchor = anchor;
-                        state.selected_gap = None;
+                        let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {
+                            if transition_in_x.is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::In, x)) {
+                                Some(FadeEdge::In)
+                            } else if transition_out_x
+                                .is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::Out, x))
+                            {
+                                Some(FadeEdge::Out)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(edge) = clicked_transition {
+                            // Sostituisce qualunque selezione di clip, anche multipla.
+                            state.selected.clear();
+                            state.selection_anchor = None;
+                            state.selected_gap = None;
+                            state.selected_transition = Some(((visual.track_index, visual.clip.id), edge));
+                        } else {
+                            let modifiers = click_modifiers(ui.input(|i| i.modifiers));
+                            let (selected, anchor) = apply_click_selection(
+                                &state.selected,
+                                state.selection_anchor,
+                                (visual.track_index, visual.clip.id),
+                                modifiers,
+                                &visuals,
+                                px_per_frame,
+                                &row_y,
+                            );
+                            state.selected = expand_to_linked_groups(&visuals, selected);
+                            state.selection_anchor = anchor;
+                            state.selected_gap = None;
+                            state.selected_transition = None;
+                        }
                     }
 
                     resp.context_menu(|ui| {
@@ -2416,6 +2608,9 @@ pub fn show_timeline(
                 }
                 if fade_drag_finished {
                     state.fade_drag = None;
+                }
+                if transition_drag_finished {
+                    state.transition_drag = None;
                 }
                 if volume_drag_finished {
                     state.volume_drag = None;
@@ -2771,6 +2966,186 @@ fn fade_zone_at(pos: egui::Pos2, clip_rect: egui::Rect, fade_in_x: f32, fade_out
         return Some(FadeEdge::Out);
     }
     None
+}
+
+/// Comincia a trascinare l'estremità (durata) di una transizione già
+/// presente: come `begin_fade_drag`, sempre locale alla singola clip.
+fn begin_transition_drag(state: &mut TimelineState, visual: &ClipVisual, edge: FadeEdge) {
+    let original_value = match edge {
+        FadeEdge::In => visual.clip.effects.transition_in.as_ref(),
+        FadeEdge::Out => visual.clip.effects.transition_out.as_ref(),
+    }
+    .map_or(0, |t| t.duration);
+    state.transition_drag = Some(TransitionDragState {
+        clip_id: visual.clip.id,
+        track_index: visual.track_index,
+        edge,
+        original_value,
+        accum_px: 0.0,
+    });
+}
+
+/// Valore (in frame, clampato a 1..=durata della clip) dell'anteprima di un
+/// drag di transizione in corso: stessa convenzione di segno di
+/// `fade_drag_value` (trascinare l'estremità verso l'interno della clip
+/// allunga la transizione, in entrambi i bordi).
+fn transition_drag_value(d: &TransitionDragState, clip_len: FrameIdx, px_per_frame: f32) -> FrameIdx {
+    let signed_delta = match d.edge {
+        FadeEdge::In => d.accum_px,
+        FadeEdge::Out => -d.accum_px,
+    };
+    (d.original_value as f32 + signed_delta / px_per_frame)
+        .round()
+        .clamp(1.0, clip_len.max(1) as f32) as FrameIdx
+}
+
+/// Durata (in/out) da mostrare per `visual`: l'anteprima del drag in corso
+/// se lo riguarda, altrimenti quella già salvata. `None` se quel bordo non
+/// ha una transizione.
+fn transition_preview(
+    state: &TimelineState,
+    visual: &ClipVisual,
+    px_per_frame: f32,
+) -> (Option<FrameIdx>, Option<FrameIdx>) {
+    let mut duration_in = visual.clip.effects.transition_in.as_ref().map(|t| t.duration);
+    let mut duration_out = visual.clip.effects.transition_out.as_ref().map(|t| t.duration);
+    if let Some(d) = &state.transition_drag
+        && d.clip_id == visual.clip.id
+    {
+        let value = transition_drag_value(d, visual.clip.timeline_len, px_per_frame);
+        match d.edge {
+            FadeEdge::In => duration_in = Some(value),
+            FadeEdge::Out => duration_out = Some(value),
+        }
+    }
+    (duration_in, duration_out)
+}
+
+/// Estremità (durata) di una transizione sotto `pos`, solo nella banda in
+/// basso alla clip — speculare a `fade_zone_at`. `None` per un bordo che
+/// non ha ancora una transizione: niente da trascinare lì.
+fn transition_handle_at(
+    pos: egui::Pos2,
+    clip_rect: egui::Rect,
+    in_x: Option<f32>,
+    out_x: Option<f32>,
+) -> Option<FadeEdge> {
+    if pos.y < clip_rect.bottom() - TRANSITION_HANDLE_ZONE_HEIGHT {
+        return None;
+    }
+    if let Some(x) = in_x
+        && (pos.x - x).abs() <= TRANSITION_HANDLE_HIT_RADIUS
+    {
+        return Some(FadeEdge::In);
+    }
+    if let Some(x) = out_x
+        && (pos.x - x).abs() <= TRANSITION_HANDLE_HIT_RADIUS
+    {
+        return Some(FadeEdge::Out);
+    }
+    None
+}
+
+/// `true` se `pos` cade nel corpo del marker di una transizione (dal bordo
+/// della clip alla sua estremità `x`), non solo sulla sua maniglia: un
+/// click ovunque lì la seleziona, non serve mirare all'estremità.
+fn transition_body_hit(pos: egui::Pos2, clip_rect: egui::Rect, edge: FadeEdge, x: f32) -> bool {
+    if pos.y < clip_rect.bottom() - TRANSITION_HANDLE_ZONE_HEIGHT {
+        return false;
+    }
+    match edge {
+        FadeEdge::In => pos.x >= clip_rect.left() && pos.x <= x,
+        FadeEdge::Out => pos.x <= clip_rect.right() && pos.x >= x,
+    }
+}
+
+/// Il marker di una transizione: una fascia colorata in basso alla clip dal
+/// bordo a `x`, un ingranaggio sul bordo (il lato fisso) e una parentesi
+/// sull'estremità `x` (il lato trascinabile) — "X]" per `In`, "[X" per
+/// `Out`, leggendo da sinistra a destra.
+fn paint_transition_marker(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    edge: FadeEdge,
+    x: f32,
+    selected: bool,
+) {
+    let x = x.clamp(clip_rect.left(), clip_rect.right());
+    let band = egui::Rect::from_min_max(
+        egui::pos2(clip_rect.left(), clip_rect.bottom() - TRANSITION_HANDLE_ZONE_HEIGHT),
+        clip_rect.max,
+    );
+    let body = match edge {
+        FadeEdge::In => egui::Rect::from_min_max(band.min, egui::pos2(x, band.bottom())),
+        FadeEdge::Out => egui::Rect::from_min_max(egui::pos2(x, band.top()), band.max),
+    };
+    let color = if selected { TRANSITION_SELECTED_COLOR } else { TRANSITION_COLOR };
+    painter.rect_filled(body, 0.0, color);
+    let edge_x = match edge {
+        FadeEdge::In => clip_rect.left(),
+        FadeEdge::Out => clip_rect.right(),
+    };
+    paint_gear_icon(painter, egui::pos2(edge_x, band.center().y), band.height() * 0.4, egui::Color32::WHITE);
+    paint_bracket_icon(painter, egui::pos2(x, band.center().y), band.height() * 0.7, edge, egui::Color32::WHITE);
+}
+
+/// Parentesi disegnata a mano (nessun glifo Unicode, vedi `paint_gear_icon`):
+/// una linea verticale con due tacche che aprono verso il bordo fisso della
+/// clip (`In`: tacche a sinistra, verso l'ingranaggio; `Out`: a destra).
+pub(crate) fn paint_bracket_icon(painter: &egui::Painter, center: egui::Pos2, height: f32, edge: FadeEdge, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    let half = height / 2.0;
+    let tick = height * 0.3;
+    let tick_dir = match edge {
+        FadeEdge::In => -1.0,
+        FadeEdge::Out => 1.0,
+    };
+    painter.line_segment(
+        [egui::pos2(center.x, center.y - half), egui::pos2(center.x, center.y + half)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x, center.y - half),
+            egui::pos2(center.x + tick * tick_dir, center.y - half),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x, center.y + half),
+            egui::pos2(center.x + tick * tick_dir, center.y + half),
+        ],
+        stroke,
+    );
+}
+
+/// Transizioni del pannello Effects, in ordine di comparsa lì — vedi
+/// `ALL_FILTER_KINDS`, stessa idea.
+pub const ALL_TRANSITION_KINDS: [vv_core::TransitionKind; 1] = [vv_core::TransitionKind::Push];
+
+pub fn transition_kind_label(kind: vv_core::TransitionKind) -> std::borrow::Cow<'static, str> {
+    match kind {
+        vv_core::TransitionKind::Push => t!("transition.push"),
+    }
+}
+
+pub fn push_direction_label(direction: vv_core::PushDirection) -> std::borrow::Cow<'static, str> {
+    match direction {
+        vv_core::PushDirection::Left => t!("transition.direction_left"),
+        vv_core::PushDirection::Right => t!("transition.direction_right"),
+        vv_core::PushDirection::Up => t!("transition.direction_up"),
+        vv_core::PushDirection::Down => t!("transition.direction_down"),
+    }
+}
+
+pub fn ease_label(ease: vv_core::Ease) -> std::borrow::Cow<'static, str> {
+    match ease {
+        vv_core::Ease::None => t!("transition.ease_none"),
+        vv_core::Ease::In => t!("transition.ease_in"),
+        vv_core::Ease::Out => t!("transition.ease_out"),
+        vv_core::Ease::InOut => t!("transition.ease_in_out"),
+    }
 }
 
 /// Offset verticale normalizzato (-1 in basso, +1 in alto) della riga del
@@ -3263,6 +3638,44 @@ fn apply_pending_action(
                     project,
                     Box::new(vv_core::set_clip_filters(timeline_id, track_index, clip_id, filters)),
                 );
+            }
+        }
+        PendingAction::ApplyTransition { track_index, clip_id, edge, kind } => {
+            let timeline = &project.timelines[timeline_id];
+            if let Some(clip) = timeline.clip(track_index, clip_id) {
+                let default_duration = (timeline.fps.as_f64().round() as FrameIdx).clamp(1, clip.timeline_len.max(1));
+                let transition = vv_core::Transition {
+                    kind,
+                    duration: default_duration,
+                    direction: vv_core::PushDirection::Right,
+                    ease: vv_core::Ease::None,
+                    curve: 0.5,
+                };
+                history.do_command(
+                    project,
+                    Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
+                );
+                state.selected.clear();
+                state.selection_anchor = None;
+                state.selected_gap = None;
+                state.selected_transition = Some(((track_index, clip_id), edge));
+            }
+        }
+        PendingAction::SetTransitionDuration { track_index, clip_id, edge, new_value } => {
+            if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
+                let mut transition = match edge {
+                    FadeEdge::In => clip.effects.transition_in.clone(),
+                    FadeEdge::Out => clip.effects.transition_out.clone(),
+                };
+                if let Some(t) = &mut transition {
+                    t.duration = new_value.clamp(1, clip.timeline_len.max(1));
+                }
+                if let Some(transition) = transition {
+                    history.do_command(
+                        project,
+                        Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
+                    );
+                }
             }
         }
         PendingAction::Unlink(track_index, clip_id) => {

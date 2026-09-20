@@ -83,3 +83,47 @@ filter.grayscale:
 pool.drag_to_clip:
   en: "Drag onto a video clip"
   it: "Trascina su una clip video"
+
+effects.transitions:
+  en: "Transitions"
+  it: "Transizioni"
+
+transition.push:
+  en: "Push"
+  it: "Push"
+
+transition.direction_left:
+  en: "Push Left"
+  it: "Push a sinistra"
+
+transition.direction_right:
+  en: "Push Right"
+  it: "Push a destra"
+
+transition.direction_up:
+  en: "Push Up"
+  it: "Push in alto"
+
+transition.direction_down:
+  en: "Push Down"
+  it: "Push in basso"
+
+transition.ease_none:
+  en: "None"
+  it: "Nessuno"
+
+transition.ease_in:
+  en: "In"
+  it: "In entrata"
+
+transition.ease_out:
+  en: "Out"
+  it: "In uscita"
+
+transition.ease_in_out:
+  en: "In & Out"
+  it: "In entrata e uscita"
+
+pool.drag_to_clip_edge:
+  en: "Drag near the left/right edge of a video clip"
+  it: "Trascina vicino al bordo sinistro/destro di una clip video"

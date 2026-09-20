@@ -9,7 +9,7 @@ pub use command::{
     ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
     SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_filters,
-    set_clip_flip, set_clip_gain, set_clip_title, set_clip_transform_param,
+    set_clip_flip, set_clip_gain, set_clip_title, set_clip_transform_param, set_clip_transition,
 };
 pub use model::*;
 pub use otio::{OtioError, OtioImport, OtioWarning, export_otio, import_otio};
@@ -1382,5 +1382,65 @@ mod tests {
         assert_eq!(clip.fade_multiplier_at(50), 1.0);
         assert!((clip.fade_multiplier_at(90) - 0.5).abs() < 1e-6);
         assert_eq!(clip.fade_multiplier_at(100), 0.0);
+    }
+
+    #[test]
+    fn set_clip_transition_is_undoable() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let clip = make_clip(&mut project, 0, 10);
+        let id = clip.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 0, clip }),
+        );
+        let transition = Transition {
+            kind: TransitionKind::Push,
+            duration: 5,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.5,
+        };
+        history.do_command(
+            &mut project,
+            Box::new(set_clip_transition(timeline, 0, id, FadeEdge::In, Some(transition.clone()))),
+        );
+        fn find<'p>(p: &'p Project, timeline: TimelineId, id: ClipId) -> &'p Clip {
+            p.timelines[timeline].clip(0, id).unwrap()
+        }
+        assert_eq!(find(&project, timeline, id).effects.transition_in, Some(transition));
+        assert!(find(&project, timeline, id).effects.transition_out.is_none());
+
+        history.undo(&mut project);
+        assert!(find(&project, timeline, id).effects.transition_in.is_none());
+    }
+
+    #[test]
+    fn transition_offset_slides_in_from_the_push_direction_then_settles() {
+        let mut clip = Clip::from_source_range(
+            ClipId(0),
+            ClipSource::Media(MediaId::default()),
+            0,
+            100,
+            0,
+            Rational::one(),
+        );
+        clip.effects.transition_in = Some(Transition {
+            kind: TransitionKind::Push,
+            duration: 20,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.0,
+        });
+        let frame_size = (1920.0, 1080.0);
+        // All'inizio della clip: fuori schermo dal lato opposto a quello
+        // d'arrivo ("Right" è il verso con cui il contenuto raggiunge il
+        // centro).
+        assert_eq!(clip.transition_offset_at(0, frame_size), [-1920.0, 0.0]);
+        let mid = clip.transition_offset_at(10, frame_size);
+        assert!((mid[0] - (-960.0)).abs() < 1.0);
+        // Finita la transizione: a posto, nessun offset residuo.
+        assert_eq!(clip.transition_offset_at(20, frame_size), [0.0, 0.0]);
+        assert_eq!(clip.transition_offset_at(50, frame_size), [0.0, 0.0]);
     }
 }

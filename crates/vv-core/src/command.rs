@@ -4,7 +4,7 @@
 use crate::model::{
     Clip, ClipFilter, ClipId, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId,
     MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
-    TransformParam,
+    TransformParam, Transition,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -48,6 +48,7 @@ pub enum CommandLabel {
     RemoveMedia,
     RelinkMedia,
     Filters,
+    Transition,
 }
 
 /// Più comandi in un solo passo di history.
@@ -1059,6 +1060,22 @@ pub fn set_clip_filters(
 ) -> SetClipValue<Vec<ClipFilter>> {
     SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Filters, value, |c| {
         &mut c.effects.filters
+    })
+}
+
+/// Imposta (o rimuove, con `None`) la transizione di un bordo della clip.
+pub fn set_clip_transition(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    edge: FadeEdge,
+    value: Option<Transition>,
+) -> SetClipValue<Option<Transition>> {
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Transition, value, move |c| {
+        match edge {
+            FadeEdge::In => &mut c.effects.transition_in,
+            FadeEdge::Out => &mut c.effects.transition_out,
+        }
     })
 }
 

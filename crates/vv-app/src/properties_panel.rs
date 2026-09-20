@@ -964,6 +964,94 @@ impl VibeVideoApp {
         }
     }
 
+    /// Pannello di una transizione selezionata (bordo di una clip): prende
+    /// il posto delle schede Video/Audio/Selezione finché resta selezionata
+    /// (vedi `TimelineState::selected_transition`).
+    fn show_transition_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: (usize, vv_core::ClipId),
+        edge: vv_core::FadeEdge,
+        pending: &mut Vec<BoxedCommand>,
+    ) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let tl = &self.project.timelines[timeline_id];
+        let Some(clip) = tl.clip(key.0, key.1) else {
+            return;
+        };
+        let existing = match edge {
+            vv_core::FadeEdge::In => clip.effects.transition_in.clone(),
+            vv_core::FadeEdge::Out => clip.effects.transition_out.clone(),
+        };
+        // La clip è stata cancellata o la transizione tolta da sotto la
+        // selezione (es. undo): niente da mostrare.
+        let Some(before) = existing else {
+            return;
+        };
+        let mut transition = before.clone();
+        let fps = tl.fps.as_f64().max(1.0);
+        let clip_len = clip.timeline_len.max(1);
+
+        ui.heading(t!("props.transition"));
+        ui.label(timeline_ui::transition_kind_label(transition.kind));
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label(t!("props.duration"));
+            let mut secs = transition.duration as f64 / fps;
+            if ui
+                .add(egui::DragValue::new(&mut secs).speed(0.02).range(0.0..=(clip_len as f64 / fps)).suffix(" s"))
+                .changed()
+            {
+                transition.duration = ((secs * fps).round() as FrameIdx).clamp(1, clip_len);
+            }
+            let mut frames = transition.duration;
+            if ui.add(egui::DragValue::new(&mut frames).range(1..=clip_len)).changed() {
+                transition.duration = frames.clamp(1, clip_len);
+            }
+            ui.label(t!("props.frames"));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(t!("props.direction"));
+            egui::ComboBox::from_id_salt("transition_direction")
+                .selected_text(timeline_ui::push_direction_label(transition.direction))
+                .show_ui(ui, |ui| {
+                    for d in vv_core::PushDirection::ALL {
+                        ui.selectable_value(&mut transition.direction, d, timeline_ui::push_direction_label(d));
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(t!("props.ease"));
+            egui::ComboBox::from_id_salt("transition_ease")
+                .selected_text(timeline_ui::ease_label(transition.ease))
+                .show_ui(ui, |ui| {
+                    for e in vv_core::Ease::ALL {
+                        ui.selectable_value(&mut transition.ease, e, timeline_ui::ease_label(e));
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(t!("props.transition_curve"));
+            ui.add(egui::Slider::new(&mut transition.curve, 0.0..=1.0));
+        });
+
+        if transition != before {
+            pending.push(Box::new(vv_core::set_clip_transition(timeline_id, key.0, key.1, edge, Some(transition))));
+        }
+
+        ui.add_space(8.0);
+        if ui.button(t!("props.remove_transition")).clicked() {
+            pending.push(Box::new(vv_core::set_clip_transition(timeline_id, key.0, key.1, edge, None)));
+            self.timeline_state.selected_transition = None;
+        }
+    }
+
     /// Restituisce le modifiche agli effetti e l'eventuale salto della testina,
     /// da applicare dopo il disegno.
     pub(crate) fn show_properties_panel(
@@ -995,7 +1083,9 @@ impl VibeVideoApp {
                         )
                         .show(ui, |ui| {
                         let selected_count = self.timeline_state.selected.len();
-                        if selected_count > 0 {
+                        if let Some((key, edge)) = self.timeline_state.selected_transition {
+                            self.show_transition_panel(ui, key, edge, &mut pending_effects);
+                        } else if selected_count > 0 {
                             properties_tab_bar(ui, &mut self.properties_tab);
                             ui.separator();
 

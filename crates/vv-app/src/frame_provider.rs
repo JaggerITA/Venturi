@@ -123,7 +123,10 @@ pub fn clip_layer(
     provider: &mut dyn FrameProvider,
 ) -> Result<Option<OwnedLayer>, String> {
     let source_frame = clip.source_frame_at(frame);
-    let transform = clip.effects.transform.value_at(source_frame);
+    let mut transform = clip.effects.transform.value_at(source_frame);
+    let push = clip.transition_offset_at(frame, (timeline_size.0 as f32, timeline_size.1 as f32));
+    transform.position[0] += push[0];
+    transform.position[1] += push[1];
     let opacity = clip.fade_multiplier_at(frame);
     let filters: Vec<vv_core::FilterKind> = clip
         .effects

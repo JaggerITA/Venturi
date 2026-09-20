@@ -119,3 +119,7 @@ history.relink_media:
 history.filters:
   en: "Clip filters"
   it: "Filtri clip"
+
+history.transition:
+  en: "Transition"
+  it: "Transizione"

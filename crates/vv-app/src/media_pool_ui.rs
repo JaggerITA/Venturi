@@ -141,6 +141,42 @@ pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
     }
 }
 
+/// Voce di una transizione nel pannello Effects: si trascina vicino a un
+/// bordo (sinistro o destro) di una clip video esistente, mai al centro né
+/// su uno spazio vuoto. Il tipo (`vv_core::TransitionKind`) è lo stesso
+/// salvato in `EffectStack::transition_in`/`transition_out`.
+pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) {
+    let label = timeline_ui::transition_kind_label(kind);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let id = ui.id().with(("transition_item", &label));
+    let resp = ui
+        .interact(rect, id, egui::Sense::click_and_drag())
+        .on_hover_text(t!("pool.drag_to_clip_edge"));
+    let visuals = ui.visuals();
+    let (bg, stroke) = if resp.hovered() || resp.dragged() {
+        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+    } else {
+        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, bg);
+    let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
+    painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
+    timeline_ui::paint_bracket_icon(&painter, thumb.center(), thumb.height() * 0.6, vv_core::FadeEdge::Out, egui::Color32::from_gray(220));
+    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    painter.text(
+        egui::pos2(thumb.right() + 14.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label.as_ref(),
+        egui::FontId::proportional(13.0),
+        visuals.text_color(),
+    );
+    resp.dnd_set_drag_payload(kind);
+    if resp.dragged() {
+        show_drag_ghost(ui, id, &label);
+    }
+}
+
 /// Larghezza della colonna "Durata": la stessa nell'intestazione e nelle
 /// righe, così restano allineate.
 pub(crate) const DURATION_COL_W: f32 = 64.0;
@@ -539,6 +575,11 @@ impl VibeVideoApp {
                 effects_section_header(ui, &t!("effects.filters"));
                 for filter in timeline_ui::ALL_FILTER_KINDS {
                     filter_item(ui, filter);
+                }
+                ui.add_space(8.0);
+                effects_section_header(ui, &t!("effects.transitions"));
+                for transition in timeline_ui::ALL_TRANSITION_KINDS {
+                    transition_item(ui, transition);
                 }
             });
     }

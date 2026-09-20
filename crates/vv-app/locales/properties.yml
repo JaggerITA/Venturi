@@ -304,6 +304,34 @@ props.filters:
   en: "Filters"
   it: "Filtri"
 
+props.transition:
+  en: "Transition"
+  it: "Transizione"
+
+props.duration:
+  en: "Duration"
+  it: "Durata"
+
+props.frames:
+  en: "frames"
+  it: "frame"
+
+props.direction:
+  en: "Direction"
+  it: "Direzione"
+
+props.ease:
+  en: "Ease"
+  it: "Ease"
+
+props.transition_curve:
+  en: "Transition Curve"
+  it: "Curva transizione"
+
+props.remove_transition:
+  en: "Remove transition"
+  it: "Rimuovi transizione"
+
 props.volume:
   en: "Volume"
   it: "Volume"

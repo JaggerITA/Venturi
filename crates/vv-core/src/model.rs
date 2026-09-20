@@ -785,6 +785,89 @@ pub struct ClipFilter {
     pub enabled: bool,
 }
 
+/// Una transizione del pannello Effects, sezione "Transizioni": come
+/// `FilterKind`, varietà aperta per transizioni future. A differenza dei
+/// filtri, si applica solo a un bordo della clip (`EffectStack::transition_in`
+/// o `transition_out`), non alla clip intera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionKind {
+    Push,
+}
+
+/// Direzione di scorrimento di una transizione Push. Indipendente dal bordo
+/// della clip a cui è agganciata (`In`/`Out`): descrive solo il verso del
+/// movimento sullo schermo durante la transizione.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PushDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl PushDirection {
+    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
+
+    /// Verso del movimento in unità di `Transform.position` (X, Y): `Y`
+    /// positivo verso l'alto, come il resto del transform.
+    fn vector(self) -> [f32; 2] {
+        match self {
+            Self::Left => [-1.0, 0.0],
+            Self::Right => [1.0, 0.0],
+            Self::Up => [0.0, 1.0],
+            Self::Down => [0.0, -1.0],
+        }
+    }
+}
+
+/// Curva di accelerazione di una transizione, applicata alla progressione
+/// 0..1 prima di tradurla in offset. Le stesse quattro opzioni di un NLE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ease {
+    None,
+    In,
+    Out,
+    InOut,
+}
+
+impl Ease {
+    pub const ALL: [Self; 4] = [Self::None, Self::In, Self::Out, Self::InOut];
+}
+
+/// `t` (0..1) rimodulato secondo `ease`; `curve` (0..1, "Transition Curve"
+/// nell'inspector) ne controlla l'intensità: 0 quasi lineare, 1 più
+/// pronunciata. Nessuna pretesa di uguagliare la curva esatta di un NLE
+/// specifico, solo una progressione monotona e simmetrica in InOut.
+fn eased(t: f32, ease: Ease, curve: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let exponent = 1.0 + curve.clamp(0.0, 1.0) * 4.0;
+    match ease {
+        Ease::None => t,
+        Ease::In => t.powf(exponent),
+        Ease::Out => 1.0 - (1.0 - t).powf(exponent),
+        Ease::InOut => {
+            if t < 0.5 {
+                0.5 * (2.0 * t).powf(exponent)
+            } else {
+                1.0 - 0.5 * (2.0 * (1.0 - t)).powf(exponent)
+            }
+        }
+    }
+}
+
+/// Una transizione applicata a un bordo di una clip (vedi
+/// `EffectStack::transition_in`/`transition_out`). `duration` in frame di
+/// timeline dal bordo, come `Clip::fade_in`/`fade_out`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transition {
+    pub kind: TransitionKind,
+    pub duration: FrameIdx,
+    pub direction: PushDirection,
+    pub ease: Ease,
+    /// "Transition Curve" nell'inspector, 0..1.
+    pub curve: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectStack {
     pub transform: TransformTracks,
@@ -795,6 +878,13 @@ pub struct EffectStack {
     pub title: Option<TitleParams>,
     #[serde(default)]
     pub filters: Vec<ClipFilter>,
+    /// Transizione agganciata al bordo iniziale/finale della clip, dal
+    /// pannello Effects. Coppia di campi come `Clip::fade_in`/`fade_out`,
+    /// non una mappa: al più una per bordo.
+    #[serde(default)]
+    pub transition_in: Option<Transition>,
+    #[serde(default)]
+    pub transition_out: Option<Transition>,
 }
 
 impl Default for EffectStack {
@@ -806,6 +896,8 @@ impl Default for EffectStack {
             color: None,
             title: None,
             filters: Vec::new(),
+            transition_in: None,
+            transition_out: None,
         }
     }
 }
@@ -987,6 +1079,43 @@ impl Clip {
             1.0
         };
         in_ramp * out_ramp
+    }
+
+    /// Offset di posizione (stesse unità pixel di `Transform.position`,
+    /// `frame_size` = risoluzione della timeline) dovuto alle transizioni
+    /// push in entrata/uscita a `timeline_frame`. Sommato al `position` già
+    /// campionato dai keyframe del transform, non lo sostituisce: così una
+    /// transizione push convive con un pan manuale sulla stessa clip. Fuori
+    /// dalla finestra della transizione l'offset è zero; alle sue estremità
+    /// coincide sempre con "fuori schermo" o "a posto", indipendentemente
+    /// da `direction`/`ease`, perché il rilascio dà alpha 0 fuori dai bordi
+    /// del source_uv (vedi `transform.wgsl`): usarlo anche per rivelare
+    /// quel che sta sotto (lower third, overlay) è lo stesso meccanismo.
+    pub fn transition_offset_at(&self, timeline_frame: FrameIdx, frame_size: (f32, f32)) -> [f32; 2] {
+        let len = self.timeline_len.max(1);
+        let pos = timeline_frame - self.timeline_start;
+        let mut offset = [0.0f32; 2];
+        if let Some(t) = &self.effects.transition_in {
+            let d = t.duration.clamp(1, len);
+            if pos >= 0 && pos < d {
+                let progress = eased(pos as f32 / d as f32, t.ease, t.curve);
+                let vec = t.direction.vector();
+                let amount = -(1.0 - progress);
+                offset[0] += vec[0] * frame_size.0 * amount;
+                offset[1] += vec[1] * frame_size.1 * amount;
+            }
+        }
+        if let Some(t) = &self.effects.transition_out {
+            let d = t.duration.clamp(1, len);
+            let from_end = len - pos;
+            if from_end > 0 && from_end <= d {
+                let progress = eased(1.0 - from_end as f32 / d as f32, t.ease, t.curve);
+                let vec = t.direction.vector();
+                offset[0] += vec[0] * frame_size.0 * progress;
+                offset[1] += vec[1] * frame_size.1 * progress;
+            }
+        }
+        offset
     }
 }
 
