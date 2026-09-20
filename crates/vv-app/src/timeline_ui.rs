@@ -2158,6 +2158,13 @@ pub fn show_timeline(
                 let mut crossing_drag_finished = false;
                 let mut volume_drag_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
+                // Il marker speculare sul vicino va disegnato dopo l'intero loop,
+                // non durante l'iterazione della clip sotto il puntatore: se il
+                // vicino viene dopo in `draw_order` (il caso comune, clip più
+                // recenti hanno id più alti), il suo stesso `paint_clip_box` lo
+                // ricoprirebbe subito — vedi il commento su `drag_finished` sopra
+                // per lo stesso motivo strutturale.
+                let mut pending_crossing_previews: Vec<(usize, ClipId, FadeEdge)> = Vec::new();
 
                 // Le clip in movimento si disegnano per ultime: invadono le altre.
                 let trimmed_keys: Vec<ClipKey> = state
@@ -2321,6 +2328,9 @@ pub fn show_timeline(
                             };
                             let is_crossing = has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
                             paint_transition_marker(&painter, clip_rect, edge, x, false, is_crossing);
+                            if is_crossing {
+                                pending_crossing_previews.push((visual.track_index, visual.clip.id, edge));
+                            }
                         }
                         if let Some(kind) = resp.dnd_release_payload::<vv_core::TransitionKind>()
                             && let Some(edge) = hover_edge
@@ -2356,6 +2366,9 @@ pub fn show_timeline(
                             };
                             let is_crossing = has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
                             paint_transition_marker(&painter, clip_rect, edge, x, false, is_crossing);
+                            if is_crossing {
+                                pending_crossing_previews.push((visual.track_index, visual.clip.id, edge));
+                            }
                         }
                         if let Some(transition) = resp.dnd_release_payload::<vv_core::Transition>()
                             && let Some(edge) = hover_edge
@@ -2766,6 +2779,21 @@ pub fn show_timeline(
                             ui.label(t!("timeline.link_hint"));
                         }
                     });
+                }
+                // Vedi doc di `pending_crossing_previews`: solo ora, a
+                // disegno di tutte le clip concluso, nessun `paint_clip_box`
+                // successivo può più ricoprirlo.
+                for (track_index, clip_id, edge) in pending_crossing_previews {
+                    paint_mirrored_marker_on_neighbor(
+                        &track_painter(track_index),
+                        &visuals,
+                        origin,
+                        &row_y,
+                        px_per_frame,
+                        track_index,
+                        clip_id,
+                        edge,
+                    );
                 }
                 // Azzerati solo ora, non con un `.take()` a metà del loop
                 // sopra — vedi il commento su `drag_finished`/`trim_finished`.
@@ -3415,19 +3443,24 @@ fn transition_drop_edge(pos: egui::Pos2, clip_rect: egui::Rect, drop_zone_px: f3
     }
 }
 
-/// C'è una clip adiacente sulla stessa track dal lato `edge` di `clip_id`?
-/// Usata durante il drag di una transizione per anticipare, col colore del
-/// marker, se il rilascio lì creerà una crossing o resterà un bordo
-/// singolo — vedi `CROSSING_COLOR`.
-fn has_neighbor(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId, edge: FadeEdge) -> bool {
-    let Some(visual) = visuals.iter().find(|v| v.track_index == track_index && v.clip.id == clip_id) else {
-        return false;
-    };
+/// La `ClipVisual` adiacente a `clip_id` dal lato `edge`, sulla stessa
+/// track — `None` se non ce n'è una. Usata durante il drag di una
+/// transizione per anticipare, col colore del marker, se il rilascio lì
+/// creerà una crossing o resterà un bordo singolo (vedi `CROSSING_COLOR`),
+/// e per disegnare anche sulla clip vicina il marker speculare (vedi
+/// `paint_mirrored_marker_on_neighbor`).
+fn neighbor_visual<'a, 'b>(
+    visuals: &'a [ClipVisual<'b>],
+    track_index: usize,
+    clip_id: ClipId,
+    edge: FadeEdge,
+) -> Option<&'a ClipVisual<'b>> {
+    let visual = visuals.iter().find(|v| v.track_index == track_index && v.clip.id == clip_id)?;
     let at = match edge {
         FadeEdge::In => visual.clip.timeline_start,
         FadeEdge::Out => visual.clip.timeline_end(),
     };
-    visuals.iter().any(|v| {
+    visuals.iter().find(|v| {
         v.track_index == track_index
             && v.clip.id != clip_id
             && match edge {
@@ -3435,6 +3468,50 @@ fn has_neighbor(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId, edg
                 FadeEdge::Out => v.clip.timeline_start == at,
             }
     })
+}
+
+fn has_neighbor(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId, edge: FadeEdge) -> bool {
+    neighbor_visual(visuals, track_index, clip_id, edge).is_some()
+}
+
+/// Se c'è una clip adiacente dal lato `edge`, disegna anche su di lei il
+/// marker speculare (bordo opposto): da rilasciata, una crossing si vede
+/// già così su entrambe le clip (vedi doc di `paint_transition_marker`) —
+/// mostrarla solo sulla clip sotto il puntatore durante il drag sarebbe
+/// fuorviante. Va chiamata DOPO il loop che disegna tutte le clip (vedi
+/// `pending_crossing_previews`): il vicino può venire dopo in `draw_order`,
+/// e il suo stesso `paint_clip_box` la ricoprirebbe se disegnata durante
+/// l'iterazione della clip sotto il puntatore. La clip vicina non è mai in
+/// drag/trim quando questa funzione viene chiamata (un solo drag alla
+/// volta, e questo è il drag di un `TransitionKind`/`Transition` dal
+/// pannello Effects), quindi il suo rettangolo statico basta.
+fn paint_mirrored_marker_on_neighbor(
+    painter: &egui::Painter,
+    visuals: &[ClipVisual],
+    origin: egui::Pos2,
+    row_y: &[f32],
+    px_per_frame: f32,
+    track_index: usize,
+    clip_id: ClipId,
+    edge: FadeEdge,
+) {
+    let Some(neighbor) = neighbor_visual(visuals, track_index, clip_id, edge) else {
+        return;
+    };
+    let x = origin.x + neighbor.clip.timeline_start as f32 * px_per_frame;
+    let y = origin.y + row_y[track_index];
+    let w = (neighbor.clip.timeline_len as f32 * px_per_frame).max(2.0);
+    let neighbor_rect = egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0));
+    let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(neighbor_rect.width() / 2.0);
+    let opposite = match edge {
+        FadeEdge::In => FadeEdge::Out,
+        FadeEdge::Out => FadeEdge::In,
+    };
+    let nx = match opposite {
+        FadeEdge::In => neighbor_rect.left() + drop_zone_px,
+        FadeEdge::Out => neighbor_rect.right() - drop_zone_px,
+    };
+    paint_transition_marker(painter, neighbor_rect, opposite, nx, false, true);
 }
 
 /// Il marker di una transizione: una fascia colorata in basso alla clip dal
