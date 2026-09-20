@@ -3751,7 +3751,7 @@ fn apply_pending_action(
         PendingAction::ApplyTransition { track_index, clip_id, edge, kind } => {
             let timeline = &project.timelines[timeline_id];
             if let Some(clip) = timeline.clip(track_index, clip_id) {
-                let default_duration = ((timeline.fps.as_f64() / 2.0).round() as FrameIdx).clamp(1, clip.timeline_len.max(1));
+                let default_duration = ((timeline.fps.as_f64() * 0.45).round() as FrameIdx).clamp(1, clip.timeline_len.max(1));
                 let transition = vv_core::Transition {
                     kind,
                     duration: default_duration,
