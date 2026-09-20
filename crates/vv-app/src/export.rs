@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    Clip, ClipId, ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
+    Clip, ClipId, ClipSource, ColorMatrix, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
 };
 
 use vv_audio::mixer::{
@@ -141,6 +141,9 @@ struct StreamingFrameProvider {
     /// Uno per clip: più track possono essere attive allo stesso frame.
     /// Potato da `retain_clips`.
     active: HashMap<ClipId, ActiveClipDecoder>,
+    /// Creato alla prima compound clip incontrata (vedi `render_ahead.rs`,
+    /// stesso motivo): un export senza compound clip non lo paga mai.
+    compositor: Option<vv_render::Compositor>,
 }
 
 impl StreamingFrameProvider {
@@ -164,6 +167,20 @@ impl FrameProvider for StreamingFrameProvider {
             .media_pool
             .get(media_id)
             .ok_or_else(|| t!("export.error_media_not_found").into_owned())?;
+
+        if let Some(nested_id) = item.compound {
+            let nested = project
+                .timelines
+                .get(nested_id)
+                .ok_or_else(|| t!("export.error_timeline_not_found").into_owned())?;
+            // Ricorsivo: `decode_video_frame`/`track_layers_at` richiamano
+            // `self.frame_for` per ogni clip Media della timeline annidata,
+            // a qualunque profondità — stesso `self`, nessun nuovo stato.
+            let layers = decode_video_frame(project, nested, self, source_frame, nested.resolution)?;
+            let compositor = self.compositor.get_or_insert_with(vv_render::Compositor::new_headless);
+            return Ok(Some(Arc::new(compose_yuv_frame(compositor, &layers, nested.resolution))));
+        }
+
         let path = item.path.clone();
         let is_image = item.meta.is_image();
 
@@ -172,6 +189,29 @@ impl FrameProvider for StreamingFrameProvider {
             Entry::Vacant(e) => e.insert(ActiveClipDecoder::open_for(&path, source_frame, is_image)?),
         };
         decoder.advance_to(source_frame)
+    }
+}
+
+/// Il frame composto di `layers` come se fosse un frame decodificato da un
+/// file: stessa I420 densa BT.709 limited di `render_ahead::compose_frame_at`
+/// (vedi lì per il perché), qui sincrona invece che cachata — l'export
+/// decodifica ogni frame una volta sola, non serve altro.
+fn compose_yuv_frame(compositor: &vv_render::Compositor, layers: &[OwnedLayer], resolution: (u32, u32)) -> vv_media::FrameYuv420 {
+    let bytes = compose_video_frame(compositor, layers, vv_render::OutputFrame::exact(resolution.0, resolution.1));
+    let (width, height) = resolution;
+    let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
+    let y_len = (width * height) as usize;
+    let chroma_len = (chroma_width * chroma_height) as usize;
+    vv_media::FrameYuv420 {
+        width,
+        height,
+        y: bytes[..y_len].to_vec(),
+        u: bytes[y_len..y_len + chroma_len].to_vec(),
+        v: bytes[y_len + chroma_len..y_len + 2 * chroma_len].to_vec(),
+        u_width: chroma_width,
+        u_height: chroma_height,
+        matrix: ColorMatrix::Bt709,
+        full_range: false,
     }
 }
 
@@ -602,6 +642,62 @@ mod tests {
         let frame =
             render_video_frame(&project, &tl, &compositor, &mut active, 12, (2, 2)).unwrap();
         assert_eq!(frame, solid_i420(2, 2, RED_I420));
+    }
+
+    /// Una clip video dentro la timeline annidata di una compound clip deve
+    /// comparire nel frame esportato, alla posizione della compound clip
+    /// nella timeline di partenza — non prima/dopo, e non a quella che
+    /// avrebbe nella sua timeline annidata.
+    #[test]
+    fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
+        let mut project = Project::default();
+        let nested_id = project.timelines.insert(Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (2, 2),
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                clips: vec![solid_color_clip(1, 0, 10, red())],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            }],
+        });
+        let compound_media = project.media_pool.insert(vv_core::MediaItem {
+            path: "Compound Clip 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 10,
+                fps: vv_core::Rational::new(25, 1),
+                width: 2,
+                height: 2,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: Some(nested_id),
+        });
+        let compound_clip =
+            Clip::from_source_range(ClipId(2), ClipSource::Media(compound_media), 0, 10, 5, vv_core::Rational::one());
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![compound_clip],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: Vec::new(),
+        }]);
+        let compositor = vv_render::Compositor::new_headless();
+        let mut provider = StreamingFrameProvider::default();
+
+        let before = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2)).unwrap();
+        assert_eq!(before, solid_i420(2, 2, BLACK_I420), "prima della compound clip: vuoto");
+
+        let during = render_video_frame(&project, &tl, &compositor, &mut provider, 7, (2, 2)).unwrap();
+        assert_eq!(during, solid_i420(2, 2, RED_I420), "dentro: il contenuto della timeline annidata");
     }
 
     #[test]
