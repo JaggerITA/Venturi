@@ -73,11 +73,16 @@ pub enum Layer<'a> {
         /// Moltiplicatore di alpha di tutto il layer (dissolvenze di clip):
         /// 1.0 = nessuna attenuazione.
         opacity: f32,
+        /// Filtri attivi della clip (`EffectStack::filters`), nell'ordine
+        /// in cui vanno applicati: vv-render non sa cosa ciascuno significhi,
+        /// solo l'id dello shader che gli corrisponde (`filter_shader_id`).
+        filters: &'a [vv_core::FilterKind],
     },
     Solid {
         color: vv_core::Rgba,
         transform: Transform,
         opacity: f32,
+        filters: &'a [vv_core::FilterKind],
     },
     /// Titolo: rasterizzato alla risoluzione di output (vedi `text`), poi
     /// trattato come un `Solid` grande quanto la timeline.
@@ -85,7 +90,20 @@ pub enum Layer<'a> {
         title: &'a vv_core::TitleParams,
         transform: Transform,
         opacity: f32,
+        filters: &'a [vv_core::FilterKind],
     },
+}
+
+/// Fino a quanti filtri per layer può portare l'uniform (vedi `filters` in
+/// `TransformUniform`): oltre, i filtri in eccesso sono ignorati. Generoso
+/// per l'uso reale, evita un buffer di dimensione dinamica per lo shader.
+const MAX_LAYER_FILTERS: usize = 8;
+
+/// Id per lo shader di ciascun `FilterKind`; 0 è riservato a "slot vuoto".
+fn filter_shader_id(kind: vv_core::FilterKind) -> f32 {
+    match kind {
+        vv_core::FilterKind::Grayscale => 1.0,
+    }
 }
 
 /// Cosa colora un layer: i piani Y/U/V, un colore pieno, o un colore
@@ -139,6 +157,10 @@ struct TransformUniform {
     solid: [f32; 4],
     /// x: opacità dell'intero layer (dissolvenze di clip). y/z/w inutilizzati.
     extra: [f32; 4],
+    /// Id shader dei filtri attivi, nell'ordine di applicazione (vedi
+    /// `filter_shader_id`); 0 = slot vuoto. `MAX_LAYER_FILTERS` in due vec4
+    /// per l'allineamento dell'uniform.
+    filters: [[f32; 4]; MAX_LAYER_FILTERS / 4],
 }
 
 impl TransformUniform {
@@ -151,6 +173,7 @@ impl TransformUniform {
         source_size: (u32, u32),
         fill: Fill,
         opacity: f32,
+        filters: &[vv_core::FilterKind],
     ) -> Self {
         let (mode, solid) = match fill {
             Fill::Video => (0.0, None),
@@ -210,6 +233,13 @@ impl TransformUniform {
                 ]
             }),
             extra: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+            filters: {
+                let mut ids = [0.0f32; MAX_LAYER_FILTERS];
+                for (slot, kind) in ids.iter_mut().zip(filters.iter().take(MAX_LAYER_FILTERS)) {
+                    *slot = filter_shader_id(*kind);
+                }
+                [[ids[0], ids[1], ids[2], ids[3]], [ids[4], ids[5], ids[6], ids[7]]]
+            },
         }
     }
 }
@@ -503,6 +533,7 @@ impl Compositor {
                     transform,
                     source_size,
                     opacity,
+                    filters,
                 } => vec![self.layer_bind_group(
                     &mut planes,
                     frame,
@@ -512,9 +543,10 @@ impl Compositor {
                     (frame.width, frame.height),
                     Fill::Video,
                     *opacity,
+                    filters,
                 )],
                 // Il colore arriva dall'uniform: i piani sono solo segnaposto.
-                Layer::Solid { color, transform, opacity } => vec![self.layer_bind_group(
+                Layer::Solid { color, transform, opacity, filters } => vec![self.layer_bind_group(
                     &mut planes,
                     &SOLID_PLACEHOLDER,
                     transform,
@@ -523,8 +555,9 @@ impl Compositor {
                     output.timeline_size,
                     Fill::Solid(*color),
                     *opacity,
+                    filters,
                 )],
-                Layer::Text { title, transform, opacity } => {
+                Layer::Text { title, transform, opacity, filters } => {
                     let render = crate::text::render_title(
                         title,
                         output.timeline_size,
@@ -549,6 +582,7 @@ impl Compositor {
                                 output.timeline_size,
                                 Fill::Mask(*color),
                                 *opacity,
+                                filters,
                             )
                         })
                         .collect()
@@ -606,6 +640,7 @@ impl Compositor {
         fit_size: (u32, u32),
         fill: Fill,
         opacity: f32,
+        filters: &[vv_core::FilterKind],
     ) -> wgpu::BindGroup {
         let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
         let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
@@ -626,6 +661,7 @@ impl Compositor {
             source_size,
             fill,
             opacity,
+            filters,
         );
         let uniform_buffer = self
             .device
@@ -853,6 +889,7 @@ impl Compositor {
                 transform: *transform,
                 source_size: (frame.width, frame.height),
                 opacity: 1.0,
+                filters: &[],
             }],
             output,
         )
@@ -871,6 +908,7 @@ impl Compositor {
                 transform: *transform,
                 source_size: (frame.width, frame.height),
                 opacity: 1.0,
+                filters: &[],
             }],
             output,
         )
@@ -1280,6 +1318,7 @@ mod tests {
                 transform,
                 source_size: (1920, 1080),
                 opacity: 1.0,
+                filters: &[],
             }],
             OutputFrame::scaled(16, 16, (1920, 1080)),
         );
@@ -1398,12 +1437,14 @@ mod tests {
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
                     opacity: 1.0,
+                    filters: &[],
                 },
                 Layer::Video {
                     frame: above.as_yuv_frame(),
                     transform: Transform::default(),
                     source_size: (above.width, above.height),
                     opacity: 1.0,
+                    filters: &[],
                 },
             ],
             OutputFrame::exact(32, 16),
@@ -1429,16 +1470,38 @@ mod tests {
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
                     opacity: 1.0,
+                    filters: &[],
                 },
                 Layer::Solid {
                     color: RED,
                     transform: Transform::default(),
                     opacity: 1.0,
+                    filters: &[],
                 },
             ],
             OutputFrame::exact(16, 16),
         );
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
+    }
+
+    /// Il filtro bianco e nero converte in luma qualunque tipo di layer,
+    /// non solo il video.
+    #[test]
+    fn grayscale_flattens_a_solid_layer_to_its_luma() {
+        let compositor = Compositor::new_headless();
+        let out = compositor.render_layers(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform::default(),
+                opacity: 1.0,
+                filters: &[vv_core::FilterKind::Grayscale],
+            }],
+            OutputFrame::exact(4, 4),
+        );
+        let pixel = out.as_chunks::<4>().0[0];
+        assert_eq!(pixel[0], pixel[1], "grigio: R=G=B");
+        assert_eq!(pixel[1], pixel[2]);
+        assert!(pixel[0] > 0 && pixel[0] < 255, "luma del rosso, non nero né bianco");
     }
 
     #[test]
@@ -1455,6 +1518,7 @@ mod tests {
                 title: &title,
                 transform: Transform::default(),
                 opacity: 1.0,
+                filters: &[],
             }],
             OutputFrame::exact(160, 90),
         );
@@ -1484,11 +1548,13 @@ mod tests {
                     color: RED,
                     transform: Transform::default(),
                     opacity: 1.0,
+                    filters: &[],
                 },
                 Layer::Text {
                     title: &title,
                     transform: Transform::default(),
                     opacity: 1.0,
+                    filters: &[],
                 },
             ],
             OutputFrame::exact(160, 90),
@@ -1518,6 +1584,7 @@ mod tests {
                     ..Transform::default()
                 },
                 opacity: 1.0,
+                filters: &[],
             }],
             OutputFrame::scaled(8, 4, (16, 8)),
         );
@@ -1540,11 +1607,13 @@ mod tests {
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
                     opacity: 1.0,
+                    filters: &[],
                 },
                 Layer::Solid {
                     color: RED,
                     transform: Transform::default(),
                     opacity: 0.5,
+                    filters: &[],
                 },
             ],
             OutputFrame::exact(4, 4),
@@ -1562,8 +1631,9 @@ mod tests {
                     transform: Transform::default(),
                     source_size: (below.width, below.height),
                     opacity: 1.0,
+                    filters: &[],
                 },
-                Layer::Solid { color: RED, transform: Transform::default(), opacity: 0.0 },
+                Layer::Solid { color: RED, transform: Transform::default(), opacity: 0.0, filters: &[] },
             ],
             OutputFrame::exact(4, 4),
         );
@@ -1578,6 +1648,7 @@ mod tests {
                 color: RED,
                 transform: Transform::default(),
                 opacity: 1.0,
+                filters: &[],
             }],
             OutputFrame::exact(5, 3),
         );
@@ -1596,6 +1667,7 @@ mod tests {
                 color,
                 transform: Transform::default(),
                 opacity: 1.0,
+                filters: &[],
             }]
         };
         let fresh = |color, w, h| {

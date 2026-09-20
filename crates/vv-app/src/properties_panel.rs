@@ -775,6 +775,10 @@ pub(crate) fn set_title((tl, track, clip): ClipRef, value: vv_core::TitleParams)
     Box::new(vv_core::set_clip_title(tl, track, clip, value))
 }
 
+pub(crate) fn set_filters((tl, track, clip): ClipRef, value: Vec<vv_core::ClipFilter>) -> BoxedCommand {
+    Box::new(vv_core::set_clip_filters(tl, track, clip, value))
+}
+
 pub(crate) fn upsert_keyframe(
     (tl, track, clip): ClipRef,
     frame: FrameIdx,
@@ -939,6 +943,7 @@ impl VibeVideoApp {
                 .map(|k| k.value_at(frame))
                 .unwrap_or(DEFAULT_SOLID_COLOR),
             title: clip.effects.title.clone(),
+            filters: clip.effects.filters.clone(),
         })
     }
 
@@ -1379,6 +1384,43 @@ impl VibeVideoApp {
                                                     pending_effects.push(
                                                         reset_transform_params((t.timeline, t.track_index, t.clip_id), params.clone(), reset_flip),
                                                     );
+                                                }
+                                            }
+
+                                            // Una riga per filtro, nell'ordine in cui sono
+                                            // stati trascinati sulla clip dal pannello
+                                            // Effects; vuota finché non ce n'è nessuno.
+                                            if !info.filters.is_empty() {
+                                                ui.add_space(6.0);
+                                                ui.label(egui::RichText::new(t!("props.filters")).strong());
+                                                for filter in &info.filters {
+                                                    let mut enabled = filter.enabled;
+                                                    let reset = title_section_header(
+                                                        ui,
+                                                        &timeline_ui::filter_label(filter.kind),
+                                                        &mut enabled,
+                                                    );
+                                                    if reset {
+                                                        enabled = true;
+                                                    }
+                                                    if reset || enabled != filter.enabled {
+                                                        let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                        for t in targets {
+                                                            let Some(effects) = target_effects(tl, t) else {
+                                                                continue;
+                                                            };
+                                                            if let Some(pos) =
+                                                                effects.filters.iter().position(|f| f.kind == filter.kind)
+                                                            {
+                                                                let mut new_filters = effects.filters.clone();
+                                                                new_filters[pos].enabled = enabled;
+                                                                pending_effects.push(set_filters(
+                                                                    (t.timeline, t.track_index, t.clip_id),
+                                                                    new_filters,
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
 

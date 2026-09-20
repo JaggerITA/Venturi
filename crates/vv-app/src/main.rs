@@ -178,6 +178,9 @@ struct ClipPanelInfo {
     color_kf_here: bool,
     color: vv_core::Rgba,
     title: Option<vv_core::TitleParams>,
+    /// Vuota finché non si trascina un filtro sulla clip dal pannello
+    /// Effects; poi uno per ciascuno, nell'ordine di applicazione.
+    filters: Vec<vv_core::ClipFilter>,
 }
 
 /// Dove atterrano le clip di un drop dal media pool, risolto una volta per
@@ -2589,6 +2592,7 @@ impl eframe::App for VibeVideoApp {
                         transform: vv_core::Transform::default(),
                         source_size: (frame.width, frame.height),
                         opacity: 1.0,
+                        filters: &[],
                     };
                     self.show_composited(
                         &[layer],

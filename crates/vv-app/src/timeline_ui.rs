@@ -336,6 +336,14 @@ enum PendingAction {
         clip_id: ClipId,
         new_value: f32,
     },
+    /// Un filtro del pannello Effects è stato rilasciato su questa clip:
+    /// aggiunto in coda alla sua lista (o riattivato se già presente),
+    /// attivo di default.
+    ApplyFilter {
+        track_index: usize,
+        clip_id: ClipId,
+        filter: vv_core::FilterKind,
+    },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
     /// gruppo nuovo — almeno 2.
@@ -901,6 +909,21 @@ fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
     }
 }
 
+/// Ingranaggio a mano (anello + denti radiali): niente glifo Unicode, che
+/// su alcune piattaforme (Asahi) manca nei font di egui (vedi il commento
+/// sul link icon in `paint_clip_overlay`).
+pub(crate) fn paint_gear_icon(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    painter.circle_stroke(center, radius * 0.55, stroke);
+    painter.circle_filled(center, radius * 0.16, color);
+    const TEETH: usize = 8;
+    for i in 0..TEETH {
+        let angle = std::f32::consts::TAU * i as f32 / TEETH as f32;
+        let dir = egui::vec2(angle.cos(), angle.sin());
+        painter.line_segment([center + dir * radius * 0.55, center + dir * radius], stroke);
+    }
+}
+
 /// Pulsante "S"/"M": pieno di `active` quando è attivo.
 fn paint_letter_button(
     painter: &egui::Painter,
@@ -1201,6 +1224,20 @@ impl TimelineDrag {
 
     fn is_media(&self) -> bool {
         matches!(self, Self::Media(_))
+    }
+}
+
+/// Filtri del pannello Effects, in ordine di comparsa lì: a differenza dei
+/// `Generator`, si applicano a una clip video esistente invece di
+/// generarne una nuova, e per questo restano fuori da `TimelineDrag`
+/// (niente ghost sulle zone vuote, niente nuove track). Il tipo condiviso
+/// con `EffectStack::filters` (`vv_core::FilterKind`) resta l'unica fonte
+/// di verità su "quali filtri esistono": qui solo la loro etichetta.
+pub const ALL_FILTER_KINDS: [vv_core::FilterKind; 1] = [vv_core::FilterKind::Grayscale];
+
+pub fn filter_label(kind: vv_core::FilterKind) -> std::borrow::Cow<'static, str> {
+    match kind {
+        vv_core::FilterKind::Grayscale => t!("filter.grayscale"),
     }
 }
 
@@ -1704,6 +1741,17 @@ pub fn show_timeline(
                     media_drop = Some((drag, frame, target));
                 }
 
+                // Ghost di un filtro: un ingranaggio invece del rettangolo verde,
+                // dovunque sulla timeline (non solo sulle track, come sopra: un
+                // filtro non atterra mai su uno spazio vuoto, ma il cursore
+                // resta comunque coerente mentre ci passa sopra).
+                if pointer_over_panel
+                    && egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(ui.ctx())
+                    && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+                {
+                    paint_gear_icon(&ghost_painter, pos + egui::vec2(14.0, 14.0), 10.0, egui::Color32::WHITE);
+                }
+
                 // Zone "aggiungi una nuova track": margini sopra/sotto ai
                 // gruppi (altezza zero se non c'è margine, vedi sopra).
                 let above_video_rect = egui::Rect::from_min_max(
@@ -2068,6 +2116,27 @@ pub fn show_timeline(
 
                     let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
                     paint_clip_box(&painter, clip_rect, visual, is_selected);
+
+                    // Filtro trascinato dal pannello Effects: solo le clip video,
+                    // non bloccate, lo accettano (niente spazi vuoti o nuove
+                    // track, a differenza di Generator/Media).
+                    if !visual.locked && track_kinds[visual.track_index] == TrackKind::Video {
+                        if resp.dnd_hover_payload::<vv_core::FilterKind>().is_some() {
+                            painter.rect_stroke(
+                                clip_rect,
+                                4.0,
+                                egui::Stroke::new(3.0, FILTER_HIGHLIGHT_COLOR),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if let Some(filter) = resp.dnd_release_payload::<vv_core::FilterKind>() {
+                            pending = Some(PendingAction::ApplyFilter {
+                                track_index: visual.track_index,
+                                clip_id: visual.clip.id,
+                                filter: *filter,
+                            });
+                        }
+                    }
 
                     // Waveform: massimo dei bin per colonna, forma indipendente dallo zoom.
                     if track_kinds[visual.track_index] == TrackKind::Audio
@@ -3170,6 +3239,24 @@ fn apply_pending_action(
                 Box::new(vv_core::set_clip_gain(timeline_id, track_index, clip_id, new_value)),
             );
         }
+        PendingAction::ApplyFilter { track_index, clip_id, filter } => {
+            // Se è già presente (ridropparlo) lo si riattiva soltanto,
+            // invece di duplicarlo in coda.
+            let new_filters = project.timelines[timeline_id].clip(track_index, clip_id).map(|clip| {
+                let mut filters = clip.effects.filters.clone();
+                match filters.iter_mut().find(|f| f.kind == filter) {
+                    Some(existing) => existing.enabled = true,
+                    None => filters.push(vv_core::ClipFilter { kind: filter, enabled: true }),
+                }
+                filters
+            });
+            if let Some(filters) = new_filters {
+                history.do_command(
+                    project,
+                    Box::new(vv_core::set_clip_filters(timeline_id, track_index, clip_id, filters)),
+                );
+            }
+        }
         PendingAction::Unlink(track_index, clip_id) => {
             history.do_command(
                 project,
@@ -3987,6 +4074,9 @@ pub const OFFLINE_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 50, 50);
 
 /// Indicatore "proxy disponibile", condiviso col media pool.
 pub const PROXY_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(220, 151, 52, 220);
+
+/// Bordo della clip mentre ci si trascina sopra un filtro del pannello Effects.
+const FILTER_HIGHLIGHT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 190, 60);
 
 fn paint_proxy_strip(painter: &egui::Painter, rect: egui::Rect) {
     let strip_rect = egui::Rect::from_min_size(

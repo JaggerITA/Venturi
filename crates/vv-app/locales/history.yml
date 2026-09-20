@@ -115,3 +115,7 @@ history.remove_media:
 history.relink_media:
   en: "Relink media"
   it: "Ricollega media"
+
+history.filters:
+  en: "Clip filters"
+  it: "Filtri clip"

@@ -300,6 +300,10 @@ props.softness:
   en: "Softness"
   it: "Sfumatura"
 
+props.filters:
+  en: "Filters"
+  it: "Filtri"
+
 props.volume:
   en: "Volume"
   it: "Volume"

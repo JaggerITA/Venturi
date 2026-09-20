@@ -105,6 +105,42 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
     }
 }
 
+/// Voce di un filtro nel pannello Effects: si trascina su una clip video
+/// esistente (mai su uno spazio vuoto). Il tipo (`vv_core::FilterKind`) è lo
+/// stesso salvato in `EffectStack::filters`: nessuna doppia rappresentazione
+/// fra editor e modello.
+pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
+    let label = timeline_ui::filter_label(filter);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let id = ui.id().with(("filter_item", &label));
+    let resp = ui
+        .interact(rect, id, egui::Sense::click_and_drag())
+        .on_hover_text(t!("pool.drag_to_clip"));
+    let visuals = ui.visuals();
+    let (bg, stroke) = if resp.hovered() || resp.dragged() {
+        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+    } else {
+        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, bg);
+    let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
+    painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
+    timeline_ui::paint_gear_icon(&painter, thumb.center(), 11.0, egui::Color32::from_gray(220));
+    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    painter.text(
+        egui::pos2(thumb.right() + 14.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label.as_ref(),
+        egui::FontId::proportional(13.0),
+        visuals.text_color(),
+    );
+    resp.dnd_set_drag_payload(filter);
+    if resp.dragged() {
+        show_drag_ghost(ui, id, &label);
+    }
+}
+
 /// Larghezza della colonna "Durata": la stessa nell'intestazione e nelle
 /// righe, così restano allineate.
 pub(crate) const DURATION_COL_W: f32 = 64.0;
@@ -489,7 +525,7 @@ impl VibeVideoApp {
             });
     }
 
-    /// Sezione Effects: effetti da trascinare sulla timeline.
+    /// Sezione Effects: generatori ed effetti da trascinare sulla timeline.
     pub(crate) fn show_effects_list(ui: &mut egui::Ui) {
         effects_section_header(ui, &t!("effects.generators"));
         egui::ScrollArea::vertical()
@@ -498,6 +534,11 @@ impl VibeVideoApp {
             .show(ui, |ui| {
                 for generator in timeline_ui::Generator::ALL {
                     effect_item(ui, generator);
+                }
+                ui.add_space(8.0);
+                effects_section_header(ui, &t!("effects.filters"));
+                for filter in timeline_ui::ALL_FILTER_KINDS {
+                    filter_item(ui, filter);
                 }
             });
     }

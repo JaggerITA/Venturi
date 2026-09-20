@@ -8,8 +8,8 @@ pub use command::{
     KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
     SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
-    UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_flip,
-    set_clip_gain, set_clip_title, set_clip_transform_param,
+    UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_filters,
+    set_clip_flip, set_clip_gain, set_clip_title, set_clip_transform_param,
 };
 pub use model::*;
 pub use otio::{OtioError, OtioImport, OtioWarning, export_otio, import_otio};

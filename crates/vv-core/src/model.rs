@@ -767,6 +767,24 @@ pub enum ClipSource {
 pub const GAIN_DB_MIN: f32 = -100.0;
 pub const GAIN_DB_MAX: f32 = 30.0;
 
+/// Un filtro del pannello Effects: la varietà è aperta (nuove varianti per
+/// nuovi filtri), il rendering la traduce in un id per lo shader — vedi
+/// `vv_render`, che non conosce il significato di ciascuna, solo il suo id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilterKind {
+    Grayscale,
+}
+
+/// Un filtro applicato a una clip. L'ordine nel `Vec` di
+/// `EffectStack::filters` è l'ordine di applicazione, configurabile
+/// dall'utente (più filtri sulla stessa clip, in una sequenza scelta da
+/// lui); `enabled` lo sospende senza toglierlo dalla sequenza.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipFilter {
+    pub kind: FilterKind,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectStack {
     pub transform: TransformTracks,
@@ -775,6 +793,8 @@ pub struct EffectStack {
     pub color: Option<Keyframed<Rgba>>,
     #[serde(default)]
     pub title: Option<TitleParams>,
+    #[serde(default)]
+    pub filters: Vec<ClipFilter>,
 }
 
 impl Default for EffectStack {
@@ -785,6 +805,7 @@ impl Default for EffectStack {
             gain_db: Keyframed::constant(0.0),
             color: None,
             title: None,
+            filters: Vec::new(),
         }
     }
 }

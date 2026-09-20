@@ -71,3 +71,15 @@ pool.items:
 effects.generators:
   en: "Generators"
   it: "Generators"
+
+effects.filters:
+  en: "Filters"
+  it: "Filtri"
+
+filter.grayscale:
+  en: "Black & White"
+  it: "Bianco e nero"
+
+pool.drag_to_clip:
+  en: "Drag onto a video clip"
+  it: "Trascina su una clip video"

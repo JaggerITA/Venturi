@@ -64,16 +64,20 @@ pub enum OwnedLayer {
         /// Risoluzione nativa del media (non del proxy): le unità del crop.
         source_size: (u32, u32),
         opacity: f32,
+        /// Solo i filtri attivi di `EffectStack::filters`, nel loro ordine.
+        filters: Vec<vv_core::FilterKind>,
     },
     Solid {
         color: Rgba,
         transform: Transform,
         opacity: f32,
+        filters: Vec<vv_core::FilterKind>,
     },
     Text {
         title: TitleParams,
         transform: Transform,
         opacity: f32,
+        filters: Vec<vv_core::FilterKind>,
     },
 }
 
@@ -85,21 +89,25 @@ impl OwnedLayer {
                 transform,
                 source_size,
                 opacity,
+                filters,
             } => vv_render::Layer::Video {
                 frame: as_render_yuv_frame(frame),
                 transform: *transform,
                 source_size: *source_size,
                 opacity: *opacity,
+                filters: filters.as_slice(),
             },
-            OwnedLayer::Solid { color, transform, opacity } => vv_render::Layer::Solid {
+            OwnedLayer::Solid { color, transform, opacity, filters } => vv_render::Layer::Solid {
                 color: *color,
                 transform: *transform,
                 opacity: *opacity,
+                filters: filters.as_slice(),
             },
-            OwnedLayer::Text { title, transform, opacity } => vv_render::Layer::Text {
+            OwnedLayer::Text { title, transform, opacity, filters } => vv_render::Layer::Text {
                 title,
                 transform: *transform,
                 opacity: *opacity,
+                filters: filters.as_slice(),
             },
         }
     }
@@ -117,6 +125,13 @@ pub fn clip_layer(
     let source_frame = clip.source_frame_at(frame);
     let transform = clip.effects.transform.value_at(source_frame);
     let opacity = clip.fade_multiplier_at(frame);
+    let filters: Vec<vv_core::FilterKind> = clip
+        .effects
+        .filters
+        .iter()
+        .filter(|f| f.enabled)
+        .map(|f| f.kind)
+        .collect();
     Ok(match &clip.source {
         ClipSource::SolidColor => Some(OwnedLayer::Solid {
             color: clip
@@ -126,12 +141,13 @@ pub fn clip_layer(
                 .map_or(Rgba::BLACK, |k| k.value_at(source_frame)),
             transform,
             opacity,
+            filters,
         }),
         ClipSource::Text => clip
             .effects
             .title
             .clone()
-            .map(|title| OwnedLayer::Text { title, transform, opacity }),
+            .map(|title| OwnedLayer::Text { title, transform, opacity, filters }),
         ClipSource::Media(_) => provider
             .frame_for(project, clip, frame)?
             .map(|frame| OwnedLayer::Video {
@@ -139,6 +155,7 @@ pub fn clip_layer(
                 transform,
                 source_size: clip_source_size(project, clip, timeline_size),
                 opacity,
+                filters,
             }),
     })
 }

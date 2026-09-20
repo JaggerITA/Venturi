@@ -22,6 +22,10 @@ struct TransformUniform {
     solid: vec4<f32>,
     // x: opacità dell'intero layer (dissolvenze di clip). y/z/w inutilizzati.
     extra: vec4<f32>,
+    // Id shader dei filtri attivi della clip, in ordine di applicazione
+    // (0 = slot vuoto); vedi `filter_shader_id` in compositor.rs, l'unico
+    // punto che sa a quale `FilterKind` corrisponde ciascun id.
+    filters: array<vec4<f32>, 2>,
 };
 
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
@@ -58,6 +62,28 @@ fn kr_kb(matrix_id: i32) -> vec2<f32> {
         return vec2<f32>(0.2627, 0.0593); // BT.2020
     }
     return vec2<f32>(0.299, 0.114); // BT.601 (anche il fallback per matrici non gestite)
+}
+
+// Slot `i` (0..8) dentro i due vec4 di `TransformUniform.filters`: un
+// array<vec4,2> non si indicizza linearmente in WGSL, va spacchettato.
+fn filter_id_at(filters: array<vec4<f32>, 2>, i: i32) -> f32 {
+    let group = filters[i / 4];
+    let lane = i % 4;
+    if (lane == 0) { return group.x; }
+    if (lane == 1) { return group.y; }
+    if (lane == 2) { return group.z; }
+    return group.w;
+}
+
+// Applica un filtro in sequenza a `rgb`; l'ordine di chiamata (vedi il
+// loop in `fs_main`) è l'ordine scelto dall'utente. Nuovi filtri: un nuovo
+// id (`filter_shader_id`) e un nuovo ramo qui, nient'altro nella pipeline.
+fn apply_filter(rgb: vec3<f32>, id: f32) -> vec3<f32> {
+    if (id > 0.5 && id < 1.5) { // Grayscale
+        let luma = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
+        return vec3<f32>(luma, luma, luma);
+    }
+    return rgb;
 }
 
 fn yuv_to_rgb(y_sample: f32, u_sample: f32, v_sample: f32, matrix_id: i32, full_range: bool) -> vec3<f32> {
@@ -149,16 +175,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // del piano Y con un sampler bilineare fa anche l'upsampling della
     // croma, gratis.
     let mode = transform.color.w;
+    var rgb: vec3<f32>;
+    var out_alpha: f32;
     if (mode > 0.5 && mode < 1.5) {
-        return vec4<f32>(transform.solid.rgb, alpha * transform.solid.a);
+        rgb = transform.solid.rgb;
+        out_alpha = alpha * transform.solid.a;
+    } else {
+        let y_sample = textureSample(y_tex, input_sampler, source_uv).r;
+        if (mode > 1.5) {
+            rgb = transform.solid.rgb;
+            out_alpha = alpha * transform.solid.a * y_sample;
+        } else {
+            let u_sample = textureSample(u_tex, input_sampler, source_uv).r;
+            let v_sample = textureSample(v_tex, input_sampler, source_uv).r;
+            let matrix_id = i32(transform.color.x);
+            let full_range = transform.color.y > 0.5;
+            rgb = yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range);
+            out_alpha = alpha;
+        }
     }
-    let y_sample = textureSample(y_tex, input_sampler, source_uv).r;
-    if (mode > 1.5) {
-        return vec4<f32>(transform.solid.rgb, alpha * transform.solid.a * y_sample);
+    for (var slot = 0; slot < 8; slot = slot + 1) {
+        let id = filter_id_at(transform.filters, slot);
+        if (id > 0.5) {
+            rgb = apply_filter(rgb, id);
+        }
     }
-    let u_sample = textureSample(u_tex, input_sampler, source_uv).r;
-    let v_sample = textureSample(v_tex, input_sampler, source_uv).r;
-    let matrix_id = i32(transform.color.x);
-    let full_range = transform.color.y > 0.5;
-    return vec4<f32>(yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range), alpha);
+    return vec4<f32>(rgb, out_alpha);
 }

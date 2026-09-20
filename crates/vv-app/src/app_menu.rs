@@ -459,5 +459,6 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::RemoveKeyframe => t!("history.remove_keyframe"),
         L::RemoveMedia => t!("history.remove_media"),
         L::RelinkMedia => t!("history.relink_media"),
+        L::Filters => t!("history.filters"),
     }
 }

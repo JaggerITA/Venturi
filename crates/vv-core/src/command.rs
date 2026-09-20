@@ -2,7 +2,7 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipId, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId,
+    Clip, ClipFilter, ClipId, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId,
     MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
     TransformParam,
 };
@@ -47,6 +47,7 @@ pub enum CommandLabel {
     RemoveKeyframe,
     RemoveMedia,
     RelinkMedia,
+    Filters,
 }
 
 /// Più comandi in un solo passo di history.
@@ -1045,6 +1046,20 @@ pub fn set_clip_title(
     value: TitleParams,
 ) -> SetClipValue<Option<TitleParams>> {
     SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Title, Some(value), |c| &mut c.effects.title)
+}
+
+/// Sostituisce l'intera lista filtri, ordine incluso: aggiungerne uno,
+/// toglierlo, attivarlo/disattivarlo o riordinarli sono tutti "scrivi la
+/// nuova lista" — chi chiama la calcola da quella attuale.
+pub fn set_clip_filters(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    value: Vec<ClipFilter>,
+) -> SetClipValue<Vec<ClipFilter>> {
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Filters, value, |c| {
+        &mut c.effects.filters
+    })
 }
 
 /// Riporta un gruppo di parametri del transform al valore di default,
