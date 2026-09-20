@@ -229,6 +229,7 @@ mod tests {
             u_height: 0,
             matrix: crate::decode::ColorMatrix::Bt601,
             full_range: false,
+            alpha: None,
         })
     }
 

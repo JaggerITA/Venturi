@@ -21,7 +21,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use vv_core::{ClipSource, ColorMatrix, FrameIdx, MediaId, Project, Timeline, TimelineId};
+use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
 use crate::frame_provider;
@@ -958,25 +958,11 @@ fn compose_frame_at(
     }
     let render_layers: Vec<vv_render::Layer> = layers.iter().map(frame_provider::OwnedLayer::as_render).collect();
     let (width, height) = nested.resolution;
-    let bytes = compositor.render_layers_i420(&render_layers, vv_render::OutputFrame::exact(width, height));
-    let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
-    let y_len = (width * height) as usize;
-    let chroma_len = (chroma_width * chroma_height) as usize;
-    if bytes.len() < y_len + 2 * chroma_len {
-        debug_assert!(false, "render_layers_i420 ha prodotto meno byte del previsto");
-        return None;
-    }
-    Some(FrameYuv420 {
-        width,
-        height,
-        y: bytes[..y_len].to_vec(),
-        u: bytes[y_len..y_len + chroma_len].to_vec(),
-        v: bytes[y_len + chroma_len..y_len + 2 * chroma_len].to_vec(),
-        u_width: chroma_width,
-        u_height: chroma_height,
-        matrix: ColorMatrix::Bt709,
-        full_range: false,
-    })
+    // RGBA e sfondo trasparente, non `render_layers_i420` (nero opaco, e
+    // senza canale alpha): questo frame torna un layer altrove, le zone
+    // dove `nested` non ha nulla da mostrare devono restare trasparenti.
+    let rgba = compositor.render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(width, height));
+    Some(frame_provider::rgba_to_yuv420_with_alpha(&rgba, width, height))
 }
 
 /// Parametri di `fill_segments` comuni alle due finestre.
@@ -1383,6 +1369,7 @@ mod tests {
             u_height: 1,
             matrix: vv_media::ColorMatrix::Bt601,
             full_range: false,
+            alpha: None,
         }
     }
 
@@ -1697,6 +1684,43 @@ mod tests {
         // ...e solo ora la compound clip si può comporre.
         let composed = caches.get(compound_media, 0).expect("ora il layer sottostante è pronto");
         assert_eq!((composed.width, composed.height), (320, 240));
+    }
+
+    /// Bug segnalato dall'utente: una compound clip è una timeline come le
+    /// altre, quindi le zone dove la sua timeline annidata non ha nulla da
+    /// mostrare devono restare trasparenti — non nere, o coprirebbero quel
+    /// che c'è sotto quando la compound clip diventa a sua volta un layer
+    /// nella timeline che la contiene.
+    #[test]
+    fn compose_frame_at_leaves_the_nested_timelines_empty_areas_transparent() {
+        let project = Project::default();
+        let mut clip = Clip::from_source_range(ClipId(1), vv_core::ClipSource::SolidColor, 0, 10, 0, Rational::one());
+        clip.effects.color = Some(vv_core::Keyframed::constant(vv_core::Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }));
+        // Taglia via la metà destra (crop in pixel di timeline): resta scoperta.
+        clip.effects.transform = vv_core::TransformTracks::constant(vv_core::Transform {
+            crop: [0.0, 0.0, 2.0, 0.0],
+            ..Default::default()
+        });
+        let nested = Timeline {
+            name: "Nested".into(),
+            fps: Rational::new(25, 1),
+            resolution: (4, 4),
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                clips: vec![clip],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            }],
+        };
+        let compositor = vv_render::Compositor::new_headless();
+        let caches = SharedFrameCache::new();
+
+        let frame = compose_frame_at(&project, &nested, 0, &compositor, &caches).expect("nessun media da attendere");
+        let alpha = frame.alpha.as_ref().expect("un frame composto porta sempre l'alpha");
+        assert_eq!(alpha[0], 255, "sinistra: coperta dalla clip rossa");
+        assert_eq!(alpha[3], 0, "destra: fuori dal crop, deve restare trasparente, non nera");
     }
 
     /// Un segmento dietro la testina più lungo di `BEHIND_CHUNK_FRAMES`

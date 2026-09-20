@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    Clip, ClipId, ClipSource, ColorMatrix, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
+    Clip, ClipId, ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
 };
 
 use vv_audio::mixer::{
@@ -193,26 +193,14 @@ impl FrameProvider for StreamingFrameProvider {
 }
 
 /// Il frame composto di `layers` come se fosse un frame decodificato da un
-/// file: stessa I420 densa BT.709 limited di `render_ahead::compose_frame_at`
-/// (vedi lì per il perché), qui sincrona invece che cachata — l'export
-/// decodifica ogni frame una volta sola, non serve altro.
+/// file: stessa conversione di `render_ahead::compose_frame_at` (RGBA e
+/// sfondo trasparente, non `compose_video_frame` che è nero opaco e senza
+/// canale alpha — questo frame torna un layer altrove), qui sincrona
+/// invece che cachata — l'export decodifica ogni frame una volta sola.
 fn compose_yuv_frame(compositor: &vv_render::Compositor, layers: &[OwnedLayer], resolution: (u32, u32)) -> vv_media::FrameYuv420 {
-    let bytes = compose_video_frame(compositor, layers, vv_render::OutputFrame::exact(resolution.0, resolution.1));
-    let (width, height) = resolution;
-    let (chroma_width, chroma_height) = (width.div_ceil(2), height.div_ceil(2));
-    let y_len = (width * height) as usize;
-    let chroma_len = (chroma_width * chroma_height) as usize;
-    vv_media::FrameYuv420 {
-        width,
-        height,
-        y: bytes[..y_len].to_vec(),
-        u: bytes[y_len..y_len + chroma_len].to_vec(),
-        v: bytes[y_len + chroma_len..y_len + 2 * chroma_len].to_vec(),
-        u_width: chroma_width,
-        u_height: chroma_height,
-        matrix: ColorMatrix::Bt709,
-        full_range: false,
-    }
+    let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+    let rgba = compositor.render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(resolution.0, resolution.1));
+    crate::frame_provider::rgba_to_yuv420_with_alpha(&rgba, resolution.0, resolution.1)
 }
 
 /// Esporta i frame `range` in `output_path`. Bloccante.
@@ -698,6 +686,78 @@ mod tests {
 
         let during = render_video_frame(&project, &tl, &compositor, &mut provider, 7, (2, 2)).unwrap();
         assert_eq!(during, solid_i420(2, 2, RED_I420), "dentro: il contenuto della timeline annidata");
+    }
+
+    /// Bug segnalato dall'utente: una compound clip è una timeline come le
+    /// altre, quindi dove la sua timeline annidata non ha nulla da
+    /// mostrare deve restare trasparente e lasciar vedere la track sotto —
+    /// non coprirla di nero.
+    #[test]
+    fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty_area() {
+        let mut project = Project::default();
+        let mut nested_clip = solid_color_clip(1, 0, 10, red());
+        // Taglia via la metà destra (crop in pixel di timeline, nested 4x2).
+        nested_clip.effects.transform = vv_core::TransformTracks::constant(vv_core::Transform {
+            crop: [0.0, 0.0, 2.0, 0.0],
+            ..Default::default()
+        });
+        let nested_id = project.timelines.insert(Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (4, 2),
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                clips: vec![nested_clip],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            }],
+        });
+        let compound_media = project.media_pool.insert(vv_core::MediaItem {
+            path: "Compound Clip 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 10,
+                fps: vv_core::Rational::new(25, 1),
+                width: 4,
+                height: 2,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: Some(nested_id),
+        });
+        let compound_clip =
+            Clip::from_source_range(ClipId(2), ClipSource::Media(compound_media), 0, 10, 0, vv_core::Rational::one());
+        let tl = timeline_with(vec![
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![solid_color_clip(3, 0, 10, blue())],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            },
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![compound_clip],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            },
+        ]);
+        let compositor = vv_render::Compositor::new_headless();
+        let mut provider = StreamingFrameProvider::default();
+
+        let frame = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (4, 2)).unwrap();
+        // Piano Y, un byte per pixel: sinistra coperta dal rosso della
+        // compound clip, destra scoperta (deve vedersi il blu sotto).
+        assert_eq!(frame[0], RED_I420[0], "sinistra: il rosso della compound clip");
+        assert_eq!(frame[3], BLUE_I420[0], "destra: il blu della track sotto, non nero");
     }
 
     #[test]

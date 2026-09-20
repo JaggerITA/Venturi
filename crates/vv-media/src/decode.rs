@@ -29,12 +29,21 @@ pub struct FrameYuv420 {
     pub matrix: ColorMatrix,
     /// `true` = full range (0-255), `false` = limited (16-235/240), la norma.
     pub full_range: bool,
+    /// Copertura per pixel (`width`x`height`, non sottocampionata): `None`
+    /// per un frame decodificato da un file (sempre opaco — un video non ha
+    /// un canale alpha). `Some` solo per un frame composto dalla timeline
+    /// annidata di una compound clip, con la vera trasparenza delle zone
+    /// dove quella timeline non ha nulla da mostrare (vedi
+    /// `render_ahead::compose_frame_at`): senza, l'esterno delle sue clip
+    /// apparirebbe nero invece di lasciar vedere quel che c'è sotto quando
+    /// la compound clip diventa a sua volta un layer altrove.
+    pub alpha: Option<Vec<u8>>,
 }
 
 impl FrameYuv420 {
-    /// Byte occupati dai tre piani.
+    /// Byte occupati dai piani.
     pub fn byte_len(&self) -> usize {
-        self.y.len() + self.u.len() + self.v.len()
+        self.y.len() + self.u.len() + self.v.len() + self.alpha.as_ref().map_or(0, Vec::len)
     }
 }
 
@@ -327,6 +336,7 @@ fn yuv420_from_decoded(
         u_height,
         matrix,
         full_range,
+        alpha: None,
     })
 }
 

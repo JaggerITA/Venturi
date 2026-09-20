@@ -33,6 +33,9 @@ struct TransformUniform {
 @group(0) @binding(2) var v_tex: texture_2d<f32>;
 @group(0) @binding(3) var input_sampler: sampler;
 @group(0) @binding(4) var<uniform> transform: TransformUniform;
+// Copertura per pixel (1x1 opaco per un layer senza vera trasparenza, es.
+// un video decodificato — vedi YuvFrame::alpha in compositor.rs).
+@group(0) @binding(5) var a_tex: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -200,5 +203,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             rgb = apply_filter(rgb, id);
         }
     }
+    // Placeholder 1x1 per un layer senza vera copertura per pixel: campiona
+    // sempre 1.0, nessun effetto (vedi doc di `a_tex`).
+    out_alpha = out_alpha * textureSample(a_tex, input_sampler, source_uv).r;
     return vec4<f32>(rgb, out_alpha);
 }

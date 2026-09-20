@@ -18,6 +18,12 @@ const BLACK: wgpu::Color = wgpu::Color {
     b: 0.0,
     a: 1.0,
 };
+const TRANSPARENT: wgpu::Color = wgpu::Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
 const SOLID_PLACEHOLDER: YuvFrame<'static> = YuvFrame {
     y: &[0],
     width: 1,
@@ -28,7 +34,12 @@ const SOLID_PLACEHOLDER: YuvFrame<'static> = YuvFrame {
     chroma_height: 1,
     matrix: ColorMatrix::Bt601,
     full_range: true,
+    alpha: OPAQUE,
 };
+/// Placeholder di `YuvFrame::alpha` quando il layer non porta una vera
+/// copertura per pixel: un solo byte, campionato ovunque (`ClampToEdge`) —
+/// zero costo per il caso comune (video/solid/text, sempre opachi).
+const OPAQUE: &[u8] = &[255];
 /// Formato dei tre piani di input (Y/U/V): un solo canale 8 bit, letto
 /// come `.r` nello shader.
 const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
@@ -58,6 +69,11 @@ pub struct YuvFrame<'a> {
     pub matrix: ColorMatrix,
     /// `true` = range JPEG/full (0-255), `false` = range MPEG/limited.
     pub full_range: bool,
+    /// Copertura per pixel, non sottocampionata: un solo byte (`&[255]`,
+    /// vedi `SOLID_PLACEHOLDER`) per "opaco ovunque" (un file decodificato
+    /// non ha canale alpha), altrimenti `width`x`height` byte come Y — vedi
+    /// `FrameYuv420::alpha`, da cui viene quando non è il placeholder.
+    pub alpha: &'a [u8],
 }
 
 /// Un layer dello stack. `Solid` e `Text` si trattano come sorgenti grandi
@@ -329,6 +345,7 @@ impl Compositor {
                     },
                     count: None,
                 },
+                plane_entry(5), // Alpha (copertura per pixel, vedi YuvFrame::alpha)
             ],
         });
 
@@ -504,12 +521,86 @@ impl Compositor {
         self.map_read(readback, |data| data[..len].to_vec())
     }
 
+    /// Come `render_layers_i420`, ma RGBA8 con lo sfondo trasparente
+    /// invece che nero opaco e senza conversione a YUV: usata per comporre
+    /// la timeline annidata di una compound clip, il cui risultato torna a
+    /// sua volta un layer altrove — l'alpha vera va preservata, `_i420` la
+    /// perderebbe (l'I420 non ha canale alpha).
+    pub fn render_layers_rgba_transparent(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
+        let output_texture = self.render_layers_to_texture_transparent(layers, output);
+        self.read_rgba_texture(&output_texture, output.width, output.height)
+    }
+
+    /// Legge una texture RGBA8 (`OUTPUT_FORMAT`) in un `Vec<u8>` denso,
+    /// rimuovendo il padding di riga che `wgpu` richiede sul buffer di
+    /// destinazione.
+    fn read_rgba_texture(&self, texture: &wgpu::Texture, width: u32, height: u32) -> Vec<u8> {
+        let unpadded_bytes_per_row = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vv-render readback buffer"),
+            size: (padded_bytes_per_row * height) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vv-render readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        self.map_read(&output_buffer, |data| {
+            let mut out = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+            for row in 0..height {
+                let start = (row * padded_bytes_per_row) as usize;
+                out.extend_from_slice(&data[start..start + unpadded_bytes_per_row as usize]);
+            }
+            out
+        })
+    }
+
     /// Versione multi-layer di [`Compositor::render_frame_to_texture`]
-    /// (vedi [`Compositor::render_layers`]).
-    pub fn render_layers_to_texture(
+    /// (vedi [`Compositor::render_layers`]). Sfondo nero opaco: per il
+    /// video finale (anteprima, export) non esiste "trasparente".
+    pub fn render_layers_to_texture(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
+        self.render_layers_to_texture_with_clear(layers, output, BLACK)
+    }
+
+    /// Come `render_layers_to_texture`, ma senza forzare uno sfondo opaco:
+    /// usata per comporre la timeline annidata di una compound clip, il cui
+    /// risultato torna a sua volta un layer altrove — le zone dove quella
+    /// timeline non ha nulla da mostrare devono restare trasparenti, non
+    /// nere, o coprirebbero quel che c'è sotto invece di lasciarlo vedere
+    /// (vedi `YuvFrame::alpha`, che porta questa trasparenza in giro).
+    pub fn render_layers_to_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
+        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT)
+    }
+
+    fn render_layers_to_texture_with_clear(
         &self,
         layers: &[Layer],
         output: OutputFrame,
+        clear: wgpu::Color,
     ) -> wgpu::Texture {
         let output_texture = self.output_texture(output.width, output.height);
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -521,9 +612,9 @@ impl Compositor {
                 label: Some("vv-render transform encoder"),
             });
 
-        // Nessun layer: resta il solo clear, cioè un frame nero.
+        // Nessun layer: resta il solo clear.
         if layers.is_empty() {
-            self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(BLACK), None);
+            self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
         }
         let mut first = true;
         for layer in layers {
@@ -590,7 +681,7 @@ impl Compositor {
             };
             for bind_group in &bind_groups {
                 let load = if first {
-                    wgpu::LoadOp::Clear(BLACK)
+                    wgpu::LoadOp::Clear(clear)
                 } else {
                     wgpu::LoadOp::Load
                 };
@@ -645,9 +736,15 @@ impl Compositor {
         let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
         let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
         let v_texture = self.plane_texture(frame.v, frame.chroma_width, frame.chroma_height);
+        // Un solo byte = placeholder "opaco ovunque" (vedi doc di
+        // `YuvFrame::alpha`): la texture resta 1x1, campionata ovunque
+        // dal `ClampToEdge` come già Y/U/V per Solid/Text.
+        let (alpha_w, alpha_h) = if frame.alpha.len() == 1 { (1, 1) } else { (frame.width, frame.height) };
+        let a_texture = self.plane_texture(frame.alpha, alpha_w, alpha_h);
         let y_view = y_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let a_view = a_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let uniform = TransformUniform::new(
             transform,
@@ -695,9 +792,13 @@ impl Compositor {
                     binding: 4,
                     resource: uniform_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&a_view),
+                },
             ],
         });
-        planes.extend([y_texture, u_texture, v_texture]);
+        planes.extend([y_texture, u_texture, v_texture, a_texture]);
         bind_group
     }
 
@@ -827,53 +928,7 @@ impl Compositor {
     /// Compone lo stack in alpha-over e legge il risultato in RGBA.
     pub fn render_layers(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
         let output_texture = self.render_layers_to_texture(layers, output);
-        let (output_w, output_h) = (output.width, output.height);
-
-        // wgpu richiede che ogni riga del buffer di destinazione sia
-        // allineata a COPY_BYTES_PER_ROW_ALIGNMENT: il buffer può quindi
-        // avere padding a fine riga che va rimosso in fase di lettura.
-        let unpadded_bytes_per_row = output_w * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vv-render readback buffer"),
-            size: (padded_bytes_per_row * output_h) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("vv-render readback encoder"),
-            });
-        encoder.copy_texture_to_buffer(
-            output_texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(output_h),
-                },
-            },
-            wgpu::Extent3d {
-                width: output_w,
-                height: output_h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        self.map_read(&output_buffer, |data| {
-            let mut out = Vec::with_capacity((unpadded_bytes_per_row * output_h) as usize);
-            for row in 0..output_h {
-                let start = (row * padded_bytes_per_row) as usize;
-                out.extend_from_slice(&data[start..start + unpadded_bytes_per_row as usize]);
-            }
-            out
-        })
+        self.read_rgba_texture(&output_texture, output.width, output.height)
     }
 
     /// Un solo frame con `transform`, letto in RGBA8.
@@ -946,6 +1001,7 @@ mod tests {
                 chroma_height: self.chroma_height,
                 matrix: self.matrix,
                 full_range: self.full_range,
+                alpha: OPAQUE,
             }
         }
     }
@@ -1685,6 +1741,65 @@ mod tests {
         let compositor = Compositor::new_headless();
         let out = compositor.render_layers(&[], OutputFrame::exact(4, 4));
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[0, 0, 0, 255]));
+    }
+
+    /// `render_layers_rgba_transparent` è quel che compone la timeline
+    /// annidata di una compound clip: le zone senza nulla sopra devono
+    /// restare trasparenti (alpha 0), non nere come per il video finale —
+    /// altrimenti coprirebbero quel che c'è sotto quando la compound clip
+    /// diventa a sua volta un layer altrove.
+    #[test]
+    fn no_layers_renders_fully_transparent_with_the_transparent_variant() {
+        let compositor = Compositor::new_headless();
+        let out = compositor.render_layers_rgba_transparent(&[], OutputFrame::exact(4, 4));
+        assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn render_layers_rgba_transparent_leaves_uncovered_areas_transparent_not_black() {
+        let compositor = Compositor::new_headless();
+        // Crop in pixel di timeline: metà destra tagliata via.
+        let out = compositor.render_layers_rgba_transparent(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform {
+                    crop: [0.0, 0.0, 8.0, 0.0],
+                    ..Transform::default()
+                },
+                opacity: 1.0,
+                filters: &[],
+            }],
+            OutputFrame::exact(16, 8),
+        );
+        let px = |x: usize, y: usize| &out[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4];
+        assert_eq!(px(2, 4), &[255, 0, 0, 255], "coperto dal layer: rosso opaco");
+        assert_eq!(px(12, 4), &[0, 0, 0, 0], "scoperto: trasparente, non nero");
+    }
+
+    /// Il meccanismo con cui una compound clip già composta ritorna un
+    /// layer altrove: `YuvFrame::alpha` porta la vera copertura per pixel,
+    /// non solo il moltiplicatore uniforme `opacity` — dove vale 0 deve
+    /// lasciar vedere quel che c'è sotto, esattamente come farebbe un
+    /// buco della timeline annidata da cui viene.
+    #[test]
+    fn a_videos_own_alpha_plane_lets_the_layer_below_show_through() {
+        let compositor = Compositor::new_headless();
+        let frame = solid_frame(4, 4, 255, 128, 128, ColorMatrix::Bt709, true); // bianco
+        // Sinistra opaca, destra trasparente.
+        let alpha: Vec<u8> = (0..16u32).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
+        let out = compositor.render_layers(
+            &[Layer::Video {
+                frame: YuvFrame { alpha: &alpha, ..frame.as_yuv_frame() },
+                transform: Transform::default(),
+                source_size: (4, 4),
+                opacity: 1.0,
+                filters: &[],
+            }],
+            OutputFrame::exact(4, 4),
+        );
+        let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+        assert_eq!(px(0, 0), &[255, 255, 255, 255], "sinistra: il video si vede, opaco");
+        assert_eq!(px(3, 0), &[0, 0, 0, 255], "destra: alpha 0 nel piano lascia vedere il nero sotto");
     }
 
     #[test]
