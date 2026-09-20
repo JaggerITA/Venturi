@@ -1549,6 +1549,48 @@ impl Project {
         item.content_hash = generation;
     }
 
+    /// `true` se una clip che referenzia `media_id` (una compound clip, o la
+    /// timeline del progetto stessa: vedi `MediaItem::compound`) non può
+    /// atterrare su `destination` senza chiudere un ciclo — cioè se
+    /// `destination` è raggiungibile dalla timeline annidata di
+    /// `media_id`, seguendo a sua volta le compound clip che contiene, a
+    /// qualunque profondità (import diretto di una timeline dentro se
+    /// stessa, o indiretto attraverso una sua compound clip). Il rendering
+    /// ha comunque un limite di profondità come rete di sicurezza (vedi
+    /// `MAX_COMPOUND_DEPTH` in `vv_app::render_ahead`), ma un ciclo non
+    /// deve poter essere creato in primo luogo.
+    pub fn would_create_a_cycle(&self, media_id: MediaId, destination: TimelineId) -> bool {
+        let Some(start) = self.media_pool.get(media_id).and_then(|m| m.compound) else {
+            return false;
+        };
+        if start == destination {
+            return true;
+        }
+        let mut visited: std::collections::HashSet<TimelineId> = std::collections::HashSet::new();
+        let mut stack = vec![start];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(timeline) = self.timelines.get(current) else {
+                continue;
+            };
+            for clip in timeline.tracks.iter().flat_map(|t| t.clips.iter()) {
+                let ClipSource::Media(id) = &clip.source else {
+                    continue;
+                };
+                let Some(nested) = self.media_pool.get(*id).and_then(|m| m.compound) else {
+                    continue;
+                };
+                if nested == destination {
+                    return true;
+                }
+                stack.push(nested);
+            }
+        }
+        false
+    }
+
     /// Ricalcola `Clip::rate` dagli fps. `source_offset`/`timeline_len` sono
     /// in frame di timeline e non cambiano.
     pub fn refresh_clip_rates(&mut self) {

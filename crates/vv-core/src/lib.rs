@@ -1755,4 +1755,89 @@ mod compound_clip_tests {
         // Undo non de-importa la compound clip dal pool, come un import.
         assert_eq!(project.media_pool.len(), 1);
     }
+
+    fn compound_media_for(project: &mut Project, nested: TimelineId) -> MediaId {
+        project.media_pool.insert(MediaItem {
+            path: "Compound".into(),
+            meta: MediaMeta {
+                duration_frames: 10,
+                fps: Rational::new(25, 1),
+                width: 1920,
+                height: 1080,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: Some(nested),
+        })
+    }
+
+    #[test]
+    fn would_create_a_cycle_catches_importing_a_timeline_into_itself() {
+        let mut project = Project::default();
+        let timeline = project.timelines.insert(Timeline {
+            name: "T".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![],
+        });
+        let media = compound_media_for(&mut project, timeline);
+
+        assert!(project.would_create_a_cycle(media, timeline), "T dentro se stessa");
+    }
+
+    #[test]
+    fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip() {
+        let mut project = Project::default();
+        let a = project.timelines.insert(Timeline {
+            name: "A".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![],
+        });
+        let b = project.timelines.insert(Timeline {
+            name: "B".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![],
+        });
+        let media_a = compound_media_for(&mut project, a);
+        let media_b = compound_media_for(&mut project, b);
+        // B contiene già una clip che referenzia A: importare B dentro A
+        // chiuderebbe il ciclo A -> B -> A.
+        project.timelines[b].tracks.push(Track {
+            kind: TrackKind::Video,
+            clips: vec![Clip::from_source_range(ClipId(1), ClipSource::Media(media_a), 0, 10, 0, Rational::one())],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: Vec::new(),
+        });
+
+        assert!(project.would_create_a_cycle(media_b, a), "A -> B -> A");
+        assert!(!project.would_create_a_cycle(media_a, b), "B -> A non ancora un ciclo su B");
+    }
+
+    #[test]
+    fn would_create_a_cycle_is_false_for_unrelated_timelines() {
+        let mut project = Project::default();
+        let a = project.timelines.insert(Timeline {
+            name: "A".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![],
+        });
+        let b = project.timelines.insert(Timeline {
+            name: "B".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![],
+        });
+        let media_a = compound_media_for(&mut project, a);
+
+        assert!(!project.would_create_a_cycle(media_a, b));
+    }
 }

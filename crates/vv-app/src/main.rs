@@ -1365,6 +1365,9 @@ impl VibeVideoApp {
         // pool), viene creata al volo ereditando fps/risoluzione da questo
         // media.
         let timeline_id = self.ensure_timeline_for(&meta);
+        if self.project.would_create_a_cycle(media_id, timeline_id) {
+            return;
+        }
         let video_track = self.project.timelines[timeline_id]
             .first_track_index(TrackKind::Video)
             .unwrap_or(0);
@@ -1417,14 +1420,25 @@ impl VibeVideoApp {
         if drops.is_empty() {
             return;
         }
-        let any_video = drops.iter().any(|(d, meta)| d.takes_video(meta));
-        let any_audio = drops.iter().any(|(d, meta)| d.takes_audio(meta));
         // fps e risoluzione dal primo media *video* del set: un audio in testa
         // non ha una risoluzione da dare alla timeline.
         let timeline_id = match drops.iter().find(|(d, meta)| d.takes_video(meta)) {
             Some((_, video_meta)) => self.ensure_timeline_for(video_meta),
             None => self.ensure_timeline_audio_only(),
         };
+        // Un drop che chiuderebbe un ciclo (una timeline importata dentro
+        // se stessa, direttamente o attraverso una sua compound clip) si
+        // scarta invece di corrompere il progetto — vedi
+        // `Project::would_create_a_cycle`.
+        let drops: Vec<(timeline_ui::MediaDrag, vv_core::MediaMeta)> = drops
+            .into_iter()
+            .filter(|(d, _)| !self.project.would_create_a_cycle(d.media_id, timeline_id))
+            .collect();
+        if drops.is_empty() {
+            return;
+        }
+        let any_video = drops.iter().any(|(d, meta)| d.takes_video(meta));
+        let any_audio = drops.iter().any(|(d, meta)| d.takes_audio(meta));
         // Un drop solo = un solo Ctrl+Z, anche se dentro sono N clip (una
         // per stream audio di ogni media) più le track create al volo.
         let group = self.history.begin_group();
@@ -1957,6 +1971,17 @@ impl VibeVideoApp {
             .clipboard
             .iter()
             .filter(|e| e.track_index < tl.tracks.len() && !tl.is_locked(e.track_index))
+            // Incollare una compound clip copiata dentro la sua stessa
+            // timeline annidata (direttamente o attraverso un'altra
+            // compound clip) chiuderebbe un ciclo — vedi
+            // `Project::would_create_a_cycle`, stesso controllo del drop
+            // dal media pool.
+            .filter(|e| match &e.clip.source {
+                vv_core::ClipSource::Media(media_id) => {
+                    !self.project.would_create_a_cycle(*media_id, timeline_id)
+                }
+                vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => true,
+            })
             .cloned()
             .collect();
         if entries.is_empty() {
@@ -3130,6 +3155,72 @@ mod tests {
             "incollata nella timeline annidata"
         );
         assert!(app.project.timelines[root_id].tracks[0].clips.is_empty(), "non nella radice");
+    }
+
+    /// Bug segnalato dall'utente: trascinare la voce di una timeline (la
+    /// timeline del progetto, o una compound clip) dal media pool dentro
+    /// se stessa deve essere rifiutato, non solo fermato durante il
+    /// rendering (`MAX_COMPOUND_DEPTH` in render_ahead.rs è solo la rete
+    /// di sicurezza, non deve mai scattare in uso normale).
+    #[test]
+    fn dropping_a_timelines_own_media_into_itself_is_refused() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+        let root_media = app
+            .project
+            .media_pool
+            .iter()
+            .find(|(_, item)| item.compound == Some(root_id))
+            .map(|(id, _)| id)
+            .expect("la timeline del progetto ha una voce nel pool");
+
+        app.add_media_to_timeline(root_media);
+
+        assert!(
+            app.project.timelines[root_id].tracks.iter().all(|t| t.clips.is_empty()),
+            "il drop è stato rifiutato, non deve comparire nessuna clip"
+        );
+    }
+
+    /// Come sopra, ma indiretto: B contiene già una clip che referenzia A,
+    /// trascinare B dentro A chiuderebbe il ciclo A -> B -> A.
+    #[test]
+    fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video)],
+        });
+        let compound_media = insert_compound_media(&mut app, nested_id);
+        let root_media = app
+            .project
+            .media_pool
+            .iter()
+            .find(|(_, item)| item.compound == Some(root_id))
+            .map(|(id, _)| id)
+            .unwrap();
+        // La timeline annidata contiene già una clip che referenzia la
+        // radice del progetto.
+        app.project.timelines[nested_id].tracks[0].clips.push(vv_core::Clip::from_source_range(
+            ClipId(1),
+            vv_core::ClipSource::Media(root_media),
+            0,
+            10,
+            0,
+            vv_core::Rational::one(),
+        ));
+
+        // Trascinare la compound clip (che porta a `nested_id`, che porta
+        // già alla radice) dentro la radice chiuderebbe il ciclo.
+        app.add_media_to_timeline(compound_media);
+
+        assert!(
+            app.project.timelines[root_id].tracks[0].clips.is_empty(),
+            "il drop indiretto è stato rifiutato"
+        );
     }
 
     /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): la seconda
