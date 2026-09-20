@@ -384,7 +384,32 @@ impl Keymap {
 
 const MAX_RECENT_PROJECTS: usize = 10;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Stato dei pannelli della UI (dimensione, aperto/chiuso): salvato per
+/// ritrovare l'interfaccia com'è stata lasciata alla riapertura.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanelLayout {
+    pub media_pool_open: bool,
+    pub effects_open: bool,
+    pub inspector_open: bool,
+    pub left_column_width: f32,
+    pub inspector_width: f32,
+    pub timeline_height: f32,
+}
+
+impl Default for PanelLayout {
+    fn default() -> Self {
+        Self {
+            media_pool_open: true,
+            effects_open: false,
+            inspector_open: true,
+            left_column_width: 260.0,
+            inspector_width: 300.0,
+            timeline_height: 240.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub keymap: Keymap,
     pub language: Language,
@@ -392,6 +417,7 @@ pub struct Settings {
     pub kinetic_scroll: bool,
     /// Progetti aperti di recente, più recente per primo.
     pub recent_projects: Vec<PathBuf>,
+    pub panels: PanelLayout,
 }
 
 impl Default for Settings {
@@ -401,6 +427,7 @@ impl Default for Settings {
             language: Language::default(),
             kinetic_scroll: true,
             recent_projects: Vec::new(),
+            panels: PanelLayout::default(),
         }
     }
 }
@@ -423,6 +450,24 @@ struct SettingsFile {
     kinetic_scroll: Option<bool>,
     #[serde(default)]
     recent_projects: Vec<PathBuf>,
+    #[serde(default)]
+    panels: PanelLayoutFile,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PanelLayoutFile {
+    #[serde(default)]
+    media_pool_open: Option<bool>,
+    #[serde(default)]
+    effects_open: Option<bool>,
+    #[serde(default)]
+    inspector_open: Option<bool>,
+    #[serde(default)]
+    left_column_width: Option<f32>,
+    #[serde(default)]
+    inspector_width: Option<f32>,
+    #[serde(default)]
+    timeline_height: Option<f32>,
 }
 
 impl Settings {
@@ -451,6 +496,15 @@ impl Settings {
         settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
         settings.recent_projects = file.recent_projects;
+        let defaults = PanelLayout::default();
+        settings.panels = PanelLayout {
+            media_pool_open: file.panels.media_pool_open.unwrap_or(defaults.media_pool_open),
+            effects_open: file.panels.effects_open.unwrap_or(defaults.effects_open),
+            inspector_open: file.panels.inspector_open.unwrap_or(defaults.inspector_open),
+            left_column_width: file.panels.left_column_width.unwrap_or(defaults.left_column_width),
+            inspector_width: file.panels.inspector_width.unwrap_or(defaults.inspector_width),
+            timeline_height: file.panels.timeline_height.unwrap_or(defaults.timeline_height),
+        };
         for (id, shortcuts) in file.shortcuts {
             let Some(action) = Action::from_id(&id) else {
                 continue;
@@ -474,6 +528,14 @@ impl Settings {
             language: Some(self.language.id().to_owned()),
             kinetic_scroll: Some(self.kinetic_scroll),
             recent_projects: self.recent_projects.clone(),
+            panels: PanelLayoutFile {
+                media_pool_open: Some(self.panels.media_pool_open),
+                effects_open: Some(self.panels.effects_open),
+                inspector_open: Some(self.panels.inspector_open),
+                left_column_width: Some(self.panels.left_column_width),
+                inspector_width: Some(self.panels.inspector_width),
+                timeline_height: Some(self.panels.timeline_height),
+            },
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {
@@ -546,6 +608,31 @@ mod tests {
         let loaded = Settings::load(&path);
         assert_eq!(loaded.keymap.shortcuts(Action::Split), &[Shortcut { alt: true, ..Shortcut::plain(egui::Key::K) }]);
         assert_eq!(loaded.keymap.shortcuts(Action::Undo), Keymap::default().shortcuts(Action::Undo));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_then_load_keeps_custom_panel_layout_and_defaults_it_when_absent() {
+        let path = std::env::temp_dir()
+            .join(format!("vv-settings-panels-{}", std::process::id()))
+            .join("settings.json");
+        let mut settings = Settings::default();
+        settings.panels = PanelLayout {
+            media_pool_open: false,
+            effects_open: true,
+            inspector_open: false,
+            left_column_width: 321.0,
+            inspector_width: 456.0,
+            timeline_height: 199.0,
+        };
+        settings.save(&path).unwrap();
+
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded, settings);
+
+        std::fs::write(&path, "{}").unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.panels, PanelLayout::default());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

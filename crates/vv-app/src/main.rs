@@ -307,8 +307,6 @@ struct VibeVideoApp {
 
     arrow_hold: Option<ArrowHold>,
 
-    properties_panel_open: bool,
-
     /// Calamita: nei drag le clip si agganciano ai bordi vicini.
     snapping_enabled: bool,
     /// Handle di transform sopra il viewer (pulsante sotto al viewer).
@@ -357,9 +355,6 @@ struct VibeVideoApp {
     /// della timeline con il livello dell'audio in uscita. Attivo di
     /// default, come nella maggior parte degli NLE.
     audiometer_enabled: bool,
-    /// Sezioni visibili nella colonna di sinistra (toggle in toolbar).
-    show_media_pool: bool,
-    show_effects: bool,
     /// Livelli del meter, con un decadimento: il picco istantaneo farebbe
     /// scendere le barre a scatti.
     audiometer_level: (f32, f32),
@@ -417,7 +412,6 @@ impl Default for VibeVideoApp {
             selection_follows_playhead: true,
             scrub_audio: true,
             arrow_hold: None,
-            properties_panel_open: true,
             snapping_enabled: true,
             show_transform_overlay: true,
             overlay_drag: None,
@@ -437,8 +431,6 @@ impl Default for VibeVideoApp {
             relink_message: None,
             pending_dialog: None,
             audiometer_enabled: true,
-            show_media_pool: true,
-            show_effects: false,
             audiometer_level: (0.0, 0.0),
             viewer_fullscreen: false,
             settings: settings::Settings::default(),
@@ -1595,8 +1587,16 @@ impl VibeVideoApp {
         if !response.open {
             self.settings_dialog = None;
         }
-        if response.changed
-            && let Some(path) = &self.settings_path
+        if response.changed {
+            self.persist_settings();
+        }
+    }
+
+    /// Impostazioni utente su disco, incluso il layout dei pannelli: chiamata
+    /// dalla finestra Impostazioni e periodicamente/alla chiusura (vedi
+    /// `eframe::App::save`).
+    fn persist_settings(&mut self) {
+        if let Some(path) = &self.settings_path
             && let Err(e) = self.settings.save(path)
         {
             self.project_error = Some(t!("settings.save_failed", error = e).into_owned());
@@ -2472,15 +2472,15 @@ impl eframe::App for VibeVideoApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.toggle_value(&mut self.show_media_pool, t!("toolbar.media_pool"));
-                ui.toggle_value(&mut self.show_effects, t!("toolbar.effects"));
+                ui.toggle_value(&mut self.settings.panels.media_pool_open, t!("toolbar.media_pool"));
+                ui.toggle_value(&mut self.settings.panels.effects_open, t!("toolbar.effects"));
                 if let Some(err) = &self.project_error {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, err);
                 }
                 // Sopra al pannello che apre, come i toggle a sinistra.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.properties_panel_open, t!("menu.inspector"));
+                    ui.toggle_value(&mut self.settings.panels.inspector_open, t!("menu.inspector"));
                 });
             });
         });
@@ -2529,12 +2529,12 @@ impl eframe::App for VibeVideoApp {
         }
 
         let mut preview_action = None;
-        if self.show_media_pool || self.show_effects {
+        if self.settings.panels.media_pool_open || self.settings.panels.effects_open {
             egui::Panel::left("left_column")
-                .default_size(260.0)
+                .default_size(self.settings.panels.left_column_width)
                 .show(ui, |ui| {
-                    if self.show_media_pool {
-                        let pool = if self.show_effects {
+                    if self.settings.panels.media_pool_open {
+                        let pool = if self.settings.panels.effects_open {
                             egui::Panel::top("media_pool")
                                 .exact_size(ui.available_height() / 2.0)
                                 .resizable(false)
@@ -2564,12 +2564,15 @@ impl eframe::App for VibeVideoApp {
                                 );
                         }
                     }
-                    if self.show_effects {
+                    if self.settings.panels.effects_open {
                         Self::show_effects_list(ui);
                     }
                 });
+            if let Some(state) = egui::PanelState::load(ui.ctx(), egui::Id::new("left_column")) {
+                self.settings.panels.left_column_width = state.size().x;
+            }
         }
-        if !self.show_media_pool {
+        if !self.settings.panels.media_pool_open {
             self.media_pool_state.focused = false;
         }
 
@@ -2585,7 +2588,7 @@ impl eframe::App for VibeVideoApp {
             None;
         let mut dropped_on_empty_timeline: Option<timeline_ui::TimelineDrag> = None;
         egui::Panel::bottom("timeline")
-            .default_size(240.0)
+            .default_size(self.settings.panels.timeline_height)
             .resizable(true)
             .show(ui, |ui| {
                 if self.audiometer_enabled {
@@ -2660,6 +2663,9 @@ impl eframe::App for VibeVideoApp {
                     ui.label(t!("timeline.empty_hint"));
                 }
             });
+        if let Some(state) = egui::PanelState::load(ui.ctx(), egui::Id::new("timeline")) {
+            self.settings.panels.timeline_height = state.size().y;
+        }
         if let Some(drag) = dropped_on_empty_timeline {
             self.add_drop_to_timeline_at(&drag, 0, timeline_ui::MediaDropTarget::Default);
         }
@@ -2949,6 +2955,13 @@ impl eframe::App for VibeVideoApp {
         {
             ui.ctx().request_repaint();
         }
+    }
+
+    /// Chiamata da eframe alla chiusura e periodicamente (vedi
+    /// `auto_save_interval`): il layout dei pannelli aggiornato a ogni frame
+    /// in `ui()` finisce così su disco senza scriverlo ad ogni resize.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.persist_settings();
     }
 }
 

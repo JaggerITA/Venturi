@@ -358,7 +358,7 @@ impl VibeVideoApp {
                 });
 
                 ui.menu_button(t!("menu.view"), |ui| {
-                    ui.checkbox(&mut self.properties_panel_open, t!("menu.inspector"));
+                    ui.checkbox(&mut self.settings.panels.inspector_open, t!("menu.inspector"));
                     ui.checkbox(&mut self.audiometer_enabled, t!("menu.audiometer"))
                         .on_hover_text(
                             t!("menu.audiometer_hint"),

@@ -1115,10 +1115,10 @@ impl VibeVideoApp {
         // testina: applicato dopo il disegno, come le modifiche agli effetti.
         let mut pending_playhead: Option<FrameIdx> = None;
 
-        if self.properties_panel_open {
+        if self.settings.panels.inspector_open {
             egui::Panel::right("properties")
                 .resizable(true)
-                .default_size(300.0)
+                .default_size(self.settings.panels.inspector_width)
                 .show(ui, |ui| {
                     // Senza, il pannello si restringerebbe al contenuto e il suo resize
                     // tornerebbe indietro.
@@ -1700,6 +1700,9 @@ impl VibeVideoApp {
                         }
                         });
                 });
+            if let Some(state) = egui::PanelState::load(ui.ctx(), egui::Id::new("properties")) {
+                self.settings.panels.inspector_width = state.size().x;
+            }
         }
         (pending_effects, pending_playhead)
     }
