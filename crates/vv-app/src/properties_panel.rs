@@ -779,6 +779,37 @@ pub(crate) fn set_filters((tl, track, clip): ClipRef, value: Vec<vv_core::ClipFi
     Box::new(vv_core::set_clip_filters(tl, track, clip, value))
 }
 
+/// Comando per salvare (o rimuovere, con `value: None`) la transizione
+/// `sel`, bordo singolo o crossing: quest'ultima ha bisogno di ritrovare
+/// `right_clip` dalla crossing esistente, non lo porta con sé
+/// `TransitionSelection::Crossing` (che identifica solo `left_clip`).
+pub(crate) fn set_transition_command(
+    project: &vv_core::Project,
+    timeline_id: TimelineId,
+    sel: timeline_ui::TransitionSelection,
+    value: Option<vv_core::Transition>,
+) -> BoxedCommand {
+    match sel {
+        timeline_ui::TransitionSelection::Edge((track_index, clip_id), edge) => {
+            Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, value))
+        }
+        timeline_ui::TransitionSelection::Crossing(track_index, left_clip) => {
+            let right_clip = project.timelines[timeline_id]
+                .tracks
+                .get(track_index)
+                .and_then(|t| t.crossing_from(left_clip))
+                .map(|c| c.right_clip);
+            let crossing_value = match (value, right_clip) {
+                (Some(transition), Some(right_clip)) => {
+                    Some(vv_core::CrossTransition { left_clip, right_clip, transition })
+                }
+                _ => None,
+            };
+            Box::new(vv_core::SetCrossTransition::new(timeline_id, track_index, left_clip, crossing_value))
+        }
+    }
+}
+
 pub(crate) fn upsert_keyframe(
     (tl, track, clip): ClipRef,
     frame: FrameIdx,
@@ -964,35 +995,54 @@ impl VibeVideoApp {
         }
     }
 
-    /// Pannello di una transizione selezionata (bordo di una clip): prende
-    /// il posto delle schede Video/Audio/Selezione finché resta selezionata
-    /// (vedi `TimelineState::selected_transition`).
+    /// Pannello di una transizione selezionata (bordo singolo o crossing):
+    /// prende il posto delle schede Video/Audio/Selezione finché resta
+    /// selezionata (vedi `TimelineState::selected_transition`).
     fn show_transition_panel(
         &mut self,
         ui: &mut egui::Ui,
-        key: (usize, vv_core::ClipId),
-        edge: vv_core::FadeEdge,
+        sel: timeline_ui::TransitionSelection,
         pending: &mut Vec<BoxedCommand>,
     ) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         let tl = &self.project.timelines[timeline_id];
-        let Some(clip) = tl.clip(key.0, key.1) else {
-            return;
+        // `before`/`max_duration` distinguono i due casi solo qui: da qui in
+        // giù i controlli sono identici, e il salvataggio/la rimozione in
+        // fondo scelgono da sé il comando giusto in base a `sel`.
+        let (before, max_duration) = match sel {
+            timeline_ui::TransitionSelection::Edge((track_index, clip_id), edge) => {
+                let Some(clip) = tl.clip(track_index, clip_id) else {
+                    return;
+                };
+                let Some(transition) = (match edge {
+                    vv_core::FadeEdge::In => clip.effects.transition_in.clone(),
+                    vv_core::FadeEdge::Out => clip.effects.transition_out.clone(),
+                }) else {
+                    return;
+                };
+                (transition, clip.timeline_len.max(1))
+            }
+            timeline_ui::TransitionSelection::Crossing(track_index, left_clip) => {
+                let Some(track) = tl.tracks.get(track_index) else {
+                    return;
+                };
+                let Some(crossing) = track.crossing_from(left_clip) else {
+                    return;
+                };
+                let max_duration = match (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) {
+                    (Some(left), Some(right)) => (2 * left.timeline_len.min(right.timeline_len)).max(1),
+                    _ => return,
+                };
+                (crossing.transition.clone(), max_duration)
+            }
         };
-        let existing = match edge {
-            vv_core::FadeEdge::In => clip.effects.transition_in.clone(),
-            vv_core::FadeEdge::Out => clip.effects.transition_out.clone(),
-        };
-        // La clip è stata cancellata o la transizione tolta da sotto la
-        // selezione (es. undo): niente da mostrare.
-        let Some(before) = existing else {
-            return;
-        };
+        // La clip (o la coppia) è stata cancellata o la transizione tolta
+        // da sotto la selezione (es. undo): niente da mostrare, già gestito
+        // sopra coi `return`.
         let mut transition = before.clone();
         let fps = tl.fps.as_f64().max(1.0);
-        let clip_len = clip.timeline_len.max(1);
 
         ui.heading(t!("props.transition"));
         ui.label(timeline_ui::transition_kind_label(transition.kind));
@@ -1002,14 +1052,14 @@ impl VibeVideoApp {
             ui.label(t!("props.duration"));
             let mut secs = transition.duration as f64 / fps;
             if ui
-                .add(egui::DragValue::new(&mut secs).speed(0.02).range(0.0..=(clip_len as f64 / fps)).suffix(" s"))
+                .add(egui::DragValue::new(&mut secs).speed(0.02).range(0.0..=(max_duration as f64 / fps)).suffix(" s"))
                 .changed()
             {
-                transition.duration = ((secs * fps).round() as FrameIdx).clamp(1, clip_len);
+                transition.duration = ((secs * fps).round() as FrameIdx).clamp(1, max_duration);
             }
             let mut frames = transition.duration;
-            if ui.add(egui::DragValue::new(&mut frames).range(1..=clip_len)).changed() {
-                transition.duration = frames.clamp(1, clip_len);
+            if ui.add(egui::DragValue::new(&mut frames).range(1..=max_duration)).changed() {
+                transition.duration = frames.clamp(1, max_duration);
             }
             ui.label(t!("props.frames"));
         });
@@ -1042,12 +1092,12 @@ impl VibeVideoApp {
         });
 
         if transition != before {
-            pending.push(Box::new(vv_core::set_clip_transition(timeline_id, key.0, key.1, edge, Some(transition))));
+            pending.push(set_transition_command(&self.project, timeline_id, sel, Some(transition)));
         }
 
         ui.add_space(8.0);
         if ui.button(t!("props.remove_transition")).clicked() {
-            pending.push(Box::new(vv_core::set_clip_transition(timeline_id, key.0, key.1, edge, None)));
+            pending.push(set_transition_command(&self.project, timeline_id, sel, None));
             self.timeline_state.selected_transition = None;
         }
     }
@@ -1083,8 +1133,8 @@ impl VibeVideoApp {
                         )
                         .show(ui, |ui| {
                         let selected_count = self.timeline_state.selected.len();
-                        if let Some((key, edge)) = self.timeline_state.selected_transition {
-                            self.show_transition_panel(ui, key, edge, &mut pending_effects);
+                        if let Some(sel) = self.timeline_state.selected_transition {
+                            self.show_transition_panel(ui, sel, &mut pending_effects);
                         } else if selected_count > 0 {
                             properties_tab_bar(ui, &mut self.properties_tab);
                             ui.separator();

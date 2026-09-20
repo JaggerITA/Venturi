@@ -2,8 +2,8 @@
 //! necessario a invertirsi nel momento in cui viene applicato.
 
 use crate::model::{
-    Clip, ClipFilter, ClipId, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId,
-    MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
+    Clip, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
+    LinkGroupId, MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
     TransformParam, Transition,
 };
 use std::cell::{Cell, RefCell};
@@ -1077,6 +1077,60 @@ pub fn set_clip_transition(
             FadeEdge::Out => &mut c.effects.transition_out,
         }
     })
+}
+
+/// Aggiunge, sostituisce o rimuove (`value: None`) la crossing transition il
+/// cui `left_clip` è `left_clip`: una clip ha al più una transizione sul suo
+/// bordo destro, quindi la identifica da sola, senza bisogno dell'id di
+/// `right_clip`.
+#[derive(Debug)]
+pub struct SetCrossTransition {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub left_clip: ClipId,
+    pub value: Option<CrossTransition>,
+    /// `None` finché non applicato; poi il valore precedente (che a sua
+    /// volta può essere `None` se non c'era nessuna crossing lì).
+    old: Option<Option<CrossTransition>>,
+}
+
+impl SetCrossTransition {
+    pub fn new(timeline: TimelineId, track_index: usize, left_clip: ClipId, value: Option<CrossTransition>) -> Self {
+        Self { timeline, track_index, left_clip, value, old: None }
+    }
+
+    fn write(track: &mut Track, left_clip: ClipId, value: &Option<CrossTransition>) -> Option<CrossTransition> {
+        let pos = track.crossings.iter().position(|c| c.left_clip == left_clip);
+        let old = pos.map(|i| track.crossings[i].clone());
+        match (pos, value) {
+            (Some(i), Some(new)) => track.crossings[i] = new.clone(),
+            (Some(i), None) => {
+                track.crossings.remove(i);
+            }
+            (None, Some(new)) => track.crossings.push(new.clone()),
+            (None, None) => {}
+        }
+        old
+    }
+}
+
+impl Command for SetCrossTransition {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::Transition
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        self.old = Some(Self::write(track, self.left_clip, &self.value));
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(old) = &self.old else {
+            return;
+        };
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        Self::write(track, self.left_clip, old);
+    }
 }
 
 /// Riporta un gruppo di parametri del transform al valore di default,

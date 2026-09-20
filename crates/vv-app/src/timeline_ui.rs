@@ -29,6 +29,17 @@ const PANE_SCROLLBAR_WIDTH: f32 = 8.0;
 /// (track, id): l'id è un contatore globale, la track serve a trovarla.
 type ClipKey = (usize, ClipId);
 
+/// Cosa mostra il pannello proprietà quando è selezionata una transizione
+/// invece di una clip — alternativa a `TimelineState::selected`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransitionSelection {
+    /// Transizione su un solo bordo (`EffectStack::transition_in`/`_out`).
+    Edge(ClipKey, FadeEdge),
+    /// Transizione a cavallo, identificata dal suo `left_clip` (una clip ha
+    /// al più una crossing sul proprio bordo destro) e dalla track.
+    Crossing(usize, ClipId),
+}
+
 pub struct TimelineState {
     /// Clip selezionate. Vuoto se nessuna clip è selezionata (non deve
     /// essere confuso con "nessuna timeline": qui è solo lo stato della
@@ -49,11 +60,11 @@ pub struct TimelineState {
     /// Vuoto selezionato (track, inizio, fine), alternativo a `selected`:
     /// si chiude con ripple delete. Lo spazio in coda non è un vuoto.
     pub selected_gap: Option<(usize, FrameIdx, FrameIdx)>,
-    /// Transizione selezionata (bordo di una clip), alternativa a
+    /// Transizione selezionata (bordo singolo o crossing), alternativa a
     /// `selected`: un click su di lei sostituisce qualunque selezione di
     /// clip, anche multipla — il pannello proprietà mostra i suoi
     /// controlli al posto di quelli della clip.
-    pub selected_transition: Option<(ClipKey, FadeEdge)>,
+    pub selected_transition: Option<TransitionSelection>,
     /// Clip copiate (Ctrl+C in `main.rs`), pronte per essere incollate
     /// (Ctrl+V) alla posizione del playhead. Vuoto se non è ancora mai
     /// stato copiato nulla in questa sessione.
@@ -61,6 +72,7 @@ pub struct TimelineState {
     trim: Option<TrimState>,
     fade_drag: Option<FadeDragState>,
     transition_drag: Option<TransitionDragState>,
+    crossing_drag: Option<CrossingDragState>,
     /// Alt+drag sul corpo (non sulla maniglia) di un marker di transizione,
     /// in corso: duplica invece di ridimensionare. Non muta nulla da sé — il
     /// payload DnD (`vv_core::Transition`) parte già impostato da
@@ -147,6 +159,23 @@ struct TransitionDragState {
     accum_px: f32,
 }
 
+/// Trascinamento dell'estremità di una crossing transition: a differenza
+/// di `TransitionDragState`, tocca sempre entrambi i lati alla pari (vedi
+/// `CrossTransition::split`) — qui non serve un `FadeEdge`, solo sapere se
+/// si sta afferrando l'estremità dentro la clip di sinistra o quella
+/// dentro la clip di destra, per il segno dello spostamento.
+struct CrossingDragState {
+    track_index: usize,
+    left_clip: ClipId,
+    grabbed_left_side: bool,
+    /// Durata totale (frame) prima del drag.
+    original_duration: FrameIdx,
+    /// Non può eccedere la durata delle due clip coinvolte: calcolato una
+    /// volta all'inizio del drag, le clip non cambiano lunghezza nel
+    /// frattempo.
+    max_duration: FrameIdx,
+    accum_px: f32,
+}
 
 /// Trascinamento verticale della riga del volume su una clip audio: come
 /// `FadeDragState`, sempre locale alla singola clip, mai una selezione
@@ -234,6 +263,11 @@ const TRANSITION_DROP_ZONE_PX: f32 = 40.0;
 /// durante il drag, così il colore anticipa cosa comparirà al rilascio.
 const TRANSITION_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 130, 235);
 const TRANSITION_SELECTED_COLOR: egui::Color32 = egui::Color32::from_rgb(190, 197, 255);
+/// Colore del marker di una crossing transition: tinta diversa da quella
+/// di un bordo singolo, per segnalare a colpo d'occhio che questa "mangia"
+/// anche la clip vicina invece di restare contro il trasparente.
+const CROSSING_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 150, 90);
+const CROSSING_SELECTED_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 195, 150);
 /// Distanza verticale (px) entro cui il puntatore afferra la riga del
 /// volume di una clip audio.
 const VOLUME_LINE_HIT_PX: f32 = 5.0;
@@ -269,6 +303,7 @@ impl Default for TimelineState {
             trim: None,
             fade_drag: None,
             transition_drag: None,
+            crossing_drag: None,
             transition_duplicate_drag: None,
             volume_drag: None,
             video_pane_height: None,
@@ -311,10 +346,13 @@ impl TimelineState {
         {
             self.selected_gap = None;
         }
-        if self
-            .selected_transition
-            .is_some_and(|((track_index, _), _)| timeline.is_locked(track_index))
-        {
+        if self.selected_transition.is_some_and(|sel| {
+            let track_index = match sel {
+                TransitionSelection::Edge((track_index, _), _) => track_index,
+                TransitionSelection::Crossing(track_index, _) => track_index,
+            };
+            timeline.is_locked(track_index)
+        }) {
             self.selected_transition = None;
         }
     }
@@ -421,6 +459,13 @@ enum PendingAction {
         clip_id: ClipId,
         edge: FadeEdge,
         transition: vv_core::Transition,
+    },
+    /// Nuova durata (in frame) di una crossing transition, dal drag
+    /// simmetrico della sua estremità — vedi `CrossingDragState`.
+    SetCrossingDuration {
+        track_index: usize,
+        left_clip: ClipId,
+        new_value: FrameIdx,
     },
     Unlink(usize, ClipId),
     /// Collega tutte le clip elencate (track_index, clip_id) in un unico
@@ -2110,6 +2155,7 @@ pub fn show_timeline(
                 let mut trim_finished = false;
                 let mut fade_drag_finished = false;
                 let mut transition_drag_finished = false;
+                let mut crossing_drag_finished = false;
                 let mut volume_drag_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
 
@@ -2273,7 +2319,8 @@ pub fn show_timeline(
                                 FadeEdge::In => clip_rect.left() + drop_zone_px,
                                 FadeEdge::Out => clip_rect.right() - drop_zone_px,
                             };
-                            paint_transition_marker(&painter, clip_rect, edge, x, false);
+                            let is_crossing = has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
+                            paint_transition_marker(&painter, clip_rect, edge, x, false, is_crossing);
                         }
                         if let Some(kind) = resp.dnd_release_payload::<vv_core::TransitionKind>()
                             && let Some(edge) = hover_edge
@@ -2307,7 +2354,8 @@ pub fn show_timeline(
                                 FadeEdge::In => clip_rect.left() + drop_zone_px,
                                 FadeEdge::Out => clip_rect.right() - drop_zone_px,
                             };
-                            paint_transition_marker(&painter, clip_rect, edge, x, false);
+                            let is_crossing = has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
+                            paint_transition_marker(&painter, clip_rect, edge, x, false, is_crossing);
                         }
                         if let Some(transition) = resp.dnd_release_payload::<vv_core::Transition>()
                             && let Some(edge) = hover_edge
@@ -2401,28 +2449,45 @@ pub fn show_timeline(
                         && (fade_in_dragging || fade_out_dragging)
                     {
                         let frames = if fade_in_dragging { fade_in_preview } else { fade_out_preview };
-                        paint_fade_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
+                        paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
                     }
 
-                    // Marker delle transizioni push già impostate: il drop dal
-                    // pannello Effects (sopra) le rende persistenti, da qui in
-                    // poi vivono come l'handle di fade — sempre visibili,
-                    // l'estremità (durata) trascinabile.
-                    let (transition_in_duration, transition_out_duration) =
-                        transition_preview(state, visual, px_per_frame);
-                    let transition_in_x = transition_in_duration
-                        .map(|d| clip_rect.left() + (d as f32 * px_per_frame).min(clip_rect.width()));
-                    let transition_out_x = transition_out_duration
-                        .map(|d| clip_rect.right() - (d as f32 * px_per_frame).min(clip_rect.width()));
-                    if let Some(x) = transition_in_x {
-                        let selected = state.selected_transition
-                            == Some(((visual.track_index, visual.clip.id), FadeEdge::In));
-                        paint_transition_marker(&painter, clip_rect, FadeEdge::In, x, selected);
+                    // Marker delle transizioni già impostate (bordo singolo o
+                    // crossing): il drop dal pannello Effects (sopra) le rende
+                    // persistenti, da qui in poi vivono come l'handle di fade —
+                    // sempre visibili, l'estremità (durata) trascinabile.
+                    let track = &project.timelines[timeline_id].tracks[visual.track_index];
+                    let left_marker = edge_marker(track, state, visual, px_per_frame, FadeEdge::In);
+                    let right_marker = edge_marker(track, state, visual, px_per_frame, FadeEdge::Out);
+                    let transition_in_x = left_marker.as_ref().map(|m| {
+                        clip_rect.left() + (m.duration as f32 * px_per_frame).min(clip_rect.width())
+                    });
+                    let transition_out_x = right_marker.as_ref().map(|m| {
+                        clip_rect.right() - (m.duration as f32 * px_per_frame).min(clip_rect.width())
+                    });
+                    if let (Some(m), Some(x)) = (&left_marker, transition_in_x) {
+                        let selected = state.selected_transition == Some(m.selection);
+                        paint_transition_marker(&painter, clip_rect, FadeEdge::In, x, selected, m.is_crossing);
                     }
-                    if let Some(x) = transition_out_x {
-                        let selected = state.selected_transition
-                            == Some(((visual.track_index, visual.clip.id), FadeEdge::Out));
-                        paint_transition_marker(&painter, clip_rect, FadeEdge::Out, x, selected);
+                    if let (Some(m), Some(x)) = (&right_marker, transition_out_x) {
+                        let selected = state.selected_transition == Some(m.selection);
+                        paint_transition_marker(&painter, clip_rect, FadeEdge::Out, x, selected, m.is_crossing);
+                    }
+                    // Overlay con la durata durante il drag della sua
+                    // estremità: comportamento generale (vedi
+                    // `paint_duration_overlay`), non solo per il fade sopra.
+                    if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        if let Some(d) = state.transition_drag.as_ref().filter(|d| d.clip_id == visual.clip.id) {
+                            let frames = transition_drag_value(d, visual.clip.timeline_len, px_per_frame);
+                            paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
+                        } else if let Some(d) = state.crossing_drag.as_ref().filter(|d| {
+                            [&left_marker, &right_marker].into_iter().flatten().any(|m| {
+                                m.selection == TransitionSelection::Crossing(d.track_index, d.left_clip)
+                            })
+                        }) {
+                            let frames = crossing_drag_value(d, px_per_frame);
+                            paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
+                        }
                     }
 
                     // Zone ridotte per le clip molto strette, altrimenti
@@ -2460,6 +2525,7 @@ pub fn show_timeline(
                         && state.drag.is_none()
                         && state.trim.is_none()
                         && state.transition_drag.is_none()
+                        && state.crossing_drag.is_none()
                         && let Some(pos) = resp.hover_pos()
                         && transition_handle_at(pos, clip_rect, transition_in_x, transition_out_x).is_some()
                     {
@@ -2492,6 +2558,10 @@ pub fn show_timeline(
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                     }
 
+                    let marker_at = |edge: FadeEdge| match edge {
+                        FadeEdge::In => left_marker.as_ref(),
+                        FadeEdge::Out => right_marker.as_ref(),
+                    };
                     if resp.drag_started() {
                         // `press_origin` e non la posizione attuale: egui dichiara il drag dopo un
                         // piccolo movimento, e verso l'interno si sarebbe già usciti dalla zona
@@ -2522,10 +2592,15 @@ pub fn show_timeline(
                         } else {
                             None
                         };
-                        match transition_handle {
-                            Some(edge) => begin_transition_drag(state, visual, edge),
-                            None => match transition_duplicate_edge {
-                            Some(edge) => begin_transition_duplicate_drag(state, &resp, visual, edge),
+                        match transition_handle.and_then(|edge| marker_at(edge).map(|m| (edge, m))) {
+                            Some((edge, m)) => match m.selection {
+                                TransitionSelection::Crossing(track_index, left_clip) => {
+                                    begin_crossing_drag(state, project, timeline_id, track_index, left_clip, edge);
+                                }
+                                TransitionSelection::Edge(..) => begin_transition_drag(state, visual, edge),
+                            },
+                            None => match transition_duplicate_edge.and_then(marker_at) {
+                            Some(m) => begin_transition_duplicate_drag(state, &resp, project, timeline_id, visual, m),
                             None => match fade_zone {
                             Some(edge) => begin_fade_drag(state, visual, edge),
                             None => match press_pos.and_then(edge_at) {
@@ -2545,6 +2620,12 @@ pub fn show_timeline(
                             && td.clip_id == visual.clip.id
                         {
                             td.accum_px += resp.drag_delta().x;
+                        } else if let Some(cd) = &mut state.crossing_drag
+                            && [&left_marker, &right_marker].into_iter().flatten().any(|m| {
+                                m.selection == TransitionSelection::Crossing(cd.track_index, cd.left_clip)
+                            })
+                        {
+                            cd.accum_px += resp.drag_delta().x;
                         } else if let Some(fd) = &mut state.fade_drag
                             && fd.clip_id == visual.clip.id
                         {
@@ -2580,6 +2661,17 @@ pub fn show_timeline(
                                 new_value: transition_drag_value(td, visual.clip.timeline_len, px_per_frame),
                             });
                             transition_drag_finished = true;
+                        } else if let Some(cd) = &state.crossing_drag
+                            && [&left_marker, &right_marker].into_iter().flatten().any(|m| {
+                                m.selection == TransitionSelection::Crossing(cd.track_index, cd.left_clip)
+                            })
+                        {
+                            pending = Some(PendingAction::SetCrossingDuration {
+                                track_index: cd.track_index,
+                                left_clip: cd.left_clip,
+                                new_value: crossing_drag_value(cd, px_per_frame),
+                            });
+                            crossing_drag_finished = true;
                         } else if state.transition_duplicate_drag == Some(visual.clip.id) {
                             // Il drop vero (se c'è stato, su un'altra clip) è già
                             // gestito da `dnd_release_payload` in quella clip;
@@ -2624,21 +2716,21 @@ pub fn show_timeline(
                     } else if resp.clicked() {
                         let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {
                             if transition_in_x.is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::In, x)) {
-                                Some(FadeEdge::In)
+                                left_marker.as_ref()
                             } else if transition_out_x
                                 .is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::Out, x))
                             {
-                                Some(FadeEdge::Out)
+                                right_marker.as_ref()
                             } else {
                                 None
                             }
                         });
-                        if let Some(edge) = clicked_transition {
+                        if let Some(m) = clicked_transition {
                             // Sostituisce qualunque selezione di clip, anche multipla.
                             state.selected.clear();
                             state.selection_anchor = None;
                             state.selected_gap = None;
-                            state.selected_transition = Some(((visual.track_index, visual.clip.id), edge));
+                            state.selected_transition = Some(m.selection);
                         } else {
                             let modifiers = click_modifiers(ui.input(|i| i.modifiers));
                             let (selected, anchor) = apply_click_selection(
@@ -2688,6 +2780,9 @@ pub fn show_timeline(
                 }
                 if transition_drag_finished {
                     state.transition_drag = None;
+                }
+                if crossing_drag_finished {
+                    state.crossing_drag = None;
                 }
                 if volume_drag_finished {
                     state.volume_drag = None;
@@ -2885,14 +2980,16 @@ fn paint_fade_wedge(painter: &egui::Painter, clip_rect: egui::Rect, corner_x: f3
     painter.circle_stroke(center, radius, egui::Stroke::new(1.0, egui::Color32::from_gray(40)));
 }
 
-/// Overlay col tempo della dissolvenza vicino al puntatore, durante il drag
-/// dell'handle: stesso layer "sempre sopra" del cursore di trim.
-fn paint_fade_overlay(ctx: &egui::Context, pos: egui::Pos2, frames: FrameIdx, fps: f64) {
+/// Overlay con la durata (dissolvenza, transizione singola o crossing)
+/// vicino al puntatore, durante il drag della sua estremità: stesso layer
+/// "sempre sopra" del cursore di trim. Comportamento generale, non solo
+/// per le dissolvenze: qualunque estremità trascinabile lo mostra.
+fn paint_duration_overlay(ctx: &egui::Context, pos: egui::Pos2, frames: FrameIdx, fps: f64) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Tooltip,
-        egui::Id::new("timeline_fade_overlay"),
+        egui::Id::new("timeline_duration_overlay"),
     ));
-    let text = format!("+{}", format_fade_duration(frames, fps));
+    let text = format!("+{}", format_duration(frames, fps));
     let text_pos = pos + egui::vec2(12.0, 14.0);
     let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
     let bg = egui::Rect::from_min_size(text_pos, galley.size()).expand(3.0);
@@ -2900,9 +2997,9 @@ fn paint_fade_overlay(ctx: &egui::Context, pos: egui::Pos2, frames: FrameIdx, fp
     painter.galley(text_pos, galley, egui::Color32::WHITE);
 }
 
-/// `S:FF`: durata di una dissolvenza in secondi e frame residui, non una
-/// posizione di timeline (niente ore/minuti, le dissolvenze sono brevi).
-fn format_fade_duration(frames: FrameIdx, fps: f64) -> String {
+/// `S:FF`: durata in secondi e frame residui, non una posizione di
+/// timeline (niente ore/minuti, queste durate sono sempre brevi).
+fn format_duration(frames: FrameIdx, fps: f64) -> String {
     let nominal = (fps.round() as i64).max(1);
     let frames = frames.max(0);
     let (secs, f) = (frames / nominal, frames % nominal);
@@ -3062,16 +3159,113 @@ fn begin_transition_drag(state: &mut TimelineState, visual: &ClipVisual, edge: F
     });
 }
 
+/// La clip adiacente a `clip_id` dal lato `edge`, sulla stessa track: `In`
+/// cerca chi tocca il suo inizio, `Out` chi tocca la sua fine. `None` se
+/// `clip_id` non esiste o non ha vicini da quel lato.
+fn adjacent_clip(track: &vv_core::Track, clip_id: ClipId, edge: FadeEdge) -> Option<ClipId> {
+    let clip = track.clip(clip_id)?;
+    let at = match edge {
+        FadeEdge::In => clip.timeline_start,
+        FadeEdge::Out => clip.timeline_end(),
+    };
+    track
+        .clips
+        .iter()
+        .find(|c| {
+            c.id != clip_id
+                && match edge {
+                    FadeEdge::In => c.timeline_end() == at,
+                    FadeEdge::Out => c.timeline_start == at,
+                }
+        })
+        .map(|c| c.id)
+}
+
+/// Crea (o sostituisce) la crossing transition tra `left_id` e `right_id`,
+/// clampando `transition.duration` a quanto le due clip possono davvero
+/// "prestarle" (il doppio della più corta delle due, vedi
+/// `CrossTransition::split`), e la seleziona.
+fn apply_new_crossing(
+    project: &mut Project,
+    history: &mut History,
+    state: &mut TimelineState,
+    timeline_id: TimelineId,
+    track_index: usize,
+    left_id: ClipId,
+    right_id: ClipId,
+    mut transition: vv_core::Transition,
+) {
+    let track = &project.timelines[timeline_id].tracks[track_index];
+    let (Some(left), Some(right)) = (track.clip(left_id), track.clip(right_id)) else {
+        return;
+    };
+    let max_duration = (2 * left.timeline_len.min(right.timeline_len)).max(1);
+    transition.duration = transition.duration.clamp(1, max_duration);
+    let crossing = vv_core::CrossTransition { left_clip: left_id, right_clip: right_id, transition };
+    history.do_command(
+        project,
+        Box::new(vv_core::SetCrossTransition::new(timeline_id, track_index, left_id, Some(crossing))),
+    );
+    state.selected.clear();
+    state.selection_anchor = None;
+    state.selected_gap = None;
+    state.selected_transition = Some(TransitionSelection::Crossing(track_index, left_id));
+}
+
+/// Comincia un drag simmetrico della durata di una crossing transition:
+/// `edge` è il bordo di *questa* clip da cui parte il drag — `Out` vuol
+/// dire che questa clip è il `left_clip` della crossing (l'estremità presa
+/// è quella dentro di lei), `In` che è il `right_clip` — coerente con
+/// `Track::crossing_from`/`crossing_into` usati da `edge_marker`.
+fn begin_crossing_drag(
+    state: &mut TimelineState,
+    project: &Project,
+    timeline_id: TimelineId,
+    track_index: usize,
+    left_clip: ClipId,
+    edge: FadeEdge,
+) {
+    let track = &project.timelines[timeline_id].tracks[track_index];
+    let Some(crossing) = track.crossing_from(left_clip) else {
+        return;
+    };
+    let (Some(left), Some(right)) = (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) else {
+        return;
+    };
+    let max_duration = (2 * left.timeline_len.min(right.timeline_len)).max(1);
+    state.crossing_drag = Some(CrossingDragState {
+        track_index,
+        left_clip,
+        grabbed_left_side: edge == FadeEdge::Out,
+        original_duration: crossing.transition.duration,
+        max_duration,
+        accum_px: 0.0,
+    });
+}
+
 /// Comincia un Alt+drag di duplicazione dal corpo di un marker di
-/// transizione: il payload DnD va impostato proprio qui, non in
-/// `resp.dragged()` come si potrebbe pensare per analogia col resto del
-/// file — `Response::dnd_set_drag_payload` agisce solo se `drag_started()`,
-/// non ad ogni frame di drag (la libreria lo tiene poi vivo da sé finché
-/// dura il drag, vedi `egui::DragAndDrop`).
-fn begin_transition_duplicate_drag(state: &mut TimelineState, resp: &egui::Response, visual: &ClipVisual, edge: FadeEdge) {
-    let transition = match edge {
-        FadeEdge::In => visual.clip.effects.transition_in.clone(),
-        FadeEdge::Out => visual.clip.effects.transition_out.clone(),
+/// transizione (bordo singolo o crossing): il payload DnD va impostato
+/// proprio qui, non in `resp.dragged()` come si potrebbe pensare per
+/// analogia col resto del file — `Response::dnd_set_drag_payload` agisce
+/// solo se `drag_started()`, non ad ogni frame di drag (la libreria lo
+/// tiene poi vivo da sé finché dura il drag, vedi `egui::DragAndDrop`).
+fn begin_transition_duplicate_drag(
+    state: &mut TimelineState,
+    resp: &egui::Response,
+    project: &Project,
+    timeline_id: TimelineId,
+    visual: &ClipVisual,
+    marker: &EdgeMarker,
+) {
+    let transition = match marker.selection {
+        TransitionSelection::Edge(_, edge) => match edge {
+            FadeEdge::In => visual.clip.effects.transition_in.clone(),
+            FadeEdge::Out => visual.clip.effects.transition_out.clone(),
+        },
+        TransitionSelection::Crossing(track_index, left_clip) => project.timelines[timeline_id]
+            .tracks[track_index]
+            .crossing_from(left_clip)
+            .map(|c| c.transition.clone()),
     };
     if let Some(transition) = transition {
         resp.dnd_set_drag_payload(transition);
@@ -3093,26 +3287,80 @@ fn transition_drag_value(d: &TransitionDragState, clip_len: FrameIdx, px_per_fra
         .clamp(1.0, clip_len.max(1) as f32) as FrameIdx
 }
 
-/// Durata (in/out) da mostrare per `visual`: l'anteprima del drag in corso
-/// se lo riguarda, altrimenti quella già salvata. `None` se quel bordo non
-/// ha una transizione.
-fn transition_preview(
+/// Durata totale (in frame) dell'anteprima di un drag di crossing in corso:
+/// simmetrico, trascinare l'estremità di sinistra verso sinistra allunga
+/// (e quella di destra verso destra allo stesso modo), sempre di due volte
+/// lo spostamento in frame — cresce/si accorcia sui due lati alla pari.
+fn crossing_drag_value(d: &CrossingDragState, px_per_frame: f32) -> FrameIdx {
+    // Come `transition_drag_value`: l'estremità sinistra è un bordo "Out"
+    // (dentro la clip di sinistra, cresce trascinandola verso sinistra,
+    // lontano dal taglio), quella destra un bordo "In" (dentro la clip di
+    // destra, cresce trascinandola verso destra) — qui in più raddoppiato
+    // sull'altro lato, vedi sopra.
+    let signed_delta = if d.grabbed_left_side { -d.accum_px } else { d.accum_px };
+    (d.original_duration as f32 + 2.0 * signed_delta / px_per_frame)
+        .round()
+        .clamp(1.0, d.max_duration.max(1) as f32) as FrameIdx
+}
+
+/// Cosa mostrare/selezionare sul bordo `edge` di `visual.clip`: un bordo
+/// singolo (`EffectStack::transition_in`/`_out`), o — se quel bordo è
+/// condiviso con una crossing transition valida — la propria metà di
+/// quella. La durata riflette l'anteprima di un drag di ridimensionamento
+/// in corso su questo bordo, se c'è.
+struct EdgeMarker {
+    duration: FrameIdx,
+    selection: TransitionSelection,
+    is_crossing: bool,
+}
+
+fn edge_marker(
+    track: &vv_core::Track,
     state: &TimelineState,
     visual: &ClipVisual,
     px_per_frame: f32,
-) -> (Option<FrameIdx>, Option<FrameIdx>) {
-    let mut duration_in = visual.clip.effects.transition_in.as_ref().map(|t| t.duration);
-    let mut duration_out = visual.clip.effects.transition_out.as_ref().map(|t| t.duration);
+    edge: FadeEdge,
+) -> Option<EdgeMarker> {
+    let crossing = match edge {
+        FadeEdge::In => track.crossing_into(visual.clip.id),
+        FadeEdge::Out => track.crossing_from(visual.clip.id),
+    };
+    if let Some(crossing) = crossing {
+        let total = if let Some(d) = &state.crossing_drag
+            && d.track_index == visual.track_index
+            && d.left_clip == crossing.left_clip
+        {
+            crossing_drag_value(d, px_per_frame)
+        } else {
+            crossing.transition.duration
+        };
+        let (split_left, split_right) = vv_core::CrossTransition::split_duration(total);
+        let duration = match edge {
+            FadeEdge::Out => split_left,
+            FadeEdge::In => split_right,
+        };
+        return Some(EdgeMarker {
+            duration,
+            selection: TransitionSelection::Crossing(visual.track_index, crossing.left_clip),
+            is_crossing: true,
+        });
+    }
+    let transition = match edge {
+        FadeEdge::In => visual.clip.effects.transition_in.as_ref(),
+        FadeEdge::Out => visual.clip.effects.transition_out.as_ref(),
+    }?;
+    let mut duration = transition.duration;
     if let Some(d) = &state.transition_drag
         && d.clip_id == visual.clip.id
+        && d.edge == edge
     {
-        let value = transition_drag_value(d, visual.clip.timeline_len, px_per_frame);
-        match d.edge {
-            FadeEdge::In => duration_in = Some(value),
-            FadeEdge::Out => duration_out = Some(value),
-        }
+        duration = transition_drag_value(d, visual.clip.timeline_len, px_per_frame);
     }
-    (duration_in, duration_out)
+    Some(EdgeMarker {
+        duration,
+        selection: TransitionSelection::Edge((visual.track_index, visual.clip.id), edge),
+        is_crossing: false,
+    })
 }
 
 /// Estremità (durata) di una transizione sotto `pos`, solo nella banda in
@@ -3167,16 +3415,43 @@ fn transition_drop_edge(pos: egui::Pos2, clip_rect: egui::Rect, drop_zone_px: f3
     }
 }
 
+/// C'è una clip adiacente sulla stessa track dal lato `edge` di `clip_id`?
+/// Usata durante il drag di una transizione per anticipare, col colore del
+/// marker, se il rilascio lì creerà una crossing o resterà un bordo
+/// singolo — vedi `CROSSING_COLOR`.
+fn has_neighbor(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId, edge: FadeEdge) -> bool {
+    let Some(visual) = visuals.iter().find(|v| v.track_index == track_index && v.clip.id == clip_id) else {
+        return false;
+    };
+    let at = match edge {
+        FadeEdge::In => visual.clip.timeline_start,
+        FadeEdge::Out => visual.clip.timeline_end(),
+    };
+    visuals.iter().any(|v| {
+        v.track_index == track_index
+            && v.clip.id != clip_id
+            && match edge {
+                FadeEdge::In => v.clip.timeline_end() == at,
+                FadeEdge::Out => v.clip.timeline_start == at,
+            }
+    })
+}
+
 /// Il marker di una transizione: una fascia colorata in basso alla clip dal
-/// bordo a `x`, un ingranaggio sul bordo (il lato fisso) e una parentesi
-/// sull'estremità `x` (il lato trascinabile) — "X]" per `In`, "[X" per
-/// `Out`, leggendo da sinistra a destra.
+/// bordo a `x`. Un bordo singolo (`is_crossing: false`) mostra un
+/// ingranaggio sul lato fisso (il bordo vero della clip, contro il
+/// trasparente) e una parentesi sull'estremità `x` (il lato trascinabile) —
+/// "X]" per `In`, "[X" per `Out". Una crossing (`is_crossing: true`) non ha
+/// un lato "fisso": il bordo condiviso col vicino mostra un'altra
+/// parentesi, aperta verso l'interno della propria metà — le due metà,
+/// disegnate una per clip, si affiancano lì in "][".
 fn paint_transition_marker(
     painter: &egui::Painter,
     clip_rect: egui::Rect,
     edge: FadeEdge,
     x: f32,
     selected: bool,
+    is_crossing: bool,
 ) {
     let x = x.clamp(clip_rect.left(), clip_rect.right());
     let band = egui::Rect::from_min_max(
@@ -3187,13 +3462,26 @@ fn paint_transition_marker(
         FadeEdge::In => egui::Rect::from_min_max(band.min, egui::pos2(x, band.bottom())),
         FadeEdge::Out => egui::Rect::from_min_max(egui::pos2(x, band.top()), band.max),
     };
-    let color = if selected { TRANSITION_SELECTED_COLOR } else { TRANSITION_COLOR };
+    let color = match (is_crossing, selected) {
+        (false, false) => TRANSITION_COLOR,
+        (false, true) => TRANSITION_SELECTED_COLOR,
+        (true, false) => CROSSING_COLOR,
+        (true, true) => CROSSING_SELECTED_COLOR,
+    };
     painter.rect_filled(body, 0.0, color);
     let edge_x = match edge {
         FadeEdge::In => clip_rect.left(),
         FadeEdge::Out => clip_rect.right(),
     };
-    paint_gear_icon(painter, egui::pos2(edge_x, band.center().y), band.height() * 0.4, egui::Color32::WHITE);
+    if is_crossing {
+        let opposite = match edge {
+            FadeEdge::In => FadeEdge::Out,
+            FadeEdge::Out => FadeEdge::In,
+        };
+        paint_bracket_icon(painter, egui::pos2(edge_x, band.center().y), band.height() * 0.7, opposite, egui::Color32::WHITE);
+    } else {
+        paint_gear_icon(painter, egui::pos2(edge_x, band.center().y), band.height() * 0.4, egui::Color32::WHITE);
+    }
     paint_bracket_icon(painter, egui::pos2(x, band.center().y), band.height() * 0.7, edge, egui::Color32::WHITE);
 }
 
@@ -3749,16 +4037,25 @@ fn apply_pending_action(
             }
         }
         PendingAction::ApplyTransition { track_index, clip_id, edge, kind } => {
-            let timeline = &project.timelines[timeline_id];
-            if let Some(clip) = timeline.clip(track_index, clip_id) {
-                let default_duration = ((timeline.fps.as_f64() * 0.45).round() as FrameIdx).clamp(1, clip.timeline_len.max(1));
-                let transition = vv_core::Transition {
-                    kind,
-                    duration: default_duration,
-                    direction: vv_core::PushDirection::Right,
-                    ease: vv_core::Ease::InOut,
-                    curve: 0.5,
+            let default_duration =
+                (project.timelines[timeline_id].fps.as_f64() * 0.45).round() as FrameIdx;
+            let transition = vv_core::Transition {
+                kind,
+                duration: default_duration.max(1),
+                direction: vv_core::PushDirection::Right,
+                ease: vv_core::Ease::InOut,
+                curve: 0.5,
+            };
+            let neighbor = adjacent_clip(&project.timelines[timeline_id].tracks[track_index], clip_id, edge);
+            if let Some(neighbor_id) = neighbor {
+                let (left_id, right_id) = match edge {
+                    FadeEdge::In => (neighbor_id, clip_id),
+                    FadeEdge::Out => (clip_id, neighbor_id),
                 };
+                apply_new_crossing(project, history, state, timeline_id, track_index, left_id, right_id, transition);
+            } else if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
+                let mut transition = transition;
+                transition.duration = transition.duration.clamp(1, clip.timeline_len.max(1));
                 history.do_command(
                     project,
                     Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
@@ -3766,7 +4063,7 @@ fn apply_pending_action(
                 state.selected.clear();
                 state.selection_anchor = None;
                 state.selected_gap = None;
-                state.selected_transition = Some(((track_index, clip_id), edge));
+                state.selected_transition = Some(TransitionSelection::Edge((track_index, clip_id), edge));
             }
         }
         PendingAction::SetTransitionDuration { track_index, clip_id, edge, new_value } => {
@@ -3786,8 +4083,30 @@ fn apply_pending_action(
                 }
             }
         }
-        PendingAction::DuplicateTransition { track_index, clip_id, edge, mut transition } => {
-            if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
+        PendingAction::SetCrossingDuration { track_index, left_clip, new_value } => {
+            let track = &project.timelines[timeline_id].tracks[track_index];
+            if let Some(mut crossing) = track.crossing_from(left_clip).cloned() {
+                let max_duration = match (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) {
+                    (Some(left), Some(right)) => (2 * left.timeline_len.min(right.timeline_len)).max(1),
+                    _ => new_value.max(1),
+                };
+                crossing.transition.duration = new_value.clamp(1, max_duration);
+                history.do_command(
+                    project,
+                    Box::new(vv_core::SetCrossTransition::new(timeline_id, track_index, left_clip, Some(crossing))),
+                );
+            }
+        }
+        PendingAction::DuplicateTransition { track_index, clip_id, edge, transition } => {
+            let neighbor = adjacent_clip(&project.timelines[timeline_id].tracks[track_index], clip_id, edge);
+            if let Some(neighbor_id) = neighbor {
+                let (left_id, right_id) = match edge {
+                    FadeEdge::In => (neighbor_id, clip_id),
+                    FadeEdge::Out => (clip_id, neighbor_id),
+                };
+                apply_new_crossing(project, history, state, timeline_id, track_index, left_id, right_id, transition);
+            } else if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
+                let mut transition = transition;
                 transition.duration = transition.duration.clamp(1, clip.timeline_len.max(1));
                 history.do_command(
                     project,
@@ -3796,7 +4115,7 @@ fn apply_pending_action(
                 state.selected.clear();
                 state.selection_anchor = None;
                 state.selected_gap = None;
-                state.selected_transition = Some(((track_index, clip_id), edge));
+                state.selected_transition = Some(TransitionSelection::Edge((track_index, clip_id), edge));
             }
         }
         PendingAction::Unlink(track_index, clip_id) => {
@@ -4715,13 +5034,13 @@ mod tests {
     }
 
     #[test]
-    fn format_fade_duration_is_seconds_and_leftover_frames() {
-        assert_eq!(format_fade_duration(0, 10.0), "0:00");
+    fn format_duration_is_seconds_and_leftover_frames() {
+        assert_eq!(format_duration(0, 10.0), "0:00");
         // 10 frame a 10fps = 1s esatto, niente frame residui.
-        assert_eq!(format_fade_duration(10, 10.0), "1:00");
+        assert_eq!(format_duration(10, 10.0), "1:00");
         // 14 frame a 10fps = 1s + 4 frame.
-        assert_eq!(format_fade_duration(14, 10.0), "1:04");
-        assert_eq!(format_fade_duration(93, 30.0), "3:03");
+        assert_eq!(format_duration(14, 10.0), "1:04");
+        assert_eq!(format_duration(93, 30.0), "3:03");
     }
 
     #[test]
@@ -4767,6 +5086,56 @@ mod tests {
             accum_px: 1000.0,
         };
         assert_eq!(fade_drag_value(&far, 30, px_per_frame), 30);
+    }
+
+    #[test]
+    fn crossing_drag_value_grows_when_the_grabbed_extremity_moves_away_from_the_cut() {
+        let px_per_frame = 2.0;
+        // Estremità sinistra trascinata più a sinistra (lontano dal
+        // taglio, verso l'interno della clip di sinistra): la crossing si
+        // allunga, il doppio dei frame spostati (cresce su entrambi i
+        // lati insieme).
+        let left_extends = CrossingDragState {
+            track_index: 0,
+            left_clip: ClipId(1),
+            grabbed_left_side: true,
+            original_duration: 10,
+            max_duration: 100,
+            accum_px: -20.0, // 20px a sinistra = 10 frame
+        };
+        assert_eq!(crossing_drag_value(&left_extends, px_per_frame), 30);
+        // Stesso spostamento in pixel ma sul lato destro, verso destra:
+        // stesso effetto, si allontana dal taglio nella direzione opposta.
+        let right_extends = CrossingDragState {
+            track_index: 0,
+            left_clip: ClipId(1),
+            grabbed_left_side: false,
+            original_duration: 10,
+            max_duration: 100,
+            accum_px: 20.0,
+        };
+        assert_eq!(crossing_drag_value(&right_extends, px_per_frame), 30);
+        // Trascinare l'estremità sinistra verso destra (verso il taglio)
+        // la accorcia, clampata a un minimo di 1 frame.
+        let shrinking = CrossingDragState {
+            track_index: 0,
+            left_clip: ClipId(1),
+            grabbed_left_side: true,
+            original_duration: 10,
+            max_duration: 100,
+            accum_px: 20.0,
+        };
+        assert_eq!(crossing_drag_value(&shrinking, px_per_frame), 1);
+        // Clampata al massimo consentito dalle due clip coinvolte.
+        let far = CrossingDragState {
+            track_index: 0,
+            left_clip: ClipId(1),
+            grabbed_left_side: true,
+            original_duration: 10,
+            max_duration: 40,
+            accum_px: -1000.0,
+        };
+        assert_eq!(crossing_drag_value(&far, px_per_frame), 40);
     }
 
     #[test]

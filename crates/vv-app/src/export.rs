@@ -17,7 +17,7 @@ use vv_audio::mixer::{
     MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into, timeline_frame_to_sample,
 };
 
-use crate::frame_provider::{FrameProvider, OwnedLayer, clip_layer, media_source_frame};
+use crate::frame_provider::{FrameProvider, OwnedLayer, media_source_frame, track_layers_at};
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
@@ -326,10 +326,20 @@ fn decode_video_frame(
     resolution: (u32, u32),
 ) -> Result<Vec<OwnedLayer>, String> {
     let clips = timeline.active_video_clips_at(frame);
-    provider.retain_clips(&clips.iter().map(|(_, c)| c.id).collect::<Vec<_>>());
+    // In più delle clip "naturalmente" attive, anche l'altra metà di una
+    // crossing transition in corso: `track_layers_at` la decodifica pure lei,
+    // altrimenti `retain_clips` la chiuderebbe a ogni frame appena aperta.
+    let mut keep: Vec<ClipId> = clips.iter().map(|(_, c)| c.id).collect();
+    for &(track_index, _) in &clips {
+        if let Some((left, right, _)) = timeline.tracks[track_index].crossing_at(frame) {
+            keep.push(left.id);
+            keep.push(right.id);
+        }
+    }
+    provider.retain_clips(&keep);
     let mut layers = Vec::with_capacity(clips.len());
-    for (_, clip) in clips {
-        layers.extend(clip_layer(project, clip, frame, resolution, provider)?);
+    for (track_index, clip) in clips {
+        layers.extend(track_layers_at(project, timeline, track_index, clip, frame, resolution, provider)?);
     }
     Ok(layers)
 }
@@ -521,6 +531,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
@@ -537,6 +548,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
@@ -560,6 +572,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut active = StreamingFrameProvider::default();
@@ -605,6 +618,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
         let compositor = vv_render::Compositor::new_headless();
         let mut provider = StreamingFrameProvider::default();
@@ -624,6 +638,7 @@ mod tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             },
             Track {
                 kind: TrackKind::Video,
@@ -631,6 +646,7 @@ mod tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             },
         ]);
         let compositor = vv_render::Compositor::new_headless();
@@ -655,6 +671,7 @@ mod tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             },
             Track {
                 kind: TrackKind::Audio,
@@ -662,6 +679,7 @@ mod tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             },
         ]);
         let mixed = mix_audio_track(&project, &tl, 0..25).unwrap();

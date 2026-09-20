@@ -988,6 +988,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -1159,6 +1160,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
 
         let segments = collect_media_segments(&tl, 40, 60);
@@ -1187,6 +1189,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
 
         let segments = collect_media_segments(&tl, 0, 40);
@@ -1212,6 +1215,7 @@ mod tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             },
             Track {
                 kind: TrackKind::Video,
@@ -1219,6 +1223,7 @@ mod tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             },
         ]);
 
@@ -1249,6 +1254,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
 
         // Finestra dietro [40,60): attraversa il taglio a 50 andando
@@ -1282,6 +1288,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
 
         let segments = collect_media_segments_behind(&tl, 40, 0);
@@ -1312,6 +1319,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]);
 
         let segments = collect_media_segments_behind(&tl, 150, 100);
@@ -1477,6 +1485,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -1552,6 +1561,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -1915,6 +1925,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -1973,6 +1984,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2057,6 +2069,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2141,6 +2154,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2236,6 +2250,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2317,6 +2332,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2389,6 +2405,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2474,6 +2491,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2559,6 +2577,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2709,6 +2728,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -2805,6 +2825,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -2890,6 +2911,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let render_ahead = RenderAhead::spawn(
@@ -2987,6 +3009,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, 0.0, 0.0);
@@ -3059,6 +3082,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3179,6 +3203,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3289,6 +3314,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();
@@ -3641,6 +3667,7 @@ mod tests {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }]));
 
         let caches = SharedFrameCache::new();

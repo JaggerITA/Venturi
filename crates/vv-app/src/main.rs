@@ -1186,7 +1186,8 @@ impl VibeVideoApp {
 
     /// I layer da comporre al playhead, dal basso verso l'alto. `None` se il
     /// frame media in cima non è pronto: si tiene quello mostrato; un layer
-    /// sotto non pronto si salta.
+    /// sotto non pronto si salta. Durante una crossing transition "in cima"
+    /// conta se manca anche una sola delle due metà.
     fn timeline_video_layers(&mut self) -> Option<Vec<frame_provider::OwnedLayer>> {
         let timeline = &self.project.timelines[self.timeline_id?];
         let render_ahead = self.render_ahead.as_mut()?;
@@ -1194,23 +1195,26 @@ impl VibeVideoApp {
         let clips = timeline.active_video_clips_at(playhead);
         let topmost = clips.len().saturating_sub(1);
         let mut layers = Vec::with_capacity(clips.len());
-        for (i, (_, clip)) in clips.iter().enumerate() {
+        for (i, &(track_index, clip)) in clips.iter().enumerate() {
             let frame = playhead.max(clip.timeline_start);
-            let layer = frame_provider::clip_layer(
+            let involved = match timeline.tracks[track_index].crossing_at(frame) {
+                Some((left, right, _)) if left.id == clip.id || right.id == clip.id => 2,
+                _ => 1,
+            };
+            let track_layers = frame_provider::track_layers_at(
                 &self.project,
+                timeline,
+                track_index,
                 clip,
                 frame,
                 timeline.resolution,
                 render_ahead,
             )
             .ok()?;
-            match layer {
-                Some(layer) => layers.push(layer),
-                None if i == topmost && matches!(clip.source, vv_core::ClipSource::Media(_)) => {
-                    return None;
-                }
-                None => {}
+            if i == topmost && track_layers.len() < involved {
+                return None;
             }
+            layers.extend(track_layers);
         }
         Some(layers)
     }
@@ -1664,11 +1668,9 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        if let Some((key, edge)) = self.timeline_state.selected_transition {
-            self.history.do_command(
-                &mut self.project,
-                Box::new(vv_core::set_clip_transition(timeline_id, key.0, key.1, edge, None)),
-            );
+        if let Some(sel) = self.timeline_state.selected_transition {
+            let cmd = set_transition_command(&self.project, timeline_id, sel, None);
+            self.history.do_command(&mut self.project, cmd);
             self.timeline_state.selected_transition = None;
             return;
         }

@@ -7,7 +7,7 @@ pub use command::{
     AddTrack, Command, CommandLabel, CompositeCommand, FadeEdge, GroupMark, History, InsertClip, KeyframeTarget,
     KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
-    SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
+    SetCrossTransition, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_filters,
     set_clip_flip, set_clip_gain, set_clip_title, set_clip_transform_param, set_clip_transition,
 };
@@ -1442,5 +1442,39 @@ mod tests {
         // Finita la transizione: a posto, nessun offset residuo.
         assert_eq!(clip.transition_offset_at(20, frame_size), [0.0, 0.0]);
         assert_eq!(clip.transition_offset_at(50, frame_size), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn cross_transition_window_straddles_the_cut_and_progresses_from_zero_to_one() {
+        let left = Clip::from_source_range(ClipId(1), ClipSource::Media(MediaId::default()), 0, 100, 0, Rational::one());
+        // Adiacente: comincia esattamente dove finisce `left` (100).
+        let right = Clip::from_source_range(ClipId(2), ClipSource::Media(MediaId::default()), 0, 100, 100, Rational::one());
+        let crossing = CrossTransition {
+            left_clip: left.id,
+            right_clip: right.id,
+            transition: Transition {
+                kind: TransitionKind::Push,
+                duration: 20,
+                direction: PushDirection::Right,
+                ease: Ease::None,
+                curve: 0.0,
+            },
+        };
+        // Finestra simmetrica sul taglio: 10 frame prima, 10 dopo.
+        assert_eq!(crossing.window(&left, &right), 90..110);
+        assert_eq!(crossing.eased_progress_at(90, &left, &right), 0.0);
+        assert!((crossing.eased_progress_at(100, &left, &right) - 0.5).abs() < 1e-6);
+        assert_eq!(crossing.eased_progress_at(110, &left, &right), 1.0);
+
+        let frame_size = (1920.0, 1080.0);
+        // A progresso 0: sinistra del tutto a posto, destra del tutto fuori
+        // (dal lato opposto a "Right", da cui arriva).
+        let (left_off, right_off) = crossing.offsets(0.0, frame_size);
+        assert_eq!(left_off, [0.0, 0.0]);
+        assert_eq!(right_off, [-1920.0, 0.0]);
+        // A progresso 1: l'opposto.
+        let (left_off, right_off) = crossing.offsets(1.0, frame_size);
+        assert_eq!(left_off, [1920.0, 0.0]);
+        assert_eq!(right_off, [0.0, 0.0]);
     }
 }

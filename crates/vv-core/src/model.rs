@@ -1149,6 +1149,15 @@ pub struct Track {
     /// può atterrare sopra.
     #[serde(default)]
     pub locked: bool,
+    /// Transizioni a cavallo tra due clip adiacenti. Non tocca mai
+    /// `timeline_start`/`timeline_len` delle clip coinvolte (restano non
+    /// sovrapposte, invariante intatto): è il rendering a "prestare" per
+    /// la sua finestra la coda di una e la testa dell'altra, vedi
+    /// `Track::crossing_at`. Una voce la cui coppia non è più adiacente
+    /// (una delle due spostata, tagliata, cancellata) resta nei dati ma
+    /// è inerte — non serve ripulirla attivamente.
+    #[serde(default)]
+    pub crossings: Vec<CrossTransition>,
 }
 
 impl Track {
@@ -1159,6 +1168,7 @@ impl Track {
             muted: false,
             solo: false,
             locked: false,
+            crossings: Vec::new(),
         }
     }
 
@@ -1181,6 +1191,96 @@ impl Track {
             .clips
             .partition_point(|c| c.timeline_start < clip.timeline_start);
         self.clips.insert(pos, clip);
+    }
+
+    /// La crossing transition la cui coppia è ancora valida (entrambe le
+    /// clip esistono e sono ancora adiacenti) e la cui finestra copre
+    /// `frame`, con le due clip coinvolte.
+    pub fn crossing_at(&self, frame: FrameIdx) -> Option<(&Clip, &Clip, &CrossTransition)> {
+        self.crossings.iter().find_map(|c| {
+            let left = self.clip(c.left_clip)?;
+            let right = self.clip(c.right_clip)?;
+            if left.timeline_end() != right.timeline_start {
+                return None;
+            }
+            c.window(left, right).contains(&frame).then_some((left, right, c))
+        })
+    }
+
+    /// La crossing transition (valida o no) il cui `left_clip` è `id`.
+    pub fn crossing_from(&self, left_clip: ClipId) -> Option<&CrossTransition> {
+        self.crossings.iter().find(|c| c.left_clip == left_clip)
+    }
+
+    /// La crossing transition (valida o no) il cui `right_clip` è `id`.
+    pub fn crossing_into(&self, right_clip: ClipId) -> Option<&CrossTransition> {
+        self.crossings.iter().find(|c| c.right_clip == right_clip)
+    }
+}
+
+/// Una transizione a cavallo tra due clip adiacenti sulla stessa track:
+/// "mangia" gli ultimi `duration/2` frame di `left_clip` e i primi
+/// `duration/2` di `right_clip`, mostrandoli sovrapposti invece che in
+/// sequenza. A differenza di `EffectStack::transition_in`/`transition_out`
+/// (un bordo solo, contro il trasparente) qui i lati sono sempre due e
+/// reali: nessuna delle due clip cambia `timeline_start`/`timeline_len`,
+/// la finestra si calcola sempre dalla loro posizione attuale.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrossTransition {
+    pub left_clip: ClipId,
+    pub right_clip: ClipId,
+    pub transition: Transition,
+}
+
+impl CrossTransition {
+    /// Quanti frame della finestra cadono prima del taglio (dentro
+    /// `left_clip`) e quanti dopo (dentro `right_clip`): sempre a metà,
+    /// l'eventuale frame dispari va al lato sinistro. Il drag della durata
+    /// è simmetrico (vedi timeline_ui), quindi la scelta di arrotondamento
+    /// conta solo per durate dispari.
+    pub fn split(&self) -> (FrameIdx, FrameIdx) {
+        Self::split_duration(self.transition.duration)
+    }
+
+    /// Come `split`, ma per una durata data invece di `self.transition.duration`
+    /// — serve all'anteprima dal vivo di un drag di ridimensionamento, dove
+    /// la durata mostrata non è ancora quella salvata.
+    pub fn split_duration(duration: FrameIdx) -> (FrameIdx, FrameIdx) {
+        let left = duration - duration / 2;
+        (left, duration - left)
+    }
+
+    /// La finestra (in frame di timeline) della transizione, dati i bordi
+    /// attuali di `left`/`right` — mai memorizzata, sempre ricalcolata: se
+    /// una clip si sposta la finestra la segue.
+    pub fn window(&self, left: &Clip, right: &Clip) -> std::ops::Range<FrameIdx> {
+        let (split_left, split_right) = self.split();
+        (left.timeline_end() - split_left)..(right.timeline_start + split_right)
+    }
+
+    /// Progresso 0..1 di `frame` nella finestra: 0 all'inizio (sinistra
+    /// ancora del tutto a posto, destra del tutto fuori), 1 alla fine
+    /// (opposto). Applica già `ease`/`curve`.
+    pub fn eased_progress_at(&self, frame: FrameIdx, left: &Clip, right: &Clip) -> f32 {
+        let window = self.window(left, right);
+        let len = (window.end - window.start).max(1);
+        let raw = (frame - window.start) as f32 / len as f32;
+        eased(raw.clamp(0.0, 1.0), self.transition.ease, self.transition.curve)
+    }
+
+    /// Offset di posizione (stesse unità pixel di `Transform.position`) dei
+    /// lati sinistro e destro al progresso già "easato" `progress`: il
+    /// sinistro esce, il destro entra, nello stesso verso — stessa
+    /// matematica di `Clip::transition_offset_at`, qui applicata a un
+    /// progresso condiviso dall'intera finestra invece che locale al bordo
+    /// di una singola clip.
+    pub fn offsets(&self, progress: f32, frame_size: (f32, f32)) -> ([f32; 2], [f32; 2]) {
+        let vec = self.transition.direction.vector();
+        let left_amount = progress;
+        let right_amount = -(1.0 - progress);
+        let left = [vec[0] * frame_size.0 * left_amount, vec[1] * frame_size.1 * left_amount];
+        let right = [vec[0] * frame_size.0 * right_amount, vec[1] * frame_size.1 * right_amount];
+        (left, right)
     }
 }
 
@@ -1560,6 +1660,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
                 Track {
                     kind: TrackKind::Video,
@@ -1567,6 +1668,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
             ],
         };
@@ -1601,6 +1703,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
                 Track {
                     kind: TrackKind::Video,
@@ -1608,6 +1711,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
             ],
         };
@@ -1643,6 +1747,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
                 Track {
                     kind: TrackKind::Audio,
@@ -1650,6 +1755,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
             ],
         };
@@ -1702,6 +1808,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
                 Track {
                     kind: TrackKind::Audio,
@@ -1709,6 +1816,7 @@ mod timeline_tests {
                     muted: false,
                     solo: false,
                     locked: false,
+                    crossings: Vec::new(),
                 },
             ],
         };
@@ -1844,6 +1952,7 @@ mod timeline_tests {
                 muted: false,
                 solo: false,
                 locked: false,
+                crossings: Vec::new(),
             }],
         });
 

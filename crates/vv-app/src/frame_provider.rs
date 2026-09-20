@@ -3,7 +3,7 @@
 //! `export.rs`). La mappatura clip -> frame sorgente è una sola.
 
 use std::sync::Arc;
-use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project, Rgba, TitleParams, Transform};
+use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project, Rgba, TitleParams, Timeline, Transform};
 use vv_media::FrameYuv420;
 
 /// `&mut self`: l'export tiene aperti i decoder.
@@ -128,6 +128,26 @@ pub fn clip_layer(
     transform.position[0] += push[0];
     transform.position[1] += push[1];
     let opacity = clip.fade_multiplier_at(frame);
+    let media_frame = match &clip.source {
+        ClipSource::Media(_) => provider.frame_for(project, clip, frame)?,
+        ClipSource::SolidColor | ClipSource::Text => None,
+    };
+    Ok(build_layer(project, clip, source_frame, transform, opacity, media_frame, timeline_size))
+}
+
+/// La parte comune a `clip_layer` e al lato di una crossing transition
+/// (`crossing_side_layer`): dato il frame sorgente, il transform già
+/// calcolato e il frame media già decodificato (se `ClipSource::Media`),
+/// assembla l'`OwnedLayer` giusto per il tipo di sorgente della clip.
+fn build_layer(
+    project: &Project,
+    clip: &Clip,
+    source_frame: FrameIdx,
+    transform: Transform,
+    opacity: f32,
+    media_frame: Option<Arc<FrameYuv420>>,
+    timeline_size: (u32, u32),
+) -> Option<OwnedLayer> {
     let filters: Vec<vv_core::FilterKind> = clip
         .effects
         .filters
@@ -135,7 +155,7 @@ pub fn clip_layer(
         .filter(|f| f.enabled)
         .map(|f| f.kind)
         .collect();
-    Ok(match &clip.source {
+    match &clip.source {
         ClipSource::SolidColor => Some(OwnedLayer::Solid {
             color: clip
                 .effects
@@ -151,14 +171,106 @@ pub fn clip_layer(
             .title
             .clone()
             .map(|title| OwnedLayer::Text { title, transform, opacity, filters }),
-        ClipSource::Media(_) => provider
-            .frame_for(project, clip, frame)?
-            .map(|frame| OwnedLayer::Video {
-                frame,
-                transform,
-                source_size: clip_source_size(project, clip, timeline_size),
-                opacity,
-                filters,
-            }),
-    })
+        ClipSource::Media(_) => media_frame.map(|frame| OwnedLayer::Video {
+            frame,
+            transform,
+            source_size: clip_source_size(project, clip, timeline_size),
+            opacity,
+            filters,
+        }),
+    }
+}
+
+/// Come `provider.frame_for`, ma oltre i bordi reali del media si blocca
+/// (freeze) sul frame sorgente più vicino disponibile invece di restituire
+/// `None`: usato solo dalle crossing transition, dove "oltre la fine" è la
+/// norma (è la clip che presta il suo bordo alla transizione), non un
+/// errore da segnalare come farebbe `clip_layer` in export.
+fn extrapolated_frame_for(
+    project: &Project,
+    clip: &Clip,
+    timeline_frame: FrameIdx,
+    provider: &mut dyn FrameProvider,
+) -> Result<Option<Arc<FrameYuv420>>, String> {
+    let ClipSource::Media(media_id) = &clip.source else {
+        return provider.frame_for(project, clip, timeline_frame);
+    };
+    let Some(media) = project.media_pool.get(*media_id) else {
+        return provider.frame_for(project, clip, timeline_frame);
+    };
+    let wanted = clip.source_frame_at(timeline_frame);
+    let clamped = wanted.clamp(0, (media.meta.duration_frames - 1).max(0));
+    let held_timeline_frame = clip.timeline_frame_at(clamped);
+    provider.frame_for(project, clip, held_timeline_frame)
+}
+
+/// Il lato di una crossing transition per una singola clip: come
+/// `clip_layer`, ma il frame sorgente si blocca ai bordi del media invece
+/// di sparire, e l'offset di posizione è quello di `CrossTransition`
+/// invece di `Clip::transition_offset_at` (che riguarda solo i bordi
+/// singoli, `transition_in`/`transition_out`).
+fn crossing_side_layer(
+    project: &Project,
+    clip: &Clip,
+    frame: FrameIdx,
+    timeline_size: (u32, u32),
+    provider: &mut dyn FrameProvider,
+    extra_offset: [f32; 2],
+) -> Result<Option<OwnedLayer>, String> {
+    let source_frame = clip.source_frame_at(frame);
+    let mut transform = clip.effects.transform.value_at(source_frame);
+    transform.position[0] += extra_offset[0];
+    transform.position[1] += extra_offset[1];
+    let opacity = clip.fade_multiplier_at(frame);
+    let media_frame = match &clip.source {
+        ClipSource::Media(_) => extrapolated_frame_for(project, clip, frame, provider)?,
+        ClipSource::SolidColor | ClipSource::Text => None,
+    };
+    Ok(build_layer(project, clip, source_frame, transform, opacity, media_frame, timeline_size))
+}
+
+/// I layer di una crossing transition attiva a `frame`: coda di `left`,
+/// poi testa di `right` (in quest'ordine, `right` sopra — per un push non
+/// importa, le due zone visibili non si sovrappongono mai davvero).
+fn crossing_layers(
+    project: &Project,
+    left: &Clip,
+    right: &Clip,
+    crossing: &vv_core::CrossTransition,
+    frame: FrameIdx,
+    timeline_size: (u32, u32),
+    provider: &mut dyn FrameProvider,
+) -> Result<Vec<OwnedLayer>, String> {
+    let frame_size = (timeline_size.0 as f32, timeline_size.1 as f32);
+    let progress = crossing.eased_progress_at(frame, left, right);
+    let (left_offset, right_offset) = crossing.offsets(progress, frame_size);
+    let mut layers = Vec::with_capacity(2);
+    layers.extend(crossing_side_layer(project, left, frame, timeline_size, provider, left_offset)?);
+    layers.extend(crossing_side_layer(project, right, frame, timeline_size, provider, right_offset)?);
+    Ok(layers)
+}
+
+/// I layer di `clip` (sulla track `track_index`) al frame di timeline
+/// `frame`: uno solo nel caso normale, ma due se `frame` cade nella
+/// finestra di una crossing transition valida che coinvolge questa clip —
+/// l'altra metà della coppia si aggiunge da sé, spinta secondo la
+/// transizione condivisa. Punto d'ingresso da preferire a `clip_layer`
+/// ovunque si componga una track intera (anteprima ed export), non solo
+/// una clip isolata.
+pub fn track_layers_at(
+    project: &Project,
+    timeline: &Timeline,
+    track_index: usize,
+    clip: &Clip,
+    frame: FrameIdx,
+    timeline_size: (u32, u32),
+    provider: &mut dyn FrameProvider,
+) -> Result<Vec<OwnedLayer>, String> {
+    let track = &timeline.tracks[track_index];
+    if let Some((left, right, crossing)) = track.crossing_at(frame)
+        && (left.id == clip.id || right.id == clip.id)
+    {
+        return crossing_layers(project, left, right, crossing, frame, timeline_size, provider);
+    }
+    Ok(clip_layer(project, clip, frame, timeline_size, provider)?.into_iter().collect())
 }
