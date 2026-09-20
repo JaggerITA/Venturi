@@ -204,6 +204,11 @@ struct VibeVideoApp {
     project: vv_core::Project,
     history: vv_core::History,
     timeline_id: Option<TimelineId>,
+    /// Le timeline "sopra" `timeline_id`, dalla radice in giù, quando si è
+    /// entrati in una compound clip con un doppio click (vedi
+    /// `enter_compound_timeline`): vuoto quando si sta editando la
+    /// timeline del progetto. Il breadcrumb sopra la timeline le mostra.
+    timeline_stack: Vec<TimelineId>,
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
     /// Media o elementi non importati, mostrati in una finestra a parte
@@ -374,6 +379,7 @@ impl Default for VibeVideoApp {
             project: vv_core::Project::default(),
             history: vv_core::History::default(),
             timeline_id: None,
+            timeline_stack: Vec::new(),
             timeline_state: timeline_ui::TimelineState::default(),
             media_pool_state: media_pool::MediaPoolState::default(),
             import_warnings: Vec::new(),
@@ -1046,6 +1052,63 @@ impl VibeVideoApp {
             ));
             self.render_ahead_generation = self.history.generation();
         }
+    }
+
+    /// Apre `nested_id` come se fosse la timeline del progetto: dal doppio
+    /// click su una compound clip (`timeline_ui::show_timeline`). Tutta la
+    /// UI di editing esistente resta invariata (è già parametrizzata su
+    /// `self.timeline_id`), qui serve solo spostare il "quale" e impilare
+    /// da dove si viene per il breadcrumb.
+    fn enter_compound_timeline(&mut self, nested_id: TimelineId) {
+        let Some(current) = self.timeline_id else {
+            return;
+        };
+        if current == nested_id || self.timeline_stack.contains(&nested_id) {
+            // Già su questo livello, o già un antenato in pila: un ciclo
+            // residuo (vedi `MAX_COMPOUND_DEPTH` in render_ahead.rs) non
+            // deve far crescere la pila all'infinito.
+            return;
+        }
+        self.timeline_stack.push(current);
+        self.switch_to_timeline(nested_id);
+    }
+
+    /// Torna alla timeline in posizione `index` di `timeline_stack` (0 =
+    /// la radice): un segmento del breadcrumb cliccato.
+    fn exit_to_timeline_stack_index(&mut self, index: usize) {
+        let Some(target) = self.timeline_stack.get(index).copied() else {
+            return;
+        };
+        self.timeline_stack.truncate(index);
+        self.switch_to_timeline(target);
+    }
+
+    /// La parte comune delle due funzioni sopra: azzera lo stato che
+    /// appartiene al livello lasciato (selezione, playhead, clip attiva) e
+    /// sveglia subito `render_ahead` sulla nuova timeline, ignorando il
+    /// generation-gate di `sync_render_ahead` (qui cambia la timeline
+    /// stessa, non il suo contenuto — `sync_render_ahead` non se ne
+    /// accorgerebbe da sola).
+    fn switch_to_timeline(&mut self, timeline_id: TimelineId) {
+        self.timeline_id = Some(timeline_id);
+        self.timeline_state = timeline_ui::TimelineState::default();
+        self.active_clip = None;
+        if let Some(render_ahead) = &self.render_ahead {
+            render_ahead.update_project(&self.project, timeline_id);
+            self.render_ahead_generation = self.history.generation();
+        }
+    }
+
+    /// Nome da mostrare per `id` nel breadcrumb sopra la timeline: quello
+    /// della sua voce nel media pool (vedi `MediaItem::compound`), che è
+    /// quello che l'utente vede altrove (es. "Compound Clip 2").
+    fn timeline_display_name(&self, id: TimelineId) -> String {
+        self.project
+            .media_pool
+            .values()
+            .find(|m| m.compound == Some(id))
+            .map(|m| file_label(&m.path))
+            .unwrap_or_else(|| self.project.timelines[id].name.clone())
     }
 
     /// Manda a `render_ahead` una copia del progetto solo quando la history è
@@ -2508,6 +2571,22 @@ impl eframe::App for VibeVideoApp {
                         });
                 }
                 if let Some(timeline_id) = self.timeline_id {
+                    if !self.timeline_stack.is_empty() {
+                        let mut jump_to = None;
+                        ui.horizontal(|ui| {
+                            for i in 0..self.timeline_stack.len() {
+                                let name = self.timeline_display_name(self.timeline_stack[i]);
+                                if ui.link(name).clicked() {
+                                    jump_to = Some(i);
+                                }
+                                ui.label(">");
+                            }
+                            ui.label(self.timeline_display_name(timeline_id));
+                        });
+                        if let Some(index) = jump_to {
+                            self.exit_to_timeline_stack_index(index);
+                        }
+                    }
                     let labels: HashMap<MediaId, String> = self
                         .project
                         .media_pool
@@ -2526,7 +2605,7 @@ impl eframe::App for VibeVideoApp {
                     // la timeline li disegna come waveform sulle clip audio.
                     self.ensure_waveforms_loaded();
                     let is_playing = self.is_timeline_playing();
-                    media_drop = timeline_ui::show_timeline(
+                    let (drop, enter_compound) = timeline_ui::show_timeline(
                         ui,
                         &mut self.project,
                         &mut self.history,
@@ -2540,6 +2619,10 @@ impl eframe::App for VibeVideoApp {
                         &self.waveform_cache,
                         is_playing,
                     );
+                    media_drop = drop;
+                    if let Some(nested_id) = enter_compound {
+                        self.enter_compound_timeline(nested_id);
+                    }
                 } else {
                     let drop_rect = ui.available_rect_before_wrap();
                     let drop_id = ui.id().with("timeline_drop_zone_empty");
@@ -2926,6 +3009,80 @@ mod tests {
             }),
         );
         clip_id
+    }
+
+    fn insert_compound_media(app: &mut VibeVideoApp, nested_id: TimelineId) -> MediaId {
+        app.project.media_pool.insert(vv_core::MediaItem {
+            path: "Compound Clip 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 10,
+                fps: vv_core::Rational::new(25, 1),
+                width: 1920,
+                height: 1080,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: Some(nested_id),
+        })
+    }
+
+    #[test]
+    fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_ui_state() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video)],
+        });
+        insert_compound_media(&mut app, nested_id);
+        app.timeline_state.playhead = 42;
+        app.timeline_state.selected = BTreeSet::from([(0, ClipId(999))]);
+
+        app.enter_compound_timeline(nested_id);
+
+        assert_eq!(app.timeline_id, Some(nested_id));
+        assert_eq!(app.timeline_stack, vec![root_id], "la radice resta in pila per il breadcrumb");
+        assert_eq!(app.timeline_state.playhead, 0, "playhead azzerato entrando in un livello nuovo");
+        assert!(app.timeline_state.selected.is_empty(), "selezione azzerata entrando in un livello nuovo");
+
+        app.exit_to_timeline_stack_index(0);
+
+        assert_eq!(app.timeline_id, Some(root_id));
+        assert!(app.timeline_stack.is_empty(), "tornati alla radice, la pila si svuota");
+    }
+
+    #[test]
+    fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+
+        // Voluto o per un ciclo residuo (vedi MAX_COMPOUND_DEPTH): non deve
+        // impilare la timeline corrente su se stessa.
+        app.enter_compound_timeline(root_id);
+        assert_eq!(app.timeline_id, Some(root_id));
+        assert!(app.timeline_stack.is_empty());
+
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video)],
+        });
+        insert_compound_media(&mut app, nested_id);
+        app.enter_compound_timeline(nested_id);
+        assert_eq!(app.timeline_stack, vec![root_id]);
+
+        // La radice è già un antenato in pila: rientrarci non deve
+        // impilare `nested_id` una seconda volta sopra se stessa.
+        app.enter_compound_timeline(root_id);
+        assert_eq!(app.timeline_id, Some(nested_id), "resta dov'era, il tentativo è ignorato");
+        assert_eq!(app.timeline_stack, vec![root_id], "la pila non cresce");
     }
 
     /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): la seconda

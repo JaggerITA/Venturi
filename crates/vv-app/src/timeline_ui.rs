@@ -1490,8 +1490,11 @@ pub fn show_timeline(
     // sempre restare visibile, quindi la vista "volta pagina" per
     // seguirla quando esce dall'area visibile (vedi sotto).
     playback_active: bool,
-) -> Option<(TimelineDrag, FrameIdx, MediaDropTarget)> {
+) -> (Option<(TimelineDrag, FrameIdx, MediaDropTarget)>, Option<TimelineId>) {
     let mut media_drop = None;
+    // Doppio click su una compound clip: il chiamante (main.rs) la apre
+    // come una sua propria timeline (vedi `VibeVideoApp::enter_compound_timeline`).
+    let mut enter_compound = None;
 
     // Alt+scroll/pinch zooma solo col puntatore sulla timeline.
     let panel_rect = ui.available_rect_before_wrap();
@@ -2729,6 +2732,12 @@ pub fn show_timeline(
                             ));
                             drag_finished = true;
                         }
+                    } else if resp.double_clicked() {
+                        if let ClipSource::Media(media_id) = visual.clip.source
+                            && let Some(nested_id) = project.media_pool.get(media_id).and_then(|m| m.compound)
+                        {
+                            enter_compound = Some(nested_id);
+                        }
                     } else if resp.clicked() {
                         let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {
                             if transition_in_x.is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::In, x)) {
@@ -2890,7 +2899,7 @@ pub fn show_timeline(
         history.end_group(mark);
     }
 
-    media_drop
+    (media_drop, enter_compound)
 }
 
 /// Inizio e lunghezza con cui disegnare `visual`: durante un trim o un drag
