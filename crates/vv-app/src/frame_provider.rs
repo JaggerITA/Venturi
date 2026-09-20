@@ -124,7 +124,7 @@ pub fn clip_layer(
 ) -> Result<Option<OwnedLayer>, String> {
     let source_frame = clip.source_frame_at(frame);
     let mut transform = clip.effects.transform.value_at(source_frame);
-    let push = clip.transition_offset_at(frame, (timeline_size.0 as f32, timeline_size.1 as f32));
+    let push = clip.transition_offset_at(frame, (timeline_size.0 as f32, timeline_size.1 as f32), transform.zoom);
     transform.position[0] += push[0];
     transform.position[1] += push[1];
     let opacity = clip.fade_multiplier_at(frame);
@@ -243,7 +243,14 @@ fn crossing_layers(
 ) -> Result<Vec<OwnedLayer>, String> {
     let frame_size = (timeline_size.0 as f32, timeline_size.1 as f32);
     let progress = crossing.eased_progress_at(frame, left, right);
-    let (left_offset, right_offset) = crossing.offsets(progress, frame_size);
+    // Lo zoom di ciascuna clip al proprio frame sorgente: serve a
+    // `offsets` per liberare davvero lo schermo anche se una delle due (o
+    // entrambe) è zoomata — vedi `push_clearance`. Ricalcolato qui e di
+    // nuovo dentro `crossing_side_layer`: costa pochissimo (`Keyframed`),
+    // non vale la pena infilarlo come parametro in più posti.
+    let left_zoom = left.effects.transform.value_at(left.source_frame_at(frame)).zoom;
+    let right_zoom = right.effects.transform.value_at(right.source_frame_at(frame)).zoom;
+    let (left_offset, right_offset) = crossing.offsets(progress, frame_size, left_zoom, right_zoom);
     let mut layers = Vec::with_capacity(2);
     layers.extend(crossing_side_layer(project, left, frame, timeline_size, provider, left_offset)?);
     layers.extend(crossing_side_layer(project, right, frame, timeline_size, provider, right_offset)?);
@@ -273,4 +280,85 @@ pub fn track_layers_at(
         return crossing_layers(project, left, right, crossing, frame, timeline_size, provider);
     }
     Ok(clip_layer(project, clip, frame, timeline_size, provider)?.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vv_core::{ClipId, CrossTransition, Ease, PushDirection, Rational, Track, TrackKind, Transform, TransformTracks, Transition, TransitionKind};
+
+    struct NoMediaProvider;
+    impl FrameProvider for NoMediaProvider {
+        fn frame_for(&mut self, _: &Project, _: &Clip, _: FrameIdx) -> Result<Option<Arc<FrameYuv420>>, String> {
+            Ok(None)
+        }
+    }
+
+    fn solid_clip(id: u64, start: FrameIdx, len: FrameIdx, zoom: [f32; 2]) -> Clip {
+        let mut clip = Clip::from_source_range(ClipId(id), ClipSource::SolidColor, 0, len, start, Rational::one());
+        clip.effects.transform = TransformTracks::constant(Transform {
+            zoom,
+            ..Default::default()
+        });
+        clip
+    }
+
+    fn position_of(layer: &OwnedLayer) -> [f32; 2] {
+        match layer {
+            OwnedLayer::Solid { transform, .. } => transform.position,
+            _ => panic!("expected a Solid layer"),
+        }
+    }
+
+    /// Riproduce il bug segnalato dall'utente: la clip destra della crossing
+    /// zoomata 2x deve restare fuori schermo per l'intera prima metà della
+    /// finestra, non comparire di scatto per poi solo "pannare" — vedi
+    /// `push_clearance` in vv-core per la derivazione del fattore 1.5.
+    #[test]
+    fn crossing_offsets_clear_a_zoomed_clip_fully_off_screen() {
+        let left = solid_clip(1, 0, 100, [1.0, 1.0]);
+        let right = solid_clip(2, 100, 100, [2.0, 2.0]);
+        let track = Track {
+            kind: TrackKind::Video,
+            clips: vec![left.clone(), right.clone()],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: vec![CrossTransition {
+                left_clip: ClipId(1),
+                right_clip: ClipId(2),
+                transition: Transition {
+                    kind: TransitionKind::Push,
+                    duration: 20,
+                    direction: PushDirection::Right,
+                    ease: Ease::None,
+                    curve: 0.0,
+                },
+            }],
+        };
+        let timeline = Timeline {
+            name: "t".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![track],
+        };
+        let project = Project::default();
+        let mut provider = NoMediaProvider;
+        let frame_size = (1920.0, 1080.0);
+
+        // Inizio finestra: la sinistra è ancora del tutto a posto, la destra
+        // zoomata deve sparire oltre `frame_size.0`, non fermarsi a `frame_size.0`.
+        let layers = track_layers_at(&project, &timeline, 0, &left, 90, timeline.resolution, &mut provider).unwrap();
+        assert_eq!(position_of(&layers[0]), [0.0, 0.0]);
+        assert_eq!(position_of(&layers[1]), [-1.5 * frame_size.0, 0.0]);
+
+        // Quasi a fine finestra (109, l'ultimo frame prima che la finestra
+        // [90, 110) si chiuda): la sinistra (zoom 1x) è quasi tutta fuori
+        // con la clearance "intera", la destra (zoom 2x) è quasi del tutto
+        // a posto.
+        let layers = track_layers_at(&project, &timeline, 0, &left, 109, timeline.resolution, &mut provider).unwrap();
+        let progress = 19.0 / 20.0;
+        assert_eq!(position_of(&layers[0]), [progress * frame_size.0, 0.0]);
+        assert_eq!(position_of(&layers[1]), [-(1.0 - progress) * 1.5 * frame_size.0, 0.0]);
+    }
 }

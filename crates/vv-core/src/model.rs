@@ -820,6 +820,22 @@ impl PushDirection {
     }
 }
 
+/// Quanto vale davvero "fuori schermo" per una clip zoomata `zoom` volte
+/// sull'asse di `vec` (`direction` è sempre assiale, quindi solo una delle
+/// due componenti conta). Nello shader lo zoom si applica *dopo* la
+/// posizione (vedi `transform.wgsl`): il centro dell'immagine si sposta di
+/// `position` a schermo qualunque sia lo zoom, ma il suo bordo reale è
+/// `zoom` volte più lontano dal centro — a `push_clearance == 1` (zoom 1)
+/// un'unità di spinta basta a liberare tutto lo schermo, a zoom maggiore
+/// ne serve di più o si vedrebbe ancora l'interno dell'immagine invece del
+/// trasparente sotto per l'intera transizione. Non tiene conto di
+/// anchor/rotazione: un caso raro abbastanza da non giustificare il conto
+/// esatto, qui basta liberare lo schermo per lo zoom (il caso comune).
+fn push_clearance(vec: [f32; 2], zoom: [f32; 2]) -> f32 {
+    let z = vec[0].abs() * zoom[0] + vec[1].abs() * zoom[1];
+    0.5 * (z + 1.0)
+}
+
 /// Curva di accelerazione di una transizione, applicata alla progressione
 /// 0..1 prima di tradurla in offset. Le stesse quattro opzioni di un NLE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1091,7 +1107,12 @@ impl Clip {
     /// da `direction`/`ease`, perché il rilascio dà alpha 0 fuori dai bordi
     /// del source_uv (vedi `transform.wgsl`): usarlo anche per rivelare
     /// quel che sta sotto (lower third, overlay) è lo stesso meccanismo.
-    pub fn transition_offset_at(&self, timeline_frame: FrameIdx, frame_size: (f32, f32)) -> [f32; 2] {
+    /// `zoom` è quello già campionato di `effects.transform` allo stesso
+    /// frame (vedi `push_clearance`): senza, una clip zoomata si vedrebbe
+    /// comparire di scatto a metà transizione invece di scorrere da fuori
+    /// schermo, perché il suo bordo vero resta oltre lo spostamento
+    /// calcolato per zoom 1.
+    pub fn transition_offset_at(&self, timeline_frame: FrameIdx, frame_size: (f32, f32), zoom: [f32; 2]) -> [f32; 2] {
         let len = self.timeline_len.max(1);
         let pos = timeline_frame - self.timeline_start;
         let mut offset = [0.0f32; 2];
@@ -1100,7 +1121,7 @@ impl Clip {
             if pos >= 0 && pos < d {
                 let progress = eased(pos as f32 / d as f32, t.ease, t.curve);
                 let vec = t.direction.vector();
-                let amount = -(1.0 - progress);
+                let amount = -(1.0 - progress) * push_clearance(vec, zoom);
                 offset[0] += vec[0] * frame_size.0 * amount;
                 offset[1] += vec[1] * frame_size.1 * amount;
             }
@@ -1111,8 +1132,9 @@ impl Clip {
             if from_end > 0 && from_end <= d {
                 let progress = eased(1.0 - from_end as f32 / d as f32, t.ease, t.curve);
                 let vec = t.direction.vector();
-                offset[0] += vec[0] * frame_size.0 * progress;
-                offset[1] += vec[1] * frame_size.1 * progress;
+                let amount = progress * push_clearance(vec, zoom);
+                offset[0] += vec[0] * frame_size.0 * amount;
+                offset[1] += vec[1] * frame_size.1 * amount;
             }
         }
         offset
@@ -1274,10 +1296,15 @@ impl CrossTransition {
     /// matematica di `Clip::transition_offset_at`, qui applicata a un
     /// progresso condiviso dall'intera finestra invece che locale al bordo
     /// di una singola clip.
-    pub fn offsets(&self, progress: f32, frame_size: (f32, f32)) -> ([f32; 2], [f32; 2]) {
+    /// `left_zoom`/`right_zoom` sono quelli già campionati del transform di
+    /// ciascuna clip allo stesso frame (vedi `push_clearance` e il doc di
+    /// `Clip::transition_offset_at`): ognuna può avere il suo, la spinta
+    /// di chi è più zoomato deve arrivare più lontano per liberare
+    /// davvero lo schermo.
+    pub fn offsets(&self, progress: f32, frame_size: (f32, f32), left_zoom: [f32; 2], right_zoom: [f32; 2]) -> ([f32; 2], [f32; 2]) {
         let vec = self.transition.direction.vector();
-        let left_amount = progress;
-        let right_amount = -(1.0 - progress);
+        let left_amount = progress * push_clearance(vec, left_zoom);
+        let right_amount = -(1.0 - progress) * push_clearance(vec, right_zoom);
         let left = [vec[0] * frame_size.0 * left_amount, vec[1] * frame_size.1 * left_amount];
         let right = [vec[0] * frame_size.0 * right_amount, vec[1] * frame_size.1 * right_amount];
         (left, right)

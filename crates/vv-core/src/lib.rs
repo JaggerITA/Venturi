@@ -1433,15 +1433,16 @@ mod tests {
             curve: 0.0,
         });
         let frame_size = (1920.0, 1080.0);
+        let zoom = [1.0, 1.0];
         // All'inizio della clip: fuori schermo dal lato opposto a quello
         // d'arrivo ("Right" è il verso con cui il contenuto raggiunge il
         // centro).
-        assert_eq!(clip.transition_offset_at(0, frame_size), [-1920.0, 0.0]);
-        let mid = clip.transition_offset_at(10, frame_size);
+        assert_eq!(clip.transition_offset_at(0, frame_size, zoom), [-1920.0, 0.0]);
+        let mid = clip.transition_offset_at(10, frame_size, zoom);
         assert!((mid[0] - (-960.0)).abs() < 1.0);
         // Finita la transizione: a posto, nessun offset residuo.
-        assert_eq!(clip.transition_offset_at(20, frame_size), [0.0, 0.0]);
-        assert_eq!(clip.transition_offset_at(50, frame_size), [0.0, 0.0]);
+        assert_eq!(clip.transition_offset_at(20, frame_size, zoom), [0.0, 0.0]);
+        assert_eq!(clip.transition_offset_at(50, frame_size, zoom), [0.0, 0.0]);
     }
 
     #[test]
@@ -1469,11 +1470,12 @@ mod tests {
         let frame_size = (1920.0, 1080.0);
         // A progresso 0: sinistra del tutto a posto, destra del tutto fuori
         // (dal lato opposto a "Right", da cui arriva).
-        let (left_off, right_off) = crossing.offsets(0.0, frame_size);
+        let zoom = [1.0, 1.0];
+        let (left_off, right_off) = crossing.offsets(0.0, frame_size, zoom, zoom);
         assert_eq!(left_off, [0.0, 0.0]);
         assert_eq!(right_off, [-1920.0, 0.0]);
         // A progresso 1: l'opposto.
-        let (left_off, right_off) = crossing.offsets(1.0, frame_size);
+        let (left_off, right_off) = crossing.offsets(1.0, frame_size, zoom, zoom);
         assert_eq!(left_off, [1920.0, 0.0]);
         assert_eq!(right_off, [0.0, 0.0]);
     }
