@@ -181,6 +181,16 @@ fn build_layer(
     }
 }
 
+/// Margine di ritentativo di `extrapolated_frame_for` verso l'inizio del
+/// file quando l'ultimo frame "congelato" non arriva mai: `duration_frames`
+/// (vedi `probe::probe`) è `durata_secondi * fps` arrotondato, non il
+/// conteggio di frame osservato dal decoder, quindi può sovrastimarlo di un
+/// frame — quel frame non esiste per il decoder (EOF), e senza ritentativo
+/// il freeze non si risolve mai (il worker di `render_ahead` ci sbatte
+/// contro all'infinito, mai in cache). Pochi frame bastano per il comune
+/// errore di arrotondamento senza mascherare un media davvero rotto.
+const EXTRAPOLATION_EOF_RETRY_FRAMES: FrameIdx = 5;
+
 /// Come `provider.frame_for`, ma oltre i bordi reali del media si blocca
 /// (freeze) sul frame sorgente più vicino disponibile invece di restituire
 /// `None`: usato solo dalle crossing transition, dove "oltre la fine" è la
@@ -200,8 +210,16 @@ fn extrapolated_frame_for(
     };
     let wanted = clip.source_frame_at(timeline_frame);
     let clamped = wanted.clamp(0, (media.meta.duration_frames - 1).max(0));
-    let held_timeline_frame = clip.timeline_frame_at(clamped);
-    provider.frame_for(project, clip, held_timeline_frame)
+    let earliest_retry = clamped.saturating_sub(EXTRAPOLATION_EOF_RETRY_FRAMES).max(0);
+    let mut probe = clamped;
+    loop {
+        let held_timeline_frame = clip.timeline_frame_at(probe);
+        match provider.frame_for(project, clip, held_timeline_frame)? {
+            some @ Some(_) => return Ok(some),
+            None if probe > earliest_retry => probe -= 1,
+            None => return Ok(None),
+        }
+    }
 }
 
 /// Il lato di una crossing transition per una singola clip: come
