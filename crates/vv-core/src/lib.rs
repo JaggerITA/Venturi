@@ -411,6 +411,96 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deleting_a_clip_removes_its_crossings_and_undo_restores_them() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 20);
+        let a_id = a.id;
+        let b = make_clip(&mut project, 20, 20);
+        let b_id = b.id;
+        history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: a }));
+        history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: b }));
+        let transition = Transition {
+            kind: TransitionKind::Push,
+            duration: 4,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.0,
+        };
+        history.do_command(
+            &mut project,
+            Box::new(command::SetCrossTransition::new(
+                timeline,
+                0,
+                a_id,
+                Some(CrossTransition { left_clip: a_id, right_clip: b_id, transition: transition.clone() }),
+            )),
+        );
+        assert_eq!(project.timelines[timeline].tracks[0].crossings.len(), 1);
+
+        history.do_command(&mut project, Box::new(command::LiftDelete::new(timeline, 0, a_id)));
+        assert!(
+            project.timelines[timeline].tracks[0].crossings.is_empty(),
+            "cancellare a_id deve togliere la crossing, non lasciarla puntare a un ClipId inesistente"
+        );
+
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline].tracks[0].clips.len(), 2);
+        assert_eq!(
+            project.timelines[timeline].tracks[0].crossings,
+            vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition }],
+        );
+    }
+
+    #[test]
+    fn moving_a_clip_to_another_track_removes_its_crossings_and_undo_restores_them() {
+        let mut project = Project::default();
+        let timeline = project.timelines.insert(Timeline {
+            name: "Timeline 1".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
+        });
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 20);
+        let a_id = a.id;
+        let b = make_clip(&mut project, 20, 20);
+        let b_id = b.id;
+        history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: a }));
+        history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: b }));
+        let transition = Transition {
+            kind: TransitionKind::Push,
+            duration: 4,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.0,
+        };
+        history.do_command(
+            &mut project,
+            Box::new(command::SetCrossTransition::new(
+                timeline,
+                0,
+                a_id,
+                Some(CrossTransition { left_clip: a_id, right_clip: b_id, transition: transition.clone() }),
+            )),
+        );
+
+        history.do_command(&mut project, Box::new(command::MoveClips::new(timeline, vec![(a_id, 0, 1, 0)])));
+        assert!(
+            project.timelines[timeline].tracks[0].crossings.is_empty(),
+            "spostare a_id su un'altra track deve togliere la crossing dalla track di partenza"
+        );
+
+        history.undo(&mut project);
+        assert_eq!(
+            project.timelines[timeline].tracks[0].crossings,
+            vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition }],
+        );
+    }
+
     fn split_clip_with_gain_keyframes(keyframes: &[(FrameIdx, f32)], split_at: FrameIdx) -> (Project, History, TimelineId) {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();

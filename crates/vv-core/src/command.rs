@@ -409,6 +409,9 @@ pub struct LiftDelete {
     pub track_index: usize,
     pub clip_id: ClipId,
     removed: Option<Clip>,
+    /// Crossing transition tolte insieme alla clip (vedi doc di
+    /// `Track::crossings`), da restituire su undo.
+    removed_crossings: Vec<CrossTransition>,
 }
 
 impl LiftDelete {
@@ -418,6 +421,7 @@ impl LiftDelete {
             track_index,
             clip_id,
             removed: None,
+            removed_crossings: Vec::new(),
         }
     }
 }
@@ -428,14 +432,21 @@ impl Command for LiftDelete {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        self.removed =
-            project.timelines[self.timeline].tracks[self.track_index].remove_clip(self.clip_id);
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        self.removed = track.remove_clip(self.clip_id);
+        self.removed_crossings = if self.removed.is_some() {
+            track.take_crossings_for(self.clip_id)
+        } else {
+            Vec::new()
+        };
     }
 
     fn undo(&self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
         if let Some(clip) = &self.removed {
-            project.timelines[self.timeline].tracks[self.track_index].insert_sorted(clip.clone());
+            track.insert_sorted(clip.clone());
         }
+        track.crossings.extend(self.removed_crossings.iter().cloned());
     }
 }
 
@@ -508,6 +519,11 @@ pub struct MoveClips {
     /// (clip_id, from_track, to_track, new_start)
     pub moves: Vec<(ClipId, usize, usize, FrameIdx)>,
     old_starts: Vec<Option<FrameIdx>>,
+    /// Crossing tolte da `from_track` per ogni move che cambia track (vedi
+    /// doc di `Track::crossings`); vuoto per un move sulla stessa track,
+    /// dove l'adiacenza si può rompere ma la clip resta lì e la crossing
+    /// resta semplicemente inerte finché non torna adiacente.
+    removed_crossings: Vec<Vec<CrossTransition>>,
 }
 
 impl MoveClips {
@@ -516,6 +532,7 @@ impl MoveClips {
             timeline,
             moves,
             old_starts: Vec::new(),
+            removed_crossings: Vec::new(),
         }
     }
 }
@@ -527,21 +544,29 @@ impl Command for MoveClips {
 
     fn apply(&mut self, project: &mut Project) {
         self.old_starts.clear();
+        self.removed_crossings.clear();
         for &(clip_id, from_track, to_track, new_start) in &self.moves {
             let tl = &mut project.timelines[self.timeline];
             let Some(mut clip) = tl.tracks[from_track].remove_clip(clip_id) else {
                 self.old_starts.push(None);
+                self.removed_crossings.push(Vec::new());
                 continue;
             };
             self.old_starts.push(Some(clip.timeline_start));
+            let removed = if from_track != to_track {
+                tl.tracks[from_track].take_crossings_for(clip_id)
+            } else {
+                Vec::new()
+            };
+            self.removed_crossings.push(removed);
             clip.timeline_start = new_start;
             tl.tracks[to_track].insert_sorted(clip);
         }
     }
 
     fn undo(&self, project: &mut Project) {
-        for (&(clip_id, from_track, to_track, _new_start), old_start) in
-            self.moves.iter().zip(&self.old_starts)
+        for ((&(clip_id, from_track, to_track, _new_start), old_start), removed) in
+            self.moves.iter().zip(&self.old_starts).zip(&self.removed_crossings)
         {
             let Some(old_start) = old_start else {
                 continue;
@@ -552,6 +577,7 @@ impl Command for MoveClips {
             };
             clip.timeline_start = *old_start;
             tl.tracks[from_track].insert_sorted(clip);
+            tl.tracks[from_track].crossings.extend(removed.iter().cloned());
         }
     }
 }

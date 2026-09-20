@@ -1175,11 +1175,14 @@ pub struct Track {
     /// `timeline_start`/`timeline_len` delle clip coinvolte (restano non
     /// sovrapposte, invariante intatto): è il rendering a "prestare" per
     /// la sua finestra la coda di una e la testa dell'altra, vedi
-    /// `Track::crossing_at`. Chi divide o rimuove una clip deve chiamare
-    /// `take_crossings_for` sul suo id, altrimenti la voce resta nei dati
-    /// come riferimento pendente (vedi `crossing_from`/`crossing_into`, che
-    /// a differenza di `crossing_at` non verificano che le clip esistano
-    /// ancora).
+    /// `Track::crossing_at`. Chi divide una clip, la elimina o la sposta su
+    /// un'altra track deve chiamare `take_crossings_for` sul suo id,
+    /// altrimenti la voce resta nei dati come riferimento pendente (vedi
+    /// `crossing_from`/`crossing_into`, che a differenza di `crossing_at`
+    /// non verificano che le clip esistano ancora); spostarla sulla stessa
+    /// track invece no, resta semplicemente inerte finché non torna
+    /// adiacente (`SplitClip`, `LiftDelete`, `MoveClips` in `command.rs`
+    /// sono i punti da imitare per un nuovo comando che tocca le clip).
     #[serde(default)]
     pub crossings: Vec<CrossTransition>,
 }
