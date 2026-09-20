@@ -510,7 +510,15 @@ impl VibeVideoApp {
                     let dragged_count = payload.items.len();
                     resp.dnd_set_drag_payload(payload);
                     if resp.double_clicked() {
-                        *preview_action = Some(id);
+                        // Una compound clip (o la timeline del progetto,
+                        // vedi `MediaItem::compound`) si apre come una sua
+                        // propria timeline, esattamente come un doppio
+                        // click sulla sua istanza in timeline — non ha
+                        // senso "anteprima" per lei.
+                        match self.project.media_pool.get(id).and_then(|m| m.compound) {
+                            Some(nested_id) => self.enter_compound_timeline(nested_id),
+                            None => *preview_action = Some(id),
+                        }
                     }
                     if resp.dragged() {
                         let ghost = if dragged_count > 1 {

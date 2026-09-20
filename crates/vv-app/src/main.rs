@@ -1059,7 +1059,7 @@ impl VibeVideoApp {
     /// UI di editing esistente resta invariata (è già parametrizzata su
     /// `self.timeline_id`), qui serve solo spostare il "quale" e impilare
     /// da dove si viene per il breadcrumb.
-    fn enter_compound_timeline(&mut self, nested_id: TimelineId) {
+    pub(crate) fn enter_compound_timeline(&mut self, nested_id: TimelineId) {
         let Some(current) = self.timeline_id else {
             return;
         };
@@ -1088,10 +1088,14 @@ impl VibeVideoApp {
     /// sveglia subito `render_ahead` sulla nuova timeline, ignorando il
     /// generation-gate di `sync_render_ahead` (qui cambia la timeline
     /// stessa, non il suo contenuto — `sync_render_ahead` non se ne
-    /// accorgerebbe da sola).
+    /// accorgerebbe da sola). La clipboard sopravvive: copiare da una
+    /// timeline/compound clip e incollare in un'altra deve funzionare
+    /// (`paste_clipboard_at_playhead` già conforma per fps diversi).
     fn switch_to_timeline(&mut self, timeline_id: TimelineId) {
         self.timeline_id = Some(timeline_id);
+        let clipboard = std::mem::take(&mut self.timeline_state.clipboard);
         self.timeline_state = timeline_ui::TimelineState::default();
+        self.timeline_state.clipboard = clipboard;
         self.active_clip = None;
         if let Some(render_ahead) = &self.render_ahead {
             render_ahead.update_project(&self.project, timeline_id);
@@ -3083,6 +3087,49 @@ mod tests {
         app.enter_compound_timeline(root_id);
         assert_eq!(app.timeline_id, Some(nested_id), "resta dov'era, il tentativo è ignorato");
         assert_eq!(app.timeline_stack, vec![root_id], "la pila non cresce");
+    }
+
+    /// Copiare in una timeline, entrare in una compound clip e incollare
+    /// lì deve funzionare: la clipboard non è per-timeline.
+    #[test]
+    fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video)],
+        });
+        insert_compound_media(&mut app, nested_id);
+
+        app.timeline_state.clipboard = vec![timeline_ui::ClipboardEntry {
+            track_index: 0,
+            relative_start: 0,
+            clip: vv_core::Clip::from_source_range(
+                ClipId(1),
+                vv_core::ClipSource::SolidColor,
+                0,
+                20,
+                0,
+                vv_core::Rational::one(),
+            ),
+            timeline_fps: vv_core::Rational::new(25, 1),
+            link_tag: None,
+        }];
+
+        app.enter_compound_timeline(nested_id);
+        assert_eq!(app.timeline_state.clipboard.len(), 1, "la clipboard sopravvive alla navigazione");
+
+        app.timeline_state.playhead = 0;
+        app.paste_clipboard_at_playhead();
+
+        assert_eq!(
+            app.project.timelines[nested_id].tracks[0].clips.len(),
+            1,
+            "incollata nella timeline annidata"
+        );
+        assert!(app.project.timelines[root_id].tracks[0].clips.is_empty(), "non nella radice");
     }
 
     /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): la seconda
