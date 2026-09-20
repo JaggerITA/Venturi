@@ -363,6 +363,54 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[0].source_out(), 20);
     }
 
+    #[test]
+    fn splitting_either_side_of_a_crossing_removes_it_and_undo_restores_it() {
+        let make_transition = || Transition {
+            kind: TransitionKind::Push,
+            duration: 4,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.0,
+        };
+
+        for split_the_right_clip in [false, true] {
+            let (mut project, timeline) = make_project_with_two_tracks();
+            let mut history = History::default();
+
+            let a = make_clip(&mut project, 0, 20);
+            let a_id = a.id;
+            let b = make_clip(&mut project, 20, 20);
+            let b_id = b.id;
+            history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: a }));
+            history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: b }));
+            history.do_command(
+                &mut project,
+                Box::new(command::SetCrossTransition::new(
+                    timeline,
+                    0,
+                    a_id,
+                    Some(CrossTransition { left_clip: a_id, right_clip: b_id, transition: make_transition() }),
+                )),
+            );
+            assert_eq!(project.timelines[timeline].tracks[0].crossings.len(), 1);
+
+            let (split_clip_id, split_at) = if split_the_right_clip { (b_id, 28) } else { (a_id, 8) };
+            history.do_command(&mut project, Box::new(command::SplitClip::new(timeline, 0, split_clip_id, split_at)));
+
+            assert!(
+                project.timelines[timeline].tracks[0].crossings.is_empty(),
+                "split_the_right_clip={split_the_right_clip}: la crossing tra le due clip originali doveva sparire, non restare orfana"
+            );
+
+            history.undo(&mut project);
+            assert_eq!(
+                project.timelines[timeline].tracks[0].crossings,
+                vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition: make_transition() }],
+                "split_the_right_clip={split_the_right_clip}: l'undo dello split deve far tornare la crossing"
+            );
+        }
+    }
+
     fn split_clip_with_gain_keyframes(keyframes: &[(FrameIdx, f32)], split_at: FrameIdx) -> (Project, History, TimelineId) {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();

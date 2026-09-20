@@ -1175,9 +1175,11 @@ pub struct Track {
     /// `timeline_start`/`timeline_len` delle clip coinvolte (restano non
     /// sovrapposte, invariante intatto): è il rendering a "prestare" per
     /// la sua finestra la coda di una e la testa dell'altra, vedi
-    /// `Track::crossing_at`. Una voce la cui coppia non è più adiacente
-    /// (una delle due spostata, tagliata, cancellata) resta nei dati ma
-    /// è inerte — non serve ripulirla attivamente.
+    /// `Track::crossing_at`. Chi divide o rimuove una clip deve chiamare
+    /// `take_crossings_for` sul suo id, altrimenti la voce resta nei dati
+    /// come riferimento pendente (vedi `crossing_from`/`crossing_into`, che
+    /// a differenza di `crossing_at` non verificano che le clip esistano
+    /// ancora).
     #[serde(default)]
     pub crossings: Vec<CrossTransition>,
 }
@@ -1237,6 +1239,24 @@ impl Track {
     /// La crossing transition (valida o no) il cui `right_clip` è `id`.
     pub fn crossing_into(&self, right_clip: ClipId) -> Option<&CrossTransition> {
         self.crossings.iter().find(|c| c.right_clip == right_clip)
+    }
+
+    /// Rimuove e restituisce tutte le crossing transition (di qualunque
+    /// tipo, presente o futuro: non filtra su `transition.kind`) che
+    /// coinvolgono `id` come `left_clip` o `right_clip`. Da chiamare da
+    /// ogni comando che divide o elimina una clip, per non lasciare
+    /// riferimenti pendenti in `crossings`.
+    pub fn take_crossings_for(&mut self, id: ClipId) -> Vec<CrossTransition> {
+        let mut removed = Vec::new();
+        self.crossings.retain(|c| {
+            if c.left_clip == id || c.right_clip == id {
+                removed.push(c.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
     }
 }
 

@@ -847,6 +847,10 @@ pub struct SplitClip {
     /// Id della metà destra deciso dal chiamante, per ricollegare le metà di
     /// più split con un comando successivo.
     preallocated_new_clip_id: Option<ClipId>,
+    /// Crossing transition tolte da `clip_id` durante lo split (di
+    /// entrambe le metà nessuna resta la controparte geometrica attesa
+    /// dalla transizione), da restituire su undo.
+    removed_crossings: Vec<CrossTransition>,
 }
 
 impl SplitClip {
@@ -865,6 +869,7 @@ impl SplitClip {
             original_effects: None,
             new_clip_id: None,
             preallocated_new_clip_id: None,
+            removed_crossings: Vec::new(),
         }
     }
 
@@ -916,6 +921,12 @@ impl Command for SplitClip {
         second_half.effects.drop_keyframes_before(second_half.source_in());
 
         track.insert_sorted(second_half);
+
+        // Una crossing su `clip_id` puntava a un bordo che ora appartiene a
+        // una delle due metà ma non più alla clip intera: invece di lasciarla
+        // pendente (vedi doc di `Track::crossings`) la si toglie qui, valido
+        // per qualunque tipo di crossing transition presente o futuro.
+        self.removed_crossings = track.take_crossings_for(self.clip_id);
     }
 
     fn undo(&self, project: &mut Project) {
@@ -931,6 +942,7 @@ impl Command for SplitClip {
                 clip.effects = effects.clone();
             }
         }
+        track.crossings.extend(self.removed_crossings.iter().cloned());
     }
 }
 
