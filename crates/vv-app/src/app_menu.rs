@@ -143,6 +143,7 @@ impl VibeVideoApp {
                         self.request_project_switch(ProjectSwitch::Open);
                         ui.close();
                     }
+                    self.recent_projects_menu(ui);
                     if ui.button(keymap.menu_label(&t!("menu.save"), Action::SaveProject)).clicked() {
                         self.save_project();
                         ui.close();
@@ -398,6 +399,28 @@ impl VibeVideoApp {
                     ui.label(t!("about.author", author = "Moreno Razzoli a.k.a. Morrolinux"));
                 });
             });
+    }
+
+    fn recent_projects_menu(&mut self, ui: &mut egui::Ui) {
+        let recent = self.settings.recent_projects.clone();
+        let mut chosen = None;
+        ui.add_enabled_ui(!recent.is_empty(), |ui| {
+            ui.menu_button(t!("menu.recent_projects"), |ui| {
+                for path in &recent {
+                    let label = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                        chosen = Some(path.clone());
+                    }
+                }
+            });
+        });
+        if let Some(path) = chosen {
+            self.request_project_switch(ProjectSwitch::OpenRecent(path));
+            ui.close();
+        }
     }
 
     /// Come in Blender: dal più recente, il pallino sullo stato attuale e un

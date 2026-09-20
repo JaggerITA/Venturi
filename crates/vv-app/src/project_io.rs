@@ -3,9 +3,10 @@
 
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectSwitch {
     Open,
+    OpenRecent(PathBuf),
     ImportOtio,
     Quit,
 }
@@ -309,6 +310,7 @@ impl VibeVideoApp {
                 self.current_project_path = Some(path.to_path_buf());
                 self.project_error = None;
                 self.mark_saved();
+                self.remember_recent_project(path.to_path_buf());
             }
             Err(e) => self.project_error = Some(t!("project.save_failed", error = e).into_owned()),
         }
@@ -353,6 +355,7 @@ impl VibeVideoApp {
     pub(crate) fn run_project_switch(&mut self, switch: ProjectSwitch) {
         match switch {
             ProjectSwitch::Open => self.open_project_dialog(),
+            ProjectSwitch::OpenRecent(path) => self.load_project_from(path),
             ProjectSwitch::ImportOtio => self.import_otio_dialog(),
             ProjectSwitch::Quit => self.quit_confirmed = true,
         }
@@ -373,7 +376,7 @@ impl VibeVideoApp {
     }
 
     pub(crate) fn show_unsaved_changes_dialog(&mut self, ui: &mut egui::Ui) {
-        let Some(switch) = self.pending_project_switch else {
+        let Some(switch) = self.pending_project_switch.clone() else {
             return;
         };
         let mut choice = None;
@@ -455,8 +458,20 @@ impl VibeVideoApp {
     /// Sostituisce il progetto e azzera lo stato UI legato al vecchio.
     pub(crate) fn load_project_from(&mut self, path: PathBuf) {
         match vv_core::load_project(&path) {
-            Ok(project) => self.replace_project(project, Some(path)),
+            Ok(project) => {
+                self.remember_recent_project(path.clone());
+                self.replace_project(project, Some(path));
+            }
             Err(e) => self.project_error = Some(t!("project.open_failed", error = e).into_owned()),
+        }
+    }
+
+    /// Aggiorna la lista "Progetti recenti" e la persiste subito, così
+    /// sopravvive anche a un crash prima della chiusura pulita.
+    pub(crate) fn remember_recent_project(&mut self, path: PathBuf) {
+        self.settings.add_recent_project(path);
+        if let Some(settings_path) = &self.settings_path {
+            let _ = self.settings.save(settings_path);
         }
     }
 

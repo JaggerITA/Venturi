@@ -382,17 +382,34 @@ impl Keymap {
     }
 }
 
+const MAX_RECENT_PROJECTS: usize = 10;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub keymap: Keymap,
     pub language: Language,
     /// Scrolling cinetico (inerzia dopo lo swipe da touchpad) sulla timeline.
     pub kinetic_scroll: bool,
+    /// Progetti aperti di recente, più recente per primo.
+    pub recent_projects: Vec<PathBuf>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { keymap: Keymap::default(), language: Language::default(), kinetic_scroll: true }
+        Self {
+            keymap: Keymap::default(),
+            language: Language::default(),
+            kinetic_scroll: true,
+            recent_projects: Vec::new(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn add_recent_project(&mut self, path: PathBuf) {
+        self.recent_projects.retain(|p| p != &path);
+        self.recent_projects.insert(0, path);
+        self.recent_projects.truncate(MAX_RECENT_PROJECTS);
     }
 }
 
@@ -404,6 +421,8 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     kinetic_scroll: Option<bool>,
+    #[serde(default)]
+    recent_projects: Vec<PathBuf>,
 }
 
 impl Settings {
@@ -431,6 +450,7 @@ impl Settings {
         let mut settings = Self::default();
         settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
+        settings.recent_projects = file.recent_projects;
         for (id, shortcuts) in file.shortcuts {
             let Some(action) = Action::from_id(&id) else {
                 continue;
@@ -453,6 +473,7 @@ impl Settings {
                 .collect(),
             language: Some(self.language.id().to_owned()),
             kinetic_scroll: Some(self.kinetic_scroll),
+            recent_projects: self.recent_projects.clone(),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

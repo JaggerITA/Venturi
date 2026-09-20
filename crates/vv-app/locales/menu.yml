@@ -8,6 +8,10 @@ menu.open_project:
   en: "Open project..."
   it: "Apri progetto..."
 
+menu.recent_projects:
+  en: "Recent projects"
+  it: "Progetti recenti"
+
 menu.save:
   en: "Save"
   it: "Salva"
