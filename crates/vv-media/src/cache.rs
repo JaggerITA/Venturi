@@ -208,6 +208,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         };
         let a = project.media_pool.insert(item(320, 240));
         let b = project.media_pool.insert(item(320, 240));

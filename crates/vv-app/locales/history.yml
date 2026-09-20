@@ -123,3 +123,7 @@ history.filters:
 history.transition:
   en: "Transition"
   it: "Transizione"
+
+history.make_compound_clip:
+  en: "Compound clip"
+  it: "Compound clip"

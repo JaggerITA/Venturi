@@ -484,5 +484,6 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::RelinkMedia => t!("history.relink_media"),
         L::Filters => t!("history.filters"),
         L::Transition => t!("history.transition"),
+        L::MakeCompoundClip => t!("history.make_compound_clip"),
     }
 }

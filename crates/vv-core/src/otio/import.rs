@@ -360,6 +360,7 @@ impl Importer<'_> {
                 path: path.clone(),
                 meta,
                 content_hash,
+                compound: None,
             })),
             Err(e) => {
                 self.warn(OtioWarning::MediaUnreadable { path: path.clone(), error: e });
@@ -581,6 +582,7 @@ mod tests {
             path: "/tmp/a.mp4".into(),
             meta: media_meta.clone(),
             content_hash: 42,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(Timeline {
             name: "Montaggio".into(),
@@ -858,6 +860,7 @@ mod tests {
             path: "/tmp/voce.wav".into(),
             meta: audio_only_meta(),
             content_hash: 42,
+            compound: None,
         });
         let fps = Rational::new(25, 1);
         let timeline_id = project.timelines.insert(Timeline {

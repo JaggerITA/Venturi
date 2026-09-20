@@ -147,6 +147,7 @@ mod tests {
                         audio_streams: 0,
                     },
                     content_hash: 0,
+                    compound: None,
                 })
             })
             .collect()

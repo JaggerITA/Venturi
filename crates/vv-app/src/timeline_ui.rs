@@ -5952,6 +5952,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         (project, media_id)
     }
@@ -5973,6 +5974,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 1,
+            compound: None,
         });
         let fps = vv_core::Rational::new(25, 1);
         let set = MediaDragSet {

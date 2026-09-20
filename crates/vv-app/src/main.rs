@@ -2901,6 +2901,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 1,
+            compound: None,
         });
         let timeline_id = app.project.timelines.insert(vv_core::Timeline {
             name: "T".into(),
@@ -2933,6 +2934,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 2,
+            compound: None,
         });
         let timeline_id = app.timeline_id.unwrap();
         let drag = |app: &VibeVideoApp, id: MediaId| {
@@ -2980,6 +2982,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 2,
+            compound: None,
         });
         let timeline_id = app.timeline_id.unwrap();
         let tracks_before = app.project.timelines[timeline_id].tracks.len();
@@ -3031,6 +3034,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 2,
+            compound: None,
         });
         let timeline_id = app.timeline_id.unwrap();
         let tracks_before = app.project.timelines[timeline_id].tracks.len();
@@ -3101,6 +3105,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 2,
+            compound: None,
         });
 
         app.select_all_media();
@@ -3137,16 +3142,19 @@ mod tests {
             path: "/questo/percorso/non/esiste/piu/intervista.mp4".into(),
             meta: meta.clone(),
             content_hash: 1,
+            compound: None,
         });
         let unresolvable = app.project.media_pool.insert(vv_core::MediaItem {
             path: "/altro/percorso/inesistente/fantasma.mp4".into(),
             meta: meta.clone(),
             content_hash: 3,
+            compound: None,
         });
         let already_ok = app.project.media_pool.insert(vv_core::MediaItem {
             path: already_ok_path.clone(),
             meta,
             content_hash: 2,
+            compound: None,
         });
         app.relink_media(&dir, &[offline, unresolvable, already_ok]);
 
@@ -3207,11 +3215,13 @@ mod tests {
             path: "/mancante/a.mp4".into(),
             meta: meta.clone(),
             content_hash: 1,
+            compound: None,
         });
         let not_selected = app.project.media_pool.insert(vv_core::MediaItem {
             path: "/mancante/b.mp4".into(),
             meta,
             content_hash: 2,
+            compound: None,
         });
         app.relink_media(&dir, &[selected]);
 
@@ -5951,6 +5961,7 @@ mod tests {
             path: media.clone(),
             meta: vv_media::probe(&media).unwrap(),
             content_hash,
+            compound: None,
         });
         let project_path = dir.join("p.vvproj");
         vv_core::save_project(&project, &project_path).unwrap();
@@ -6105,6 +6116,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 1,
+            compound: None,
         });
         let meta = app.project.media_pool[media_id].meta.clone();
 

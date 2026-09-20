@@ -1053,6 +1053,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         // 60 frame (2.4s a 25fps): dentro a `DEFAULT_LOOKAHEAD_SECS`
         // (3s), altrimenti l'ultimo frame resterebbe fuori dalla finestra
@@ -1152,6 +1153,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         }
     }
 
@@ -1536,6 +1538,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let media_b = project.media_pool.insert(MediaItem {
             path: path_b,
@@ -1551,6 +1554,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -1624,6 +1628,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         };
         let media_a = project.media_pool.insert(item(path_a));
         let media_b = project.media_pool.insert(item(path_b));
@@ -1733,6 +1738,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         // Taglio a timeline_start=50 tra due pezzi *contigui* dello
         // stesso file (un plain split, non un trim con buco in mezzo):
@@ -2103,6 +2109,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2162,6 +2169,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2247,6 +2255,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2332,6 +2341,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2428,6 +2438,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2510,6 +2521,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2583,6 +2595,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -2662,6 +2675,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         // Taglio a timeline_start=60 tra due pezzi dello stesso file:
         // il primo usa il sorgente [0,60), il secondo riparte da un
@@ -2751,6 +2765,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         // Stesso taglio del test precedente: [0,60) poi [200,300).
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
@@ -2888,6 +2903,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let media_b = project.media_pool.insert(MediaItem {
             path: path_b,
@@ -2903,6 +2919,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3003,6 +3020,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3089,6 +3107,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3187,6 +3206,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3260,6 +3280,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3381,6 +3402,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3492,6 +3514,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -3601,6 +3624,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         // `fill_segments` non ha bisogno di una timeline: lavora già a
         // livello di segmento risolto.
@@ -3676,6 +3700,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
 
         let caches = SharedFrameCache::new();
@@ -3752,6 +3777,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
 
         let caches = SharedFrameCache::new();
@@ -3845,6 +3871,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,

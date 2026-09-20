@@ -3,11 +3,11 @@
 
 use crate::model::{
     Clip, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
-    LinkGroupId, MediaId, MediaItem, Project, Rgba, TimelineId, TitleParams, Track, TrackKind, Transform,
-    TransformParam, Transition,
+    LinkGroupId, MediaId, MediaItem, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track,
+    TrackKind, Transform, TransformParam, Transition,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 pub trait Command: std::fmt::Debug {
@@ -49,6 +49,7 @@ pub enum CommandLabel {
     RelinkMedia,
     Filters,
     Transition,
+    MakeCompoundClip,
 }
 
 /// Più comandi in un solo passo di history.
@@ -1855,5 +1856,148 @@ pub fn cut_overlaps(
             )));
         }
     }
+}
+
+/// Il risultato di `plan_compound_clip`: la timeline annidata pronta da
+/// inserire nel pool, e dove va la nuova clip risultante nella timeline di
+/// partenza. Pura lettura: non tocca `project`, il chiamante decide se e
+/// come applicarla (vedi `compound_clip_commands`).
+pub struct CompoundPlan {
+    pub nested_timeline: Timeline,
+    pub range_start: FrameIdx,
+    pub len: FrameIdx,
+    pub has_video: bool,
+    pub has_audio: bool,
+    /// Track (nella timeline di partenza) su cui posizionare la clip video
+    /// risultante: la più in alto fra quelle coinvolte, `Some` solo se
+    /// `has_video`.
+    pub video_track: Option<usize>,
+    /// Come `video_track`, per la clip audio risultante.
+    pub audio_track: Option<usize>,
+}
+
+/// Selezione di clip (anche su più track, video e audio insieme) →
+/// contenuto di una nuova timeline annidata, con l'ordine relativo delle
+/// track coinvolte preservato. `None` se `clips` non risolve a nessuna clip
+/// reale. Il chiamante inserisce `nested_timeline`/una `MediaItem` che la
+/// referenzia (`MediaItem::compound`) nel `Project`, poi usa
+/// `compound_clip_commands` per la parte da mandare in history.
+pub fn plan_compound_clip(
+    project: &Project,
+    timeline_id: TimelineId,
+    clips: &[(usize, ClipId)],
+) -> Option<CompoundPlan> {
+    let timeline = project.timelines.get(timeline_id)?;
+    let mut originals: Vec<(usize, Clip)> = clips
+        .iter()
+        .filter_map(|&(track_index, id)| {
+            Some((track_index, timeline.tracks.get(track_index)?.clip(id)?.clone()))
+        })
+        .collect();
+    if originals.is_empty() {
+        return None;
+    }
+    originals.sort_by_key(|(track_index, c)| (*track_index, c.timeline_start));
+
+    let range_start = originals.iter().map(|(_, c)| c.timeline_start).min()?;
+    let range_end = originals.iter().map(|(_, c)| c.timeline_end()).max()?;
+
+    let mut distinct: Vec<usize> = originals.iter().map(|(track_index, _)| *track_index).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+
+    let mut nested_tracks = Vec::new();
+    let mut index_map = HashMap::new();
+    for &old_index in &distinct {
+        index_map.insert(old_index, nested_tracks.len());
+        nested_tracks.push(Track::new(timeline.tracks[old_index].kind));
+    }
+
+    let mut has_video = false;
+    let mut has_audio = false;
+    for (old_index, mut clip) in originals.iter().cloned() {
+        clip.timeline_start -= range_start;
+        let new_index = index_map[&old_index];
+        match nested_tracks[new_index].kind {
+            TrackKind::Video => has_video = true,
+            TrackKind::Audio => has_audio = true,
+        }
+        nested_tracks[new_index].insert_sorted(clip);
+    }
+
+    let video_track = distinct
+        .iter()
+        .copied()
+        .filter(|&i| timeline.tracks[i].kind == TrackKind::Video)
+        .max();
+    let audio_track = distinct
+        .iter()
+        .copied()
+        .filter(|&i| timeline.tracks[i].kind == TrackKind::Audio)
+        .max();
+
+    Some(CompoundPlan {
+        nested_timeline: Timeline {
+            name: "Compound".into(),
+            fps: timeline.fps,
+            resolution: timeline.resolution,
+            tracks: nested_tracks,
+        },
+        range_start,
+        len: range_end - range_start,
+        has_video,
+        has_audio,
+        video_track,
+        audio_track,
+    })
+}
+
+/// Comandi (da mandare in history come un unico gruppo, es. dentro una
+/// `CompositeCommand`) che tolgono `clips` dalla timeline di partenza e
+/// mettono al loro posto la clip risultante — o le due, video e audio,
+/// linkate — che punta a `media_id`. `plan` è quello di `plan_compound_clip`
+/// per la stessa `clips`; `media_id` è già stato inserito nel pool dal
+/// chiamante (con `MediaItem::compound` che punta alla timeline annidata
+/// già inserita anch'essa). Il pool e la timeline annidata restano fuori
+/// dalla history, come un import: `RemoveMedia` è l'unico comando che
+/// tocca `media_pool`, un undo qui non li cancella, esattamente come un
+/// undo dopo un trim non de-importa il media appena arrivato.
+pub fn compound_clip_commands(
+    project: &mut Project,
+    timeline_id: TimelineId,
+    clips: &[(usize, ClipId)],
+    plan: &CompoundPlan,
+    media_id: MediaId,
+) -> Vec<Box<dyn Command>> {
+    let mut commands: Vec<Box<dyn Command>> = clips
+        .iter()
+        .map(|&(track_index, clip_id)| {
+            Box::new(LiftDelete::new(timeline_id, track_index, clip_id)) as Box<dyn Command>
+        })
+        .collect();
+
+    let mut new_members = Vec::new();
+    let mut push_clip = |project: &mut Project, track_index: usize, commands: &mut Vec<Box<dyn Command>>| {
+        let clip = Clip::from_source_range(
+            project.alloc_clip_id(),
+            ClipSource::Media(media_id),
+            0,
+            plan.len,
+            plan.range_start,
+            Rational::one(),
+        );
+        new_members.push((track_index, clip.id));
+        commands.push(Box::new(InsertClip { timeline: timeline_id, track_index, clip }));
+    };
+    if let Some(track_index) = plan.video_track.filter(|_| plan.has_video) {
+        push_clip(project, track_index, &mut commands);
+    }
+    if let Some(track_index) = plan.audio_track.filter(|_| plan.has_audio) {
+        push_clip(project, track_index, &mut commands);
+    }
+    if new_members.len() >= 2 {
+        commands.push(Box::new(LinkClips::new(timeline_id, new_members)));
+    }
+    commands
 }
 

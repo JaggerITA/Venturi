@@ -58,6 +58,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 42,
+            compound: None,
         });
 
         let clip_id = project.alloc_clip_id();

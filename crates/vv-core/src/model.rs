@@ -175,11 +175,23 @@ impl MediaMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaItem {
+    /// Per una compound clip (`compound.is_some()`) è solo il nome
+    /// visualizzato nel media pool ("Compound Clip N"), non un file reale.
     pub path: PathBuf,
     pub meta: MediaMeta,
     /// Chiave stabile per cache dei frame e proxy: hash del contenuto
     /// (non del path), così spostare/rinominare il file non invalida nulla.
+    /// Per una compound clip, cambia ogni volta che la sua timeline
+    /// annidata cambia (vedi `Project::touch_compound`): invalida la cache
+    /// dei frame compositati senza dover confrontare l'intera timeline.
     pub content_hash: u64,
+    /// `Some` se questo item è una compound clip: il suo contenuto è
+    /// `Project::timelines[_]` invece di un file su disco. `meta` resta
+    /// comunque valida (ricalcolata da `Project::sync_compound_meta`), così
+    /// il resto del programma (probe, drag&drop, durata in timeline) può
+    /// trattarla come un media qualunque.
+    #[serde(default)]
+    pub compound: Option<TimelineId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1466,6 +1478,14 @@ pub struct Project {
     next_clip_id: u64,
     #[serde(default)]
     next_link_group_id: u64,
+    /// Contatore per il nome delle compound clip ("Compound Clip N"), mai
+    /// riusato: cancellarne una non fa slittare i numeri delle successive.
+    #[serde(default)]
+    next_compound_id: u64,
+    /// Contatore per `MediaItem::content_hash` delle compound clip: vedi
+    /// `Project::touch_compound`.
+    #[serde(default)]
+    next_compound_generation: u64,
 }
 
 impl Project {
@@ -1479,6 +1499,54 @@ impl Project {
         let id = LinkGroupId(self.next_link_group_id);
         self.next_link_group_id += 1;
         id
+    }
+
+    /// Nome per una nuova compound clip nel media pool, in ordine crescente.
+    pub fn alloc_compound_name(&mut self) -> String {
+        self.next_compound_id += 1;
+        format!("Compound Clip {}", self.next_compound_id)
+    }
+
+    /// Nuovo valore per `MediaItem::content_hash` di una compound clip: da
+    /// assegnare alla creazione e ogni volta che la sua timeline annidata
+    /// cambia, per invalidare la cache dei frame compositati che dipendono
+    /// dal suo contenuto.
+    pub fn alloc_compound_generation(&mut self) -> u64 {
+        self.next_compound_generation += 1;
+        self.next_compound_generation
+    }
+
+    /// Ricalcola `meta`/`content_hash` di una compound clip dalla sua
+    /// timeline annidata attuale. Da chiamare dopo ogni comando che tocca
+    /// quella timeline, non solo alla creazione: `meta.duration_frames`
+    /// (quindi `Clip::timeline_len` disponibile in un drag dal media pool)
+    /// deve riflettere il contenuto vero, non quello al momento della
+    /// creazione.
+    pub fn sync_compound_meta(&mut self, media_id: MediaId) {
+        let Some(item) = self.media_pool.get(media_id) else { return };
+        let Some(timeline_id) = item.compound else { return };
+        let Some(timeline) = self.timelines.get(timeline_id) else { return };
+        let has_video = timeline
+            .tracks_of_kind(TrackKind::Video)
+            .any(|(_, t)| !t.clips.is_empty());
+        let has_audio = timeline
+            .tracks_of_kind(TrackKind::Audio)
+            .any(|(_, t)| !t.clips.is_empty());
+        let meta = MediaMeta {
+            duration_frames: timeline.total_frames(),
+            fps: timeline.fps,
+            width: timeline.resolution.0,
+            height: timeline.resolution.1,
+            has_video,
+            has_audio,
+            sample_rate: 48_000,
+            channels: 2,
+            audio_streams: 1,
+        };
+        let generation = self.alloc_compound_generation();
+        let item = self.media_pool.get_mut(media_id).expect("checked above");
+        item.meta = meta;
+        item.content_hash = generation;
     }
 
     /// Ricalcola `Clip::rate` dagli fps. `source_offset`/`timeline_len` sono
@@ -1989,6 +2057,7 @@ mod timeline_tests {
                 audio_streams: 0,
             },
             content_hash: 0,
+            compound: None,
         });
         let mut clip = media_clip_at(Rational::one(), 0, 1000, 0);
         clip.source = ClipSource::Media(media_id);

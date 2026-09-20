@@ -469,11 +469,13 @@ mod tests {
             path: PathBuf::from("a.wav"),
             meta: meta.clone(),
             content_hash: 1,
+            compound: None,
         });
         let b = project.media_pool.insert(MediaItem {
             path: PathBuf::from("b.wav"),
             meta,
             content_hash: 2,
+            compound: None,
         });
         (project, a, b)
     }
@@ -623,6 +625,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 7,
+            compound: None,
         });
         let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
         let clip =
@@ -671,6 +674,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 7,
+            compound: None,
         });
         let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
         let clip = Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 1000, 0, rate);

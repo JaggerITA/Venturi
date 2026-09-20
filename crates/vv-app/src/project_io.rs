@@ -120,6 +120,7 @@ impl VibeVideoApp {
                     path: path.clone(),
                     meta,
                     content_hash,
+                    compound: None,
                 });
                 self.unsaved_media = true;
                 self.enqueue_media_background_jobs(media_id);

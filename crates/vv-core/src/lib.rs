@@ -4,12 +4,13 @@ pub mod otio;
 pub mod persistence;
 
 pub use command::{
-    AddTrack, Command, CommandLabel, CompositeCommand, FadeEdge, GroupMark, History, InsertClip, KeyframeTarget,
-    KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
+    AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge, GroupMark, History, InsertClip,
+    KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
     ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
     SetCrossTransition, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
-    UpsertKeyframe, cut_overlaps, insert_overwriting, make_room_for_ranges, reset_clip_gain, set_clip_filters,
-    set_clip_flip, set_clip_gain, set_clip_title, set_clip_transform_param, set_clip_transition,
+    UpsertKeyframe, compound_clip_commands, cut_overlaps, insert_overwriting, make_room_for_ranges,
+    plan_compound_clip, reset_clip_gain, set_clip_filters, set_clip_flip, set_clip_gain, set_clip_title,
+    set_clip_transform_param, set_clip_transition,
 };
 pub use model::*;
 pub use otio::{OtioError, OtioImport, OtioWarning, export_otio, import_otio};
@@ -56,6 +57,7 @@ mod tests {
                 audio_streams: 0,
             },
             content_hash: 7,
+            compound: None,
         })
     }
 
@@ -1616,5 +1618,141 @@ mod tests {
         let (left_off, right_off) = crossing.offsets(1.0, frame_size, zoom, zoom);
         assert_eq!(left_off, [1920.0, 0.0]);
         assert_eq!(right_off, [0.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod compound_clip_tests {
+    use super::*;
+
+    fn project_with_tracks(kinds: &[TrackKind]) -> (Project, TimelineId) {
+        let mut project = Project::default();
+        let timeline = project.timelines.insert(Timeline {
+            name: "Timeline 1".into(),
+            fps: Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: kinds.iter().map(|k| Track::new(*k)).collect(),
+        });
+        (project, timeline)
+    }
+
+    fn insert_clip(project: &mut Project, timeline: TimelineId, track_index: usize, start: FrameIdx, len: FrameIdx) -> ClipId {
+        let clip = Clip::from_source_range(project.alloc_clip_id(), ClipSource::SolidColor, 0, len, start, Rational::one());
+        let id = clip.id;
+        project.timelines[timeline].tracks[track_index].insert_sorted(clip);
+        id
+    }
+
+    /// Inserisce nel pool una compound clip che referenzia `plan`, come farebbe
+    /// il chiamante reale (main.rs) prima di girare `compound_clip_commands`.
+    fn insert_compound_media(project: &mut Project, plan: &CompoundPlan) -> MediaId {
+        let nested = project.timelines.insert(Timeline {
+            name: plan.nested_timeline.name.clone(),
+            fps: plan.nested_timeline.fps,
+            resolution: plan.nested_timeline.resolution,
+            tracks: plan.nested_timeline.tracks.clone(),
+        });
+        let path = project.alloc_compound_name().into();
+        let content_hash = project.alloc_compound_generation();
+        project.media_pool.insert(MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: plan.len,
+                fps: plan.nested_timeline.fps,
+                width: plan.nested_timeline.resolution.0,
+                height: plan.nested_timeline.resolution.1,
+                has_video: plan.has_video,
+                has_audio: plan.has_audio,
+                sample_rate: 48_000,
+                channels: 2,
+                audio_streams: 1,
+            },
+            content_hash,
+            compound: Some(nested),
+        })
+    }
+
+    #[test]
+    fn plan_rebases_clips_into_the_nested_timeline_preserving_relative_track_order() {
+        let (mut project, timeline) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+        let video_id = insert_clip(&mut project, timeline, 0, 10, 30);
+        let audio_id = insert_clip(&mut project, timeline, 1, 20, 30);
+
+        let plan = plan_compound_clip(&project, timeline, &[(0, video_id), (1, audio_id)]).unwrap();
+
+        assert_eq!(plan.range_start, 10);
+        assert_eq!(plan.len, 40); // fino a 50 (fine della clip audio), da 10
+        assert!(plan.has_video && plan.has_audio);
+        assert_eq!(plan.video_track, Some(0));
+        assert_eq!(plan.audio_track, Some(1));
+
+        assert_eq!(plan.nested_timeline.tracks.len(), 2);
+        assert_eq!(plan.nested_timeline.tracks[0].kind, TrackKind::Video);
+        assert_eq!(plan.nested_timeline.tracks[0].clips[0].timeline_start, 0);
+        assert_eq!(plan.nested_timeline.tracks[1].kind, TrackKind::Audio);
+        assert_eq!(plan.nested_timeline.tracks[1].clips[0].timeline_start, 10);
+    }
+
+    #[test]
+    fn plan_folds_multiple_video_tracks_into_a_single_result_clip_on_the_topmost() {
+        let (mut project, timeline) = project_with_tracks(&[TrackKind::Video, TrackKind::Video]);
+        let bottom = insert_clip(&mut project, timeline, 0, 0, 20);
+        let top = insert_clip(&mut project, timeline, 1, 10, 20);
+
+        let plan = plan_compound_clip(&project, timeline, &[(0, bottom), (1, top)]).unwrap();
+
+        assert!(plan.has_video);
+        assert!(!plan.has_audio);
+        assert_eq!(plan.video_track, Some(1), "la track più in alto fra quelle coinvolte");
+        assert_eq!(plan.audio_track, None);
+        assert_eq!(plan.nested_timeline.tracks.len(), 2, "una track annidata per ogni track video coinvolta");
+    }
+
+    #[test]
+    fn plan_returns_none_for_an_empty_selection() {
+        let (project, timeline) = project_with_tracks(&[TrackKind::Video]);
+        assert!(plan_compound_clip(&project, timeline, &[]).is_none());
+    }
+
+    #[test]
+    fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores_it() {
+        let (mut project, timeline) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+        let video_id = insert_clip(&mut project, timeline, 0, 10, 30);
+        let audio_id = insert_clip(&mut project, timeline, 1, 20, 30);
+        let selection = vec![(0, video_id), (1, audio_id)];
+
+        let plan = plan_compound_clip(&project, timeline, &selection).unwrap();
+        let media_id = insert_compound_media(&mut project, &plan);
+        let commands = compound_clip_commands(&mut project, timeline, &selection, &plan, media_id);
+
+        let mut history = History::default();
+        history.do_command(
+            &mut project,
+            Box::new(CompositeCommand::new(CommandLabel::MakeCompoundClip, commands)),
+        );
+
+        let video_track = &project.timelines[timeline].tracks[0];
+        assert_eq!(video_track.clips.len(), 1);
+        assert!(matches!(video_track.clips[0].source, ClipSource::Media(id) if id == media_id));
+        assert_eq!(video_track.clips[0].timeline_start, 10);
+        assert_eq!(video_track.clips[0].timeline_len, 40);
+
+        let audio_track = &project.timelines[timeline].tracks[1];
+        assert_eq!(audio_track.clips.len(), 1);
+        assert!(matches!(audio_track.clips[0].source, ClipSource::Media(id) if id == media_id));
+        let group = video_track.clips[0].linked_group.expect("video collegato all'audio");
+        assert_eq!(audio_track.clips[0].linked_group, Some(group));
+
+        // Il pool e la timeline annidata restano fuori dalla history.
+        assert_eq!(project.media_pool.len(), 1);
+        assert_eq!(project.timelines.len(), 2);
+
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline].tracks[0].clips.len(), 1);
+        assert_eq!(project.timelines[timeline].tracks[0].clips[0].id, video_id);
+        assert_eq!(project.timelines[timeline].tracks[0].clips[0].timeline_start, 10);
+        assert_eq!(project.timelines[timeline].tracks[1].clips[0].id, audio_id);
+        // Undo non de-importa la compound clip dal pool, come un import.
+        assert_eq!(project.media_pool.len(), 1);
     }
 }

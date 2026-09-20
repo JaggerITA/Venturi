@@ -212,6 +212,7 @@ mod tests {
                 audio_streams: 1,
             },
             content_hash: 1,
+            compound: None,
         });
         let timeline = project.timelines.insert(Timeline {
             name: "Timeline 1".into(),

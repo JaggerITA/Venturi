@@ -602,6 +602,7 @@ mod tests {
                     audio_streams: 0,
                 },
                 content_hash: 0,
+                compound: None,
             })
         };
         let project = Project::default();
