@@ -1213,7 +1213,15 @@ impl TimelineDrag {
 
     pub fn released(resp: &egui::Response) -> Option<Self> {
         // `take_payload` scarta il payload anche se il tipo non combacia:
-        // va scelto il tipo giusto prima di prenderlo.
+        // va scelto il tipo giusto prima di prenderlo. Un `FilterKind` non è
+        // mai un `TimelineDrag` (si rilascia solo su una clip, gestito nel
+        // loop delle clip): se è quello in corso, uscire subito, altrimenti
+        // il ramo `MediaDragSet` sotto lo prenderebbe e distruggerebbe senza
+        // riuscire a interpretarlo, e il rilascio sulla clip non vedrebbe
+        // più nulla.
+        if egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(&resp.ctx) {
+            return None;
+        }
         if egui::DragAndDrop::has_payload_of_type::<Generator>(&resp.ctx) {
             resp.dnd_release_payload::<Generator>().map(|g| Self::Generator(*g))
         } else {
