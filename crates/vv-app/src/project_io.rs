@@ -137,6 +137,11 @@ impl VibeVideoApp {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
+        // Una compound clip non ha un file su disco da proxare/thumbnare/
+        // analizzare: il suo contenuto è `item.compound`, non `item.path`.
+        if item.compound.is_some() {
+            return;
+        }
         // Un'immagine non ha nulla da guadagnare da un proxy, e la sua durata è
         // il sentinel `IMAGE_DURATION_FRAMES`.
         if item.meta.has_video && !item.meta.is_image() {
@@ -513,7 +518,7 @@ impl VibeVideoApp {
         self.render_ahead_generation = self.history.generation();
         for item in self.project.media_pool.values_mut() {
             // Progetti salvati prima di `MediaMeta::audio_streams`.
-            if item.meta.has_audio && item.meta.audio_streams == 0 {
+            if item.compound.is_none() && item.meta.has_audio && item.meta.audio_streams == 0 {
                 item.meta.audio_streams =
                     vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
             }
@@ -747,7 +752,7 @@ impl VibeVideoApp {
             let Some(item) = self.project.media_pool.get(media_id) else {
                 continue;
             };
-            if item.path.exists() {
+            if item.compound.is_some() || item.path.exists() {
                 continue;
             }
             let Some(file_name) = item.path.file_name() else {

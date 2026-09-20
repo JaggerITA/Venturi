@@ -474,6 +474,9 @@ enum PendingAction {
     /// Rimuove la track a questo indice (e le sue clip).
     RemoveTrack(usize),
     SetTrackFlag(usize, TrackFlag, bool),
+    /// Sostituisce le clip elencate con una compound clip (vedi
+    /// `make_compound_clip`).
+    MakeCompound(Vec<ClipKey>),
 }
 
 #[derive(Clone, Copy)]
@@ -2778,6 +2781,19 @@ pub fn show_timeline(
                         } else {
                             ui.label(t!("timeline.link_hint"));
                         }
+                        ui.separator();
+                        if ui.button(t!("timeline.make_compound_clip")).clicked() {
+                            // Un right-click su una clip non selezionata agisce solo
+                            // su di lei, non sulla selezione precedente rimasta stale.
+                            let base = if state.selected.is_empty() {
+                                BTreeSet::from([(visual.track_index, visual.clip.id)])
+                            } else {
+                                state.selected.clone()
+                            };
+                            let selection = expand_to_linked_groups(&visuals, base);
+                            pending = Some(PendingAction::MakeCompound(selection.into_iter().collect()));
+                            ui.close();
+                        }
                     });
                 }
                 // Vedi doc di `pending_crossing_previews`: solo ora, a
@@ -4224,7 +4240,54 @@ fn apply_pending_action(
             // Gli indici di track della selezione non valgono più: si azzera.
             state.clear_selection();
         }
+        PendingAction::MakeCompound(clips) => {
+            make_compound_clip(project, history, timeline_id, clips);
+            state.clear_selection();
+        }
     }
+}
+
+/// Toglie `clips` dalla timeline (anche più clip, video e audio insieme, su
+/// più track) e mette al loro posto una compound clip: il pool e la sua
+/// timeline annidata restano fuori dalla history come un import (vedi doc
+/// di `vv_core::compound_clip_commands`), solo l'inserimento della clip
+/// risultante è undoable.
+fn make_compound_clip(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    clips: Vec<ClipKey>,
+) {
+    let Some(plan) = vv_core::plan_compound_clip(project, timeline_id, &clips) else {
+        return;
+    };
+    let fps = plan.nested_timeline.fps;
+    let resolution = plan.nested_timeline.resolution;
+    let (has_video, has_audio, len) = (plan.has_video, plan.has_audio, plan.len);
+    let nested_id = project.timelines.insert(plan.nested_timeline.clone());
+    let name = project.alloc_compound_name();
+    let content_hash = project.alloc_compound_generation();
+    let media_id = project.media_pool.insert(vv_core::MediaItem {
+        path: name.into(),
+        meta: vv_core::MediaMeta {
+            duration_frames: len,
+            fps,
+            width: resolution.0,
+            height: resolution.1,
+            has_video,
+            has_audio,
+            sample_rate: 48_000,
+            channels: 2,
+            audio_streams: 1,
+        },
+        content_hash,
+        compound: Some(nested_id),
+    });
+    let commands = vv_core::compound_clip_commands(project, timeline_id, &clips, &plan, media_id);
+    history.do_command(
+        project,
+        Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::MakeCompoundClip, commands)),
+    );
 }
 
 /// Aggiunge una track in coda e ne restituisce l'indice.
@@ -6331,6 +6394,72 @@ mod tests {
 
         history.undo(&mut project);
         assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2, "un solo passo di undo");
+    }
+
+    #[test]
+    fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        let mut history = History::default();
+        let solid = |id, start, len| {
+            Clip::from_source_range(id, vv_core::ClipSource::SolidColor, 0, len, start, vv_core::Rational::one())
+        };
+        let (v, a) = (project.alloc_clip_id(), project.alloc_clip_id());
+        for (track_index, clip) in [(0, solid(v, 10, 30)), (1, solid(a, 20, 30))] {
+            history.do_command(
+                &mut project,
+                Box::new(vv_core::InsertClip { timeline: timeline_id, track_index, clip }),
+            );
+        }
+
+        make_compound_clip(&mut project, &mut history, timeline_id, vec![(0, v), (1, a)]);
+
+        let video_track = &project.timelines[timeline_id].tracks[0];
+        assert_eq!(video_track.clips.len(), 1, "le due originali diventano una sola clip video");
+        let vv_core::ClipSource::Media(media_id) = video_track.clips[0].source else {
+            panic!("la compound clip risultante deve puntare al media pool");
+        };
+        assert_eq!(video_track.clips[0].timeline_start, 10);
+        assert_eq!(video_track.clips[0].timeline_len, 40);
+        let audio_track = &project.timelines[timeline_id].tracks[1];
+        assert_eq!(audio_track.clips.len(), 1);
+        assert_eq!(video_track.clips[0].linked_group, audio_track.clips[0].linked_group);
+
+        let item = project.media_pool.get(media_id).expect("inserita nel pool");
+        assert_eq!(item.path.to_str(), Some("Compound Clip 1"));
+        assert!(item.meta.has_video && item.meta.has_audio);
+        let nested_id = item.compound.expect("è una compound clip");
+        let nested = &project.timelines[nested_id];
+        assert_eq!(nested.tracks[0].clips[0].timeline_start, 0, "riofsettata sull'inizio della selezione");
+        assert_eq!(nested.tracks[1].clips[0].timeline_start, 10);
+
+        // Un undo restituisce le clip originali, ma il pool (come un
+        // import) non torna indietro.
+        history.undo(&mut project);
+        assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 1);
+        assert_eq!(project.timelines[timeline_id].tracks[0].clips[0].id, v);
+        assert_eq!(project.media_pool.len(), 1);
+
+        // Una seconda compound clip prosegue la numerazione.
+        let (v2, a2) = (project.alloc_clip_id(), project.alloc_clip_id());
+        for (track_index, clip) in [(0, solid(v2, 100, 10)), (1, solid(a2, 100, 10))] {
+            history.do_command(
+                &mut project,
+                Box::new(vv_core::InsertClip { timeline: timeline_id, track_index, clip }),
+            );
+        }
+        make_compound_clip(&mut project, &mut history, timeline_id, vec![(0, v2), (1, a2)]);
+        let second = project
+            .media_pool
+            .values()
+            .find(|m| m.path.to_str() != Some("Compound Clip 1"))
+            .unwrap();
+        assert_eq!(second.path.to_str(), Some("Compound Clip 2"));
     }
 
     /// Esegue `show_timeline` per davvero dentro un `egui::Context`

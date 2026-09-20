@@ -44,6 +44,10 @@ timeline.link_hint:
   en: "Select at least 2 clips to link them"
   it: "Seleziona almeno 2 clip per collegarle"
 
+timeline.make_compound_clip:
+  en: "Compound Clip"
+  it: "Compound Clip"
+
 timeline.media_offline:
   en: "⚠ Media offline"
   it: "⚠ Media offline"
