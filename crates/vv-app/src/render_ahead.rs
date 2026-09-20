@@ -453,6 +453,80 @@ fn clipped_media_segments(
     segments
 }
 
+/// Segmenti "in prestito" per le crossing transition attive in
+/// `[from_frame, end_frame)`: `extrapolated_frame_for` (`frame_provider.rs`)
+/// non congela mai una clip sul suo ultimo/primo frame reale, ma continua a
+/// giocare il girato che il trim aveva scartato finché non arriva alla vera
+/// fine del media — cioè, oltre il proprio bordo dichiarato, chiede un
+/// range di frame sorgente crescente, non un singolo frame fisso. Nessun
+/// segmento di `clipped_media_segments` lo copre mai (è ritagliato stretto
+/// sul range dichiarato di ciascuna clip), quindi senza questo
+/// `SharedFrameCache::reconcile` lo sfratta (o non lo scarica mai) appena
+/// la testina supera il taglio, congelando il compositing per quella metà
+/// della finestra della crossing.
+fn crossing_borrowed_segments(
+    project: &Project,
+    timeline: &Timeline,
+    from_frame: FrameIdx,
+    end_frame: FrameIdx,
+) -> Vec<MediaSegment> {
+    let mut segments = Vec::new();
+    for (_, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
+        if track.muted {
+            continue;
+        }
+        for crossing in &track.crossings {
+            let (Some(left), Some(right)) = (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) else {
+                continue;
+            };
+            let window = crossing.window(left, right);
+            if window.end <= from_frame || window.start >= end_frame {
+                continue;
+            }
+            // `left` presta il tratto dopo il proprio bordo dichiarato,
+            // `right` quello prima: l'altra metà di ciascuna è già coperta
+            // dal proprio segmento normale.
+            if window.end > left.timeline_end() {
+                push_borrowed_segment(&mut segments, project, left, left.timeline_end(), window.end - 1);
+            }
+            if window.start < right.timeline_start {
+                push_borrowed_segment(&mut segments, project, right, window.start, right.timeline_start - 1);
+            }
+        }
+    }
+    segments
+}
+
+/// Un segmento sorgente per il tratto di `clip` prestato a una crossing,
+/// `[from_timeline, to_timeline]` (inclusivo) in frame di timeline,
+/// clampato agli stessi bordi di `media.meta.duration_frames` che userebbe
+/// `extrapolated_frame_for` — altrimenti si chiederebbe di bufferizzare un
+/// frame sorgente che il decoder non produrrà mai.
+fn push_borrowed_segment(
+    segments: &mut Vec<MediaSegment>,
+    project: &Project,
+    clip: &vv_core::Clip,
+    from_timeline: FrameIdx,
+    to_timeline: FrameIdx,
+) {
+    let ClipSource::Media(media_id) = &clip.source else {
+        return;
+    };
+    let Some(item) = project.media_pool.get(*media_id) else {
+        return;
+    };
+    let last = (item.meta.duration_frames - 1).max(0);
+    let a = clip.source_frame_at(from_timeline).clamp(0, last);
+    let b = clip.source_frame_at(to_timeline).clamp(0, last);
+    segments.push(MediaSegment {
+        media_id: *media_id,
+        source_start: a.min(b),
+        source_end: a.max(b),
+        timeline_start: from_timeline,
+        rate: clip.rate,
+    });
+}
+
 /// Spezza i segmenti dietro la testina in blocchi di `BEHIND_CHUNK_FRAMES`,
 /// dal bordo vicino alla testina (`source_end`) verso quello lontano.
 fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
@@ -608,8 +682,10 @@ fn walk_and_fill(
     let end_frame = from_frame + lookahead_frames;
     let start_frame = (from_frame - behind_frames).max(0);
 
-    let forward_segments = collect_media_segments(timeline, from_frame, end_frame);
-    let behind_segments = collect_media_segments_behind(timeline, from_frame, start_frame);
+    let mut forward_segments = collect_media_segments(timeline, from_frame, end_frame);
+    let mut behind_segments = collect_media_segments_behind(timeline, from_frame, start_frame);
+    forward_segments.extend(crossing_borrowed_segments(project, timeline, from_frame, end_frame));
+    behind_segments.extend(crossing_borrowed_segments(project, timeline, start_frame, from_frame));
     if forward_segments.is_empty() && behind_segments.is_empty() {
         return WalkOutcome::SETTLED;
     }
@@ -1514,6 +1590,115 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Riproduzione end-to-end del bug segnalato dall'utente: durante una
+    /// crossing transition, `extrapolated_frame_for` (`frame_provider.rs`)
+    /// chiede per il lato "in prestito" un tratto di frame sorgente che
+    /// appartiene al range NORMALE di una clip ma cade fuori dal range
+    /// dichiarato dell'ALTRA — nessun `MediaSegment` normale lo copre, e
+    /// senza `crossing_borrowed_segments` `SharedFrameCache::reconcile` lo
+    /// sfratta (o non lo scarica mai) appena la testina supera il taglio,
+    /// congelando il compositing per metà della finestra della crossing.
+    /// `clip_a` è tagliata corta (30 delle 50 frame reali disponibili) e
+    /// `clip_b` parte da `source_in=5`: la crossing mangia sia il girato
+    /// scartato dal trim di `clip_a` sia quello prima dell'inizio
+    /// dichiarato di `clip_b`.
+    #[test]
+    fn render_ahead_keeps_both_sides_of_a_crossing_readable_through_the_whole_window() {
+        let path_a = make_test_clip("vv-app-render-ahead-test", "crossing_a.mp4", 2);
+        let path_b = make_test_clip("vv-app-render-ahead-test", "crossing_b.mp4", 2);
+
+        let mut project = Project::default();
+        let item = |path: std::path::PathBuf| MediaItem {
+            path,
+            meta: MediaMeta {
+                duration_frames: 50,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 0,
+        };
+        let media_a = project.media_pool.insert(item(path_a));
+        let media_b = project.media_pool.insert(item(path_b));
+
+        let clip_a = media_clip(1, media_a, 0, 30); // timeline [0,30)
+        let clip_b = media_clip_trimmed(2, media_b, 30, 5, 30); // timeline [30,60), source_in=5
+
+        let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+            kind: TrackKind::Video,
+            clips: vec![clip_a, clip_b],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: vec![vv_core::CrossTransition {
+                left_clip: ClipId(1),
+                right_clip: ClipId(2),
+                transition: vv_core::Transition {
+                    kind: vv_core::TransitionKind::Push,
+                    duration: 16,
+                    direction: vv_core::PushDirection::Right,
+                    ease: vv_core::Ease::None,
+                    curve: 0.0,
+                },
+            }],
+        }]));
+        let timeline = project.timelines.get(timeline_id).unwrap().clone();
+
+        let mut render_ahead = RenderAhead::spawn(
+            project.clone(),
+            timeline_id,
+            100_000_000,
+            false,
+            DEFAULT_LOOKAHEAD_SECS,
+            DEFAULT_BEHIND_SECS,
+        );
+
+        // Finestra della crossing (duration=16, split 8/8 attorno al
+        // taglio a 30): [22,38). Copre un buon margine prima e dopo.
+        let mut missing = Vec::new();
+        for frame in 15..45 {
+            render_ahead.set_target(frame);
+            let start = std::time::Instant::now();
+            let (mut ok, mut expected);
+            loop {
+                let clips = timeline.active_video_clips_at(frame);
+                ok = 0;
+                expected = 0;
+                for (track_index, clip) in &clips {
+                    let involved = match timeline.tracks[*track_index].crossing_at(frame) {
+                        Some((left, right, _)) if left.id == clip.id || right.id == clip.id => 2,
+                        _ => 1,
+                    };
+                    expected += involved;
+                    let layers = crate::frame_provider::track_layers_at(
+                        &project,
+                        &timeline,
+                        *track_index,
+                        clip,
+                        frame,
+                        (320, 240),
+                        &mut render_ahead,
+                    )
+                    .unwrap();
+                    ok += layers.len();
+                }
+                if ok >= expected || start.elapsed() > Duration::from_secs(5) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if ok < expected {
+                missing.push((frame, ok, expected));
+            }
+        }
+        assert!(missing.is_empty(), "frame con layer mancanti (frame, ok, expected): {missing:?}");
     }
 
     /// Riproduzione end-to-end (thread worker reale, non `walk_and_fill`
