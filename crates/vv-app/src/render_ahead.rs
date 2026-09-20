@@ -406,13 +406,20 @@ struct MediaSegment {
 /// `.0` sono i media veri da decodificare, `.1` le compound clip coinvolte
 /// (a qualunque profondità di nesting) da comporre — vedi
 /// `compose_compound_segments`.
+/// Limite alla profondità di nesting di compound clip che questo modulo
+/// segue: da quando anche la timeline del progetto compare nel media pool
+/// (vedi `MediaItem::compound`), trascinarla dentro se stessa (o dentro una
+/// sua compound clip) creerebbe un ciclo — senza un limite, uno stack
+/// overflow invece di un semplice "non composto". Generoso per l'uso reale.
+const MAX_COMPOUND_DEPTH: u32 = 16;
+
 fn collect_media_segments(
     project: &Project,
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
 ) -> (Vec<MediaSegment>, Vec<MediaSegment>) {
-    let (mut real, compound) = clipped_media_segments(project, timeline, from_frame, end_frame);
+    let (mut real, compound) = clipped_media_segments(project, timeline, from_frame, end_frame, 0);
     real.sort_by_key(|(track, s)| (s.timeline_start, std::cmp::Reverse(*track)));
     (strip_track(real), strip_track(compound))
 }
@@ -425,7 +432,7 @@ fn collect_media_segments_behind(
     from_frame: FrameIdx,
     start_frame: FrameIdx,
 ) -> (Vec<MediaSegment>, Vec<MediaSegment>) {
-    let (mut real, compound) = clipped_media_segments(project, timeline, start_frame, from_frame);
+    let (mut real, compound) = clipped_media_segments(project, timeline, start_frame, from_frame, 0);
     real.sort_by_key(|(track, s)| (std::cmp::Reverse(s.timeline_start), std::cmp::Reverse(*track)));
     (strip_track(real), strip_track(compound))
 }
@@ -441,15 +448,19 @@ fn strip_track(segments: Vec<(usize, MediaSegment)>) -> Vec<MediaSegment> {
 /// segmento da decodificare, ma uno da comporre (vedi `classify_segment`)
 /// più — sullo stesso range, tradotto in frame della sua timeline annidata
 /// da `Clip::source_frame_at` — gli stessi due elenchi raccolti dentro
-/// quella timeline, a qualunque profondità.
+/// quella timeline, a qualunque profondità (entro `MAX_COMPOUND_DEPTH`).
 fn clipped_media_segments(
     project: &Project,
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
+    depth: u32,
 ) -> (Vec<(usize, MediaSegment)>, Vec<(usize, MediaSegment)>) {
     let mut real = Vec::new();
     let mut compound = Vec::new();
+    if depth >= MAX_COMPOUND_DEPTH {
+        return (real, compound);
+    }
     for (track_index, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
         if track.muted {
             continue;
@@ -475,7 +486,7 @@ fn clipped_media_segments(
                 timeline_start: segment_start,
                 rate: clip.rate,
             };
-            classify_segment(project, track_index, segment, &mut real, &mut compound);
+            classify_segment(project, track_index, segment, depth, &mut real, &mut compound);
         }
     }
     (real, compound)
@@ -490,6 +501,7 @@ fn classify_segment(
     project: &Project,
     track_index: usize,
     segment: MediaSegment,
+    depth: u32,
     real: &mut Vec<(usize, MediaSegment)>,
     compound: &mut Vec<(usize, MediaSegment)>,
 ) {
@@ -498,7 +510,7 @@ fn classify_segment(
             compound.push((track_index, segment));
             if let Some(nested) = project.timelines.get(nested_id) {
                 let (nested_real, nested_compound) =
-                    clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1);
+                    clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1, depth + 1);
                 real.extend(nested_real);
                 compound.extend(nested_compound);
             }
@@ -587,7 +599,7 @@ fn push_borrowed_segment(
             compound.push(segment);
             if let Some(nested) = project.timelines.get(nested_id) {
                 let (nested_real, nested_compound) =
-                    clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1);
+                    clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1, 0);
                 real.extend(strip_track(nested_real));
                 compound.extend(strip_track(nested_compound));
             }
@@ -1721,6 +1733,48 @@ mod tests {
         let alpha = frame.alpha.as_ref().expect("un frame composto porta sempre l'alpha");
         assert_eq!(alpha[0], 255, "sinistra: coperta dalla clip rossa");
         assert_eq!(alpha[3], 0, "destra: fuori dal crop, deve restare trasparente, non nera");
+    }
+
+    /// Da quando anche la timeline del progetto compare nel media pool
+    /// (vedi `MediaItem::compound`), un utente può trascinarla dentro se
+    /// stessa: un ciclo, non solo un nesting profondo. Senza
+    /// `MAX_COMPOUND_DEPTH` questo andrebbe in stack overflow invece di
+    /// fermarsi.
+    #[test]
+    fn collect_media_segments_stops_at_a_cyclic_compound_clip_instead_of_overflowing() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(timeline_with(vec![]));
+        let media_id = project.media_pool.insert(vv_core::MediaItem {
+            path: "Timeline 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 100,
+                fps: Rational::new(25, 1),
+                width: 320,
+                height: 240,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: Some(timeline_id),
+        });
+        // La timeline referenzia se stessa tramite la propria voce nel pool.
+        project.timelines[timeline_id].tracks.push(Track {
+            kind: TrackKind::Video,
+            clips: vec![media_clip(1, media_id, 0, 100)],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: Vec::new(),
+        });
+
+        let (real, compound) =
+            collect_media_segments(&project, &project.timelines[timeline_id], 0, 100);
+
+        assert!(real.is_empty(), "nessun media vero da decodificare in un ciclo puro");
+        assert_eq!(compound.len() as u32, MAX_COMPOUND_DEPTH, "si ferma al limite, non prosegue all'infinito");
     }
 
     /// Un segmento dietro la testina più lungo di `BEHIND_CHUNK_FRAMES`

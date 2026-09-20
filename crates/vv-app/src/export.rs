@@ -21,6 +21,10 @@ use crate::frame_provider::{FrameProvider, OwnedLayer, media_source_frame, track
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
+/// Stesso limite e stesso motivo di `MAX_COMPOUND_DEPTH` in
+/// `render_ahead.rs`: da quando la timeline del progetto è anche lei nel
+/// media pool, un ciclo di compound clip è possibile.
+const MAX_COMPOUND_DEPTH: u32 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportSettings {
@@ -144,6 +148,12 @@ struct StreamingFrameProvider {
     /// Creato alla prima compound clip incontrata (vedi `render_ahead.rs`,
     /// stesso motivo): un export senza compound clip non lo paga mai.
     compositor: Option<vv_render::Compositor>,
+    /// Quante compound clip sono già "aperte" nella ricorsione corrente
+    /// (vedi `MAX_COMPOUND_DEPTH` in `render_ahead.rs`, stesso limite,
+    /// stesso motivo: da quando la timeline del progetto è anche lei nel
+    /// media pool, un ciclo è possibile e qui sarebbe uno stack overflow
+    /// vero, non solo un giro sprecato).
+    compound_depth: u32,
 }
 
 impl StreamingFrameProvider {
@@ -169,6 +179,11 @@ impl FrameProvider for StreamingFrameProvider {
             .ok_or_else(|| t!("export.error_media_not_found").into_owned())?;
 
         if let Some(nested_id) = item.compound {
+            if self.compound_depth >= MAX_COMPOUND_DEPTH {
+                // Ciclo (o nesting assurdo): niente layer per questa clip
+                // invece di uno stack overflow, come un media mancante.
+                return Ok(None);
+            }
             let nested = project
                 .timelines
                 .get(nested_id)
@@ -176,7 +191,10 @@ impl FrameProvider for StreamingFrameProvider {
             // Ricorsivo: `decode_video_frame`/`track_layers_at` richiamano
             // `self.frame_for` per ogni clip Media della timeline annidata,
             // a qualunque profondità — stesso `self`, nessun nuovo stato.
-            let layers = decode_video_frame(project, nested, self, source_frame, nested.resolution)?;
+            self.compound_depth += 1;
+            let layers = decode_video_frame(project, nested, self, source_frame, nested.resolution);
+            self.compound_depth -= 1;
+            let layers = layers?;
             let compositor = self.compositor.get_or_insert_with(vv_render::Compositor::new_headless);
             return Ok(Some(Arc::new(compose_yuv_frame(compositor, &layers, nested.resolution))));
         }
@@ -444,7 +462,7 @@ fn mix_audio_track(
     // Ricorsivo: i media veri dentro una compound clip finiscono nella
     // stessa raccolta, come se fossero clip di `timeline`.
     let mut streams_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
-    collect_audio_streams(project, timeline, &mut streams_by_path);
+    collect_audio_streams(project, timeline, &mut streams_by_path, 0);
     let mut buffers: HashMap<(PathBuf, usize), Arc<Vec<f32>>> = HashMap::new();
     for (path, streams) in streams_by_path {
         let mut decoded = vec![Vec::new(); streams.len()];
@@ -471,7 +489,7 @@ fn mix_audio_track(
         PROJECT_SAMPLE_RATE,
         PROJECT_CHANNELS,
         |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
-        |_, media_id| compound_mix_buffer(project, media_id, &buffers),
+        |_, media_id| compound_mix_buffer(project, media_id, &buffers, 0),
     );
     let fps = timeline.fps.as_f64();
     let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
@@ -486,7 +504,15 @@ fn mix_audio_track(
 /// le compound clip) che referenzia un file vero, raccolta in
 /// `streams_by_path`: una compound clip stessa non genera una voce (il suo
 /// "file" non esiste), solo quel che referenzia la sua timeline annidata.
-fn collect_audio_streams(project: &Project, timeline: &Timeline, streams_by_path: &mut HashMap<PathBuf, Vec<usize>>) {
+fn collect_audio_streams(
+    project: &Project,
+    timeline: &Timeline,
+    streams_by_path: &mut HashMap<PathBuf, Vec<usize>>,
+    depth: u32,
+) {
+    if depth >= MAX_COMPOUND_DEPTH {
+        return;
+    }
     for (_, track) in timeline.audible_tracks() {
         for clip in track.clips.iter().filter(|c| !c.disabled) {
             let ClipSource::Media(media_id) = &clip.source else {
@@ -498,7 +524,7 @@ fn collect_audio_streams(project: &Project, timeline: &Timeline, streams_by_path
             match item.compound {
                 Some(nested_id) => {
                     if let Some(nested) = project.timelines.get(nested_id) {
-                        collect_audio_streams(project, nested, streams_by_path);
+                        collect_audio_streams(project, nested, streams_by_path, depth + 1);
                     }
                 }
                 None => {
@@ -522,7 +548,11 @@ fn compound_mix_buffer(
     project: &Project,
     media_id: MediaId,
     buffers: &HashMap<(PathBuf, usize), Arc<Vec<f32>>>,
+    depth: u32,
 ) -> Option<Arc<Vec<f32>>> {
+    if depth >= MAX_COMPOUND_DEPTH {
+        return None;
+    }
     let item = project.media_pool.get(media_id)?;
     let nested = project.timelines.get(item.compound?)?;
     let snapshot = MixSnapshot::from_timeline(
@@ -531,7 +561,7 @@ fn compound_mix_buffer(
         PROJECT_SAMPLE_RATE,
         PROJECT_CHANNELS,
         |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
-        |_, inner_media_id| compound_mix_buffer(project, inner_media_id, buffers),
+        |_, inner_media_id| compound_mix_buffer(project, inner_media_id, buffers, depth + 1),
     );
     let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
     let mut buffer = vec![0.0_f32; len as usize * PROJECT_CHANNELS as usize];
@@ -1082,7 +1112,7 @@ mod tests {
             .project
             .media_pool
             .iter()
-            .next()
+            .find(|(_, item)| item.compound.is_none())
             .map(|(id, _)| id)
             .expect("media importato atteso nel pool");
         assert!(app.project.media_pool[media_id].meta.is_image());
@@ -1173,7 +1203,7 @@ mod tests {
             app.project.timelines[timeline_id].fps,
             vv_core::Rational::new(25, 1)
         );
-        let first = app.project.media_pool.iter().next().map(|(id, _)| id).unwrap();
+        let first = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
         app.add_media_to_timeline(first);
 
         app.import_media(sine_23976);
@@ -1181,6 +1211,7 @@ mod tests {
             .project
             .media_pool
             .iter()
+            .filter(|(_, item)| item.compound.is_none())
             .map(|(id, _)| id)
             .find(|id| *id != first)
             .expect("secondo media atteso nel pool");
@@ -1286,7 +1317,7 @@ mod tests {
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(source_path);
-        let media_id = app.project.media_pool.iter().next().map(|(id, _)| id).unwrap();
+        let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
         let total = app.project.timelines[timeline_id].total_frames();
@@ -1330,7 +1361,7 @@ mod tests {
 
         let mut app = crate::VibeVideoApp::default();
         app.import_media(source_path);
-        let media_id = app.project.media_pool.iter().next().map(|(id, _)| id).unwrap();
+        let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
 

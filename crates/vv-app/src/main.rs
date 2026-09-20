@@ -282,6 +282,8 @@ struct VibeVideoApp {
     render_ahead: Option<render_ahead::RenderAhead>,
     /// `history.generation()` all'ultimo aggiornamento di `render_ahead`.
     render_ahead_generation: u64,
+    /// `history.generation()` all'ultimo `sync_root_timeline_media`.
+    root_timeline_media_generation: u64,
 
     /// Mixer delle track audio e clock del playback della timeline.
     /// `None` finché non serve (nei test si apre solo se usato).
@@ -403,6 +405,7 @@ impl Default for VibeVideoApp {
             browse_audio_streams: 0,
             render_ahead: None,
             render_ahead_generation: 0,
+            root_timeline_media_generation: 0,
             timeline_audio: None,
             playback_speed: 1.0,
             selection_follows_playhead: true,
@@ -994,14 +997,37 @@ impl VibeVideoApp {
             tracks.push(Track::new(TrackKind::Video));
         }
         tracks.push(Track::new(TrackKind::Audio));
+        let name: String = "Timeline 1".into();
         let id = self.project.timelines.insert(vv_core::Timeline {
-            name: "Timeline 1".into(),
+            name: name.clone(),
             fps,
             resolution,
             tracks,
         });
         self.timeline_id = Some(id);
         self.spawn_render_ahead_if_needed(id);
+        // La timeline del progetto è a tutti gli effetti una timeline come
+        // le altre (vedi doc di `MediaItem::compound`): compare nel media
+        // pool esattamente come una compound clip, trascinabile altrove.
+        // `meta` iniziale qualunque, `sync_root_timeline_media` la
+        // corregge subito al primo giro (chiamata da `update`).
+        let media_id = self.project.media_pool.insert(vv_core::MediaItem {
+            path: name.into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 0,
+                fps,
+                width: resolution.0,
+                height: resolution.1,
+                has_video: include_video_track,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 2,
+                audio_streams: 1,
+            },
+            content_hash: 0,
+            compound: Some(id),
+        });
+        self.project.sync_compound_meta(media_id);
         id
     }
 
@@ -1045,6 +1071,31 @@ impl VibeVideoApp {
             render_ahead.set_lookahead_secs(self.lookahead_secs);
         }
         render_ahead.set_target(self.timeline_state.playhead);
+    }
+
+    /// La voce nel media pool della timeline del progetto (vedi
+    /// `ensure_timeline_with`) riflette sempre il suo contenuto vero, non
+    /// solo quello al momento della creazione: durata, presenza di
+    /// video/audio possono cambiare a ogni modifica.
+    fn sync_root_timeline_media(&mut self) {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        let generation = self.history.generation();
+        if generation == self.root_timeline_media_generation {
+            return;
+        }
+        self.root_timeline_media_generation = generation;
+        let Some(media_id) = self
+            .project
+            .media_pool
+            .iter()
+            .find(|(_, item)| item.compound == Some(timeline_id))
+            .map(|(id, _)| id)
+        else {
+            return;
+        };
+        self.project.sync_compound_meta(media_id);
     }
 
     /// `lookahead_secs` scalato per la velocità di riproduzione, entro quanto
@@ -2536,6 +2587,7 @@ impl eframe::App for VibeVideoApp {
         self.drive_browse_playback();
         // Il buffer della timeline resta caldo anche durante l'anteprima del pool.
         self.sync_render_ahead();
+        self.sync_root_timeline_media();
 
         let (pending_effects, pending_playhead) =
             self.show_properties_panel(ui, &video_targets, &audio_targets);
@@ -3842,7 +3894,7 @@ mod tests {
             .project
             .media_pool
             .iter()
-            .next()
+            .find(|(_, item)| item.compound.is_none())
             .map(|(id, _)| id)
             .expect("media importato atteso nel pool");
 
@@ -4528,7 +4580,7 @@ mod tests {
 
         let mut app = VibeVideoApp::default();
         app.import_media(path);
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
         let audio_track = app.project.timelines[timeline_id]
@@ -5342,7 +5394,7 @@ mod tests {
 
         let mut app = VibeVideoApp::default();
         app.import_media(path);
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
         let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
@@ -5408,7 +5460,7 @@ mod tests {
 
         let mut app = VibeVideoApp::default();
         app.import_media(path); // accoda anche la generazione del proxy
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
         let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
@@ -5473,13 +5525,14 @@ mod tests {
         with_bad.push(dir.join("inesistente.mp4"));
         app.import_media_files(with_bad);
 
-        assert_eq!(app.project.media_pool.len(), 2);
+        // +1: la timeline del progetto compare anche lei nel pool.
+        assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 2);
         let warnings = &app.import_warnings;
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("inesistente.mp4"), "{warnings:?}");
         let worker = app.proxy_worker.as_ref().unwrap();
         assert_eq!(worker.progress().total, 2);
-        for item in app.project.media_pool.values() {
+        for item in app.project.media_pool.values().filter(|m| m.compound.is_none()) {
             assert!(worker.state(item.content_hash).is_some());
             assert!(app.thumbnails.contains_key(&item.content_hash));
         }
@@ -5514,8 +5567,10 @@ mod tests {
         output.textures_delta.clear();
 
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
-        assert_eq!(app.project.media_pool.len(), 1);
-        let item = app.project.media_pool.values().next().unwrap();
+        // +1: la timeline del progetto, creata al volo dall'import (vedi
+        // `ensure_timeline_for`), compare anche lei nel pool.
+        assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 1);
+        let item = app.project.media_pool.values().find(|m| m.compound.is_none()).unwrap();
         assert_eq!(item.path, path);
     }
 
@@ -5712,7 +5767,7 @@ mod tests {
         let mut app = VibeVideoApp::default();
         app.import_media(path_a);
         app.import_media(path_b);
-        let mut media_ids = app.project.media_pool.iter().map(|(id, _)| id);
+        let mut media_ids = app.project.media_pool.iter().filter(|(_, item)| item.compound.is_none()).map(|(id, _)| id);
         let media_a = media_ids.next().unwrap();
         let media_b = media_ids.next().unwrap();
         drop(media_ids);
@@ -6001,7 +6056,7 @@ mod tests {
         let mut app = VibeVideoApp::default();
         app.import_media_files(vec![path]);
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
-        let (media_id, item) = app.project.media_pool.iter().next().unwrap();
+        let (media_id, item) = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap();
         assert!(!item.meta.has_video);
         assert!(app.proxy_worker.is_none(), "niente proxy per un media solo audio");
         assert!(app.thumbnails.is_empty());
@@ -6070,7 +6125,7 @@ mod tests {
         app.import_media_files(vec![path.clone()]);
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
 
-        let (media_id, item) = app.project.media_pool.iter().next().unwrap();
+        let (media_id, item) = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap();
         assert!(item.meta.is_image());
         assert!(item.meta.has_video);
         assert!(!item.meta.has_audio);
@@ -6222,7 +6277,7 @@ mod tests {
 
         let mut app = VibeVideoApp::default();
         app.import_media(path.clone());
-        let media_id = app.project.media_pool.iter().next().unwrap().0;
+        let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
 
         let timeline_id = app.timeline_id.unwrap();

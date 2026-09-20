@@ -128,6 +128,24 @@ impl MixBufferCache {
     /// con `vv_audio::mixer::mix_clip_from`, la stessa funzione che usa
     /// `from_timeline`.
     pub fn get_or_compute_compound(&mut self, project: &Project, media_id: MediaId) -> Option<Arc<Vec<f32>>> {
+        self.get_or_compute_compound_at_depth(project, media_id, 0)
+    }
+
+    /// Limite alla profondità di nesting: da quando la timeline del
+    /// progetto è anche lei nel media pool, trascinarla dentro se stessa
+    /// (o dentro una sua compound clip) creerebbe un ciclo — senza un
+    /// limite, uno stack overflow invece di un semplice "non pronto".
+    const MAX_COMPOUND_DEPTH: u32 = 16;
+
+    fn get_or_compute_compound_at_depth(
+        &mut self,
+        project: &Project,
+        media_id: MediaId,
+        depth: u32,
+    ) -> Option<Arc<Vec<f32>>> {
+        if depth >= Self::MAX_COMPOUND_DEPTH {
+            return None;
+        }
         let item = project.media_pool.get(media_id)?;
         let nested_id = item.compound?;
         let content_hash = item.content_hash;
@@ -153,7 +171,7 @@ impl MixBufferCache {
                 // deve decidere se cachare, i due casi contano — `in_progress`
                 // li distingue.
                 let buffer = if inner_item.compound.is_some() {
-                    let Some(buffer) = self.get_or_compute_compound(project, *inner_id) else {
+                    let Some(buffer) = self.get_or_compute_compound_at_depth(project, *inner_id, depth + 1) else {
                         return None;
                     };
                     buffer
