@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    Clip, ClipId, ClipSource, FrameIdx, Project, Timeline, TimelineId, TrackKind,
+    Clip, ClipId, ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
 };
 
 use vv_audio::mixer::{
@@ -413,21 +413,10 @@ fn mix_audio_track(
 ) -> Result<Vec<f32>, String> {
     // Stessa decodifica dell'anteprima (`mix_buffers`): swresample a
     // `PROJECT_SAMPLE_RATE`, tutti gli stream di un file in una passata.
+    // Ricorsivo: i media veri dentro una compound clip finiscono nella
+    // stessa raccolta, come se fossero clip di `timeline`.
     let mut streams_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
-    for (_, track) in timeline.audible_tracks() {
-        for clip in track.clips.iter().filter(|c| !c.disabled) {
-            let ClipSource::Media(media_id) = &clip.source else {
-                continue;
-            };
-            let Some(item) = project.media_pool.get(*media_id) else {
-                continue;
-            };
-            let streams = streams_by_path.entry(item.path.clone()).or_default();
-            if !streams.contains(&clip.audio_stream_index) {
-                streams.push(clip.audio_stream_index);
-            }
-        }
-    }
+    collect_audio_streams(project, timeline, &mut streams_by_path);
     let mut buffers: HashMap<(PathBuf, usize), Arc<Vec<f32>>> = HashMap::new();
     for (path, streams) in streams_by_path {
         let mut decoded = vec![Vec::new(); streams.len()];
@@ -454,6 +443,7 @@ fn mix_audio_track(
         PROJECT_SAMPLE_RATE,
         PROJECT_CHANNELS,
         |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
+        |_, media_id| compound_mix_buffer(project, media_id, &buffers),
     );
     let fps = timeline.fps.as_f64();
     let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
@@ -462,6 +452,63 @@ fn mix_audio_track(
         vec![0.0_f32; (end_sample - start_sample) as usize * PROJECT_CHANNELS as usize];
     mix_range(&snapshot, start_sample, &mut mixed);
     Ok(mixed)
+}
+
+/// Ogni clip Media di `timeline` (a qualunque profondità di nesting dentro
+/// le compound clip) che referenzia un file vero, raccolta in
+/// `streams_by_path`: una compound clip stessa non genera una voce (il suo
+/// "file" non esiste), solo quel che referenzia la sua timeline annidata.
+fn collect_audio_streams(project: &Project, timeline: &Timeline, streams_by_path: &mut HashMap<PathBuf, Vec<usize>>) {
+    for (_, track) in timeline.audible_tracks() {
+        for clip in track.clips.iter().filter(|c| !c.disabled) {
+            let ClipSource::Media(media_id) = &clip.source else {
+                continue;
+            };
+            let Some(item) = project.media_pool.get(*media_id) else {
+                continue;
+            };
+            match item.compound {
+                Some(nested_id) => {
+                    if let Some(nested) = project.timelines.get(nested_id) {
+                        collect_audio_streams(project, nested, streams_by_path);
+                    }
+                }
+                None => {
+                    let streams = streams_by_path.entry(item.path.clone()).or_default();
+                    if !streams.contains(&clip.audio_stream_index) {
+                        streams.push(clip.audio_stream_index);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Il mixdown della timeline annidata di una compound clip, a
+/// `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`: qui non serve cacharlo (l'export
+/// lo chiede una volta sola per l'intero export) né controllare che i media
+/// veri siano pronti (`buffers` li ha già tutti, decodificati prima di
+/// arrivare qui da `collect_audio_streams`). Ricorsiva per una compound
+/// clip dentro un'altra.
+fn compound_mix_buffer(
+    project: &Project,
+    media_id: MediaId,
+    buffers: &HashMap<(PathBuf, usize), Arc<Vec<f32>>>,
+) -> Option<Arc<Vec<f32>>> {
+    let item = project.media_pool.get(media_id)?;
+    let nested = project.timelines.get(item.compound?)?;
+    let snapshot = MixSnapshot::from_timeline(
+        project,
+        nested,
+        PROJECT_SAMPLE_RATE,
+        PROJECT_CHANNELS,
+        |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
+        |_, inner_media_id| compound_mix_buffer(project, inner_media_id, buffers),
+    );
+    let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+    let mut buffer = vec![0.0_f32; len as usize * PROJECT_CHANNELS as usize];
+    mix_range(&snapshot, 0, &mut buffer);
+    Some(Arc::new(buffer))
 }
 
 #[cfg(test)]
@@ -689,6 +736,89 @@ mod tests {
             (PROJECT_SAMPLE_RATE as usize) * PROJECT_CHANNELS as usize
         );
         assert!(mixed.iter().all(|&s| s == 0.0));
+    }
+
+    /// Un file audio vero dentro la timeline annidata di una compound clip
+    /// deve arrivare nel mix dell'export, alla posizione della compound
+    /// clip nella timeline di partenza — non a quella che avrebbe nella sua
+    /// timeline annidata.
+    #[test]
+    fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
+        let dir = std::env::temp_dir().join("vv-app-export-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compound_audio_source.wav");
+        vv_media::test_support::ffmpeg(
+            &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"],
+            &path,
+        );
+
+        let mut project = Project::default();
+        let real_media = project.media_pool.insert(vv_core::MediaItem {
+            path: path.clone(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 25,
+                fps: vv_core::Rational::new(25, 1),
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 1,
+                audio_streams: 1,
+            },
+            content_hash: 1,
+            compound: None,
+        });
+        let real_clip =
+            Clip::from_source_range(ClipId(100), ClipSource::Media(real_media), 0, 25, 0, vv_core::Rational::one());
+        let nested_id = project.timelines.insert(Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1, 1),
+            tracks: vec![Track {
+                kind: TrackKind::Audio,
+                clips: vec![real_clip],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            }],
+        });
+        let compound_media = project.media_pool.insert(vv_core::MediaItem {
+            path: "Compound Clip 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 25,
+                fps: vv_core::Rational::new(25, 1),
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 1,
+                audio_streams: 1,
+            },
+            content_hash: 2,
+            compound: Some(nested_id),
+        });
+        // A 25 (1s dopo l'inizio): silenzio prima, sine wave durante.
+        let compound_clip =
+            Clip::from_source_range(ClipId(1), ClipSource::Media(compound_media), 0, 25, 25, vv_core::Rational::one());
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Audio,
+            clips: vec![compound_clip],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: Vec::new(),
+        }]);
+
+        let mixed = mix_audio_track(&project, &tl, 0..50).unwrap();
+        let per_second = PROJECT_SAMPLE_RATE as usize * PROJECT_CHANNELS as usize;
+        assert!(mixed[..per_second].iter().all(|&s| s == 0.0), "silenzio prima della compound clip");
+        assert!(
+            mixed[per_second..].iter().any(|&s| s.abs() > 0.01),
+            "il contenuto della timeline annidata arriva nel mix alla posizione della compound clip"
+        );
     }
 
     /// End-to-end: costruisce una timeline vera (via `VibeVideoApp`, non

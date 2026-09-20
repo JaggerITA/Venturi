@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 
+use vv_core::{ClipSource, MediaId, Project};
+
 use crate::worker::Worker;
 
 type Key = (PathBuf, usize);
@@ -29,6 +31,12 @@ pub struct MixBufferCache {
     in_progress: HashSet<Key>,
     worker: Worker<(Key, bool)>,
     ready_rx: mpsc::Receiver<Ready>,
+    sample_rate: u32,
+    channels: u16,
+    /// Mixdown già calcolati di una compound clip, chiave `MediaId` +
+    /// `content_hash` con cui sono stati calcolati: vedi
+    /// `get_or_compute_compound`.
+    compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
 }
 
 impl MixBufferCache {
@@ -75,6 +83,9 @@ impl MixBufferCache {
             in_progress: HashSet::new(),
             worker,
             ready_rx,
+            sample_rate,
+            channels,
+            compound: HashMap::new(),
         }
     }
 
@@ -103,6 +114,76 @@ impl MixBufferCache {
         self.in_progress.insert(key.clone());
         self.entries.insert(key, None);
         None
+    }
+
+    /// Il mixdown della timeline annidata di una compound clip, a
+    /// `sample_rate`/`channels` di questa cache — trattato da lì in poi
+    /// come un file già decodificato. Cachato per `content_hash`: `None`
+    /// finché anche solo una delle clip audio coinvolte (a qualunque
+    /// profondità di nesting) non ha ancora un buffer pronto — un mixdown a
+    /// cui manca un pezzo, cachato, resterebbe sbagliato finché
+    /// `content_hash` non cambia di nuovo. Non passa da
+    /// `MixSnapshot::from_timeline` (che prenderebbe due chiusure entrambe
+    /// mutabili su `self`, in conflitto): costruisce le `MixClip` a mano
+    /// con `vv_audio::mixer::mix_clip_from`, la stessa funzione che usa
+    /// `from_timeline`.
+    pub fn get_or_compute_compound(&mut self, project: &Project, media_id: MediaId) -> Option<Arc<Vec<f32>>> {
+        let item = project.media_pool.get(media_id)?;
+        let nested_id = item.compound?;
+        let content_hash = item.content_hash;
+        if let Some((hash, buffer)) = self.compound.get(&media_id)
+            && *hash == content_hash
+        {
+            return Some(buffer.clone());
+        }
+        let nested = project.timelines.get(nested_id)?;
+        let timeline_fps = nested.fps.as_f64().max(1e-9);
+        let mut clips = Vec::new();
+        for (_, track) in nested.audible_tracks() {
+            for clip in track.clips.iter().filter(|c| !c.disabled) {
+                let ClipSource::Media(inner_id) = &clip.source else {
+                    continue;
+                };
+                let Some(inner_item) = project.media_pool.get(*inner_id) else {
+                    continue;
+                };
+                // `get_or_request` risponde `None` sia "non ancora deciso"
+                // sia "niente audio a questo stream" (stesso trattamento per
+                // l'ascolto dal vivo, dove non fa differenza): solo qui, che
+                // deve decidere se cachare, i due casi contano — `in_progress`
+                // li distingue.
+                let buffer = if inner_item.compound.is_some() {
+                    let Some(buffer) = self.get_or_compute_compound(project, *inner_id) else {
+                        return None;
+                    };
+                    buffer
+                } else {
+                    let key = (inner_item.path.clone(), clip.audio_stream_index);
+                    match self.get_or_request(&inner_item.path, clip.audio_stream_index) {
+                        Some(buffer) => buffer,
+                        None if self.in_progress.contains(&key) => return None,
+                        None => continue,
+                    }
+                };
+                let clip_fps = inner_item.meta.fps.as_f64().max(1e-9);
+                if let Some(mix_clip) =
+                    vv_audio::mixer::mix_clip_from(clip, timeline_fps, clip_fps, self.sample_rate, self.channels as u64, buffer)
+                {
+                    clips.push(mix_clip);
+                }
+            }
+        }
+        let snapshot = vv_audio::mixer::MixSnapshot {
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            clips,
+        };
+        let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+        let mut buffer = vec![0.0f32; len as usize * self.channels.max(1) as usize];
+        vv_audio::mixer::mix_range(&snapshot, 0, &mut buffer);
+        let buffer = Arc::new(buffer);
+        self.compound.insert(media_id, (content_hash, buffer.clone()));
+        Some(buffer)
     }
 
     /// Raccoglie i buffer pronti (anche parziali); `true` se ne è arrivato
@@ -203,6 +284,94 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "decodifica mai finita");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn get_or_compute_compound_waits_for_its_real_media_then_caches_the_mixdown() {
+        let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compound_source.wav");
+        vv_media::test_support::ffmpeg(
+            &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"],
+            &path,
+        );
+
+        let mut project = Project::default();
+        let real_media = project.media_pool.insert(vv_core::MediaItem {
+            path: path.clone(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 25,
+                fps: vv_core::Rational::new(25, 1),
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 1,
+                audio_streams: 1,
+            },
+            content_hash: 1,
+            compound: None,
+        });
+        let real_clip = vv_core::Clip::from_source_range(
+            vv_core::ClipId(1),
+            vv_core::ClipSource::Media(real_media),
+            0,
+            25,
+            0,
+            vv_core::Rational::one(),
+        );
+        let nested_id = project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1, 1),
+            tracks: vec![vv_core::Track {
+                kind: vv_core::TrackKind::Audio,
+                clips: vec![real_clip],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            }],
+        });
+        let compound_media = project.media_pool.insert(vv_core::MediaItem {
+            path: "Compound Clip 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 25,
+                fps: vv_core::Rational::new(25, 1),
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 1,
+                audio_streams: 1,
+            },
+            content_hash: 2,
+            compound: Some(nested_id),
+        });
+
+        let mut cache = MixBufferCache::spawn(48_000, 1);
+        assert!(
+            cache.get_or_compute_compound(&project, compound_media).is_none(),
+            "il media vero non è ancora decodificato: la compound clip non è pronta"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let buffer = loop {
+            assert!(std::time::Instant::now() < deadline, "il mixdown non è mai diventato pronto");
+            cache.poll();
+            if let Some(buffer) = cache.get_or_compute_compound(&project, compound_media) {
+                break buffer;
+            }
+            std::thread::yield_now();
+        };
+        assert!(buffer.iter().any(|&s| s.abs() > 0.01), "il sine wave deve arrivare nel mixdown");
+
+        // Stesso content_hash: la seconda chiamata restituisce il buffer
+        // cachato, non ne ricalcola uno nuovo.
+        let cached = cache.get_or_compute_compound(&project, compound_media).unwrap();
+        assert!(Arc::ptr_eq(&buffer, &cached));
     }
 
     #[test]
