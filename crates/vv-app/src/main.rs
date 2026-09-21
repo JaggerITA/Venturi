@@ -244,9 +244,6 @@ struct VibeVideoApp {
     /// `RenderAhead`, configurabile dal menu.
     cache_budget_bytes: usize,
 
-    /// Anteprima dal proxy tutto-intra quando pronto: scrub fluido su sorgenti
-    /// long-GOP. L'export usa sempre i sorgenti.
-    proxy_enabled: bool,
     /// Genera i proxy anche col toggle spento, così sono pronti quando lo si
     /// riattiva. Creato al primo import.
     proxy_worker: Option<proxy_worker::ProxyWorker>,
@@ -400,7 +397,6 @@ impl Default for VibeVideoApp {
             egui_render_state: None,
             browsing_render_ahead: None,
             cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
-            proxy_enabled: true,
             proxy_worker: None,
             proxy_paused_for_export: false,
             waveform_worker: None,
@@ -574,7 +570,7 @@ impl VibeVideoApp {
             project,
             timeline_id,
             self.cache_budget_bytes,
-            self.proxy_enabled,
+            self.settings.proxy_enabled,
             self.lookahead_secs,
             self.behind_secs,
         );
@@ -954,7 +950,7 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
         };
-        if !self.proxy_enabled {
+        if !self.settings.proxy_enabled {
             return Vec::new();
         }
         let Some(proxy_worker) = &self.proxy_worker else {
@@ -1159,7 +1155,7 @@ impl VibeVideoApp {
                 self.project.clone(),
                 timeline_id,
                 self.cache_budget_bytes,
-                self.proxy_enabled,
+                self.settings.proxy_enabled,
                 self.lookahead_secs,
                 self.behind_secs,
             ));
@@ -6293,7 +6289,7 @@ mod tests {
             "con il proxy pronto e il toggle attivo, deve coprire l'intera clip"
         );
 
-        app.proxy_enabled = false;
+        app.settings.proxy_enabled = false;
         assert!(
             app.proxy_timeline_ranges().is_empty(),
             "col toggle disattivato non deve segnalare nulla, anche col proxy pronto"

@@ -287,15 +287,16 @@ impl VibeVideoApp {
                 ui.menu_button(t!("menu.playback"), |ui| {
                     ui.menu_button("Proxy", |ui| {
                         if ui
-                            .checkbox(&mut self.proxy_enabled, t!("menu.use_proxy"))
+                            .checkbox(&mut self.settings.proxy_enabled, t!("menu.use_proxy"))
                             .on_hover_text(
                                 t!("menu.use_proxy_hint"),
                             )
                             .changed()
                         {
                             for render_ahead in self.render_aheads() {
-                                render_ahead.set_proxy_enabled(self.proxy_enabled);
+                                render_ahead.set_proxy_enabled(self.settings.proxy_enabled);
                             }
+                            self.persist_settings();
                         }
                         ui.horizontal(|ui| {
                             ui.label(t!("menu.read_ahead"));

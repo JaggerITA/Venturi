@@ -417,6 +417,9 @@ pub struct Settings {
     pub language: Language,
     /// Scrolling cinetico (inerzia dopo lo swipe da touchpad) sulla timeline.
     pub kinetic_scroll: bool,
+    /// Anteprima dal proxy tutto-intra quando pronto: scrub fluido su sorgenti
+    /// long-GOP. L'export usa sempre i sorgenti.
+    pub proxy_enabled: bool,
     /// Progetti aperti di recente, più recente per primo.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
@@ -428,6 +431,7 @@ impl Default for Settings {
             keymap: Keymap::default(),
             language: Language::default(),
             kinetic_scroll: true,
+            proxy_enabled: true,
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
         }
@@ -450,6 +454,8 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     kinetic_scroll: Option<bool>,
+    #[serde(default)]
+    proxy_enabled: Option<bool>,
     #[serde(default)]
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
@@ -499,6 +505,7 @@ impl Settings {
         let mut settings = Self::default();
         settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
+        settings.proxy_enabled = file.proxy_enabled.unwrap_or(true);
         settings.recent_projects = file.recent_projects;
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
@@ -535,6 +542,7 @@ impl Settings {
                 .collect(),
             language: Some(self.language.id().to_owned()),
             kinetic_scroll: Some(self.kinetic_scroll),
+            proxy_enabled: Some(self.proxy_enabled),
             recent_projects: self.recent_projects.clone(),
             panels: PanelLayoutFile {
                 media_pool_open: Some(self.panels.media_pool_open),
@@ -608,6 +616,7 @@ mod tests {
         settings.keymap.assign(Action::Split, Some(0), Shortcut::ctrl(egui::Key::K));
         settings.keymap.remove(Action::ZoomIn, 1);
         settings.language = Language::Italian;
+        settings.proxy_enabled = false;
         settings.save(&path).unwrap();
 
         let loaded = Settings::load(&path);
@@ -617,6 +626,7 @@ mod tests {
         let loaded = Settings::load(&path);
         assert_eq!(loaded.keymap.shortcuts(Action::Split), &[Shortcut { alt: true, ..Shortcut::plain(egui::Key::K) }]);
         assert_eq!(loaded.keymap.shortcuts(Action::Undo), Keymap::default().shortcuts(Action::Undo));
+        assert!(loaded.proxy_enabled);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
