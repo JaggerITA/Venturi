@@ -28,7 +28,7 @@ pub trait FrameProvider {
         _project: &Project,
         _nested: &Timeline,
         _local_frame: FrameIdx,
-    ) -> Result<Option<vv_render::wgpu::Texture>, String> {
+    ) -> Result<Option<vv_render::PooledTexture>, String> {
         Ok(None)
     }
 }
@@ -164,7 +164,7 @@ pub enum OwnedLayer {
     },
     /// Compound clip composta su GPU (vedi `FrameProvider::compound_texture`).
     Texture {
-        texture: vv_render::wgpu::Texture,
+        texture: vv_render::PooledTexture,
         transform: Transform,
         /// Risoluzione della timeline annidata: le unità del crop, come
         /// `source_size` di `Video` (la texture può essere più piccola).
@@ -273,7 +273,7 @@ impl FrameProvider for GpuCompounds<'_> {
         project: &Project,
         nested: &Timeline,
         local_frame: FrameIdx,
-    ) -> Result<Option<vv_render::wgpu::Texture>, String> {
+    ) -> Result<Option<vv_render::PooledTexture>, String> {
         if self.depth >= MAX_COMPOUND_DEPTH {
             return Ok(None);
         }
@@ -369,7 +369,7 @@ fn clip_content(
 enum ClipContent {
     None,
     Yuv(Arc<FrameYuv420>),
-    Texture(vv_render::wgpu::Texture),
+    Texture(vv_render::PooledTexture),
 }
 
 /// La parte comune a `clip_layer` e al lato di una crossing transition

@@ -287,6 +287,9 @@ pub struct Compositor {
     /// Texture riusate da un frame all'altro, per dimensione: allocarne di
     /// nuove a ogni frame costa più del disegno stesso.
     pool: Mutex<TexturePool>,
+    /// Pool a parte per gli intermedi (vedi `PooledTexture`): ci tornano
+    /// quando chi li usa li lascia andare, non a fine render.
+    scratch: Arc<Mutex<Vec<wgpu::Texture>>>,
 }
 
 #[derive(Default)]
@@ -304,12 +307,37 @@ struct I420Buffers {
     readback: wgpu::Buffer,
 }
 
-/// Se la texture di output torna nel pool o resta a chi la riceve: vedi
-/// `render_layers_to_owned_texture_transparent`.
+/// Se la texture di output torna subito nel pool dei frame o esce come
+/// `PooledTexture`, che ce la rimette quando chi la usa la lascia andare.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Recycle {
-    Yes,
-    No,
+    Immediately,
+    OnDrop,
+}
+
+/// Una texture intermedia (il frame composto di una timeline annidata) che
+/// torna al pool da sé: finché qualcuno la tiene come layer nessun altro
+/// render ci disegna sopra, e quando la lascia andare è di nuovo
+/// disponibile, senza riallocare 8 MB a ogni frame.
+pub struct PooledTexture {
+    texture: Option<wgpu::Texture>,
+    pool: Arc<Mutex<Vec<wgpu::Texture>>>,
+}
+
+impl std::ops::Deref for PooledTexture {
+    type Target = wgpu::Texture;
+
+    fn deref(&self) -> &wgpu::Texture {
+        self.texture.as_ref().expect("la texture c'è fino al Drop")
+    }
+}
+
+impl Drop for PooledTexture {
+    fn drop(&mut self) {
+        if let Some(texture) = self.texture.take() {
+            give_back(&mut self.pool.lock().unwrap(), [texture]);
+        }
+    }
 }
 
 /// Oltre, le texture di dimensioni non più usate vengono lasciate andare.
@@ -439,6 +467,7 @@ impl Compositor {
             sampler,
             i420_pipeline,
             pool: Mutex::default(),
+            scratch: Arc::default(),
         }
     }
 
@@ -608,7 +637,7 @@ impl Compositor {
     /// (vedi [`Compositor::render_layers`]). Sfondo nero opaco: per il
     /// video finale (anteprima, export) non esiste "trasparente".
     pub fn render_layers_to_texture(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
-        self.render_layers_to_texture_with_clear(layers, output, BLACK, Recycle::Yes)
+        self.render_layers_to_texture_with_clear(layers, output, BLACK, Recycle::Immediately)
     }
 
     /// Come `render_layers_to_texture`, ma senza forzare uno sfondo opaco:
@@ -618,15 +647,18 @@ impl Compositor {
     /// nere, o coprirebbero quel che c'è sotto invece di lasciarlo vedere
     /// (vedi `YuvFrame::alpha`, che porta questa trasparenza in giro).
     pub fn render_layers_to_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
-        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::Yes)
+        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::Immediately)
     }
 
-    /// Come `render_layers_to_texture_transparent`, ma la texture **non**
-    /// torna nel pool: la tiene chi la riceve, per riusarla come
-    /// `Layer::Texture` in una composizione successiva. Col riciclo, il
-    /// primo render della stessa dimensione le disegnerebbe sopra.
-    pub fn render_layers_to_owned_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
-        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::No)
+    /// Come `render_layers_to_texture_transparent`, ma la texture resta a
+    /// chi la riceve finché non la lascia andare, per usarla nel frattempo
+    /// come `Layer::Texture`: col riciclo immediato il primo render della
+    /// stessa dimensione le disegnerebbe sopra.
+    pub fn render_layers_to_owned_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> PooledTexture {
+        PooledTexture {
+            texture: Some(self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::OnDrop)),
+            pool: Arc::clone(&self.scratch),
+        }
     }
 
     fn render_layers_to_texture_with_clear(
@@ -636,7 +668,10 @@ impl Compositor {
         clear: wgpu::Color,
         recycle: Recycle,
     ) -> wgpu::Texture {
-        let output_texture = self.output_texture(output.width, output.height);
+        let output_texture = match recycle {
+            Recycle::Immediately => self.output_texture(output.width, output.height),
+            Recycle::OnDrop => self.scratch_texture(output.width, output.height),
+        };
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut planes = Vec::new();
 
@@ -742,7 +777,7 @@ impl Compositor {
         self.queue.submit(Some(encoder.finish()));
         let mut pool = self.pool.lock().unwrap();
         give_back(&mut pool.planes, planes);
-        if recycle == Recycle::Yes {
+        if recycle == Recycle::Immediately {
             // Una copia resta nel pool: il prossimo frame della stessa
             // dimensione ci ridisegna sopra, dopo che la GPU ha finito con
             // questo (stessa coda).
@@ -934,11 +969,23 @@ impl Compositor {
         texture
     }
 
+    /// Come `output_texture`, ma dal pool degli intermedi (vedi
+    /// `PooledTexture`), separato perché lì una texture resta occupata
+    /// finché chi la usa non la restituisce.
+    fn scratch_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
+        take_sized(&mut self.scratch.lock().unwrap(), output_w, output_h)
+            .unwrap_or_else(|| self.new_output_texture(output_w, output_h))
+    }
+
     fn output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
         if let Some(texture) = take_sized(&mut self.pool.lock().unwrap().outputs, output_w, output_h)
         {
             return texture;
         }
+        self.new_output_texture(output_w, output_h)
+    }
+
+    fn new_output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("vv-render output frame"),
             size: wgpu::Extent3d {
@@ -1822,6 +1869,22 @@ mod tests {
         // Rosso al 50% sopra il bianco. Con la doppia moltiplicazione il
         // rosso scenderebbe a ~191.
         assert_close_rgba(out.as_chunks::<4>().0[0], [255, 128, 128, 255]);
+    }
+
+    /// L'intermedio torna nel suo pool appena chi lo usa lo lascia andare,
+    /// e il render successivo lo ritrova invece di allocare.
+    #[test]
+    fn an_owned_texture_returns_to_the_pool_when_dropped() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(8, 8);
+
+        let texture = compositor.render_layers_to_owned_texture_transparent(&[], output);
+        assert!(compositor.scratch.lock().unwrap().is_empty(), "in uso, non nel pool");
+        drop(texture);
+        assert_eq!(compositor.scratch.lock().unwrap().len(), 1);
+
+        let _reused = compositor.render_layers_to_owned_texture_transparent(&[], output);
+        assert!(compositor.scratch.lock().unwrap().is_empty(), "ripresa dal pool, non allocata");
     }
 
     /// `render_layers_to_owned_texture_transparent` non rimette la texture
