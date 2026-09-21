@@ -90,6 +90,7 @@ pub enum OwnedLayer {
         opacity: f32,
         /// Solo i filtri attivi di `EffectStack::filters`, nel loro ordine.
         filters: Vec<vv_core::FilterKind>,
+        blend: vv_core::BlendMode,
     },
     /// Compound clip composta su GPU (vedi `FrameProvider::compound_texture`).
     Texture {
@@ -100,18 +101,21 @@ pub enum OwnedLayer {
         source_size: (u32, u32),
         opacity: f32,
         filters: Vec<vv_core::FilterKind>,
+        blend: vv_core::BlendMode,
     },
     Solid {
         color: Rgba,
         transform: Transform,
         opacity: f32,
         filters: Vec<vv_core::FilterKind>,
+        blend: vv_core::BlendMode,
     },
     Text {
         title: TitleParams,
         transform: Transform,
         opacity: f32,
         filters: Vec<vv_core::FilterKind>,
+        blend: vv_core::BlendMode,
     },
 }
 
@@ -124,12 +128,14 @@ impl OwnedLayer {
                 source_size,
                 opacity,
                 filters,
+                blend,
             } => vv_render::Layer::Video {
                 frame: as_render_yuv_frame(frame),
                 transform: *transform,
                 source_size: *source_size,
                 opacity: *opacity,
                 filters: filters.as_slice(),
+                blend: *blend,
             },
             OwnedLayer::Texture {
                 texture,
@@ -137,24 +143,28 @@ impl OwnedLayer {
                 source_size,
                 opacity,
                 filters,
+                blend,
             } => vv_render::Layer::Texture {
                 texture,
                 transform: *transform,
                 source_size: *source_size,
                 opacity: *opacity,
                 filters: filters.as_slice(),
+                blend: *blend,
             },
-            OwnedLayer::Solid { color, transform, opacity, filters } => vv_render::Layer::Solid {
+            OwnedLayer::Solid { color, transform, opacity, filters, blend } => vv_render::Layer::Solid {
                 color: *color,
                 transform: *transform,
                 opacity: *opacity,
                 filters: filters.as_slice(),
+                blend: *blend,
             },
-            OwnedLayer::Text { title, transform, opacity, filters } => vv_render::Layer::Text {
+            OwnedLayer::Text { title, transform, opacity, filters, blend } => vv_render::Layer::Text {
                 title,
                 transform: *transform,
                 opacity: *opacity,
                 filters: filters.as_slice(),
+                blend: *blend,
             },
         }
     }
@@ -321,6 +331,10 @@ fn build_layer(
         .filter(|f| f.enabled)
         .map(|f| f.kind)
         .collect();
+    let blend = clip.effects.blend_mode;
+    // L'opacità della clip si moltiplica a quella già portata dalle
+    // dissolvenze.
+    let opacity = opacity * (transform.opacity / 100.0).clamp(0.0, 1.0);
     match &clip.source {
         ClipSource::SolidColor => Some(OwnedLayer::Solid {
             color: clip
@@ -331,12 +345,13 @@ fn build_layer(
             transform,
             opacity,
             filters,
+            blend,
         }),
         ClipSource::Text => clip
             .effects
             .title
             .clone()
-            .map(|title| OwnedLayer::Text { title, transform, opacity, filters }),
+            .map(|title| OwnedLayer::Text { title, transform, opacity, filters, blend }),
         ClipSource::Media(_) => match content {
             ClipContent::None => None,
             ClipContent::Yuv(frame) => Some(OwnedLayer::Video {
@@ -345,6 +360,7 @@ fn build_layer(
                 source_size: clip_source_size(project, clip, timeline_size),
                 opacity,
                 filters,
+                blend,
             }),
             ClipContent::Texture(texture) => Some(OwnedLayer::Texture {
                 texture,
@@ -352,6 +368,7 @@ fn build_layer(
                 source_size: clip_source_size(project, clip, timeline_size),
                 opacity,
                 filters,
+                blend,
             }),
         },
     }

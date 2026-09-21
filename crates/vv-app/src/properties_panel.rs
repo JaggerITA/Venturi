@@ -775,6 +775,31 @@ pub(crate) fn set_title((tl, track, clip): ClipRef, value: vv_core::TitleParams)
     Box::new(vv_core::set_clip_title(tl, track, clip, value))
 }
 
+pub(crate) fn blend_mode_label(mode: vv_core::BlendMode) -> Cow<'static, str> {
+    use vv_core::BlendMode as B;
+    match mode {
+        B::Normal => t!("blend.normal"),
+        B::Add => t!("blend.add"),
+        B::Multiply => t!("blend.multiply"),
+        B::Screen => t!("blend.screen"),
+        B::Overlay => t!("blend.overlay"),
+        B::Darken => t!("blend.darken"),
+        B::Lighten => t!("blend.lighten"),
+        B::ColorDodge => t!("blend.color_dodge"),
+        B::ColorBurn => t!("blend.color_burn"),
+        B::HardLight => t!("blend.hard_light"),
+        B::SoftLight => t!("blend.soft_light"),
+        B::Difference => t!("blend.difference"),
+        B::Exclusion => t!("blend.exclusion"),
+        B::Subtract => t!("blend.subtract"),
+        B::Divide => t!("blend.divide"),
+    }
+}
+
+pub(crate) fn set_blend_mode((tl, track, clip): ClipRef, value: vv_core::BlendMode) -> BoxedCommand {
+    Box::new(vv_core::set_clip_blend_mode(tl, track, clip, value))
+}
+
 pub(crate) fn set_filters((tl, track, clip): ClipRef, value: Vec<vv_core::ClipFilter>) -> BoxedCommand {
     Box::new(vv_core::set_clip_filters(tl, track, clip, value))
 }
@@ -975,6 +1000,7 @@ impl VibeVideoApp {
                 .unwrap_or(DEFAULT_SOLID_COLOR),
             title: clip.effects.title.clone(),
             filters: clip.effects.filters.clone(),
+            blend_mode: clip.effects.blend_mode,
         })
     }
 
@@ -1469,6 +1495,57 @@ impl VibeVideoApp {
                                                 },
                                             );
                                             rows.push((softness_params, row));
+
+                                            ui.add_space(6.0);
+                                            let mut blend_mode = info.blend_mode;
+                                            let mut blend_changed = false;
+                                            if section_reset(ui, &t!("props.composite")) {
+                                                reset_groups.push((vec![P::Opacity], false));
+                                                blend_mode = vv_core::BlendMode::Normal;
+                                                blend_changed = true;
+                                            }
+
+                                            let row = param_row(ui, &t!("props.composite_mode"), None, |ui| {
+                                                let mut changed = false;
+                                                egui::ComboBox::from_id_salt("clip_blend_mode")
+                                                    .selected_text(blend_mode_label(blend_mode))
+                                                    .width(ui.available_width())
+                                                    .show_ui(ui, |ui| {
+                                                        for mode in vv_core::BlendMode::ALL {
+                                                            changed |= ui
+                                                                .selectable_value(&mut blend_mode, mode, blend_mode_label(mode))
+                                                                .changed();
+                                                        }
+                                                    });
+                                                changed
+                                            });
+                                            blend_changed |= row.changed;
+                                            if row.reset {
+                                                blend_mode = vv_core::BlendMode::Normal;
+                                                blend_changed = true;
+                                            }
+                                            if blend_changed {
+                                                for t in targets {
+                                                    pending_effects.push(set_blend_mode((t.timeline, t.track_index, t.clip_id), blend_mode));
+                                                }
+                                            }
+
+                                            let opacity_params = vec![P::Opacity];
+                                            let row = param_row(
+                                                ui,
+                                                &t!("props.opacity"),
+                                                Some(row_keyframe(&opacity_params)),
+                                                |ui| {
+                                                    slider_field(
+                                                        ui,
+                                                        &mut transform.opacity,
+                                                        0.0..=100.0,
+                                                        0.5,
+                                                        2,
+                                                    )
+                                                },
+                                            );
+                                            rows.push((opacity_params, row));
 
                                             let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                             for (params, row) in &rows {

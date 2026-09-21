@@ -20,7 +20,9 @@ struct TransformUniform {
     color: vec4<f32>,
     // RGBA del layer a colore pieno, al posto dei piani Y/U/V.
     solid: vec4<f32>,
-    // x: opacità dell'intero layer (dissolvenze di clip). y/z/w inutilizzati.
+    // x: opacità dell'intero layer (dissolvenze di clip e opacità della
+    // clip). y: id del metodo di composizione (vedi `blend_shader_id`).
+    // z/w inutilizzati.
     extra: vec4<f32>,
     // Id shader dei filtri attivi della clip, in ordine di applicazione
     // (0 = slot vuoto); vedi `filter_shader_id` in compositor.rs, l'unico
@@ -36,6 +38,11 @@ struct TransformUniform {
 // Copertura per pixel (1x1 opaco per un layer senza vera trasparenza, es.
 // un video decodificato — vedi YuvFrame::alpha in compositor.rs).
 @group(0) @binding(5) var a_tex: texture_2d<f32>;
+// Copia di quel che è già stato composto sotto, premoltiplicato: serve solo
+// ai metodi di composizione diversi da Normal, che devono leggere lo sfondo
+// (l'alpha blending fisso della pipeline non basta). Con Normal è un
+// placeholder 1x1 mai campionato.
+@group(0) @binding(6) var backdrop_tex: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -117,8 +124,8 @@ fn yuv_to_rgb(y_sample: f32, u_sample: f32, v_sample: f32, matrix_id: i32, full_
     return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+// Colore del layer da solo, non premoltiplicato.
+fn shade(in: VertexOutput) -> vec4<f32> {
     let zoom = max(abs(transform.zoom_pos.xy), vec2<f32>(0.0001, 0.0001));
     let position = transform.zoom_pos.zw;
     let anchor = transform.anchor_flip.xy;
@@ -214,4 +221,74 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // sempre 1.0, nessun effetto (vedi doc di `a_tex`).
     out_alpha = out_alpha * textureSample(a_tex, input_sampler, source_uv).r;
     return vec4<f32>(rgb, out_alpha);
+}
+
+// B(Cb, Cs) dei metodi separabili, canale per canale; `id` viene da
+// `blend_shader_id` in compositor.rs.
+fn blend_channel(id: i32, cb: f32, cs: f32) -> f32 {
+    switch (id) {
+        case 1: { return min(cb + cs, 1.0); }            // Add
+        case 2: { return cb * cs; }                      // Multiply
+        case 3: { return cb + cs - cb * cs; }            // Screen
+        case 4: {                                        // Overlay
+            if (cb <= 0.5) { return 2.0 * cb * cs; }
+            return 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs);
+        }
+        case 5: { return min(cb, cs); }                  // Darken
+        case 6: { return max(cb, cs); }                  // Lighten
+        case 7: {                                        // Color Dodge
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb / (1.0 - cs), 1.0);
+        }
+        case 8: {                                        // Color Burn
+            if (cs <= 0.0) { return 0.0; }
+            return 1.0 - min((1.0 - cb) / cs, 1.0);
+        }
+        case 9: {                                        // Hard Light
+            if (cs <= 0.5) { return 2.0 * cb * cs; }
+            return 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs);
+        }
+        case 10: {                                       // Soft Light (W3C)
+            var d: f32;
+            if (cb <= 0.25) {
+                d = ((16.0 * cb - 12.0) * cb + 4.0) * cb;
+            } else {
+                d = sqrt(cb);
+            }
+            if (cs <= 0.5) { return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb); }
+            return cb + (2.0 * cs - 1.0) * (d - cb);
+        }
+        case 11: { return abs(cb - cs); }                // Difference
+        case 12: { return cb + cs - 2.0 * cb * cs; }     // Exclusion
+        case 13: { return max(cb - cs, 0.0); }           // Subtract
+        case 14: {                                       // Divide
+            if (cs <= 0.0) { return 1.0; }
+            return min(cb / cs, 1.0);
+        }
+        default: { return cs; }
+    }
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = shade(in);
+    let blend_id = i32(transform.extra.y);
+    // Normal: ci pensa l'alpha blending della pipeline, il colore esce
+    // non premoltiplicato.
+    if (blend_id == 0) {
+        return src;
+    }
+    // Gli altri modi scrivono in REPLACE il risultato già composto, quindi
+    // premoltiplicato come il backdrop che hanno letto.
+    let dst = textureLoad(backdrop_tex, vec2<i32>(floor(in.clip_position.xy)), 0);
+    let dst_rgb = dst.rgb / max(dst.a, 1.0 / 255.0);
+    var blended = vec3<f32>(
+        blend_channel(blend_id, dst_rgb.r, src.r),
+        blend_channel(blend_id, dst_rgb.g, src.g),
+        blend_channel(blend_id, dst_rgb.b, src.b),
+    );
+    // Dove sotto non c'è niente il blend non ha un fondo su cui agire: lì
+    // vale il colore sorgente e basta.
+    blended = mix(src.rgb, blended, dst.a);
+    return vec4<f32>(blended * src.a + dst.rgb * (1.0 - src.a), src.a + dst.a * (1.0 - src.a));
 }

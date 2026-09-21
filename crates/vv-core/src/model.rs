@@ -290,6 +290,7 @@ impl Lerp for Transform {
         Self {
             crop,
             crop_softness: f32::lerp(&a.crop_softness, &b.crop_softness, t),
+            opacity: f32::lerp(&a.opacity, &b.opacity, t),
             zoom: [
                 f32::lerp(&a.zoom[0], &b.zoom[0], t),
                 f32::lerp(&a.zoom[1], &b.zoom[1], t),
@@ -397,6 +398,8 @@ pub struct Transform {
     pub anchor: [f32; 2],
     /// Specchiatura orizzontale (X) e verticale (Y).
     pub flip: [bool; 2],
+    /// Opacità del layer in percentuale, 0-100.
+    pub opacity: f32,
 }
 
 impl Default for Transform {
@@ -409,6 +412,7 @@ impl Default for Transform {
             rotation: 0.0,
             anchor: [0.0, 0.0],
             flip: [false, false],
+            opacity: 100.0,
         }
     }
 }
@@ -429,10 +433,11 @@ pub enum TransformParam {
     CropRight,
     CropBottom,
     CropSoftness,
+    Opacity,
 }
 
 impl TransformParam {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::ZoomX,
         Self::ZoomY,
         Self::PositionX,
@@ -445,6 +450,7 @@ impl TransformParam {
         Self::CropRight,
         Self::CropBottom,
         Self::CropSoftness,
+        Self::Opacity,
     ];
 
     /// Posizione in `TransformTracks::params` — l'ordine di `ALL`, che è
@@ -468,17 +474,39 @@ impl TransformParam {
             Self::CropRight => t.crop[2],
             Self::CropBottom => t.crop[3],
             Self::CropSoftness => t.crop_softness,
+            Self::Opacity => t.opacity,
         }
     }
 }
 
 /// Il transform di una clip: un `Keyframed<f32>` per parametro, così ogni
 /// parametro si anima per conto suo, più il flip (non animabile).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TransformTracks {
     /// Uno per `TransformParam`, nell'ordine di `TransformParam::ALL`.
     params: Vec<Keyframed<f32>>,
     pub flip: [bool; 2],
+}
+
+/// I progetti salvati prima che un parametro esistesse hanno meno tracce di
+/// `TransformParam::ALL`: la coda mancante prende il valore di default.
+impl<'de> Deserialize<'de> for TransformTracks {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Repr {
+            params: Vec<Keyframed<f32>>,
+            flip: [bool; 2],
+        }
+        let mut repr = Repr::deserialize(deserializer)?;
+        let default = Transform::default();
+        for p in TransformParam::ALL.iter().skip(repr.params.len()) {
+            repr.params.push(Keyframed::constant(p.of(&default)));
+        }
+        Ok(Self {
+            params: repr.params,
+            flip: repr.flip,
+        })
+    }
 }
 
 impl Default for TransformTracks {
@@ -530,6 +558,7 @@ impl TransformTracks {
                 v(TransformParam::CropBottom),
             ],
             crop_softness: v(TransformParam::CropSoftness),
+            opacity: v(TransformParam::Opacity),
             zoom: [v(TransformParam::ZoomX), v(TransformParam::ZoomY)],
             position: [v(TransformParam::PositionX), v(TransformParam::PositionY)],
             rotation: v(TransformParam::Rotation),
@@ -899,6 +928,48 @@ pub struct Transition {
     pub curve: f32,
 }
 
+/// Metodo di composizione di un layer su quelli sotto ("Composite Mode"
+/// nell'inspector). Solo modi separabili, calcolati canale per canale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Subtract,
+    Divide,
+}
+
+impl BlendMode {
+    pub const ALL: [Self; 15] = [
+        Self::Normal,
+        Self::Add,
+        Self::Multiply,
+        Self::Screen,
+        Self::Overlay,
+        Self::Darken,
+        Self::Lighten,
+        Self::ColorDodge,
+        Self::ColorBurn,
+        Self::HardLight,
+        Self::SoftLight,
+        Self::Difference,
+        Self::Exclusion,
+        Self::Subtract,
+        Self::Divide,
+    ];
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectStack {
     pub transform: TransformTracks,
@@ -916,6 +987,8 @@ pub struct EffectStack {
     pub transition_in: Option<Transition>,
     #[serde(default)]
     pub transition_out: Option<Transition>,
+    #[serde(default)]
+    pub blend_mode: BlendMode,
 }
 
 impl Default for EffectStack {
@@ -929,6 +1002,7 @@ impl Default for EffectStack {
             filters: Vec::new(),
             transition_in: None,
             transition_out: None,
+            blend_mode: BlendMode::default(),
         }
     }
 }
@@ -968,6 +1042,7 @@ impl EffectStack {
             && self.gain_db.is_constant()
             && self.gain_db.default == 0.0
             && self.color.is_none()
+            && self.blend_mode == BlendMode::Normal
     }
 }
 
@@ -1783,6 +1858,7 @@ mod keyframe_tests {
             rotation: 90.0,
             anchor: [0.2, 0.4],
             flip: [true, true],
+            opacity: 0.0,
         };
         let mid = Transform::lerp(&a, &b, 0.5);
         assert_eq!(mid.crop, [0.1, 0.1, 0.4, 0.4]);
@@ -1791,6 +1867,7 @@ mod keyframe_tests {
         assert_eq!(mid.position, [0.5, -0.5]);
         assert_eq!(mid.rotation, 45.0);
         assert_eq!(mid.anchor, [0.1, 0.2]);
+        assert_eq!(mid.opacity, 50.0);
         assert_eq!(mid.flip, [true, true], "il flip scatta a metà, non sfuma");
     }
 
@@ -2181,4 +2258,17 @@ mod timeline_tests {
         };
         assert_eq!(tl.total_frames(), 0);
     }
+
+    /// Un progetto salvato prima di un parametro nuovo ha meno tracce: il
+    /// parametro mancante deve tornare al suo default, non far fallire il
+    /// caricamento.
+    #[test]
+    fn transform_tracks_saved_without_a_newer_param_load_with_its_default() {
+        let older = "(params: [], flip: (false, false))";
+        let tracks: TransformTracks = ron::from_str(older).expect("caricamento");
+        let t = tracks.value_at(0);
+        assert_eq!(t.opacity, 100.0);
+        assert_eq!(t.zoom, [1.0, 1.0]);
+    }
+
 }

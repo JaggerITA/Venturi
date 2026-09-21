@@ -363,3 +363,71 @@ props.no_clip:
 props.import_to_start:
   en: "Import a media file to create the timeline."
   it: "Importa un media per creare la timeline."
+
+props.composite:
+  en: "Composite"
+  it: "Composite"
+
+props.composite_mode:
+  en: "Composite Mode"
+  it: "Metodo di composizione"
+
+blend.normal:
+  en: "Normal"
+  it: "Normale"
+
+blend.add:
+  en: "Add"
+  it: "Aggiunta"
+
+blend.multiply:
+  en: "Multiply"
+  it: "Moltiplica"
+
+blend.screen:
+  en: "Screen"
+  it: "Scolora"
+
+blend.overlay:
+  en: "Overlay"
+  it: "Sovrapponi"
+
+blend.darken:
+  en: "Darken"
+  it: "Scurisci"
+
+blend.lighten:
+  en: "Lighten"
+  it: "Schiarisci"
+
+blend.color_dodge:
+  en: "Color Dodge"
+  it: "Color Dodge"
+
+blend.color_burn:
+  en: "Color Burn"
+  it: "Color Burn"
+
+blend.hard_light:
+  en: "Hard Light"
+  it: "Luce intensa"
+
+blend.soft_light:
+  en: "Soft Light"
+  it: "Luce soffusa"
+
+blend.difference:
+  en: "Difference"
+  it: "Differenza"
+
+blend.exclusion:
+  en: "Exclusion"
+  it: "Esclusione"
+
+blend.subtract:
+  en: "Subtract"
+  it: "Sottrai"
+
+blend.divide:
+  en: "Divide"
+  it: "Dividi"

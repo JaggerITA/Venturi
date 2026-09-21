@@ -181,6 +181,7 @@ struct ClipPanelInfo {
     /// Vuota finché non si trascina un filtro sulla clip dal pannello
     /// Effects; poi uno per ciascuno, nell'ordine di applicazione.
     filters: Vec<vv_core::ClipFilter>,
+    blend_mode: vv_core::BlendMode,
 }
 
 /// Dove atterrano le clip di un drop dal media pool, risolto una volta per
@@ -3016,6 +3017,7 @@ impl eframe::App for VibeVideoApp {
                         source_size: (frame.width, frame.height),
                         opacity: 1.0,
                         filters: &[],
+                        blend: vv_core::BlendMode::Normal,
                     };
                     self.show_composited(
                         &[layer],

@@ -48,6 +48,7 @@ pub enum CommandLabel {
     RemoveMedia,
     RelinkMedia,
     Filters,
+    BlendMode,
     Transition,
     MakeCompoundClip,
 }
@@ -1099,6 +1100,18 @@ pub fn set_clip_filters(
 ) -> SetClipValue<Vec<ClipFilter>> {
     SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Filters, value, |c| {
         &mut c.effects.filters
+    })
+}
+
+/// Metodo di composizione del layer della clip.
+pub fn set_clip_blend_mode(
+    timeline: TimelineId,
+    track_index: usize,
+    clip_id: ClipId,
+    value: crate::model::BlendMode,
+) -> SetClipValue<crate::model::BlendMode> {
+    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::BlendMode, value, |c| {
+        &mut c.effects.blend_mode
     })
 }
 

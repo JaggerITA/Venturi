@@ -8,7 +8,7 @@
 //!   stesso device di egui.
 
 use std::sync::{Arc, Mutex};
-use vv_core::{ColorMatrix, Transform};
+use vv_core::{BlendMode, ColorMatrix, Transform};
 use wgpu::util::DeviceExt;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -93,6 +93,8 @@ pub enum Layer<'a> {
         /// in cui vanno applicati: vv-render non sa cosa ciascuno significhi,
         /// solo l'id dello shader che gli corrisponde (`filter_shader_id`).
         filters: &'a [vv_core::FilterKind],
+        /// Come il layer si compone su quelli sotto.
+        blend: BlendMode,
     },
     /// Un frame già composto e residente sulla GPU: la timeline annidata di
     /// una compound clip, che torna layer nella timeline esterna senza
@@ -105,12 +107,14 @@ pub enum Layer<'a> {
         source_size: (u32, u32),
         opacity: f32,
         filters: &'a [vv_core::FilterKind],
+        blend: BlendMode,
     },
     Solid {
         color: vv_core::Rgba,
         transform: Transform,
         opacity: f32,
         filters: &'a [vv_core::FilterKind],
+        blend: BlendMode,
     },
     /// Titolo: rasterizzato alla risoluzione di output (vedi `text`), poi
     /// trattato come un `Solid` grande quanto la timeline.
@@ -119,6 +123,7 @@ pub enum Layer<'a> {
         transform: Transform,
         opacity: f32,
         filters: &'a [vv_core::FilterKind],
+        blend: BlendMode,
     },
 }
 
@@ -131,6 +136,29 @@ const MAX_LAYER_FILTERS: usize = 8;
 fn filter_shader_id(kind: vv_core::FilterKind) -> f32 {
     match kind {
         vv_core::FilterKind::Grayscale => 1.0,
+    }
+}
+
+/// Id per lo shader di ciascun `BlendMode`, allineato allo `switch` di
+/// `blend_channel` in `transform.wgsl`; 0 = Normal, l'unico che usa
+/// l'alpha blending della pipeline invece di leggere il backdrop.
+fn blend_shader_id(mode: BlendMode) -> f32 {
+    match mode {
+        BlendMode::Normal => 0.0,
+        BlendMode::Add => 1.0,
+        BlendMode::Multiply => 2.0,
+        BlendMode::Screen => 3.0,
+        BlendMode::Overlay => 4.0,
+        BlendMode::Darken => 5.0,
+        BlendMode::Lighten => 6.0,
+        BlendMode::ColorDodge => 7.0,
+        BlendMode::ColorBurn => 8.0,
+        BlendMode::HardLight => 9.0,
+        BlendMode::SoftLight => 10.0,
+        BlendMode::Difference => 11.0,
+        BlendMode::Exclusion => 12.0,
+        BlendMode::Subtract => 13.0,
+        BlendMode::Divide => 14.0,
     }
 }
 
@@ -187,7 +215,8 @@ struct TransformUniform {
     anchor_flip: [f32; 4],
     color: [f32; 4],
     solid: [f32; 4],
-    /// x: opacità dell'intero layer (dissolvenze di clip). y/z/w inutilizzati.
+    /// x: opacità dell'intero layer. y: id del metodo di composizione
+    /// (`blend_shader_id`). z/w inutilizzati.
     extra: [f32; 4],
     /// Id shader dei filtri attivi, nell'ordine di applicazione (vedi
     /// `filter_shader_id`); 0 = slot vuoto. `MAX_LAYER_FILTERS` in due vec4
@@ -206,6 +235,7 @@ impl TransformUniform {
         fill: Fill,
         opacity: f32,
         filters: &[vv_core::FilterKind],
+        blend: BlendMode,
     ) -> Self {
         let (mode, solid) = match fill {
             Fill::Video => (0.0, None),
@@ -265,7 +295,7 @@ impl TransformUniform {
                     c.a.clamp(0.0, 1.0),
                 ]
             }),
-            extra: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+            extra: [opacity.clamp(0.0, 1.0), blend_shader_id(blend), 0.0, 0.0],
             filters: {
                 let mut ids = [0.0f32; MAX_LAYER_FILTERS];
                 for (slot, kind) in ids.iter_mut().zip(filters.iter().take(MAX_LAYER_FILTERS)) {
@@ -281,6 +311,9 @@ pub struct Compositor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::RenderPipeline,
+    /// Come `pipeline`, ma in REPLACE: la usano i metodi di composizione
+    /// diversi da Normal (vedi `blend_shader_id`).
+    blend_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     i420_pipeline: wgpu::ComputePipeline,
@@ -399,6 +432,7 @@ impl Compositor {
                     count: None,
                 },
                 plane_entry(5), // Alpha (copertura per pixel, vedi YuvFrame::alpha)
+                plane_entry(6), // Backdrop (vedi `backdrop_tex` nello shader)
             ],
         });
 
@@ -408,33 +442,42 @@ impl Compositor {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vv-render transform pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: OUTPUT_FORMAT,
-                    // Non REPLACE: le zone scoperte (letterbox) escono con alpha 0 e devono
-                    // mostrare il layer sotto.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let transform_pipeline = |label, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: OUTPUT_FORMAT,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Normal: non REPLACE, perché le zone scoperte (letterbox) escono con
+        // alpha 0 e devono mostrare il layer sotto. Gli altri metodi di
+        // composizione il layer sotto se lo leggono da soli (`backdrop_tex`) e
+        // scrivono il risultato già composto.
+        let pipeline = transform_pipeline(
+            "vv-render transform pipeline",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
+        let blend_pipeline = transform_pipeline("vv-render blend pipeline", Some(wgpu::BlendState::REPLACE));
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vv-render transform sampler"),
@@ -463,6 +506,7 @@ impl Compositor {
             device,
             queue,
             pipeline,
+            blend_pipeline,
             bind_group_layout,
             sampler,
             i420_pipeline,
@@ -674,6 +718,12 @@ impl Compositor {
         };
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut planes = Vec::new();
+        // Segnaposto per lo slot del backdrop dei layer in Normal, che non
+        // lo campionano (vedi `backdrop_tex` nello shader).
+        let no_backdrop = self.plane_texture(OPAQUE, 1, 1);
+        let no_backdrop_view = no_backdrop.create_view(&wgpu::TextureViewDescriptor::default());
+        // Copia dello stack già composto, una per pass che ne ha bisogno.
+        let mut backdrops: Vec<Option<wgpu::Texture>> = Vec::new();
 
         let mut encoder = self
             .device
@@ -687,6 +737,18 @@ impl Compositor {
         }
         let mut first = true;
         for layer in layers {
+            let blend = layer_blend(layer);
+            let backdrop_view = |backdrops: &mut Vec<Option<wgpu::Texture>>| {
+                let texture = (blend != BlendMode::Normal)
+                    .then(|| self.scratch_texture(output.width, output.height));
+                let view = texture.as_ref().map_or_else(
+                    || no_backdrop_view.clone(),
+                    |t| t.create_view(&wgpu::TextureViewDescriptor::default()),
+                );
+                backdrops.push(texture);
+                view
+            };
+            let backdrop_start = backdrops.len();
             let bind_groups = match layer {
                 Layer::Video {
                     frame,
@@ -694,6 +756,7 @@ impl Compositor {
                     source_size,
                     opacity,
                     filters,
+                    ..
                 } => vec![self.layer_bind_group(
                     &mut planes,
                     frame,
@@ -704,6 +767,8 @@ impl Compositor {
                     Fill::Video,
                     *opacity,
                     filters,
+                    blend,
+                    &backdrop_view(&mut backdrops),
                 )],
                 Layer::Texture {
                     texture,
@@ -711,6 +776,7 @@ impl Compositor {
                     source_size,
                     opacity,
                     filters,
+                    ..
                 } => vec![self.texture_bind_group(
                     &mut planes,
                     texture,
@@ -719,9 +785,11 @@ impl Compositor {
                     *source_size,
                     *opacity,
                     filters,
+                    blend,
+                    &backdrop_view(&mut backdrops),
                 )],
                 // Il colore arriva dall'uniform: i piani sono solo segnaposto.
-                Layer::Solid { color, transform, opacity, filters } => vec![self.layer_bind_group(
+                Layer::Solid { color, transform, opacity, filters, .. } => vec![self.layer_bind_group(
                     &mut planes,
                     &SOLID_PLACEHOLDER,
                     transform,
@@ -731,51 +799,77 @@ impl Compositor {
                     Fill::Solid(*color),
                     *opacity,
                     filters,
+                    blend,
+                    &backdrop_view(&mut backdrops),
                 )],
-                Layer::Text { title, transform, opacity, filters } => {
+                Layer::Text { title, transform, opacity, filters, .. } => {
                     let render = crate::text::render_title(
                         title,
                         output.timeline_size,
                         (output.width, output.height),
                     );
-                    render
-                        .layers
-                        .iter()
-                        .map(|(mask, color)| {
-                            let frame = YuvFrame {
-                                y: &mask.data,
-                                width: mask.width,
-                                height: mask.height,
-                                ..SOLID_PLACEHOLDER
-                            };
-                            self.layer_bind_group(
-                                &mut planes,
-                                &frame,
-                                transform,
-                                output,
-                                output.timeline_size,
-                                output.timeline_size,
-                                Fill::Mask(*color),
-                                *opacity,
-                                filters,
-                            )
-                        })
-                        .collect()
+                    let mut groups = Vec::with_capacity(render.layers.len());
+                    for (mask, color) in &render.layers {
+                        let frame = YuvFrame {
+                            y: &mask.data,
+                            width: mask.width,
+                            height: mask.height,
+                            ..SOLID_PLACEHOLDER
+                        };
+                        // Ombra, sfondo e testo sono pass distinti: ognuno si
+                        // compone su quelli prima, backdrop compreso.
+                        let view = backdrop_view(&mut backdrops);
+                        groups.push(self.layer_bind_group(
+                            &mut planes,
+                            &frame,
+                            transform,
+                            output,
+                            output.timeline_size,
+                            output.timeline_size,
+                            Fill::Mask(*color),
+                            *opacity,
+                            filters,
+                            blend,
+                            &view,
+                        ));
+                    }
+                    groups
                 }
             };
-            for bind_group in &bind_groups {
+            let pipeline = if blend == BlendMode::Normal {
+                &self.pipeline
+            } else {
+                &self.blend_pipeline
+            };
+            for (bind_group, backdrop) in bind_groups.iter().zip(&backdrops[backdrop_start..]) {
+                if let Some(backdrop) = backdrop {
+                    // Il backdrop va letto da una copia: la texture di output
+                    // è già attaccata al pass che lo compone. Se questo è il
+                    // primo layer, il clear va fatto prima di copiarlo.
+                    if first {
+                        self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
+                        first = false;
+                    }
+                    encoder.copy_texture_to_texture(
+                        output_texture.as_image_copy(),
+                        backdrop.as_image_copy(),
+                        output_texture.size(),
+                    );
+                }
                 let load = if first {
                     wgpu::LoadOp::Clear(clear)
                 } else {
                     wgpu::LoadOp::Load
                 };
                 first = false;
-                self.pass(&mut encoder, &output_view, load, Some(bind_group));
+                self.pass(&mut encoder, &output_view, load, Some((bind_group, pipeline)));
             }
         }
 
         self.queue.submit(Some(encoder.finish()));
+        give_back(&mut self.scratch.lock().unwrap(), backdrops.into_iter().flatten());
         let mut pool = self.pool.lock().unwrap();
+        planes.push(no_backdrop);
         give_back(&mut pool.planes, planes);
         if recycle == Recycle::Immediately {
             // Una copia resta nel pool: il prossimo frame della stessa
@@ -818,6 +912,8 @@ impl Compositor {
         fill: Fill,
         opacity: f32,
         filters: &[vv_core::FilterKind],
+        blend: BlendMode,
+        backdrop: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
         let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
@@ -845,8 +941,9 @@ impl Compositor {
             fill,
             opacity,
             filters,
+            blend,
         );
-        let bind_group = self.bind_group_for([&y_view, &u_view, &v_view, &a_view], &uniform);
+        let bind_group = self.bind_group_for([&y_view, &u_view, &v_view, &a_view, backdrop], &uniform);
         planes.extend([y_texture, u_texture, v_texture, a_texture]);
         bind_group
     }
@@ -866,6 +963,8 @@ impl Compositor {
         source_size: (u32, u32),
         opacity: f32,
         filters: &[vv_core::FilterKind],
+        blend: BlendMode,
+        backdrop: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let u_texture = self.plane_texture(&[128], 1, 1);
         let v_texture = self.plane_texture(&[128], 1, 1);
@@ -888,15 +987,16 @@ impl Compositor {
             Fill::Rgba,
             opacity,
             filters,
+            blend,
         );
-        let bind_group = self.bind_group_for([&rgba_view, &u_view, &v_view, &a_view], &uniform);
+        let bind_group = self.bind_group_for([&rgba_view, &u_view, &v_view, &a_view, backdrop], &uniform);
         planes.extend([u_texture, v_texture, a_texture]);
         bind_group
     }
 
-    /// Il bind group del pass: le view nell'ordine `[sorgente, U, V, alpha]`
-    /// (la prima è il piano Y o la texture RGBA, vedi `Fill`).
-    fn bind_group_for(&self, views: [&wgpu::TextureView; 4], uniform: &TransformUniform) -> wgpu::BindGroup {
+    /// Il bind group del pass: le view nell'ordine `[sorgente, U, V, alpha,
+    /// backdrop]` (la prima è il piano Y o la texture RGBA, vedi `Fill`).
+    fn bind_group_for(&self, views: [&wgpu::TextureView; 5], uniform: &TransformUniform) -> wgpu::BindGroup {
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -931,6 +1031,10 @@ impl Compositor {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(views[3]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(views[4]),
                 },
             ],
         })
@@ -1000,6 +1104,7 @@ impl Compositor {
             // TEXTURE_BINDING serve al path zero-copy: egui-wgpu la campiona.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
@@ -1012,7 +1117,7 @@ impl Compositor {
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         load: wgpu::LoadOp<wgpu::Color>,
-        bind_group: Option<&wgpu::BindGroup>,
+        bind_group: Option<(&wgpu::BindGroup, &wgpu::RenderPipeline)>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("vv-render transform pass"),
@@ -1030,11 +1135,21 @@ impl Compositor {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        if let Some(bind_group) = bind_group {
-            pass.set_pipeline(&self.pipeline);
+        if let Some((bind_group, pipeline)) = bind_group {
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+}
+
+/// Il metodo di composizione di un layer, qualunque sia la sua sorgente.
+fn layer_blend(layer: &Layer) -> BlendMode {
+    match layer {
+        Layer::Video { blend, .. }
+        | Layer::Texture { blend, .. }
+        | Layer::Solid { blend, .. }
+        | Layer::Text { blend, .. } => *blend,
     }
 }
 
@@ -1091,6 +1206,7 @@ impl Compositor {
                 source_size: (frame.width, frame.height),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             output,
         )
@@ -1110,6 +1226,7 @@ impl Compositor {
                 source_size: (frame.width, frame.height),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             output,
         )
@@ -1521,6 +1638,7 @@ mod tests {
                 source_size: (1920, 1080),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::scaled(16, 16, (1920, 1080)),
         );
@@ -1640,6 +1758,7 @@ mod tests {
                     source_size: (below.width, below.height),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
                 Layer::Video {
                     frame: above.as_yuv_frame(),
@@ -1647,6 +1766,7 @@ mod tests {
                     source_size: (above.width, above.height),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
             ],
             OutputFrame::exact(32, 16),
@@ -1673,12 +1793,14 @@ mod tests {
                     source_size: (below.width, below.height),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
                 Layer::Solid {
                     color: RED,
                     transform: Transform::default(),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
             ],
             OutputFrame::exact(16, 16),
@@ -1697,6 +1819,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 1.0,
                 filters: &[vv_core::FilterKind::Grayscale],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::exact(4, 4),
         );
@@ -1721,6 +1844,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::exact(160, 90),
         );
@@ -1751,12 +1875,14 @@ mod tests {
                     transform: Transform::default(),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
                 Layer::Text {
                     title: &title,
                     transform: Transform::default(),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
             ],
             OutputFrame::exact(160, 90),
@@ -1799,12 +1925,14 @@ mod tests {
             transform: Transform::default(),
             opacity: 1.0,
             filters: &[],
+            blend: BlendMode::Normal,
         };
         let above = || Layer::Solid {
             color: RED,
             transform: inner,
             opacity: 1.0,
             filters: &[],
+            blend: BlendMode::Normal,
         };
 
         let nested = compositor.render_layers_to_owned_texture_transparent(&[above()], output);
@@ -1817,6 +1945,7 @@ mod tests {
                     source_size: (16, 16),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
             ],
             output,
@@ -1845,6 +1974,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 0.5,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             output,
         );
@@ -1855,6 +1985,7 @@ mod tests {
                     transform: Transform::default(),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
                 Layer::Texture {
                     texture: &nested,
@@ -1862,6 +1993,7 @@ mod tests {
                     source_size: (8, 8),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
             ],
             output,
@@ -1900,6 +2032,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             output,
         );
@@ -1909,6 +2042,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             output,
         );
@@ -1937,6 +2071,7 @@ mod tests {
                 },
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::scaled(8, 4, (16, 8)),
         );
@@ -1960,12 +2095,14 @@ mod tests {
                     source_size: (below.width, below.height),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
                 Layer::Solid {
                     color: RED,
                     transform: Transform::default(),
                     opacity: 0.5,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
             ],
             OutputFrame::exact(4, 4),
@@ -1984,8 +2121,9 @@ mod tests {
                     source_size: (below.width, below.height),
                     opacity: 1.0,
                     filters: &[],
+                    blend: BlendMode::Normal,
                 },
-                Layer::Solid { color: RED, transform: Transform::default(), opacity: 0.0, filters: &[] },
+                Layer::Solid { color: RED, transform: Transform::default(), opacity: 0.0, filters: &[], blend: BlendMode::Normal },
             ],
             OutputFrame::exact(4, 4),
         );
@@ -2001,6 +2139,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::exact(5, 3),
         );
@@ -2020,6 +2159,7 @@ mod tests {
                 transform: Transform::default(),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }]
         };
         let fresh = |color, w, h| {
@@ -2064,6 +2204,7 @@ mod tests {
                 },
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::exact(16, 8),
         );
@@ -2090,6 +2231,7 @@ mod tests {
                 source_size: (4, 4),
                 opacity: 1.0,
                 filters: &[],
+                blend: BlendMode::Normal,
             }],
             OutputFrame::exact(4, 4),
         );
@@ -2195,4 +2337,97 @@ mod tests {
             "il path zero-copy deve produrre esattamente gli stessi pixel del path con readback"
         );
     }
+
+    /// I metodi di composizione diversi da Normal leggono lo stack già
+    /// composto e ci applicano la loro formula, canale per canale.
+    #[test]
+    fn a_blend_mode_combines_the_layer_with_what_is_below() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(8, 8);
+        let grey = vv_core::Rgba { r: 0.5, g: 0.5, b: 0.5, a: 1.0 };
+        let blended = |mode| {
+            let out = compositor.render_layers(
+                &[
+                    Layer::Solid {
+                        color: grey,
+                        transform: Transform::default(),
+                        opacity: 1.0,
+                        filters: &[],
+                        blend: BlendMode::Normal,
+                    },
+                    Layer::Solid {
+                        color: grey,
+                        transform: Transform::default(),
+                        opacity: 1.0,
+                        filters: &[],
+                        blend: mode,
+                    },
+                ],
+                output,
+            );
+            out.as_chunks::<4>().0[0]
+        };
+        assert_close_rgba(blended(BlendMode::Normal), [128, 128, 128, 255]);
+        assert_close_rgba(blended(BlendMode::Multiply), [64, 64, 64, 255]);
+        assert_close_rgba(blended(BlendMode::Screen), [191, 191, 191, 255]);
+        assert_close_rgba(blended(BlendMode::Add), [255, 255, 255, 255]);
+        assert_close_rgba(blended(BlendMode::Difference), [0, 0, 0, 255]);
+        assert_close_rgba(blended(BlendMode::Subtract), [0, 0, 0, 255]);
+    }
+
+    /// Un layer in blend non cancella lo sfondo dove non copre: fuori dal
+    /// crop resta quel che c'era sotto (la pipeline in REPLACE scriverebbe
+    /// zeri se lo shader non ricomponesse il backdrop).
+    #[test]
+    fn a_blended_layer_leaves_the_backdrop_where_it_does_not_cover() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(16, 16);
+        let out = compositor.render_layers(
+            &[
+                Layer::Solid {
+                    color: BLUE,
+                    transform: Transform::default(),
+                    opacity: 1.0,
+                    filters: &[],
+                    blend: BlendMode::Normal,
+                },
+                Layer::Solid {
+                    color: WHITE,
+                    // Via la metà destra: lì deve restare il blu.
+                    transform: Transform {
+                        crop: [0.0, 0.0, 8.0, 0.0],
+                        ..Transform::default()
+                    },
+                    opacity: 1.0,
+                    filters: &[],
+                    blend: BlendMode::Screen,
+                },
+            ],
+            output,
+        );
+        let pixels = out.as_chunks::<4>().0;
+        assert_close_rgba(pixels[0], [255, 255, 255, 255]);
+        assert_close_rgba(pixels[12], [0, 0, 255, 255]);
+    }
+
+    /// Il primo layer di uno stack può essere in blend: il clear va fatto
+    /// prima, o il backdrop che legge sarebbe il frame precedente.
+    #[test]
+    fn the_first_layer_can_be_blended_over_the_clear() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(8, 8);
+        let out = compositor.render_layers(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform::default(),
+                opacity: 1.0,
+                filters: &[],
+                blend: BlendMode::Screen,
+            }],
+            output,
+        );
+        // Screen su nero (il clear) lascia il colore com'è.
+        assert_close_rgba(out.as_chunks::<4>().0[0], [255, 0, 0, 255]);
+    }
+
 }

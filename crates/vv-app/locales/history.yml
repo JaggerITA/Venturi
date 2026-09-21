@@ -127,3 +127,7 @@ history.transition:
 history.make_compound_clip:
   en: "Compound clip"
   it: "Compound clip"
+
+history.blend_mode:
+  en: "Composite mode"
+  it: "Metodo di composizione"
