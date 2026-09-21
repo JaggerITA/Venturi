@@ -391,6 +391,7 @@ pub struct PanelLayout {
     pub media_pool_open: bool,
     pub effects_open: bool,
     pub inspector_open: bool,
+    pub keyframe_editor_open: bool,
     pub left_column_width: f32,
     pub inspector_width: f32,
     pub timeline_height: f32,
@@ -402,6 +403,7 @@ impl Default for PanelLayout {
             media_pool_open: true,
             effects_open: false,
             inspector_open: true,
+            keyframe_editor_open: false,
             left_column_width: 260.0,
             inspector_width: 300.0,
             timeline_height: 240.0,
@@ -463,6 +465,8 @@ struct PanelLayoutFile {
     #[serde(default)]
     inspector_open: Option<bool>,
     #[serde(default)]
+    keyframe_editor_open: Option<bool>,
+    #[serde(default)]
     left_column_width: Option<f32>,
     #[serde(default)]
     inspector_width: Option<f32>,
@@ -501,6 +505,10 @@ impl Settings {
             media_pool_open: file.panels.media_pool_open.unwrap_or(defaults.media_pool_open),
             effects_open: file.panels.effects_open.unwrap_or(defaults.effects_open),
             inspector_open: file.panels.inspector_open.unwrap_or(defaults.inspector_open),
+            keyframe_editor_open: file
+                .panels
+                .keyframe_editor_open
+                .unwrap_or(defaults.keyframe_editor_open),
             left_column_width: file.panels.left_column_width.unwrap_or(defaults.left_column_width),
             inspector_width: file.panels.inspector_width.unwrap_or(defaults.inspector_width),
             timeline_height: file.panels.timeline_height.unwrap_or(defaults.timeline_height),
@@ -532,6 +540,7 @@ impl Settings {
                 media_pool_open: Some(self.panels.media_pool_open),
                 effects_open: Some(self.panels.effects_open),
                 inspector_open: Some(self.panels.inspector_open),
+                keyframe_editor_open: Some(self.panels.keyframe_editor_open),
                 left_column_width: Some(self.panels.left_column_width),
                 inspector_width: Some(self.panels.inspector_width),
                 timeline_height: Some(self.panels.timeline_height),
@@ -621,6 +630,7 @@ mod tests {
             media_pool_open: false,
             effects_open: true,
             inspector_open: false,
+            keyframe_editor_open: true,
             left_column_width: 321.0,
             inspector_width: 456.0,
             timeline_height: 199.0,

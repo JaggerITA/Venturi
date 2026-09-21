@@ -202,6 +202,66 @@ pub enum Interpolation {
     Hold,
     Linear,
     EaseInOut,
+    EaseIn,
+    EaseOut,
+    /// Curva libera: punti di controllo di una bezier cubica normalizzata
+    /// sul segmento (da `(0,0)` a `(1,1)`), come `cubic-bezier` di CSS.
+    Bezier { c1: [f32; 2], c2: [f32; 2] },
+}
+
+impl Interpolation {
+    /// I preset offerti dall'editor di keyframe, nell'ordine della barra.
+    pub const PRESETS: [Self; 5] = [
+        Self::Hold,
+        Self::Linear,
+        Self::EaseInOut,
+        Self::EaseIn,
+        Self::EaseOut,
+    ];
+
+    /// Peso del keyframe di arrivo a `t` (0 = quello di partenza).
+    pub fn ease(self, t: f32) -> f32 {
+        match self {
+            Self::Hold => 0.0,
+            Self::Linear => t,
+            Self::EaseInOut => smoothstep(t),
+            Self::EaseIn => t * t,
+            Self::EaseOut => t * (2.0 - t),
+            Self::Bezier { c1, c2 } => bezier_ease(c1, c2, t),
+        }
+    }
+
+    /// I punti di controllo equivalenti, per gli handle dell'editor: `Hold`
+    /// non ha una curva da manipolare.
+    pub fn control_points(self) -> Option<([f32; 2], [f32; 2])> {
+        match self {
+            Self::Hold => None,
+            Self::Linear => Some(([1.0 / 3.0, 1.0 / 3.0], [2.0 / 3.0, 2.0 / 3.0])),
+            Self::EaseInOut => Some(([0.5, 0.0], [0.5, 1.0])),
+            Self::EaseIn => Some(([0.42, 0.0], [1.0, 1.0])),
+            Self::EaseOut => Some(([0.0, 0.0], [0.58, 1.0])),
+            Self::Bezier { c1, c2 } => Some((c1, c2)),
+        }
+    }
+}
+
+/// `x` di una bezier cubica normalizzata non è `t`: lo si inverte per
+/// bisezione (monotòna finché le ascisse dei controlli stanno in `0..=1`).
+fn bezier_ease(c1: [f32; 2], c2: [f32; 2], x: f32) -> f32 {
+    let axis = |a: f32, b: f32, t: f32| {
+        let u = 1.0 - t;
+        3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+    };
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if axis(c1[0], c2[0], mid) < x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    axis(c1[1], c2[1], 0.5 * (lo + hi))
 }
 
 /// Parametro animabile via keyframe. Sempre ordinato per tempo crescente.
@@ -255,6 +315,20 @@ impl<T: Clone> Keyframed<T> {
     /// Frame del keyframe più vicino dopo `frame`.
     pub fn keyframe_after(&self, frame: FrameIdx) -> Option<FrameIdx> {
         self.keyframes.iter().map(|k| k.0).find(|&f| f > frame)
+    }
+
+    /// Cambia l'interpolazione uscente del keyframe a `frame`, se c'è, e
+    /// restituisce quella che aveva.
+    pub fn set_interpolation(
+        &mut self,
+        frame: FrameIdx,
+        interpolation: Interpolation,
+    ) -> Option<Interpolation> {
+        let idx = self
+            .keyframes
+            .binary_search_by_key(&frame, |(f, _, _)| *f)
+            .ok()?;
+        Some(std::mem::replace(&mut self.keyframes[idx].2, interpolation))
     }
 
     /// Il keyframe esattamente a `frame`, se esiste.
@@ -331,10 +405,10 @@ impl<T: Lerp + Clone> Keyframed<T> {
                 let (f0, v0, interp) = &self.keyframes[idx - 1];
                 let (f1, v1, _) = &self.keyframes[idx];
                 let t = (frame - f0) as f32 / (f1 - f0) as f32;
-                match interp {
-                    Interpolation::Hold => v0.clone(),
-                    Interpolation::Linear => T::lerp(v0, v1, t),
-                    Interpolation::EaseInOut => T::lerp(v0, v1, smoothstep(t)),
+                if interp == &Interpolation::Hold {
+                    v0.clone()
+                } else {
+                    T::lerp(v0, v1, interp.ease(t))
                 }
             }
         }
@@ -419,7 +493,7 @@ impl Default for Transform {
 
 /// Un parametro del transform, ognuno con i suoi keyframe. `flip` no: non
 /// si interpola.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransformParam {
     ZoomX,
     ZoomY,
@@ -1712,6 +1786,47 @@ impl Project {
 #[cfg(test)]
 mod keyframe_tests {
     use super::*;
+
+    #[test]
+    fn ease_in_and_ease_out_are_slow_then_fast_and_viceversa() {
+        assert!(Interpolation::EaseIn.ease(0.5) < 0.5);
+        assert!(Interpolation::EaseOut.ease(0.5) > 0.5);
+        for interp in Interpolation::PRESETS {
+            assert_eq!(interp.ease(1.0), 1.0, "{interp:?} deve arrivare a destinazione");
+        }
+    }
+
+    #[test]
+    fn a_bezier_matches_the_linear_curve_when_its_controls_are_on_the_diagonal() {
+        let linear = Interpolation::Bezier {
+            c1: [1.0 / 3.0, 1.0 / 3.0],
+            c2: [2.0 / 3.0, 2.0 / 3.0],
+        };
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert!((linear.ease(t) - t).abs() < 1e-3, "t={t}");
+        }
+    }
+
+    #[test]
+    fn a_bezier_keyframe_interpolates_along_its_curve() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        // Controlli schiacciati in basso: a metà segmento il valore è
+        // ancora sotto la metà.
+        k.upsert(0, 0.0, Interpolation::Bezier { c1: [0.5, 0.0], c2: [1.0, 0.0] });
+        k.upsert(10, 100.0, Interpolation::Linear);
+        assert!(k.value_at(5) < 50.0);
+        assert_eq!(k.value_at(0), 0.0);
+        assert_eq!(k.value_at(10), 100.0);
+    }
+
+    #[test]
+    fn set_interpolation_returns_the_previous_one_and_ignores_empty_frames() {
+        let mut k: Keyframed<f32> = Keyframed::constant(0.0);
+        k.upsert(4, 1.0, Interpolation::Linear);
+        assert_eq!(k.set_interpolation(4, Interpolation::Hold), Some(Interpolation::Linear));
+        assert_eq!(k.keyframe_at(4), Some((1.0, Interpolation::Hold)));
+        assert_eq!(k.set_interpolation(7, Interpolation::Hold), None);
+    }
 
     #[test]
     fn value_at_returns_default_when_no_keyframes() {

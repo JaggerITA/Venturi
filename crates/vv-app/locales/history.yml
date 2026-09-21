@@ -131,3 +131,11 @@ history.make_compound_clip:
 history.blend_mode:
   en: "Composite mode"
   it: "Metodo di composizione"
+
+history.move_keyframes:
+  en: "Move keyframes"
+  it: "Sposta keyframe"
+
+history.set_interpolation:
+  en: "Keyframe interpolation"
+  it: "Interpolazione keyframe"

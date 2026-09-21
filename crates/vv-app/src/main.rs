@@ -11,6 +11,7 @@ mod export;
 mod export_dialog;
 mod frame_provider;
 mod i18n;
+mod keyframe_editor;
 mod media_pool;
 mod media_pool_ui;
 mod mix_buffers;
@@ -212,6 +213,7 @@ struct VibeVideoApp {
     timeline_stack: Vec<TimelineId>,
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
+    keyframe_editor: keyframe_editor::KeyframeEditorState,
     /// Media o elementi non importati, mostrati in una finestra a parte
     /// finché l'utente non la chiude.
     import_warnings: Vec<String>,
@@ -381,6 +383,7 @@ impl Default for VibeVideoApp {
             timeline_stack: Vec::new(),
             timeline_state: timeline_ui::TimelineState::default(),
             media_pool_state: media_pool::MediaPoolState::default(),
+            keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
             import_warnings: Vec::new(),
             preview_meta: None,
             preview_error: None,
@@ -2718,6 +2721,10 @@ impl eframe::App for VibeVideoApp {
             ui.horizontal(|ui| {
                 ui.toggle_value(&mut self.settings.panels.media_pool_open, t!("toolbar.media_pool"));
                 ui.toggle_value(&mut self.settings.panels.effects_open, t!("toolbar.effects"));
+                ui.toggle_value(
+                    &mut self.settings.panels.keyframe_editor_open,
+                    t!("toolbar.keyframe_editor"),
+                );
                 if let Some(err) = &self.project_error {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, err);
@@ -2951,8 +2958,25 @@ impl eframe::App for VibeVideoApp {
         self.sync_render_ahead();
         self.sync_root_timeline_media();
 
-        let (pending_effects, pending_playhead) =
+        let (mut pending_effects, mut pending_playhead) =
             self.show_properties_panel(ui, &video_targets, &audio_targets);
+
+        if self.settings.panels.keyframe_editor_open {
+            let target = video_targets
+                .first()
+                .or(audio_targets.first())
+                .map(|t| (t.timeline, t.track_index, t.clip_id));
+            let editor = keyframe_editor::show_keyframe_editor(
+                ui.ctx(),
+                &mut self.settings.panels.keyframe_editor_open,
+                &mut self.keyframe_editor,
+                &self.project,
+                target,
+                self.timeline_state.playhead,
+            );
+            pending_effects.extend(editor.commands);
+            pending_playhead = editor.playhead.or(pending_playhead);
+        }
 
         if let Some(id) = preview_action {
             self.preview_media(id);

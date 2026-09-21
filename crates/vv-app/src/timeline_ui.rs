@@ -1104,7 +1104,7 @@ fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
 
 /// Timecode HH:MM:SS:FF non drop-frame: con fps non interi (29,97) i
 /// secondi si contano sull'fps nominale arrotondato, come negli NLE.
-fn format_timecode(total_secs: f64, fps: f64) -> String {
+pub(crate) fn format_timecode(total_secs: f64, fps: f64) -> String {
     let nominal = (fps.round() as i64).max(1);
     let frame = (total_secs.max(0.0) * fps).round() as i64;
     let (h, m) = (frame / (nominal * 3600), frame / (nominal * 60) % 60);

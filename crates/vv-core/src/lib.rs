@@ -5,8 +5,10 @@ pub mod persistence;
 
 pub use command::{
     AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge, GroupMark, History, InsertClip,
-    KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClips, RemoveKeyframe, RemoveMedia, RemoveTrack,
+    KeyframePick, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClips, MoveKeyframes, RemoveKeyframe,
+    RemoveMedia, RemoveTrack,
     ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
+    SetKeyframeInterpolation,
     SetCrossTransition, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, compound_clip_commands, cut_overlaps, insert_overwriting, make_room_for_ranges,
     plan_compound_clip, reset_clip_gain, set_clip_blend_mode, set_clip_filters, set_clip_flip, set_clip_gain, set_clip_title,
@@ -949,6 +951,105 @@ mod tests {
             Some((-6.0, Interpolation::Linear)),
             "l'undo deve ripristinare il keyframe precedente, non rimuoverlo"
         );
+    }
+
+    /// Clip con due keyframe di gain, pronta per i comandi di gruppo.
+    fn clip_with_two_gain_keyframes() -> (Project, History, TimelineId, ClipId) {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+        let a = make_clip(&mut project, 0, 20);
+        let a_id = a.id;
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip { timeline, track_index: 0, clip: a }),
+        );
+        for (frame, value) in [(5, -6.0), (10, 3.0)] {
+            history.do_command(
+                &mut project,
+                Box::new(command::UpsertKeyframe::new(
+                    timeline,
+                    0,
+                    a_id,
+                    frame,
+                    command::KeyframeValue::Gain(value),
+                    Interpolation::Linear,
+                )),
+            );
+        }
+        (project, history, timeline, a_id)
+    }
+
+    #[test]
+    fn moving_keyframes_shifts_them_and_undo_puts_them_back() {
+        let (mut project, mut history, timeline, clip_id) = clip_with_two_gain_keyframes();
+        history.do_command(
+            &mut project,
+            Box::new(command::MoveKeyframes::new(
+                timeline,
+                0,
+                clip_id,
+                vec![(command::KeyframeTarget::Gain, 5), (command::KeyframeTarget::Gain, 10)],
+                4,
+            )),
+        );
+
+        let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+        assert_eq!(gain.keyframe_at(5), None);
+        assert_eq!(gain.keyframe_at(9), Some((-6.0, Interpolation::Linear)));
+        assert_eq!(gain.keyframe_at(14), Some((3.0, Interpolation::Linear)));
+
+        history.undo(&mut project);
+        let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+        assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::Linear)));
+        assert_eq!(gain.keyframe_at(10), Some((3.0, Interpolation::Linear)));
+        assert_eq!(gain.keyframes().len(), 2);
+    }
+
+    #[test]
+    fn moving_a_keyframe_onto_another_restores_it_on_undo() {
+        let (mut project, mut history, timeline, clip_id) = clip_with_two_gain_keyframes();
+        history.do_command(
+            &mut project,
+            Box::new(command::MoveKeyframes::new(
+                timeline,
+                0,
+                clip_id,
+                vec![(command::KeyframeTarget::Gain, 5)],
+                5,
+            )),
+        );
+
+        let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+        assert_eq!(gain.keyframes().len(), 1, "quello di arrivo è stato sovrascritto");
+        assert_eq!(gain.keyframe_at(10), Some((-6.0, Interpolation::Linear)));
+
+        history.undo(&mut project);
+        let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+        assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::Linear)));
+        assert_eq!(gain.keyframe_at(10), Some((3.0, Interpolation::Linear)));
+    }
+
+    #[test]
+    fn setting_interpolation_only_touches_the_picked_keyframes() {
+        let (mut project, mut history, timeline, clip_id) = clip_with_two_gain_keyframes();
+        history.do_command(
+            &mut project,
+            Box::new(command::SetKeyframeInterpolation::new(
+                timeline,
+                0,
+                clip_id,
+                vec![(command::KeyframeTarget::Gain, 5)],
+                Interpolation::EaseIn,
+            )),
+        );
+
+        let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+        assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::EaseIn)));
+        assert_eq!(gain.keyframe_at(10), Some((3.0, Interpolation::Linear)));
+
+        history.undo(&mut project);
+        let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+        assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::Linear)));
     }
 
     #[test]

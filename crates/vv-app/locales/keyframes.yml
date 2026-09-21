@@ -1,0 +1,53 @@
+_version: 2
+
+keyframes.title:
+  en: "Keyframe Editor"
+  it: "Editor di keyframe"
+
+keyframes.no_clip:
+  en: "Select a clip to see its keyframes."
+  it: "Seleziona una clip per vederne i keyframe."
+
+keyframes.no_keyframes:
+  en: "This clip has no keyframes yet."
+  it: "Questa clip non ha ancora keyframe."
+
+keyframes.no_curve:
+  en: "No curve for this parameter: use the rows below."
+  it: "Nessuna curva per questo parametro: usa le righe qui sotto."
+
+keyframes.hold:
+  en: "Hold"
+  it: "Hold"
+
+keyframes.linear:
+  en: "Linear"
+  it: "Lineare"
+
+keyframes.ease_in_out:
+  en: "Ease In and Out"
+  it: "Ease In and Out"
+
+keyframes.ease_in:
+  en: "Ease In"
+  it: "Ease In"
+
+keyframes.ease_out:
+  en: "Ease Out"
+  it: "Ease Out"
+
+keyframes.bezier:
+  en: "Custom curve"
+  it: "Curva personalizzata"
+
+keyframes.selection_hint:
+  en: "Click or drag a box to select keyframes; drag them to move them in time."
+  it: "Clicca o trascina un riquadro per selezionare i keyframe; trascinali per spostarli nel tempo."
+
+keyframes.gain:
+  en: "Gain"
+  it: "Gain"
+
+keyframes.color:
+  en: "Color"
+  it: "Colore"

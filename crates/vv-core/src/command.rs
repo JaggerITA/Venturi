@@ -51,6 +51,8 @@ pub enum CommandLabel {
     BlendMode,
     Transition,
     MakeCompoundClip,
+    MoveKeyframes,
+    SetInterpolation,
 }
 
 /// Più comandi in un solo passo di history.
@@ -1434,11 +1436,228 @@ impl Command for UpsertKeyframe {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyframeTarget {
     TransformParam(TransformParam),
     Gain,
     Color,
+}
+
+impl KeyframeValue {
+    pub fn target(self) -> KeyframeTarget {
+        match self {
+            Self::TransformParam(param, _) => KeyframeTarget::TransformParam(param),
+            Self::Gain(_) => KeyframeTarget::Gain,
+            Self::Color(_) => KeyframeTarget::Color,
+        }
+    }
+}
+
+/// Un keyframe indicato per parametro e frame: la moneta con cui l'editor
+/// di keyframe passa una selezione ai comandi.
+pub type KeyframePick = (KeyframeTarget, FrameIdx);
+
+/// Toglie dal parametro il keyframe a `frame`, restituendolo.
+fn take_keyframe(
+    effects: &mut EffectStack,
+    target: KeyframeTarget,
+    frame: FrameIdx,
+) -> Option<(KeyframeValue, Interpolation)> {
+    match target {
+        KeyframeTarget::TransformParam(param) => effects
+            .transform
+            .track_mut(param)
+            .remove_at(frame)
+            .map(|(v, i)| (KeyframeValue::TransformParam(param, v), i)),
+        KeyframeTarget::Gain => effects
+            .gain_db
+            .remove_at(frame)
+            .map(|(v, i)| (KeyframeValue::Gain(v), i)),
+        KeyframeTarget::Color => effects
+            .color
+            .as_mut()
+            .and_then(|c| c.remove_at(frame))
+            .map(|(v, i)| (KeyframeValue::Color(v), i)),
+    }
+}
+
+fn put_keyframe(
+    effects: &mut EffectStack,
+    value: KeyframeValue,
+    frame: FrameIdx,
+    interpolation: Interpolation,
+) {
+    match value {
+        KeyframeValue::TransformParam(param, v) => {
+            effects.transform.track_mut(param).upsert(frame, v, interpolation)
+        }
+        KeyframeValue::Gain(v) => effects.gain_db.upsert(frame, v, interpolation),
+        KeyframeValue::Color(v) => {
+            if let Some(color) = &mut effects.color {
+                color.upsert(frame, v, interpolation);
+            }
+        }
+    }
+}
+
+fn set_keyframe_interpolation(
+    effects: &mut EffectStack,
+    target: KeyframeTarget,
+    frame: FrameIdx,
+    interpolation: Interpolation,
+) -> Option<Interpolation> {
+    match target {
+        KeyframeTarget::TransformParam(param) => effects
+            .transform
+            .track_mut(param)
+            .set_interpolation(frame, interpolation),
+        KeyframeTarget::Gain => effects.gain_db.set_interpolation(frame, interpolation),
+        KeyframeTarget::Color => effects
+            .color
+            .as_mut()
+            .and_then(|c| c.set_interpolation(frame, interpolation)),
+    }
+}
+
+/// Sposta nel tempo un gruppo di keyframe (anche di parametri diversi)
+/// tutti dello stesso `delta`.
+#[derive(Debug)]
+pub struct MoveKeyframes {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub picks: Vec<KeyframePick>,
+    pub delta: FrameIdx,
+    /// I keyframe effettivamente spostati, alla posizione di partenza.
+    moved: Vec<(KeyframeTarget, FrameIdx, KeyframeValue, Interpolation)>,
+    /// Keyframe finiti sotto quelli spostati: l'undo li rimette.
+    overwritten: Vec<(FrameIdx, KeyframeValue, Interpolation)>,
+}
+
+impl MoveKeyframes {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        picks: Vec<KeyframePick>,
+        delta: FrameIdx,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            picks,
+            delta,
+            moved: Vec::new(),
+            overwritten: Vec::new(),
+        }
+    }
+}
+
+impl Command for MoveKeyframes {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::MoveKeyframes
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+            return;
+        };
+        // Prima si tolgono tutti, poi si riappoggiano: altrimenti uno
+        // spostamento di un frame sovrascriverebbe il vicino che sta per
+        // spostarsi a sua volta.
+        let moved: Vec<_> = self
+            .picks
+            .iter()
+            .filter_map(|&(target, frame)| {
+                take_keyframe(&mut clip.effects, target, frame).map(|(v, i)| (target, frame, v, i))
+            })
+            .collect();
+        let mut overwritten = Vec::new();
+        for &(target, frame, value, interp) in &moved {
+            let destination = frame + self.delta;
+            if let Some((v, i)) = take_keyframe(&mut clip.effects, target, destination) {
+                overwritten.push((destination, v, i));
+            }
+            put_keyframe(&mut clip.effects, value, destination, interp);
+        }
+        self.moved = moved;
+        self.overwritten = overwritten;
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+            return;
+        };
+        for &(target, frame, _, _) in &self.moved {
+            take_keyframe(&mut clip.effects, target, frame + self.delta);
+        }
+        for &(frame, value, interp) in &self.overwritten {
+            put_keyframe(&mut clip.effects, value, frame, interp);
+        }
+        for &(_, frame, value, interp) in &self.moved {
+            put_keyframe(&mut clip.effects, value, frame, interp);
+        }
+    }
+}
+
+/// Cambia l'interpolazione uscente di un gruppo di keyframe.
+#[derive(Debug)]
+pub struct SetKeyframeInterpolation {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub picks: Vec<KeyframePick>,
+    pub interpolation: Interpolation,
+    previous: Vec<(KeyframeTarget, FrameIdx, Interpolation)>,
+}
+
+impl SetKeyframeInterpolation {
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        picks: Vec<KeyframePick>,
+        interpolation: Interpolation,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            picks,
+            interpolation,
+            previous: Vec::new(),
+        }
+    }
+}
+
+impl Command for SetKeyframeInterpolation {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::SetInterpolation
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+            return;
+        };
+        self.previous = self
+            .picks
+            .iter()
+            .filter_map(|&(target, frame)| {
+                set_keyframe_interpolation(&mut clip.effects, target, frame, self.interpolation)
+                    .map(|old| (target, frame, old))
+            })
+            .collect();
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+            return;
+        };
+        for &(target, frame, interp) in &self.previous {
+            set_keyframe_interpolation(&mut clip.effects, target, frame, interp);
+        }
+    }
 }
 
 /// Rimuove il keyframe di `target` esattamente al frame indicato, se c'è.

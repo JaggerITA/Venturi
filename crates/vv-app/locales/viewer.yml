@@ -63,3 +63,7 @@ viewer.ghost_audio_only:
 transport.play_hint:
   en: "Play/pause (Space) · I/O: mark in/out"
   it: "Play/pausa (Spazio) · I/O: punto di inizio/fine"
+
+toolbar.keyframe_editor:
+  en: "Keyframes"
+  it: "Keyframe"
