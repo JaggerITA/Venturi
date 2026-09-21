@@ -1911,6 +1911,12 @@ impl VibeVideoApp {
         self.timeline_state.set_selection(selected, anchor);
     }
 
+    /// Canc nell'editor di keyframe: tocca i keyframe, non la clip.
+    fn delete_selected_keyframes(&mut self) {
+        let commands = self.keyframe_editor.remove_selected(self.zoom_link);
+        self.apply_effect_changes(commands, false);
+    }
+
     fn delete_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;

@@ -34,8 +34,10 @@ impl VibeVideoApp {
             };
             if pressed(Action::Delete) {
                 // Il pannello che ha ricevuto l'ultimo click decide chi
-                // cancella: media pool o timeline.
-                if self.media_pool_state.focused {
+                // cancella: editor di keyframe, media pool o timeline.
+                if self.keyframe_editor.owns_delete() {
+                    self.delete_selected_keyframes();
+                } else if self.media_pool_state.focused {
                     self.delete_selected_media();
                 } else {
                     self.delete_selected();

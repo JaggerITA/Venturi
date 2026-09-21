@@ -57,9 +57,36 @@ pub(crate) struct KeyframeEditorState {
     /// Porzione di clip visibile (primo frame, durata) quando si è zoomato;
     /// `None` = tutta la clip.
     view: Option<(FrameIdx, FrameIdx)>,
+    /// L'ultimo click è caduto qui dentro: come per il media pool, decide
+    /// chi si prende il Canc.
+    focused: bool,
 }
 
 impl KeyframeEditorState {
+    /// Il Canc cancella i keyframe selezionati solo se l'editor ha
+    /// l'ultimo click e qualcosa di selezionato; altrimenti resta alla
+    /// timeline, che cancella la clip.
+    pub(crate) fn owns_delete(&self) -> bool {
+        self.focused && !self.selection.is_empty()
+    }
+
+    /// I comandi per togliere i keyframe selezionati, che smettono di
+    /// esserlo.
+    pub(crate) fn remove_selected(&mut self, zoom_link: bool) -> Vec<BoxedCommand> {
+        let Some((timeline, track_index, clip_id)) = self.clip else {
+            return Vec::new();
+        };
+        let picks = with_zoom_link(self.selection.drain().collect(), zoom_link);
+        picks
+            .into_iter()
+            .map(|(target, frame)| {
+                Box::new(vv_core::RemoveKeyframe::new(
+                    timeline, track_index, clip_id, target, frame,
+                )) as BoxedCommand
+            })
+            .collect()
+    }
+
     /// La clip è cambiata sotto i piedi (altra selezione, undo): quel che
     /// era selezionato non esiste più.
     fn reset_for(&mut self, clip: (TimelineId, usize, ClipId)) {
@@ -252,7 +279,7 @@ pub(crate) fn show_keyframe_editor(
 ) -> KeyframeEditorResponse {
     let mut response = KeyframeEditorResponse { commands: Vec::new(), playhead: None };
     let mut window_open = *open;
-    egui::Window::new(t!("keyframes.title"))
+    let window = egui::Window::new(t!("keyframes.title"))
         .id(egui::Id::new("keyframe_editor"))
         .open(&mut window_open)
         .default_size([720.0, 340.0])
@@ -342,6 +369,13 @@ pub(crate) fn show_keyframe_editor(
             });
         });
     *open = window_open;
+    // Chi ha ricevuto l'ultimo click decide a chi va il Canc, come fra
+    // media pool e timeline.
+    if let Some(pos) =
+        ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
+    {
+        state.focused = *open && window.is_some_and(|w| w.response.rect.contains(pos));
+    }
     response
 }
 
@@ -969,6 +1003,30 @@ mod tests {
         assert_eq!(both.len(), 2, "nessun doppione se sono già selezionati entrambi");
 
         assert_eq!(with_zoom_link(picks.clone(), false), picks);
+    }
+
+    #[test]
+    fn the_delete_key_is_the_editors_only_with_a_selection_and_the_last_click() {
+        let mut state = KeyframeEditorState::default();
+        state.selection.insert((KeyframeTarget::Gain, 3));
+        assert!(!state.owns_delete(), "senza l'ultimo click il Canc è della timeline");
+        state.focused = true;
+        assert!(state.owns_delete());
+        state.selection.clear();
+        assert!(!state.owns_delete(), "niente da cancellare: il Canc torna alla clip");
+    }
+
+    #[test]
+    fn removing_the_selection_empties_it_and_follows_the_zoom_link() {
+        let mut state = KeyframeEditorState::default();
+        state.clip = Some((TimelineId::default(), 0, ClipId(1)));
+        state.selection.insert(zoom(TransformParam::ZoomX, 7));
+        assert_eq!(state.remove_selected(true).len(), 2, "anche il gemello Y");
+        assert!(state.selection.is_empty());
+
+        let mut state = KeyframeEditorState::default();
+        state.selection.insert((KeyframeTarget::Gain, 1));
+        assert!(state.remove_selected(false).is_empty(), "senza clip non c'è niente da togliere");
     }
 
     #[test]
