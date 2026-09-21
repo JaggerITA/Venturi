@@ -887,20 +887,52 @@ impl VibeVideoApp {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
         };
-        let Some(render_ahead) = &self.render_ahead else {
+        if self.render_ahead.is_none() {
+            return Vec::new();
+        }
+        let mut cached: HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>> = HashMap::new();
+        self.cached_ranges_of_timeline(timeline_id, &mut cached, 0)
+    }
+
+    /// Intervalli decodificati di `timeline_id`, in frame di quella
+    /// timeline. Una compound clip non ha frame in cache propri (non è un
+    /// media da decodificare): i suoi valgono quelli della sua timeline
+    /// annidata, rimappati attraverso la clip.
+    fn cached_ranges_of_timeline(
+        &self,
+        timeline_id: TimelineId,
+        cached: &mut HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>>,
+        depth: usize,
+    ) -> Vec<(FrameIdx, FrameIdx)> {
+        let (Some(render_ahead), Some(timeline)) =
+            (&self.render_ahead, self.project.timelines.get(timeline_id))
+        else {
             return Vec::new();
         };
-        let mut cached: HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>> = HashMap::new();
+        let clips: Vec<(MediaId, &vv_core::Clip)> = timeline
+            .tracks_of_kind(TrackKind::Video)
+            .flat_map(|(_, track)| track.clips.iter())
+            .filter_map(|clip| match clip.source {
+                vv_core::ClipSource::Media(media_id) => Some((media_id, clip)),
+                _ => None,
+            })
+            .collect();
         let mut ranges = Vec::new();
-        for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Video) {
-            for clip in &track.clips {
-                if let vv_core::ClipSource::Media(media_id) = &clip.source {
-                    let source_ranges = cached
-                        .entry(*media_id)
-                        .or_insert_with(|| render_ahead.cached_ranges_for(*media_id));
-                    ranges.extend(map_source_ranges_to_timeline(clip, source_ranges));
-                }
+        for (media_id, clip) in clips {
+            if !cached.contains_key(&media_id) {
+                let nested = self
+                    .project
+                    .media_pool
+                    .get(media_id)
+                    .and_then(|item| item.compound)
+                    .filter(|_| depth < MAX_COMPOUND_WALK_DEPTH);
+                let source_ranges = match nested {
+                    Some(nested_id) => self.cached_ranges_of_timeline(nested_id, cached, depth + 1),
+                    None => render_ahead.cached_ranges_for(media_id),
+                };
+                cached.insert(media_id, source_ranges);
             }
+            ranges.extend(map_source_ranges_to_timeline(clip, &cached[&media_id]));
         }
         ranges
     }
@@ -989,7 +1021,7 @@ impl VibeVideoApp {
     /// compone da quelle delle clip della sua timeline annidata (vedi
     /// `compose_compound_waveform`), caricandole prima se serve.
     fn ensure_compound_waveform(&mut self, media_id: vv_core::MediaId, depth: usize) {
-        if depth > MAX_COMPOUND_WAVEFORM_DEPTH {
+        if depth > MAX_COMPOUND_WALK_DEPTH {
             return;
         }
         let Some(item) = self.project.media_pool.get(media_id) else {
@@ -2392,9 +2424,10 @@ fn map_source_ranges_to_timeline(
         .collect()
 }
 
-/// Quanti livelli di compound clip annidate si compongono per la
-/// waveform: oltre, si rinuncia (come `MAX_COMPOUND_DEPTH` del render).
-const MAX_COMPOUND_WAVEFORM_DEPTH: usize = 8;
+/// Quanti livelli di compound clip annidate si percorrono (waveform,
+/// striscia "buffered"): oltre, si rinuncia — come `MAX_COMPOUND_DEPTH`
+/// del render.
+const MAX_COMPOUND_WALK_DEPTH: usize = 8;
 
 /// Picchi di una compound clip, composti da quelli delle clip audio della
 /// sua timeline annidata: non c'è un file da decodificare, quindi il
@@ -6065,6 +6098,84 @@ mod tests {
                 clip.timeline_start,
                 clip.timeline_end()
             );
+        }
+    }
+
+    /// La striscia "buffered" non deve saltare le compound clip: i loro
+    /// frame in cache sono quelli dei media della timeline annidata.
+    #[test]
+    fn buffered_timeline_ranges_covers_a_compound_clip_through_its_nested_timeline() {
+        let dir = std::env::temp_dir().join("vv-app-buffered-ranges-compound-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &path,
+        );
+
+        let mut app = VibeVideoApp::default();
+        app.import_media(path);
+        let media_id = app
+            .project
+            .media_pool
+            .iter()
+            .find(|(_, item)| item.compound.is_none())
+            .unwrap()
+            .0;
+        app.add_media_to_timeline(media_id);
+        let timeline_id = app.timeline_id.unwrap();
+
+        // La clip importata diventa il contenuto di una compound clip, e
+        // in timeline resta solo quest'ultima.
+        let inner = app.project.timelines[timeline_id].tracks[0].clips.remove(0);
+        let len = inner.timeline_len;
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: app.project.timelines[timeline_id].fps,
+            resolution: (320, 240),
+            tracks: vec![Track::new(TrackKind::Video)],
+        });
+        app.project.timelines[nested_id].tracks[0].insert_sorted(inner);
+        let compound = insert_compound_media(&mut app, nested_id);
+        app.project.media_pool[compound].meta.duration_frames = len;
+        let compound_clip = vv_core::Clip::from_source_range(
+            app.project.alloc_clip_id(),
+            vv_core::ClipSource::Media(compound),
+            0,
+            len,
+            0,
+            vv_core::Rational::one(),
+        );
+        let (start, end) = (compound_clip.timeline_start, compound_clip.timeline_end());
+        app.project.timelines[timeline_id].tracks[0].insert_sorted(compound_clip);
+        app.sync_render_ahead();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ranges = app.buffered_timeline_ranges();
+            if !ranges.is_empty() {
+                for (s, e) in ranges {
+                    assert!(
+                        s >= start && e < end,
+                        "range {s}..{e} fuori dalla compound ({start}..{end})"
+                    );
+                }
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timeout: la compound clip non risulta mai bufferizzata"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
