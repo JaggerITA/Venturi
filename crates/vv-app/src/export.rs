@@ -761,6 +761,75 @@ mod tests {
         assert_eq!(frame[3], BLUE_I420[0], "destra: il blu della track sotto, non nero");
     }
 
+    /// Una PNG con trasparenza importata nel pool deve lasciar vedere la
+    /// track sotto dove è trasparente, non coprirla: la sua alpha va
+    /// conservata dal decode fino al compositing.
+    #[test]
+    fn render_video_frame_lets_the_track_below_show_through_a_transparent_png() {
+        let dir = std::env::temp_dir().join("vv-app-export-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("half_transparent.png");
+        // Metà sinistra rossa opaca, metà destra completamente trasparente.
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:size=4x2:d=1",
+                "-vf",
+                "format=rgba,geq=r='255':g='0':b='0':a='if(lt(X,2),255,0)'",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &path,
+        );
+
+        let mut project = Project::default();
+        let meta = vv_media::probe::probe_image(&path).expect("probe della PNG fallito");
+        let png_media = project.media_pool.insert(vv_core::MediaItem {
+            path: path.clone(),
+            meta,
+            content_hash: 1,
+            compound: None,
+        });
+        let png_clip =
+            Clip::from_source_range(ClipId(2), ClipSource::Media(png_media), 0, 10, 0, vv_core::Rational::one());
+        let tl = timeline_with(vec![
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![solid_color_clip(3, 0, 10, blue())],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            },
+            Track {
+                kind: TrackKind::Video,
+                clips: vec![png_clip],
+                muted: false,
+                solo: false,
+                locked: false,
+                crossings: Vec::new(),
+            },
+        ]);
+        let compositor = vv_render::Compositor::new_headless();
+        let mut provider = StreamingFrameProvider::default();
+
+        let frame = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (4, 2)).unwrap();
+        assert!(
+            (frame[0] as i16 - RED_I420[0] as i16).abs() <= 4,
+            "sinistra: il rosso opaco della PNG, non il blu ({})",
+            frame[0]
+        );
+        assert!(
+            (frame[3] as i16 - BLUE_I420[0] as i16).abs() <= 4,
+            "destra: trasparente, si deve vedere il blu sotto ({})",
+            frame[3]
+        );
+    }
+
     #[test]
     fn render_video_frame_applies_the_transform_to_a_solid_color_clip() {
         let project = Project::default();

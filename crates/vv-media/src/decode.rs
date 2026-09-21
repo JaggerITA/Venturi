@@ -1,5 +1,7 @@
 //! Decode di un media: `next_frame` in sequenza o dopo `seek_to_time`.
-//! Ogni formato pixel diventa YUV420P 8 bit denso; la conversione a RGB la
+//! Ogni formato pixel diventa YUV420P 8 bit denso — YUVA420P se il
+//! sorgente ha un canale alpha (PNG, WebM con alpha, ProRes 4444), così la
+//! trasparenza arriva fino al compositing; la conversione a RGB la
 //! fa lo shader. Matrice e range si leggono dal frame originale (lo
 //! scaling non li cambia), con un'euristica per risoluzione se mancano.
 
@@ -29,14 +31,12 @@ pub struct FrameYuv420 {
     pub matrix: ColorMatrix,
     /// `true` = full range (0-255), `false` = limited (16-235/240), la norma.
     pub full_range: bool,
-    /// Copertura per pixel (`width`x`height`, non sottocampionata): `None`
-    /// per un frame decodificato da un file (sempre opaco — un video non ha
-    /// un canale alpha). `Some` solo per un frame composto dalla timeline
-    /// annidata di una compound clip, con la vera trasparenza delle zone
-    /// dove quella timeline non ha nulla da mostrare (vedi
-    /// `render_ahead::compose_frame_at`): senza, l'esterno delle sue clip
-    /// apparirebbe nero invece di lasciar vedere quel che c'è sotto quando
-    /// la compound clip diventa a sua volta un layer altrove.
+    /// Copertura per pixel (`width`x`height`, non sottocampionata, alpha
+    /// *straight* non premoltiplicata): `Some` quando il formato sorgente
+    /// ha un canale alpha (`format_has_alpha`), `None` quando è opaco. Un
+    /// PNG con trasparenza la porta fin qui, e senza di essa le sue zone
+    /// trasparenti apparirebbero del colore che il file ci ha lasciato
+    /// sotto — spesso nero — invece di lasciar vedere la clip sotto.
     pub alpha: Option<Vec<u8>>,
 }
 
@@ -119,11 +119,12 @@ impl Decoder {
         });
         let decoder = decoder_ctx.video()?;
 
+        let source_format = without_deprecated_range(decoder.format());
         let scaler = Scaler::get(
-            without_deprecated_range(decoder.format()),
+            source_format,
             decoder.width(),
             decoder.height(),
-            Pixel::YUV420P,
+            target_format(source_format),
             decoder.width(),
             decoder.height(),
             Flags::BILINEAR,
@@ -273,11 +274,48 @@ impl Decoder {
         let idx = (secs * self.fps.as_f64()).round() as FrameIdx;
         let matrix = guess_matrix(decoded.color_space(), decoded.height());
         let format = decoded.format();
-        let full_range = decoded.color_range() == color::Range::JPEG
-            || without_deprecated_range(format) != format;
+        // Un frame RGB si dichiara sempre `JPEG`, ma è il range dell'RGB,
+        // non quello dello YUV che sws ne ricava: lì converte a limited se
+        // non gli si dice altro, e crederlo full sbiadirebbe ogni immagine
+        // importata.
+        let full_range = !format_is_rgb(format)
+            && (decoded.color_range() == color::Range::JPEG
+                || without_deprecated_range(format) != format);
         decoded.set_format(without_deprecated_range(format));
         let frame = yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range)?;
         Ok((idx, frame))
+    }
+}
+
+/// I flag di `format`: ffmpeg-next non espone
+/// `AVPixFmtDescriptor::flags`, e `nb_components` da solo non
+/// distinguerebbe un canale alpha dal padding di un `0RGB`.
+fn format_flags(format: Pixel) -> u64 {
+    match format.descriptor() {
+        Some(descriptor) => unsafe { (*descriptor.as_ptr()).flags },
+        None => 0,
+    }
+}
+
+/// `true` se `format` porta un canale alpha vero (PNG, WebM con alpha,
+/// ProRes 4444) e non un quarto canale di padding.
+fn format_has_alpha(format: Pixel) -> bool {
+    format_flags(format) & ffmpeg::ffi::AV_PIX_FMT_FLAG_ALPHA as u64 != 0
+}
+
+/// `true` per i formati RGB (una PNG importata, per dire), che lo scaler
+/// deve convertire a YUV invece di limitarsi a risistemare i piani.
+fn format_is_rgb(format: Pixel) -> bool {
+    format_flags(format) & ffmpeg::ffi::AV_PIX_FMT_FLAG_RGB as u64 != 0
+}
+
+/// Il formato a cui si scala: YUVA420P conserva l'alpha nel quarto piano,
+/// YUV420P la butterebbe via.
+fn target_format(source: Pixel) -> Pixel {
+    if format_has_alpha(source) {
+        Pixel::YUVA420P
+    } else {
+        Pixel::YUV420P
     }
 }
 
@@ -325,6 +363,7 @@ fn yuv420_from_decoded(
     let y = pack_plane(0);
     let u = pack_plane(1);
     let v = pack_plane(2);
+    let alpha = (scaled.format() == Pixel::YUVA420P).then(|| pack_plane(3));
 
     Ok(FrameYuv420 {
         width,
@@ -336,7 +375,7 @@ fn yuv420_from_decoded(
         u_height,
         matrix,
         full_range,
-        alpha: None,
+        alpha,
     })
 }
 
@@ -534,6 +573,69 @@ mod tests {
         path
     }
 
+    /// Una PNG con trasparenza deve portarsela fino al frame decodificato:
+    /// scalata a YUV420P l'alpha sparirebbe e le zone trasparenti
+    /// finirebbero opache, del colore rimasto sotto nel file.
+    #[test]
+    fn a_transparent_png_keeps_its_alpha_channel() {
+        let dir = std::env::temp_dir().join("vv-media-decode-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("half_transparent.png");
+        // Metà sinistra opaca, metà destra completamente trasparente.
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:size=16x8:d=1",
+                "-vf",
+                "format=rgba,geq=r='255':g='0':b='0':a='if(lt(X,8),255,0)'",
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+            ],
+            &path,
+        );
+
+        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+
+        let alpha = frame.alpha.expect("una PNG con trasparenza deve portare il piano alpha");
+        assert_eq!(alpha.len(), (frame.width * frame.height) as usize, "alpha non sottocampionata");
+        let at = |x: u32, y: u32| alpha[(y * frame.width + x) as usize];
+        assert_eq!(at(2, 4), 255, "sinistra: opaca");
+        assert_eq!(at(13, 4), 0, "destra: trasparente, non opaca");
+    }
+
+    /// Un frame RGB (una PNG) si dichiara sempre `color_range = JPEG`, ma
+    /// è il range dell'RGB: lo YUV che sws ne ricava è a range limitato, e
+    /// crederlo full sbiadirebbe ogni immagine importata.
+    #[test]
+    fn a_png_is_reported_as_limited_range_because_that_is_what_the_scaler_produces() {
+        let path = make_test_image("range.png");
+        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+
+        assert!(!frame.full_range);
+        assert!(
+            frame.y.iter().all(|&y| (16..=235).contains(&y)),
+            "valori fuori dall'intervallo limited: non è il range dichiarato"
+        );
+    }
+
+    /// Un video senza canale alpha non deve pagare un quarto piano di
+    /// copertura tutto opaco: costa memoria di cache e un upload di
+    /// texture per frame.
+    #[test]
+    fn a_video_without_alpha_carries_no_alpha_plane() {
+        let path = make_test_clip("no-alpha.mp4", 1);
+        let mut decoder = Decoder::open(&path).expect("apertura fallita");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+
+        assert!(frame.alpha.is_none());
+    }
+
     #[test]
     fn open_image_decodes_correct_dimensions_and_pixels() {
         let path = make_test_image("still.png");
@@ -668,3 +770,5 @@ mod tests {
         }
     }
 }
+
+
