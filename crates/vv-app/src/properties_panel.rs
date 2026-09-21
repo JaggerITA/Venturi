@@ -129,7 +129,7 @@ pub(crate) fn title_editor(
         let mut changed = false;
         egui::ComboBox::from_id_salt("title_font_family")
             .selected_text(shown)
-            .width(ui.available_width())
+            .width(combo_width(ui))
             .height(320.0)
             .show_ui(ui, |ui| {
                 changed |= ui
@@ -162,7 +162,7 @@ pub(crate) fn title_editor(
         let mut changed = false;
         egui::ComboBox::from_id_salt("title_font_face")
             .selected_text(vv_render::text::face_name(title.font_weight, title.italic))
-            .width(ui.available_width())
+            .width(combo_width(ui))
             .show_ui(ui, |ui| {
                 for face in &faces {
                     let selected = face.weight == title.font_weight && face.italic == title.italic;
@@ -223,7 +223,7 @@ pub(crate) fn title_editor(
         let mut changed = false;
         egui::ComboBox::from_id_salt("title_font_case")
             .selected_text(label(title.case))
-            .width(ui.available_width())
+            .width(combo_width(ui))
             .show_ui(ui, |ui| {
                 for case in [FontCase::Mixed, FontCase::Upper, FontCase::Lower, FontCase::Title] {
                     changed |= ui.selectable_value(&mut title.case, case, label(case)).changed();
@@ -499,6 +499,15 @@ pub(crate) struct RowResponse {
 /// Una riga del pannello dei parametri: etichetta, controlli, il diamante
 /// di keyframe con le sue frecce di navigazione (assente per i parametri
 /// non animabili) e il ripristino di quella sola riga.
+/// Larghezza di un menu a tendina in una riga di parametri. Non
+/// `available_width` nudo: il bottone ci aggiunge freccia e margini, il
+/// pannello si allarga per contenerlo (`set_min_width`) e alla riga dopo
+/// `available_width` è già più grande — cresce a ogni frame finché non si
+/// mangia il viewer.
+pub(crate) fn combo_width(ui: &egui::Ui) -> f32 {
+    (ui.available_width() - 30.0).clamp(80.0, 260.0)
+}
+
 pub(crate) fn param_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -1509,7 +1518,7 @@ impl VibeVideoApp {
                                                 let mut changed = false;
                                                 egui::ComboBox::from_id_salt("clip_blend_mode")
                                                     .selected_text(blend_mode_label(blend_mode))
-                                                    .width(ui.available_width())
+                                                    .width(combo_width(ui))
                                                     .show_ui(ui, |ui| {
                                                         for mode in vv_core::BlendMode::ALL {
                                                             changed |= ui
