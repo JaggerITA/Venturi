@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 
 use crate::i18n::Language;
+use crate::properties_panel::preview_combo;
 use crate::settings::{Action, Keymap, Settings, Shortcut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,15 +188,11 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(t!("settings.language"));
-        egui::ComboBox::from_id_salt("settings_language")
-            .selected_text(settings.language.label())
-            .show_ui(ui, |ui| {
-                for language in Language::ALL {
-                    changed |= ui
-                        .selectable_value(&mut settings.language, language, language.label())
-                        .changed();
-                }
-            });
+        let items: Vec<_> = Language::ALL
+            .iter()
+            .map(|language| (*language, language.label().to_string(), true))
+            .collect();
+        changed |= preview_combo(ui, "settings_language", &mut settings.language, &items, None, None, None);
     });
     if changed {
         settings.language.apply();

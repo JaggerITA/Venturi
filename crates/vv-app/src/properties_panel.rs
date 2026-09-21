@@ -121,27 +121,17 @@ pub(crate) fn title_editor(
     ui.add_space(4.0);
 
     let row = param_row(ui, &t!("props.font"), None, |ui| {
-        let shown = if title.font_family.is_empty() {
-            "Sans-serif"
-        } else {
-            title.font_family.as_str()
-        };
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("title_font_family")
-            .selected_text(shown)
-            .width(ui.available_width())
-            .height(320.0)
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(&mut title.font_family, String::new(), "Sans-serif")
-                    .changed();
-                for family in fonts.families() {
-                    changed |= ui
-                        .selectable_value(&mut title.font_family, family.clone(), family)
-                        .changed();
-                }
-            });
-        changed
+        let mut items = vec![(String::new(), "Sans-serif".to_string(), true)];
+        items.extend(fonts.families().iter().map(|f| (f.clone(), f.clone(), true)));
+        preview_combo(
+            ui,
+            "title_font_family",
+            &mut title.font_family,
+            &items,
+            Some(ui.available_width()),
+            Some(320.0),
+            None,
+        )
     });
     if row.reset {
         title.font_family = defaults.font_family.clone();
@@ -159,20 +149,23 @@ pub(crate) fn title_editor(
                 })
                 .collect();
         }
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("title_font_face")
-            .selected_text(vv_render::text::face_name(title.font_weight, title.italic))
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                for face in &faces {
-                    let selected = face.weight == title.font_weight && face.italic == title.italic;
-                    if ui.selectable_label(selected, &face.name).clicked() {
-                        title.font_weight = face.weight;
-                        title.italic = face.italic;
-                        changed = true;
-                    }
-                }
-            });
+        let items: Vec<_> = faces
+            .iter()
+            .map(|face| ((face.weight, face.italic), face.name.clone(), true))
+            .collect();
+        let mut face = (title.font_weight, title.italic);
+        let changed = preview_combo(
+            ui,
+            "title_font_face",
+            &mut face,
+            &items,
+            Some(ui.available_width()),
+            None,
+            None,
+        );
+        if changed {
+            (title.font_weight, title.italic) = face;
+        }
         changed
     });
     if row.reset {
@@ -220,16 +213,19 @@ pub(crate) fn title_editor(
             FontCase::Lower => t!("props.case_lower"),
             FontCase::Title => t!("props.case_title"),
         };
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("title_font_case")
-            .selected_text(label(title.case))
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                for case in [FontCase::Mixed, FontCase::Upper, FontCase::Lower, FontCase::Title] {
-                    changed |= ui.selectable_value(&mut title.case, case, label(case)).changed();
-                }
-            });
-        changed
+        let items: Vec<_> = [FontCase::Mixed, FontCase::Upper, FontCase::Lower, FontCase::Title]
+            .into_iter()
+            .map(|case| (case, label(case).to_string(), true))
+            .collect();
+        preview_combo(
+            ui,
+            "title_font_case",
+            &mut title.case,
+            &items,
+            Some(ui.available_width()),
+            None,
+            None,
+        )
     });
     if row.reset {
         title.case = defaults.case;
@@ -671,6 +667,127 @@ pub(crate) fn slider_field(
             .min_decimals(decimals),
     );
     slider.changed() || drag.changed()
+}
+
+/// Id del menu a tendina attualmente aperto, per chi deve sapere che c'è
+/// un'anteprima in corso.
+const OPEN_COMBO: &str = "preview_combo_open";
+
+/// C'è un menu a tendina aperto che sta applicando l'anteprima delle voci?
+/// Finché dura, le modifiche vanno raggruppate in un solo passo di undo.
+pub(crate) fn preview_combo_open(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new(OPEN_COMBO)))
+        .is_some_and(|id| egui::ComboBox::is_open(ctx, id))
+}
+
+/// Menu a tendina con anteprima: la rotella lo scorre anche da chiuso e, da
+/// aperto, la voce sotto il puntatore viene applicata subito. Se si chiude
+/// senza confermare con un click (Esc, click fuori) torna al valore che
+/// aveva prima di aprirsi.
+///
+/// `items` sono `(valore, etichetta, abilitato)`.
+pub(crate) fn preview_combo<T>(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    value: &mut T,
+    items: &[(T, String, bool)],
+    width: Option<f32>,
+    height: Option<f32>,
+    disabled_hint: Option<&str>,
+) -> bool
+where
+    T: Clone + PartialEq + Send + Sync + 'static,
+{
+    let button_id = ui.make_persistent_id(id_salt);
+    let original_id = button_id.with("preview_original");
+    let was_open = egui::ComboBox::is_open(ui.ctx(), button_id);
+    let before = value.clone();
+    let mut confirmed = false;
+
+    let selected_text = items
+        .iter()
+        .find(|(v, _, _)| v == value)
+        .map(|(_, label, _)| label.clone())
+        .unwrap_or_default();
+    let mut combo = egui::ComboBox::from_id_salt(id_salt).selected_text(selected_text);
+    if let Some(width) = width {
+        combo = combo.width(width);
+    }
+    if let Some(height) = height {
+        combo = combo.height(height);
+    }
+
+    let response = combo
+        .show_ui(ui, |ui| {
+            for (item, label, enabled) in items {
+                let response = ui
+                    .add_enabled_ui(*enabled, |ui| ui.selectable_label(item == value, label))
+                    .inner;
+                if !*enabled {
+                    if let Some(hint) = disabled_hint {
+                        response.on_disabled_hover_text(hint);
+                    }
+                    continue;
+                }
+                if response.clicked() {
+                    *value = item.clone();
+                    confirmed = true;
+                } else if response.hovered() && item != value {
+                    *value = item.clone();
+                }
+            }
+        })
+        .response;
+
+    if !was_open && response.contains_pointer() {
+        let notches: i32 = ui.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } if delta.y != 0.0 => -delta.y.signum() as i32,
+                    _ => 0,
+                })
+                .sum()
+        });
+        if notches != 0 {
+            let step = notches.signum() as isize;
+            let start = items.iter().position(|(v, _, _)| v == value).unwrap_or(0) as isize;
+            let mut i = start + step;
+            while i >= 0 && i < items.len() as isize {
+                if items[i as usize].2 {
+                    *value = items[i as usize].0.clone();
+                    break;
+                }
+                i += step;
+            }
+        }
+        // La rotella sul menu non deve anche scorrere il pannello sotto.
+        ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+    }
+
+    let open = egui::ComboBox::is_open(ui.ctx(), button_id);
+    if open {
+        ui.ctx().data_mut(|d| {
+            if !was_open {
+                d.insert_temp(original_id, before.clone());
+            }
+            d.insert_temp(egui::Id::new(OPEN_COMBO), button_id);
+        });
+    } else if was_open {
+        let original = ui.ctx().data_mut(|d| {
+            let original = d.get_temp::<T>(original_id);
+            d.remove::<T>(original_id);
+            original
+        });
+        if let Some(original) = original
+            && !confirmed
+        {
+            *value = original;
+        }
+    }
+
+    *value != before
 }
 
 /// Il lucchetto che tiene insieme i due assi dello zoom.
@@ -1117,24 +1234,20 @@ impl VibeVideoApp {
 
         ui.horizontal(|ui| {
             ui.label(t!("props.direction"));
-            egui::ComboBox::from_id_salt("transition_direction")
-                .selected_text(timeline_ui::push_direction_label(transition.direction))
-                .show_ui(ui, |ui| {
-                    for d in vv_core::PushDirection::ALL {
-                        ui.selectable_value(&mut transition.direction, d, timeline_ui::push_direction_label(d));
-                    }
-                });
+            let items: Vec<_> = vv_core::PushDirection::ALL
+                .iter()
+                .map(|d| (*d, timeline_ui::push_direction_label(*d).to_string(), true))
+                .collect();
+            preview_combo(ui, "transition_direction", &mut transition.direction, &items, None, None, None);
         });
 
         ui.horizontal(|ui| {
             ui.label(t!("props.ease"));
-            egui::ComboBox::from_id_salt("transition_ease")
-                .selected_text(timeline_ui::ease_label(transition.ease))
-                .show_ui(ui, |ui| {
-                    for e in vv_core::Ease::ALL {
-                        ui.selectable_value(&mut transition.ease, e, timeline_ui::ease_label(e));
-                    }
-                });
+            let items: Vec<_> = vv_core::Ease::ALL
+                .iter()
+                .map(|e| (*e, timeline_ui::ease_label(*e).to_string(), true))
+                .collect();
+            preview_combo(ui, "transition_ease", &mut transition.ease, &items, None, None, None);
         });
 
         ui.horizontal(|ui| {
@@ -1531,18 +1644,19 @@ impl VibeVideoApp {
                                             }
 
                                             let row = param_row(ui, &t!("props.composite_mode"), None, |ui| {
-                                                let mut changed = false;
-                                                egui::ComboBox::from_id_salt("clip_blend_mode")
-                                                    .selected_text(blend_mode_label(blend_mode))
-                                                    .width(ui.available_width())
-                                                    .show_ui(ui, |ui| {
-                                                        for mode in vv_core::BlendMode::ALL {
-                                                            changed |= ui
-                                                                .selectable_value(&mut blend_mode, mode, blend_mode_label(mode))
-                                                                .changed();
-                                                        }
-                                                    });
-                                                changed
+                                                let items: Vec<_> = vv_core::BlendMode::ALL
+                                                    .iter()
+                                                    .map(|mode| (*mode, blend_mode_label(*mode).to_string(), true))
+                                                    .collect();
+                                                preview_combo(
+                                                    ui,
+                                                    "clip_blend_mode",
+                                                    &mut blend_mode,
+                                                    &items,
+                                                    Some(ui.available_width()),
+                                                    None,
+                                                    None,
+                                                )
                                             });
                                             blend_changed |= row.changed;
                                             if row.reset {

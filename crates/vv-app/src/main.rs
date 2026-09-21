@@ -2968,8 +2968,10 @@ impl eframe::App for VibeVideoApp {
         // Una modifica dal pannello può toccare più clip (selezione
         // multipla): un solo comando composito, così l'undo le riporta
         // indietro tutte insieme.
-        let pointer_down = ui.input(|i| i.pointer.any_down());
-        self.apply_effect_changes(pending_effects, pointer_down);
+        // Un menu a tendina aperto sta applicando l'anteprima delle voci:
+        // le sue modifiche vanno in un solo passo di undo, come un drag.
+        let holding = ui.input(|i| i.pointer.any_down()) || preview_combo_open(ui.ctx());
+        self.apply_effect_changes(pending_effects, holding);
 
         let mut transport_action = transport::TransportResponse::default();
         let mut viewer_rect = None;

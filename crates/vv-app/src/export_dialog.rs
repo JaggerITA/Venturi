@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use vv_core::{FrameIdx, Rational};
 use vv_media::{AudioCodec, VideoCodec};
+use crate::properties_panel::preview_combo;
 
 use crate::export::ExportSettings;
 use crate::format_duration;
@@ -166,35 +167,32 @@ impl ExportDialog {
             .show(ui, |ui| {
                 ui.label(t!("export.encoder"));
                 let before = video.codec;
-                egui::ComboBox::from_id_salt("export_video_codec")
-                    .selected_text(video_codec_label(video.codec))
-                    .show_ui(ui, |ui| {
-                        for codec in VideoCodec::ALL {
-                            ui.add_enabled_ui(codec.is_available(), |ui| {
-                                ui.selectable_value(
-                                    &mut video.codec,
-                                    codec,
-                                    video_codec_label(codec),
-                                )
-                                .on_disabled_hover_text(t!("export.unavailable_on_system"));
-                            });
-                        }
-                    });
+                let items: Vec<_> = VideoCodec::ALL
+                    .iter()
+                    .map(|codec| (*codec, video_codec_label(*codec).to_string(), codec.is_available()))
+                    .collect();
+                preview_combo(
+                    ui,
+                    "export_video_codec",
+                    &mut video.codec,
+                    &items,
+                    None,
+                    None,
+                    Some(&t!("export.unavailable_on_system")),
+                );
                 if video.codec != before {
                     video.preset = video.codec.default_preset().into();
                 }
                 ui.end_row();
 
-                ui.label(t!("export.preset"));
-                egui::ComboBox::from_id_salt("export_video_preset")
-                    .selected_text(&video.preset)
-                    .show_ui(ui, |ui| {
-                        for preset in video.codec.presets() {
-                            ui.selectable_value(&mut video.preset, preset.to_string(), *preset);
-                        }
-                    })
-                    .response
-                    .on_hover_text(t!("export.preset_hint"));
+                ui.label(t!("export.preset")).on_hover_text(t!("export.preset_hint"));
+                let items: Vec<_> = video
+                    .codec
+                    .presets()
+                    .iter()
+                    .map(|preset| (preset.to_string(), preset.to_string(), true))
+                    .collect();
+                preview_combo(ui, "export_video_preset", &mut video.preset, &items, None, None, None);
                 ui.end_row();
 
                 ui.label(match video.codec {
@@ -213,13 +211,11 @@ impl ExportDialog {
                     let (w, h) = probe.output_size(info.resolution);
                     format!("{w}×{h} ({percent}%)")
                 };
-                egui::ComboBox::from_id_salt("export_scale")
-                    .selected_text(size_label(*scale))
-                    .show_ui(ui, |ui| {
-                        for percent in ExportSettings::SCALE_CHOICES {
-                            ui.selectable_value(scale, percent, size_label(percent));
-                        }
-                    });
+                let items: Vec<_> = ExportSettings::SCALE_CHOICES
+                    .iter()
+                    .map(|percent| (*percent, size_label(*percent), true))
+                    .collect();
+                preview_combo(ui, "export_scale", scale, &items, None, None, None);
                 ui.end_row();
 
                 ui.label(t!("export.frame_rate"));
@@ -251,52 +247,37 @@ impl ExportDialog {
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 ui.label(t!("export.encoder"));
-                egui::ComboBox::from_id_salt("export_audio_codec")
-                    .selected_text(audio_codec_label(audio.codec))
-                    .show_ui(ui, |ui| {
-                        for codec in AudioCodec::ALL {
-                            ui.add_enabled_ui(codec.is_available(), |ui| {
-                                ui.selectable_value(
-                                    &mut audio.codec,
-                                    codec,
-                                    audio_codec_label(codec),
-                                )
-                                .on_disabled_hover_text(
-                                    t!("export.unavailable_in_ffmpeg"),
-                                );
-                            });
-                        }
-                    });
+                let items: Vec<_> = AudioCodec::ALL
+                    .iter()
+                    .map(|codec| (*codec, audio_codec_label(*codec).to_string(), codec.is_available()))
+                    .collect();
+                preview_combo(
+                    ui,
+                    "export_audio_codec",
+                    &mut audio.codec,
+                    &items,
+                    None,
+                    None,
+                    Some(&t!("export.unavailable_in_ffmpeg")),
+                );
                 ui.end_row();
 
                 if audio.codec == AudioCodec::Aac {
                     ui.label(t!("export.preset"));
-                    egui::ComboBox::from_id_salt("export_audio_coder")
-                        .selected_text(aac_coder_label(audio.fast_coder))
-                        .show_ui(ui, |ui| {
-                            for fast in [false, true] {
-                                ui.selectable_value(
-                                    &mut audio.fast_coder,
-                                    fast,
-                                    aac_coder_label(fast),
-                                );
-                            }
-                        });
+                    let items: Vec<_> = [false, true]
+                        .into_iter()
+                        .map(|fast| (fast, aac_coder_label(fast).to_string(), true))
+                        .collect();
+                    preview_combo(ui, "export_audio_coder", &mut audio.fast_coder, &items, None, None, None);
                     ui.end_row();
                 }
 
                 ui.label("Bitrate");
-                egui::ComboBox::from_id_salt("export_audio_bitrate")
-                    .selected_text(format!("{} kbps", audio.bitrate_kbps))
-                    .show_ui(ui, |ui| {
-                        for kbps in [96, 128, 160, 192, 256, 320] {
-                            ui.selectable_value(
-                                &mut audio.bitrate_kbps,
-                                kbps,
-                                format!("{kbps} kbps"),
-                            );
-                        }
-                    });
+                let items: Vec<_> = [96, 128, 160, 192, 256, 320]
+                    .into_iter()
+                    .map(|kbps| (kbps, format!("{kbps} kbps"), true))
+                    .collect();
+                preview_combo(ui, "export_audio_bitrate", &mut audio.bitrate_kbps, &items, None, None, None);
                 ui.end_row();
             });
     }
