@@ -338,6 +338,7 @@ struct VibeVideoApp {
     current_project_path: Option<PathBuf>,
     /// Ultimo titolo inviato al compositor: il comando si manda solo quando cambia.
     window_title: String,
+    about_icon: Option<egui::TextureHandle>,
     /// `history.generation()` all'ultimo salvataggio o apertura.
     saved_generation: u64,
     /// Media importati dopo l'ultimo salvataggio: il media pool cambia
@@ -436,6 +437,7 @@ impl Default for VibeVideoApp {
             last_export_settings: None,
             current_project_path: None,
             window_title: String::new(),
+            about_icon: None,
             saved_generation: 0,
             unsaved_media: false,
             pending_project_switch: None,

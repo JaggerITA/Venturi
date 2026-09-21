@@ -377,20 +377,6 @@ impl VibeVideoApp {
                         ui.close();
                     }
                 });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let unsaved = if self.has_unsaved_changes() { "*" } else { "" };
-                    let label = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("VibeVideo — {}{unsaved}", self.project_label()))
-                                .weak(),
-                        )
-                        .truncate(),
-                    );
-                    if let Some(path) = &self.current_project_path {
-                        label.on_hover_text(path.display().to_string());
-                    }
-                });
             });
         });
 
@@ -401,6 +387,7 @@ impl VibeVideoApp {
     }
 
     pub(crate) fn show_about_dialog(&mut self, ctx: &egui::Context) {
+        let icon = self.about_icon(ctx);
         egui::Window::new(t!("about.title"))
             .open(&mut self.about_open)
             .collapsible(false)
@@ -408,12 +395,28 @@ impl VibeVideoApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
+                    if let Some(texture) = &icon {
+                        ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+                    }
                     ui.heading("VibeVideo");
                     ui.label(t!("about.version", version = env!("VV_GIT_HASH")));
                     ui.add_space(8.0);
                     ui.label(t!("about.author", author = "Moreno Razzoli a.k.a. Morrolinux"));
                 });
             });
+    }
+
+    /// Texture dell'icona dell'app, caricata alla prima apertura dell'about.
+    fn about_icon(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if self.about_icon.is_none() {
+            let icon = app_icon()?;
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width as usize, icon.height as usize],
+                &icon.rgba,
+            );
+            self.about_icon = Some(ctx.load_texture("app_icon", image, egui::TextureOptions::LINEAR));
+        }
+        self.about_icon.clone()
     }
 
     fn recent_projects_menu(&mut self, ui: &mut egui::Ui) {
