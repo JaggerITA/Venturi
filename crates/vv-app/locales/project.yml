@@ -127,3 +127,7 @@ otio.unsupported_url:
 otio.media_unreadable:
   en: "%{path}: %{error}"
   it: "%{path}: %{error}"
+
+project.untitled:
+  en: "Untitled project"
+  it: "Progetto senza titolo"

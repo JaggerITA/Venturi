@@ -377,6 +377,20 @@ impl VibeVideoApp {
                         ui.close();
                     }
                 });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let unsaved = if self.has_unsaved_changes() { "*" } else { "" };
+                    let label = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("VibeVideo — {}{unsaved}", self.project_label()))
+                                .weak(),
+                        )
+                        .truncate(),
+                    );
+                    if let Some(path) = &self.current_project_path {
+                        label.on_hover_text(path.display().to_string());
+                    }
+                });
             });
         });
 

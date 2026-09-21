@@ -336,6 +336,8 @@ struct VibeVideoApp {
 
     /// `None` finché non salvato: "Salva" si comporta come "Salva con nome".
     current_project_path: Option<PathBuf>,
+    /// Ultimo titolo inviato al compositor: il comando si manda solo quando cambia.
+    window_title: String,
     /// `history.generation()` all'ultimo salvataggio o apertura.
     saved_generation: u64,
     /// Media importati dopo l'ultimo salvataggio: il media pool cambia
@@ -433,6 +435,7 @@ impl Default for VibeVideoApp {
             export_dialog: None,
             last_export_settings: None,
             current_project_path: None,
+            window_title: String::new(),
             saved_generation: 0,
             unsaved_media: false,
             pending_project_switch: None,
@@ -2721,6 +2724,7 @@ impl eframe::App for VibeVideoApp {
             }
         }
         self.sync_timeline_audio();
+        self.sync_window_title(ui.ctx());
 
         self.handle_shortcuts(ui);
 
@@ -3254,6 +3258,19 @@ impl eframe::App for VibeVideoApp {
     }
 }
 
+fn app_icon() -> Option<egui::IconData> {
+    const PNG: &[u8] = include_bytes!("../../../media/icons/png/vv-icon-256.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(PNG));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    Some(egui::IconData { rgba: buf, width: info.width, height: info.height })
+}
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -3264,8 +3281,18 @@ fn main() -> eframe::Result<()> {
     // La prima verifica di NVENC inizializza CUDA: meglio non nella UI.
     std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("VibeVideo")
+        // Deve combaciare con il nome del .desktop, altrimenti i compositor
+        // Wayland non associano l'icona alla finestra.
+        .with_app_id("vibevideo");
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        viewport,
         ..Default::default()
     };
 

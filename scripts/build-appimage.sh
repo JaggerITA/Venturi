@@ -36,7 +36,21 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib"
 cp "$TARGET_DIR/release/vv-app" "$APPDIR/usr/bin/"
 cp -a "$FFMPEG_PREFIX"/lib/*.so.* "$APPDIR/usr/lib/"
-cp packaging/appimage/vibevideo.desktop packaging/appimage/vibevideo.svg "$APPDIR/"
+cp packaging/appimage/vibevideo.desktop "$APPDIR/"
+mkdir -p "$APPDIR/usr/share/applications"
+cp packaging/appimage/vibevideo.desktop "$APPDIR/usr/share/applications/"
+
+# Il nome dei file icona deve combaciare con la chiave Icon= del .desktop.
+cp media/icons/svg/vv-icon.svg "$APPDIR/vibevideo.svg"
+for dir in media/icons/linux/hicolor/*/apps; do
+    size="$(basename "$(dirname "$dir")")"
+    dest="$APPDIR/usr/share/icons/hicolor/$size/apps"
+    mkdir -p "$dest"
+    for f in "$dir"/vibe-video.*; do
+        cp "$f" "$dest/vibevideo.${f##*.}"
+    done
+done
+cp media/icons/png/vv-icon-256.png "$APPDIR/.DirIcon"
 ln -s usr/bin/vv-app "$APPDIR/AppRun"
 
 # L'rpath va impostato qui, non via link-arg di cargo: gli argomenti dopo

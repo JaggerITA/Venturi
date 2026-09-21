@@ -406,6 +406,27 @@ impl VibeVideoApp {
         self.unsaved_media || self.history.generation() != self.saved_generation
     }
 
+    /// Nome del progetto corrente, senza estensione.
+    pub(crate) fn project_label(&self) -> String {
+        self.current_project_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| t!("project.untitled").into_owned())
+    }
+
+    pub(crate) fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let title = format!(
+            "{}{} — VibeVideo",
+            self.project_label(),
+            if self.has_unsaved_changes() { "*" } else { "" },
+        );
+        if title != self.window_title {
+            self.window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+    }
+
     /// Apre o importa un progetto, chiedendo prima se salvare le modifiche.
     pub(crate) fn request_project_switch(&mut self, switch: ProjectSwitch) {
         if self.has_unsaved_changes() {
