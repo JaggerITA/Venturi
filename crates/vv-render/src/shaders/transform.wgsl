@@ -16,7 +16,7 @@ struct TransformUniform {
     // x: matrice (0=BT.601, 1=BT.709, 2=BT.2020). y: 1 se full range.
     // z: aspect dell'output, per ruotare senza deformare.
     // w: 0 video, 1 colore pieno, 2 colore pieno con copertura nel piano Y
-    // (testo).
+    // (testo), 3 texture RGBA premoltiplicata al posto dei piani.
     color: vec4<f32>,
     // RGBA del layer a colore pieno, al posto dei piani Y/U/V.
     solid: vec4<f32>,
@@ -183,6 +183,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (mode > 0.5 && mode < 1.5) {
         rgb = transform.solid.rgb;
         out_alpha = alpha * transform.solid.a;
+    } else if (mode > 2.5) {
+        // Il frame è stato composto in alpha-over su uno sfondo
+        // trasparente: il colore è già moltiplicato per l'alpha, e
+        // l'alpha-over di questo pass lo rimoltiplicherebbe.
+        let texel = textureSample(y_tex, input_sampler, source_uv);
+        rgb = clamp(texel.rgb / max(texel.a, 1.0 / 255.0), vec3<f32>(0.0), vec3<f32>(1.0));
+        out_alpha = alpha * texel.a;
     } else {
         let y_sample = textureSample(y_tex, input_sampler, source_uv).r;
         if (mode > 1.5) {

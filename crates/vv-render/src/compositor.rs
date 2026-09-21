@@ -94,6 +94,18 @@ pub enum Layer<'a> {
         /// solo l'id dello shader che gli corrisponde (`filter_shader_id`).
         filters: &'a [vv_core::FilterKind],
     },
+    /// Un frame già composto e residente sulla GPU: la timeline annidata di
+    /// una compound clip, che torna layer nella timeline esterna senza
+    /// passare dalla CPU. RGBA premoltiplicato — vedi `Fill::Rgba`.
+    Texture {
+        texture: &'a wgpu::Texture,
+        transform: Transform,
+        /// Come in `Video`: le unità del crop, che possono non essere le
+        /// dimensioni di `texture` (anteprima a risoluzione ridotta).
+        source_size: (u32, u32),
+        opacity: f32,
+        filters: &'a [vv_core::FilterKind],
+    },
     Solid {
         color: vv_core::Rgba,
         transform: Transform,
@@ -129,6 +141,10 @@ enum Fill {
     Video,
     Solid(vv_core::Rgba),
     Mask(vv_core::Rgba),
+    /// Texture RGBA già composta, con il colore premoltiplicato per l'alpha
+    /// (è il risultato di un `ALPHA_BLENDING` su clear trasparente): lo
+    /// shader lo divide prima di rimetterlo in alpha-over.
+    Rgba,
 }
 
 /// Risoluzione in pixel della texture prodotta e quella logica della
@@ -195,6 +211,7 @@ impl TransformUniform {
             Fill::Video => (0.0, None),
             Fill::Solid(c) => (1.0, Some(c)),
             Fill::Mask(c) => (2.0, Some(c)),
+            Fill::Rgba => (3.0, None),
         };
         // Il `Transform` è in pixel — di timeline per posizione e anchor,
         // del media per il crop; lo shader lavora in coordinate
@@ -285,6 +302,14 @@ struct I420Buffers {
     storage: wgpu::Buffer,
     params: wgpu::Buffer,
     readback: wgpu::Buffer,
+}
+
+/// Se la texture di output torna nel pool o resta a chi la riceve: vedi
+/// `render_layers_to_owned_texture_transparent`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recycle {
+    Yes,
+    No,
 }
 
 /// Oltre, le texture di dimensioni non più usate vengono lasciate andare.
@@ -583,7 +608,7 @@ impl Compositor {
     /// (vedi [`Compositor::render_layers`]). Sfondo nero opaco: per il
     /// video finale (anteprima, export) non esiste "trasparente".
     pub fn render_layers_to_texture(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
-        self.render_layers_to_texture_with_clear(layers, output, BLACK)
+        self.render_layers_to_texture_with_clear(layers, output, BLACK, Recycle::Yes)
     }
 
     /// Come `render_layers_to_texture`, ma senza forzare uno sfondo opaco:
@@ -593,7 +618,15 @@ impl Compositor {
     /// nere, o coprirebbero quel che c'è sotto invece di lasciarlo vedere
     /// (vedi `YuvFrame::alpha`, che porta questa trasparenza in giro).
     pub fn render_layers_to_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
-        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT)
+        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::Yes)
+    }
+
+    /// Come `render_layers_to_texture_transparent`, ma la texture **non**
+    /// torna nel pool: la tiene chi la riceve, per riusarla come
+    /// `Layer::Texture` in una composizione successiva. Col riciclo, il
+    /// primo render della stessa dimensione le disegnerebbe sopra.
+    pub fn render_layers_to_owned_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
+        self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::No)
     }
 
     fn render_layers_to_texture_with_clear(
@@ -601,6 +634,7 @@ impl Compositor {
         layers: &[Layer],
         output: OutputFrame,
         clear: wgpu::Color,
+        recycle: Recycle,
     ) -> wgpu::Texture {
         let output_texture = self.output_texture(output.width, output.height);
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -633,6 +667,21 @@ impl Compositor {
                     *source_size,
                     (frame.width, frame.height),
                     Fill::Video,
+                    *opacity,
+                    filters,
+                )],
+                Layer::Texture {
+                    texture,
+                    transform,
+                    source_size,
+                    opacity,
+                    filters,
+                } => vec![self.texture_bind_group(
+                    &mut planes,
+                    texture,
+                    transform,
+                    output,
+                    *source_size,
                     *opacity,
                     filters,
                 )],
@@ -693,10 +742,12 @@ impl Compositor {
         self.queue.submit(Some(encoder.finish()));
         let mut pool = self.pool.lock().unwrap();
         give_back(&mut pool.planes, planes);
-        // Una copia resta nel pool: il prossimo frame della stessa
-        // dimensione ci ridisegna sopra, dopo che la GPU ha finito con
-        // questo (stessa coda).
-        give_back(&mut pool.outputs, [output_texture.clone()]);
+        if recycle == Recycle::Yes {
+            // Una copia resta nel pool: il prossimo frame della stessa
+            // dimensione ci ridisegna sopra, dopo che la GPU ha finito con
+            // questo (stessa coda).
+            give_back(&mut pool.outputs, [output_texture.clone()]);
+        }
         output_texture
     }
 
@@ -760,29 +811,79 @@ impl Compositor {
             opacity,
             filters,
         );
+        let bind_group = self.bind_group_for([&y_view, &u_view, &v_view, &a_view], &uniform);
+        planes.extend([y_texture, u_texture, v_texture, a_texture]);
+        bind_group
+    }
+
+    /// Come `layer_bind_group`, ma la sorgente è una texture RGBA già
+    /// composta (`Layer::Texture`): occupa lo slot del piano Y — il layout
+    /// chiede solo una texture 2D float filtrabile, e `Rgba8Unorm` lo
+    /// soddisfa quanto `R8Unorm` — e gli altri slot prendono i placeholder
+    /// 1x1, che con `Fill::Rgba` lo shader non campiona (tranne l'alpha,
+    /// che deve restare opaco).
+    fn texture_bind_group(
+        &self,
+        planes: &mut Vec<wgpu::Texture>,
+        texture: &wgpu::Texture,
+        transform: &Transform,
+        output: OutputFrame,
+        source_size: (u32, u32),
+        opacity: f32,
+        filters: &[vv_core::FilterKind],
+    ) -> wgpu::BindGroup {
+        let u_texture = self.plane_texture(&[128], 1, 1);
+        let v_texture = self.plane_texture(&[128], 1, 1);
+        let a_texture = self.plane_texture(OPAQUE, 1, 1);
+        let rgba_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let a_view = a_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let uniform = TransformUniform::new(
+            transform,
+            ColorMatrix::Bt709,
+            false,
+            fit_factors(
+                (texture.width().max(1) as f32, texture.height().max(1) as f32),
+                (output.width as f32, output.height as f32),
+            ),
+            output,
+            source_size,
+            Fill::Rgba,
+            opacity,
+            filters,
+        );
+        let bind_group = self.bind_group_for([&rgba_view, &u_view, &v_view, &a_view], &uniform);
+        planes.extend([u_texture, v_texture, a_texture]);
+        bind_group
+    }
+
+    /// Il bind group del pass: le view nell'ordine `[sorgente, U, V, alpha]`
+    /// (la prima è il piano Y o la texture RGBA, vedi `Fill`).
+    fn bind_group_for(&self, views: [&wgpu::TextureView; 4], uniform: &TransformUniform) -> wgpu::BindGroup {
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("vv-render transform uniform"),
-                contents: bytemuck::bytes_of(&uniform),
+                contents: bytemuck::bytes_of(uniform),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vv-render transform bind group"),
             layout: &self.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&y_view),
+                    resource: wgpu::BindingResource::TextureView(views[0]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&u_view),
+                    resource: wgpu::BindingResource::TextureView(views[1]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&v_view),
+                    resource: wgpu::BindingResource::TextureView(views[2]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -794,12 +895,10 @@ impl Compositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&a_view),
+                    resource: wgpu::BindingResource::TextureView(views[3]),
                 },
             ],
-        });
-        planes.extend([y_texture, u_texture, v_texture, a_texture]);
-        bind_group
+        })
     }
 
     /// Un piano R8 con `data`, preso dal pool se ce n'è uno della stessa
@@ -1617,6 +1716,140 @@ mod tests {
         );
         let pixels = out.as_chunks::<4>().0;
         assert!(pixels.iter().any(|px| px == &[0, 0, 0, 255]), "nessun pixel d'ombra");
+    }
+
+    const BLUE: vv_core::Rgba = vv_core::Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    const WHITE: vv_core::Rgba = vv_core::Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    /// Comporre in un intermedio (la timeline annidata di una compound
+    /// clip) e riusarlo come `Layer::Texture` deve dare gli stessi pixel
+    /// che comporre i suoi layer direttamente: l'alpha-over è associativo,
+    /// e il round-trip attraverso la texture non deve introdurre
+    /// differenze.
+    #[test]
+    fn a_texture_layer_composites_like_the_layers_it_was_made_of() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(16, 16);
+        // Zoom < 1: attorno al rosso resta scoperto, cioè trasparente
+        // nell'intermedio — è la parte che deve lasciar vedere il blu.
+        let inner = Transform {
+            zoom: [0.5, 0.5],
+            ..Transform::default()
+        };
+        let below = || Layer::Solid {
+            color: BLUE,
+            transform: Transform::default(),
+            opacity: 1.0,
+            filters: &[],
+        };
+        let above = || Layer::Solid {
+            color: RED,
+            transform: inner,
+            opacity: 1.0,
+            filters: &[],
+        };
+
+        let nested = compositor.render_layers_to_owned_texture_transparent(&[above()], output);
+        let via_texture = compositor.render_layers(
+            &[
+                below(),
+                Layer::Texture {
+                    texture: &nested,
+                    transform: Transform::default(),
+                    source_size: (16, 16),
+                    opacity: 1.0,
+                    filters: &[],
+                },
+            ],
+            output,
+        );
+        let direct = compositor.render_layers(&[below(), above()], output);
+
+        for (i, (a, b)) in via_texture.iter().zip(direct.iter()).enumerate() {
+            assert!(
+                (*a as i16 - *b as i16).abs() <= 2,
+                "byte {i}: via texture {a}, diretto {b}"
+            );
+        }
+    }
+
+    /// Un intermedio è composto su sfondo trasparente con
+    /// `ALPHA_BLENDING`, quindi il suo colore è già moltiplicato per
+    /// l'alpha: riusarlo come layer senza dividerlo lo attenuerebbe una
+    /// seconda volta (alpha al quadrato sui bordi e sulle dissolvenze).
+    #[test]
+    fn a_semitransparent_texture_layer_is_not_faded_twice() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(8, 8);
+        let nested = compositor.render_layers_to_owned_texture_transparent(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform::default(),
+                opacity: 0.5,
+                filters: &[],
+            }],
+            output,
+        );
+        let out = compositor.render_layers(
+            &[
+                Layer::Solid {
+                    color: WHITE,
+                    transform: Transform::default(),
+                    opacity: 1.0,
+                    filters: &[],
+                },
+                Layer::Texture {
+                    texture: &nested,
+                    transform: Transform::default(),
+                    source_size: (8, 8),
+                    opacity: 1.0,
+                    filters: &[],
+                },
+            ],
+            output,
+        );
+        // Rosso al 50% sopra il bianco. Con la doppia moltiplicazione il
+        // rosso scenderebbe a ~191.
+        assert_close_rgba(out.as_chunks::<4>().0[0], [255, 128, 128, 255]);
+    }
+
+    /// `render_layers_to_owned_texture_transparent` non rimette la texture
+    /// nel pool: un render successivo della stessa dimensione non deve
+    /// disegnarci sopra, o il frame annidato conservato si corromperebbe.
+    #[test]
+    fn an_owned_texture_is_not_recycled_by_the_next_render() {
+        let compositor = Compositor::new_headless();
+        let output = OutputFrame::exact(8, 8);
+        let nested = compositor.render_layers_to_owned_texture_transparent(
+            &[Layer::Solid {
+                color: RED,
+                transform: Transform::default(),
+                opacity: 1.0,
+                filters: &[],
+            }],
+            output,
+        );
+        compositor.render_layers(
+            &[Layer::Solid {
+                color: BLUE,
+                transform: Transform::default(),
+                opacity: 1.0,
+                filters: &[],
+            }],
+            output,
+        );
+        assert_eq!(read_back(&compositor, &nested, 8, 8).as_chunks::<4>().0[0], [255, 0, 0, 255]);
     }
 
     const RED: vv_core::Rgba = vv_core::Rgba {
