@@ -1080,6 +1080,133 @@ mod tests {
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
     }
 
+    /// Regressione per una segnalazione utente di audio in anticipo
+    /// sul video nell'export (percepito con mpv, 2-3 frame): un flash
+    /// nero->bianco (`ClipSource::SolidColor`, nessun encode/decode video
+    /// in gioco per la sua posizione) e un beep (clip audio vera) che
+    /// iniziano allo stesso frame di timeline, a un fps frazionario NTSC
+    /// (30000/1001) apposta perché `PROJECT_SAMPLE_RATE / fps` non sia un
+    /// intero (a 24fps invece è esattamente 2000, che nasconderebbe un
+    /// bug di arrotondamento) — il caso reale isolato dalla segnalazione
+    /// era già a fps intero, e qui risulta comunque perfettamente in
+    /// sync: se questo test si rompe, il bug è nell'arrotondamento
+    /// frame<->sample di `export.rs`/`encode.rs`/`vv_audio::mixer`, non
+    /// nella causa originale della segnalazione (probabilmente lato
+    /// player, non in questo export).
+    #[test]
+    fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
+        let dir = std::env::temp_dir().join("vv-app-diag-avsync-frac");
+        std::fs::create_dir_all(&dir).unwrap();
+        let beep_path = dir.join("beep.wav");
+        vv_media::test_support::ffmpeg(
+            &["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=1"],
+            &beep_path,
+        );
+
+        let mut project = Project::default();
+        let beep_media = project.media_pool.insert(vv_core::MediaItem {
+            path: beep_path,
+            meta: vv_core::MediaMeta {
+                duration_frames: 30,
+                fps: vv_core::Rational::new(30000, 1001),
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 1,
+                audio_streams: 1,
+            },
+            content_hash: 1,
+            compound: None,
+        });
+        const FLASH_FRAME: FrameIdx = 20;
+        let beep_clip = Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(beep_media),
+            0,
+            25,
+            FLASH_FRAME,
+            vv_core::Rational::one(),
+        );
+        let tl = Timeline {
+            name: "diag".into(),
+            fps: vv_core::Rational::new(30000, 1001),
+            resolution: (64, 48),
+            tracks: vec![
+                Track {
+                    kind: TrackKind::Video,
+                    clips: vec![
+                        solid_color_clip(10, 0, FLASH_FRAME, black()),
+                        solid_color_clip(11, FLASH_FRAME, 15, white()),
+                    ],
+                    muted: false,
+                    solo: false,
+                    locked: false,
+                    crossings: Vec::new(),
+                },
+                Track {
+                    kind: TrackKind::Audio,
+                    clips: vec![beep_clip],
+                    muted: false,
+                    solo: false,
+                    locked: false,
+                    crossings: Vec::new(),
+                },
+            ],
+        };
+        let timeline_id = project.timelines.insert(tl);
+
+        let output_path = dir.join("out.mp4");
+        let progress = Mutex::new(ExportProgress::default());
+        let cancel = AtomicBool::new(false);
+        let total = project.timelines[timeline_id].total_frames();
+        let settings = ExportSettings::new(output_path.clone());
+        export_timeline(&project, timeline_id, &settings, 0..total, &progress, &cancel)
+            .expect("export fallito");
+
+        let fps = 30000.0_f64 / 1001.0;
+
+        let mut decoder = vv_media::Decoder::open(&output_path).unwrap();
+        let mut white_frame_idx = None;
+        let mut idx = 0i64;
+        while let Some((_, frame)) = decoder.next_frame().unwrap() {
+            let avg_y = frame.y.iter().map(|&b| b as u64).sum::<u64>() / frame.y.len() as u64;
+            if avg_y > 128 && white_frame_idx.is_none() {
+                white_frame_idx = Some(idx);
+            }
+            idx += 1;
+        }
+        let white_frame_idx = white_frame_idx.expect("nessun frame bianco trovato nell'export");
+
+        let audio = vv_media::decode_audio_track(&output_path, 0).unwrap().expect("audio atteso");
+        let mut onset_sample = None;
+        for (i, &s) in audio.samples.iter().enumerate() {
+            if s.abs() > 0.05 {
+                onset_sample = Some(i as u64 / audio.channels as u64);
+                break;
+            }
+        }
+        let onset_sample = onset_sample.expect("nessun onset audio trovato nell'export");
+        let onset_secs = onset_sample as f64 / audio.sample_rate as f64;
+        let onset_frame = (onset_secs * fps).floor() as i64;
+
+        assert_eq!(white_frame_idx, FLASH_FRAME, "il flash video non è al frame atteso");
+        assert_eq!(
+            onset_frame, FLASH_FRAME,
+            "l'attacco audio ({onset_secs:.6}s) cade nel frame {onset_frame} invece del frame {FLASH_FRAME} del flash video: sfasamento di {} frame",
+            FLASH_FRAME - onset_frame
+        );
+    }
+
+    fn black() -> Rgba {
+        Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+    }
+
+    fn white() -> Rgba {
+        Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+    }
+
     /// Regressione end-to-end per l'export di un'immagine (vedi
     /// `ActiveClipDecoder::open_for`): la clip di default (5s = 125
     /// frame a 25fps) copre ben oltre l'unico frame reale che
