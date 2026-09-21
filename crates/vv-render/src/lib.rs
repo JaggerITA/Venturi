@@ -5,3 +5,6 @@ pub mod compositor;
 pub mod text;
 
 pub use compositor::{Compositor, Layer, OutputFrame, YuvFrame, fit_output_size};
+/// Riesportato: chi possiede una texture per `Layer::Texture` deve usare
+/// la stessa versione di wgpu del compositor.
+pub use wgpu;

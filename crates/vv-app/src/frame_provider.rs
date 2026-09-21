@@ -17,6 +17,29 @@ pub trait FrameProvider {
         clip: &Clip,
         timeline_frame: FrameIdx,
     ) -> Result<Option<Arc<FrameYuv420>>, String>;
+
+    /// Il frame composto di `nested` (la timeline annidata di una compound
+    /// clip) a `local_frame`, come texture GPU. `None` dall'implementazione
+    /// di default: chi non sa comporre su GPU ricade su `frame_for`, cioè
+    /// sul frame composto e riportato in CPU. Chi la implementa compone
+    /// ricorsivamente con `track_layers_at`, passando sé stesso.
+    fn compound_texture(
+        &mut self,
+        _project: &Project,
+        _nested: &Timeline,
+        _local_frame: FrameIdx,
+    ) -> Result<Option<vv_render::wgpu::Texture>, String> {
+        Ok(None)
+    }
+}
+
+/// La timeline annidata di `clip`, se è una compound clip.
+fn nested_timeline_of<'a>(project: &'a Project, clip: &Clip) -> Option<&'a Timeline> {
+    let ClipSource::Media(media_id) = &clip.source else {
+        return None;
+    };
+    let nested_id = project.media_pool.get(*media_id)?.compound?;
+    project.timelines.get(nested_id)
 }
 
 /// `(media, frame sorgente)` di `clip` a `timeline_frame`; `None` se non è
@@ -139,6 +162,16 @@ pub enum OwnedLayer {
         /// Solo i filtri attivi di `EffectStack::filters`, nel loro ordine.
         filters: Vec<vv_core::FilterKind>,
     },
+    /// Compound clip composta su GPU (vedi `FrameProvider::compound_texture`).
+    Texture {
+        texture: vv_render::wgpu::Texture,
+        transform: Transform,
+        /// Risoluzione della timeline annidata: le unità del crop, come
+        /// `source_size` di `Video` (la texture può essere più piccola).
+        source_size: (u32, u32),
+        opacity: f32,
+        filters: Vec<vv_core::FilterKind>,
+    },
     Solid {
         color: Rgba,
         transform: Transform,
@@ -164,6 +197,19 @@ impl OwnedLayer {
                 filters,
             } => vv_render::Layer::Video {
                 frame: as_render_yuv_frame(frame),
+                transform: *transform,
+                source_size: *source_size,
+                opacity: *opacity,
+                filters: filters.as_slice(),
+            },
+            OwnedLayer::Texture {
+                texture,
+                transform,
+                source_size,
+                opacity,
+                filters,
+            } => vv_render::Layer::Texture {
+                texture,
                 transform: *transform,
                 source_size: *source_size,
                 opacity: *opacity,
@@ -200,11 +246,37 @@ pub fn clip_layer(
     transform.position[0] += push[0];
     transform.position[1] += push[1];
     let opacity = clip.fade_multiplier_at(frame);
-    let media_frame = match &clip.source {
-        ClipSource::Media(_) => provider.frame_for(project, clip, frame)?,
-        ClipSource::SolidColor | ClipSource::Text => None,
-    };
-    Ok(build_layer(project, clip, source_frame, transform, opacity, media_frame, timeline_size))
+    let content = clip_content(project, clip, frame, provider)?;
+    Ok(build_layer(project, clip, source_frame, transform, opacity, content, timeline_size))
+}
+
+/// Cosa mostra una clip a `timeline_frame`: niente se non è una clip Media,
+/// la texture composta se è una compound clip e il provider sa comporla su
+/// GPU, altrimenti il frame decodificato (o composto e riportato in CPU).
+fn clip_content(
+    project: &Project,
+    clip: &Clip,
+    timeline_frame: FrameIdx,
+    provider: &mut dyn FrameProvider,
+) -> Result<ClipContent, String> {
+    if !matches!(clip.source, ClipSource::Media(_)) {
+        return Ok(ClipContent::None);
+    }
+    if let Some(nested) = nested_timeline_of(project, clip)
+        && let Some(texture) = provider.compound_texture(project, nested, clip.source_frame_at(timeline_frame))?
+    {
+        return Ok(ClipContent::Texture(texture));
+    }
+    Ok(provider
+        .frame_for(project, clip, timeline_frame)?
+        .map_or(ClipContent::None, ClipContent::Yuv))
+}
+
+/// Il contenuto già procurato di una clip, vedi `clip_content`.
+enum ClipContent {
+    None,
+    Yuv(Arc<FrameYuv420>),
+    Texture(vv_render::wgpu::Texture),
 }
 
 /// La parte comune a `clip_layer` e al lato di una crossing transition
@@ -217,7 +289,7 @@ fn build_layer(
     source_frame: FrameIdx,
     transform: Transform,
     opacity: f32,
-    media_frame: Option<Arc<FrameYuv420>>,
+    content: ClipContent,
     timeline_size: (u32, u32),
 ) -> Option<OwnedLayer> {
     let filters: Vec<vv_core::FilterKind> = clip
@@ -243,37 +315,41 @@ fn build_layer(
             .title
             .clone()
             .map(|title| OwnedLayer::Text { title, transform, opacity, filters }),
-        ClipSource::Media(_) => media_frame.map(|frame| OwnedLayer::Video {
-            frame,
-            transform,
-            source_size: clip_source_size(project, clip, timeline_size),
-            opacity,
-            filters,
-        }),
+        ClipSource::Media(_) => match content {
+            ClipContent::None => None,
+            ClipContent::Yuv(frame) => Some(OwnedLayer::Video {
+                frame,
+                transform,
+                source_size: clip_source_size(project, clip, timeline_size),
+                opacity,
+                filters,
+            }),
+            ClipContent::Texture(texture) => Some(OwnedLayer::Texture {
+                texture,
+                transform,
+                source_size: clip_source_size(project, clip, timeline_size),
+                opacity,
+                filters,
+            }),
+        },
     }
 }
 
-/// Come `provider.frame_for`, ma oltre i bordi reali del media si blocca
-/// (freeze) sul frame sorgente più vicino disponibile invece di restituire
-/// `None`: usato solo dalle crossing transition, dove "oltre la fine" è la
-/// norma (è la clip che presta il suo bordo alla transizione), non un
-/// errore da segnalare come farebbe `clip_layer` in export.
-fn extrapolated_frame_for(
-    project: &Project,
-    clip: &Clip,
-    timeline_frame: FrameIdx,
-    provider: &mut dyn FrameProvider,
-) -> Result<Option<Arc<FrameYuv420>>, String> {
+/// Il frame di timeline da cui prendere il contenuto: `timeline_frame`, o
+/// quello del frame sorgente più vicino se cade oltre i bordi reali del
+/// media (freeze invece di niente). Usato solo dalle crossing transition,
+/// dove "oltre la fine" è la norma — è la clip che presta il suo bordo alla
+/// transizione — non un errore da segnalare come fa `clip_layer` in export.
+fn held_timeline_frame(project: &Project, clip: &Clip, timeline_frame: FrameIdx) -> FrameIdx {
     let ClipSource::Media(media_id) = &clip.source else {
-        return provider.frame_for(project, clip, timeline_frame);
+        return timeline_frame;
     };
     let Some(media) = project.media_pool.get(*media_id) else {
-        return provider.frame_for(project, clip, timeline_frame);
+        return timeline_frame;
     };
     let wanted = clip.source_frame_at(timeline_frame);
     let clamped = wanted.clamp(0, (media.meta.duration_frames - 1).max(0));
-    let held_timeline_frame = clip.timeline_frame_at(clamped);
-    provider.frame_for(project, clip, held_timeline_frame)
+    clip.timeline_frame_at(clamped)
 }
 
 /// Il lato di una crossing transition per una singola clip: come
@@ -294,11 +370,8 @@ fn crossing_side_layer(
     transform.position[0] += extra_offset[0];
     transform.position[1] += extra_offset[1];
     let opacity = clip.fade_multiplier_at(frame);
-    let media_frame = match &clip.source {
-        ClipSource::Media(_) => extrapolated_frame_for(project, clip, frame, provider)?,
-        ClipSource::SolidColor | ClipSource::Text => None,
-    };
-    Ok(build_layer(project, clip, source_frame, transform, opacity, media_frame, timeline_size))
+    let content = clip_content(project, clip, held_timeline_frame(project, clip, frame), provider)?;
+    Ok(build_layer(project, clip, source_frame, transform, opacity, content, timeline_size))
 }
 
 /// I layer di una crossing transition attiva a `frame`: coda di `left`,
