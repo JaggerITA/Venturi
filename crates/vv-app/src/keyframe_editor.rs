@@ -23,7 +23,10 @@ const CURVE_HEIGHT: f32 = 170.0;
 /// che altrimenti sarebbe quasi impossibile prendere.
 const PICK_RADIUS: f32 = 7.0;
 const POINT_RADIUS: f32 = 4.0;
-const HANDLE_RADIUS: f32 = 3.5;
+const HANDLE_RADIUS: f32 = 5.0;
+/// Gli handle stanno sulla curva, fra i punti: il loro bersaglio è più
+/// generoso, o prenderli col mouse è un terno al lotto.
+const HANDLE_PICK_RADIUS: f32 = 10.0;
 const PLAYHEAD_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
 const CURVE_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 150, 230);
 
@@ -623,7 +626,8 @@ fn draw_curve(
     if interaction.drag_started() && let Some(pos) = interaction.interact_pointer_pos() {
         let handle = handles
             .iter()
-            .find(|(_, _, p)| p.distance(pos) <= PICK_RADIUS)
+            .filter(|(_, _, p)| p.distance(pos) <= HANDLE_PICK_RADIUS)
+            .min_by(|a, b| a.2.distance(pos).total_cmp(&b.2.distance(pos)))
             .map(|(pick, outgoing, _)| (*pick, *outgoing));
         let point = frames
             .iter()
