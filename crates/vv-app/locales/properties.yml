@@ -370,7 +370,7 @@ props.composite:
 
 props.composite_mode:
   en: "Composite Mode"
-  it: "Metodo di composizione"
+  it: "Composizione"
 
 blend.normal:
   en: "Normal"
