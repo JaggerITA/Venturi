@@ -3,7 +3,7 @@
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
 use std::sync::Once;
-use vv_core::{MediaMeta, Rational};
+use vv_core::{FrameIdx, MediaMeta, Rational};
 
 static INIT: Once = Once::new();
 
@@ -59,8 +59,19 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         .count() as u16;
     let (fps, width, height) = video.unwrap_or((AUDIO_ONLY_FPS, 0, 0));
     let duration_secs = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
+    let nominal_duration_frames = (duration_secs * fps.as_f64()).round() as i64;
+    // Il container spesso dichiara più frame di quanti il decoder ne
+    // produca davvero (drop frame, indice CFR impreciso...): chi chiede
+    // il frame `duration_frames - 1` come "ultimo frame" (es. il freeze
+    // di `extrapolated_frame_for`) riceverebbe per sempre `None` se ci
+    // fidassimo ciecamente del calcolo aritmetico.
+    let duration_frames = if video.is_some() {
+        verify_last_decodable_frame(path, fps, nominal_duration_frames)
+    } else {
+        nominal_duration_frames
+    };
     Ok(MediaMeta {
-        duration_frames: (duration_secs * fps.as_f64()).round() as i64,
+        duration_frames,
         fps,
         width,
         height,
@@ -70,6 +81,39 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         channels,
         audio_streams,
     })
+}
+
+/// Corregge `nominal` (durata*fps) al vero conteggio di frame che il
+/// decoder produce, decodificando dall'ultimo GOP fino alla vera fine
+/// dello stream invece di fidarsi del calcolo aritmetico. Il costo è
+/// quello di un seek + la decodifica di un GOP (indipendente dalla durata
+/// totale del file), non di un decode completo: `SAFETY_MARGIN_SECS`
+/// deve coprire il GOP più grande atteso in pratica. Non alza mai
+/// `nominal`: se il decode fallisce si tiene il valore aritmetico, e se
+/// lo stream produce più frame di quanti ne prevedeva `nominal`
+/// (arrotondamento nell'altra direzione) si ignora l'eccedenza — questo
+/// fix corregge solo la sovrastima, non ne introduce una nuova.
+fn verify_last_decodable_frame(path: &Path, fps: Rational, nominal: i64) -> i64 {
+    const SAFETY_MARGIN_SECS: f64 = 15.0;
+    let Ok(mut decoder) = crate::decode::Decoder::open(path) else {
+        return nominal;
+    };
+    let nominal_secs = nominal as f64 / fps.as_f64();
+    let seek_secs = (nominal_secs - SAFETY_MARGIN_SECS).max(0.0);
+    if decoder.seek_to_time(seek_secs).is_err() {
+        return nominal;
+    }
+    let mut last_idx: Option<FrameIdx> = None;
+    loop {
+        match decoder.next_frame() {
+            Ok(Some((idx, _))) => last_idx = Some(last_idx.map_or(idx, |max| max.max(idx))),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    match last_idx {
+        Some(idx) => (idx + 1).min(nominal),
+        None => nominal,
+    }
 }
 
 /// Come `probe` per un'immagine: `duration_frames` è il sentinel
@@ -157,6 +201,29 @@ pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Riproduce lo scenario del bug: un container che dichiara più frame
+    /// di quanti il decoder ne produca davvero (qui simulato passando a
+    /// `verify_last_decodable_frame` un `nominal` gonfiato oltre il vero
+    /// conteggio, invece di un container reale rotto). Deve correggerlo
+    /// al vero ultimo frame decodificabile, non fidarsi del valore dato.
+    #[test]
+    fn verify_last_decodable_frame_corrects_an_inflated_nominal() {
+        let dir = std::env::temp_dir().join("vv-media-probe-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dieci_frame.mp4");
+        crate::test_support::ffmpeg(
+            &["-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p"],
+            &path,
+        );
+
+        let fps = Rational::new(10, 1);
+        let real = verify_last_decodable_frame(&path, fps, 10);
+        let corrected = verify_last_decodable_frame(&path, fps, 10_000);
+
+        assert_eq!(corrected, real, "un nominal gonfiato deve convergere al vero ultimo frame decodificabile");
+        assert!(corrected <= 15, "10 frame veri a 10fps: il conteggio corretto non deve restare vicino al nominal gonfiato ({corrected})");
+    }
 
     /// Genera un vero file x264 (con audio AAC) via ffmpeg CLI e verifica
     /// che il probe legga metadata coerenti. Questo è il caso d'uso
