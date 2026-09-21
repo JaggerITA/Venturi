@@ -3,7 +3,7 @@
 //! `export.rs`). La mappatura clip -> frame sorgente è una sola.
 
 use std::sync::Arc;
-use vv_core::{Clip, ClipSource, ColorMatrix, FrameIdx, MediaId, Project, Rgba, TitleParams, Timeline, Transform};
+use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project, Rgba, TitleParams, Timeline, Transform};
 use vv_media::FrameYuv420;
 
 /// `&mut self`: l'export tiene aperti i decoder.
@@ -61,77 +61,6 @@ pub fn clip_source_size(project: &Project, clip: &Clip, timeline_size: (u32, u32
             .map(|m| (m.meta.width, m.meta.height))
             .unwrap_or((1, 1)),
         ClipSource::SolidColor | ClipSource::Text => timeline_size,
-    }
-}
-
-/// Converte un buffer RGBA8 denso (`width`x`height`, come da
-/// `Compositor::render_layers_rgba_transparent`) in un `FrameYuv420`
-/// BT.709 limited con l'alpha portato per intero, non sottocampionato, in
-/// `FrameYuv420::alpha` — la conversione inversa di `yuv_to_rgb` in
-/// `transform.wgsl`. Usata solo per il frame composto della timeline
-/// annidata di una compound clip: un giro RGB->YUV->RGB in più rispetto a
-/// un video reale, la stessa perdita di risoluzione croma che il 4:2:0 ha
-/// già ovunque (non tocca l'accuratezza del *frame*, solo la sua croma).
-pub fn rgba_to_yuv420_with_alpha(rgba: &[u8], width: u32, height: u32) -> FrameYuv420 {
-    const KR: f32 = 0.2126;
-    const KB: f32 = 0.0722;
-    const KG: f32 = 1.0 - KR - KB;
-    let (w, h) = (width as usize, height as usize);
-    let luma = |r: f32, g: f32, b: f32| KR * r + KG * g + KB * b;
-    let sample = |x: usize, y: usize| -> (f32, f32, f32) {
-        let i = (y * w + x) * 4;
-        (rgba[i] as f32 / 255.0, rgba[i + 1] as f32 / 255.0, rgba[i + 2] as f32 / 255.0)
-    };
-
-    let mut y_plane = vec![0u8; w * h];
-    let mut alpha = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            let (r, g, b) = sample(x, y);
-            y_plane[i] = (16.0 + luma(r, g, b) * 219.0).round().clamp(0.0, 255.0) as u8;
-            alpha[i] = rgba[i * 4 + 3];
-        }
-    }
-
-    // Croma 4:2:0: media del blocco 2x2 corrispondente, come farebbe un
-    // encoder reale invece di prendere un solo campione ad angolo.
-    let (cw, ch) = (width.div_ceil(2) as usize, height.div_ceil(2) as usize);
-    let mut u_plane = vec![0u8; cw * ch];
-    let mut v_plane = vec![0u8; cw * ch];
-    for cy in 0..ch {
-        for cx in 0..cw {
-            let (mut u_sum, mut v_sum, mut n) = (0.0f32, 0.0f32, 0.0f32);
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let (x, y) = (cx * 2 + dx, cy * 2 + dy);
-                    if x >= w || y >= h {
-                        continue;
-                    }
-                    let (r, g, b) = sample(x, y);
-                    let yn = luma(r, g, b);
-                    u_sum += (b - yn) / (2.0 * (1.0 - KB));
-                    v_sum += (r - yn) / (2.0 * (1.0 - KR));
-                    n += 1.0;
-                }
-            }
-            let n = n.max(1.0);
-            u_plane[cy * cw + cx] = (128.0 + (u_sum / n) * 224.0).round().clamp(0.0, 255.0) as u8;
-            v_plane[cy * cw + cx] = (128.0 + (v_sum / n) * 224.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    FrameYuv420 {
-        width,
-        height,
-        y: y_plane,
-        u: u_plane,
-        v: v_plane,
-        u_width: cw as u32,
-        u_height: ch as u32,
-        matrix: ColorMatrix::Bt709,
-        full_range: false,
-        alpha: Some(alpha),
     }
 }
 

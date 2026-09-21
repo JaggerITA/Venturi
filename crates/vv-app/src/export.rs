@@ -17,7 +17,7 @@ use vv_audio::mixer::{
     MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into, timeline_frame_to_sample,
 };
 
-use crate::frame_provider::{FrameProvider, OwnedLayer, media_source_frame, track_layers_at};
+use crate::frame_provider::{FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at};
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
@@ -145,15 +145,6 @@ struct StreamingFrameProvider {
     /// Uno per clip: più track possono essere attive allo stesso frame.
     /// Potato da `retain_clips`.
     active: HashMap<ClipId, ActiveClipDecoder>,
-    /// Creato alla prima compound clip incontrata (vedi `render_ahead.rs`,
-    /// stesso motivo): un export senza compound clip non lo paga mai.
-    compositor: Option<vv_render::Compositor>,
-    /// Quante compound clip sono già "aperte" nella ricorsione corrente
-    /// (vedi `MAX_COMPOUND_DEPTH` in `render_ahead.rs`, stesso limite,
-    /// stesso motivo: da quando la timeline del progetto è anche lei nel
-    /// media pool, un ciclo è possibile e qui sarebbe uno stack overflow
-    /// vero, non solo un giro sprecato).
-    compound_depth: u32,
 }
 
 impl StreamingFrameProvider {
@@ -178,25 +169,11 @@ impl FrameProvider for StreamingFrameProvider {
             .get(media_id)
             .ok_or_else(|| t!("export.error_media_not_found").into_owned())?;
 
-        if let Some(nested_id) = item.compound {
-            if self.compound_depth >= MAX_COMPOUND_DEPTH {
-                // Ciclo (o nesting assurdo): niente layer per questa clip
-                // invece di uno stack overflow, come un media mancante.
-                return Ok(None);
-            }
-            let nested = project
-                .timelines
-                .get(nested_id)
-                .ok_or_else(|| t!("export.error_timeline_not_found").into_owned())?;
-            // Ricorsivo: `decode_video_frame`/`track_layers_at` richiamano
-            // `self.frame_for` per ogni clip Media della timeline annidata,
-            // a qualunque profondità — stesso `self`, nessun nuovo stato.
-            self.compound_depth += 1;
-            let layers = decode_video_frame(project, nested, self, source_frame, nested.resolution);
-            self.compound_depth -= 1;
-            let layers = layers?;
-            let compositor = self.compositor.get_or_insert_with(vv_render::Compositor::new_headless);
-            return Ok(Some(Arc::new(compose_yuv_frame(compositor, &layers, nested.resolution))));
+        // Una compound clip non si decodifica: la compone `GpuCompounds`.
+        // Arrivare qui vuol dire che si è fermato al limite di nesting —
+        // niente layer per questa clip, come per un media mancante.
+        if item.compound.is_some() {
+            return Ok(None);
         }
 
         let path = item.path.clone();
@@ -208,17 +185,6 @@ impl FrameProvider for StreamingFrameProvider {
         };
         decoder.advance_to(source_frame)
     }
-}
-
-/// Il frame composto di `layers` come se fosse un frame decodificato da un
-/// file: stessa conversione di `render_ahead::compose_frame_at` (RGBA e
-/// sfondo trasparente, non `compose_video_frame` che è nero opaco e senza
-/// canale alpha — questo frame torna un layer altrove), qui sincrona
-/// invece che cachata — l'export decodifica ogni frame una volta sola.
-fn compose_yuv_frame(compositor: &vv_render::Compositor, layers: &[OwnedLayer], resolution: (u32, u32)) -> vv_media::FrameYuv420 {
-    let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
-    let rgba = compositor.render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(resolution.0, resolution.1));
-    crate::frame_provider::rgba_to_yuv420_with_alpha(&rgba, resolution.0, resolution.1)
 }
 
 /// Esporta i frame `range` in `output_path`. Bloccante.
@@ -275,6 +241,12 @@ pub fn export_timeline(
         std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(RENDER_AHEAD_FRAMES);
     let resolution = timeline.resolution;
     let output = vv_render::OutputFrame::scaled(out_w, out_h, resolution);
+    // Uno solo per i due stadi GPU: la texture di una compound clip nasce
+    // nello stadio di decode e viene campionata in quello di composizione,
+    // quindi devono stare sullo stesso device. Headless, per non contendere
+    // quello della UI.
+    let compositor = vv_render::Compositor::new_headless();
+    let compositor = &compositor;
     std::thread::scope(|scope| {
         let mut audio_mix = has_audio_track.then(|| {
             let range = range.clone();
@@ -289,7 +261,7 @@ pub fn export_timeline(
                     return;
                 }
                 let decoded =
-                    decode_video_frame(project, timeline, &mut provider, frame, resolution);
+                    decode_video_frame(project, timeline, &mut provider, compositor, frame, resolution);
                 let failed = decoded.is_err();
                 // `send` fallisce solo se lo stadio dopo ha già smesso.
                 if decoded_tx.send(decoded).is_err() || failed {
@@ -299,12 +271,9 @@ pub fn export_timeline(
         });
 
         scope.spawn(move || {
-            // Compositor indipendente: evita qualunque contesa GPU col
-            // device della UI (che ha il suo, in `main.rs`).
-            let compositor = vv_render::Compositor::new_headless();
             for decoded in decoded_rx {
                 let composed =
-                    decoded.map(|layers| compose_video_frame(&compositor, &layers, output));
+                    decoded.map(|layers| compose_video_frame(compositor, &layers, output));
                 let failed = composed.is_err();
                 if composed_tx.send(composed).is_err() || failed {
                     return;
@@ -357,7 +326,7 @@ fn render_video_frame(
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<u8>, String> {
-    let layers = decode_video_frame(project, timeline, provider, frame, resolution)?;
+    let layers = decode_video_frame(project, timeline, provider, compositor, frame, resolution)?;
     let output = vv_render::OutputFrame::exact(resolution.0, resolution.1);
     Ok(compose_video_frame(compositor, &layers, output))
 }
@@ -368,6 +337,7 @@ fn decode_video_frame(
     project: &Project,
     timeline: &Timeline,
     provider: &mut StreamingFrameProvider,
+    compositor: &vv_render::Compositor,
     frame: FrameIdx,
     resolution: (u32, u32),
 ) -> Result<Vec<OwnedLayer>, String> {
@@ -383,9 +353,10 @@ fn decode_video_frame(
         }
     }
     provider.retain_clips(&keep);
+    let mut gpu = GpuCompounds::new(provider, compositor);
     let mut layers = Vec::with_capacity(clips.len());
     for (track_index, clip) in clips {
-        layers.extend(track_layers_at(project, timeline, track_index, clip, frame, resolution, provider)?);
+        layers.extend(track_layers_at(project, timeline, track_index, clip, frame, resolution, &mut gpu)?);
     }
     Ok(layers)
 }
