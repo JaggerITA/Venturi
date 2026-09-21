@@ -1102,6 +1102,16 @@ fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
         .unwrap_or(*CANDIDATES.last().unwrap())
 }
 
+/// `true` se il puntatore è sul rettangolo *e* niente gli sta sopra: una
+/// finestra fluttuante (l'editor di keyframe) si tiene il proprio scroll,
+/// la timeline sotto non deve reagire.
+pub(crate) fn pointer_over(ctx: &egui::Context, rect: egui::Rect) -> bool {
+    ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+        rect.contains(p)
+            && ctx.layer_id_at(p).is_none_or(|l| l.order == egui::Order::Background)
+    })
+}
+
 /// Timecode HH:MM:SS:FF non drop-frame: con fps non interi (29,97) i
 /// secondi si contano sull'fps nominale arrotondato, come negli NLE.
 pub(crate) fn format_timecode(total_secs: f64, fps: f64) -> String {
@@ -1503,9 +1513,7 @@ pub fn show_timeline(
 
     // Alt+scroll/pinch zooma solo col puntatore sulla timeline.
     let panel_rect = ui.available_rect_before_wrap();
-    let pointer_over_panel = ui
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|p| panel_rect.contains(p));
+    let pointer_over_panel = pointer_over(ui.ctx(), panel_rect);
     if pointer_over_panel {
         let zoom = ui.input(|i| i.zoom_delta());
         if zoom != 1.0 {
@@ -1616,7 +1624,7 @@ pub fn show_timeline(
     // Rotella: scroll verticale del riquadro sotto al puntatore (quello
     // orizzontale resta a Shift+rotella, come già faceva la ScrollArea).
     if let Some(pos) = ui.input(|i| i.pointer.hover_pos())
-        && panel_rect.contains(pos)
+        && pointer_over(ui.ctx(), panel_rect)
     {
         let local_y = pos.y - panel_rect.top();
         let wheel = ui.input(|i| i.smooth_scroll_delta.y);
@@ -3865,9 +3873,7 @@ fn sync_timeline_scroll(
     if !kinetic_scroll_enabled || playback_active {
         state.hscroll_vel = 0.0;
     }
-    let hovering_panel = ctx
-        .input(|i| i.pointer.hover_pos())
-        .is_some_and(|p| panel_rect.contains(p));
+    let hovering_panel = pointer_over(ctx, panel_rect);
     // Swipe orizzontale in corso: applicato subito (come farebbe la
     // ScrollArea), e la sua velocità istantanea diventa l'inerzia da
     // smorzare quando il gesto finisce.

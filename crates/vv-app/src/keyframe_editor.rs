@@ -116,6 +116,35 @@ fn scalar_at(
     }
 }
 
+/// I keyframe scalari di una riga, valore e interpolazione compresi.
+fn scalar_keyframes(
+    effects: &EffectStack,
+    target: KeyframeTarget,
+) -> Vec<(FrameIdx, f32, Interpolation)> {
+    match target {
+        KeyframeTarget::TransformParam(p) => effects.transform.track(p).keyframes().to_vec(),
+        KeyframeTarget::Gain => effects.gain_db.keyframes().to_vec(),
+        KeyframeTarget::Color => Vec::new(),
+    }
+}
+
+/// La curva a tempo continuo: `Keyframed::value_at` lavora a frame interi,
+/// e da vicino la sua scaletta è quella dei frame, non della curva.
+fn sample(keyframes: &[(FrameIdx, f32, Interpolation)], at: f32) -> Option<f32> {
+    let first = keyframes.first()?;
+    let last = keyframes.last()?;
+    if at <= first.0 as f32 {
+        return Some(first.1);
+    }
+    if at >= last.0 as f32 {
+        return Some(last.1);
+    }
+    let i = keyframes.partition_point(|(f, _, _)| (*f as f32) <= at) - 1;
+    let ((f0, v0, interp), (f1, v1, _)) = (keyframes[i], keyframes[i + 1]);
+    let t = (at - f0 as f32) / (f1 - f0) as f32;
+    Some(v0 + (v1 - v0) * interp.ease(t))
+}
+
 fn scalar_value_at(effects: &EffectStack, target: KeyframeTarget, frame: FrameIdx) -> Option<f32> {
     match target {
         KeyframeTarget::TransformParam(p) => Some(effects.transform.track(p).value_at(frame)),
@@ -189,7 +218,12 @@ impl TimeAxis {
     }
 
     fn frame(&self, x: f32) -> FrameIdx {
-        self.first + ((x - self.left) / self.width * self.span as f32).round() as FrameIdx
+        self.time(x).round() as FrameIdx
+    }
+
+    /// Come `frame`, ma senza arrotondare al frame: per disegnare.
+    fn time(&self, x: f32) -> f32 {
+        self.first as f32 + (x - self.left) / self.width * self.span as f32
     }
 }
 
@@ -316,7 +350,13 @@ fn handle_zoom(
     rect: egui::Rect,
     full: (FrameIdx, FrameIdx),
 ) {
-    let Some(pos) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) else {
+    // Solo se il puntatore è davvero su questa finestra: sotto c'è la
+    // timeline, che zooma con lo stesso gesto.
+    let Some(pos) = ui
+        .ctx()
+        .pointer_hover_pos()
+        .filter(|p| rect.contains(*p) && ui.ctx().layer_id_at(*p) == Some(ui.layer_id()))
+    else {
         return;
     };
     let (zoom, pan) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.x));
@@ -501,15 +541,16 @@ fn draw_curve(
         );
     }
 
-    // La curva campionata com'è valutata davvero, interpolazione compresa.
+    // Una colonna di pixel per campione, a tempo continuo: a zoom alto un
+    // campione per frame darebbe una scaletta.
+    let curve = scalar_keyframes(&clip.effects, row);
     let mut points = Vec::new();
     let mut x = plot.left();
     while x <= plot.right() {
-        let frame = axis.frame(x);
-        if let Some(v) = scalar_value_at(&clip.effects, row, frame) {
+        if let Some(v) = sample(&curve, axis.time(x)) {
             points.push(egui::pos2(x, y(v)));
         }
-        x += 2.0;
+        x += 1.0;
     }
     painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, CURVE_COLOR)));
 
@@ -924,6 +965,28 @@ mod tests {
         assert_eq!(both.len(), 2, "nessun doppione se sono già selezionati entrambi");
 
         assert_eq!(with_zoom_link(picks.clone(), false), picks);
+    }
+
+    #[test]
+    fn the_curve_is_sampled_between_frames_not_only_on_them() {
+        let keyframes = vec![
+            (0, 0.0, Interpolation::Linear),
+            (10, 100.0, Interpolation::Linear),
+        ];
+        assert_eq!(sample(&keyframes, 2.5), Some(25.0));
+        assert_eq!(sample(&keyframes, -3.0), Some(0.0), "prima del primo");
+        assert_eq!(sample(&keyframes, 40.0), Some(100.0), "dopo l'ultimo");
+        assert_eq!(sample(&[], 1.0), None);
+    }
+
+    #[test]
+    fn a_hold_segment_stays_flat_until_the_next_keyframe() {
+        let keyframes = vec![
+            (0, 0.0, Interpolation::Hold),
+            (10, 100.0, Interpolation::Linear),
+        ];
+        assert_eq!(sample(&keyframes, 9.9), Some(0.0));
+        assert_eq!(sample(&keyframes, 10.0), Some(100.0));
     }
 
     #[test]
