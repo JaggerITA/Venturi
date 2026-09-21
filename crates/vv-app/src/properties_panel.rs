@@ -618,7 +618,8 @@ pub(crate) fn axis_field(
     range: std::ops::RangeInclusive<f32>,
 ) -> bool {
     ui.label(axis);
-    ui.add(
+    drag_value(
+        ui,
         egui::DragValue::new(value)
             .speed(speed)
             .range(range)
@@ -626,6 +627,22 @@ pub(crate) fn axis_field(
             .min_decimals(decimals),
     )
     .changed()
+}
+
+/// Un `DragValue` che, mentre lo si trascina, confina il puntatore alla
+/// finestra: uscendone il compositor smetterebbe di consegnarci il
+/// movimento e il trascinamento si interromperebbe a metà.
+pub(crate) fn drag_value(ui: &mut egui::Ui, drag: egui::DragValue<'_>) -> egui::Response {
+    let response = ui.add(drag);
+    if response.drag_started() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Confined));
+    }
+    if response.drag_stopped() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None));
+    }
+    response
 }
 
 /// Un parametro a un valore solo: slider più campo numerico, come
@@ -645,7 +662,8 @@ pub(crate) fn slider_field(
             .show_value(false)
             .trailing_fill(false),
     );
-    let drag = ui.add(
+    let drag = drag_value(
+        ui,
         egui::DragValue::new(value)
             .speed(speed)
             .range(range)
@@ -1082,14 +1100,16 @@ impl VibeVideoApp {
         ui.horizontal(|ui| {
             ui.label(t!("props.duration"));
             let mut secs = transition.duration as f64 / fps;
-            if ui
-                .add(egui::DragValue::new(&mut secs).speed(0.02).range(0.0..=(max_duration as f64 / fps)).suffix(" s"))
-                .changed()
+            if drag_value(
+                ui,
+                egui::DragValue::new(&mut secs).speed(0.02).range(0.0..=(max_duration as f64 / fps)).suffix(" s"),
+            )
+            .changed()
             {
                 transition.duration = ((secs * fps).round() as FrameIdx).clamp(1, max_duration);
             }
             let mut frames = transition.duration;
-            if ui.add(egui::DragValue::new(&mut frames).range(1..=max_duration)).changed() {
+            if drag_value(ui, egui::DragValue::new(&mut frames).range(1..=max_duration)).changed() {
                 transition.duration = frames.clamp(1, max_duration);
             }
             ui.label(t!("props.frames"));
@@ -1312,12 +1332,6 @@ impl VibeVideoApp {
                                                         3,
                                                         0.01..=20.0,
                                                     );
-                                                    if link_button(ui, &mut self.zoom_link).changed()
-                                                        && self.zoom_link
-                                                    {
-                                                        transform.zoom[1] = transform.zoom[0];
-                                                        changed = true;
-                                                    }
                                                     let y_changed = axis_field(
                                                         ui,
                                                         "Y",
@@ -1326,6 +1340,12 @@ impl VibeVideoApp {
                                                         3,
                                                         0.01..=20.0,
                                                     );
+                                                    if link_button(ui, &mut self.zoom_link).changed()
+                                                        && self.zoom_link
+                                                    {
+                                                        transform.zoom[1] = transform.zoom[0];
+                                                        changed = true;
+                                                    }
                                                     if self.zoom_link {
                                                         // Il link vale in entrambi
                                                         // i versi: chi è stato

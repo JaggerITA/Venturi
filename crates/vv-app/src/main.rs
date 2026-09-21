@@ -47,7 +47,7 @@ use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 
 /// Colore di una clip Solid Color appena creata.
-const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba::gray(0.6);
+const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba { r: 1.0, g: 1.0, b: 0.0, a: 1.0 };
 
 /// Dopo quanto (s) una freccia tenuta premuta smette di fare il passo
 /// singolo e inizia a scorrere a `ARROW_HOLD_SPEED`.

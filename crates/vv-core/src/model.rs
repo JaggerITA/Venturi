@@ -746,7 +746,7 @@ impl Default for TitleBackground {
             height: 0.0,
             corner_radius: 0.1,
             center: [0.0, 0.0],
-            opacity: 50.0,
+            opacity: 100.0,
         }
     }
 }
