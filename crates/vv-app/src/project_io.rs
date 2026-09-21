@@ -201,7 +201,7 @@ impl VibeVideoApp {
         }
         // Un'immagine non ha nulla da guadagnare da un proxy, e la sua durata è
         // il sentinel `IMAGE_DURATION_FRAMES`.
-        if item.meta.has_video && !item.meta.is_image() {
+        if self.settings.proxy_enabled && item.meta.has_video && !item.meta.is_image() {
             let frames = item.meta.duration_frames.max(0) as u64;
             self.proxy_worker
                 .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
@@ -761,6 +761,39 @@ impl VibeVideoApp {
 
         if should_close && let Some(state) = self.export.take() {
             let _ = state.handle.join();
+        }
+    }
+
+    /// Applica il toggle "usa proxy": spento ferma anche la generazione in
+    /// corso (il worker viene buttato via, l'encode parziale scartato), acceso
+    /// la fa ripartire per i media che un proxy ancora non ce l'hanno.
+    pub(crate) fn apply_proxy_enabled(&mut self) {
+        let enabled = self.settings.proxy_enabled;
+        for render_ahead in self.render_aheads() {
+            render_ahead.set_proxy_enabled(enabled);
+        }
+        if !enabled {
+            self.proxy_worker = None;
+            self.proxy_paused_for_export = false;
+            return;
+        }
+        let media: Vec<(PathBuf, u64, u64)> = self
+            .project
+            .media_pool
+            .iter()
+            .filter(|(_, item)| {
+                item.compound.is_none() && item.meta.has_video && !item.meta.is_image()
+            })
+            .map(|(_, item)| {
+                (item.path.clone(), item.content_hash, item.meta.duration_frames.max(0) as u64)
+            })
+            .collect();
+        if media.is_empty() {
+            return;
+        }
+        let worker = self.proxy_worker.get_or_insert_with(proxy_worker::ProxyWorker::spawn);
+        for (path, content_hash, frames) in media {
+            worker.enqueue(path, content_hash, frames);
         }
     }
 

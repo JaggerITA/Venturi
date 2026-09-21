@@ -293,9 +293,7 @@ impl VibeVideoApp {
                             )
                             .changed()
                         {
-                            for render_ahead in self.render_aheads() {
-                                render_ahead.set_proxy_enabled(self.settings.proxy_enabled);
-                            }
+                            self.apply_proxy_enabled();
                             self.persist_settings();
                         }
                         ui.horizontal(|ui| {

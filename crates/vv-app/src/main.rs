@@ -244,8 +244,7 @@ struct VibeVideoApp {
     /// `RenderAhead`, configurabile dal menu.
     cache_budget_bytes: usize,
 
-    /// Genera i proxy anche col toggle spento, così sono pronti quando lo si
-    /// riattiva. Creato al primo import.
+    /// Creato al primo import; buttato via quando l'utente spegne i proxy.
     proxy_worker: Option<proxy_worker::ProxyWorker>,
     /// L'export ha messo in pausa i proxy e deve riprenderli; `false` se la
     /// pausa era dell'utente.
@@ -6375,6 +6374,43 @@ mod tests {
         assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 1);
         let item = app.project.media_pool.values().find(|m| m.compound.is_none()).unwrap();
         assert_eq!(item.path, path);
+    }
+
+    /// Col toggle "usa proxy" spento non si genera nulla; riaccendendolo i
+    /// media già nel pool tornano in coda.
+    #[test]
+    fn disabling_proxies_stops_generation_and_enabling_requeues_the_pool() {
+        let dir = std::env::temp_dir().join("vv-app-proxy-toggle-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        vv_media::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &path,
+        );
+
+        let mut app = VibeVideoApp::default();
+        app.settings.proxy_enabled = false;
+        app.import_media_files(vec![path]);
+        app.wait_for_import();
+        assert!(app.proxy_worker.is_none(), "col toggle spento non parte nessun proxy");
+
+        app.settings.proxy_enabled = true;
+        app.apply_proxy_enabled();
+        let worker = app.proxy_worker.as_ref().unwrap();
+        assert_eq!(worker.progress().total, 1);
+
+        app.settings.proxy_enabled = false;
+        app.apply_proxy_enabled();
+        assert!(app.proxy_worker.is_none(), "spegnendo il toggle la coda va buttata via");
     }
 
     /// L'export mette in pausa la generazione dei proxy (che altrimenti
