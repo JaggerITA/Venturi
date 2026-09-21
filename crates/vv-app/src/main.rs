@@ -1311,6 +1311,7 @@ impl VibeVideoApp {
                 Some((left, right, _)) if left.id == clip.id || right.id == clip.id => 2,
                 _ => 1,
             };
+            let mut provider = frame_provider::GpuCompounds::new(render_ahead, &self.compositor);
             let track_layers = frame_provider::track_layers_at(
                 &self.project,
                 timeline,
@@ -1318,7 +1319,7 @@ impl VibeVideoApp {
                 clip,
                 frame,
                 timeline.resolution,
-                render_ahead,
+                &mut provider,
             )
             .ok()?;
             if i == topmost && track_layers.len() < involved {

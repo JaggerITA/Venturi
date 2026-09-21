@@ -231,6 +231,99 @@ impl OwnedLayer {
     }
 }
 
+/// Limite alla profondità di nesting delle compound clip: una compound
+/// clip che contenesse sé stessa (`Project::would_create_compound_cycle` lo
+/// impedisce all'inserimento) manderebbe la composizione in ricorsione
+/// infinita. Rete di sicurezza, non un limite di progetto.
+pub const MAX_COMPOUND_DEPTH: u32 = 16;
+
+/// Aggiunge a un provider qualunque la composizione su GPU delle compound
+/// clip: la timeline annidata diventa una texture che resta sulla scheda,
+/// invece di un frame composto, riportato in CPU e riconvertito a YUV.
+/// `inner` procura i media veri, che il resto della pipeline decodifica
+/// come sempre (anche quelli dentro le timeline annidate).
+pub struct GpuCompounds<'a> {
+    inner: &'a mut dyn FrameProvider,
+    compositor: &'a vv_render::Compositor,
+    depth: u32,
+}
+
+impl<'a> GpuCompounds<'a> {
+    pub fn new(inner: &'a mut dyn FrameProvider, compositor: &'a vv_render::Compositor) -> Self {
+        Self {
+            inner,
+            compositor,
+            depth: 0,
+        }
+    }
+}
+
+impl FrameProvider for GpuCompounds<'_> {
+    fn frame_for(
+        &mut self,
+        project: &Project,
+        clip: &Clip,
+        timeline_frame: FrameIdx,
+    ) -> Result<Option<Arc<FrameYuv420>>, String> {
+        self.inner.frame_for(project, clip, timeline_frame)
+    }
+
+    fn compound_texture(
+        &mut self,
+        project: &Project,
+        nested: &Timeline,
+        local_frame: FrameIdx,
+    ) -> Result<Option<vv_render::wgpu::Texture>, String> {
+        if self.depth >= MAX_COMPOUND_DEPTH {
+            return Ok(None);
+        }
+        self.depth += 1;
+        let layers = nested_layers(project, nested, local_frame, self);
+        self.depth -= 1;
+        let Some(layers) = layers? else {
+            return Ok(None);
+        };
+        let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+        let (width, height) = nested.resolution;
+        // Sfondo trasparente: dove `nested` non ha nulla da mostrare deve
+        // restare visibile quel che sta sotto nella timeline esterna. E la
+        // texture non torna nel pool, perché la teniamo noi fino al pass.
+        Ok(Some(self.compositor.render_layers_to_owned_texture_transparent(
+            &render_layers,
+            vv_render::OutputFrame::exact(width, height),
+        )))
+    }
+}
+
+/// I layer di `nested` a `local_frame`, o `None` se una clip che copre quel
+/// frame non ha ancora il suo contenuto (un media in decoding): un frame
+/// composto a metà sarebbe peggio di nessun frame. Nessuna clip attiva è un
+/// caso valido, non un "non pronto": dà un frame trasparente.
+fn nested_layers(
+    project: &Project,
+    nested: &Timeline,
+    local_frame: FrameIdx,
+    provider: &mut dyn FrameProvider,
+) -> Result<Option<Vec<OwnedLayer>>, String> {
+    let mut layers = Vec::new();
+    for (track_index, clip) in nested.active_video_clips_at(local_frame) {
+        let clip_layers = track_layers_at(
+            project,
+            nested,
+            track_index,
+            clip,
+            local_frame,
+            nested.resolution,
+            provider,
+        )?;
+        if clip_layers.is_empty() {
+            return Ok(None);
+        }
+        layers.extend(clip_layers);
+    }
+    Ok(Some(layers))
+}
+
 /// Il layer di `clip` al frame di timeline `frame`, condiviso da anteprima
 /// ed export. `Ok(None)`: frame del media non disponibile.
 pub fn clip_layer(
@@ -452,6 +545,146 @@ mod tests {
         match layer {
             OwnedLayer::Solid { transform, .. } => transform.position,
             _ => panic!("expected a Solid layer"),
+        }
+    }
+
+    /// Bug segnalato dall'utente: una compound clip è una timeline come le
+    /// altre, quindi le zone dove la sua timeline annidata non ha nulla da
+    /// mostrare devono restare trasparenti — non nere, o coprirebbero quel
+    /// che c'è sotto nella timeline che la contiene.
+    #[test]
+    fn an_empty_area_of_a_compound_clip_shows_the_layer_below_it() {
+        let mut project = Project::default();
+        // Timeline annidata: un rosso che copre solo la metà sinistra.
+        let mut red = solid_clip(1, 0, 10, [1.0, 1.0]);
+        red.effects.color = Some(vv_core::Keyframed::constant(Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }));
+        red.effects.transform = TransformTracks::constant(Transform {
+            crop: [0.0, 0.0, 2.0, 0.0],
+            ..Default::default()
+        });
+        let nested_id = project.timelines.insert(Timeline {
+            name: "Nested".into(),
+            fps: Rational::new(25, 1),
+            resolution: (4, 4),
+            tracks: vec![video_track(vec![red])],
+        });
+        let compound_media = project.media_pool.insert(compound_media_item(nested_id, (4, 4), 10));
+
+        // Timeline esterna: un blu sotto, la compound clip sopra.
+        let mut blue = solid_clip(2, 0, 10, [1.0, 1.0]);
+        blue.effects.color = Some(vv_core::Keyframed::constant(Rgba { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }));
+        let compound_clip = Clip::from_source_range(
+            ClipId(3),
+            ClipSource::Media(compound_media),
+            0,
+            10,
+            0,
+            Rational::one(),
+        );
+        let outer = Timeline {
+            name: "Outer".into(),
+            fps: Rational::new(25, 1),
+            resolution: (4, 4),
+            tracks: vec![video_track(vec![blue]), video_track(vec![compound_clip])],
+        };
+
+        let compositor = vv_render::Compositor::new_headless();
+        let mut inner = NoMediaProvider;
+        let mut provider = GpuCompounds::new(&mut inner, &compositor);
+        let mut layers = Vec::new();
+        for (track_index, clip) in outer.active_video_clips_at(0) {
+            layers.extend(
+                track_layers_at(&project, &outer, track_index, clip, 0, outer.resolution, &mut provider).unwrap(),
+            );
+        }
+        assert_eq!(layers.len(), 2, "il blu e la compound clip");
+
+        let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+        let out = compositor.render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(4, 4));
+        let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+        assert_eq!(px(0, 1), &[255, 0, 0, 255], "sinistra: il rosso della timeline annidata");
+        assert_eq!(px(3, 1), &[0, 0, 255, 255], "destra: vuota nella annidata, si vede il blu sotto");
+    }
+
+    /// Finché un media dentro la timeline annidata non è pronto, la
+    /// compound clip non produce un layer: meglio nessun frame che un
+    /// frame composto a metà.
+    #[test]
+    fn a_compound_clip_has_no_layer_until_its_nested_media_is_ready() {
+        let mut project = Project::default();
+        let missing_media = project.media_pool.insert(vv_core::MediaItem {
+            path: "a.mp4".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 10,
+                fps: Rational::new(25, 1),
+                width: 4,
+                height: 4,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: None,
+        });
+        let nested_id = project.timelines.insert(Timeline {
+            name: "Nested".into(),
+            fps: Rational::new(25, 1),
+            resolution: (4, 4),
+            tracks: vec![video_track(vec![Clip::from_source_range(
+                ClipId(1),
+                ClipSource::Media(missing_media),
+                0,
+                10,
+                0,
+                Rational::one(),
+            )])],
+        });
+        let compound_media = project.media_pool.insert(compound_media_item(nested_id, (4, 4), 10));
+        let clip = Clip::from_source_range(ClipId(2), ClipSource::Media(compound_media), 0, 10, 0, Rational::one());
+        let outer = Timeline {
+            name: "Outer".into(),
+            fps: Rational::new(25, 1),
+            resolution: (4, 4),
+            tracks: vec![video_track(vec![clip.clone()])],
+        };
+
+        let compositor = vv_render::Compositor::new_headless();
+        let mut inner = NoMediaProvider;
+        let mut provider = GpuCompounds::new(&mut inner, &compositor);
+        let layers = track_layers_at(&project, &outer, 0, &clip, 0, outer.resolution, &mut provider).unwrap();
+
+        assert!(layers.is_empty(), "il media annidato non è in cache: niente layer");
+    }
+
+    fn video_track(clips: Vec<Clip>) -> Track {
+        Track {
+            kind: TrackKind::Video,
+            clips,
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: Vec::new(),
+        }
+    }
+
+    fn compound_media_item(nested: vv_core::TimelineId, size: (u32, u32), duration: FrameIdx) -> vv_core::MediaItem {
+        vv_core::MediaItem {
+            path: "Compound Clip 1".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: duration,
+                fps: Rational::new(25, 1),
+                width: size.0,
+                height: size.1,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: 1,
+            compound: Some(nested),
         }
     }
 

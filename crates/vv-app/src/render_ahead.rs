@@ -4,13 +4,11 @@
 //! REFACTOR_PIPELINE.md §2). Solo decode: il compositing resta sul thread UI,
 //! l'audio lo suona il mixer.
 //!
-//! Le compound clip sono l'unica eccezione al "solo decode": il loro
-//! contenuto non è su disco, quindi questo stesso worker cammina anche
-//! dentro la loro timeline annidata (a qualunque profondità) per
-//! decodificarne i media veri, poi compone i frame risultanti con un
-//! `Compositor` headless e li mette nella stessa `SharedFrameCache` sotto il
-//! `MediaId` della compound clip — da lì il thread UI li tratta come un
-//! frame decodificato qualunque, senza saperlo (vedi `compose_compound_segments`).
+//! Una compound clip non si decodifica e non si mette in cache: il suo
+//! contenuto è una timeline, composta al volo da chi compone il frame
+//! esterno (`frame_provider::GpuCompounds`). Qui si cammina comunque dentro
+//! la sua timeline annidata, a qualunque profondità, per tenere caldi i
+//! media veri che quella composizione andrà a leggere.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -24,7 +22,6 @@ use std::time::Duration;
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
-use crate::frame_provider;
 
 /// Secondi bufferizzati avanti dal playhead, di default.
 pub const DEFAULT_LOOKAHEAD_SECS: f64 = 3.0;
@@ -305,9 +302,6 @@ fn worker_loop(
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Decoder separati per la finestra dietro la testina: vedi `walk_and_fill`.
     let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    // Creato alla prima compound clip incontrata, poi riusato: un progetto
-    // senza compound clip non paga mai il costo di un device wgpu headless.
-    let mut compositor: Option<vv_render::Compositor> = None;
     // `from` del ciclo precedente (solo quello, mai un min/max storico):
     // dice se la testina è tornata indietro.
     let mut last_from_frame: Option<FrameIdx> = None;
@@ -357,7 +351,6 @@ fn worker_loop(
             &shared.caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             from,
             shared.cache_budget_bytes.load(Ordering::Relaxed),
             went_backward,
@@ -403,9 +396,8 @@ struct MediaSegment {
 /// Segmenti di `[from_frame, end_frame)`, uno per clip Media di ogni track
 /// video (anche quelle sotto: si vedono nelle bande di letterbox),
 /// dal più vicino alla testina e, a pari posizione, dalla track più alta.
-/// `.0` sono i media veri da decodificare, `.1` le compound clip coinvolte
-/// (a qualunque profondità di nesting) da comporre — vedi
-/// `compose_compound_segments`.
+/// Solo media veri: una compound clip non si decodifica, ci si cammina
+/// dentro (a qualunque profondità di nesting).
 /// Limite alla profondità di nesting di compound clip che questo modulo
 /// segue: da quando anche la timeline del progetto compare nel media pool
 /// (vedi `MediaItem::compound`), trascinarla dentro se stessa (o dentro una
@@ -418,10 +410,10 @@ fn collect_media_segments(
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
-) -> (Vec<MediaSegment>, Vec<MediaSegment>) {
-    let (mut real, compound) = clipped_media_segments(project, timeline, from_frame, end_frame, 0);
+) -> Vec<MediaSegment> {
+    let mut real = clipped_media_segments(project, timeline, from_frame, end_frame, 0);
     real.sort_by_key(|(track, s)| (s.timeline_start, std::cmp::Reverse(*track)));
-    (strip_track(real), strip_track(compound))
+    strip_track(real)
 }
 
 /// Come `collect_media_segments` per la finestra dietro: dal più vicino
@@ -431,10 +423,10 @@ fn collect_media_segments_behind(
     timeline: &Timeline,
     from_frame: FrameIdx,
     start_frame: FrameIdx,
-) -> (Vec<MediaSegment>, Vec<MediaSegment>) {
-    let (mut real, compound) = clipped_media_segments(project, timeline, start_frame, from_frame, 0);
+) -> Vec<MediaSegment> {
+    let mut real = clipped_media_segments(project, timeline, start_frame, from_frame, 0);
     real.sort_by_key(|(track, s)| (std::cmp::Reverse(s.timeline_start), std::cmp::Reverse(*track)));
-    (strip_track(real), strip_track(compound))
+    strip_track(real)
 }
 
 fn strip_track(segments: Vec<(usize, MediaSegment)>) -> Vec<MediaSegment> {
@@ -445,21 +437,20 @@ fn strip_track(segments: Vec<(usize, MediaSegment)>) -> Vec<MediaSegment> {
 /// video ritagliata su `[from_frame, end_frame)`, con l'indice della sua
 /// track per poterle poi ordinare. Non ordinati. Ricorsiva: una clip che
 /// referenzia una compound clip (`MediaItem::compound`) non genera un
-/// segmento da decodificare, ma uno da comporre (vedi `classify_segment`)
-/// più — sullo stesso range, tradotto in frame della sua timeline annidata
-/// da `Clip::source_frame_at` — gli stessi due elenchi raccolti dentro
-/// quella timeline, a qualunque profondità (entro `MAX_COMPOUND_DEPTH`).
+/// segmento da decodificare, ma — sullo stesso range, tradotto in frame
+/// della sua timeline annidata da `Clip::source_frame_at` — i segmenti
+/// raccolti dentro quella timeline, a qualunque profondità (entro
+/// `MAX_COMPOUND_DEPTH`).
 fn clipped_media_segments(
     project: &Project,
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
     depth: u32,
-) -> (Vec<(usize, MediaSegment)>, Vec<(usize, MediaSegment)>) {
+) -> Vec<(usize, MediaSegment)> {
     let mut real = Vec::new();
-    let mut compound = Vec::new();
     if depth >= MAX_COMPOUND_DEPTH {
-        return (real, compound);
+        return real;
     }
     for (track_index, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
         if track.muted {
@@ -486,33 +477,27 @@ fn clipped_media_segments(
                 timeline_start: segment_start,
                 rate: clip.rate,
             };
-            classify_segment(project, track_index, segment, depth, &mut real, &mut compound);
+            push_or_recurse(project, track_index, segment, depth, &mut real);
         }
     }
-    (real, compound)
+    real
 }
 
-/// Smista `segment` fra media veri e compound clip: se `segment.media_id`
-/// è una compound clip, va in `compound` (mai decodificata da un
-/// `Decoder`) e si ricorre nella sua timeline annidata sullo stesso range
-/// (in frame sorgente, cioè già nello spazio della timeline annidata),
-/// aggiungendo quel che trova a entrambi gli elenchi.
-fn classify_segment(
+/// Aggiunge `segment` ai media da decodificare, o — se `segment.media_id` è
+/// una compound clip, che non si decodifica mai — ricorre nella sua
+/// timeline annidata sullo stesso range (in frame sorgente, cioè già nello
+/// spazio di quella timeline).
+fn push_or_recurse(
     project: &Project,
     track_index: usize,
     segment: MediaSegment,
     depth: u32,
     real: &mut Vec<(usize, MediaSegment)>,
-    compound: &mut Vec<(usize, MediaSegment)>,
 ) {
     match project.media_pool.get(segment.media_id).and_then(|m| m.compound) {
         Some(nested_id) => {
-            compound.push((track_index, segment));
             if let Some(nested) = project.timelines.get(nested_id) {
-                let (nested_real, nested_compound) =
-                    clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1, depth + 1);
-                real.extend(nested_real);
-                compound.extend(nested_compound);
+                real.extend(clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1, depth + 1));
             }
         }
         None => real.push((track_index, segment)),
@@ -529,16 +514,15 @@ fn classify_segment(
 /// sul range dichiarato di ciascuna clip), quindi senza questo
 /// `SharedFrameCache::reconcile` lo sfratta (o non lo scarica mai) appena
 /// la testina supera il taglio, congelando il compositing per quella metà
-/// della finestra della crossing. Come `clipped_media_segments`, `.1` sono
-/// le compound clip coinvolte da comporre invece che decodificare.
+/// della finestra della crossing. Come `clipped_media_segments`, solo media
+/// veri: dentro una compound clip si cammina.
 fn crossing_borrowed_segments(
     project: &Project,
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
-) -> (Vec<MediaSegment>, Vec<MediaSegment>) {
+) -> Vec<MediaSegment> {
     let mut real = Vec::new();
-    let mut compound = Vec::new();
     for (_, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
         if track.muted {
             continue;
@@ -555,20 +539,20 @@ fn crossing_borrowed_segments(
             // `right` quello prima: l'altra metà di ciascuna è già coperta
             // dal proprio segmento normale.
             if window.end > left.timeline_end() {
-                push_borrowed_segment(project, left, left.timeline_end(), window.end - 1, &mut real, &mut compound);
+                push_borrowed_segment(project, left, left.timeline_end(), window.end - 1, &mut real);
             }
             if window.start < right.timeline_start {
-                push_borrowed_segment(project, right, window.start, right.timeline_start - 1, &mut real, &mut compound);
+                push_borrowed_segment(project, right, window.start, right.timeline_start - 1, &mut real);
             }
         }
     }
-    (real, compound)
+    real
 }
 
 /// Un segmento sorgente per il tratto di `clip` prestato a una crossing,
 /// `[from_timeline, to_timeline]` (inclusivo) in frame di timeline,
 /// clampato agli stessi bordi di `media.meta.duration_frames` che userebbe
-/// `extrapolated_frame_for` — altrimenti si chiederebbe di bufferizzare un
+/// `held_timeline_frame` — altrimenti si chiederebbe di bufferizzare un
 /// frame sorgente che il decoder non produrrà mai.
 fn push_borrowed_segment(
     project: &Project,
@@ -576,7 +560,6 @@ fn push_borrowed_segment(
     from_timeline: FrameIdx,
     to_timeline: FrameIdx,
     real: &mut Vec<MediaSegment>,
-    compound: &mut Vec<MediaSegment>,
 ) {
     let ClipSource::Media(media_id) = &clip.source else {
         return;
@@ -596,12 +579,14 @@ fn push_borrowed_segment(
     };
     match item.compound {
         Some(nested_id) => {
-            compound.push(segment);
             if let Some(nested) = project.timelines.get(nested_id) {
-                let (nested_real, nested_compound) =
-                    clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1, 0);
-                real.extend(strip_track(nested_real));
-                compound.extend(strip_track(nested_compound));
+                real.extend(strip_track(clipped_media_segments(
+                    project,
+                    nested,
+                    segment.source_start,
+                    segment.source_end + 1,
+                    0,
+                )));
             }
         }
         None => real.push(segment),
@@ -746,7 +731,6 @@ fn walk_and_fill(
     caches: &SharedFrameCache,
     open: &mut HashMap<MediaId, OpenDecoder>,
     open_behind: &mut HashMap<MediaId, OpenDecoder>,
-    compositor: &mut Option<vv_render::Compositor>,
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
     went_backward: bool,
@@ -764,15 +748,11 @@ fn walk_and_fill(
     let end_frame = from_frame + lookahead_frames;
     let start_frame = (from_frame - behind_frames).max(0);
 
-    let (mut forward_segments, mut forward_compound) = collect_media_segments(project, timeline, from_frame, end_frame);
-    let (mut behind_segments, mut behind_compound) = collect_media_segments_behind(project, timeline, from_frame, start_frame);
-    let (cross_forward_real, cross_forward_compound) = crossing_borrowed_segments(project, timeline, from_frame, end_frame);
-    let (cross_behind_real, cross_behind_compound) = crossing_borrowed_segments(project, timeline, start_frame, from_frame);
-    forward_segments.extend(cross_forward_real);
-    behind_segments.extend(cross_behind_real);
-    forward_compound.extend(cross_forward_compound);
-    behind_compound.extend(cross_behind_compound);
-    if forward_segments.is_empty() && behind_segments.is_empty() && forward_compound.is_empty() && behind_compound.is_empty() {
+    let mut forward_segments = collect_media_segments(project, timeline, from_frame, end_frame);
+    let mut behind_segments = collect_media_segments_behind(project, timeline, from_frame, start_frame);
+    forward_segments.extend(crossing_borrowed_segments(project, timeline, from_frame, end_frame));
+    behind_segments.extend(crossing_borrowed_segments(project, timeline, start_frame, from_frame));
+    if forward_segments.is_empty() && behind_segments.is_empty() {
         return WalkOutcome::SETTLED;
     }
     let forward_media: HashSet<MediaId> = forward_segments.iter().map(|s| s.media_id).collect();
@@ -783,8 +763,6 @@ fn walk_and_fill(
     let window: Vec<WantedRange> = forward_segments
         .iter()
         .chain(behind_segments.iter())
-        .chain(forward_compound.iter())
-        .chain(behind_compound.iter())
         .map(|s| WantedRange {
             media_id: s.media_id,
             source_start: s.source_start,
@@ -858,123 +836,10 @@ fn walk_and_fill(
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
         return outcome;
     }
-    forward_compound.extend(behind_compound);
-    compose_compound_segments(project, caches, compositor, &forward_compound);
     // Toglie subito i frame di transito rimasti: la UI legge lo stato appena
     // dichiarato `caught_up` e non deve vedere una striscia più larga del vero.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
     WalkOutcome::SETTLED
-}
-
-/// Passate di composizione per giro del worker: più di una risolve nesting
-/// a più livelli (una compound clip dentro un'altra) senza doverle ordinare
-/// per profondità — una passata compone quelle il cui contenuto è già
-/// pronto, la successiva quelle che dipendevano da loro, e così via.
-const MAX_COMPOUND_PASSES: usize = 8;
-
-/// Compone ogni frame non ancora in cache dei segmenti di `segments` (uno
-/// per istanza di compound clip nella finestra, in frame della sua timeline
-/// annidata): se un layer coinvolto non è ancora pronto — un media vero non
-/// ancora decodificato, o un'altra compound clip non ancora composta — il
-/// frame resta assente e si ritenta al giro successivo del worker, esattamente
-/// come un `Ok(None)` di `FrameProvider::frame_for` per un file in decoding.
-fn compose_compound_segments(
-    project: &Project,
-    caches: &SharedFrameCache,
-    compositor: &mut Option<vv_render::Compositor>,
-    segments: &[MediaSegment],
-) {
-    if segments.is_empty() {
-        return;
-    }
-    let compositor = compositor.get_or_insert_with(vv_render::Compositor::new_headless);
-    for _ in 0..MAX_COMPOUND_PASSES {
-        let mut progressed = false;
-        for segment in segments {
-            let Some(nested_id) = project.media_pool.get(segment.media_id).and_then(|m| m.compound) else {
-                continue;
-            };
-            let Some(nested) = project.timelines.get(nested_id) else {
-                continue;
-            };
-            for local_frame in segment.source_start..=segment.source_end {
-                if caches.get(segment.media_id, local_frame).is_some() {
-                    continue;
-                }
-                if let Some(frame) = compose_frame_at(project, nested, local_frame, compositor, caches) {
-                    caches.insert(segment.media_id, local_frame, Arc::new(frame));
-                    progressed = true;
-                }
-            }
-        }
-        if !progressed {
-            break;
-        }
-    }
-}
-
-/// Legge un frame già decodificato/composto dalla cache condivisa, senza
-/// mai avviarne uno nuovo: usato per assemblare i layer di una compound
-/// clip da quel che il resto del worker ha già prodotto in questo giro (o
-/// in uno precedente).
-struct CacheOnlyProvider<'a> {
-    caches: &'a SharedFrameCache,
-}
-
-impl frame_provider::FrameProvider for CacheOnlyProvider<'_> {
-    fn frame_for(
-        &mut self,
-        _project: &Project,
-        clip: &vv_core::Clip,
-        timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<FrameYuv420>>, String> {
-        let Some((media_id, source_frame)) = frame_provider::media_source_frame(clip, timeline_frame) else {
-            return Ok(None);
-        };
-        Ok(self.caches.get(media_id, source_frame))
-    }
-}
-
-/// Il frame composto della timeline annidata `nested` a `local_frame`, o
-/// `None` se un media coinvolto non è ancora pronto (vedi
-/// `compose_compound_segments`). Un vuoto (nessuna clip attiva su nessuna
-/// track) è un frame valido — nero/trasparente, come in anteprima — non un
-/// "non pronto".
-fn compose_frame_at(
-    project: &Project,
-    nested: &Timeline,
-    local_frame: FrameIdx,
-    compositor: &vv_render::Compositor,
-    caches: &SharedFrameCache,
-) -> Option<FrameYuv420> {
-    let mut provider = CacheOnlyProvider { caches };
-    let mut layers = Vec::new();
-    for (track_index, clip) in nested.active_video_clips_at(local_frame) {
-        let clip_layers = frame_provider::track_layers_at(
-            project,
-            nested,
-            track_index,
-            clip,
-            local_frame,
-            nested.resolution,
-            &mut provider,
-        )
-        .ok()?;
-        if clip_layers.is_empty() {
-            // Una clip copre `local_frame` ma il suo layer non c'è: il suo
-            // media (o, ricorsivamente, un'altra compound clip) non è
-            // ancora pronto — niente frame per ora, non un frame nero.
-            return None;
-        }
-        layers.extend(clip_layers);
-    }
-    let render_layers: Vec<vv_render::Layer> = layers.iter().map(frame_provider::OwnedLayer::as_render).collect();
-    let (width, height) = nested.resolution;
-    // RGBA e sfondo trasparente, non `render_layers_i420` (nero opaco, e
-    // senza canale alpha): questo frame torna un layer altrove, le zone
-    // dove `nested` non ha nulla da mostrare devono restare trasparenti.
-    let rgba = compositor.render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(width, height));
-    Some(frame_provider::rgba_to_yuv420_with_alpha(&rgba, width, height))
 }
 
 /// Parametri di `fill_segments` comuni alle due finestre.
@@ -1272,7 +1137,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let generous_budget = 320 * 240 * 4 * 200;
         let outcome = walk_and_fill(
             &project,
@@ -1280,7 +1144,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             0,
             generous_budget,
             false,
@@ -1445,7 +1308,7 @@ mod tests {
             crossings: Vec::new(),
         }]);
 
-        let segments = collect_media_segments(&Project::default(), &tl, 40, 60).0;
+        let segments = collect_media_segments(&Project::default(), &tl, 40, 60);
         assert_eq!(
             segments.len(),
             2,
@@ -1474,7 +1337,7 @@ mod tests {
             crossings: Vec::new(),
         }]);
 
-        let segments = collect_media_segments(&Project::default(), &tl, 0, 40).0;
+        let segments = collect_media_segments(&Project::default(), &tl, 0, 40);
         assert_eq!(
             segments.len(),
             2,
@@ -1509,7 +1372,7 @@ mod tests {
             },
         ]);
 
-        let segments = collect_media_segments(&Project::default(), &tl, 0, 50).0;
+        let segments = collect_media_segments(&Project::default(), &tl, 0, 50);
         assert_eq!(segments.len(), 2);
         assert_eq!(
             (segments[0].media_id, segments[1].media_id),
@@ -1521,7 +1384,7 @@ mod tests {
     #[test]
     fn collect_media_segments_is_empty_for_a_timeline_with_no_clips() {
         let tl = timeline_with(vec![Track::new(TrackKind::Video)]);
-        assert!(collect_media_segments(&Project::default(), &tl, 0, 100).0.is_empty());
+        assert!(collect_media_segments(&Project::default(), &tl, 0, 100).is_empty());
     }
 
     #[test]
@@ -1541,7 +1404,7 @@ mod tests {
 
         // Finestra dietro [40,60): attraversa il taglio a 50 andando
         // all'indietro, simmetrico al test forward sopra.
-        let segments = collect_media_segments_behind(&Project::default(), &tl, 60, 40).0;
+        let segments = collect_media_segments_behind(&Project::default(), &tl, 60, 40);
         assert_eq!(
             segments.len(),
             2,
@@ -1573,7 +1436,7 @@ mod tests {
             crossings: Vec::new(),
         }]);
 
-        let segments = collect_media_segments_behind(&Project::default(), &tl, 40, 0).0;
+        let segments = collect_media_segments_behind(&Project::default(), &tl, 40, 0);
         assert_eq!(
             segments.len(),
             2,
@@ -1586,7 +1449,7 @@ mod tests {
     #[test]
     fn collect_media_segments_behind_is_empty_for_a_timeline_with_no_clips() {
         let tl = timeline_with(vec![Track::new(TrackKind::Video)]);
-        assert!(collect_media_segments_behind(&Project::default(), &tl, 100, 0).0.is_empty());
+        assert!(collect_media_segments_behind(&Project::default(), &tl, 100, 0).is_empty());
     }
 
     #[test]
@@ -1604,7 +1467,7 @@ mod tests {
             crossings: Vec::new(),
         }]);
 
-        let segments = collect_media_segments_behind(&Project::default(), &tl, 150, 100).0;
+        let segments = collect_media_segments_behind(&Project::default(), &tl, 150, 100);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].timeline_start, 100);
         assert_eq!(segments[0].source_start, 100);
@@ -1614,8 +1477,8 @@ mod tests {
     /// Un progetto con una compound clip: il suo media vero (dentro la
     /// timeline annidata) deve comparire fra i segmenti da decodificare,
     /// nello spazio della timeline annidata — non in quello della timeline
-    /// di partenza — e la compound clip stessa deve comparire fra quelli
-    /// da comporre, mai fra quelli da decodificare.
+    /// di partenza — mentre la compound clip stessa non compare mai (non si
+    /// decodifica: si compone al volo, vedi `frame_provider::GpuCompounds`).
     fn project_with_compound_clip() -> (Project, Timeline, MediaId, MediaId) {
         let mut project = Project::default();
         let real_media = project.media_pool.insert(dummy_media_item());
@@ -1661,78 +1524,14 @@ mod tests {
 
     #[test]
     fn collect_media_segments_recurses_into_a_compound_clips_nested_timeline() {
-        let (project, root, real_media, compound_media) = project_with_compound_clip();
+        let (project, root, real_media, _) = project_with_compound_clip();
 
-        let (real, compound) = collect_media_segments(&project, &root, 10, 30);
+        let real = collect_media_segments(&project, &root, 10, 30);
 
-        assert_eq!(real.len(), 1, "il media vero dentro la compound clip va decodificato");
+        assert_eq!(real.len(), 1, "solo il media vero dentro la compound clip, che è l'unico da decodificare");
         assert_eq!(real[0].media_id, real_media);
         assert_eq!(real[0].source_start, 10, "stesso range, in frame della timeline annidata");
         assert_eq!(real[0].source_end, 29);
-
-        assert_eq!(compound.len(), 1, "la compound clip stessa va composta, non decodificata");
-        assert_eq!(compound[0].media_id, compound_media);
-        assert_eq!(compound[0].source_start, 10);
-        assert_eq!(compound[0].source_end, 29);
-    }
-
-    #[test]
-    fn compose_compound_segments_fills_the_cache_only_once_its_real_media_is_ready() {
-        let (project, root, real_media, compound_media) = project_with_compound_clip();
-        let (_, compound) = collect_media_segments(&project, &root, 0, 5);
-        let caches = SharedFrameCache::new();
-        let mut compositor = None;
-
-        compose_compound_segments(&project, &caches, &mut compositor, &compound);
-        assert!(
-            caches.get(compound_media, 0).is_none(),
-            "il media vero non è ancora in cache: non c'è ancora nulla da comporre"
-        );
-
-        // Il media vero arriva in cache (come farebbe il decode reale)...
-        caches.insert(real_media, 0, Arc::new(dummy_frame()));
-        compose_compound_segments(&project, &caches, &mut compositor, &compound);
-
-        // ...e solo ora la compound clip si può comporre.
-        let composed = caches.get(compound_media, 0).expect("ora il layer sottostante è pronto");
-        assert_eq!((composed.width, composed.height), (320, 240));
-    }
-
-    /// Bug segnalato dall'utente: una compound clip è una timeline come le
-    /// altre, quindi le zone dove la sua timeline annidata non ha nulla da
-    /// mostrare devono restare trasparenti — non nere, o coprirebbero quel
-    /// che c'è sotto quando la compound clip diventa a sua volta un layer
-    /// nella timeline che la contiene.
-    #[test]
-    fn compose_frame_at_leaves_the_nested_timelines_empty_areas_transparent() {
-        let project = Project::default();
-        let mut clip = Clip::from_source_range(ClipId(1), vv_core::ClipSource::SolidColor, 0, 10, 0, Rational::one());
-        clip.effects.color = Some(vv_core::Keyframed::constant(vv_core::Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }));
-        // Taglia via la metà destra (crop in pixel di timeline): resta scoperta.
-        clip.effects.transform = vv_core::TransformTracks::constant(vv_core::Transform {
-            crop: [0.0, 0.0, 2.0, 0.0],
-            ..Default::default()
-        });
-        let nested = Timeline {
-            name: "Nested".into(),
-            fps: Rational::new(25, 1),
-            resolution: (4, 4),
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                clips: vec![clip],
-                muted: false,
-                solo: false,
-                locked: false,
-                crossings: Vec::new(),
-            }],
-        };
-        let compositor = vv_render::Compositor::new_headless();
-        let caches = SharedFrameCache::new();
-
-        let frame = compose_frame_at(&project, &nested, 0, &compositor, &caches).expect("nessun media da attendere");
-        let alpha = frame.alpha.as_ref().expect("un frame composto porta sempre l'alpha");
-        assert_eq!(alpha[0], 255, "sinistra: coperta dalla clip rossa");
-        assert_eq!(alpha[3], 0, "destra: fuori dal crop, deve restare trasparente, non nera");
     }
 
     /// Da quando anche la timeline del progetto compare nel media pool
@@ -1770,11 +1569,9 @@ mod tests {
             crossings: Vec::new(),
         });
 
-        let (real, compound) =
-            collect_media_segments(&project, &project.timelines[timeline_id], 0, 100);
+        let real = collect_media_segments(&project, &project.timelines[timeline_id], 0, 100);
 
         assert!(real.is_empty(), "nessun media vero da decodificare in un ciclo puro");
-        assert_eq!(compound.len() as u32, MAX_COMPOUND_DEPTH, "si ferma al limite, non prosegue all'infinito");
     }
 
     /// Un segmento dietro la testina più lungo di `BEHIND_CHUNK_FRAMES`
@@ -2493,7 +2290,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let generous_budget = 320 * 240 * 4 * 200; // ben oltre i 75 frame della finestra
         let outcome = walk_and_fill(
             &project,
@@ -2501,7 +2297,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             0,
             generous_budget,
             false,
@@ -2555,7 +2350,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Budget generoso: niente sfratto per capacità a confondere il
         // risultato, qui interessa solo "viene decodificato" o no.
         let generous_budget = 320 * 240 * 3 / 2 * 200;
@@ -2569,7 +2363,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             60,
             generous_budget,
             false,
@@ -2643,7 +2436,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Testina a 95: finestra in avanti minuscola (solo [95,99], la
         // clip finisce a 100), finestra dietro normale (2s = 50 frame,
         // [45,94]). Budget per la finestra in avanti (5 frame) più *solo*
@@ -2658,7 +2450,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             95,
             tight_budget,
             false,
@@ -2731,7 +2522,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let generous_budget = 320 * 240 * 3 / 2 * 200;
 
         // Primo giro: riempie per intero sia avanti che dietro (più
@@ -2742,7 +2532,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             95,
             generous_budget,
             false,
@@ -2774,7 +2563,6 @@ mod tests {
                 &caches,
                 &mut open,
                 &mut open_behind,
-                &mut compositor,
                 95,
                 generous_budget,
                 false,
@@ -2831,7 +2619,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let generous_budget = 320 * 240 * 3 / 2 * 200;
 
         let outcome = walk_and_fill(
@@ -2840,7 +2627,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             60,
             generous_budget,
             false,
@@ -2916,7 +2702,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Budget minuscolo: la finestra di lookahead (3s = 75 frame a
         // 25fps) non ci sta tutta nella cache.
         let tiny_budget = 320 * 240 * 4 * 5;
@@ -2926,7 +2711,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             0,
             tiny_budget,
             false,
@@ -2992,7 +2776,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Il target live è già oltre soglia rispetto a from_frame=0 prima
         // ancora che il fill inizi: simula la testina che è saltata
         // altrove mentre questo ciclo stava per partire.
@@ -3004,7 +2787,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             0,
             100_000_000,
             false,
@@ -3081,7 +2863,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let budget = 100_000_000;
 
         // La finestra di lookahead (3s = 75 frame a 25fps) da 40
@@ -3093,7 +2874,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             40,
             budget,
             false,
@@ -3170,7 +2950,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Capacità ~60 frame YUV420 (width*height*3/2 byte/frame):
         // meno di quanto i due segmenti insieme chiederebbero (~20 + ~55),
         // ma più di quanto ciascuno chiede da solo — costringe la
@@ -3183,7 +2962,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             40,
             budget,
             false,
@@ -3325,7 +3103,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Budget che a 320x240 (307_200 B/frame) basta per ~60 frame
         // totali: con due media a contendersi la finestra ce ne stanno
         // pochi a testa, con uno solo molti di più.
@@ -3344,7 +3121,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             0,
             total_budget,
             false,
@@ -3365,7 +3141,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             200,
             total_budget,
             false,
@@ -3686,7 +3461,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Budget stretto: la finestra intera non ci sta in cache, quindi
         // avanzando `evict_before` scarta davvero i frame dietro la
         // testina invece di lasciarli semplicemente ancora presenti per
@@ -3707,7 +3481,6 @@ mod tests {
                 &caches,
                 &mut open,
                 &mut open_behind,
-                &mut compositor,
                 from,
                 budget,
                 went_backward,
@@ -3735,7 +3508,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             80,
             budget,
             true,
@@ -3811,7 +3583,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let budget = 43_000_000; // capacità ~139 frame
 
         // Bufferizza attorno a 300: con keyint=250 (default libx264) il
@@ -3823,7 +3594,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             300,
             budget,
             false,
@@ -3847,7 +3617,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             270,
             budget,
             true,
@@ -3926,7 +3695,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         let budget = 43_000_000; // capacità ~139 frame, come sopra
 
         // Stesso setup del test sopra: riempimento iniziale a 300, poi
@@ -3937,7 +3705,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             300,
             budget,
             false,
@@ -3952,7 +3719,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             290,
             budget,
             true,
@@ -3975,7 +3741,6 @@ mod tests {
                 &caches,
                 &mut open,
                 &mut open_behind,
-                &mut compositor,
                 290,
                 budget,
                 false,
@@ -4287,7 +4052,6 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let mut compositor: Option<vv_render::Compositor> = None;
         // Budget stretto: ogni avanzamento di 10 frame aggiunge più
         // frame di quanti la cache possa contenere senza sfrattarne,
         // costringendo lo sfratto ad agire ad ogni ciclo.
@@ -4299,7 +4063,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             10,
             budget,
             false,
@@ -4316,7 +4079,6 @@ mod tests {
             &caches,
             &mut open,
             &mut open_behind,
-            &mut compositor,
             target,
             budget,
             false,
@@ -4333,7 +4095,6 @@ mod tests {
                 &caches,
                 &mut open,
                 &mut open_behind,
-                &mut compositor,
                 target,
                 budget,
                 false,
