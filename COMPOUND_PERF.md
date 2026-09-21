@@ -182,12 +182,20 @@ compound. È offline: non urgente, va in coda.
    compone la timeline annidata al volo; da `render_ahead.rs` sono spariti
    il canale compound, `compose_compound_segments`, `CacheOnlyProvider` e
    `compose_frame_at`.
-5. Export sullo stesso path (§3.6) — **da fare**. Paga ancora readback +
-   `rgba_to_yuv420_with_alpha` per ogni frame compound, compreso l'α² dei
-   bordi descritto in §3.2.
+5. ~~Export sullo stesso path (§3.6)~~ — fatto: stesso `GpuCompounds`, con
+   i due stadi GPU su un compositor condiviso (la texture nasce nel decode
+   e si campiona nella composizione). `rgba_to_yuv420_with_alpha` è sparita
+   con l'ultimo chiamante.
 
 Resta da misurare sul materiale reale se 1080@60 ora regge il playback, e
 se la varianza sul thread UI giustifica il ring corto di §5.
+
+**Strascico da valutare:** `FrameYuv420::alpha` (e con essa
+`YuvFrame::alpha`, il binding 5 `a_tex` dello shader e il placeholder
+`OPAQUE`) ora è sempre `None`: la portavano solo i frame composti delle
+compound clip. Toglierla risparmia un upload di texture e un sample per
+layer per frame, ma va prima deciso se serve a un eventuale supporto di
+media con vero canale alpha.
 
 ---
 
