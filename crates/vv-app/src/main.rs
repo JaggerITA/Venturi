@@ -21,6 +21,7 @@ mod proxy_worker;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
+mod import_worker;
 mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
@@ -217,6 +218,10 @@ struct VibeVideoApp {
     /// Media o elementi non importati, mostrati in una finestra a parte
     /// finché l'utente non la chiude.
     import_warnings: Vec<String>,
+    /// Probe dei file di un import multiplo, in corso in background.
+    pending_import: Option<project_io::PendingImport>,
+    /// File scelti mentre un import era già in corso: partono dopo.
+    import_queue: Vec<PathBuf>,
 
     preview_meta: Option<vv_core::MediaMeta>,
     preview_error: Option<String>,
@@ -385,6 +390,8 @@ impl Default for VibeVideoApp {
             media_pool_state: media_pool::MediaPoolState::default(),
             keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
             import_warnings: Vec::new(),
+            pending_import: None,
+            import_queue: Vec::new(),
             preview_meta: None,
             preview_error: None,
             video_texture_id: None,
@@ -2706,6 +2713,7 @@ impl eframe::App for VibeVideoApp {
         self.handle_close_request(&ui.ctx().clone());
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
+        self.poll_pending_import(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
         if self.thumbnail_worker.as_ref().is_some_and(|w| w.has_pending()) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -2734,6 +2742,14 @@ impl eframe::App for VibeVideoApp {
                 if let Some(err) = &self.project_error {
                     ui.separator();
                     ui.colored_label(egui::Color32::RED, err);
+                }
+                if let Some((done, total)) = self.import_progress() {
+                    ui.separator();
+                    ui.add(
+                        egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                            .desired_width(180.0)
+                            .text(t!("project.import_progress", done = done, total = total)),
+                    );
                 }
                 // Sopra al pannello che apre, come i toggle a sinistra.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -6313,6 +6329,7 @@ mod tests {
         let mut with_bad = paths.clone();
         with_bad.push(dir.join("inesistente.mp4"));
         app.import_media_files(with_bad);
+        app.wait_for_import();
 
         // +1: la timeline del progetto compare anche lei nel pool.
         assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 2);
@@ -6354,6 +6371,7 @@ mod tests {
         input.dropped_files = vec![std::sync::Arc::new(TestDroppedFile(path.clone()))];
         let mut output = ctx.run_ui(input, |ui| app.poll_dropped_files(ui.ctx()));
         output.textures_delta.clear();
+        app.wait_for_import();
 
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
         // +1: la timeline del progetto, creata al volo dall'import (vedi
@@ -6844,6 +6862,7 @@ mod tests {
         let path = make_wav("tono.wav");
         let mut app = VibeVideoApp::default();
         app.import_media_files(vec![path]);
+        app.wait_for_import();
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
         let (media_id, item) = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap();
         assert!(!item.meta.has_video);
@@ -6912,6 +6931,7 @@ mod tests {
         let path = make_png("still.png");
         let mut app = VibeVideoApp::default();
         app.import_media_files(vec![path.clone()]);
+        app.wait_for_import();
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
 
         let (media_id, item) = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap();

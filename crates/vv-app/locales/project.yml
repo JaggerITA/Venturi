@@ -12,6 +12,10 @@ project.default_file_name:
   en: "project"
   it: "progetto"
 
+project.import_progress:
+  en: "Importing %{done}/%{total}"
+  it: "Importazione %{done}/%{total}"
+
 project.save_failed:
   en: "Save failed: %{error}"
   it: "Salvataggio fallito: %{error}"

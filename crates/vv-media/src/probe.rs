@@ -83,37 +83,113 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     })
 }
 
-/// Corregge `nominal` (durata*fps) al vero conteggio di frame che il
-/// decoder produce, decodificando dall'ultimo GOP fino alla vera fine
-/// dello stream invece di fidarsi del calcolo aritmetico. Il costo è
-/// quello di un seek + la decodifica di un GOP (indipendente dalla durata
-/// totale del file), non di un decode completo: `SAFETY_MARGIN_SECS`
-/// deve coprire il GOP più grande atteso in pratica. Non alza mai
-/// `nominal`: se il decode fallisce si tiene il valore aritmetico, e se
-/// lo stream produce più frame di quanti ne prevedeva `nominal`
-/// (arrotondamento nell'altra direzione) si ignora l'eccedenza — questo
-/// fix corregge solo la sovrastima, non ne introduce una nuova.
+/// Corregge `nominal` (durata*fps) al vero conteggio di frame che lo
+/// stream produce. Due passate, entrambe sulla sola coda del file: un
+/// demux (nessuna decodifica) che trova il pts dell'ultimo pacchetto
+/// video e dell'ultimo keyframe, poi la decodifica del solo ultimo GOP
+/// per confermare che quel frame esca davvero dal decoder. Non alza mai
+/// `nominal`: se qualcosa fallisce si tiene il valore aritmetico e
+/// l'eventuale eccedenza si ignora — questo fix corregge solo la
+/// sovrastima, non ne introduce una nuova.
 fn verify_last_decodable_frame(path: &Path, fps: Rational, nominal: i64) -> i64 {
-    const SAFETY_MARGIN_SECS: f64 = 15.0;
-    let Ok(mut decoder) = crate::decode::Decoder::open(path) else {
+    let idx_of = |secs: f64| (secs * fps.as_f64()).round() as FrameIdx;
+    let Some((last_packet_secs, last_key_secs)) = scan_tail(path, fps, nominal) else {
         return nominal;
     };
-    let nominal_secs = nominal as f64 / fps.as_f64();
-    let seek_secs = (nominal_secs - SAFETY_MARGIN_SECS).max(0.0);
-    if decoder.seek_to_time(seek_secs).is_err() {
-        return nominal;
+    match decode_from(path, last_key_secs) {
+        Some(secs) => (idx_of(secs) + 1).min(nominal),
+        // Il GOP finale non si decodifica: ci si ferma al demux, che è
+        // comunque più vicino al vero del calcolo aritmetico.
+        None => (idx_of(last_packet_secs) + 1).min(nominal),
     }
-    let mut last_idx: Option<FrameIdx> = None;
-    loop {
-        match decoder.next_frame() {
-            Ok(Some((idx, _))) => last_idx = Some(last_idx.map_or(idx, |max| max.max(idx))),
-            Ok(None) | Err(_) => break,
+}
+
+/// `(pts dell'ultimo pacchetto video, pts dell'ultimo keyframe)` in
+/// secondi, demuxando dalla coda dello stream. Se il seek atterra oltre
+/// la vera fine (è il caso che stiamo correggendo) si rilegge dall'inizio:
+/// senza decodifica costa comunque pochi ms anche su file lunghi.
+fn scan_tail(path: &Path, fps: Rational, nominal: i64) -> Option<(f64, f64)> {
+    const SAFETY_MARGIN_SECS: f64 = 15.0;
+    let nominal_secs = nominal as f64 / fps.as_f64();
+    for seek_secs in [(nominal_secs - SAFETY_MARGIN_SECS).max(0.0), 0.0] {
+        let mut input = ffmpeg::format::input(&path).ok()?;
+        let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+        let stream_index = stream.index();
+        let time_base = seconds_per_tick(stream.time_base());
+        let ts = (seek_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+        if input.seek(ts, ..ts).is_err() {
+            continue;
+        }
+        let mut last = None;
+        let mut last_key = 0.0f64;
+        for (stream, packet) in input.packets() {
+            if stream.index() != stream_index {
+                continue;
+            }
+            let Some(secs) = packet.pts().map(|pts| pts as f64 * time_base) else {
+                continue;
+            };
+            last = Some(last.map_or(secs, |max: f64| max.max(secs)));
+            if packet.is_key() {
+                last_key = last_key.max(secs);
+            }
+        }
+        if let Some(last) = last {
+            return Some((last, last_key));
+        }
+        if seek_secs == 0.0 {
+            break;
         }
     }
-    match last_idx {
-        Some(idx) => (idx + 1).min(nominal),
-        None => nominal,
+    None
+}
+
+/// Pts dell'ultimo frame che il decoder produce partendo dal keyframe a
+/// `from_secs`, in secondi. Nessuno scaler: serve solo il timestamp, non
+/// i pixel.
+fn decode_from(path: &Path, from_secs: f64) -> Option<f64> {
+    let mut input = ffmpeg::format::input(&path).ok()?;
+    let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+    let stream_index = stream.index();
+    let time_base = seconds_per_tick(stream.time_base());
+    let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .ok()?
+        .decoder();
+    context.set_threading(ffmpeg::threading::Config {
+        kind: ffmpeg::threading::Type::Frame,
+        count: 0,
+        ..Default::default()
+    });
+    let mut decoder = context.video().ok()?;
+    let ts = (from_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+    input.seek(ts, ..ts).ok()?;
+
+    let mut frame = ffmpeg::frame::Video::empty();
+    let mut last: Option<f64> = None;
+    let mut drain = |decoder: &mut ffmpeg::decoder::Video, last: &mut Option<f64>| {
+        while decoder.receive_frame(&mut frame).is_ok() {
+            let Some(secs) = frame.pts().map(|pts| pts as f64 * time_base) else {
+                continue;
+            };
+            *last = Some(last.map_or(secs, |max: f64| max.max(secs)));
+        }
+    };
+    for (stream, packet) in input.packets() {
+        if stream.index() != stream_index {
+            continue;
+        }
+        if decoder.send_packet(&packet).is_ok() {
+            drain(&mut decoder, &mut last);
+        }
     }
+    if decoder.send_eof().is_ok() {
+        drain(&mut decoder, &mut last);
+    }
+    last
+}
+
+fn seconds_per_tick(time_base: ffmpeg::Rational) -> f64 {
+    time_base.numerator() as f64 / time_base.denominator() as f64
 }
 
 /// Come `probe` per un'immagine: `duration_frames` è il sentinel
@@ -223,6 +299,31 @@ mod tests {
 
         assert_eq!(corrected, real, "un nominal gonfiato deve convergere al vero ultimo frame decodificabile");
         assert!(corrected <= 15, "10 frame veri a 10fps: il conteggio corretto non deve restare vicino al nominal gonfiato ({corrected})");
+    }
+
+    /// Caso reale della sovrastima: l'audio dura più del video, quindi la
+    /// durata del container (il massimo fra gli stream) moltiplicata per
+    /// gli fps promette molti più frame di quanti il video ne abbia.
+    #[test]
+    fn probe_ignores_frames_promised_by_an_audio_track_longer_than_the_video() {
+        let dir = std::env::temp_dir().join("vv-media-probe-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audio_piu_lungo.mp4");
+        crate::test_support::ffmpeg(
+            &[
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            ],
+            &path,
+        );
+
+        let meta = probe(&path).expect("probe fallito");
+        assert!(
+            (meta.duration_frames - 25).abs() <= 2,
+            "1 s di video a 25 fps, non i frame promessi dai 4 s di audio: {}",
+            meta.duration_frames
+        );
     }
 
     /// Genera un vero file x264 (con audio AAC) via ffmpeg CLI e verifica

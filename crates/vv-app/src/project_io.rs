@@ -33,6 +33,14 @@ pub(crate) enum DialogOutcome {
     Files(Option<Vec<PathBuf>>),
 }
 
+/// Import multiplo in corso: probe sui thread di `ImportWorker`, esito
+/// (anteprima dell'ultimo, errori) applicato quando finisce.
+pub(crate) struct PendingImport {
+    pub(crate) worker: import_worker::ImportWorker,
+    pub(crate) errors: Vec<String>,
+    pub(crate) last_imported: Option<MediaId>,
+}
+
 pub(crate) struct PendingDialog {
     pub(crate) kind: DialogKind,
     pub(crate) rx: mpsc::Receiver<DialogOutcome>,
@@ -82,22 +90,69 @@ impl VibeVideoApp {
         }
     }
 
-    /// Import multiplo: anteprima solo dell'ultimo media importato, errori
-    /// raccolti invece che sovrascritti a vicenda.
+    /// Import multiplo: il probe dei file va su `ImportWorker` (decine di
+    /// ms ciascuno), la UI resta viva e mostra l'avanzamento. Anteprima
+    /// solo dell'ultimo media importato, errori raccolti invece che
+    /// sovrascritti a vicenda.
     pub(crate) fn import_media_files(&mut self, paths: Vec<PathBuf>) {
-        let mut errors = Vec::new();
-        let mut last_imported = None;
-        for path in paths {
+        if paths.is_empty() {
+            return;
+        }
+        if self.pending_import.is_some() {
+            self.import_queue.extend(paths);
+            return;
+        }
+        self.import_warnings.clear();
+        self.pending_import = Some(PendingImport {
+            worker: import_worker::ImportWorker::spawn(paths, is_image_path),
+            errors: Vec::new(),
+            last_imported: None,
+        });
+    }
+
+    /// Aggiunge al pool i media già probati dall'`ImportWorker`.
+    pub(crate) fn poll_pending_import(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.pending_import.take() else {
+            let queued = std::mem::take(&mut self.import_queue);
+            self.import_media_files(queued);
+            return;
+        };
+        for (path, result) in pending.worker.drain_ready() {
             let label = file_label(&path);
-            match self.add_media_to_pool(path) {
-                Ok(media_id) => last_imported = Some(media_id),
-                Err(e) => errors.push(format!("{label}: {e}")),
+            match result {
+                Ok(meta) => pending.last_imported = Some(self.insert_media(path, meta)),
+                Err(e) => pending.errors.push(format!("{label}: {e}")),
             }
         }
-        self.import_warnings = errors;
-        if let Some(media_id) = last_imported {
+        if !pending.worker.is_finished() {
+            self.pending_import = Some(pending);
+            // Senza un nuovo evento egui non ridisegnerebbe: la barra di
+            // avanzamento resterebbe ferma.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        }
+        self.import_warnings = pending.errors;
+        if let Some(media_id) = pending.last_imported {
             self.preview_media(media_id);
         }
+    }
+
+    /// Blocca finché l'import multiplo in corso non è finito: i test
+    /// non hanno un event loop che chiami `poll_pending_import`.
+    #[cfg(test)]
+    pub(crate) fn wait_for_import(&mut self) {
+        let ctx = egui::Context::default();
+        while self.pending_import.is_some() || !self.import_queue.is_empty() {
+            self.poll_pending_import(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    pub(crate) fn import_progress(&self) -> Option<(usize, usize)> {
+        self.pending_import.as_ref().map(|p| {
+            let (done, total) = p.worker.progress();
+            (done, total + self.import_queue.len())
+        })
     }
 
     pub(crate) fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
@@ -107,27 +162,29 @@ impl VibeVideoApp {
             vv_media::probe(&path)
         };
         match probed {
-            Ok(meta) => {
-                if meta.has_video {
-                    self.ensure_timeline_for(&meta);
-                } else {
-                    self.ensure_timeline_audio_only();
-                }
-                // `0` solo se il file è sparito nel frattempo: al più si rigenera un
-                // proxy.
-                let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-                let media_id = self.project.media_pool.insert(vv_core::MediaItem {
-                    path: path.clone(),
-                    meta,
-                    content_hash,
-                    compound: None,
-                });
-                self.unsaved_media = true;
-                self.enqueue_media_background_jobs(media_id);
-                Ok(media_id)
-            }
+            Ok(meta) => Ok(self.insert_media(path, meta)),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    fn insert_media(&mut self, path: PathBuf, meta: vv_core::MediaMeta) -> MediaId {
+        if meta.has_video {
+            self.ensure_timeline_for(&meta);
+        } else {
+            self.ensure_timeline_audio_only();
+        }
+        // `0` solo se il file è sparito nel frattempo: al più si rigenera un
+        // proxy.
+        let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
+        let media_id = self.project.media_pool.insert(vv_core::MediaItem {
+            path,
+            meta,
+            content_hash,
+            compound: None,
+        });
+        self.unsaved_media = true;
+        self.enqueue_media_background_jobs(media_id);
+        media_id
     }
 
     /// Proxy, miniatura e waveform di un media del pool, sia appena
