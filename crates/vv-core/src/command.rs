@@ -1513,11 +1513,14 @@ impl Command for RemoveKeyframe {
 
 /// Rimuove un media dal pool; le sue clip restano offline. `slotmap` non
 /// reinserisce con la stessa chiave: l'undo riscrive le clip col nuovo id,
-/// da cui `Cell`/`RefCell` (`undo` prende `&self`).
+/// da cui `Cell`/`RefCell` (`undo` prende `&self`). Di una compound clip
+/// sparisce anche la timeline annidata, altrimenti resterebbe orfana nel
+/// progetto (e il suo nome occupato, vedi `alloc_compound_name`).
 #[derive(Debug)]
 pub struct RemoveMedia {
     media: Cell<MediaId>,
     removed: RefCell<Option<MediaItem>>,
+    nested: RefCell<Option<Timeline>>,
 }
 
 impl RemoveMedia {
@@ -1525,6 +1528,7 @@ impl RemoveMedia {
         Self {
             media: Cell::new(media),
             removed: RefCell::new(None),
+            nested: RefCell::new(None),
         }
     }
 }
@@ -1535,13 +1539,20 @@ impl Command for RemoveMedia {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        *self.removed.borrow_mut() = project.media_pool.remove(self.media.get());
+        let removed = project.media_pool.remove(self.media.get());
+        if let Some(nested_id) = removed.as_ref().and_then(|item| item.compound) {
+            *self.nested.borrow_mut() = project.timelines.remove(nested_id);
+        }
+        *self.removed.borrow_mut() = removed;
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(item) = self.removed.borrow_mut().take() else {
+        let Some(mut item) = self.removed.borrow_mut().take() else {
             return;
         };
+        if let Some(nested) = self.nested.borrow_mut().take() {
+            item.compound = Some(project.timelines.insert(nested));
+        }
         let old = self.media.get();
         let new = project.media_pool.insert(item);
         self.media.set(new);
@@ -1869,7 +1880,7 @@ pub struct CompoundPlan {
     pub has_video: bool,
     pub has_audio: bool,
     /// Track (nella timeline di partenza) su cui posizionare la clip video
-    /// risultante: la più in alto fra quelle coinvolte, `Some` solo se
+    /// risultante: la più in basso fra quelle coinvolte, `Some` solo se
     /// `has_video`.
     pub video_track: Option<usize>,
     /// Come `video_track`, per la clip audio risultante.
@@ -1929,12 +1940,12 @@ pub fn plan_compound_clip(
         .iter()
         .copied()
         .filter(|&i| timeline.tracks[i].kind == TrackKind::Video)
-        .max();
+        .min();
     let audio_track = distinct
         .iter()
         .copied()
         .filter(|&i| timeline.tracks[i].kind == TrackKind::Audio)
-        .max();
+        .min();
 
     Some(CompoundPlan {
         nested_timeline: Timeline {

@@ -258,6 +258,9 @@ struct VibeVideoApp {
     /// Waveform cercate su disco e non trovate: si riprova solo quando il
     /// worker le segnala pronte, non a ogni frame.
     waveform_missing: std::collections::HashSet<(u64, usize)>,
+    /// Compound clip la cui waveform è stata composta con dei sorgenti
+    /// non ancora pronti: da rifare quando arrivano.
+    waveform_partial: std::collections::HashSet<(u64, usize)>,
     /// Secondi bufferizzati avanti/dietro la testina (menu Playback > Proxy).
     lookahead_secs: f64,
     behind_secs: f64,
@@ -394,6 +397,7 @@ impl Default for VibeVideoApp {
             thumbnails: HashMap::new(),
             waveform_cache: HashMap::new(),
             waveform_missing: Default::default(),
+            waveform_partial: Default::default(),
             lookahead_secs: render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
             active_clip: None,
@@ -931,13 +935,22 @@ impl VibeVideoApp {
     /// leggendo il file di cache una volta sola per chiave.
     fn ensure_waveforms_loaded(&mut self) {
         if let Some(worker) = &self.waveform_worker {
-            for key in worker.drain_ready() {
-                self.waveform_missing.remove(&key);
+            let arrived = worker.drain_ready();
+            for key in &arrived {
+                self.waveform_missing.remove(key);
+            }
+            // Le compound composte con dei sorgenti ancora mancanti vanno
+            // rifatte ora che ne è arrivato qualcuno.
+            if !arrived.is_empty() {
+                for key in self.waveform_partial.drain() {
+                    self.waveform_cache.remove(&key);
+                }
             }
         }
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
+        let mut compounds: Vec<vv_core::MediaId> = Vec::new();
         for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Audio) {
             for clip in &track.clips {
                 let vv_core::ClipSource::Media(media_id) = &clip.source else {
@@ -953,6 +966,10 @@ impl VibeVideoApp {
                 {
                     continue;
                 }
+                if item.compound.is_some() {
+                    compounds.push(*media_id);
+                    continue;
+                }
                 match vv_media::waveform::load_waveform(key.0, key.1) {
                     Some(waveform) => {
                         self.waveform_cache.insert(key, waveform);
@@ -963,6 +980,67 @@ impl VibeVideoApp {
                 }
             }
         }
+        for media_id in compounds {
+            self.ensure_compound_waveform(media_id, 0);
+        }
+    }
+
+    /// Waveform di una compound clip: non c'è un file da decodificare, si
+    /// compone da quelle delle clip della sua timeline annidata (vedi
+    /// `compose_compound_waveform`), caricandole prima se serve.
+    fn ensure_compound_waveform(&mut self, media_id: vv_core::MediaId, depth: usize) {
+        if depth > MAX_COMPOUND_WAVEFORM_DEPTH {
+            return;
+        }
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
+        let (Some(nested_id), key) = (item.compound, (item.content_hash, 0)) else {
+            return;
+        };
+        if self.waveform_cache.contains_key(&key) {
+            return;
+        }
+        let sources: Vec<(vv_core::MediaId, usize)> = self.project.timelines[nested_id]
+            .tracks_of_kind(TrackKind::Audio)
+            .flat_map(|(_, track)| track.clips.iter())
+            .filter_map(|clip| match clip.source {
+                vv_core::ClipSource::Media(id) => Some((id, clip.audio_stream_index)),
+                _ => None,
+            })
+            .collect();
+        for (source_id, stream) in sources {
+            let Some(source) = self.project.media_pool.get(source_id) else {
+                continue;
+            };
+            if source.compound.is_some() {
+                self.ensure_compound_waveform(source_id, depth + 1);
+                continue;
+            }
+            let source_key = (source.content_hash, stream);
+            if self.waveform_cache.contains_key(&source_key)
+                || self.waveform_missing.contains(&source_key)
+            {
+                continue;
+            }
+            match vv_media::waveform::load_waveform(source_key.0, source_key.1) {
+                Some(waveform) => {
+                    self.waveform_cache.insert(source_key, waveform);
+                }
+                None => {
+                    self.waveform_missing.insert(source_key);
+                }
+            }
+        }
+        let Some((waveform, complete)) =
+            compose_compound_waveform(&self.project, &self.waveform_cache, media_id)
+        else {
+            return;
+        };
+        if !complete {
+            self.waveform_partial.insert(key);
+        }
+        self.waveform_cache.insert(key, waveform);
     }
 
     fn ensure_timeline(&mut self) -> TimelineId {
@@ -1853,6 +1931,27 @@ impl VibeVideoApp {
             Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RemoveMedia, commands)),
         );
         self.media_pool_state.clear();
+        self.leave_removed_timelines();
+    }
+
+    /// Cancellare una compound clip ne cancella la timeline annidata
+    /// (`vv_core::RemoveMedia`): se la si stava editando si risale al
+    /// livello superiore ancora esistente.
+    fn leave_removed_timelines(&mut self) {
+        while self
+            .timeline_id
+            .is_some_and(|id| !self.project.timelines.contains_key(id))
+        {
+            match self.timeline_stack.pop() {
+                Some(parent) => self.switch_to_timeline(parent),
+                None => {
+                    self.timeline_id = None;
+                    self.timeline_state = timeline_ui::TimelineState::default();
+                    self.active_clip = None;
+                    return;
+                }
+            }
+        }
     }
 
     /// La clip attiva punta a un media non piu' nel media pool.
@@ -1921,7 +2020,8 @@ impl VibeVideoApp {
                 Some((
                     clip.linked_group,
                     timeline_ui::ClipboardEntry {
-                        track_index,
+                        track_kind: tl.tracks[track_index].kind,
+                        track_number: tl.track_number(track_index),
                         relative_start: clip.timeline_start,
                         clip: clip.clone(),
                         timeline_fps: tl.fps,
@@ -1966,12 +2066,10 @@ impl VibeVideoApp {
             return;
         }
         let playhead = self.timeline_state.playhead;
-        let tl = &self.project.timelines[timeline_id];
         let entries: Vec<timeline_ui::ClipboardEntry> = self
             .timeline_state
             .clipboard
             .iter()
-            .filter(|e| e.track_index < tl.tracks.len() && !tl.is_locked(e.track_index))
             // Incollare una compound clip copiata dentro la sua stessa
             // timeline annidata (direttamente o attraverso un'altra
             // compound clip) chiuderebbe un ciclo — vedi
@@ -1989,10 +2087,26 @@ impl VibeVideoApp {
             return;
         }
 
+        let mark = self.history.begin_group();
+        self.add_tracks_for_clipboard(timeline_id, &entries);
+
+        let tl = &self.project.timelines[timeline_id];
+        let entries: Vec<(usize, timeline_ui::ClipboardEntry)> = entries
+            .into_iter()
+            .filter_map(|e| {
+                let index = tl.track_of_kind_numbered(e.track_kind, e.track_number)?;
+                (!tl.is_locked(index)).then_some((index, e))
+            })
+            .collect();
+        if entries.is_empty() {
+            self.history.end_group(mark);
+            return;
+        }
+
         let timeline_fps = self.project.timelines[timeline_id].fps;
         let clips: Vec<(usize, vv_core::Clip, Option<u64>)> = entries
             .iter()
-            .map(|entry| {
+            .map(|(track_index, entry)| {
                 let mut clip = entry.clip.clone();
                 clip.id = self.project.alloc_clip_id();
                 clip.timeline_start = entry.relative_start;
@@ -2009,18 +2123,42 @@ impl VibeVideoApp {
                     clip.retime(entry.timeline_fps, timeline_fps, rate);
                 }
                 clip.timeline_start += playhead;
-                (entry.track_index, clip, entry.link_tag)
+                (*track_index, clip, entry.link_tag)
             })
             .collect();
         let new_selection: BTreeSet<(usize, ClipId)> =
             clips.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
         let end = clips.iter().map(|(_, clip, _)| clip.timeline_end()).max();
         self.insert_clips_overwriting(timeline_id, clips, vv_core::CommandLabel::PasteClips);
+        self.history.end_group_as(mark, vv_core::CommandLabel::PasteClips);
         let anchor = new_selection.iter().next().copied();
         self.timeline_state.set_selection(new_selection, anchor);
         if let Some(end) = end {
             self.timeline_state.playhead = end;
             self.ensure_active_clip_matches_playhead(true);
+        }
+    }
+
+    /// Track mancanti per incollare `entries`: una compound clip di sole
+    /// track video incollata in una timeline che ne ha una sola deve
+    /// crearsi la V2, non finire sull'audio.
+    fn add_tracks_for_clipboard(
+        &mut self,
+        timeline_id: TimelineId,
+        entries: &[timeline_ui::ClipboardEntry],
+    ) {
+        for kind in [TrackKind::Video, TrackKind::Audio] {
+            let wanted = entries
+                .iter()
+                .filter(|e| e.track_kind == kind)
+                .map(|e| e.track_number)
+                .max()
+                .unwrap_or(0);
+            let existing = self.project.timelines[timeline_id].tracks_of_kind(kind).count();
+            for _ in existing..wanted {
+                self.history
+                    .do_command(&mut self.project, Box::new(vv_core::AddTrack::new(timeline_id, kind)));
+            }
         }
     }
 
@@ -2252,6 +2390,77 @@ fn map_source_ranges_to_timeline(
             (start <= end).then(|| (clip.timeline_frame_at(start), clip.timeline_frame_at(end)))
         })
         .collect()
+}
+
+/// Quanti livelli di compound clip annidate si compongono per la
+/// waveform: oltre, si rinuncia (come `MAX_COMPOUND_DEPTH` del render).
+const MAX_COMPOUND_WAVEFORM_DEPTH: usize = 8;
+
+/// Picchi di una compound clip, composti da quelli delle clip audio della
+/// sua timeline annidata: non c'è un file da decodificare, quindi il
+/// worker non può generarli. Il `bool` è `false` se qualche sorgente non
+/// era in cache — la waveform è parziale e va rifatta più tardi.
+fn compose_compound_waveform(
+    project: &vv_core::Project,
+    cache: &HashMap<(u64, usize), vv_media::Waveform>,
+    media_id: vv_core::MediaId,
+) -> Option<(vv_media::Waveform, bool)> {
+    let item = project.media_pool.get(media_id)?;
+    let timeline = project.timelines.get(item.compound?)?;
+    let fps = timeline.fps.as_f64();
+    let duration_secs = item.meta.duration_frames as f64 / fps;
+    if duration_secs <= 0.0 {
+        return None;
+    }
+    let num_peaks = vv_media::recommended_num_peaks(duration_secs);
+    let mut peaks = vec![0.0f32; num_peaks];
+    let mut complete = true;
+    for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
+        if track.muted {
+            continue;
+        }
+        for clip in track.clips.iter().filter(|c| !c.disabled) {
+            let vv_core::ClipSource::Media(source_id) = clip.source else {
+                continue;
+            };
+            let Some(source) = project.media_pool.get(source_id) else {
+                continue;
+            };
+            let Some(source_wf) = cache.get(&(source.content_hash, clip.audio_stream_index)) else {
+                complete = false;
+                continue;
+            };
+            if source_wf.peaks.is_empty() || source_wf.audio_duration_secs <= 0.0 {
+                continue;
+            }
+            let bin_of = |frame: FrameIdx| {
+                ((frame as f64 / fps) / duration_secs * num_peaks as f64) as usize
+            };
+            let first = bin_of(clip.timeline_start).min(num_peaks);
+            let last = (bin_of(clip.timeline_end()) + 1).min(num_peaks);
+            for bin in first..last {
+                let secs = (bin as f64 + 0.5) / num_peaks as f64 * duration_secs;
+                let frame = (secs * fps) as FrameIdx;
+                if !clip.contains(frame) {
+                    continue;
+                }
+                let source_secs = clip.media_secs_at(frame, fps);
+                let source_bin = ((source_secs / source_wf.audio_duration_secs
+                    * source_wf.peaks.len() as f64) as usize)
+                    .min(source_wf.peaks.len() - 1);
+                let source_frame = (source_secs * source.meta.fps.as_f64()) as FrameIdx;
+                let gain = vv_audio::mixer::db_to_linear(clip.effects.gain_db.value_at(source_frame));
+                peaks[bin] = peaks[bin].max(source_wf.peaks[source_bin] * gain);
+            }
+        }
+    }
+    Some((
+        vv_media::Waveform {
+            peaks,
+            audio_duration_secs: duration_secs,
+        },
+        complete,
+    ))
 }
 
 #[cfg(test)]
@@ -3073,6 +3282,129 @@ mod tests {
         })
     }
 
+    /// Copiare da una compound clip di sole track video e incollare nella
+    /// timeline: V2 deve restare video, non finire sulla track audio che
+    /// lì ha lo stesso indice assoluto.
+    #[test]
+    fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
+        });
+        insert_compound_media(&mut app, nested_id);
+        app.enter_compound_timeline(nested_id);
+        for track_index in 0..2 {
+            let clip_id = app.project.alloc_clip_id();
+            let clip = vv_core::Clip::from_source_range(
+                clip_id,
+                vv_core::ClipSource::SolidColor,
+                0,
+                20,
+                0,
+                vv_core::Rational::one(),
+            );
+            app.project.timelines[nested_id].tracks[track_index].insert_sorted(clip);
+            app.timeline_state.selected.insert((track_index, clip_id));
+        }
+        app.copy_selected_clips();
+
+        app.exit_to_timeline_stack_index(0);
+        app.timeline_state.playhead = 0;
+        app.paste_clipboard_at_playhead();
+
+        let tl = &app.project.timelines[root_id];
+        let video_tracks: Vec<usize> = tl.tracks_of_kind(TrackKind::Video).map(|(i, _)| i).collect();
+        assert_eq!(video_tracks.len(), 2, "la V2 mancante viene creata");
+        for &index in &video_tracks {
+            assert_eq!(tl.tracks[index].clips.len(), 1);
+        }
+        for (_, track) in tl.tracks_of_kind(TrackKind::Audio) {
+            assert!(track.clips.is_empty(), "niente clip video sull'audio");
+        }
+    }
+
+    #[test]
+    fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() {
+        let mut app = VibeVideoApp::default();
+        let root_id = app.ensure_timeline();
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video)],
+        });
+        let media = insert_compound_media(&mut app, nested_id);
+        app.enter_compound_timeline(nested_id);
+
+        app.media_pool_state.selected.insert(media);
+        app.delete_selected_media();
+
+        assert_eq!(app.timeline_id, Some(root_id));
+        assert!(app.timeline_stack.is_empty());
+        assert!(!app.project.timelines.contains_key(nested_id));
+    }
+
+    /// Una compound clip non ha un file da decodificare: i picchi si
+    /// compongono da quelli delle sue clip audio annidate.
+    #[test]
+    fn a_compound_waveform_is_composed_from_the_nested_clips() {
+        let mut app = VibeVideoApp::default();
+        let source = app.project.media_pool.insert(vv_core::MediaItem {
+            path: "a.wav".into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 50,
+                fps: vv_core::Rational::new(25, 1),
+                width: 0,
+                height: 0,
+                has_video: false,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 2,
+                audio_streams: 1,
+            },
+            content_hash: 7,
+            compound: None,
+        });
+        let nested_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "Nested".into(),
+            fps: vv_core::Rational::new(25, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Audio)],
+        });
+        let clip = vv_core::Clip::from_source_range(
+            app.project.alloc_clip_id(),
+            vv_core::ClipSource::Media(source),
+            0,
+            25,
+            0,
+            vv_core::Rational::one(),
+        );
+        app.project.timelines[nested_id].tracks[0].insert_sorted(clip);
+        let compound = insert_compound_media(&mut app, nested_id);
+        app.project.media_pool[compound].meta.has_audio = true;
+        app.project.media_pool[compound].meta.duration_frames = 50;
+
+        app.waveform_cache.insert(
+            (7, 0),
+            vv_media::Waveform {
+                peaks: vec![1.0; 100],
+                audio_duration_secs: 2.0,
+            },
+        );
+        let (waveform, complete) =
+            compose_compound_waveform(&app.project, &app.waveform_cache, compound).unwrap();
+
+        assert!(complete);
+        assert_eq!(waveform.audio_duration_secs, 2.0);
+        let half = waveform.peaks.len() / 2;
+        assert!(waveform.peaks[..half].iter().all(|&p| p > 0.0), "prima metà suona");
+        assert!(waveform.peaks[half + 1..].iter().all(|&p| p == 0.0), "seconda metà muta");
+    }
+
     #[test]
     fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_ui_state() {
         let mut app = VibeVideoApp::default();
@@ -3143,7 +3475,8 @@ mod tests {
         insert_compound_media(&mut app, nested_id);
 
         app.timeline_state.clipboard = vec![timeline_ui::ClipboardEntry {
-            track_index: 0,
+            track_kind: TrackKind::Video,
+            track_number: 1,
             relative_start: 0,
             clip: vv_core::Clip::from_source_range(
                 ClipId(1),
@@ -5033,7 +5366,8 @@ mod tests {
         assert!(app.timeline_state.selected.iter().all(|&(t, _)| t == 0));
 
         app.timeline_state.clipboard = vec![timeline_ui::ClipboardEntry {
-            track_index: 1,
+            track_kind: TrackKind::Audio,
+            track_number: 1,
             relative_start: 0,
             clip: app.project.timelines[timeline_id].tracks[0].clips[0].clone(),
             timeline_fps: vv_core::Rational::new(25, 1),

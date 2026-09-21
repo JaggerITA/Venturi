@@ -137,6 +137,9 @@ pub type FrameIdx = i64;
 /// campo in più e non limita il trim.
 pub const IMAGE_DURATION_FRAMES: FrameIdx = 1_000_000_000;
 
+/// Prefisso del nome delle compound clip nel media pool.
+pub const COMPOUND_NAME_PREFIX: &str = "Compound Clip ";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMeta {
     pub duration_frames: FrameIdx,
@@ -1377,12 +1380,23 @@ impl Timeline {
 
     /// Nome della track come in un NLE: V1, V2… A1, A2…, per tipo.
     pub fn track_label(&self, track_index: usize) -> String {
-        let kind = self.tracks[track_index].kind;
-        let number = self.tracks[..=track_index].iter().filter(|t| t.kind == kind).count();
-        match kind {
+        let number = self.track_number(track_index);
+        match self.tracks[track_index].kind {
             TrackKind::Video => format!("V{number}"),
             TrackKind::Audio => format!("A{number}"),
         }
+    }
+
+    /// Posizione della track fra quelle del suo tipo, da 1 (la V/A di
+    /// `track_label`).
+    pub fn track_number(&self, track_index: usize) -> usize {
+        let kind = self.tracks[track_index].kind;
+        self.tracks[..=track_index].iter().filter(|t| t.kind == kind).count()
+    }
+
+    /// Indice assoluto della `number`-esima track (da 1) di tipo `kind`.
+    pub fn track_of_kind_numbered(&self, kind: TrackKind, number: usize) -> Option<usize> {
+        self.tracks_of_kind(kind).map(|(i, _)| i).nth(number.checked_sub(1)?)
     }
 
     /// Le track di tipo `kind`, con il loro indice assoluto in `tracks`.
@@ -1478,8 +1492,9 @@ pub struct Project {
     next_clip_id: u64,
     #[serde(default)]
     next_link_group_id: u64,
-    /// Contatore per il nome delle compound clip ("Compound Clip N"), mai
-    /// riusato: cancellarne una non fa slittare i numeri delle successive.
+    /// Numero più alto mai assegnato a una compound clip: tenuto solo per
+    /// compatibilità con i progetti salvati, il nome nuovo lo sceglie
+    /// `alloc_compound_name`.
     #[serde(default)]
     next_compound_id: u64,
     /// Contatore per `MediaItem::content_hash` delle compound clip: vedi
@@ -1501,10 +1516,20 @@ impl Project {
         id
     }
 
-    /// Nome per una nuova compound clip nel media pool, in ordine crescente.
+    /// Nome per una nuova compound clip nel media pool: il numero libero
+    /// più basso, così cancellarne una ne libera il nome.
     pub fn alloc_compound_name(&mut self) -> String {
-        self.next_compound_id += 1;
-        format!("Compound Clip {}", self.next_compound_id)
+        let used: std::collections::HashSet<u64> = self
+            .media_pool
+            .values()
+            .filter(|item| item.compound.is_some())
+            .filter_map(|item| {
+                item.path.to_str()?.strip_prefix(COMPOUND_NAME_PREFIX)?.parse().ok()
+            })
+            .collect();
+        let number = (1..).find(|n| !used.contains(n)).unwrap_or(1);
+        self.next_compound_id = self.next_compound_id.max(number);
+        format!("{COMPOUND_NAME_PREFIX}{number}")
     }
 
     /// Nuovo valore per `MediaItem::content_hash` di una compound clip: da

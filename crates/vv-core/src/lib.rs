@@ -1694,7 +1694,7 @@ mod compound_clip_tests {
     }
 
     #[test]
-    fn plan_folds_multiple_video_tracks_into_a_single_result_clip_on_the_topmost() {
+    fn plan_folds_multiple_video_tracks_into_a_single_result_clip_on_the_bottommost() {
         let (mut project, timeline) = project_with_tracks(&[TrackKind::Video, TrackKind::Video]);
         let bottom = insert_clip(&mut project, timeline, 0, 0, 20);
         let top = insert_clip(&mut project, timeline, 1, 10, 20);
@@ -1703,9 +1703,41 @@ mod compound_clip_tests {
 
         assert!(plan.has_video);
         assert!(!plan.has_audio);
-        assert_eq!(plan.video_track, Some(1), "la track più in alto fra quelle coinvolte");
+        assert_eq!(plan.video_track, Some(0), "la track più in basso fra quelle coinvolte");
         assert_eq!(plan.audio_track, None);
         assert_eq!(plan.nested_timeline.tracks.len(), 2, "una track annidata per ogni track video coinvolta");
+    }
+
+    #[test]
+    fn deleting_a_compound_clip_frees_its_name_and_its_nested_timeline() {
+        let (mut project, timeline) = project_with_tracks(&[TrackKind::Video]);
+        let id = insert_clip(&mut project, timeline, 0, 0, 20);
+        let plan = plan_compound_clip(&project, timeline, &[(0, id)]).unwrap();
+        let media = insert_compound_media(&mut project, &plan);
+        assert_eq!(project.media_pool[media].path.to_str(), Some("Compound Clip 1"));
+
+        let mut history = History::default();
+        history.do_command(&mut project, Box::new(command::RemoveMedia::new(media)));
+        assert_eq!(project.timelines.len(), 1, "la timeline annidata sparisce col media");
+
+        let again = insert_compound_media(&mut project, &plan);
+        assert_eq!(project.media_pool[again].path.to_str(), Some("Compound Clip 1"));
+    }
+
+    #[test]
+    fn undoing_the_deletion_of_a_compound_clip_restores_its_nested_timeline() {
+        let (mut project, timeline) = project_with_tracks(&[TrackKind::Video]);
+        let id = insert_clip(&mut project, timeline, 0, 0, 20);
+        let plan = plan_compound_clip(&project, timeline, &[(0, id)]).unwrap();
+        let media = insert_compound_media(&mut project, &plan);
+
+        let mut history = History::default();
+        history.do_command(&mut project, Box::new(command::RemoveMedia::new(media)));
+        history.undo(&mut project);
+
+        assert_eq!(project.media_pool.len(), 1);
+        let nested = project.media_pool.values().next().unwrap().compound.unwrap();
+        assert!(project.timelines.contains_key(nested));
     }
 
     #[test]

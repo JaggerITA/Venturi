@@ -103,7 +103,12 @@ pub struct TimelineState {
 /// è relativa alla più a sinistra delle clip copiate.
 #[derive(Clone)]
 pub struct ClipboardEntry {
-    pub track_index: usize,
+    /// Track di origine come V/A + numero, non indice assoluto: incollare
+    /// da una compound clip di sole track video in una timeline
+    /// video+audio deve finire su V2, non sulla track di indice 2 (che lì
+    /// è audio).
+    pub track_kind: TrackKind,
+    pub track_number: usize,
     pub relative_start: FrameIdx,
     /// La clip com'era alla copia; id, posizione e gruppo si riassegnano
     /// all'incolla.
