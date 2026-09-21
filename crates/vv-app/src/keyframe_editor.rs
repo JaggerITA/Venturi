@@ -51,6 +51,9 @@ pub(crate) struct KeyframeEditorState {
     /// Rettangolo di selezione in corso: origine, angolo corrente e se è
     /// partito nella curva (le due aree non se lo devono rubare).
     box_select: Option<(egui::Pos2, egui::Pos2, bool)>,
+    /// Porzione di clip visibile (primo frame, durata) quando si è zoomato;
+    /// `None` = tutta la clip.
+    view: Option<(FrameIdx, FrameIdx)>,
 }
 
 impl KeyframeEditorState {
@@ -63,6 +66,7 @@ impl KeyframeEditorState {
             self.selection.clear();
             self.drag = None;
             self.box_select = None;
+            self.view = None;
         }
     }
 }
@@ -165,14 +169,19 @@ struct TimeAxis {
 }
 
 impl TimeAxis {
-    fn new(rect: egui::Rect, clip: &Clip) -> Self {
-        let (first, last) = (clip.source_in(), clip.source_out());
+    /// `view` è la porzione di clip visibile: primo frame e durata.
+    fn new(rect: egui::Rect, view: (FrameIdx, FrameIdx)) -> Self {
         Self {
             left: rect.left(),
-            width: rect.width(),
-            first,
-            span: (last - first).max(1),
+            width: rect.width().max(1.0),
+            first: view.0,
+            span: view.1.max(1),
         }
+    }
+
+    /// Quanti frame vale uno spostamento orizzontale di `dx` pixel.
+    fn delta(&self, dx: f32) -> FrameIdx {
+        (dx / self.width * self.span as f32).round() as FrameIdx
     }
 
     fn x(&self, frame: FrameIdx) -> f32 {
@@ -192,6 +201,7 @@ pub(crate) struct KeyframeEditorResponse {
 
 /// Disegna la finestra. `target` è la clip da mostrare (la prima
 /// selezionata) e `playhead` il frame di timeline corrente.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn show_keyframe_editor(
     ctx: &egui::Context,
     open: &mut bool,
@@ -199,6 +209,9 @@ pub(crate) fn show_keyframe_editor(
     project: &Project,
     target: Option<(TimelineId, usize, ClipId)>,
     playhead: FrameIdx,
+    // Zoom bloccato in proporzioni nell'inspector: qui X e Y si muovono
+    // insieme, altrimenti l'editor romperebbe il vincolo.
+    zoom_link: bool,
 ) -> KeyframeEditorResponse {
     let mut response = KeyframeEditorResponse { commands: Vec::new(), playhead: None };
     let mut window_open = *open;
@@ -229,18 +242,24 @@ pub(crate) fn show_keyframe_editor(
                 rows.contains(t) && frames_of(&clip.effects, *t).contains(f)
             });
 
-            show_toolbar(ui, state, (timeline, track_index, clip_id), &mut response);
+            show_toolbar(ui, state, zoom_link, (timeline, track_index, clip_id), &mut response);
             ui.separator();
 
             let axis_rect = |rect: egui::Rect| rect.with_min_x(rect.left() + LABEL_WIDTH);
             let head = clip.source_frame_at(playhead);
+            let full = (
+                clip.source_in(),
+                (clip.source_out() - clip.source_in()).max(1),
+            );
+            handle_zoom(ui, state, axis_rect(ui.available_rect_before_wrap()), full);
+            let view = state.view.unwrap_or(full);
 
             if let Some(row) = state.row {
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), CURVE_HEIGHT),
                     egui::Sense::hover(),
                 );
-                let axis = TimeAxis::new(axis_rect(rect), clip);
+                let axis = TimeAxis::new(axis_rect(rect), view);
                 draw_curve(
                     ui,
                     rect,
@@ -250,6 +269,7 @@ pub(crate) fn show_keyframe_editor(
                     (timeline, track_index, clip_id),
                     row,
                     head,
+                    zoom_link,
                     &mut response,
                 );
             }
@@ -260,7 +280,7 @@ pub(crate) fn show_keyframe_editor(
                     egui::Sense::hover(),
                 )
                 .0;
-            let axis = TimeAxis::new(axis_rect(ruler), clip);
+            let axis = TimeAxis::new(axis_rect(ruler), view);
             draw_ruler(ui, ruler, axis, clip, project, timeline, head);
             let ruler_response =
                 ui.interact(axis_rect(ruler), ui.id().with("kf_ruler"), egui::Sense::click_and_drag());
@@ -271,16 +291,78 @@ pub(crate) fn show_keyframe_editor(
             }
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                draw_rows(ui, state, clip, (timeline, track_index, clip_id), &rows, head, &mut response);
+                draw_rows(
+                    ui,
+                    state,
+                    clip,
+                    (timeline, track_index, clip_id),
+                    &rows,
+                    view,
+                    head,
+                    zoom_link,
+                    &mut response,
+                );
             });
         });
     *open = window_open;
     response
 }
 
+/// Alt+scroll (o pinch) zooma attorno al puntatore come sulla timeline;
+/// lo scroll orizzontale fa scorrere la porzione visibile.
+fn handle_zoom(
+    ui: &egui::Ui,
+    state: &mut KeyframeEditorState,
+    rect: egui::Rect,
+    full: (FrameIdx, FrameIdx),
+) {
+    let Some(pos) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) else {
+        return;
+    };
+    let (zoom, pan) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.x));
+    if zoom == 1.0 && pan == 0.0 {
+        return;
+    }
+    let axis = TimeAxis::new(rect, state.view.unwrap_or(full));
+    let anchor = axis.frame(pos.x);
+    let span = ((axis.span as f32 / zoom).round() as FrameIdx).clamp(2, full.1);
+    // Il frame sotto il puntatore resta dov'è.
+    let first = anchor
+        - ((anchor - axis.first) as f32 * span as f32 / axis.span as f32).round() as FrameIdx
+        - axis.delta(pan);
+    state.view = (span < full.1).then(|| {
+        (first.clamp(full.0, full.0 + full.1 - span), span)
+    });
+}
+
+/// Con lo zoom bloccato in proporzioni X e Y sono gemelli: quel che si fa
+/// al keyframe di uno va fatto a quello dell'altro allo stesso frame.
+fn with_zoom_link(picks: Vec<KeyframePick>, zoom_link: bool) -> Vec<KeyframePick> {
+    if !zoom_link {
+        return picks;
+    }
+    let mut all = picks.clone();
+    for (target, frame) in picks {
+        let KeyframeTarget::TransformParam(param) = target else {
+            continue;
+        };
+        let twin = match param {
+            TransformParam::ZoomX => TransformParam::ZoomY,
+            TransformParam::ZoomY => TransformParam::ZoomX,
+            _ => continue,
+        };
+        let pick = (KeyframeTarget::TransformParam(twin), frame);
+        if !all.contains(&pick) {
+            all.push(pick);
+        }
+    }
+    all
+}
+
 fn show_toolbar(
     ui: &mut egui::Ui,
     state: &mut KeyframeEditorState,
+    zoom_link: bool,
     clip: (TimelineId, usize, ClipId),
     response: &mut KeyframeEditorResponse,
 ) {
@@ -288,7 +370,8 @@ fn show_toolbar(
         ui.add_enabled_ui(!state.selection.is_empty(), |ui| {
             for preset in Interpolation::PRESETS {
                 if ui.button(preset_label(preset)).clicked() {
-                    let picks: Vec<KeyframePick> = state.selection.iter().copied().collect();
+                    let picks =
+                        with_zoom_link(state.selection.iter().copied().collect(), zoom_link);
                     response.commands.push(Box::new(vv_core::SetKeyframeInterpolation::new(
                         clip.0, clip.1, clip.2, picks, preset,
                     )));
@@ -365,6 +448,7 @@ fn draw_curve(
     clip_ref: (TimelineId, usize, ClipId),
     row: KeyframeTarget,
     head: FrameIdx,
+    zoom_link: bool,
     response: &mut KeyframeEditorResponse,
 ) {
     let plot = rect.with_min_x(axis.left);
@@ -439,24 +523,37 @@ fn draw_curve(
         scalar_value_at(&clip.effects, row, frame).map(|v| egui::pos2(axis.x(frame), y(v)))
     };
 
-    // Handle delle bezier dei keyframe selezionati: uno uscente dal
-    // keyframe, uno entrante in quello dopo.
-    let mut handles: Vec<(KeyframePick, bool, egui::Pos2)> = Vec::new();
+    // Segmenti su cui mostrare gli handle: quello che esce da un keyframe
+    // selezionato e quello che ci entra, così anche un solo keyframe
+    // selezionato ne ha uno addosso.
+    let mut segments: Vec<usize> = Vec::new();
     for (i, &frame) in frames.iter().enumerate() {
         if !state.selection.contains(&(row, frame)) {
             continue;
         }
-        let (Some(next), Some((_, interp))) =
-            (frames.get(i + 1), scalar_at(&clip.effects, row, frame))
-        else {
+        if i + 1 < frames.len() {
+            segments.push(i);
+        }
+        if i > 0 {
+            segments.push(i - 1);
+        }
+    }
+    segments.sort_unstable();
+    segments.dedup();
+
+    let mut handles: Vec<(KeyframePick, bool, egui::Pos2)> = Vec::new();
+    for i in segments {
+        let (frame, next) = (frames[i], frames[i + 1]);
+        let (Some((_, interp)), Some(from), Some(to)) = (
+            scalar_at(&clip.effects, row, frame),
+            point_pos(frame),
+            point_pos(next),
+        ) else {
             continue;
         };
-        let (Some(c1), Some(from), Some(to)) =
-            (interp.control_points(), point_pos(frame), point_pos(*next))
-        else {
+        let Some((c1, c2)) = interp.control_points() else {
             continue;
         };
-        let (c1, c2) = c1;
         let control = |c: [f32; 2]| {
             egui::pos2(from.x + (to.x - from.x) * c[0], from.y + (to.y - from.y) * c[1])
         };
@@ -546,7 +643,7 @@ fn draw_curve(
                         clip_ref.0,
                         clip_ref.1,
                         clip_ref.2,
-                        vec![pick],
+                        with_zoom_link(vec![pick], zoom_link),
                         Interpolation::Bezier { c1, c2 },
                     )));
                 }
@@ -556,7 +653,8 @@ fn draw_curve(
                 let step = wanted - applied;
                 let (tl, track, id) = clip_ref;
                 if step != 0 {
-                    let picks: Vec<KeyframePick> = state.selection.iter().copied().collect();
+                    let picks =
+                        with_zoom_link(state.selection.iter().copied().collect(), zoom_link);
                     response.commands.push(Box::new(vv_core::MoveKeyframes::new(
                         tl, track, id, picks, step,
                     )));
@@ -579,14 +677,21 @@ fn draw_curve(
                 // frame: l'interpolazione si legge alla vecchia posizione.
                 if let Some((_, interp)) = scalar_at(&clip.effects, row, pick.1) {
                     let value = value_at_y(pos.y);
-                    response.commands.push(Box::new(vv_core::UpsertKeyframe::new(
-                        tl,
-                        track,
-                        id,
-                        frame,
-                        keyframe_value(row, value),
-                        interp,
-                    )));
+                    // Anche il valore va replicato sul gemello, o lo zoom
+                    // bloccato resterebbe tale solo di nome.
+                    for (target, _) in with_zoom_link(vec![(row, pick.1)], zoom_link) {
+                        if scalar_at(&clip.effects, target, pick.1).is_none() {
+                            continue;
+                        }
+                        response.commands.push(Box::new(vv_core::UpsertKeyframe::new(
+                            tl,
+                            track,
+                            id,
+                            frame,
+                            keyframe_value(target, value),
+                            interp,
+                        )));
+                    }
                 }
             }
             _ => {}
@@ -627,22 +732,27 @@ fn keyframe_value(target: KeyframeTarget, value: f32) -> vv_core::KeyframeValue 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_rows(
     ui: &mut egui::Ui,
     state: &mut KeyframeEditorState,
     clip: &Clip,
     clip_ref: (TimelineId, usize, ClipId),
     rows: &[KeyframeTarget],
+    view: (FrameIdx, FrameIdx),
     head: FrameIdx,
+    zoom_link: bool,
     response: &mut KeyframeEditorResponse,
 ) {
+    // Anche lo spazio che avanza sotto l'ultima riga fa parte dell'area:
+    // ci si deve poter cominciare un riquadro di selezione.
     let height = rows.len() as f32 * ROW_HEIGHT;
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height.max(ROW_HEIGHT)),
+        egui::vec2(ui.available_width(), height.max(ui.available_height())),
         egui::Sense::hover(),
     );
     let track_rect = rect.with_min_x(rect.left() + LABEL_WIDTH);
-    let axis = TimeAxis::new(track_rect, clip);
+    let axis = TimeAxis::new(track_rect, view);
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
 
@@ -719,10 +829,8 @@ fn draw_rows(
     };
 
     if interaction.drag_started() && let Some(pos) = interaction.interact_pointer_pos() {
-        if pos.x < track_rect.left() {
-            if let Some(row) = row_at(pos) {
-                state.row = Some(row);
-            }
+        if pos.x < track_rect.left() && let Some(row) = row_at(pos) {
+            state.row = Some(row);
         } else if let Some(pick) = hit(pos) {
             state.row = Some(pick.0);
             if !additive && !state.selection.contains(&pick) {
@@ -745,7 +853,7 @@ fn draw_rows(
         let wanted = axis.frame(pos.x) - origin_frame;
         let step = wanted - applied;
         if step != 0 {
-            let picks: Vec<KeyframePick> = state.selection.iter().copied().collect();
+            let picks = with_zoom_link(state.selection.iter().copied().collect(), zoom_link);
             response.commands.push(Box::new(vv_core::MoveKeyframes::new(
                 clip_ref.0, clip_ref.1, clip_ref.2, picks, step,
             )));
@@ -778,10 +886,8 @@ fn draw_rows(
     }
 
     if interaction.clicked() && let Some(pos) = interaction.interact_pointer_pos() {
-        if pos.x < track_rect.left() {
-            if let Some(row) = row_at(pos) {
-                state.row = Some(row);
-            }
+        if pos.x < track_rect.left() && let Some(row) = row_at(pos) {
+            state.row = Some(row);
         } else if let Some(pick) = hit(pos) {
             state.row = Some(pick.0);
             if !additive {
@@ -793,5 +899,40 @@ fn draw_rows(
 
     if interaction.drag_stopped() {
         state.drag = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zoom(param: TransformParam, frame: FrameIdx) -> KeyframePick {
+        (KeyframeTarget::TransformParam(param), frame)
+    }
+
+    #[test]
+    fn zoom_link_adds_the_twin_axis_once_and_only_for_zoom() {
+        let picks = vec![zoom(TransformParam::ZoomX, 5), (KeyframeTarget::Gain, 5)];
+        let linked = with_zoom_link(picks.clone(), true);
+        assert!(linked.contains(&zoom(TransformParam::ZoomY, 5)));
+        assert_eq!(linked.len(), 3, "il gain non ha gemelli");
+
+        let both = with_zoom_link(
+            vec![zoom(TransformParam::ZoomX, 5), zoom(TransformParam::ZoomY, 5)],
+            true,
+        );
+        assert_eq!(both.len(), 2, "nessun doppione se sono già selezionati entrambi");
+
+        assert_eq!(with_zoom_link(picks.clone(), false), picks);
+    }
+
+    #[test]
+    fn the_time_axis_maps_the_visible_window_onto_the_rect() {
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(200.0, 10.0));
+        let axis = TimeAxis::new(rect, (50, 100));
+        assert_eq!(axis.x(50), 100.0);
+        assert_eq!(axis.x(150), 300.0);
+        assert_eq!(axis.frame(200.0), 100);
+        assert_eq!(axis.delta(-20.0), -10);
     }
 }

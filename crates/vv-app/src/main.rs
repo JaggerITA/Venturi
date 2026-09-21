@@ -2973,6 +2973,7 @@ impl eframe::App for VibeVideoApp {
                 &self.project,
                 target,
                 self.timeline_state.playhead,
+                self.zoom_link,
             );
             pending_effects.extend(editor.commands);
             pending_playhead = editor.playhead.or(pending_playhead);
