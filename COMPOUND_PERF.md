@@ -169,16 +169,25 @@ compound. È offline: non urgente, va in coda.
 
 ---
 
-## 4. Ordine di lavoro
+## 4. Ordine di lavoro e stato
 
-1. `Layer::Texture` + `Fill::Rgba` + un-premultiply nello shader, con test
-   di equivalenza contro il path attuale e un test che inchioda l'α² dei
-   bordi (§3.2).
-2. Variante di `render_layers_to_texture` che non ricicla l'output (§3.3).
-3. Device condiviso al worker (§3.4).
-4. Compound come sotto-pass in `clip_layer` / `track_layers_at`, e rimozione
-   del canale compound da `render_ahead.rs` (§3.5).
-5. Export sullo stesso path (§3.6).
+1. ~~`Layer::Texture` + `Fill::Rgba` + un-premultiply nello shader (§3.1,
+   §3.2)~~ — fatto.
+2. ~~Variante di `render_layers_to_texture` che non ricicla l'output
+   (§3.3)~~ — fatto, ed è diventata `PooledTexture`: l'intermedio torna nel
+   suo pool quando il layer che lo usa viene lasciato andare.
+3. ~~Device condiviso al worker (§3.4)~~ — **non serve più**: col §3.5 il
+   worker non compone niente, quindi non gli serve nessun compositor.
+4. ~~Compound come sotto-pass (§3.5)~~ — fatto: `frame_provider::GpuCompounds`
+   compone la timeline annidata al volo; da `render_ahead.rs` sono spariti
+   il canale compound, `compose_compound_segments`, `CacheOnlyProvider` e
+   `compose_frame_at`.
+5. Export sullo stesso path (§3.6) — **da fare**. Paga ancora readback +
+   `rgba_to_yuv420_with_alpha` per ogni frame compound, compreso l'α² dei
+   bordi descritto in §3.2.
+
+Resta da misurare sul materiale reale se 1080@60 ora regge il playback, e
+se la varianza sul thread UI giustifica il ring corto di §5.
 
 ---
 
