@@ -190,12 +190,18 @@ compound. È offline: non urgente, va in coda.
 Resta da misurare sul materiale reale se 1080@60 ora regge il playback, e
 se la varianza sul thread UI giustifica il ring corto di §5.
 
-**Strascico da valutare:** `FrameYuv420::alpha` (e con essa
-`YuvFrame::alpha`, il binding 5 `a_tex` dello shader e il placeholder
-`OPAQUE`) ora è sempre `None`: la portavano solo i frame composti delle
-compound clip. Toglierla risparmia un upload di texture e un sample per
-layer per frame, ma va prima deciso se serve a un eventuale supporto di
-media con vero canale alpha.
+**`FrameYuv420::alpha` non si tocca.** Era rimasta senza produttori quando
+le compound clip hanno smesso di passare dalla CPU, e sembrava morta — ma
+serviva a un caso che *non funzionava affatto*: lo scaler convertiva tutto
+a YUV420P, quindi una PNG importata con trasparenza arrivava opaca. Ora la
+riempie il decoder (YUVA420P quando il formato sorgente ha un'alpha vera),
+e tutto il trasporto fino allo shader era già al suo posto.
+
+**Buco noto:** un *video* con alpha (WebM VP9, ProRes 4444) a cui venga
+generato un proxy lo perde, perché il proxy è H.264. Le immagini non
+ricevono proxy (`project_io.rs`), quindi le PNG sono salve; per i video con
+alpha servirebbe saltare la generazione del proxy, il che vuol dire un
+`has_alpha` in `MediaMeta`.
 
 ---
 
