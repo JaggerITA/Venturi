@@ -79,7 +79,7 @@ pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsSt
     index
 }
 
-impl VibeVideoApp {
+impl VenturiApp {
     pub(crate) fn import_media(&mut self, path: PathBuf) {
         match self.add_media_to_pool(path) {
             Ok(media_id) => {
@@ -417,7 +417,7 @@ impl VibeVideoApp {
 
     pub(crate) fn sync_window_title(&mut self, ctx: &egui::Context) {
         let title = format!(
-            "{}{} — VibeVideo",
+            "{}{} — Venturi",
             self.project_label(),
             if self.has_unsaved_changes() { "*" } else { "" },
         );

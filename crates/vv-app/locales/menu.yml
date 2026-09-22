@@ -197,12 +197,12 @@ menu.help:
   it: "Aiuto"
 
 menu.about:
-  en: "About VibeVideo..."
-  it: "Informazioni su VibeVideo..."
+  en: "About Venturi..."
+  it: "Informazioni su Venturi..."
 
 about.title:
-  en: "About VibeVideo"
-  it: "Informazioni su VibeVideo"
+  en: "About Venturi"
+  it: "Informazioni su Venturi"
 
 about.version:
   en: "Version %{version}"

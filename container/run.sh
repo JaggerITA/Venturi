@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrapper per lanciare comandi dentro il container di test di vibevideo
+# Wrapper per lanciare comandi dentro il container di test di Venturi
 # (vedi README.md in questa directory). Monta il repo dal path reale
 # (sempre lo stato locale corrente, l'immagine non contiene il sorgente)
 # e due volumi nominati per cache/target di cargo, così le build
@@ -15,12 +15,12 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO_ROOT="$(pwd)"
 
-podman volume create vibevideo-cargo-registry >/dev/null 2>&1 || true
-podman volume create vibevideo-target >/dev/null 2>&1 || true
+podman volume create venturi-cargo-registry >/dev/null 2>&1 || true
+podman volume create venturi-target >/dev/null 2>&1 || true
 
 exec podman run --rm -it \
     -v "$REPO_ROOT:/workspace:Z" \
-    -v vibevideo-cargo-registry:/root/.cargo/registry \
-    -v vibevideo-target:/cargo-target \
-    vibevideo-test \
+    -v venturi-cargo-registry:/root/.cargo/registry \
+    -v venturi-target:/cargo-target \
+    venturi-test \
     "$@"

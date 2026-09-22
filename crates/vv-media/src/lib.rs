@@ -37,7 +37,7 @@ pub enum MediaError {
     Io(#[from] std::io::Error),
 }
 
-/// Cartella di cache globale `$XDG_CACHE_HOME/vibevideo/<name>` (o
+/// Cartella di cache globale `$XDG_CACHE_HOME/venturi/<name>` (o
 /// `~/.cache/...`, o la temp di sistema senza `HOME`).
 pub(crate) fn cache_dir(name: &str) -> std::path::PathBuf {
     use std::path::PathBuf;
@@ -45,7 +45,7 @@ pub(crate) fn cache_dir(name: &str) -> std::path::PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("vibevideo").join(name)
+    base.join("venturi").join(name)
 }
 
 /// Fixture dei test (anche di vv-app): genera `output` con la CLI di ffmpeg.

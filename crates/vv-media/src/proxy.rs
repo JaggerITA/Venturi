@@ -292,7 +292,7 @@ mod tests {
         assert!(
             proxy_path_for(42)
                 .to_string_lossy()
-                .ends_with("vibevideo/proxies/000000000000002a.mp4")
+                .ends_with("venturi/proxies/000000000000002a.mp4")
         );
     }
 

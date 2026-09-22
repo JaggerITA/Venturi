@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=VibeVideo
+Name=Venturi
 Comment=Video editor
 Exec=vv-app
-Icon=vibevideo
+Icon=venturi
 Terminal=false
 Categories=AudioVideo;Video;AudioVideoEditing;

@@ -1,5 +1,5 @@
 //! Impostazioni utente del programma (non del progetto), salvate in
-//! `~/.config/vibevideo/settings.json`.
+//! `~/.config/venturi/settings.json`.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -486,7 +486,7 @@ impl Settings {
             .filter(|d| !d.is_empty())
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(config.join("vibevideo").join("settings.json"))
+        Some(config.join("venturi").join("settings.json"))
     }
 
     /// File assente o illeggibile = impostazioni predefinite; le azioni

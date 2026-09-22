@@ -1,4 +1,4 @@
-# vibevideo — architettura
+# Venturi — architettura
 
 Editor video "solo edit page" in stile DaVinci Resolve: taglio multi-traccia,
 trasformazioni di base (solid color, text, crop, zoom, speed, audio gain),
@@ -129,7 +129,7 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   fa da testina.
 - **Proxy** (`vv-media/src/proxy.rs`, thread `vv-app::proxy_worker`): per
   ogni media importato, H.264 tutto-intra a 960px di larghezza in
-  `$XDG_CACHE_HOME/vibevideo/proxies/`, chiave `content_hash` (fingerprint
+  `$XDG_CACHE_HOME/venturi/proxies/`, chiave `content_hash` (fingerprint
   veloce: path canonico + dimensione + mtime). Toggle nel menu Playback > Proxy,
   attivo di default; l'export usa sempre i sorgenti originali.
 - **Waveform** (`vv-media/src/waveform.rs`, thread
@@ -244,7 +244,7 @@ duplica, drop dal media pool).
 ## Struttura del workspace Cargo
 
 ```
-vibevideo/
+venturi/
   crates/
     vv-core/     # modello dati, comandi, undo/redo, persistenza RON
     vv-media/    # probe, decode, cache frame, proxy, waveform, encode
@@ -300,7 +300,7 @@ Fatto:
 - Progetto su file `.vvproj` in RON (Ctrl+O, Ctrl+S, Ctrl+Shift+S).
 - OpenTimelineIO (`vv-core/src/otio/`, File → Esporta/Importa OTIO).
   Export: `source_range` all'fps della timeline, i buchi come `Gap`,
-  effetti, gruppi collegati e stream audio in `metadata.vibevideo`.
+  effetti, gruppi collegati e stream audio in `metadata.venturi`.
   Import: apre il file come progetto nuovo quantizzando i tempi al frame
   della timeline; un file nostro torna identico, da altri editor si
   ricollegano video e audio dello stesso tratto, e quel che non si sa

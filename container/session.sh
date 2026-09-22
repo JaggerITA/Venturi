@@ -24,12 +24,12 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO_ROOT="$(pwd)"
-NAME=vibevideo-session
+NAME=venturi-session
 
 case "${1:-}" in
     start)
-        podman volume create vibevideo-cargo-registry >/dev/null 2>&1 || true
-        podman volume create vibevideo-target >/dev/null 2>&1 || true
+        podman volume create venturi-cargo-registry >/dev/null 2>&1 || true
+        podman volume create venturi-target >/dev/null 2>&1 || true
         mkdir -p container/shots
         if podman container exists "$NAME"; then
             echo "Sessione '$NAME' già attiva (container/session.sh stop per fermarla)." >&2
@@ -37,9 +37,9 @@ case "${1:-}" in
         fi
         podman run -d --name "$NAME" \
             -v "$REPO_ROOT:/workspace:Z" \
-            -v vibevideo-cargo-registry:/root/.cargo/registry \
-            -v vibevideo-target:/cargo-target \
-            vibevideo-test \
+            -v venturi-cargo-registry:/root/.cargo/registry \
+            -v venturi-target:/cargo-target \
+            venturi-test \
             sleep infinity
         # L'entrypoint di norma fa `exec "$@"` dopo aver avviato Xvfb, ma
         # qui il processo principale è `sleep infinity` (per restare vivo

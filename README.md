@@ -1,4 +1,4 @@
-# vibevideo
+# Venturi
 
 Editor video "solo edit page" in Rust — vedi [ARCHITECTURE.md](ARCHITECTURE.md)
 per il design. Sviluppato e testato principalmente su Fedora Asahi Remix
@@ -81,7 +81,7 @@ i successivi sono incrementali.
 scripts/build-appimage.sh
 ```
 
-Produce `target/appimage/VibeVideo-<arch>.AppImage` con dentro FFmpeg
+Produce `target/appimage/Venturi-<arch>.AppImage` con dentro FFmpeg
 compilato da sorgente (librerie condivise, con libx264, zlib e NVENC) e
 libx264: sulla macchina di destinazione non servono né FFmpeg né RPM Fusion.
 glibc, ALSA, Vulkan e l'eventuale driver NVIDIA (NVENC richiede >= 550)
@@ -93,9 +93,9 @@ glibc gira solo su glibc >= a quella della macchina di build, quindi la
 release non va compilata su Fedora. Sull'host serve solo `podman`.
 
 FFmpeg viene compilato una volta sola dentro il volume di build
-(`vibevideo-appimage-target`); per ripartire da zero:
-`podman volume rm vibevideo-appimage-cargo vibevideo-appimage-target`,
-e `podman rmi vibevideo-appimage` se cambi il `Containerfile.appimage`.
+(`venturi-appimage-target`); per ripartire da zero:
+`podman volume rm venturi-appimage-cargo venturi-appimage-target`,
+e `podman rmi venturi-appimage` se cambi il `Containerfile.appimage`.
 
 L'AppImage è GPL (include libx264) e non include FDK-AAC: l'export usa
 l'encoder AAC nativo di FFmpeg.

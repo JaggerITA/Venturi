@@ -56,7 +56,7 @@ const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba { r: 1.0, g: 1.0, b: 0.
 const ARROW_HOLD_DELAY_SECS: f64 = 0.3;
 const ARROW_HOLD_SPEED: f64 = 0.5;
 
-/// Freccia sinistra/destra tenuta premuta (`VibeVideoApp::arrow_hold`).
+/// Freccia sinistra/destra tenuta premuta (`VenturiApp::arrow_hold`).
 struct ArrowHold {
     direction: FrameIdx,
     pressed_at: f64,
@@ -71,7 +71,7 @@ fn arrow_hold_target(hold: &ArrowHold, elapsed: f64, fps: f64) -> FrameIdx {
 }
 
 /// Le due velocità di riproduzione accelerata raggiungibili col tasto "a"
-/// (vedi `VibeVideoApp::handle_fast_playback_key`) — non un `f64` libero:
+/// (vedi `VenturiApp::handle_fast_playback_key`) — non un `f64` libero:
 /// solo questi due fattori vengono mai richiesti a `vv_audio::stretch_samples`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpeedTier {
@@ -90,7 +90,7 @@ impl SpeedTier {
     }
 
     /// Il tier raggiunto premendo "a" un'altra volta rispetto a questo —
-    /// vedi `VibeVideoApp::handle_fast_playback_key`. Resta a X8 oltre.
+    /// vedi `VenturiApp::handle_fast_playback_key`. Resta a X8 oltre.
     fn next(self) -> Self {
         match self {
             SpeedTier::X2 => SpeedTier::X4,
@@ -203,7 +203,7 @@ enum ViewerFrameKind {
     Offline,
 }
 
-struct VibeVideoApp {
+struct VenturiApp {
     project: vv_core::Project,
     history: vv_core::History,
     timeline_id: Option<TimelineId>,
@@ -378,7 +378,7 @@ struct VibeVideoApp {
     wayland_dnd: Option<wayland_dnd::WaylandDnd>,
 }
 
-impl Default for VibeVideoApp {
+impl Default for VenturiApp {
     fn default() -> Self {
         Self {
             project: vv_core::Project::default(),
@@ -458,7 +458,7 @@ impl Default for VibeVideoApp {
     }
 }
 
-impl VibeVideoApp {
+impl VenturiApp {
 
     /// Meter stereo del picco d'uscita, con decadimento.
     fn draw_audiometer(&mut self, ui: &mut egui::Ui) {
@@ -2029,7 +2029,7 @@ impl VibeVideoApp {
                 egui::Event::Copy => {
                     self.copy_selected_clips();
                     if !self.timeline_state.clipboard.is_empty() {
-                        ui.ctx().copy_text("vibevideo:clip".to_owned());
+                        ui.ctx().copy_text("venturi:clip".to_owned());
                     }
                 }
                 // Ctrl+X in un campo di testo taglia il testo, non le clip.
@@ -2038,7 +2038,7 @@ impl VibeVideoApp {
                         continue;
                     }
                     self.copy_selected_clips();
-                    ui.ctx().copy_text("vibevideo:clip".to_owned());
+                    ui.ctx().copy_text("venturi:clip".to_owned());
                     self.delete_selected();
                 }
                 egui::Event::Paste(_) => self.paste_clipboard_at_playhead(),
@@ -2700,7 +2700,7 @@ fn unstick_wheel_modifiers(raw_input: &mut egui::RawInput) {
     }
 }
 
-impl eframe::App for VibeVideoApp {
+impl eframe::App for VenturiApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         unstick_wheel_modifiers(raw_input);
         #[cfg(target_os = "linux")]
@@ -3284,10 +3284,10 @@ fn main() -> eframe::Result<()> {
     std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("VibeVideo")
+        .with_title("Venturi")
         // Deve combaciare con il nome del .desktop, altrimenti i compositor
         // Wayland non associano l'icona alla finestra.
-        .with_app_id("vibevideo");
+        .with_app_id("venturi");
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -3299,13 +3299,13 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "vibevideo",
+        "venturi",
         options,
         Box::new(move |cc| {
             // Zoom della timeline con Alt+scroll invece del Ctrl di default.
             cc.egui_ctx
                 .options_mut(|o| o.input_options.zoom_modifier = egui::Modifiers::ALT);
-            let mut app = VibeVideoApp::default();
+            let mut app = VenturiApp::default();
             app.settings_path = settings::Settings::default_path();
             if let Some(path) = &app.settings_path {
                 app.settings = settings::Settings::load(path);
@@ -3337,7 +3337,7 @@ mod tests {
     use super::*;
 
     fn make_timeline_with_clip(
-        app: &mut VibeVideoApp,
+        app: &mut VenturiApp,
         track_index: usize,
         start: FrameIdx,
         len: FrameIdx,
@@ -3371,7 +3371,7 @@ mod tests {
         clip_id
     }
 
-    fn insert_compound_media(app: &mut VibeVideoApp, nested_id: TimelineId) -> MediaId {
+    fn insert_compound_media(app: &mut VenturiApp, nested_id: TimelineId) -> MediaId {
         app.project.media_pool.insert(vv_core::MediaItem {
             path: "Compound Clip 1".into(),
             meta: vv_core::MediaMeta {
@@ -3395,7 +3395,7 @@ mod tests {
     /// lì ha lo stesso indice assoluto.
     #[test]
     fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
         let nested_id = app.project.timelines.insert(vv_core::Timeline {
             name: "Nested".into(),
@@ -3437,7 +3437,7 @@ mod tests {
 
     #[test]
     fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
         let nested_id = app.project.timelines.insert(vv_core::Timeline {
             name: "Nested".into(),
@@ -3460,7 +3460,7 @@ mod tests {
     /// compongono da quelli delle sue clip audio annidate.
     #[test]
     fn a_compound_waveform_is_composed_from_the_nested_clips() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let source = app.project.media_pool.insert(vv_core::MediaItem {
             path: "a.wav".into(),
             meta: vv_core::MediaMeta {
@@ -3515,7 +3515,7 @@ mod tests {
 
     #[test]
     fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_ui_state() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
         let nested_id = app.project.timelines.insert(vv_core::Timeline {
             name: "Nested".into(),
@@ -3542,7 +3542,7 @@ mod tests {
 
     #[test]
     fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
 
         // Voluto o per un ciclo residuo (vedi MAX_COMPOUND_DEPTH): non deve
@@ -3572,7 +3572,7 @@ mod tests {
     /// lì deve funzionare: la clipboard non è per-timeline.
     #[test]
     fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
         let nested_id = app.project.timelines.insert(vv_core::Timeline {
             name: "Nested".into(),
@@ -3619,7 +3619,7 @@ mod tests {
     /// di sicurezza, non deve mai scattare in uso normale).
     #[test]
     fn dropping_a_timelines_own_media_into_itself_is_refused() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
         let root_media = app
             .project
@@ -3641,7 +3641,7 @@ mod tests {
     /// trascinare B dentro A chiuderebbe il ciclo A -> B -> A.
     #[test]
     fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
         let nested_id = app.project.timelines.insert(vv_core::Timeline {
             name: "Nested".into(),
@@ -3687,8 +3687,8 @@ mod tests {
     /// Timeline a 30 fps + media a 29,97: la clip inserita porta il
     /// `rate` di conformazione e dura in timeline il tempo reale del
     /// media, non i suoi frame contati 1:1.
-    fn app_with_media_at(timeline_fps: vv_core::Rational, media_fps: vv_core::Rational, duration_frames: FrameIdx) -> (VibeVideoApp, MediaId) {
-        let mut app = VibeVideoApp::default();
+    fn app_with_media_at(timeline_fps: vv_core::Rational, media_fps: vv_core::Rational, duration_frames: FrameIdx) -> (VenturiApp, MediaId) {
+        let mut app = VenturiApp::default();
         let media_id = app.project.media_pool.insert(vv_core::MediaItem {
             path: "/tmp/vv-conform-test.mp4".into(),
             meta: vv_core::MediaMeta {
@@ -3739,7 +3739,7 @@ mod tests {
             compound: None,
         });
         let timeline_id = app.timeline_id.unwrap();
-        let drag = |app: &VibeVideoApp, id: MediaId| {
+        let drag = |app: &VenturiApp, id: MediaId| {
             timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
         };
         let set = timeline_ui::MediaDragSet {
@@ -3788,7 +3788,7 @@ mod tests {
         });
         let timeline_id = app.timeline_id.unwrap();
         let tracks_before = app.project.timelines[timeline_id].tracks.len();
-        let drag = |app: &VibeVideoApp, id: MediaId| {
+        let drag = |app: &VenturiApp, id: MediaId| {
             timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
         };
         let set = timeline_ui::MediaDragSet {
@@ -3840,7 +3840,7 @@ mod tests {
         });
         let timeline_id = app.timeline_id.unwrap();
         let tracks_before = app.project.timelines[timeline_id].tracks.len();
-        let drag = |app: &VibeVideoApp, id: MediaId| {
+        let drag = |app: &VenturiApp, id: MediaId| {
             timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
         };
         let set = timeline_ui::MediaDragSet {
@@ -3928,7 +3928,7 @@ mod tests {
         let already_ok_path = dir.join("gia-raggiungibile.mp4");
         std::fs::write(&already_ok_path, b"altro contenuto").unwrap();
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let meta = vv_core::MediaMeta {
             duration_frames: 10,
             fps: vv_core::Rational::new(25, 1),
@@ -4001,7 +4001,7 @@ mod tests {
         let other_found_path = dir.join("b.mp4");
         std::fs::write(&other_found_path, b"b").unwrap();
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let meta = vv_core::MediaMeta {
             duration_frames: 10,
             fps: vv_core::Rational::new(25, 1),
@@ -4098,7 +4098,7 @@ mod tests {
     /// `PendingAction::Trim`), qui riprodotto con gli stessi comandi.
     #[test]
     fn extending_a_clip_over_its_neighbor_cuts_the_neighbor() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let b = make_timeline_with_clip(&mut app, 0, 10, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -4117,7 +4117,7 @@ mod tests {
     /// Se l'allungamento copre la vicina per intero, la vicina sparisce.
     #[test]
     fn extending_a_clip_over_a_whole_neighbor_removes_it() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10);
         make_timeline_with_clip(&mut app, 0, 10, 10);
         let c = make_timeline_with_clip(&mut app, 0, 20, 10);
@@ -4136,7 +4136,7 @@ mod tests {
     /// Allungando il bordo *sinistro* all'indietro vale la stessa regola.
     #[test]
     fn extending_a_clip_backwards_cuts_the_previous_neighbor() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
         // b nasce con source_in 8: ha davvero 8 frame di margine per
@@ -4171,7 +4171,7 @@ mod tests {
     /// Il trim di un bordo con l'overwrite di quel che incontra, come lo
     /// compone la UI: prima si libera il tratto guadagnato, poi si trimma.
     fn apply_trim_with_overwrite(
-        app: &mut VibeVideoApp,
+        app: &mut VenturiApp,
         timeline_id: TimelineId,
         track_index: usize,
         clip_id: ClipId,
@@ -4324,7 +4324,7 @@ mod tests {
 
     #[test]
     fn active_video_clip_at_prefers_the_topmost_video_track() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let bottom = make_timeline_with_clip(&mut app, 0, 0, 30);
         let timeline_id = app.timeline_id.unwrap();
         app.history.do_command(
@@ -4340,7 +4340,7 @@ mod tests {
 
     #[test]
     fn ripple_delete_selected_shifts_other_tracks_and_selects_clip_under_playhead() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
         let _audio_a = make_timeline_with_clip(&mut app, 1, 0, 10);
@@ -4369,9 +4369,9 @@ mod tests {
 
     #[test]
     fn ripple_delete_selected_clears_selection_when_follow_playhead_disabled() {
-        let mut app = VibeVideoApp {
+        let mut app = VenturiApp {
             selection_follows_playhead: false,
-            ..VibeVideoApp::default()
+            ..VenturiApp::default()
         };
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
@@ -4387,7 +4387,7 @@ mod tests {
     /// piazzare una clip (`make_room_for_ranges`).
     #[test]
     fn moving_a_clip_onto_another_cuts_the_one_underneath() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let target = make_timeline_with_clip(&mut app, 0, 0, 20);
         let moved = make_timeline_with_clip(&mut app, 1, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -4424,7 +4424,7 @@ mod tests {
     /// finisce sopra a quel che c'era prima.
     #[test]
     fn ripple_delete_of_two_unlinked_clips_on_the_same_range_closes_it_once() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_mid = make_timeline_with_clip(&mut app, 0, 10, 10);
         let video_last = make_timeline_with_clip(&mut app, 0, 20, 10);
@@ -4454,7 +4454,7 @@ mod tests {
     /// l'altra, non lasciata accatastata.
     #[test]
     fn ripple_delete_cuts_a_clip_the_shift_landed_on() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video = make_timeline_with_clip(&mut app, 0, 0, 10);
         let audio_long = make_timeline_with_clip(&mut app, 1, 0, 30);
         let audio_late = make_timeline_with_clip(&mut app, 1, 30, 10);
@@ -4484,7 +4484,7 @@ mod tests {
     /// punto di giunzione invece che da dove stava prima.
     #[test]
     fn ripple_delete_selected_moves_playhead_to_the_clip_that_slid_back() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let b = make_timeline_with_clip(&mut app, 0, 10, 10);
         let c = make_timeline_with_clip(&mut app, 0, 20, 10);
@@ -4504,7 +4504,7 @@ mod tests {
     /// c'è nessun punto di giunzione: la testina non va spostata nel vuoto.
     #[test]
     fn ripple_delete_selected_keeps_the_playhead_when_nothing_slides_back() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let b = make_timeline_with_clip(&mut app, 0, 10, 10);
 
@@ -4518,7 +4518,7 @@ mod tests {
     /// Stessa regola per il ripple delete di un vuoto selezionato.
     #[test]
     fn ripple_delete_of_a_gap_moves_playhead_to_the_closed_gap() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let c = make_timeline_with_clip(&mut app, 0, 20, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -4538,7 +4538,7 @@ mod tests {
     /// chiudere entrambi i gap correttamente, non solo il primo.
     #[test]
     fn delete_selected_removes_every_selected_clip() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let b = make_timeline_with_clip(&mut app, 0, 10, 10);
         let c = make_timeline_with_clip(&mut app, 0, 20, 10);
@@ -4563,7 +4563,7 @@ mod tests {
     /// spostamento o un gap non chiuso correttamente.
     #[test]
     fn ripple_delete_selected_multiple_clips_closes_every_gap() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
         let b = make_timeline_with_clip(&mut app, 0, 10, 10); // [10,20), da rimuovere
         let c = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30)
@@ -4593,7 +4593,7 @@ mod tests {
 
     #[test]
     fn delete_selected_does_not_shift_other_tracks() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let video_b = make_timeline_with_clip(&mut app, 0, 10, 10);
         make_timeline_with_clip(&mut app, 1, 0, 10);
@@ -4637,7 +4637,7 @@ mod tests {
             &path,
         );
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path);
         let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
         let media_id = app
@@ -4668,7 +4668,7 @@ mod tests {
     }
 
     fn self_test_set_gain(
-        app: &mut VibeVideoApp,
+        app: &mut VenturiApp,
         timeline_id: TimelineId,
         track_index: usize,
         clip_id: vv_core::ClipId,
@@ -4713,7 +4713,7 @@ mod tests {
 
     #[test]
     fn keyframe_arrows_ignore_keyframes_outside_the_clip() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let id = make_timeline_with_clip(&mut app, 0, 0, 100);
         let timeline_id = app.timeline_id.unwrap();
         let clip = &mut app.project.timelines[timeline_id].tracks[0].clips[0];
@@ -4739,7 +4739,7 @@ mod tests {
     /// applica come uno solo, così l'undo le riporta indietro insieme.
     #[test]
     fn effect_changes_on_several_clips_are_one_undo_step() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let first = make_timeline_with_clip(&mut app, 0, 0, 20);
         let second = make_timeline_with_clip(&mut app, 0, 30, 20);
         let timeline_id = app.timeline_id.unwrap();
@@ -4776,7 +4776,7 @@ mod tests {
     #[test]
     fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_position_by_delta() {
         use vv_core::TransformParam as P;
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let first = make_timeline_with_clip(&mut app, 0, 0, 20);
         let second = make_timeline_with_clip(&mut app, 0, 30, 20);
         let timeline_id = app.timeline_id.unwrap();
@@ -4839,13 +4839,13 @@ mod tests {
 
     #[test]
     fn dragging_a_value_is_a_single_undo_step() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
         let set_x = |v| {
             vec![set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::PositionX, v)]
         };
-        let x = |app: &VibeVideoApp| {
+        let x = |app: &VenturiApp| {
             app.project.timelines[timeline_id].tracks[0].clips[0]
                 .effects
                 .transform
@@ -4870,7 +4870,7 @@ mod tests {
 
     #[test]
     fn effect_command_upsert_gain_keyframe_applies_correctly() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -4886,7 +4886,7 @@ mod tests {
 
     #[test]
     fn effect_command_remove_transform_keyframe_applies_correctly() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -4905,7 +4905,7 @@ mod tests {
 
     #[test]
     fn effect_command_set_defaults_applies_correctly() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -4925,7 +4925,7 @@ mod tests {
 
     #[test]
     fn dropping_solid_color_creates_timeline_and_initialized_color() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         assert!(app.timeline_id.is_none());
 
         app.add_generator_to_timeline_at(
@@ -4943,7 +4943,7 @@ mod tests {
 
     #[test]
     fn dropping_solid_color_on_new_video_track_places_it_at_the_drop_frame() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let timeline_id = app.ensure_timeline();
         let tracks_before = app.project.timelines[timeline_id].tracks.len();
 
@@ -4965,9 +4965,9 @@ mod tests {
 
     #[test]
     fn dropping_solid_color_on_a_track_overwrites_what_is_under_it() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let timeline_id = app.ensure_timeline();
-        let drop = |app: &mut VibeVideoApp, start| {
+        let drop = |app: &mut VenturiApp, start| {
             app.add_generator_to_timeline_at(
                 timeline_ui::Generator::SolidColor,
                 start,
@@ -4990,7 +4990,7 @@ mod tests {
 
     #[test]
     fn dropping_text_creates_a_text_clip_with_default_title() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.add_generator_to_timeline_at(
             timeline_ui::Generator::Text,
             10,
@@ -5029,7 +5029,7 @@ mod tests {
 
     #[test]
     fn solid_color_clip_under_the_playhead_becomes_the_active_clip() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.add_generator_to_timeline_at(
             timeline_ui::Generator::SolidColor,
             0,
@@ -5045,7 +5045,7 @@ mod tests {
 
     #[test]
     fn effect_command_color_upsert_and_remove_round_trip() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.add_generator_to_timeline_at(
             timeline_ui::Generator::SolidColor,
             0,
@@ -5087,7 +5087,7 @@ mod tests {
 
     const TEST_FPS: f64 = 25.0;
 
-    fn clock_frame(app: &VibeVideoApp) -> FrameIdx {
+    fn clock_frame(app: &VenturiApp) -> FrameIdx {
         app.timeline_audio
             .as_ref()
             .expect("timeline_audio atteso")
@@ -5095,13 +5095,13 @@ mod tests {
     }
 
     /// Simula il mixer arrivato a `frame` senza aspettare in tempo reale.
-    fn move_clock_to(app: &mut VibeVideoApp, frame: FrameIdx) {
+    fn move_clock_to(app: &mut VenturiApp, frame: FrameIdx) {
         app.timeline_audio().seek_frame(frame, TEST_FPS);
     }
 
     #[test]
     fn moving_the_playhead_while_paused_seeks_the_timeline_clock() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 50);
         app.timeline_audio();
 
@@ -5117,7 +5117,7 @@ mod tests {
     /// Bug: "il player mi ignora se sposto la playhead mentre riproduce".
     #[test]
     fn scrubbing_during_playback_moves_the_clock_only_when_forced() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 500);
         app.toggle_playback();
         assert!(app.is_timeline_playing());
@@ -5136,7 +5136,7 @@ mod tests {
 
     #[test]
     fn playback_follows_the_clock_across_a_cut() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_a = make_timeline_with_clip(&mut app, 0, 0, 25);
         let clip_b = make_timeline_with_clip(&mut app, 0, 25, 25);
         app.toggle_playback();
@@ -5153,7 +5153,7 @@ mod tests {
     /// Bug: "la selezione non segue durante la riproduzione".
     #[test]
     fn selection_follows_playhead_during_normal_playback() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         assert!(app.selection_follows_playhead, "attivo di default");
         let clip_a = make_timeline_with_clip(&mut app, 0, 0, 25);
         let clip_b = make_timeline_with_clip(&mut app, 0, 25, 25);
@@ -5173,7 +5173,7 @@ mod tests {
     /// Bug: "la riproduzione parte solo se seleziono la clip".
     #[test]
     fn toggle_playback_works_without_any_selection() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip = make_timeline_with_clip(&mut app, 0, 0, 25);
         assert!(app.timeline_state.selected.is_empty());
 
@@ -5187,7 +5187,7 @@ mod tests {
     /// saltare alla prossima clip ma riprodurre una schermata nera".
     #[test]
     fn playback_runs_through_a_gap_and_picks_up_the_next_clip() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let clip_b = make_timeline_with_clip(&mut app, 0, 20, 10);
         app.toggle_playback();
@@ -5205,7 +5205,7 @@ mod tests {
 
     #[test]
     fn toggle_playback_starts_from_inside_a_gap_and_pauses_again() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         make_timeline_with_clip(&mut app, 0, 20, 10);
         app.timeline_state.playhead = 15;
@@ -5220,7 +5220,7 @@ mod tests {
 
     #[test]
     fn toggle_playback_does_nothing_past_the_end_of_the_content() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         app.timeline_state.playhead = 15;
 
@@ -5232,7 +5232,7 @@ mod tests {
     /// Una clip solo audio oltre l'ultima video fa parte del contenuto.
     #[test]
     fn playback_reaches_the_end_of_audio_only_content_and_stops_there() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         make_timeline_with_clip(&mut app, 1, 0, 30);
         app.timeline_state.playhead = 20;
@@ -5247,7 +5247,7 @@ mod tests {
     }
 
     /// Come fa `ui()` a ogni frame, finché lo stretch non porta a `speed`.
-    fn wait_for_playback_speed(app: &mut VibeVideoApp, speed: f64) {
+    fn wait_for_playback_speed(app: &mut VenturiApp, speed: f64) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while app.playback_speed != speed {
             assert!(std::time::Instant::now() < deadline, "velocità {speed}x mai applicata");
@@ -5262,7 +5262,7 @@ mod tests {
     /// barra spaziatrice mette sempre in pausa e riporta a 1x.
     #[test]
     fn fast_playback_key_cycles_speed_and_space_always_resets_it() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 5000);
 
         app.handle_fast_playback_key();
@@ -5287,7 +5287,7 @@ mod tests {
 
     #[test]
     fn fast_playback_advances_the_playhead_faster() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 5000);
         app.toggle_playback();
         app.request_playback_speed(4.0);
@@ -5328,7 +5328,7 @@ mod tests {
             &path,
         );
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path);
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
@@ -5349,7 +5349,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "decodifica audio mai arrivata");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let peak = |app: &VibeVideoApp, frame| {
+        let peak = |app: &VenturiApp, frame| {
             app.timeline_audio
                 .as_ref()
                 .unwrap()
@@ -5417,7 +5417,7 @@ mod tests {
     /// Senza selezione T taglia tutte le track in un colpo solo.
     #[test]
     fn split_at_playhead_cuts_every_track_without_selection() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
@@ -5443,7 +5443,7 @@ mod tests {
         assert_eq!(tl.tracks[1].clips.len(), 1);
     }
 
-    fn lock_track(app: &mut VibeVideoApp, track_index: usize) {
+    fn lock_track(app: &mut VenturiApp, track_index: usize) {
         let timeline_id = app.timeline_id.unwrap();
         app.history.do_command(
             &mut app.project,
@@ -5458,7 +5458,7 @@ mod tests {
 
     #[test]
     fn locked_tracks_are_not_split_selected_or_pasted_on() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         make_timeline_with_clip(&mut app, 1, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
@@ -5497,11 +5497,11 @@ mod tests {
 
     #[test]
     fn d_disables_the_selection_and_enables_it_again() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 20);
         let b = make_timeline_with_clip(&mut app, 0, 20, 20);
         let timeline_id = app.timeline_id.unwrap();
-        let disabled = |app: &VibeVideoApp| -> Vec<bool> {
+        let disabled = |app: &VenturiApp| -> Vec<bool> {
             app.project.timelines[timeline_id].tracks[0]
                 .clips
                 .iter()
@@ -5553,7 +5553,7 @@ mod tests {
 
     #[test]
     fn select_all_clips_takes_every_track() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 20);
         let b = make_timeline_with_clip(&mut app, 1, 30, 20);
         app.select_all_clips();
@@ -5565,7 +5565,7 @@ mod tests {
 
     #[test]
     fn select_clips_from_playhead_skips_the_ones_that_already_ended() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let before = make_timeline_with_clip(&mut app, 0, 0, 20);
         let under = make_timeline_with_clip(&mut app, 1, 20, 20);
         let after = make_timeline_with_clip(&mut app, 0, 50, 20);
@@ -5580,7 +5580,7 @@ mod tests {
 
     #[test]
     fn split_at_playhead_cuts_only_selected_clips() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         make_timeline_with_clip(&mut app, 1, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
@@ -5603,7 +5603,7 @@ mod tests {
     /// ricollegate tra loro in un gruppo nuovo.
     #[test]
     fn split_at_playhead_keeps_linked_group_on_both_halves() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
         let timeline_id = app.timeline_id.unwrap();
@@ -5698,7 +5698,7 @@ mod tests {
 
     #[test]
     fn delete_selected_removes_every_selected_clip_together() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -5732,7 +5732,7 @@ mod tests {
 
     #[test]
     fn arrows_step_one_frame_then_scroll_at_half_speed_while_held() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 1000);
         app.timeline_state.playhead = 100;
 
@@ -5751,7 +5751,7 @@ mod tests {
 
     #[test]
     fn copy_then_paste_creates_a_new_clip_at_the_playhead_with_a_new_id() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let original_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -5778,7 +5778,7 @@ mod tests {
 
     #[test]
     fn copy_then_paste_relinks_a_linked_group_to_each_other_not_to_the_originals() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -5818,7 +5818,7 @@ mod tests {
 
     #[test]
     fn copy_then_paste_multiple_clips_preserves_their_relative_spacing() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let a_id = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
         let b_id = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30), 10 frame di gap da "a"
         let timeline_id = app.timeline_id.unwrap();
@@ -5840,7 +5840,7 @@ mod tests {
 
     #[test]
     fn paste_with_an_empty_clipboard_is_a_no_op() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -5861,7 +5861,7 @@ mod tests {
     /// stesso trucco già usato per `show_timeline` in `timeline_ui.rs`.
     #[test]
     fn handle_clipboard_events_primes_the_system_clipboard_after_a_copy() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
 
@@ -5885,7 +5885,7 @@ mod tests {
 
     #[test]
     fn cut_copies_the_selected_clips_and_removes_them() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
 
@@ -5906,7 +5906,7 @@ mod tests {
     /// eventualmente copiato altrove per incollarlo in un'altra app).
     #[test]
     fn handle_clipboard_events_does_not_touch_system_clipboard_when_nothing_is_selected() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
 
         let ctx = egui::Context::default();
@@ -5927,7 +5927,7 @@ mod tests {
     /// sistema): incolla comunque quel che avevamo già copiato.
     #[test]
     fn handle_clipboard_events_pastes_regardless_of_the_paste_events_payload() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
         app.copy_selected_clips();
@@ -5949,7 +5949,7 @@ mod tests {
     /// esistente, quella va rimossa del tutto (`make_room_for_ranges`).
     #[test]
     fn paste_over_an_existing_clip_it_fully_covers_deletes_the_underlying_clip() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let existing = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
         let source = make_timeline_with_clip(&mut app, 0, 50, 10); // da copiare, stessa lunghezza
         let timeline_id = app.timeline_id.unwrap();
@@ -5973,7 +5973,7 @@ mod tests {
     /// lasciata sovrapposta.
     #[test]
     fn paste_overlapping_the_tail_of_an_existing_clip_trims_its_end() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let existing = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
         let source = make_timeline_with_clip(&mut app, 0, 50, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -5997,7 +5997,7 @@ mod tests {
     /// clip incollata: va accorciata lì (bordo sinistro).
     #[test]
     fn paste_overlapping_the_head_of_an_existing_clip_trims_its_start() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let existing = make_timeline_with_clip(&mut app, 0, 10, 10); // [10,20)
         let source = make_timeline_with_clip(&mut app, 0, 50, 10);
         let timeline_id = app.timeline_id.unwrap();
@@ -6022,7 +6022,7 @@ mod tests {
     /// (coperto) che sparisce.
     #[test]
     fn paste_inside_an_existing_clip_splits_it_in_two() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let existing = make_timeline_with_clip(&mut app, 0, 0, 20); // [0,20)
         let source = make_timeline_with_clip(&mut app, 0, 50, 5);
         let timeline_id = app.timeline_id.unwrap();
@@ -6059,7 +6059,7 @@ mod tests {
     /// *tra loro*, non alla vecchia gemella (persa nello split).
     #[test]
     fn paste_splitting_a_linked_group_relinks_the_new_halves_to_each_other() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let video_id = make_timeline_with_clip(&mut app, 0, 0, 20); // [0,20)
         let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20); // [0,20)
         let timeline_id = app.timeline_id.unwrap();
@@ -6143,7 +6143,7 @@ mod tests {
             &path,
         );
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path);
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
@@ -6197,7 +6197,7 @@ mod tests {
             &path,
         );
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path);
         let media_id = app
             .project
@@ -6287,7 +6287,7 @@ mod tests {
         let content_hash = vv_media::content_fingerprint(&path).unwrap();
         let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash));
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path); // accoda anche la generazione del proxy
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
@@ -6349,7 +6349,7 @@ mod tests {
             })
             .collect();
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let mut with_bad = paths.clone();
         with_bad.push(dir.join("inesistente.mp4"));
         app.import_media_files(with_bad);
@@ -6388,7 +6388,7 @@ mod tests {
     #[test]
     fn dropping_a_file_from_the_file_manager_imports_it_into_the_pool() {
         let path = make_wav("dropped.wav");
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
 
         let ctx = egui::Context::default();
         let mut input = egui::RawInput::default();
@@ -6426,7 +6426,7 @@ mod tests {
             &path,
         );
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.settings.proxy_enabled = false;
         app.import_media_files(vec![path]);
         app.wait_for_import();
@@ -6447,7 +6447,7 @@ mod tests {
     /// fine — ma non riprende una pausa scelta dall'utente.
     #[test]
     fn export_pauses_the_proxy_queue_and_resumes_it_afterwards() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.proxy_worker = Some(proxy_worker::ProxyWorker::spawn());
 
         app.pause_proxies_for_export();
@@ -6464,7 +6464,7 @@ mod tests {
         );
     }
 
-    fn browse_fixture(name: &str) -> (VibeVideoApp, MediaId) {
+    fn browse_fixture(name: &str) -> (VenturiApp, MediaId) {
         let dir = std::env::temp_dir().join("vv-app-browse-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
@@ -6487,7 +6487,7 @@ mod tests {
             ],
             &path,
         );
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let media_id = app.add_media_to_pool(path).unwrap();
         app.preview_media(media_id);
         app.browsing_media = Some(media_id);
@@ -6524,7 +6524,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "decodifica audio mai arrivata");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let peak = |app: &VibeVideoApp| {
+        let peak = |app: &VenturiApp| {
             app.timeline_audio
                 .as_ref()
                 .unwrap()
@@ -6595,7 +6595,7 @@ mod tests {
 
     #[test]
     fn in_out_keys_on_the_timeline_set_the_export_range() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 100);
         app.timeline_state.playhead = 20;
         app.mark_at_playhead(true);
@@ -6632,7 +6632,7 @@ mod tests {
             );
         }
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path_a);
         app.import_media(path_b);
         let mut media_ids = app.project.media_pool.iter().filter(|(_, item)| item.compound.is_none()).map(|(id, _)| id);
@@ -6640,7 +6640,7 @@ mod tests {
         let media_b = media_ids.next().unwrap();
         drop(media_ids);
 
-        let whole = |app: &VibeVideoApp, id| {
+        let whole = |app: &VenturiApp, id| {
             timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
         };
         app.add_media_to_timeline_at(whole(&app, media_a), 0, timeline_ui::MediaDropTarget::Default); // [0,50)
@@ -6673,7 +6673,7 @@ mod tests {
 
     #[test]
     fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
         app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
@@ -6690,7 +6690,7 @@ mod tests {
         // Un progetto "nuovo" in memoria (un'altra clip, un'altra
         // selezione/playhead): caricare deve sostituire tutto, non
         // fondere.
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 999);
         app.timeline_state.playhead = 42;
 
@@ -6715,7 +6715,7 @@ mod tests {
 
     #[test]
     fn load_project_from_a_bad_path_sets_project_error_without_touching_the_current_project() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -6733,7 +6733,7 @@ mod tests {
 
     #[test]
     fn export_otio_to_writes_the_file_and_reports_failures() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
         let dir = std::env::temp_dir().join("vv-app-otio-test");
@@ -6793,7 +6793,7 @@ mod tests {
         let otio_path = dir.join("timeline.otio");
         std::fs::write(&otio_path, otio.to_string()).unwrap();
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.current_project_path = Some(dir.join("vecchio.vvproj"));
         app.import_otio_from(&otio_path);
 
@@ -6811,7 +6811,7 @@ mod tests {
 
     #[test]
     fn unsaved_changes_follow_edits_and_saves() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         assert!(!app.has_unsaved_changes(), "progetto vuoto");
         make_timeline_with_clip(&mut app, 0, 0, 10);
         assert!(app.has_unsaved_changes());
@@ -6829,7 +6829,7 @@ mod tests {
     /// e un salvataggio fallito lasciano il progetto com'è.
     #[test]
     fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
 
@@ -6890,7 +6890,7 @@ mod tests {
         vv_core::save_project(&project, &project_path).unwrap();
         assert!(!vv_media::waveform::waveform_exists(content_hash, 0));
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.load_project_from(project_path);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !vv_media::waveform::waveform_exists(content_hash, 0) {
@@ -6921,7 +6921,7 @@ mod tests {
     #[test]
     fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
         let path = make_wav("tono.wav");
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media_files(vec![path]);
         app.wait_for_import();
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
@@ -6990,7 +6990,7 @@ mod tests {
     #[test]
     fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
         let path = make_png("still.png");
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media_files(vec![path.clone()]);
         app.wait_for_import();
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
@@ -7026,7 +7026,7 @@ mod tests {
     /// la prima volta, quando è anche lui a far nascere la timeline.
     #[test]
     fn dropping_audio_only_media_creates_no_video_track() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let media_id = app.project.media_pool.insert(vv_core::MediaItem {
             path: "/tmp/vv-audio-only.wav".into(),
             meta: vv_core::MediaMeta {
@@ -7060,7 +7060,7 @@ mod tests {
         );
     }
 
-    fn close_request_commands(app: &mut VibeVideoApp) -> Vec<egui::ViewportCommand> {
+    fn close_request_commands(app: &mut VenturiApp) -> Vec<egui::ViewportCommand> {
         let ctx = egui::Context::default();
         let mut input = egui::RawInput::default();
         input
@@ -7082,11 +7082,11 @@ mod tests {
     /// senza modifiche, o dopo "Non salvare", si esce.
     #[test]
     fn closing_the_window_asks_to_save_unsaved_changes() {
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         let commands = close_request_commands(&mut app);
         assert!(!commands.contains(&egui::ViewportCommand::CancelClose), "niente da salvare");
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 10);
         let commands = close_request_commands(&mut app);
         assert!(commands.contains(&egui::ViewportCommand::CancelClose));
@@ -7145,7 +7145,7 @@ mod tests {
             &path,
         );
 
-        let mut app = VibeVideoApp::default();
+        let mut app = VenturiApp::default();
         app.import_media(path.clone());
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);

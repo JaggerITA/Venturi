@@ -29,12 +29,12 @@ completa una feature:
 
 ## Build
 
-Quando viene chiesta una build, copiare in `~/Nextcloud/Share/VibeVideo-builds` 
+Quando viene chiesta una build, copiare in `~/Nextcloud/Share/Venturi-builds` 
 la versione appena compilata con architettura e timestamp nel suffisso del nome.
 
 ES:
 ```
 export TIMESTAMP=$(date +%s)
-cp target/appimage/VibeVideo-x86_64.AppImage ~/Nextcloud/Share/VibeVideo-builds/vv-app-$(uname -m)-${TIMESTAMP}.AppImage
-cp target/release/vv-app ~/Nextcloud/Share/VibeVideo-builds/vv-app-$(uname -m)-${TIMESTAMP}
+cp target/appimage/Venturi-x86_64.AppImage ~/Nextcloud/Share/Venturi-builds/vv-app-$(uname -m)-${TIMESTAMP}.AppImage
+cp target/release/vv-app ~/Nextcloud/Share/Venturi-builds/vv-app-$(uname -m)-${TIMESTAMP}
 ```

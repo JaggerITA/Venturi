@@ -1,5 +1,5 @@
 /target
-.vibevideo/proxies/
-.vibevideo/waveforms/
+.venturi/proxies/
+.venturi/waveforms/
 *.vvproj.bak
 /container/shots/

@@ -2,7 +2,7 @@
 //! `timeline_len` (vedi `Clip`): esatto anche per le clip conformate, dove
 //! nell'fps del media l'inizio cadrebbe a metà frame. Quel che OTIO non sa
 //! rappresentare (effetti, gruppi collegati, stream audio) finisce in
-//! `metadata.vibevideo`.
+//! `metadata.venturi`.
 
 use super::OtioError;
 use crate::model::{Clip, ClipSource, FrameIdx, Project, Rational, TimelineId, Track, TrackKind};
@@ -30,7 +30,7 @@ pub fn timeline_to_otio(project: &Project, timeline_id: TimelineId) -> Value {
         "name": timeline.name,
         "global_start_time": rational_time(0, fps),
         "metadata": {
-            "vibevideo": {
+            "venturi": {
                 "fps": timeline.fps,
                 "resolution": timeline.resolution,
             }
@@ -142,7 +142,7 @@ fn clip_to_otio(project: &Project, clip: &Clip, fps: Rational) -> Value {
         "markers": [],
         "enabled": !clip.disabled,
         "metadata": {
-            "vibevideo": {
+            "venturi": {
                 "effects": clip.effects,
                 "linked_group": clip.linked_group,
                 "audio_stream_index": clip.audio_stream_index,
@@ -307,7 +307,7 @@ mod tests {
         project.timelines[timeline_id].tracks[2].clips.push(clip);
 
         let otio = timeline_to_otio(&project, timeline_id);
-        let meta = &otio["tracks"]["children"][2]["children"][0]["metadata"]["vibevideo"];
+        let meta = &otio["tracks"]["children"][2]["children"][0]["metadata"]["venturi"];
         assert_eq!(meta["audio_stream_index"], 1);
         assert_eq!(meta["linked_group"], 7);
         assert_eq!(meta["effects"]["gain_db"]["default"], -6.0);

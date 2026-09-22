@@ -17,7 +17,7 @@ ARCH="$(uname -m)"
 TARGET_DIR="$(realpath -m "${CARGO_TARGET_DIR:-target}")"
 FFMPEG_PREFIX="$TARGET_DIR/ffmpeg-shared"
 APPDIR="$TARGET_DIR/appimage/AppDir"
-OUT="$TARGET_DIR/appimage/VibeVideo-$ARCH.AppImage"
+OUT="$TARGET_DIR/appimage/Venturi-$ARCH.AppImage"
 
 scripts/build-ffmpeg.sh "$FFMPEG_PREFIX"
 
@@ -43,18 +43,18 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib"
 cp "$TARGET_DIR/release/vv-app" "$APPDIR/usr/bin/"
 cp -a "$FFMPEG_PREFIX"/lib/*.so.* "$APPDIR/usr/lib/"
-cp packaging/appimage/vibevideo.desktop "$APPDIR/"
+cp packaging/appimage/venturi.desktop "$APPDIR/"
 mkdir -p "$APPDIR/usr/share/applications"
-cp packaging/appimage/vibevideo.desktop "$APPDIR/usr/share/applications/"
+cp packaging/appimage/venturi.desktop "$APPDIR/usr/share/applications/"
 
 # Il nome dei file icona deve combaciare con la chiave Icon= del .desktop.
-cp media/icons/svg/vv-icon.svg "$APPDIR/vibevideo.svg"
+cp media/icons/svg/vv-icon.svg "$APPDIR/venturi.svg"
 for dir in media/icons/linux/hicolor/*/apps; do
     size="$(basename "$(dirname "$dir")")"
     dest="$APPDIR/usr/share/icons/hicolor/$size/apps"
     mkdir -p "$dest"
-    for f in "$dir"/vibe-video.*; do
-        cp "$f" "$dest/vibevideo.${f##*.}"
+    for f in "$dir"/venturi.*; do
+        cp "$f" "$dest/venturi.${f##*.}"
     done
 done
 cp media/icons/png/vv-icon-256.png "$APPDIR/.DirIcon"

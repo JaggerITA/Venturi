@@ -10,7 +10,7 @@ dover ricostruire l'immagine a ogni modifica.
 ## Setup (una volta)
 
 ```sh
-podman build -t vibevideo-test -f container/Containerfile container/
+podman build -t venturi-test -f container/Containerfile container/
 ```
 
 ## Uso rapido (comando singolo, container usa-e-getta)
@@ -27,7 +27,7 @@ Usa un'immagine separata (`Containerfile.appimage`, Debian 13) perché la
 release deve linkare contro una glibc vecchia, non quella di Fedora 44:
 
 ```sh
-scripts/build-appimage.sh   # -> target/appimage/VibeVideo-<arch>.AppImage
+scripts/build-appimage.sh   # -> target/appimage/Venturi-<arch>.AppImage
 ```
 
 Lo script rientra da solo nel container (via `container/build-appimage.sh`,
@@ -68,11 +68,11 @@ per un drag (`mousedown 1` ... `mousemove` ... `mouseup 1`).
 ## Cache tra le run
 
 `run.sh`/`session.sh` montano due volumi Podman nominati
-(`vibevideo-cargo-registry`, `vibevideo-target`) così le dipendenze
+(`venturi-cargo-registry`, `venturi-target`) così le dipendenze
 scaricate e gli artefatti di build restano tra un container e l'altro
 — solo il primo build è lento (bindgen di `ffmpeg-next` + `wgpu`,
 ~2 minuti), i successivi sono incrementali. Per ripartire da zero:
-`podman volume rm vibevideo-cargo-registry vibevideo-target`.
+`podman volume rm venturi-cargo-registry venturi-target`.
 
 ## Limiti noti
 

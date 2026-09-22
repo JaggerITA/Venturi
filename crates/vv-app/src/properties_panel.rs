@@ -1066,7 +1066,7 @@ pub(crate) fn remove_color_keyframe(clip: ClipRef, frame: FrameIdx) -> BoxedComm
     remove_keyframe(clip, frame, vv_core::KeyframeTarget::Color)
 }
 
-impl VibeVideoApp {
+impl VenturiApp {
     /// La scheda "Selezione": tutto quel che è selezionato, video e audio
     /// insieme, con i dati che prima stavano in cima al pannello dei
     /// parametri (track, start, durata, frame corrente).

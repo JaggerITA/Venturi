@@ -262,7 +262,7 @@ pub(crate) fn file_label(path: &std::path::Path) -> String {
         .to_string()
 }
 
-impl VibeVideoApp {
+impl VenturiApp {
     /// Contenuto della sezione Media pool nella colonna di sinistra.
     pub(crate) fn show_media_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
         if let Some(worker) = &self.proxy_worker {

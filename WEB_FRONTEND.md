@@ -1,4 +1,4 @@
-# vibevideo — frontend web/tablet: indicazioni per l'implementazione
+# Venturi — frontend web/tablet: indicazioni per l'implementazione
 
 Documento di design per disaccoppiare l'editing da egui e permettere un
 client web (es. tablet in rete locale) che pilota un backend headless in
@@ -74,7 +74,7 @@ progetto resta su LAN con pochissimi client).
 ```
 
 Sul lato server, ogni messaggio si traduce in una chiamata diretta ai
-metodi già esistenti su `VibeVideoApp`-equivalente (`split_at_playhead`,
+metodi già esistenti su `VenturiApp`-equivalente (`split_at_playhead`,
 `ripple_delete_selected`, ecc.) o in un `History::do_command` con il
 `Command` di `vv-core` corrispondente costruito dai campi del messaggio.
 

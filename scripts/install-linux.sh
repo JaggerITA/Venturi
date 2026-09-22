@@ -22,7 +22,7 @@ if [ -z "$PREFIX" ]; then
 fi
 
 BIN="$PREFIX/bin/vv-app"
-DESKTOP="$PREFIX/share/applications/vibevideo.desktop"
+DESKTOP="$PREFIX/share/applications/venturi.desktop"
 ICONS="$PREFIX/share/icons/hicolor"
 
 refresh_caches() {
@@ -35,7 +35,7 @@ refresh_caches() {
 
 if [ "$UNINSTALL" -eq 1 ]; then
     rm -f "$BIN" "$DESKTOP"
-    find "$ICONS" -name 'vibevideo.png' -o -name 'vibevideo.svg' 2>/dev/null \
+    find "$ICONS" -name 'venturi.png' -o -name 'venturi.svg' 2>/dev/null \
         | while read -r f; do rm -f "$f"; done
     refresh_caches
     echo "rimosso da $PREFIX"
@@ -48,13 +48,13 @@ if [ ! -x "$TARGET_DIR/release/vv-app" ]; then
 fi
 
 install -Dm755 "$TARGET_DIR/release/vv-app" "$BIN"
-install -Dm644 packaging/appimage/vibevideo.desktop "$DESKTOP"
+install -Dm644 packaging/appimage/venturi.desktop "$DESKTOP"
 
 # Il nome del file icona deve combaciare con la chiave Icon= del .desktop.
 for dir in media/icons/linux/hicolor/*/apps; do
     size="$(basename "$(dirname "$dir")")"
-    for f in "$dir"/vibe-video.*; do
-        install -Dm644 "$f" "$ICONS/$size/apps/vibevideo.${f##*.}"
+    for f in "$dir"/venturi.*; do
+        install -Dm644 "$f" "$ICONS/$size/apps/venturi.${f##*.}"
     done
 done
 

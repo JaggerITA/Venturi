@@ -100,7 +100,7 @@ struct SharedState {
     behind_secs: AtomicU64,
 }
 
-/// Vedi il doc del modulo. Uno per `VibeVideoApp`.
+/// Vedi il doc del modulo. Uno per `VenturiApp`.
 pub struct RenderAhead {
     shared: Arc<SharedState>,
     tx: mpsc::Sender<Command>,

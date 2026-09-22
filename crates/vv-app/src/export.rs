@@ -1047,7 +1047,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: costruisce una timeline vera (via `VibeVideoApp`, non
+    /// End-to-end: costruisce una timeline vera (via `VenturiApp`, non
     /// `Clip`/`Track` a mano) con un vero file video+audio generato da
     /// ffmpeg CLI (stesso pattern dei test in `main.rs`), esporta, e
     /// verifica il risultato rileggendolo con `vv_media` — l'unico modo di
@@ -1077,7 +1077,7 @@ mod tests {
             &source_path,
         );
 
-        let mut app = crate::VibeVideoApp::default();
+        let mut app = crate::VenturiApp::default();
         app.import_media(source_path);
         let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
         let media_id = app
@@ -1272,7 +1272,7 @@ mod tests {
             &source_path,
         );
 
-        let mut app = crate::VibeVideoApp::default();
+        let mut app = crate::VenturiApp::default();
         app.import_media(source_path);
         let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
         let media_id = app
@@ -1363,7 +1363,7 @@ mod tests {
             &sine_23976,
         );
 
-        let mut app = crate::VibeVideoApp::default();
+        let mut app = crate::VenturiApp::default();
         app.import_media(mute_25);
         let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
         assert_eq!(
@@ -1482,7 +1482,7 @@ mod tests {
             &source_path,
         );
 
-        let mut app = crate::VibeVideoApp::default();
+        let mut app = crate::VenturiApp::default();
         app.import_media(source_path);
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
         app.add_media_to_timeline(media_id);
@@ -1526,7 +1526,7 @@ mod tests {
             &source_path,
         );
 
-        let mut app = crate::VibeVideoApp::default();
+        let mut app = crate::VenturiApp::default();
         app.import_media(source_path);
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
         app.add_media_to_timeline(media_id);

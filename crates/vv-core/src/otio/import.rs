@@ -1,8 +1,8 @@
 //! Le posizioni arrivano in secondi a un rate qualunque e vengono
 //! quantizzate al frame della timeline. Le track si leggono accumulando i
 //! secondi e arrotondando inizio e fine di ogni elemento, così non si
-//! accumula deriva lungo la track. Un file esportato da VibeVideo torna
-//! identico grazie a `metadata.vibevideo`.
+//! accumula deriva lungo la track. Un file esportato da Venturi torna
+//! identico grazie a `metadata.venturi`.
 
 use super::OtioError;
 use crate::model::{
@@ -94,7 +94,7 @@ struct Importer<'a> {
 /// Resolve non vanno mescolati.
 #[derive(PartialEq, Eq, Hash)]
 enum GroupKey {
-    VibeVideo(u64),
+    Venturi(u64),
     Resolve(u64),
 }
 
@@ -107,8 +107,8 @@ struct ForeignClip {
 
 impl Importer<'_> {
     fn timeline(&mut self, otio: &Value) {
-        let vibevideo = &otio["metadata"]["vibevideo"];
-        let fps = serde_json::from_value::<Rational>(vibevideo["fps"].clone())
+        let venturi = &otio["metadata"]["venturi"];
+        let fps = serde_json::from_value::<Rational>(venturi["fps"].clone())
             .ok()
             .or_else(|| otio["global_start_time"]["rate"].as_f64().map(Rational::from_fps))
             .or_else(|| first_item_rate(otio).map(Rational::from_fps))
@@ -173,7 +173,7 @@ impl Importer<'_> {
         }
         self.link_foreign_clips(&mut tracks, &foreign);
 
-        let resolution = serde_json::from_value::<(u32, u32)>(vibevideo["resolution"].clone())
+        let resolution = serde_json::from_value::<(u32, u32)>(venturi["resolution"].clone())
             .ok()
             .or_else(|| self.first_video_resolution(&tracks))
             .unwrap_or((1920, 1080));
@@ -186,7 +186,7 @@ impl Importer<'_> {
     }
 
     /// Durata occupata sulla track (anche se la clip non viene importata)
-    /// e la clip, con `true` se non viene da VibeVideo.
+    /// e la clip, con `true` se non viene da Venturi.
     #[allow(clippy::too_many_arguments)]
     fn clip(
         &mut self,
@@ -220,8 +220,8 @@ impl Importer<'_> {
             self.warn(OtioWarning::ClipShorterThanAFrame { clip: name.to_owned() });
             return (duration, None);
         }
-        let vibevideo = &item["metadata"]["vibevideo"];
-        let mut effects = serde_json::from_value::<EffectStack>(vibevideo["effects"].clone())
+        let venturi = &item["metadata"]["venturi"];
+        let mut effects = serde_json::from_value::<EffectStack>(venturi["effects"].clone())
             .unwrap_or_default();
         // Secondi nel media all'inizio della clip e fps del media, per
         // tradurre i keyframe degli effetti di altri editor.
@@ -284,14 +284,14 @@ impl Importer<'_> {
             self.effect(effect, &mut effects, media_start, keyframe_rate);
         }
 
-        let group_key = vibevideo["linked_group"]
+        let group_key = venturi["linked_group"]
             .as_u64()
-            .map(GroupKey::VibeVideo)
+            .map(GroupKey::Venturi)
             .or_else(|| resolve["Link Group ID"].as_u64().map(GroupKey::Resolve));
         let is_foreign = group_key.is_none();
         let linked_group = group_key
             .map(|key| *groups.entry(key).or_insert_with(|| self.project.alloc_link_group_id()));
-        let audio_stream_index = vibevideo["audio_stream_index"]
+        let audio_stream_index = venturi["audio_stream_index"]
             .as_u64()
             .or_else(|| resolve_source_track(resolve))
             .unwrap_or(0) as usize;
@@ -572,10 +572,10 @@ mod tests {
         (clip.timeline_start, clip.source_offset, clip.timeline_len, clip.rate)
     }
 
-    /// Export e import di un progetto VibeVideo restituiscono le stesse
+    /// Export e import di un progetto Venturi restituiscono le stesse
     /// clip, anche divise a metà frame sorgente.
     #[test]
-    fn a_vibevideo_export_imports_back_unchanged() {
+    fn a_venturi_export_imports_back_unchanged() {
         let media_meta = meta(Rational::new(30_000, 1001), 1000);
         let mut project = Project::default();
         let media = project.media_pool.insert(MediaItem {

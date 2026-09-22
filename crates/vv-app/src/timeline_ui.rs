@@ -1508,7 +1508,7 @@ pub fn show_timeline(
 ) -> (Option<(TimelineDrag, FrameIdx, MediaDropTarget)>, Option<TimelineId>) {
     let mut media_drop = None;
     // Doppio click su una compound clip: il chiamante (main.rs) la apre
-    // come una sua propria timeline (vedi `VibeVideoApp::enter_compound_timeline`).
+    // come una sua propria timeline (vedi `VenturiApp::enter_compound_timeline`).
     let mut enter_compound = None;
 
     // Alt+scroll/pinch zooma solo col puntatore sulla timeline.
