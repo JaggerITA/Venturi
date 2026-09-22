@@ -129,13 +129,15 @@ fn clip_to_otio(
                 }),
             ),
         },
+        // Resolve names a generator clip after its kind: ours used to carry
+        // the colour or the text, which its importer does not expect.
         ClipSource::SolidColor => {
             let color = clip.effects.color.as_ref().map_or(Rgba::BLACK, |c| c.default);
-            ("Colore".to_owned(), generator::solid_color(color))
+            ("Solid Color".to_owned(), generator::solid_color(color))
         }
         ClipSource::Text => {
             let title = clip.effects.title.clone().unwrap_or_default();
-            (title.content.clone(), generator::text(&title, frame))
+            ("Text".to_owned(), generator::text(&title, frame))
         }
     };
 
@@ -156,6 +158,7 @@ fn clip_to_otio(
         "markers": [],
         "enabled": !clip.disabled,
         "metadata": {
+            "Resolve_OTIO": {},
             "venturi": {
                 "effects": clip.effects,
                 "linked_group": clip.linked_group,
