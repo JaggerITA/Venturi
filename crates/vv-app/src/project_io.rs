@@ -392,7 +392,8 @@ impl VenturiApp {
     }
 
     pub(crate) fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
-        self.project_error = vv_core::export_otio(&self.project, timeline_id, path)
+        let measure = |title: &vv_core::TitleParams| vv_render::text::background_box(title);
+        self.project_error = vv_core::export_otio(&self.project, timeline_id, path, Some(&measure))
             .err()
             .map(|e| t!("project.otio_export_failed", error = e).into_owned());
     }

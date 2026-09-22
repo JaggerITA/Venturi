@@ -873,7 +873,7 @@ mod tests {
         let mut split = crate::SplitClip::new(timeline_id, 0, ClipId(1), 500);
         crate::Command::apply(&mut split, &mut project);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let mut probe = probe_from(vec![("/tmp/a.mp4", media_meta.clone())]);
         let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
@@ -941,7 +941,7 @@ mod tests {
         project.timelines[timeline_id].tracks[0].clips.push(color);
         project.timelines[timeline_id].tracks[1].clips.push(text);
 
-        let mut otio = timeline_to_otio(&project, timeline_id);
+        let mut otio = timeline_to_otio(&project, timeline_id, None);
         for track in otio["tracks"]["children"].as_array_mut().unwrap() {
             for clip in track["children"].as_array_mut().unwrap() {
                 clip["metadata"]["venturi"] = json!(null);
@@ -1313,7 +1313,7 @@ mod tests {
         let mut split = crate::SplitClip::new(timeline_id, 1, ClipId(1), 77);
         crate::Command::apply(&mut split, &mut project);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let mut probe = probe_from(vec![("/tmp/voce.wav", audio_only_meta())]);
         let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);

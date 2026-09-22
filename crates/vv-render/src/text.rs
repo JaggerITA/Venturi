@@ -147,26 +147,7 @@ pub fn render_title(
     mask
 }
 
-fn with_opacity(color: Rgba, opacity: f32) -> Rgba {
-    Rgba {
-        a: color.a * (opacity / 100.0).clamp(0.0, 1.0),
-        ..color
-    }
-}
-
-fn rasterize(
-    font_system: &mut FontSystem,
-    swash: &mut SwashCache,
-    params: &TitleParams,
-    timeline_size: (u32, u32),
-    output_size: (u32, u32),
-) -> TitleRender {
-    let (width, height) = (output_size.0.max(1), output_size.1.max(1));
-    let mut data = vec![0u8; (width * height) as usize];
-    let scale = width as f32 / timeline_size.0.max(1) as f32;
-    let font_size = (params.size * scale).max(1.0);
-    let line_height = (font_size * 1.2 + params.line_spacing * scale).max(1.0);
-
+fn text_attrs(params: &TitleParams) -> (Attrs<'_>, Align) {
     let family = if params.font_family.is_empty() {
         Family::SansSerif
     } else {
@@ -187,14 +168,23 @@ fn rasterize(
         TextAlign::Right => Align::Right,
         TextAlign::Justify => Align::Justified,
     };
+    (attrs, align)
+}
 
-    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+/// Shapes the text into `buffer` and returns the size of the block.
+/// Without a width, alignment has no reference: the layout is redone on the
+/// longest line. The extra pixel keeps rounding from wrapping precisely
+/// that line.
+fn shape_block(
+    font_system: &mut FontSystem,
+    buffer: &mut Buffer,
+    params: &TitleParams,
+    attrs: &Attrs,
+    align: Align,
+) -> (f32, f32) {
     buffer.set_size(None, None);
-    buffer.set_text(&params.display_text(), &attrs, Shaping::Advanced, Some(align));
+    buffer.set_text(&params.display_text(), attrs, Shaping::Advanced, Some(align));
     buffer.shape_until_scroll(font_system, false);
-    // Without a width, alignment has no reference: the layout is redone on
-    // the longest line. The extra pixel keeps rounding from wrapping
-    // precisely that line.
     let block_w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
     buffer.set_size(Some(block_w + 1.0), None);
     buffer.shape_until_scroll(font_system, false);
@@ -202,6 +192,48 @@ fn rasterize(
         .layout_runs()
         .map(|r| r.line_top + r.line_height)
         .fold(0.0, f32::max);
+    (block_w, block_h)
+}
+
+/// Size in timeline pixels of the rectangle the background covers on the
+/// axes left at 0, which mean "around the text" (see `TitleBackground`).
+/// The OTIO export needs it: Resolve has no such shorthand.
+pub fn background_box(params: &TitleParams) -> (f32, f32) {
+    let mut state = lock();
+    let TextState { font_system, .. } = &mut *state;
+    let font_size = params.size.max(1.0);
+    let line_height = (font_size * 1.2 + params.line_spacing).max(1.0);
+    let (attrs, align) = text_attrs(params);
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    let (block_w, block_h) = shape_block(font_system, &mut buffer, params, &attrs, align);
+    let padding = font_size * 0.2 * 2.0;
+    (block_w + padding, block_h + padding)
+}
+
+fn with_opacity(color: Rgba, opacity: f32) -> Rgba {
+    Rgba {
+        a: color.a * (opacity / 100.0).clamp(0.0, 1.0),
+        ..color
+    }
+}
+
+fn rasterize(
+    font_system: &mut FontSystem,
+    swash: &mut SwashCache,
+    params: &TitleParams,
+    timeline_size: (u32, u32),
+    output_size: (u32, u32),
+) -> TitleRender {
+    let (width, height) = (output_size.0.max(1), output_size.1.max(1));
+    let mut data = vec![0u8; (width * height) as usize];
+    let scale = width as f32 / timeline_size.0.max(1) as f32;
+    let font_size = (params.size * scale).max(1.0);
+    let line_height = (font_size * 1.2 + params.line_spacing * scale).max(1.0);
+
+    let (attrs, align) = text_attrs(params);
+
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    let (block_w, block_h) = shape_block(font_system, &mut buffer, params, &attrs, align);
 
     let anchor_x = width as f32 / 2.0 + params.position[0] * scale;
     let anchor_y = height as f32 / 2.0 - params.position[1] * scale;

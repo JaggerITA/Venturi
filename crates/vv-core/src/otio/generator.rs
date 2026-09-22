@@ -6,6 +6,7 @@
 //! Colours travel as `#rrggbb` and lose their alpha, and the lengths that
 //! are ours in timeline pixels become fractions of the frame.
 
+use super::MeasureTitle;
 use crate::model::{
     HAnchor, Rgba, TextAlign, TitleBackground, TitleParams, TitleShadow, VAnchor,
 };
@@ -25,12 +26,12 @@ pub(super) fn solid_color(color: Rgba) -> Value {
     )]))
 }
 
-pub(super) fn text(title: &TitleParams, frame: (f32, f32)) -> Value {
+pub(super) fn text(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> Value {
     reference("Text", "Rich", json!([
         rich_text(title, frame),
         drop_shadow(&title.shadow, frame),
         stroke(),
-        background(&title.background, frame),
+        background(title, frame, measure),
     ]))
 }
 
@@ -65,7 +66,15 @@ fn stroke() -> Value {
     ]))
 }
 
-fn background(background: &TitleBackground, frame: (f32, f32)) -> Value {
+/// A width or a height of 0 means "around the text" for us and literally
+/// nothing for Resolve, so the measured box takes its place.
+fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> Value {
+    let background = &title.background;
+    let box_size = measure.map(|measure| measure(title)).unwrap_or(frame);
+    let axis = |value: f32, measured: f32, frame: f32| match value > 0.0 {
+        true => value,
+        false => (measured / frame).clamp(0.0, 2.0),
+    };
     block("Background", "Background", 27, 1, background.enabled, json!([
         parameter("backgroundColor", hex(background.color), json!("#000000"), "Color"),
         parameter("backgroundOutlineColor", hex(background.outline_color), json!("#000000"), "Color"),
@@ -75,8 +84,18 @@ fn background(background: &TitleBackground, frame: (f32, f32)) -> Value {
             json!(0),
             [0.0, 30.0],
         ),
-        animatable("backgroundWidth", json!(background.width), json!(0.9), [0.0, 2.0]),
-        animatable("backgroundHeight", json!(background.height), json!(0.0), [0.0, 2.0]),
+        animatable(
+            "backgroundWidth",
+            json!(axis(background.width, box_size.0, frame.0)),
+            json!(0.9),
+            [0.0, 2.0],
+        ),
+        animatable(
+            "backgroundHeight",
+            json!(axis(background.height, box_size.1, frame.1)),
+            json!(0.0),
+            [0.0, 2.0],
+        ),
         animatable(
             "backgroundCornerRadius",
             json!(background.corner_radius),

@@ -5,7 +5,7 @@
 //! Resolve does not read) ends up in `metadata.venturi`; the transform and
 //! the transitions also travel in Resolve's own namespace (see `resolve`).
 
-use super::OtioError;
+use super::{MeasureTitle, OtioError};
 use super::generator;
 use super::resolve::{self, Scale};
 use crate::FadeEdge;
@@ -15,13 +15,22 @@ use crate::model::{
 use serde_json::{Value, json};
 use std::path::Path;
 
-pub fn export_otio(project: &Project, timeline: TimelineId, path: &Path) -> Result<(), OtioError> {
-    let contents = serde_json::to_string_pretty(&timeline_to_otio(project, timeline))?;
+pub fn export_otio(
+    project: &Project,
+    timeline: TimelineId,
+    path: &Path,
+    measure: Option<MeasureTitle>,
+) -> Result<(), OtioError> {
+    let contents = serde_json::to_string_pretty(&timeline_to_otio(project, timeline, measure))?;
     std::fs::write(path, contents)?;
     Ok(())
 }
 
-pub fn timeline_to_otio(project: &Project, timeline_id: TimelineId) -> Value {
+pub fn timeline_to_otio(
+    project: &Project,
+    timeline_id: TimelineId,
+    measure: Option<MeasureTitle>,
+) -> Value {
     let timeline = &project.timelines[timeline_id];
     let fps = timeline.fps;
     let tracks: Vec<Value> = timeline
@@ -29,7 +38,7 @@ pub fn timeline_to_otio(project: &Project, timeline_id: TimelineId) -> Value {
         .iter()
         .enumerate()
         .map(|(i, track)| {
-            track_to_otio(project, track, timeline.track_label(i), fps, timeline.resolution)
+            track_to_otio(project, track, timeline.track_label(i), fps, timeline.resolution, measure)
         })
         .collect();
 
@@ -66,6 +75,7 @@ fn track_to_otio(
     name: String,
     fps: Rational,
     resolution: (u32, u32),
+    measure: Option<MeasureTitle>,
 ) -> Value {
     let mut children = Vec::new();
     let mut cursor = 0;
@@ -76,7 +86,7 @@ fn track_to_otio(
         if let Some(transition) = &clip.effects.transition_in {
             children.push(resolve::transition_to_otio(transition, FadeEdge::In, fps));
         }
-        children.push(clip_to_otio(project, clip, track.kind, fps, resolution));
+        children.push(clip_to_otio(project, clip, track.kind, fps, resolution, measure));
         if let Some(transition) = &clip.effects.transition_out {
             children.push(resolve::transition_to_otio(transition, FadeEdge::Out, fps));
         }
@@ -104,6 +114,7 @@ fn clip_to_otio(
     kind: TrackKind,
     fps: Rational,
     resolution: (u32, u32),
+    measure: Option<MeasureTitle>,
 ) -> Value {
     let frame = (resolution.0 as f32, resolution.1 as f32);
     let (name, media_reference) = match &clip.source {
@@ -140,7 +151,7 @@ fn clip_to_otio(
         }
         ClipSource::Text => {
             let title = clip.effects.title.clone().unwrap_or_default();
-            ("Text".to_owned(), generator::text(&title, frame))
+            ("Text".to_owned(), generator::text(&title, frame, measure))
         }
     };
 
@@ -268,7 +279,7 @@ mod tests {
         tl.tracks[1].clips.push(color);
         tl.tracks[2].muted = true;
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let tracks = otio["tracks"]["children"].as_array().unwrap();
         let names: Vec<&str> = tracks.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["V1", "V2", "A1"]);
@@ -311,7 +322,7 @@ mod tests {
         let mut split = crate::SplitClip::new(timeline_id, 0, ClipId(1), 500);
         crate::Command::apply(&mut split, &mut project);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let v1 = otio["tracks"]["children"][0]["children"].as_array().unwrap();
         assert_eq!(v1.len(), 2, "nessun gap tra le due metà");
         let start = |i: usize| v1[i]["source_range"]["start_time"]["value"].as_f64().unwrap();
@@ -341,7 +352,7 @@ mod tests {
         clip.fade_in = 12;
         project.timelines[timeline_id].tracks[0].clips.push(clip);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let effects = otio["tracks"]["children"][0]["children"][0]["effects"].as_array().unwrap();
         let named = |name: &str| {
             effects
@@ -413,10 +424,57 @@ mod tests {
             .upsert(40, 2.0, Interpolation::Linear);
         project.timelines[timeline_id].tracks[0].clips.push(clip);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let keys = &otio["tracks"]["children"][0]["children"][0]["effects"][0]["metadata"]
             ["Resolve_OTIO"]["Parameters"][0]["Key Frames"];
         assert_eq!(keys["10"]["Value"], 2.0, "frame 40 della sorgente, decimo della clip");
+    }
+
+    /// "Around the text" is a shorthand we have and Resolve does not: the
+    /// axes left at 0 travel as the fraction of the frame the box really
+    /// covers.
+    #[test]
+    fn a_background_around_the_text_becomes_an_explicit_size() {
+        let (mut project, timeline_id, _) = project();
+        let mut clip =
+            Clip::from_source_range(ClipId(1), ClipSource::Text, 0, 60, 0, Rational::one());
+        let mut title = TitleParams::default();
+        title.background.enabled = true;
+        title.background.width = 0.0;
+        title.background.height = 0.0;
+        clip.effects.title = Some(title);
+        project.timelines[timeline_id].tracks[0].clips.push(clip);
+
+        let measure = |_: &TitleParams| (480.0, 216.0);
+        let otio = timeline_to_otio(&project, timeline_id, Some(&measure));
+        let blocks = &otio["tracks"]["children"][0]["children"][0]["media_references"]
+            ["DEFAULT_MEDIA"]["parameters"]["Resolve_OTIO"];
+        let background = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["Effect Name"] == "Background")
+            .unwrap();
+        let value = |id: &str| {
+            background["Parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["Parameter ID"] == id)
+                .unwrap()["Parameter Value"]
+                .as_f64()
+                .unwrap()
+        };
+        assert_eq!(value("backgroundWidth"), 0.25, "480 px su 1920");
+        assert!((value("backgroundHeight") - 0.2).abs() < 1e-6, "216 px su 1080");
+
+        // Without a measurement there is nothing better than the frame.
+        let otio = timeline_to_otio(&project, timeline_id, None);
+        let background = otio["tracks"]["children"][0]["children"][0]["media_references"]
+            ["DEFAULT_MEDIA"]["parameters"]["Resolve_OTIO"][3]["Parameters"][4]["Parameter Value"]
+            .as_f64()
+            .unwrap();
+        assert_eq!(background, 1.0);
     }
 
     /// Resolve reads the parameters of a generator only from a file that
@@ -425,7 +483,7 @@ mod tests {
     #[test]
     fn marks_the_file_as_written_by_resolve() {
         let (project, timeline_id, _) = project();
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         assert_eq!(otio["metadata"]["Resolve_OTIO"]["Resolve OTIO Meta Version"], "1.0");
         for track in otio["tracks"]["children"].as_array().unwrap() {
             assert_eq!(track["metadata"]["Resolve_OTIO"]["Locked"], false);
@@ -465,7 +523,7 @@ mod tests {
         clip.effects.transform.track_mut(TransformParam::PositionX).default = -700.0;
         project.timelines[timeline_id].tracks[0].clips.push(clip);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let pan = otio["tracks"]["children"][0]["children"][0]["effects"][0]["metadata"]
             ["Resolve_OTIO"]["Parameters"][0]["Parameter Value"]
             .as_f64()
@@ -492,7 +550,7 @@ mod tests {
         });
         project.timelines[timeline_id].tracks[0].clips.push(clip);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let children = otio["tracks"]["children"][0]["children"].as_array().unwrap();
         assert_eq!(children.len(), 2);
         let transition = &children[0];
@@ -525,7 +583,7 @@ mod tests {
         clip.effects.gain_db = Keyframed::constant(-6.0);
         project.timelines[timeline_id].tracks[2].clips.push(clip);
 
-        let otio = timeline_to_otio(&project, timeline_id);
+        let otio = timeline_to_otio(&project, timeline_id, None);
         let meta = &otio["tracks"]["children"][2]["children"][0]["metadata"]["venturi"];
         assert_eq!(meta["audio_stream_index"], 1);
         assert_eq!(meta["linked_group"], 7);
