@@ -2240,11 +2240,12 @@ pub fn show_timeline(
                             egui::Stroke::new(1.0, egui::Color32::from_gray(15)),
                             egui::StrokeKind::Inside,
                         );
-                        painter.text(
-                            clip_rect.left_top() + egui::vec2(4.0, 2.0),
-                            egui::Align2::LEFT_TOP,
+                        let label_pos = clip_rect.left_top() + egui::vec2(4.0, 2.0);
+                        paint_clip_label(
+                            &painter,
                             &visual.label,
-                            egui::FontId::proportional(12.0),
+                            label_pos,
+                            clip_rect.right() - 4.0 - label_pos.x,
                             egui::Color32::BLACK,
                         );
                     }
@@ -3006,6 +3007,39 @@ fn paint_clip_box(painter: &egui::Painter, clip_rect: egui::Rect, visual: &ClipV
     painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
 }
 
+const LABEL_FONT_SIZE: f32 = 12.0;
+const LINK_ICON_WIDTH: f32 = 16.0;
+/// Sotto questa soglia di caratteri visibili il nome non aiuta a
+/// riconoscere la clip: meglio non disegnarlo affatto.
+const LABEL_MIN_CHARS: usize = 4;
+
+/// Nome troncato entro `max_width`, omesso se non ci stanno almeno
+/// `LABEL_MIN_CHARS` caratteri.
+fn paint_clip_label(
+    painter: &egui::Painter,
+    label: &str,
+    pos: egui::Pos2,
+    max_width: f32,
+    color: egui::Color32,
+) {
+    let font = egui::FontId::proportional(LABEL_FONT_SIZE);
+    let min_text: String = label.chars().take(LABEL_MIN_CHARS).collect();
+    if min_text.is_empty() {
+        return;
+    }
+    let min_width = painter
+        .layout_no_wrap(min_text, font.clone(), color)
+        .size()
+        .x;
+    if max_width < min_width {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width);
+    let galley = painter.layout_job(job);
+    painter.galley(pos, galley, color);
+}
+
 /// Label, "disabled" badge, link icon and veil of the locked
 /// tracks, on top of the waveform.
 fn paint_clip_overlay(
@@ -3025,18 +3059,22 @@ fn paint_clip_overlay(
         paint_disabled_badge(painter, label_pos);
         label_pos.x += DISABLED_BADGE_SIZE + 4.0;
     }
-    painter.text(
-        label_pos,
-        egui::Align2::LEFT_TOP,
+    let label_color = if visual.muted {
+        egui::Color32::from_gray(185)
+    } else {
+        egui::Color32::BLACK
+    };
+    let show_link_icon =
+        visual.clip.linked_group.is_some() && clip_rect.width() > LINK_ICON_WIDTH;
+    let reserved_right = if show_link_icon { LINK_ICON_WIDTH } else { 4.0 };
+    paint_clip_label(
+        painter,
         &visual.label,
-        egui::FontId::proportional(12.0),
-        if visual.muted {
-            egui::Color32::from_gray(185)
-        } else {
-            egui::Color32::BLACK
-        },
+        label_pos,
+        clip_rect.right() - reserved_right - label_pos.x,
+        label_color,
     );
-    if visual.clip.linked_group.is_some() {
+    if show_link_icon {
         // Two hand-drawn rings: on some platforms (Asahi) egui's fonts do not
         // have 🔗.
         let center = clip_rect.right_top() + egui::vec2(-9.0, 8.0);
