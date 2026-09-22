@@ -4,8 +4,7 @@
 //! along the track. A file exported by Venturi comes back identical thanks
 //! to `metadata.venturi`.
 
-use super::OtioError;
-use super::generator;
+use super::{MeasureTitle, OtioError, generator};
 use crate::model::{
     Clip, ClipSource, Ease, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
     MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline, Track, TrackKind,
@@ -46,10 +45,11 @@ pub enum OtioWarning {
 pub fn import_otio(
     path: &Path,
     mut probe: impl FnMut(&Path) -> ProbeResult,
+    measure: Option<MeasureTitle>,
 ) -> Result<OtioImport, OtioError> {
     let value: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
     let base_dir = path.parent().unwrap_or(Path::new("."));
-    project_from_otio(&value, base_dir, &mut probe)
+    project_from_otio(&value, base_dir, &mut probe, measure)
 }
 
 /// `base_dir` resolves relative `target_url`s.
@@ -57,6 +57,7 @@ pub fn project_from_otio(
     value: &Value,
     base_dir: &Path,
     probe: &mut dyn FnMut(&Path) -> ProbeResult,
+    measure: Option<MeasureTitle>,
 ) -> Result<OtioImport, OtioError> {
     let mut timelines = Vec::new();
     collect_timelines(value, &mut timelines);
@@ -70,6 +71,7 @@ pub fn project_from_otio(
         ignored_effects: BTreeMap::new(),
         base_dir,
         probe,
+        measure,
     };
     for timeline in timelines {
         importer.timeline(timeline);
@@ -95,6 +97,7 @@ struct Importer<'a> {
     ignored_effects: BTreeMap<(String, bool), usize>,
     base_dir: &'a Path,
     probe: &'a mut dyn FnMut(&Path) -> ProbeResult,
+    measure: Option<MeasureTitle<'a>>,
 }
 
 /// Space of linked group numbers in the file: ours and Resolve's must not
@@ -308,7 +311,7 @@ impl Importer<'_> {
             "GeneratorReference" if reference["generator_kind"] == "Rich" => {
                 if effects.title.is_none() {
                     let frame = self.timeline_resolution(venturi, &ClipSource::Text);
-                    effects.title = Some(generator::read_text(reference, frame));
+                    effects.title = Some(generator::read_text(reference, frame, self.measure));
                 }
                 (ClipSource::Text, Rational::one(), 0, None)
             }
@@ -875,7 +878,7 @@ mod tests {
 
         let otio = timeline_to_otio(&project, timeline_id, None);
         let mut probe = probe_from(vec![("/tmp/a.mp4", media_meta.clone())]);
-        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+        let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
 
         let original = &project.timelines[timeline_id];
@@ -912,6 +915,7 @@ mod tests {
     /// Qt rich text and the colour from the hex.
     #[test]
     fn reads_back_the_generators_without_our_metadata() {
+        let measure = |_: &crate::model::TitleParams| (480.0, 216.0);
         let mut project = Project::default();
         let timeline_id = project.timelines.insert(Timeline {
             name: "Generatori".into(),
@@ -935,20 +939,28 @@ mod tests {
             align: crate::model::TextAlign::Left,
             anchor: (crate::model::HAnchor::Right, crate::model::VAnchor::Bottom),
             position: [192.0, -108.0],
+            background: crate::model::TitleBackground {
+                enabled: true,
+                width: 0.25,
+                height: 0.2,
+                corner_radius: 0.1,
+                ..Default::default()
+            },
             ..Default::default()
         };
         text.effects.title = Some(title.clone());
         project.timelines[timeline_id].tracks[0].clips.push(color);
         project.timelines[timeline_id].tracks[1].clips.push(text);
 
-        let mut otio = timeline_to_otio(&project, timeline_id, None);
+        let mut otio = timeline_to_otio(&project, timeline_id, Some(&measure));
         for track in otio["tracks"]["children"].as_array_mut().unwrap() {
             for clip in track["children"].as_array_mut().unwrap() {
                 clip["metadata"]["venturi"] = json!(null);
             }
         }
         let mut probe = probe_from(vec![]);
-        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+        let imported =
+            project_from_otio(&otio, Path::new("/"), &mut probe, Some(&measure)).unwrap();
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
 
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
@@ -963,6 +975,11 @@ mod tests {
         assert_eq!(back.align, crate::model::TextAlign::Left);
         assert_eq!(back.anchor, title.anchor, "indice 8 della griglia 3x3");
         assert!((back.position[0] - 192.0).abs() < 0.01 && (back.position[1] + 108.0).abs() < 0.01);
+        assert!(
+            (back.background.corner_radius - title.background.corner_radius).abs() < 1e-4,
+            "il raggio torna nelle nostre unità: {}",
+            back.background.corner_radius
+        );
     }
 
     /// A clip exported by Resolve: the transform lives in `Effect.1` items
@@ -1051,7 +1068,7 @@ mod tests {
             }]},
         });
         let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
-        let imported = project_from_otio(&otio, Path::new("/media"), &mut probe).unwrap();
+        let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
         assert_eq!(
             imported.warnings,
             vec![OtioWarning::SpeedNotApplied { clip: "uno".into(), percent: 200 }],
@@ -1150,7 +1167,7 @@ mod tests {
             }],
         });
         let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
-        let imported = project_from_otio(&otio, Path::new("/media"), &mut probe).unwrap();
+        let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
 
         assert_eq!(imported.warnings.len(), 2, "{:?}", imported.warnings);
         assert_eq!(imported.warnings[0], OtioWarning::ClipDisabled { clip: "spenta".into() });
@@ -1252,7 +1269,7 @@ mod tests {
             ]},
         });
         let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
-        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+        let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
 
         assert_eq!(imported.warnings, [OtioWarning::EffectIgnored { effect: "Zoom".into(), clips: 2 }]);
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
@@ -1315,7 +1332,7 @@ mod tests {
 
         let otio = timeline_to_otio(&project, timeline_id, None);
         let mut probe = probe_from(vec![("/tmp/voce.wav", audio_only_meta())]);
-        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+        let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
         assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
         let (_, back) = imported.project.timelines.iter().next().unwrap();
         let spans = |t: &Timeline| t.tracks[1].clips.iter().map(span).collect::<Vec<_>>();
@@ -1341,7 +1358,7 @@ mod tests {
             "global_start_time": rt(0.0, 25.0),
             "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [track("Video"), track("Audio")] },
         });
-        let imported = project_from_otio(&foreign, Path::new("/"), &mut probe).unwrap();
+        let imported = project_from_otio(&foreign, Path::new("/"), &mut probe, None).unwrap();
         assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
         assert!(matches!(imported.warnings[0], OtioWarning::AudioOnlyOnVideoTrack { .. }));
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
@@ -1356,7 +1373,7 @@ mod tests {
     fn a_file_without_timelines_is_an_error() {
         let mut probe = probe_from(vec![]);
         let not_a_timeline = json!({ "OTIO_SCHEMA": "Clip.2" });
-        let result = project_from_otio(&not_a_timeline, Path::new("/"), &mut probe);
+        let result = project_from_otio(&not_a_timeline, Path::new("/"), &mut probe, None);
         assert!(matches!(result, Err(OtioError::Format(_))));
     }
 

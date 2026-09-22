@@ -70,11 +70,13 @@ fn stroke() -> Value {
 /// nothing for Resolve, so the measured box takes its place.
 fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> Value {
     let background = &title.background;
-    let box_size = measure.map(|measure| measure(title)).unwrap_or(frame);
-    let axis = |value: f32, measured: f32, frame: f32| match value > 0.0 {
-        true => value,
-        false => (measured / frame).clamp(0.0, 2.0),
-    };
+    let measured = measure.map(|measure| measure(title)).unwrap_or(frame);
+    // The rectangle Resolve will draw, in timeline pixels: what the radius
+    // and the two fractions both have to agree on.
+    let box_size = (
+        resolved(background.width, measured.0, frame.0),
+        resolved(background.height, measured.1, frame.1),
+    );
     block("Background", "Background", 27, 1, background.enabled, json!([
         parameter("backgroundColor", hex(background.color), json!("#000000"), "Color"),
         parameter("backgroundOutlineColor", hex(background.outline_color), json!("#000000"), "Color"),
@@ -84,27 +86,47 @@ fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTit
             json!(0),
             [0.0, 30.0],
         ),
-        animatable(
-            "backgroundWidth",
-            json!(axis(background.width, box_size.0, frame.0)),
-            json!(0.9),
-            [0.0, 2.0],
-        ),
-        animatable(
-            "backgroundHeight",
-            json!(axis(background.height, box_size.1, frame.1)),
-            json!(0.0),
-            [0.0, 2.0],
-        ),
+        animatable("backgroundWidth", json!(box_size.0 / frame.0), json!(0.9), [0.0, 2.0]),
+        animatable("backgroundHeight", json!(box_size.1 / frame.1), json!(0.0), [0.0, 2.0]),
         animatable(
             "backgroundCornerRadius",
-            json!(background.corner_radius),
+            json!(corner_radius(background.corner_radius, box_size, frame.1)),
             json!(0.037_037_037_037_037_035),
             [0.0, 1.0],
         ),
         point("backgroundCenter", fraction(background.center, frame), json!([0.0, 0.0])),
         animatable("backgroundOpacity", json!(background.opacity.round() as i64), json!(50), [0.0, 100.0]),
     ]))
+}
+
+/// A side of the rectangle in timeline pixels: a fraction of the frame,
+/// or the measured text box when left at 0.
+fn resolved(fraction: f32, measured: f32, frame: f32) -> f32 {
+    match fraction > 0.0 {
+        true => (fraction * frame).min(frame * 2.0),
+        false => measured,
+    }
+}
+
+/// Ours is a fraction of the shorter side of the rectangle, Resolve's one
+/// of the height of the frame: the same number would round a small box into
+/// a lozenge.
+fn corner_radius(radius: f32, box_size: (f32, f32), frame_height: f32) -> f32 {
+    (radius.clamp(0.0, 0.5) * box_size.0.min(box_size.1) / frame_height).clamp(0.0, 1.0)
+}
+
+/// Back from the frame to the rectangle, for a title that comes from
+/// Resolve.
+fn corner_radius_from_resolve(
+    radius: f32,
+    box_size: (f32, f32),
+    frame_height: f32,
+) -> f32 {
+    let shorter = box_size.0.min(box_size.1);
+    match shorter > 0.0 {
+        true => (radius * frame_height / shorter).clamp(0.0, 0.5),
+        false => radius,
+    }
 }
 
 fn reference(name: &str, kind: &str, blocks: Value) -> Value {
@@ -273,7 +295,11 @@ pub(super) fn read_solid_color(reference: &Value) -> Option<Rgba> {
 
 /// The title of a `Rich` generator, with what we cannot read left at its
 /// default.
-pub(super) fn read_text(reference: &Value, frame: (f32, f32)) -> TitleParams {
+pub(super) fn read_text(
+    reference: &Value,
+    frame: (f32, f32),
+    measure: Option<MeasureTitle>,
+) -> TitleParams {
     let mut title = TitleParams::default();
     for block in blocks(reference) {
         let enabled = block["Enabled"] != false;
@@ -292,6 +318,15 @@ pub(super) fn read_text(reference: &Value, frame: (f32, f32)) -> TitleParams {
             _ => {}
         }
     }
+    // The radius refers to the rectangle, which is only known once the rest
+    // of the title is.
+    let measured = measure.map(|measure| measure(&title)).unwrap_or(frame);
+    let box_size = (
+        resolved(title.background.width, measured.0, frame.0),
+        resolved(title.background.height, measured.1, frame.1),
+    );
+    title.background.corner_radius =
+        corner_radius_from_resolve(title.background.corner_radius, box_size, frame.1);
     title
 }
 
