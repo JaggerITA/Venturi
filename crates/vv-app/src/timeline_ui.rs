@@ -4,6 +4,7 @@
 //! selection mutates `TimelineState`. Drawn with the painter: for a dense
 //! grid of rectangles it costs less than nested widgets.
 
+use egui::emath::GuiRounding as _;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
@@ -2231,15 +2232,21 @@ pub fn show_timeline(
                                 (visual.clip.timeline_len as f32 * px_per_frame).max(2.0),
                                 ROW_HEIGHT - 4.0,
                             ),
-                        );
+                        )
+                        .round_to_pixels(ui.pixels_per_point());
                         let painter = track_painter(visual.track_index);
-                        painter.rect_filled(clip_rect, 4.0, visual.color);
-                        painter.rect_stroke(
-                            clip_rect,
-                            4.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(15)),
-                            egui::StrokeKind::Inside,
-                        );
+                        let corner = clip_corner_radius(clip_rect);
+                        painter.rect_filled(clip_rect, corner, visual.color);
+                        if clip_rect.width() >= MIN_WIDTH_FOR_STROKE {
+                            painter.rect_stroke(
+                                clip_rect,
+                                corner,
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(15)),
+                                egui::StrokeKind::Inside,
+                            );
+                        } else {
+                            paint_clip_separator(&painter, clip_rect);
+                        }
                         let label_pos = clip_rect.left_top() + egui::vec2(4.0, 2.0);
                         paint_clip_label(
                             &painter,
@@ -2283,10 +2290,14 @@ pub fn show_timeline(
                         None => origin.y + row_y[visual.track_index],
                     };
                     let w = (display_len as f32 * px_per_frame).max(2.0);
+                    // Snap ai pixel: senza, i bordi delle clip fitte cadono a
+                    // cavallo di due pixel e l'antialiasing li rende di
+                    // spessore irregolare (effetto seghettato).
                     let clip_rect = egui::Rect::from_min_size(
                         egui::pos2(x, y + 2.0),
                         egui::vec2(w, ROW_HEIGHT - 4.0),
-                    );
+                    )
+                    .round_to_pixels(ui.pixels_per_point());
 
                     let id = ui.id().with("clip").with(visual.clip.id.0);
                     let sense = if visual.locked {
@@ -3003,10 +3014,39 @@ fn paint_clip_box(painter: &egui::Painter, clip_rect: egui::Rect, visual: &ClipV
     } else {
         visual.color
     };
-    painter.rect_filled(clip_rect, 4.0, fill);
-    painter.rect_stroke(clip_rect, 4.0, stroke, egui::StrokeKind::Inside);
+    let corner = clip_corner_radius(clip_rect);
+    painter.rect_filled(clip_rect, corner, fill);
+    // Su clip strettissime (zoom out molto indietro) il bordo mangerebbe
+    // tutto il colore: si tiene solo quello, più informativo, della
+    // selezione.
+    if is_selected || clip_rect.width() >= MIN_WIDTH_FOR_STROKE {
+        painter.rect_stroke(clip_rect, corner, stroke, egui::StrokeKind::Inside);
+    } else {
+        paint_clip_separator(painter, clip_rect);
+    }
 }
 
+/// Riga scura di un pixel esatto sul bordo destro: su clip più strette
+/// del bordo completo serve solo a far vedere dove finisce la clip.
+fn paint_clip_separator(painter: &egui::Painter, clip_rect: egui::Rect) {
+    let px = 1.0 / painter.pixels_per_point();
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(clip_rect.right() - px, clip_rect.top()),
+            clip_rect.max,
+        ),
+        0.0,
+        egui::Color32::from_gray(15),
+    );
+}
+
+/// Angoli arrotondati solo finché la clip è abbastanza larga: sotto,
+/// il raggio deformerebbe l'intero rettangolo.
+fn clip_corner_radius(clip_rect: egui::Rect) -> f32 {
+    (clip_rect.width() / 2.0).min(4.0)
+}
+
+const MIN_WIDTH_FOR_STROKE: f32 = 4.0;
 const LABEL_FONT_SIZE: f32 = 12.0;
 const LINK_ICON_WIDTH: f32 = 16.0;
 /// Sotto questa soglia di caratteri visibili il nome non aiuta a
