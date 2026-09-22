@@ -57,6 +57,12 @@ pub(crate) struct ExportUiState {
 
 /// All the files under `base_dir` by name, breadth-first: on equal names the
 /// least nested one wins. Unreadable directories are skipped.
+/// Absolute, symlink-free form of `path`, or `path` itself if the file is
+/// not reachable (removed media must still compare equal to itself).
+fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
     let mut index = HashMap::new();
     let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
@@ -81,6 +87,12 @@ pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsSt
 
 impl VenturiApp {
     pub(crate) fn import_media(&mut self, path: PathBuf) {
+        if let Some(existing) = self.media_with_path(&path) {
+            self.import_warnings.clear();
+            self.preview_media(existing);
+            self.media_pool_state.select_only([existing]);
+            return;
+        }
         match self.add_media_to_pool(path) {
             Ok(media_id) => {
                 self.import_warnings.clear();
@@ -101,6 +113,10 @@ impl VenturiApp {
         }
         if self.pending_import.is_some() {
             self.import_queue.extend(paths);
+            return;
+        }
+        let paths = self.without_media_already_in_pool(paths);
+        if paths.is_empty() {
             return;
         }
         self.import_warnings.clear();
@@ -160,6 +176,30 @@ impl VenturiApp {
             let (done, total) = p.worker.progress();
             (done, total + self.import_queue.len())
         })
+    }
+
+    /// The media in the pool that points at `path`, if any. Paths are
+    /// canonicalized so that symlinks and `..` do not import a duplicate.
+    pub(crate) fn media_with_path(&self, path: &Path) -> Option<MediaId> {
+        let target = canonical_path(path);
+        self.project
+            .media_pool
+            .iter()
+            .find(|(_, item)| item.compound.is_none() && canonical_path(&item.path) == target)
+            .map(|(id, _)| id)
+    }
+
+    /// Drops the paths already in the pool and the duplicates inside the
+    /// batch itself.
+    fn without_media_already_in_pool(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut seen: std::collections::HashSet<PathBuf> = self
+            .project
+            .media_pool
+            .iter()
+            .filter(|(_, item)| item.compound.is_none())
+            .map(|(_, item)| canonical_path(&item.path))
+            .collect();
+        paths.into_iter().filter(|path| seen.insert(canonical_path(path))).collect()
     }
 
     pub(crate) fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {

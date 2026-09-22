@@ -6642,6 +6642,35 @@ mod tests {
         assert_eq!(app.media_pool_state.selected, imported);
     }
 
+    /// Re-importing the same file does not duplicate it in the pool: the
+    /// media already there is selected again.
+    #[test]
+    fn importing_an_already_present_path_is_skipped() {
+        let path = make_wav("gia-presente.wav");
+        let mut app = VenturiApp::default();
+        app.import_media(path.clone());
+        let pool_count =
+            |app: &VenturiApp| app.project.media_pool.values().filter(|m| m.compound.is_none()).count();
+        assert_eq!(pool_count(&app), 1);
+        let media_id = app
+            .project
+            .media_pool
+            .iter()
+            .find(|(_, m)| m.compound.is_none())
+            .map(|(id, _)| id)
+            .unwrap();
+
+        app.import_media(path.clone());
+        assert_eq!(pool_count(&app), 1);
+        assert_eq!(app.media_pool_state.selected, BTreeSet::from([media_id]));
+
+        // Same file via a non-canonical path, and duplicated inside the batch.
+        let detour = path.parent().unwrap().join("..").join(path.parent().unwrap().file_name().unwrap()).join("gia-presente.wav");
+        app.import_media_files(vec![path.clone(), detour, make_wav("nuova.wav")]);
+        app.wait_for_import();
+        assert_eq!(pool_count(&app), 2);
+    }
+
     /// Minimal counterpart of `egui::DroppedFile` to simulate a
     /// drag from the file manager without a real windowing
     /// backend — only `path()` is needed by `poll_dropped_files`.
