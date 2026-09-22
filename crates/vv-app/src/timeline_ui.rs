@@ -4,6 +4,7 @@
 //! selection mutates `TimelineState`. Drawn with the painter: for a dense
 //! grid of rectangles it costs less than nested widgets.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use vv_core::{
@@ -486,6 +487,8 @@ enum PendingAction {
     /// Replaces the listed clips with a compound clip (see
     /// `make_compound_clip`).
     MakeCompound(Vec<ClipKey>),
+    /// Timeline color of the listed clips; `None` goes back to the default one.
+    SetDisplayColor(Vec<ClipKey>, Option<vv_core::ClipColor>),
 }
 
 #[derive(Clone, Copy)]
@@ -2818,6 +2821,22 @@ pub fn show_timeline(
                             state.paste_attributes_requested = true;
                             ui.close();
                         }
+                        ui.menu_button(t!("timeline.clip_color"), |ui| {
+                            let targets = || color_targets(&visuals, state, visual.track_index, visual.clip.id);
+                            if ui.button(t!("timeline.clear_clip_color")).clicked() {
+                                pending = Some(PendingAction::SetDisplayColor(targets(), None));
+                                ui.close();
+                            }
+                            ui.separator();
+                            for color in vv_core::ClipColor::ALL {
+                                let checked = visual.clip.display_color == Some(color);
+                                if clip_color_item(ui, color, checked).clicked() {
+                                    pending = Some(PendingAction::SetDisplayColor(targets(), Some(color)));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
                         if ui.button(t!("timeline.make_compound_clip")).clicked() {
                             // A right-click on an unselected clip acts only
                             // on it, not on the stale previous selection.
@@ -4278,6 +4297,12 @@ fn apply_pending_action(
             make_compound_clip(project, history, timeline_id, clips);
             state.clear_selection();
         }
+        PendingAction::SetDisplayColor(clips, color) => {
+            history.do_command(
+                project,
+                Box::new(vv_core::SetClipsDisplayColor::new(timeline_id, clips, color)),
+            );
+        }
     }
 }
 
@@ -4391,11 +4416,11 @@ fn clip_label_and_color(
             } else {
                 egui::Color32::from_rgb(90, 190, 140)
             };
-            (label, darken_if_edited(color, clip))
+            (label, clip_box_color(color, clip))
         }
         vv_core::ClipSource::SolidColor => (
             t!("generator.solid_color").into_owned(),
-            darken_if_edited(egui::Color32::from_rgb(200, 170, 90), clip),
+            clip_box_color(egui::Color32::from_rgb(200, 170, 90), clip),
         ),
         vv_core::ClipSource::Text => (
             clip.effects
@@ -4403,9 +4428,19 @@ fn clip_label_and_color(
                 .as_ref()
                 .and_then(|t| t.content.lines().next())
                 .map_or_else(|| t!("generator.text").into_owned(), str::to_string),
-            darken_if_edited(egui::Color32::from_rgb(170, 110, 200), clip),
+            clip_box_color(egui::Color32::from_rgb(170, 110, 200), clip),
         ),
     }
+}
+
+/// The color chosen by the user wins over the one of the source kind; the
+/// darkening for an edited clip applies to both.
+fn clip_box_color(default_color: egui::Color32, clip: &Clip) -> egui::Color32 {
+    let color = clip.display_color.map_or(default_color, |c| {
+        let (r, g, b) = c.rgb();
+        egui::Color32::from_rgb(r, g, b)
+    });
+    darken_if_edited(color, clip)
 }
 
 /// Clips with some effect changed from the default stand out
@@ -4420,6 +4455,59 @@ fn darken_if_edited(color: egui::Color32, clip: &Clip) -> egui::Color32 {
         (color.g() as f32 * F) as u8,
         (color.b() as f32 * F) as u8,
     )
+}
+
+/// A right-click on a clip of the selection colors the whole selection;
+/// on a clip outside it, only that clip.
+fn color_targets(
+    visuals: &[ClipVisual],
+    state: &TimelineState,
+    track_index: usize,
+    clip_id: ClipId,
+) -> Vec<ClipKey> {
+    let clicked = (track_index, clip_id);
+    if state.selected.contains(&clicked) {
+        expand_to_linked_groups(visuals, state.selected.clone()).into_iter().collect()
+    } else {
+        expand_to_linked_groups(visuals, BTreeSet::from([clicked])).into_iter().collect()
+    }
+}
+
+const COLOR_MENU_WIDTH: f32 = 150.0;
+const COLOR_MENU_DOT_RADIUS: f32 = 5.0;
+
+/// Menu entry with the name of the color and its dot on the right, like Resolve.
+fn clip_color_item(ui: &mut egui::Ui, color: vv_core::ClipColor, checked: bool) -> egui::Response {
+    let (r, g, b) = color.rgb();
+    let label = clip_color_label(color);
+    let text = if checked { format!("✔ {label}") } else { label.into_owned() };
+    let resp = ui.add(egui::Button::new(text).min_size(egui::vec2(COLOR_MENU_WIDTH, 0.0)));
+    let center = egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y);
+    ui.painter()
+        .circle_filled(center, COLOR_MENU_DOT_RADIUS, egui::Color32::from_rgb(r, g, b));
+    resp
+}
+
+fn clip_color_label(color: vv_core::ClipColor) -> Cow<'static, str> {
+    use vv_core::ClipColor as C;
+    match color {
+        C::Orange => t!("timeline.color_orange"),
+        C::Apricot => t!("timeline.color_apricot"),
+        C::Yellow => t!("timeline.color_yellow"),
+        C::Lime => t!("timeline.color_lime"),
+        C::Olive => t!("timeline.color_olive"),
+        C::Green => t!("timeline.color_green"),
+        C::Teal => t!("timeline.color_teal"),
+        C::Navy => t!("timeline.color_navy"),
+        C::Blue => t!("timeline.color_blue"),
+        C::Purple => t!("timeline.color_purple"),
+        C::Violet => t!("timeline.color_violet"),
+        C::Pink => t!("timeline.color_pink"),
+        C::Tan => t!("timeline.color_tan"),
+        C::Beige => t!("timeline.color_beige"),
+        C::Brown => t!("timeline.color_brown"),
+        C::Chocolate => t!("timeline.color_chocolate"),
+    }
 }
 
 const DISABLED_BADGE_SIZE: f32 = 12.0;

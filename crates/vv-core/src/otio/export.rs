@@ -179,6 +179,7 @@ fn clip_to_otio(
                 "audio_stream_index": clip.audio_stream_index,
                 "fade_in": clip.fade_in,
                 "fade_out": clip.fade_out,
+                "display_color": clip.display_color,
             }
         },
         "media_references": { "DEFAULT_MEDIA": media_reference },
@@ -586,6 +587,7 @@ mod tests {
         clip.audio_stream_index = 1;
         clip.linked_group = Some(LinkGroupId(7));
         clip.effects.gain_db = Keyframed::constant(-6.0);
+        clip.display_color = Some(crate::model::ClipColor::Navy);
         project.timelines[timeline_id].tracks[2].clips.push(clip);
 
         let otio = timeline_to_otio(&project, timeline_id, None);
@@ -593,5 +595,6 @@ mod tests {
         assert_eq!(meta["audio_stream_index"], 1);
         assert_eq!(meta["linked_group"], 7);
         assert_eq!(meta["effects"]["gain_db"]["default"], -6.0);
+        assert_eq!(meta["display_color"], "Navy");
     }
 }

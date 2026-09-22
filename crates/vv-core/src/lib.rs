@@ -7,7 +7,7 @@ pub use command::{
     AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge, GroupMark, History, InsertClip,
     KeyframePick, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClips, MoveKeyframes, RemoveKeyframe,
     RemoveMedia, RemoveTrack,
-    ResetTransformParams, RippleDeleteGap, SetClipAttributes, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
+    ResetTransformParams, RippleDeleteGap, SetClipAttributes, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled, SetClipsDisplayColor,
     SetKeyframeInterpolation,
     SetCrossTransition, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, compound_clip_commands, cut_overlaps, insert_overwriting, make_room_for_ranges,
@@ -1171,6 +1171,49 @@ mod tests {
                 .color
                 .is_none()
         );
+    }
+
+    #[test]
+    fn set_display_color_applies_to_every_clip_and_undo_restores_each_one() {
+        let (mut project, timeline) = make_project_with_two_tracks();
+        let mut history = History::default();
+
+        let a = make_clip(&mut project, 0, 20);
+        let b = make_clip(&mut project, 30, 20);
+        let (a_id, b_id) = (a.id, b.id);
+        for clip in [a, b] {
+            history.do_command(
+                &mut project,
+                Box::new(command::InsertClip {
+                    timeline,
+                    track_index: 0,
+                    clip,
+                }),
+            );
+        }
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipsDisplayColor::new(timeline, vec![(0, a_id)], Some(ClipColor::Navy))),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::SetClipsDisplayColor::new(
+                timeline,
+                vec![(0, a_id), (0, b_id)],
+                Some(ClipColor::Pink),
+            )),
+        );
+
+        let color = |project: &Project, id| project.timelines[timeline].clip(0, id).unwrap().display_color;
+        assert_eq!(color(&project, a_id), Some(ClipColor::Pink));
+        assert_eq!(color(&project, b_id), Some(ClipColor::Pink));
+
+        history.undo(&mut project);
+        assert_eq!(color(&project, a_id), Some(ClipColor::Navy));
+        assert_eq!(color(&project, b_id), None);
+
+        history.undo(&mut project);
+        assert_eq!(color(&project, a_id), None);
     }
 
     #[test]

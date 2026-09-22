@@ -513,6 +513,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::Title => t!("history.title"),
         L::ResetTransform => t!("history.reset_transform"),
         L::ClipColor => t!("history.clip_color"),
+        L::ClipDisplayColor => t!("history.clip_display_color"),
         L::SetKeyframe => t!("history.set_keyframe"),
         L::RemoveKeyframe => t!("history.remove_keyframe"),
         L::RemoveMedia => t!("history.remove_media"),

@@ -104,6 +104,10 @@ history.clip_color:
   en: "Clip color"
   it: "Colore clip"
 
+history.clip_display_color:
+  en: "Timeline clip color"
+  it: "Colore clip in timeline"
+
 history.set_keyframe:
   en: "Set keyframe"
   it: "Imposta keyframe"

@@ -1121,6 +1121,69 @@ impl EffectStack {
     }
 }
 
+/// Names and shades follow Resolve's clip colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClipColor {
+    Orange,
+    Apricot,
+    Yellow,
+    Lime,
+    Olive,
+    Green,
+    Teal,
+    Navy,
+    Blue,
+    Purple,
+    Violet,
+    Pink,
+    Tan,
+    Beige,
+    Brown,
+    Chocolate,
+}
+
+impl ClipColor {
+    pub const ALL: [ClipColor; 16] = [
+        ClipColor::Orange,
+        ClipColor::Apricot,
+        ClipColor::Yellow,
+        ClipColor::Lime,
+        ClipColor::Olive,
+        ClipColor::Green,
+        ClipColor::Teal,
+        ClipColor::Navy,
+        ClipColor::Blue,
+        ClipColor::Purple,
+        ClipColor::Violet,
+        ClipColor::Pink,
+        ClipColor::Tan,
+        ClipColor::Beige,
+        ClipColor::Brown,
+        ClipColor::Chocolate,
+    ];
+
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            ClipColor::Orange => (223, 129, 48),
+            ClipColor::Apricot => (232, 176, 101),
+            ClipColor::Yellow => (222, 202, 84),
+            ClipColor::Lime => (168, 203, 86),
+            ClipColor::Olive => (118, 160, 76),
+            ClipColor::Green => (86, 175, 128),
+            ClipColor::Teal => (74, 175, 175),
+            ClipColor::Navy => (58, 112, 186),
+            ClipColor::Blue => (76, 160, 214),
+            ClipColor::Purple => (146, 122, 200),
+            ClipColor::Violet => (178, 116, 190),
+            ClipColor::Pink => (224, 134, 178),
+            ClipColor::Tan => (196, 168, 142),
+            ClipColor::Beige => (201, 185, 160),
+            ClipColor::Brown => (150, 110, 80),
+            ClipColor::Chocolate => (118, 86, 68),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Clip {
     pub id: ClipId,
@@ -1154,6 +1217,9 @@ pub struct Clip {
     /// of the clip. 0 = none.
     #[serde(default)]
     pub fade_out: FrameIdx,
+    /// Hand-picked timeline color; `None` = the one derived from the source kind.
+    #[serde(default)]
+    pub display_color: Option<ClipColor>,
 }
 
 impl Clip {
@@ -1181,6 +1247,7 @@ impl Clip {
             disabled: false,
             fade_in: 0,
             fade_out: 0,
+            display_color: None,
         }
     }
 

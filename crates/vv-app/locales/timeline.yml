@@ -55,3 +55,75 @@ timeline.paste_attributes:
 timeline.media_offline:
   en: "⚠ Media offline"
   it: "⚠ Media offline"
+
+timeline.clip_color:
+  en: "Clip color"
+  it: "Colore clip"
+
+timeline.clear_clip_color:
+  en: "Clear Color"
+  it: "Rimuovi colore"
+
+timeline.color_orange:
+  en: "Orange"
+  it: "Arancione"
+
+timeline.color_apricot:
+  en: "Apricot"
+  it: "Albicocca"
+
+timeline.color_yellow:
+  en: "Yellow"
+  it: "Giallo"
+
+timeline.color_lime:
+  en: "Lime"
+  it: "Lime"
+
+timeline.color_olive:
+  en: "Olive"
+  it: "Oliva"
+
+timeline.color_green:
+  en: "Green"
+  it: "Verde"
+
+timeline.color_teal:
+  en: "Teal"
+  it: "Foglia di tè"
+
+timeline.color_navy:
+  en: "Navy"
+  it: "Blu notte"
+
+timeline.color_blue:
+  en: "Blue"
+  it: "Blu"
+
+timeline.color_purple:
+  en: "Purple"
+  it: "Porpora"
+
+timeline.color_violet:
+  en: "Violet"
+  it: "Viola"
+
+timeline.color_pink:
+  en: "Pink"
+  it: "Rosa"
+
+timeline.color_tan:
+  en: "Tan"
+  it: "Cuoio"
+
+timeline.color_beige:
+  en: "Beige"
+  it: "Beige"
+
+timeline.color_brown:
+  en: "Brown"
+  it: "Marrone"
+
+timeline.color_chocolate:
+  en: "Chocolate"
+  it: "Cioccolato"

@@ -2,7 +2,7 @@
 //! needed to invert itself at the moment it is applied.
 
 use crate::model::{
-    Clip, ClipAttributes, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
+    Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
     LinkGroupId, MediaId, MediaItem, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track,
     TrackKind, Transform, TransformParam, Transition,
 };
@@ -43,6 +43,7 @@ pub enum CommandLabel {
     Title,
     ResetTransform,
     ClipColor,
+    ClipDisplayColor,
     SetKeyframe,
     RemoveKeyframe,
     RemoveMedia,
@@ -378,6 +379,53 @@ impl Command for SetClipsDisabled {
         for &(track_index, clip_id, old) in &self.old {
             if let Some(clip) = tl.clip_mut(track_index, clip_id) {
                 clip.disabled = old;
+            }
+        }
+    }
+}
+
+/// Timeline color of several clips at once; `None` goes back to the
+/// color derived from the source kind.
+#[derive(Debug)]
+pub struct SetClipsDisplayColor {
+    pub timeline: TimelineId,
+    pub clips: Vec<(usize, ClipId)>,
+    pub color: Option<ClipColor>,
+    old: Vec<(usize, ClipId, Option<ClipColor>)>,
+}
+
+impl SetClipsDisplayColor {
+    pub fn new(timeline: TimelineId, clips: Vec<(usize, ClipId)>, color: Option<ClipColor>) -> Self {
+        Self {
+            timeline,
+            clips,
+            color,
+            old: Vec::new(),
+        }
+    }
+}
+
+impl Command for SetClipsDisplayColor {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::ClipDisplayColor
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        self.old.clear();
+        for &(track_index, clip_id) in &self.clips {
+            if let Some(clip) = tl.clip_mut(track_index, clip_id) {
+                self.old.push((track_index, clip_id, clip.display_color));
+                clip.display_color = self.color;
+            }
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let tl = &mut project.timelines[self.timeline];
+        for &(track_index, clip_id, old) in &self.old {
+            if let Some(clip) = tl.clip_mut(track_index, clip_id) {
+                clip.display_color = old;
             }
         }
     }

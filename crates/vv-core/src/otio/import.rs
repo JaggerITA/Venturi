@@ -373,6 +373,7 @@ impl Importer<'_> {
             disabled: false,
             fade_in: fades.0.clamp(0, timeline_len),
             fade_out: fades.1.clamp(0, timeline_len),
+            display_color: serde_json::from_value(venturi["display_color"].clone()).unwrap_or(None),
         };
         (duration, Some((clip, is_foreign)))
     }
