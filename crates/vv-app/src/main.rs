@@ -2007,7 +2007,7 @@ impl VenturiApp {
     /// Ctrl+A with the media pool focused: selects all the media of the pool.
     fn select_all_media(&mut self) {
         let ids: Vec<MediaId> = self.project.media_pool.keys().collect();
-        self.media_pool_state.set_marquee_selection(ids);
+        self.media_pool_state.select_only(ids);
     }
 
     /// Alt+Y: selects from the playhead forward — the clip under the
@@ -6601,6 +6601,45 @@ mod tests {
             assert!(worker.state(item.content_hash).is_some());
             assert!(app.thumbnails.contains_key(&item.content_hash));
         }
+    }
+
+    #[test]
+    fn imported_media_end_up_selected_in_the_pool() {
+        let dir = std::env::temp_dir().join("vv-app-import-selection-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = ["x.mp4", "y.mp4"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                vv_media::test_support::ffmpeg(
+                    &[
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "testsrc=size=320x240:rate=25:duration=1",
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                    ],
+                    &path,
+                );
+                path
+            })
+            .collect();
+
+        let mut app = VenturiApp::default();
+        app.import_media_files(paths);
+        app.wait_for_import();
+
+        let imported: BTreeSet<MediaId> = app
+            .project
+            .media_pool
+            .iter()
+            .filter(|(_, m)| m.compound.is_none())
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(app.media_pool_state.selected, imported);
     }
 
     /// Minimal counterpart of `egui::DroppedFile` to simulate a

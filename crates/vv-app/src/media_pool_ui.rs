@@ -572,7 +572,7 @@ impl VenturiApp {
                             .iter()
                             .filter(|(_, r)| r.intersects(rect))
                             .map(|(id, _)| *id);
-                        self.media_pool_state.set_marquee_selection(hits);
+                        self.media_pool_state.select_only(hits);
                     }
                 } else if bg.clicked() {
                     self.media_pool_state.clear();

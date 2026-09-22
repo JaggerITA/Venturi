@@ -48,9 +48,9 @@ impl MediaPoolState {
         self.anchor = anchor;
     }
 
-    /// `hits` in drawing order: the first becomes the anchor for a possible
-    /// later shift+click.
-    pub fn set_marquee_selection(&mut self, hits: impl IntoIterator<Item = MediaId>) {
+    /// Replaces the selection with `hits`, in drawing order: the first
+    /// becomes the anchor for a possible later shift+click.
+    pub fn select_only(&mut self, hits: impl IntoIterator<Item = MediaId>) {
         let hits: Vec<MediaId> = hits.into_iter().collect();
         self.anchor = hits.first().copied();
         self.selected = hits.into_iter().collect();

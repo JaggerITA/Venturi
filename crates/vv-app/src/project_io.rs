@@ -38,7 +38,7 @@ pub(crate) enum DialogOutcome {
 pub(crate) struct PendingImport {
     pub(crate) worker: import_worker::ImportWorker,
     pub(crate) errors: Vec<String>,
-    pub(crate) last_imported: Option<MediaId>,
+    pub(crate) imported: Vec<MediaId>,
 }
 
 pub(crate) struct PendingDialog {
@@ -85,6 +85,7 @@ impl VenturiApp {
             Ok(media_id) => {
                 self.import_warnings.clear();
                 self.preview_media(media_id);
+                self.media_pool_state.select_only([media_id]);
             }
             Err(e) => self.import_warnings = vec![e],
         }
@@ -106,7 +107,7 @@ impl VenturiApp {
         self.pending_import = Some(PendingImport {
             worker: import_worker::ImportWorker::spawn(paths, is_image_path),
             errors: Vec::new(),
-            last_imported: None,
+            imported: Vec::new(),
         });
     }
 
@@ -120,7 +121,10 @@ impl VenturiApp {
         for (path, result) in pending.worker.drain_ready() {
             let label = file_label(&path);
             match result {
-                Ok(meta) => pending.last_imported = Some(self.insert_media(path, meta)),
+                Ok(meta) => {
+                    let media_id = self.insert_media(path, meta);
+                    pending.imported.push(media_id);
+                }
                 Err(e) => pending.errors.push(format!("{label}: {e}")),
             }
         }
@@ -132,8 +136,11 @@ impl VenturiApp {
             return;
         }
         self.import_warnings = pending.errors;
-        if let Some(media_id) = pending.last_imported {
-            self.preview_media(media_id);
+        if let Some(&last) = pending.imported.last() {
+            self.preview_media(last);
+        }
+        if !pending.imported.is_empty() {
+            self.media_pool_state.select_only(pending.imported);
         }
     }
 
