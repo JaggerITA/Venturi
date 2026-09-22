@@ -1,16 +1,16 @@
-//! Handle di posizione, scala e anchor point della clip selezionata,
-//! disegnati sopra il viewer. Stessa geometria dello shader
-//! (`transform.wgsl`): un punto `p` della clip (pixel di timeline dal suo
-//! centro, Y in alto) finisce a `position + anchor + R(zoom * (p - anchor))`,
-//! con `R` rotazione oraria.
+//! Position, scale and anchor point handles of the selected clip, drawn on
+//! top of the viewer. Same geometry as the shader (`transform.wgsl`): a
+//! point `p` of the clip (timeline pixels from its center, Y up) ends up at
+//! `position + anchor + R(zoom * (p - anchor))`, with `R` a clockwise
+//! rotation.
 
 use vv_core::Transform;
 
 const HANDLE_RADIUS: f32 = 4.5;
 const ANCHOR_RADIUS: f32 = 6.5;
-/// Distanza a schermo del pomello di rotazione dal pivot.
+/// On-screen distance of the rotation knob from the pivot.
 const ROTATION_ARM: f32 = 100.0;
-/// Passo della rotazione con Shift premuto.
+/// Rotation step with Shift held.
 const ROTATION_SNAP: f32 = 15.0;
 const MIN_ZOOM: f32 = 0.01;
 
@@ -19,7 +19,7 @@ enum Handle {
     Move,
     Anchor,
     Rotate,
-    /// Segno degli assi scalati: (±1, ±1) un angolo, (±1, 0)/(0, ±1) un lato.
+    /// Sign of the scaled axes: (±1, ±1) a corner, (±1, 0)/(0, ±1) a side.
     Scale(f32, f32),
 }
 
@@ -28,12 +28,12 @@ pub struct OverlayDrag {
     start_pointer: egui::Pos2,
     start: Transform,
     last_pointer: egui::Pos2,
-    /// Gradi girati finora col pomello di rotazione.
+    /// Degrees turned so far with the rotation knob.
     turned: f32,
 }
 
-/// Dove sta la clip nel frame, senza transform: il sorgente inscritto
-/// nella timeline, meno il crop.
+/// Where the clip sits in the frame, without transform: the source fitted
+/// into the timeline, minus the crop.
 #[derive(Debug, Clone, Copy)]
 struct ClipBox {
     left: f32,
@@ -56,7 +56,7 @@ impl ClipBox {
         }
     }
 
-    /// Punto della clip per un handle di scala: angolo o metà di un lato.
+    /// Point of the clip for a scale handle: corner or midpoint of a side.
     fn point(&self, sx: f32, sy: f32) -> [f32; 2] {
         let pick = |s: f32, lo: f32, hi: f32| match s {
             s if s < 0.0 => lo,
@@ -72,16 +72,16 @@ fn rotate_cw(v: [f32; 2], degrees: f32) -> [f32; 2] {
     [v[0] * cs + v[1] * sn, -v[0] * sn + v[1] * cs]
 }
 
-/// Da un punto della clip al frame (pixel di timeline dal centro, Y in alto).
+/// From a point of the clip to the frame (timeline pixels from the center, Y up).
 fn clip_to_frame(t: &Transform, p: [f32; 2]) -> [f32; 2] {
     let scaled = [t.zoom[0] * (p[0] - t.anchor[0]), t.zoom[1] * (p[1] - t.anchor[1])];
     let r = rotate_cw(scaled, t.rotation);
     [t.position[0] + t.anchor[0] + r[0], t.position[1] + t.anchor[1] + r[1]]
 }
 
-/// Il nuovo transform trascinando `handle` di `delta` (pixel di timeline,
-/// Y in alto) a partire da `start`. `free`: un angolo scala i due assi
-/// indipendentemente invece che in proporzione.
+/// The new transform from dragging `handle` by `delta` (timeline pixels,
+/// Y up) starting from `start`. `free`: a corner scales the two axes
+/// independently instead of proportionally.
 fn drag_transform(
     start: &Transform,
     clip_box: &ClipBox,
@@ -95,14 +95,14 @@ fn drag_transform(
         Handle::Move => {
             t.position = [start.position[0] + delta[0], start.position[1] + delta[1]];
         }
-        // Come dal pannello: cambia solo l'anchor, e il pivot a schermo
-        // (`position + anchor`) segue il puntatore.
+        // As from the panel: only the anchor changes, and the on-screen pivot
+        // (`position + anchor`) follows the pointer.
         Handle::Anchor => {
             t.anchor = [start.anchor[0] + delta[0], start.anchor[1] + delta[1]];
         }
         Handle::Scale(sx, sy) => {
             let h = clip_box.point(sx, sy);
-            // Handle rispetto all'anchor, nel riferimento non ruotato.
+            // Handle relative to the anchor, in the unrotated frame of reference.
             let from = [
                 start.zoom[0] * (h[0] - start.anchor[0]),
                 start.zoom[1] * (h[1] - start.anchor[1]),
@@ -136,17 +136,17 @@ fn drag_transform(
     t
 }
 
-/// Angolo orario (gradi) che porta `from` su `to`, vettori dal pivot con Y
-/// in alto, nell'intervallo (-180, 180].
+/// Clockwise angle (degrees) taking `from` onto `to`, vectors from the pivot
+/// with Y up, in the range (-180, 180].
 fn clockwise_turn(from: [f32; 2], to: [f32; 2]) -> f32 {
     let d = (from[1].atan2(from[0]) - to[1].atan2(to[0])).to_degrees();
     (d + 180.0).rem_euclid(360.0) - 180.0
 }
 
-/// Disegna gli handle sopra `frame_rect` (dove il viewer mostra il frame
-/// di timeline) e gestisce il trascinamento, che si può cominciare in tutta
-/// `area`: gli handle possono uscire dal frame. Restituisce il transform
-/// nuovo se l'utente l'ha cambiato in questo frame.
+/// Draws the handles on top of `frame_rect` (where the viewer shows the
+/// timeline frame) and handles the dragging, which can start anywhere in
+/// `area`: the handles can fall outside the frame. Returns the new transform
+/// if the user changed it in this frame.
 pub fn show(
     ui: &egui::Ui,
     frame_rect: egui::Rect,
@@ -217,7 +217,7 @@ pub fn show(
     {
         let shift = ui.input(|i| i.modifiers.shift);
         let new = if d.handle == Handle::Rotate {
-            // Accumulato frame per frame: si può girare oltre mezzo giro.
+            // Accumulated frame by frame: one can turn past half a revolution.
             let from = d.last_pointer - pivot;
             let to = pos - pivot;
             d.turned += clockwise_turn([from.x, -from.y], [to.x, -to.y]);
@@ -322,7 +322,7 @@ mod tests {
             anchor: [-960.0, 540.0],
             ..Default::default()
         };
-        // Lo zoom attorno all'angolo alto-sinistra lo lascia dov'è.
+        // Zooming around the top-left corner leaves it where it is.
         assert_close(clip_to_frame(&t, [-960.0, 540.0]), [-860.0, 540.0]);
         let r = Transform {
             rotation: 90.0,

@@ -1,5 +1,5 @@
-//! Import dei media, file dialog, salvataggio/apertura del progetto, OTIO,
-//! export e relink.
+//! Media import, file dialogs, saving/opening the project, OTIO,
+//! export and relink.
 
 use super::*;
 
@@ -17,8 +17,8 @@ pub(crate) enum UnsavedChoice {
     Cancel,
 }
 
-/// Cosa fare del risultato di un file dialog in background. `RelinkMedia`
-/// porta la selezione del pool com'era all'apertura.
+/// What to do with the result of a background file dialog. `RelinkMedia`
+/// carries the pool selection as it was when it opened.
 pub(crate) enum DialogKind {
     ImportMedia,
     SaveProjectAs,
@@ -33,8 +33,8 @@ pub(crate) enum DialogOutcome {
     Files(Option<Vec<PathBuf>>),
 }
 
-/// Import multiplo in corso: probe sui thread di `ImportWorker`, esito
-/// (anteprima dell'ultimo, errori) applicato quando finisce.
+/// Multiple import in progress: probing on the `ImportWorker` threads, outcome
+/// (preview of the last one, errors) applied when it finishes.
 pub(crate) struct PendingImport {
     pub(crate) worker: import_worker::ImportWorker,
     pub(crate) errors: Vec<String>,
@@ -46,17 +46,17 @@ pub(crate) struct PendingDialog {
     pub(crate) rx: mpsc::Receiver<DialogOutcome>,
 }
 
-/// Stato UI di un export in corso: progresso/cancellazione condivisi col
-/// thread che sta effettivamente esportando (`export::export_timeline`),
-/// più l'handle per recuperarne l'esito a fine corsa.
+/// UI state of an export in progress: progress/cancellation shared with the
+/// thread actually exporting (`export::export_timeline`),
+/// plus the handle to collect its outcome at the end.
 pub(crate) struct ExportUiState {
     pub(crate) progress: std::sync::Arc<Mutex<export::ExportProgress>>,
     pub(crate) cancel: std::sync::Arc<AtomicBool>,
     pub(crate) handle: std::thread::JoinHandle<Result<(), String>>,
 }
 
-/// Tutti i file sotto `base_dir` per nome, in ampiezza: a parità di nome
-/// vince il meno annidato. Le cartelle illeggibili si saltano.
+/// All the files under `base_dir` by name, breadth-first: on equal names the
+/// least nested one wins. Unreadable directories are skipped.
 pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
     let mut index = HashMap::new();
     let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
@@ -90,10 +90,10 @@ impl VenturiApp {
         }
     }
 
-    /// Import multiplo: il probe dei file va su `ImportWorker` (decine di
-    /// ms ciascuno), la UI resta viva e mostra l'avanzamento. Anteprima
-    /// solo dell'ultimo media importato, errori raccolti invece che
-    /// sovrascritti a vicenda.
+    /// Multiple import: probing the files goes to `ImportWorker` (tens of
+    /// ms each), the UI stays alive and shows the progress. Preview
+    /// of the last imported media only, errors collected instead of
+    /// overwriting one another.
     pub(crate) fn import_media_files(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
@@ -110,7 +110,7 @@ impl VenturiApp {
         });
     }
 
-    /// Aggiunge al pool i media già probati dall'`ImportWorker`.
+    /// Adds to the pool the media already probed by the `ImportWorker`.
     pub(crate) fn poll_pending_import(&mut self, ctx: &egui::Context) {
         let Some(mut pending) = self.pending_import.take() else {
             let queued = std::mem::take(&mut self.import_queue);
@@ -126,8 +126,8 @@ impl VenturiApp {
         }
         if !pending.worker.is_finished() {
             self.pending_import = Some(pending);
-            // Senza un nuovo evento egui non ridisegnerebbe: la barra di
-            // avanzamento resterebbe ferma.
+            // Without a new event egui would not redraw: the progress
+            // bar would stay frozen.
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
@@ -137,8 +137,8 @@ impl VenturiApp {
         }
     }
 
-    /// Blocca finché l'import multiplo in corso non è finito: i test
-    /// non hanno un event loop che chiami `poll_pending_import`.
+    /// Blocks until the multiple import in progress is finished: the tests
+    /// have no event loop calling `poll_pending_import`.
     #[cfg(test)]
     pub(crate) fn wait_for_import(&mut self) {
         let ctx = egui::Context::default();
@@ -173,8 +173,8 @@ impl VenturiApp {
         } else {
             self.ensure_timeline_audio_only();
         }
-        // `0` solo se il file è sparito nel frattempo: al più si rigenera un
-        // proxy.
+        // `0` only if the file vanished in the meantime: at worst a proxy is
+        // regenerated.
         let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
         let media_id = self.project.media_pool.insert(vv_core::MediaItem {
             path,
@@ -187,20 +187,20 @@ impl VenturiApp {
         media_id
     }
 
-    /// Proxy, miniatura e waveform di un media del pool, sia appena
-    /// importato sia da un progetto aperto: quel che è già in cache su
-    /// disco viene saltato dai worker.
+    /// Proxy, thumbnail and waveform of a media in the pool, whether just
+    /// imported or from an opened project: what is already in the on-disk
+    /// cache is skipped by the workers.
     pub(crate) fn enqueue_media_background_jobs(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
-        // Una compound clip non ha un file su disco da proxare/thumbnare/
-        // analizzare: il suo contenuto è `item.compound`, non `item.path`.
+        // A compound clip has no file on disk to proxy/thumbnail/
+        // analyze: its content is `item.compound`, not `item.path`.
         if item.compound.is_some() {
             return;
         }
-        // Un'immagine non ha nulla da guadagnare da un proxy, e la sua durata è
-        // il sentinel `IMAGE_DURATION_FRAMES`.
+        // An image has nothing to gain from a proxy, and its duration is
+        // the `IMAGE_DURATION_FRAMES` sentinel.
         if self.settings.proxy_enabled && item.meta.has_video && !item.meta.is_image() {
             let frames = item.meta.duration_frames.max(0) as u64;
             self.proxy_worker
@@ -217,8 +217,8 @@ impl VenturiApp {
                     item.meta.duration_frames as f64 / item.meta.fps.as_f64(),
                 );
         }
-        // Solo i media con audio: la timeline disegna la waveform solo
-        // sulle clip audio.
+        // Only media with audio: the timeline draws the waveform only
+        // on audio clips.
         if item.meta.has_audio {
             let secs = item.meta.duration_frames as f64 / item.meta.fps.as_f64();
             let num_peaks = vv_media::recommended_num_peaks(secs);
@@ -252,9 +252,9 @@ impl VenturiApp {
         }
     }
 
-    /// Apre il file dialog nativo in un thread a parte: sul thread
-    /// dell'event loop GNOME/Wayland segnala l'app come bloccata. Uno alla
-    /// volta.
+    /// Opens the native file dialog on a separate thread: on the
+    /// GNOME/Wayland event loop thread it marks the app as unresponsive. One at
+    /// a time.
     pub(crate) fn spawn_dialog(
         &mut self,
         kind: DialogKind,
@@ -278,15 +278,15 @@ impl VenturiApp {
         self.spawn_dialog(kind, |dlg| DialogOutcome::File(build(dlg)));
     }
 
-    /// Applica il risultato del dialog in background, se è arrivato.
+    /// Applies the result of the background dialog, if it arrived.
     pub(crate) fn poll_pending_dialog(&mut self, ctx: &egui::Context) {
         let Some(pending) = &self.pending_dialog else {
             return;
         };
         let Ok(outcome) = pending.rx.try_recv() else {
-            // Ancora in attesa: senza un nuovo evento (mouse, tastiera)
-            // egui non ridisegnerebbe, quindi il risultato arriverebbe
-            // solo al prossimo input dell'utente.
+            // Still waiting: without a new event (mouse, keyboard)
+            // egui would not redraw, so the result would arrive
+            // only at the user's next input.
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
             return;
         };
@@ -312,12 +312,12 @@ impl VenturiApp {
             (DialogKind::RelinkMedia(targets), DialogOutcome::File(Some(base_dir))) => {
                 self.relink_media(&base_dir, &targets);
             }
-            _ => {} // dialog annullato dall'utente
+            _ => {} // dialog cancelled by the user
         }
     }
 
-    /// File rilasciati dal file manager sulla finestra: si importano nel pool,
-    /// ovunque cadano.
+    /// Files dropped by the file manager onto the window: they are imported into
+    /// the pool, wherever they land.
     pub(crate) fn poll_dropped_files(&mut self, ctx: &egui::Context) {
         let paths: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
@@ -327,8 +327,8 @@ impl VenturiApp {
         }
     }
 
-    // Apre il file dialog e importa i file scelti (usato dal pulsante
-    // toolbar e dalla shortcut Ctrl+I).
+    // Opens the file dialog and imports the chosen files (used by the toolbar
+    // button and by the Ctrl+I shortcut).
     pub(crate) fn import_media_dialog(&mut self) {
         self.spawn_dialog(DialogKind::ImportMedia, |dlg| {
             DialogOutcome::Files(
@@ -347,8 +347,8 @@ impl VenturiApp {
         });
     }
 
-    /// Salva nel file corrente (`current_project_path`), o come "salva con
-    /// nome" se il progetto non è ancora stato salvato/aperto.
+    /// Saves to the current file (`current_project_path`), or as a "save as"
+    /// if the project has not been saved/opened yet.
     pub(crate) fn save_project(&mut self) {
         match self.current_project_path.clone() {
             Some(path) => self.save_project_to(&path),
@@ -356,8 +356,8 @@ impl VenturiApp {
         }
     }
 
-    /// Apre sempre il file dialog di salvataggio, anche se il progetto ha
-    /// già un file corrente (usato dal pulsante "Salva con nome..." e da
+    /// Always opens the save file dialog, even if the project already has
+    /// a current file (used by the "Save as..." button and by
     /// Ctrl+Shift+S).
     pub(crate) fn save_project_as(&mut self) {
         self.spawn_file_dialog(DialogKind::SaveProjectAs, |dlg| {
@@ -406,7 +406,7 @@ impl VenturiApp {
         self.unsaved_media || self.history.generation() != self.saved_generation
     }
 
-    /// Nome del progetto corrente, senza estensione.
+    /// Name of the current project, without extension.
     pub(crate) fn project_label(&self) -> String {
         self.current_project_path
             .as_ref()
@@ -427,7 +427,7 @@ impl VenturiApp {
         }
     }
 
-    /// Apre o importa un progetto, chiedendo prima se salvare le modifiche.
+    /// Opens or imports a project, asking first whether to save the changes.
     pub(crate) fn request_project_switch(&mut self, switch: ProjectSwitch) {
         if self.has_unsaved_changes() {
             self.pending_project_switch = Some(switch);
@@ -445,8 +445,8 @@ impl VenturiApp {
         }
     }
 
-    /// La chiusura della finestra si sospende finché l'utente non risponde
-    /// a "salvare le modifiche?"; poi la si richiede di nuovo.
+    /// Closing the window is suspended until the user answers
+    /// "save the changes?"; then it is requested again.
     pub(crate) fn handle_close_request(&mut self, ctx: &egui::Context) {
         if self.quit_confirmed {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -500,7 +500,7 @@ impl VenturiApp {
         match choice {
             UnsavedChoice::Save => {
                 self.save_project();
-                // Salvataggio annullato o fallito: meglio non perdere nulla.
+                // Save cancelled or failed: better not to lose anything.
                 if !self.has_unsaved_changes() {
                     self.run_project_switch(switch);
                 }
@@ -516,9 +516,9 @@ impl VenturiApp {
         });
     }
 
-    /// Come "Apri progetto", ma da un `.otio`: Ctrl+S chiederà dove
-    /// salvare invece di sovrascrivere il file importato. Quel che non è
-    /// stato importato finisce in `import_warnings`.
+    /// Like "Open project", but from an `.otio`: Ctrl+S will ask where to
+    /// save instead of overwriting the imported file. What was not
+    /// imported ends up in `import_warnings`.
     pub(crate) fn import_otio_from(&mut self, path: &Path) {
         let imported = vv_core::import_otio(path, |media_path| {
             let meta = vv_media::probe(media_path).map_err(|e| e.to_string())?;
@@ -539,7 +539,7 @@ impl VenturiApp {
         });
     }
 
-    /// Sostituisce il progetto e azzera lo stato UI legato al vecchio.
+    /// Replaces the project and resets the UI state tied to the old one.
     pub(crate) fn load_project_from(&mut self, path: PathBuf) {
         match vv_core::load_project(&path) {
             Ok(project) => {
@@ -550,8 +550,8 @@ impl VenturiApp {
         }
     }
 
-    /// Aggiorna la lista "Progetti recenti" e la persiste subito, così
-    /// sopravvive anche a un crash prima della chiusura pulita.
+    /// Updates the "Recent projects" list and persists it immediately, so it
+    /// survives even a crash before a clean shutdown.
     pub(crate) fn remember_recent_project(&mut self, path: PathBuf) {
         self.settings.add_recent_project(path);
         if let Some(settings_path) = &self.settings_path {
@@ -559,8 +559,8 @@ impl VenturiApp {
         }
     }
 
-    /// `path` è il file su cui salverà Ctrl+S: `None` per un progetto che
-    /// non viene da un `.vvproj` (import OTIO).
+    /// `path` is the file Ctrl+S will save to: `None` for a project not
+    /// coming from a `.vvproj` (OTIO import).
     pub(crate) fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
         self.timeline_id = project.timelines.keys().next();
         self.project = project;
@@ -585,8 +585,8 @@ impl VenturiApp {
         self.current_project_path = path;
         self.project_error = None;
         self.mark_saved();
-        // Progetto sostituito fuori dalla history: `sync_render_ahead` non se ne
-        // accorgerebbe.
+        // Project replaced outside the history: `sync_render_ahead` would not
+        // notice.
         if let Some(timeline_id) = self.timeline_id {
             self.spawn_render_ahead_if_needed(timeline_id);
             if let Some(render_ahead) = &self.render_ahead {
@@ -595,7 +595,7 @@ impl VenturiApp {
         }
         self.render_ahead_generation = self.history.generation();
         for item in self.project.media_pool.values_mut() {
-            // Progetti salvati prima di `MediaMeta::audio_streams`.
+            // Projects saved before `MediaMeta::audio_streams`.
             if item.compound.is_none() && item.meta.has_audio && item.meta.audio_streams == 0 {
                 item.meta.audio_streams =
                     vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
@@ -607,10 +607,10 @@ impl VenturiApp {
         }
     }
 
-    /// Apre la finestra delle impostazioni: l'export parte solo da lì
+    /// Opens the settings window: the export starts only from there
     /// (`run_export`).
     pub(crate) fn start_export(&mut self) {
-        // Il pulsante è disabilitato durante un export, ma Ctrl+Shift+E no.
+        // The button is disabled during an export, but Ctrl+Shift+E is not.
         if self.timeline_id.is_none() || self.export.is_some() || self.export_dialog.is_some() {
             return;
         }
@@ -649,8 +649,8 @@ impl VenturiApp {
         }
     }
 
-    /// Esporta in un thread su una copia del progetto: si può continuare a
-    /// editare.
+    /// Exports on a thread using a copy of the project: editing can
+    /// continue.
     pub(crate) fn run_export(
         &mut self,
         timeline_id: TimelineId,
@@ -674,7 +674,7 @@ impl VenturiApp {
                 &thread_progress,
                 &thread_cancel,
             );
-            // Anche errore e annullamento chiudono `progress`: la UI legge solo quello.
+            // Errors and cancellation close `progress` too: the UI reads only that.
             if let Err(e) = &result {
                 let mut p = thread_progress.lock().unwrap();
                 p.error = Some(e.clone());
@@ -771,7 +771,7 @@ impl VenturiApp {
                 });
             });
 
-        // Senza input egui non ridisegna: la barra resterebbe ferma.
+        // Without input egui does not redraw: the bar would stay frozen.
         if !done {
             ui.ctx().request_repaint();
         }
@@ -785,9 +785,9 @@ impl VenturiApp {
         }
     }
 
-    /// Applica il toggle "usa proxy": spento ferma anche la generazione in
-    /// corso (il worker viene buttato via, l'encode parziale scartato), acceso
-    /// la fa ripartire per i media che un proxy ancora non ce l'hanno.
+    /// Applies the "use proxy" toggle: off also stops the generation in
+    /// progress (the worker is thrown away, the partial encode discarded), on
+    /// restarts it for the media that do not have a proxy yet.
     pub(crate) fn apply_proxy_enabled(&mut self) {
         let enabled = self.settings.proxy_enabled;
         for render_ahead in self.render_aheads() {
@@ -818,8 +818,8 @@ impl VenturiApp {
         }
     }
 
-    /// Pausa i proxy durante l'export: l'encode di un proxy lo rallenta molto.
-    /// Una pausa già scelta dall'utente non va annullata a fine export.
+    /// Pauses the proxies during the export: encoding a proxy slows it down a lot.
+    /// A pause already chosen by the user must not be cancelled at the end of the export.
     pub(crate) fn pause_proxies_for_export(&mut self) {
         let Some(worker) = &self.proxy_worker else {
             return;
@@ -831,7 +831,7 @@ impl VenturiApp {
         self.proxy_paused_for_export = true;
     }
 
-    /// Riprende i proxy se li aveva messi in pausa l'export. Idempotente.
+    /// Resumes the proxies if the export paused them. Idempotent.
     pub(crate) fn resume_proxies_after_export(&mut self) {
         if !self.proxy_paused_for_export {
             return;
@@ -842,8 +842,8 @@ impl VenturiApp {
         }
     }
 
-    /// Chiede una cartella base e ricollega i media selezionati. La selezione
-    /// si fissa ora: il dialog torna quando vuole.
+    /// Asks for a base directory and relinks the selected media. The selection
+    /// is fixed now: the dialog comes back whenever it wants.
     pub(crate) fn relink_media_dialog(&mut self) {
         if self.media_pool_state.selected.is_empty() {
             return;
@@ -852,8 +852,8 @@ impl VenturiApp {
         self.spawn_file_dialog(DialogKind::RelinkMedia(targets), |dlg| dlg.pick_folder());
     }
 
-    /// Ricollega i media di `targets` che non esistono più al loro percorso a
-    /// un file con lo stesso nome sotto `base_dir`.
+    /// Relinks the media of `targets` that no longer exist at their path to
+    /// a file with the same name under `base_dir`.
     pub(crate) fn relink_media(&mut self, base_dir: &Path, targets: &[MediaId]) {
         let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
         let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();

@@ -1,5 +1,5 @@
-//! Generazione proxy su un thread dedicato, una alla volta: separata dal
-//! worker di `render_ahead` per non rallentare il decode del playback.
+//! Proxy generation on a dedicated thread, one at a time: kept separate from
+//! `render_ahead`'s worker so it does not slow down playback decoding.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ struct Job {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProxyState {
     Queued,
-    /// Frazione completata, 0..=1.
+    /// Fraction completed, 0..=1.
     Generating(f32),
     Ready,
     Failed,
@@ -36,7 +36,7 @@ impl Shared {
         self.states.lock().unwrap().insert(content_hash, state);
     }
 
-    /// Blocca finché in pausa; `false` se il worker deve terminare.
+    /// Blocks while paused; `false` if the worker must terminate.
     fn wait_while_paused(&self) -> bool {
         let mut paused = self.paused.lock().unwrap();
         while *paused && !self.shutdown.load(Ordering::Relaxed) {
@@ -46,10 +46,10 @@ impl Shared {
     }
 }
 
-/// Avanzamento complessivo della coda della sessione.
+/// Overall progress of the session queue.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProxyProgress {
-    /// Pronti o falliti: non c'è più nulla da fare per loro.
+    /// Ready or failed: there is nothing left to do for them.
     pub finished: usize,
     pub total: usize,
     pub fraction: f32,
@@ -82,7 +82,7 @@ impl ProxyWorker {
                     job.content_hash,
                     |frames| {
                         let fraction = (frames as f32 / total).min(1.0);
-                        // Aggiornare il lock a ogni frame è inutile: la UI legge a ~60Hz.
+                        // Updating the lock on every frame is pointless: the UI reads at ~60Hz.
                         if fraction - last_reported >= 0.005 {
                             last_reported = fraction;
                             shared.set_state(job.content_hash, ProxyState::Generating(fraction));
@@ -106,9 +106,9 @@ impl ProxyWorker {
         Self { shared, worker }
     }
 
-    /// Accoda `path` (chiave `content_hash`) per la generazione del
-    /// proxy — non bloccante, ritorna subito. Un media già accodato in
-    /// questa sessione non viene riaccodato.
+    /// Queues `path` (keyed by `content_hash`) for proxy generation —
+    /// non-blocking, returns immediately. A media already queued in this
+    /// session is not queued again.
     pub fn enqueue(&self, path: PathBuf, content_hash: u64, duration_frames: u64) {
         {
             let mut states = self.shared.states.lock().unwrap();
@@ -175,8 +175,8 @@ impl ProxyWorker {
 
 impl Drop for ProxyWorker {
     fn drop(&mut self) {
-        // Interrompe anche un encode in corso o in pausa prima che `worker`
-        // aspetti il thread: altrimenti aspetterebbe la fine del file.
+        // Also interrupts an encode in progress or paused before `worker`
+        // waits for the thread: otherwise it would wait for the end of the file.
         self.shared.shutdown.store(true, Ordering::Relaxed);
         self.set_paused(false);
     }

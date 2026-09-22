@@ -1,14 +1,14 @@
-// RGBA composto -> I420 denso (piano Y, poi U, poi V, senza padding),
-// BT.709 range limitato. Ogni invocazione scrive 4 byte consecutivi del
-// buffer piatto, così le righe non devono essere multiple di 4.
+// Composed RGBA -> dense I420 (Y plane, then U, then V, no padding),
+// BT.709 limited range. Each invocation writes 4 consecutive bytes of the
+// flat buffer, so the rows do not have to be multiples of 4.
 
 struct Params {
     width: u32,
     height: u32,
     chroma_width: u32,
     chroma_height: u32,
-    // Invocazioni per riga della griglia di dispatch (2D oltre i 65535
-    // workgroup per dimensione).
+    // Invocations per row of the dispatch grid (2D past the 65535
+    // workgroups per dimension).
     row_stride: u32,
     total_words: u32,
 }

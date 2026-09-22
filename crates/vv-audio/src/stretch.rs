@@ -1,7 +1,7 @@
-//! Time-stretch a pitch preservato col filtro `rubberband` di
-//! libavfilter. Lavora su finestre di qualche secondo
-//! (`vv-app::timeline_audio`), non sull'intera traccia: stretchare tutto
-//! ritarderebbe di secondi il primo suono.
+//! Pitch-preserving time-stretch with libavfilter's `rubberband` filter.
+//! It works on windows of a few seconds (`vv-app::timeline_audio`), not on
+//! the whole track: stretching everything would delay the first sound by
+//! seconds.
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg::channel_layout::ChannelLayout;
@@ -18,8 +18,8 @@ fn ensure_init() {
 
 const CHUNK_FRAMES: usize = 4096;
 
-/// Durata moltiplicata per `1/tempo`, stesso rate e canali, pitch
-/// preservato.
+/// Duration multiplied by `1/tempo`, same rate and channels, pitch
+/// preserved.
 pub fn stretch_samples(
     samples: &[f32],
     sample_rate: u32,
@@ -55,9 +55,9 @@ pub fn stretch_samples(
         )
         .map_err(|e| e.to_string())?;
 
-    // `rubberband` può uscire planar anche con input packed: `aformat` forza
-    // packed, altrimenti `drain_filtered` legge oltre il primo piano (panic
-    // con audio stereo).
+    // `rubberband` can output planar even with packed input: `aformat` forces
+    // packed, otherwise `drain_filtered` reads past the first plane (panic
+    // with stereo audio).
     graph
         .output("in", 0)
         .and_then(|p| p.input("out", 0))
@@ -161,11 +161,11 @@ mod tests {
         assert!((ratio - 4.0).abs() < 0.1, "ratio={ratio}");
     }
 
-    /// Regressione: il filtro `rubberband` può restituire l'audio in
-    /// formato planar anche con input packed (vedi `aformat` dopo
-    /// `rubberband` in `stretch_samples`) — con un solo canale (mono) i
-    /// due formati coincidono in memoria, quindi solo un test con più
-    /// canali esercita davvero questo percorso.
+    /// Regression: the `rubberband` filter can return the audio in planar
+    /// format even with packed input (see `aformat` after `rubberband` in
+    /// `stretch_samples`) — with a single channel (mono) the two formats
+    /// coincide in memory, so only a test with more channels really
+    /// exercises this path.
     #[test]
     fn stretch_stereo_roughly_halves_duration_and_stays_interleaved() {
         let sample_rate = 44_100;
@@ -195,16 +195,15 @@ mod bench_window {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// Non una garanzia hard-realtime, ma una soglia larga: stretchare la
-    /// finestra scelta da `vv-app` (`WINDOW_FRAMES` in `timeline_audio`, 8s) deve restare
-    /// ben sotto il margine reale disponibile prima che l'estensione in
-    /// background (triggerata quando restano `EXTEND_TRIGGER_MARGIN_SECS`,
-    /// 4s, di finestra non ancora suonata) serva davvero — quel margine
-    /// in tempo *reale* si restringe con la velocità (4s di audio
-    /// originale sono 1s reale a 4x, 0.5s a 8x), quindi la soglia qui
-    /// scala di conseguenza (metà del margine reale, headroom 2x).
-    /// Misurato in pratica ~150ms indipendentemente dal tempo, vedi
-    /// commento nel modulo.
+    /// Not a hard-realtime guarantee, but a generous threshold: stretching the
+    /// window chosen by `vv-app` (`WINDOW_FRAMES` in `timeline_audio`, 8s) must stay
+    /// well under the real margin available before the background extension
+    /// (triggered when `EXTEND_TRIGGER_MARGIN_SECS`, 4s, of window are left
+    /// unplayed) is actually needed — that margin in *real* time shrinks
+    /// with the speed (4s of original audio are 1s real at 4x, 0.5s at 8x),
+    /// so the threshold here scales accordingly (half the real margin, 2x
+    /// headroom). Measured in practice at ~150ms regardless of tempo, see
+    /// the module comment.
     #[test]
     fn stretching_an_8s_window_is_well_under_the_extension_margin() {
         let sample_rate = 48_000u32;

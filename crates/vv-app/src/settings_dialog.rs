@@ -1,4 +1,4 @@
-//! Finestra File → Impostazioni.
+//! File → Settings window.
 
 use std::borrow::Cow;
 
@@ -23,8 +23,8 @@ impl Section {
     }
 }
 
-/// Scorciatoia in attesa del prossimo tasto: sostituisce la `slot`-esima,
-/// o se ne aggiunge una se `None`.
+/// Shortcut waiting for the next key: replaces the `slot`-th one, or is
+/// appended if `None`.
 #[derive(Debug, Clone, Copy)]
 struct Capture {
     action: Action,
@@ -47,7 +47,7 @@ impl SettingsDialog {
         Self { section: Section::General, capture: None, notice: None }
     }
 
-    /// Finché aspetta un tasto le scorciatoie globali vanno sospese.
+    /// While waiting for a key, global shortcuts must be suspended.
     pub fn is_capturing(&self) -> bool {
         self.capture.is_some()
     }

@@ -1,5 +1,5 @@
-//! Miniatura RGBA di un media per il media pool: un frame singolo,
-//! convertito su CPU (troppo piccola per giustificare il compositor).
+//! RGBA thumbnail of a media for the media pool: a single frame,
+//! converted on CPU (too small to justify the compositor).
 
 use crate::decode::{ColorMatrix, Decoder, FrameYuv420};
 use std::path::Path;
@@ -10,8 +10,8 @@ pub struct Thumbnail {
     pub rgba: Vec<u8>,
 }
 
-/// Frame a ~1s (o a metà, per clip più corte): il primissimo frame è
-/// spesso nero per fade-in.
+/// Frame at ~1s (or at the midpoint, for shorter clips): the very first
+/// frame is often black because of a fade-in.
 pub fn generate_thumbnail(
     path: &Path,
     duration_secs: f64,
@@ -97,10 +97,10 @@ mod tests {
         assert!(center[0] > 200 && center[1] < 60 && center[2] < 60, "{center:?}");
     }
 
-    /// Un'immagine ferma passa `duration_frames`/`fps` sentinel (vedi
-    /// `vv_core::IMAGE_DURATION_FRAMES`) come `duration_secs` — enorme,
-    /// ma `generate_thumbnail` limita comunque il target del seek a
-    /// `<= 1.0`, quindi funziona senza bisogno di `Decoder::open_image`.
+    /// A still image passes the `duration_frames`/`fps` sentinel (see
+    /// `vv_core::IMAGE_DURATION_FRAMES`) as `duration_secs` — huge, but
+    /// `generate_thumbnail` clamps the seek target to `<= 1.0` anyway, so
+    /// it works without needing `Decoder::open_image`.
     #[test]
     fn generate_thumbnail_works_on_a_still_image_despite_the_sentinel_duration() {
         let dir = std::env::temp_dir().join("vv-media-thumbnail-test");

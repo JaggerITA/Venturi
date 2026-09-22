@@ -1,9 +1,9 @@
-//! Decode di un media: `next_frame` in sequenza o dopo `seek_to_time`.
-//! Ogni formato pixel diventa YUV420P 8 bit denso — YUVA420P se il
-//! sorgente ha un canale alpha (PNG, WebM con alpha, ProRes 4444), così la
-//! trasparenza arriva fino al compositing; la conversione a RGB la
-//! fa lo shader. Matrice e range si leggono dal frame originale (lo
-//! scaling non li cambia), con un'euristica per risoluzione se mancano.
+//! Decoding a media: `next_frame` in sequence or after `seek_to_time`.
+//! Every pixel format becomes dense 8-bit YUV420P — YUVA420P if the
+//! source has an alpha channel (PNG, WebM with alpha, ProRes 4444), so
+//! transparency makes it all the way to compositing; the conversion to RGB
+//! is done by the shader. Matrix and range are read from the original frame
+//! (scaling does not change them), with a resolution heuristic if missing.
 
 use ffmpeg::format::Pixel;
 use ffmpeg::media::Type;
@@ -15,51 +15,51 @@ use vv_core::FrameIdx;
 
 pub use vv_core::ColorMatrix;
 
-/// Frame YUV420P 8 bit, piani densi (niente padding di riga).
+/// 8-bit YUV420P frame, dense planes (no row padding).
 #[derive(Clone)]
 pub struct FrameYuv420 {
     pub width: u32,
     pub height: u32,
     pub y: Vec<u8>,
-    /// Piani U/V sottocampionati 4:2:0: dimensioni `plane_width(1)` x
-    /// `plane_height(1)` del frame scalato (ffmpeg arrotonda per
-    /// eccesso su dimensioni dispari, non un semplice `width/2`).
+    /// 4:2:0 subsampled U/V planes: `plane_width(1)` x `plane_height(1)`
+    /// dimensions of the scaled frame (ffmpeg rounds up on odd
+    /// dimensions, not a plain `width/2`).
     pub u: Vec<u8>,
     pub v: Vec<u8>,
     pub u_width: u32,
     pub u_height: u32,
     pub matrix: ColorMatrix,
-    /// `true` = full range (0-255), `false` = limited (16-235/240), la norma.
+    /// `true` = full range (0-255), `false` = limited (16-235/240), the norm.
     pub full_range: bool,
-    /// Copertura per pixel (`width`x`height`, non sottocampionata, alpha
-    /// *straight* non premoltiplicata): `Some` quando il formato sorgente
-    /// ha un canale alpha (`format_has_alpha`), `None` quando è opaco. Un
-    /// PNG con trasparenza la porta fin qui, e senza di essa le sue zone
-    /// trasparenti apparirebbero del colore che il file ci ha lasciato
-    /// sotto — spesso nero — invece di lasciar vedere la clip sotto.
+    /// Per-pixel coverage (`width`x`height`, not subsampled, *straight*
+    /// non-premultiplied alpha): `Some` when the source format has an alpha
+    /// channel (`format_has_alpha`), `None` when it is opaque. A PNG with
+    /// transparency carries it all the way here, and without it its
+    /// transparent areas would show the color the file left underneath —
+    /// often black — instead of letting the clip below show through.
     pub alpha: Option<Vec<u8>>,
 }
 
 impl FrameYuv420 {
-    /// Byte occupati dai piani.
+    /// Bytes used by the planes.
     pub fn byte_len(&self) -> usize {
         self.y.len() + self.u.len() + self.v.len() + self.alpha.as_ref().map_or(0, Vec::len)
     }
 }
 
-/// Byte di un frame YUV420 8 bit `width`x`height`, per stimare budget di
-/// cache prima di averlo decodificato.
+/// Bytes of an 8-bit YUV420 `width`x`height` frame, to estimate cache
+/// budgets before having decoded it.
 pub fn yuv420_frame_bytes(width: u32, height: u32) -> usize {
     width as usize * height as usize * 3 / 2
 }
 
-/// Matrice quando il sorgente non la segnala: BT.601 sotto 720 righe,
-/// BT.709 sopra, come ffmpeg. BT.2020 mai indovinata.
+/// Matrix when the source does not signal it: BT.601 below 720 rows,
+/// BT.709 above, like ffmpeg. BT.2020 is never guessed.
 fn guess_matrix(space: color::Space, height: u32) -> ColorMatrix {
     match space {
         color::Space::BT709 => ColorMatrix::Bt709,
         color::Space::BT2020NCL | color::Space::BT2020CL => ColorMatrix::Bt2020,
-        // Stessa matrice BT.601. Le altre (rare) ricadono sull'euristica.
+        // Same BT.601 matrix. The others (rare) fall back on the heuristic.
         color::Space::SMPTE170M | color::Space::BT470BG => ColorMatrix::Bt601,
         _ => {
             if height >= 720 {
@@ -71,9 +71,9 @@ fn guess_matrix(space: color::Space, height: u32) -> ColorMatrix {
     }
 }
 
-/// Decoder aperto su un singolo stream video di un media. Non `Sync`: ogni
-/// thread di decode (es. il decode-ahead in `playback`) ne possiede una
-/// istanza propria.
+/// Decoder open on a single video stream of a media. Not `Sync`: every
+/// decode thread (e.g. the decode-ahead in `playback`) owns its own
+/// instance.
 pub struct Decoder {
     ictx: ffmpeg::format::context::Input,
     decoder: ffmpeg::codec::decoder::Video,
@@ -81,16 +81,16 @@ pub struct Decoder {
     video_stream_index: usize,
     time_base: ffmpeg::Rational,
     fps: vv_core::Rational,
-    /// Dopo `send_eof` ffmpeg ne rifiuta un altro prima di un flush: si drena
-    /// solo.
+    /// After `send_eof` ffmpeg refuses another one before a flush: it only
+    /// drains.
     eof_sent: bool,
-    /// Frame decodificato da `seek_to_time` per controllare l'atterraggio:
-    /// `next_frame` lo restituisce per primo.
+    /// Frame decoded by `seek_to_time` to check where it landed:
+    /// `next_frame` returns it first.
     pending: Option<(FrameIdx, FrameYuv420)>,
-    /// Unico frame di un'immagine: seek e `next_frame` lo restituiscono sempre,
-    /// il resto del decode tratterebbe l'EOF dopo un frame come un errore.
+    /// The single frame of an image: seek and `next_frame` always return it,
+    /// the rest of the decode would treat EOF after one frame as an error.
     still_image: Option<FrameYuv420>,
-    /// Indice che cresce a ogni `next_frame` su un'immagine, come in un video.
+    /// Index growing on every `next_frame` on an image, as in a video.
     synthetic_idx: FrameIdx,
 }
 
@@ -110,8 +110,8 @@ impl Decoder {
 
         let mut decoder_ctx =
             ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?.decoder();
-        // Decode multithread: il seek decodifica dall'ultimo keyframe fino al
-        // target, in parallelo è molto più veloce.
+        // Multithreaded decode: a seek decodes from the last keyframe up to
+        // the target, in parallel it is much faster.
         decoder_ctx.set_threading(ffmpeg::threading::Config {
             kind: ffmpeg::threading::Type::Frame,
             count: 0,
@@ -144,11 +144,11 @@ impl Decoder {
         })
     }
 
-    /// Come `open`, per un'immagine ferma: decodifica subito l'unico frame.
+    /// Like `open`, for a still image: decodes the single frame immediately.
     pub fn open_image(path: &Path) -> Result<Self, crate::MediaError> {
         let mut decoder = Self::open(path)?;
-        // Lo stesso fps di `probe_image`, non quello (fittizio) del demuxer, o
-        // i secondi dei seek non corrisponderebbero ai frame del media.
+        // The same fps as `probe_image`, not the demuxer's (fictitious) one, or
+        // the seek seconds would not match the media frames.
         decoder.fps = crate::probe::IMAGE_FPS;
         let frame = decoder
             .decode_next_frame()?
@@ -170,22 +170,22 @@ impl Decoder {
         self.fps
     }
 
-    /// Seek al keyframe `<= secs`, garantito: su mp4 con B-frame
-    /// `avformat_seek_file` atterra a volte sul keyframe *dopo*, e i frame in
-    /// mezzo non verrebbero mai decodificati. Si decodifica subito il frame di
-    /// atterraggio (tenuto in `pending`) e, se è oltre, si riprova più
-    /// indietro raddoppiando il passo.
+    /// Seek to the keyframe `<= secs`, guaranteed: on mp4 with B-frames
+    /// `avformat_seek_file` sometimes lands on the keyframe *after*, and the
+    /// frames in between would never be decoded. The landing frame is decoded
+    /// immediately (kept in `pending`) and, if it is past the target, the seek
+    /// is retried further back, doubling the step.
     pub fn seek_to_time(&mut self, secs: f64) -> Result<(), crate::MediaError> {
         let target_idx = (secs.max(0.0) * self.fps.as_f64()).round() as FrameIdx;
         if let Some(frame) = &self.still_image {
-            // Un'immagine atterra esattamente sul target; `synthetic_idx` riparte da
-            // lì.
+            // An image lands exactly on the target; `synthetic_idx` restarts from
+            // there.
             self.pending = Some((target_idx, frame.clone()));
             self.synthetic_idx = target_idx + 1;
             return Ok(());
         }
         let mut ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
-        // Passo iniziale del backoff: un secondo, raddoppiato a ogni tentativo.
+        // Initial backoff step: one second, doubled on every attempt.
         let mut step = i64::from(ffmpeg::ffi::AV_TIME_BASE);
         const MAX_RETRIES: u32 = 20;
         for _ in 0..MAX_RETRIES {
@@ -197,7 +197,7 @@ impl Decoder {
                 Some((idx, frame)) if idx > target_idx && ts > 0 => {
                     ts = ts.saturating_sub(step).max(0);
                     step = step.saturating_mul(2);
-                    let _ = frame; // scartato, si riprova più indietro
+                    let _ = frame; // discarded, retried further back
                 }
                 landed => {
                     self.pending = landed;
@@ -208,15 +208,15 @@ impl Decoder {
         Ok(())
     }
 
-    /// Decodifica il prossimo frame video disponibile in ordine di
-    /// presentazione. `Ok(None)` a fine stream.
+    /// Decodes the next available video frame in presentation order.
+    /// `Ok(None)` at the end of the stream.
     pub fn next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
         if let Some(landed) = self.pending.take() {
             return Ok(Some(landed));
         }
         if let Some(frame) = &self.still_image {
-            // Chiamato senza un seek prima (`pending` vuoto): "avanza" di
-            // un frame sintetico, sempre la stessa immagine — vedi doc di
+            // Called without a preceding seek (`pending` empty): "advances" by
+            // a synthetic frame, always the same image — see the docs of
             // `still_image`/`synthetic_idx`.
             let idx = self.synthetic_idx;
             self.synthetic_idx += 1;
@@ -225,11 +225,11 @@ impl Decoder {
         self.decode_next_frame()
     }
 
-    /// `next_frame` senza `pending`.
+    /// `next_frame` without `pending`.
     fn decode_next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Video::empty();
 
-        // EOF già inviato: si drenano solo i frame rimasti.
+        // EOF already sent: only the remaining frames are drained.
         if self.eof_sent {
             return Ok(if self.decoder.receive_frame(&mut decoded).is_ok() {
                 Some(self.finish_frame(&mut decoded)?)
@@ -274,10 +274,10 @@ impl Decoder {
         let idx = (secs * self.fps.as_f64()).round() as FrameIdx;
         let matrix = guess_matrix(decoded.color_space(), decoded.height());
         let format = decoded.format();
-        // Un frame RGB si dichiara sempre `JPEG`, ma è il range dell'RGB,
-        // non quello dello YUV che sws ne ricava: lì converte a limited se
-        // non gli si dice altro, e crederlo full sbiadirebbe ogni immagine
-        // importata.
+        // An RGB frame always declares itself `JPEG`, but that is the range of
+        // the RGB, not of the YUV sws derives from it: there it converts to
+        // limited unless told otherwise, and believing it full would wash out
+        // every imported image.
         let full_range = !format_is_rgb(format)
             && (decoded.color_range() == color::Range::JPEG
                 || without_deprecated_range(format) != format);
@@ -287,9 +287,9 @@ impl Decoder {
     }
 }
 
-/// I flag di `format`: ffmpeg-next non espone
-/// `AVPixFmtDescriptor::flags`, e `nb_components` da solo non
-/// distinguerebbe un canale alpha dal padding di un `0RGB`.
+/// The flags of `format`: ffmpeg-next does not expose
+/// `AVPixFmtDescriptor::flags`, and `nb_components` alone would not
+/// tell an alpha channel from the padding of an `0RGB`.
 fn format_flags(format: Pixel) -> u64 {
     match format.descriptor() {
         Some(descriptor) => unsafe { (*descriptor.as_ptr()).flags },
@@ -297,20 +297,20 @@ fn format_flags(format: Pixel) -> u64 {
     }
 }
 
-/// `true` se `format` porta un canale alpha vero (PNG, WebM con alpha,
-/// ProRes 4444) e non un quarto canale di padding.
+/// `true` if `format` carries a real alpha channel (PNG, WebM with alpha,
+/// ProRes 4444) and not a fourth padding channel.
 fn format_has_alpha(format: Pixel) -> bool {
     format_flags(format) & ffmpeg::ffi::AV_PIX_FMT_FLAG_ALPHA as u64 != 0
 }
 
-/// `true` per i formati RGB (una PNG importata, per dire), che lo scaler
-/// deve convertire a YUV invece di limitarsi a risistemare i piani.
+/// `true` for RGB formats (an imported PNG, say), which the scaler must
+/// convert to YUV instead of just rearranging the planes.
 fn format_is_rgb(format: Pixel) -> bool {
     format_flags(format) & ffmpeg::ffi::AV_PIX_FMT_FLAG_RGB as u64 != 0
 }
 
-/// Il formato a cui si scala: YUVA420P conserva l'alpha nel quarto piano,
-/// YUV420P la butterebbe via.
+/// The format to scale to: YUVA420P preserves the alpha in the fourth plane,
+/// YUV420P would throw it away.
 fn target_format(source: Pixel) -> Pixel {
     if format_has_alpha(source) {
         Pixel::YUVA420P
@@ -319,9 +319,9 @@ fn target_format(source: Pixel) -> Pixel {
     }
 }
 
-/// I formati `yuvj*` fanno comprimere a sws il range full in limited, ma
-/// il range è già portato da `FrameYuv420::full_range`: si converte come se
-/// fossero `yuv*`, lasciando i valori intatti.
+/// The `yuvj*` formats make sws compress the full range into limited, but
+/// the range is already carried by `FrameYuv420::full_range`: the conversion
+/// treats them as `yuv*`, leaving the values intact.
 fn without_deprecated_range(format: Pixel) -> Pixel {
     match format {
         Pixel::YUVJ420P => Pixel::YUV420P,
@@ -342,7 +342,7 @@ fn yuv420_from_decoded(
     let mut scaled = ffmpeg::frame::Video::empty();
     scaler.run(decoded, &mut scaled)?;
 
-    // `sws_scale` può lasciare padding a fine riga: si ricompatta ogni piano.
+    // `sws_scale` may leave padding at the end of a row: each plane is recompacted.
     let pack_plane = |index: usize| -> Vec<u8> {
         let w = scaled.plane_width(index) as usize;
         let h = scaled.plane_height(index) as usize;
@@ -421,9 +421,9 @@ mod tests {
 
     #[test]
     fn guess_matrix_never_guesses_bt2020_from_the_heuristic() {
-        // BT.2020 è troppo specifica per essere indovinata: anche a
-        // risoluzioni UHD, senza segnalazione esplicita si resta su
-        // BT.709, mai BT.2020.
+        // BT.2020 is too specific to be guessed: even at UHD resolutions,
+        // without an explicit signal it stays on BT.709, never
+        // BT.2020.
         assert_eq!(
             guess_matrix(color::Space::Unspecified, 2160),
             ColorMatrix::Bt709
@@ -444,7 +444,7 @@ mod tests {
                 "-c:v",
                 "libx264",
                 "-g",
-                "10", // GOP corto: più keyframe per testare il seek
+                "10", // short GOP: more keyframes to test the seek
                 "-pix_fmt",
                 "yuv420p",
             ],
@@ -536,15 +536,15 @@ mod tests {
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 240);
         assert_eq!(frame.y.len(), 320 * 240, "piano Y denso, 1 byte/pixel");
-        // 4:2:0: piani croma a metà risoluzione (arrotondata per eccesso,
-        // qui esatta perché 320x240 è già pari).
+        // 4:2:0: chroma planes at half resolution (rounded up,
+        // exact here because 320x240 is already even).
         assert_eq!(frame.u_width, 160);
         assert_eq!(frame.u_height, 120);
         assert_eq!(frame.u.len(), 160 * 120);
         assert_eq!(frame.v.len(), 160 * 120);
 
-        // Il pattern testsrc non è mai uniforme: se troviamo più di un
-        // valore distinto nel piano Y, lo stride/formato sono corretti.
+        // The testsrc pattern is never uniform: if we find more than one
+        // distinct value in the Y plane, the stride/format are correct.
         let distinct: std::collections::HashSet<u8> = frame.y.iter().step_by(37).copied().collect();
         assert!(
             distinct.len() > 5,
@@ -573,15 +573,15 @@ mod tests {
         path
     }
 
-    /// Una PNG con trasparenza deve portarsela fino al frame decodificato:
-    /// scalata a YUV420P l'alpha sparirebbe e le zone trasparenti
-    /// finirebbero opache, del colore rimasto sotto nel file.
+    /// A PNG with transparency must carry it all the way to the decoded frame:
+    /// scaled to YUV420P the alpha would disappear and the transparent areas
+    /// would end up opaque, in the color left underneath in the file.
     #[test]
     fn a_transparent_png_keeps_its_alpha_channel() {
         let dir = std::env::temp_dir().join("vv-media-decode-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("half_transparent.png");
-        // Metà sinistra opaca, metà destra completamente trasparente.
+        // Left half opaque, right half fully transparent.
         crate::test_support::ffmpeg(
             &[
                 "-f",
@@ -608,9 +608,9 @@ mod tests {
         assert_eq!(at(13, 4), 0, "destra: trasparente, non opaca");
     }
 
-    /// Un frame RGB (una PNG) si dichiara sempre `color_range = JPEG`, ma
-    /// è il range dell'RGB: lo YUV che sws ne ricava è a range limitato, e
-    /// crederlo full sbiadirebbe ogni immagine importata.
+    /// An RGB frame (a PNG) always declares `color_range = JPEG`, but that
+    /// is the range of the RGB: the YUV sws derives from it is limited range, and
+    /// believing it full would wash out every imported image.
     #[test]
     fn a_png_is_reported_as_limited_range_because_that_is_what_the_scaler_produces() {
         let path = make_test_image("range.png");
@@ -624,9 +624,9 @@ mod tests {
         );
     }
 
-    /// Un video senza canale alpha non deve pagare un quarto piano di
-    /// copertura tutto opaco: costa memoria di cache e un upload di
-    /// texture per frame.
+    /// A video without an alpha channel must not pay for a fourth, fully
+    /// opaque coverage plane: it costs cache memory and one texture upload
+    /// per frame.
     #[test]
     fn a_video_without_alpha_carries_no_alpha_plane() {
         let path = make_test_clip("no-alpha.mp4", 1);
@@ -644,11 +644,10 @@ mod tests {
         assert_eq!(decoder.height(), 240);
     }
 
-    /// Un'immagine non ha "il prossimo frame": qualunque `source_frame`
-    /// richiesto (via `seek_to_time`) o una chiamata sequenziale a
-    /// `next_frame` senza seek deve restituire sempre lo stesso
-    /// contenuto, mai `None` come farebbe un vero video dopo l'unico
-    /// frame disponibile.
+    /// An image has no "next frame": any requested `source_frame` (via
+    /// `seek_to_time`) or a sequential call to `next_frame` without a seek
+    /// must always return the same content, never `None` as a real video
+    /// would after the single available frame.
     #[test]
     fn open_image_returns_the_same_frame_for_any_requested_position() {
         let path = make_test_image("still_repeat.png");
@@ -663,15 +662,15 @@ mod tests {
         assert_eq!(idx_far, (120.0 * crate::probe::IMAGE_FPS.as_f64()).round() as FrameIdx);
         assert_eq!(frame_far.y, frame0.y, "stesso identico frame, qualunque posizione");
 
-        // Senza un seek in mezzo, next_frame continua a restituire
-        // qualcosa (mai None) invece di comportarsi come un vero EOF.
+        // Without a seek in between, next_frame keeps returning
+        // something (never None) instead of behaving like a real EOF.
         let (idx_next, frame_next) = decoder.next_frame().unwrap().expect("mai EOF per un'immagine");
         assert!(idx_next > idx_far);
         assert_eq!(frame_next.y, frame0.y);
     }
 
-    /// I JPEG decodificano in `yuvj420p`: il range full va preservato, non
-    /// compresso a limited dallo scaler.
+    /// JPEGs decode into `yuvj420p`: the full range must be preserved, not
+    /// compressed to limited by the scaler.
     #[test]
     fn full_range_jpeg_keeps_its_luma_range() {
         let dir = std::env::temp_dir().join("vv-media-decode-test");
@@ -689,9 +688,9 @@ mod tests {
 
     #[test]
     fn decode_first_frame_defaults_to_mpeg_limited_range_and_a_resolution_based_matrix() {
-        // make_test_clip non segnala esplicitamente matrice/range (comune
-        // per contenuti generati/consumer): 320x240 è sotto la soglia
-        // 720p, deve ricadere su BT.601 + limited range.
+        // make_test_clip does not explicitly signal matrix/range (common
+        // for generated/consumer content): 320x240 is below the 720p
+        // threshold, it must fall back on BT.601 + limited range.
         let path = make_test_clip("colorspace.mp4", 1);
         let frame = decode_first_frame(&path).expect("decode fallito");
         assert_eq!(frame.matrix, ColorMatrix::Bt601);
@@ -713,7 +712,7 @@ mod tests {
             last_idx = idx;
             count += 1;
         }
-        // ~25fps per 1s: qualche frame di tolleranza sull'ultimo GOP.
+        // ~25fps for 1s: a few frames of tolerance on the last GOP.
         assert!((20..=30).contains(&count), "count={count}");
     }
 
@@ -728,33 +727,32 @@ mod tests {
             .unwrap()
             .expect("doveva esserci un frame dopo il seek");
 
-        // Il seek atterra al keyframe <= target: con GOP=10 a 25fps la
-        // distanza dal frame 1.5s*25=37 non supera un GOP.
+        // The seek lands on the keyframe <= target: with GOP=10 at 25fps the
+        // distance from frame 1.5s*25=37 does not exceed one GOP.
         assert!(idx <= 37, "idx={idx} dovrebbe essere <= al target");
         assert!(idx >= 37 - 10, "idx={idx} troppo lontano dal target");
     }
 
-    /// Regressione per un bug reale, confermato dall'utente su un file
-    /// 1080p60fps con B-frame: `avformat_seek_file`, anche vincolando
-    /// `max_ts` al target (provato e verificato inefficace: il demuxer
-    /// mov/mp4 lo ignora), può comunque atterrare su un keyframe
-    /// *successivo* al target invece che sul precedente, quando il
-    /// target cade a un frame o due da un confine di keyframe — il
-    /// caso concreto era `target=749` che atterrava su `idx=751` invece
-    /// che su un keyframe precedente molto più indietro, lasciando
-    /// scoperti per sempre i frame in mezzo (vedi `seek_to_time`, che
-    /// ora si autocorregge riprovando più indietro finché non atterra
-    /// davvero `<=` al target). Non riprodotto dal contenuto sintetico
-    /// qui sotto (il file reale che ha innescato il bug aveva una
-    /// struttura B-frame che questo `testsrc` non replica), ma il
-    /// contratto (`idx <= target`) va rispettato comunque, vicino a
-    /// *ogni* confine di keyframe, non solo lontano da essi come nel
-    /// test sopra.
+    /// Regression for a real bug, confirmed by the user on a
+    /// 1080p60fps file with B-frames: `avformat_seek_file`, even constraining
+    /// `max_ts` to the target (tried and verified ineffective: the mov/mp4
+    /// demuxer ignores it), can still land on a keyframe *after* the
+    /// target instead of on the preceding one, when the target falls a
+    /// frame or two from a keyframe boundary — the concrete case was
+    /// `target=749` landing on `idx=751` instead of on a much earlier
+    /// preceding keyframe, leaving the frames in between uncovered
+    /// forever (see `seek_to_time`, which now corrects itself by retrying
+    /// further back until it really lands `<=` the target). Not reproduced
+    /// by the synthetic content below (the real file that triggered the bug
+    /// had a B-frame structure this `testsrc` does not replicate), but the
+    /// contract (`idx <= target`) must be respected all the same, near
+    /// *every* keyframe boundary, not only far from them as in the test
+    /// above.
     #[test]
     fn decoder_seek_lands_at_or_before_target_near_every_keyframe_boundary() {
         let path = make_test_clip_with_gop_and_bframes("seek_boundaries.mp4", 4, 25, 3);
-        // Keyframe a 0,25,50,75 (fps=25, g=25): un target a 1/2/3 frame
-        // prima di ciascuno è il caso limite che ha innescato il bug.
+        // Keyframes at 0,25,50,75 (fps=25, g=25): a target 1/2/3 frames
+        // before each one is the edge case that triggered the bug.
         for keyframe in [25, 50, 75] {
             for offset in [1, 2, 3] {
                 let target = keyframe - offset;

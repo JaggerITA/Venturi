@@ -1,15 +1,15 @@
 #!/bin/bash
-# Wrapper per lanciare comandi dentro il container di test di Venturi
-# (vedi README.md in questa directory). Monta il repo dal path reale
-# (sempre lo stato locale corrente, l'immagine non contiene il sorgente)
-# e due volumi nominati per cache/target di cargo, così le build
-# successive sono incrementali invece di ripartire da zero a ogni run.
+# Wrapper to run commands inside Venturi's test container
+# (see README.md in this directory). It mounts the repo from its real path
+# (always the current local state, the image does not contain the source)
+# and two named volumes for cargo's cache/target, so later builds
+# are incremental instead of starting from scratch on every run.
 #
-# Uso: container/run.sh <comando...>
-# Esempi:
+# Usage: container/run.sh <command...>
+# Examples:
 #   container/run.sh cargo build -p vv-app
 #   container/run.sh cargo test -p vv-app -- --test-threads=1
-#   container/run.sh bash   # shell interattiva dentro il container
+#   container/run.sh bash   # interactive shell inside the container
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

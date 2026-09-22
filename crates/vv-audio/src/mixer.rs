@@ -1,7 +1,7 @@
-//! Mixer continuo delle track audio della timeline: snapshot immutabile
-//! delle clip (costruito dal thread UI) + `mix_range`, funzione pura usata
-//! sia dal callback cpal sia dall'export, così anteprima ed export
-//! producono lo stesso mix.
+//! Continuous mixer of the timeline audio tracks: an immutable snapshot
+//! of the clips (built by the UI thread) + `mix_range`, a pure function used
+//! both by the cpal callback and by the export, so preview and export
+//! produce the same mix.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::path::Path;
@@ -10,22 +10,22 @@ use std::sync::{Arc, Mutex};
 use vv_core::{ClipSource, FrameIdx, Keyframed, MediaId, Project, Timeline};
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
-/// Granularità control-rate (~60Hz) del gain keyframeato, non sample-accurate.
+/// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
 pub const GAIN_BLOCK_FRAMES: u64 = 800;
 
 
 pub struct MixClip {
-    /// In frame audio di timeline (un campione per canale).
+    /// In timeline audio frames (one sample per channel).
     pub start: u64,
     pub len: u64,
-    /// Frame audio di `buffer` corrispondente a `start`.
+    /// Audio frame of `buffer` corresponding to `start`.
     pub source_offset: u64,
-    /// Interleaved a `sample_rate`/`channels` dello snapshot.
+    /// Interleaved at the snapshot's `sample_rate`/`channels`.
     pub buffer: Arc<Vec<f32>>,
     pub gain_db: Keyframed<f32>,
     pub clip_fps: f64,
-    /// Dissolvenze, in frame audio di timeline dall'inizio/dalla fine di
-    /// `len` (vedi `Clip::fade_multiplier_at`, stessa semantica sui sample).
+    /// Fades, in timeline audio frames from the start/end of
+    /// `len` (see `Clip::fade_multiplier_at`, same semantics on samples).
     pub fade_in: u64,
     pub fade_out: u64,
 }
@@ -45,11 +45,11 @@ impl MixSnapshot {
         }
     }
 
-    /// `buffer_for` dà il buffer già a `sample_rate`/`channels` di un file
-    /// vero; `compound_buffer_for` quello del mixdown di una compound clip
-    /// (vedi `vv_app::mix_buffers` per come lo calcola e lo cacha — qui non
-    /// importa, solo che può essere chiesto dato un `MediaId`). `None` da
-    /// uno dei due (non ancora pronto, o senza audio) rende la clip muta.
+    /// `buffer_for` gives the buffer already at the `sample_rate`/`channels` of a
+    /// real file; `compound_buffer_for` that of the mixdown of a compound clip
+    /// (see `vv_app::mix_buffers` for how it computes and caches it — it does not
+    /// matter here, only that it can be asked given a `MediaId`). `None` from
+    /// either one (not ready yet, or no audio) makes the clip silent.
     pub fn from_timeline(
         project: &Project,
         timeline: &Timeline,
@@ -91,14 +91,14 @@ impl MixSnapshot {
     }
 }
 
-/// La `MixClip` di `clip`, dato il buffer già decodificato/composto a
-/// `sample_rate`: la parte di `from_timeline` indipendente da come si è
-/// procurato `buffer` (file vero o mixdown di una compound clip), riusata
-/// anche da `vv_app::mix_buffers::MixBufferCache::get_or_compute_compound`
-/// per costruire lo stesso identico mix di una timeline annidata senza
-/// passare da `from_timeline` (che richiederebbe due chiusure entrambe
-/// mutabili sulla stessa cache, in conflitto — vedi lì per il dettaglio).
-/// `None` se il buffer non copre nemmeno un campione della clip.
+/// The `MixClip` of `clip`, given the buffer already decoded/composed at
+/// `sample_rate`: the part of `from_timeline` independent of how `buffer` was
+/// obtained (a real file or the mixdown of a compound clip), reused
+/// also by `vv_app::mix_buffers::MixBufferCache::get_or_compute_compound`
+/// to build the exact same mix of a nested timeline without
+/// going through `from_timeline` (which would require two closures both
+/// mutable on the same cache, in conflict — see there for the details).
+/// `None` if the buffer does not cover even one sample of the clip.
 pub fn mix_clip_from(
     clip: &vv_core::Clip,
     timeline_fps: f64,
@@ -142,9 +142,9 @@ pub fn sample_to_timeline_frame(sample: u64, fps: f64, sample_rate: u32) -> Fram
     (sample as f64 / sample_rate as f64 * fps).floor() as FrameIdx
 }
 
-/// Scrive in `out` (interleaved, `snapshot.channels` canali) il mix a
-/// partire dal frame audio di timeline `start`. Niente allocazioni: gira
-/// nel callback realtime.
+/// Writes into `out` (interleaved, `snapshot.channels` channels) the mix
+/// starting from timeline audio frame `start`. No allocations: it runs
+/// in the realtime callback.
 pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
     out.fill(0.0);
     let ch = snapshot.channels as usize;
@@ -177,8 +177,8 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
     }
 }
 
-/// Rampa lineare delle dissolvenze a `in_clip` sample dall'inizio della
-/// clip, stessa semantica di `Clip::fade_multiplier_at` ma in sample audio.
+/// Linear fade ramp at `in_clip` samples from the start of the
+/// clip, same semantics as `Clip::fade_multiplier_at` but in audio samples.
 fn fade_multiplier(clip: &MixClip, in_clip: u64) -> f32 {
     let in_ramp = if clip.fade_in > 0 {
         (in_clip as f32 / clip.fade_in as f32).clamp(0.0, 1.0)
@@ -198,8 +198,8 @@ fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
     if clip.gain_db.is_constant() {
         return db_to_linear(clip.gain_db.default);
     }
-    // I keyframe del gain vivono in frame *sorgente*: il frame che copre
-    // questo istante del media.
+    // The gain keyframes live in *source* frames: the frame covering
+    // this instant of the media.
     let media_secs = (clip.source_offset + block * GAIN_BLOCK_FRAMES) as f64 / sample_rate as f64;
     let source_frame = (media_secs * clip.clip_fps).floor() as FrameIdx;
     db_to_linear(clip.gain_db.value_at(source_frame))
@@ -209,9 +209,9 @@ pub fn db_to_linear(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
-/// Da `from` a `to` canali, accodando a `out`. Simmetrico, non un downmix
-/// da broadcast: scendendo il canale `i` va mediato su `i % to` (sul 5.1
-/// ffmpeg raggruppa L,C,Ls e R,LFE,Rs), salendo il canale `i` copia
+/// From `from` to `to` channels, appending to `out`. Symmetric, not a broadcast
+/// downmix: going down, channel `i` is averaged onto `i % to` (on 5.1
+/// ffmpeg groups L,C,Ls and R,LFE,Rs), going up, channel `i` copies
 /// `i % from`.
 pub fn remix_channels_into(samples: &[f32], from: u16, to: u16, out: &mut Vec<f32>) {
     if from == 0 || to == 0 {
@@ -239,8 +239,8 @@ pub fn remix_channels_into(samples: &[f32], from: u16, to: u16, out: &mut Vec<f3
     }
 }
 
-/// Audio già stretchato a `tempo` (fast forward): il frame `i` della
-/// concatenazione di `chunks` corrisponde al frame audio di timeline
+/// Audio already stretched to `tempo` (fast forward): frame `i` of the
+/// concatenation of `chunks` corresponds to timeline audio frame
 /// `origin + i * tempo`.
 #[derive(Clone)]
 pub struct StretchedWindow {
@@ -255,21 +255,21 @@ impl StretchedWindow {
         self.chunks.iter().map(|c| (c.len() / ch) as u64).sum()
     }
 
-    /// Primo frame audio di timeline non coperto.
+    /// First uncovered timeline audio frame.
     pub fn covered_until(&self, channels: u16) -> u64 {
         self.origin + self.frames(channels) * self.tempo
     }
 }
 
-/// Ciò che il callback suona: il mix, oppure a velocità > 1x la finestra
-/// stretchata.
+/// What the callback plays: the mix, or at speeds > 1x the stretched
+/// window.
 pub struct MixerState {
     pub mix: Arc<MixSnapshot>,
     pub stretched: Option<StretchedWindow>,
 }
 
-/// Scrive in `out` l'audio stretchato che corrisponde al frame audio di
-/// timeline `position`; silenzio fuori dalla finestra. Niente allocazioni.
+/// Writes into `out` the stretched audio corresponding to timeline audio
+/// frame `position`; silence outside the window. No allocations.
 pub fn render_stretched(window: &StretchedWindow, channels: u16, position: u64, out: &mut [f32]) {
     out.fill(0.0);
     let ch = channels as usize;
@@ -293,16 +293,16 @@ pub fn render_stretched(window: &StretchedWindow, channels: u16, position: u64, 
     }
 }
 
-/// Stream cpal unico che suona lo stato corrente. La posizione (frame
-/// audio di timeline) è il clock del playback.
+/// Single cpal stream playing the current state. The position (timeline
+/// audio frame) is the playback clock.
 pub struct Mixer {
     _stream: cpal::Stream,
     playing: Arc<AtomicBool>,
     position: Arc<AtomicU64>,
     pending: Arc<Mutex<Option<Arc<MixerState>>>>,
-    /// Stati pubblicati ancora referenziati dal callback: tenerli qui
-    /// garantisce che l'ultimo drop (con deallocazione) avvenga sul thread
-    /// UI, mai in quello audio.
+    /// Published states still referenced by the callback: keeping them here
+    /// guarantees that the last drop (with deallocation) happens on the UI
+    /// thread, never on the audio one.
     retained: Vec<Arc<MixerState>>,
     peak_left_bits: Arc<AtomicU32>,
     peak_right_bits: Arc<AtomicU32>,
@@ -316,9 +316,9 @@ impl Mixer {
         let device = host
             .default_output_device()
             .ok_or("nessun device audio di output")?;
-        // Canali nativi del device: chiederne altri fa inserire a PipeWire un
-        // remix che aggiunge latenza in uscita, visibile come audio in
-        // ritardo rispetto a playhead e waveform.
+        // Native channels of the device: asking for others makes PipeWire insert a
+        // remix that adds output latency, visible as audio lagging
+        // behind playhead and waveform.
         let channels = device
             .default_output_config()
             .map(|c| c.channels())
@@ -370,7 +370,7 @@ impl Mixer {
                                 frames
                             }
                         };
-                        // Un seek arrivato durante il mix vince sull'avanzamento.
+                        // A seek that arrived during the mix wins over the advance.
                         let _ = cb_position.compare_exchange(
                             pos,
                             pos + advance,
@@ -481,8 +481,8 @@ mod tests {
         )
     }
 
-    /// Progetto a 10 fps con due media (`a.wav`, `b.wav`): a `RATE` = 100
-    /// ogni frame di timeline sono 10 frame audio.
+    /// Project at 10 fps with two media (`a.wav`, `b.wav`): at `RATE` = 100
+    /// every timeline frame is 10 audio frames.
     fn project() -> (Project, vv_core::MediaId, vv_core::MediaId) {
         let mut project = Project::default();
         let meta = MediaMeta {
@@ -531,8 +531,8 @@ mod tests {
         }
     }
 
-    /// Mono: `a` vale sempre 0.5, `b` è una rampa (campione i = i/1000);
-    /// stream 1 di `a` vale 0.25.
+    /// Mono: `a` is always 0.5, `b` is a ramp (sample i = i/1000);
+    /// stream 1 of `a` is 0.25.
     fn buffers(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
         match (path.to_str()?, stream) {
             ("a.wav", 0) => Some(Arc::new(vec![0.5; 1000])),
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn offset_clip_plays_its_source_range_at_its_timeline_position() {
         let (project, _, b) = project();
-        // Timeline frame 2 (= audio 20) suona la sorgente dal frame 3 (= audio 30).
+        // Timeline frame 2 (= audio 20) plays the source from frame 3 (= audio 30).
         let tl = timeline(vec![audio_track(vec![clip_at(b, 2, 3, 1)])]);
         let out = render(&project, &tl, 15, 20);
         assert!(out[..5].iter().all(|&s| s == 0.0));
@@ -676,14 +676,14 @@ mod tests {
         assert_eq!(snap.clips.len(), 1, "compound_buffer_for ha risposto: la clip entra nel mix");
     }
 
-    /// Il caso del bug: media a 9,99 fps (10000/1001, l'analogo in
-    /// piccolo di 59,94 su 60) su timeline a 10 fps. Conformata, la clip
-    /// dura in timeline quanto dura il suo audio, e il mix a fine clip è
-    /// ancora allineato al campione giusto invece di essere tagliato.
+    /// The bug case: media at 9.99 fps (10000/1001, the small-scale analogue
+    /// of 59.94 on 60) on a 10 fps timeline. Conformed, the clip
+    /// lasts on the timeline as long as its audio does, and the mix at the end of the clip is
+    /// still aligned to the right sample instead of being cut off.
     #[test]
     fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
         const SOURCE_FRAMES: FrameIdx = 1000;
-        const AUDIO_SAMPLES: usize = 10_010; // 1000 frame / 9,99 fps = 100,1 s
+        const AUDIO_SAMPLES: usize = 10_010; // 1000 frames / 9.99 fps = 100.1 s
 
         let mut project = Project::default();
         let media = project.media_pool.insert(MediaItem {
@@ -720,8 +720,8 @@ mod tests {
             "tutto l'audio del media entra nella clip, niente di tagliato"
         );
 
-        // Ultimi 10 campioni della clip: ancora quelli di fine buffer,
-        // nessuno scarto accumulato lungo i 100 s precedenti.
+        // Last 10 samples of the clip: still the ones at the end of the buffer,
+        // no drift accumulated over the preceding 100 s.
         let mut out = vec![9.0; 10];
         mix_range(&snap, AUDIO_SAMPLES as u64 - 10, &mut out);
         for (i, s) in out.iter().enumerate() {
@@ -730,8 +730,8 @@ mod tests {
         }
     }
 
-    /// Uno split a metà di un frame sorgente non sposta l'audio: la metà
-    /// destra riparte dal campione che l'originale suonava in quel punto.
+    /// A split in the middle of a source frame does not move the audio: the right
+    /// half restarts from the sample the original was playing at that point.
     #[test]
     fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
         let mut project = Project::default();
@@ -790,13 +790,13 @@ mod tests {
     #[test]
     fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
         let (project, a, _) = project();
-        // Lunga abbastanza da coprire più blocchi di gain.
+        // Long enough to cover several gain blocks.
         let blocks = 3;
         let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
         let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
         let mut gain = Keyframed::constant(0.0f32);
         gain.upsert(0, 0.0, Interpolation::Hold);
-        // Dal secondo blocco (audio 800 = frame sorgente 80) in poi: -inf pratico.
+        // From the second block (audio 800 = source frame 80) on: practically -inf.
         gain.upsert(80, -200.0, Interpolation::Hold);
         clip.effects.gain_db = gain;
         let tl = timeline(vec![audio_track(vec![clip])]);
@@ -927,7 +927,7 @@ mod tests {
         render_stretched(&w, 1, 100, &mut out);
         assert_eq!(out, [1.0, 2.0, 3.0]);
 
-        // Posizione 110 = frame stretchato 2, attraverso il confine dei chunk.
+        // Position 110 = stretched frame 2, across the chunk boundary.
         render_stretched(&w, 1, 110, &mut out);
         assert_eq!(out, [3.0, 4.0, 5.0]);
 
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn downmix_interleaved_averages_all_channels_to_mono() {
-        // Un frame stereo [1.0, 0.0] -> mono deve dare la media, 0.5.
+        // A stereo frame [1.0, 0.0] -> mono must give the average, 0.5.
         let samples = vec![1.0, 0.0, 0.5, 0.5];
         let mono = downmix_interleaved(&samples, 2, 1);
         assert_eq!(mono, vec![0.5, 0.5]);
@@ -977,11 +977,11 @@ mod tests {
 
     #[test]
     fn downmix_interleaved_six_to_two_groups_even_and_odd_channels() {
-        // Ordine tipico ffmpeg per il 5.1(side): L,R,C,LFE,Ls,Rs. Con
-        // indice pari -> canale 0 (L,C,Ls) e dispari -> canale 1
-        // (R,LFE,Rs): un frame con L=1.0 e tutti gli altri a 0 deve finire
-        // quasi tutto sul canale 0 (media di 1.0,0.0,0.0 = 1/3), niente
-        // sul canale 1.
+        // Typical ffmpeg order for 5.1(side): L,R,C,LFE,Ls,Rs. With
+        // an even index -> channel 0 (L,C,Ls) and odd -> channel 1
+        // (R,LFE,Rs): a frame with L=1.0 and all the others at 0 must end up
+        // almost entirely on channel 0 (average of 1.0,0.0,0.0 = 1/3), nothing
+        // on channel 1.
         let l_only = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let stereo = downmix_interleaved(&l_only, 6, 2);
         assert_eq!(stereo.len(), 2);
@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     fn downmix_interleaved_preserves_frame_count() {
-        let samples = vec![0.0f32; 6 * 100]; // 100 frame a 6 canali
+        let samples = vec![0.0f32; 6 * 100]; // 100 frames at 6 channels
         let stereo = downmix_interleaved(&samples, 6, 2);
         assert_eq!(stereo.len(), 2 * 100);
     }
@@ -1006,10 +1006,10 @@ mod tests {
     #[test]
     fn db_to_linear_matches_known_reference_points() {
         assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
-        // -6dB ~= dimezza l'ampiezza; +6dB ~= raddoppia.
+        // -6dB ~= halves the amplitude; +6dB ~= doubles it.
         assert!((db_to_linear(-6.0) - 0.5012).abs() < 1e-3);
         assert!((db_to_linear(6.0) - 1.9953).abs() < 1e-3);
-        // -20dB = fattore 0.1 esatto.
+        // -20dB = exactly a factor of 0.1.
         assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
     }
 
@@ -1047,8 +1047,8 @@ mod tests {
 
     #[test]
     fn overlapping_fades_multiply_instead_of_dipping_below_either_ramp_alone() {
-        // Fade in e out coprono tutta la clip: al centro ogni rampa vale
-        // 0.5, il prodotto (non il minimo) è quello che si vede.
+        // Fade in and out cover the whole clip: at the center each ramp is
+        // 0.5, the product (not the minimum) is what one sees.
         let clip = fade_test_clip(1000, 1000);
         assert!((fade_multiplier(&clip, 500) - 0.25).abs() < 1e-6);
     }
@@ -1056,7 +1056,7 @@ mod tests {
     #[test]
     fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
         let (project, a, _) = project();
-        // 3 blocchi di GAIN_BLOCK_FRAMES: il fade copre esattamente il primo.
+        // 3 blocks of GAIN_BLOCK_FRAMES: the fade covers exactly the first one.
         let blocks = 3;
         let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
         let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);

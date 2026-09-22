@@ -1,8 +1,8 @@
-//! Selezione multipla nel media pool, con le stesse regole della timeline:
-//! click semplice, ctrl+click per aggiungere/togliere, shift+click per un
-//! range, rettangolo di selezione trascinando dallo sfondo. La logica di
-//! selezione vive qui come funzione pura (testabile senza `egui::Ui`); il
-//! disegno del pannello resta in `main.rs`.
+//! Multiple selection in the media pool, with the same rules as the timeline:
+//! plain click, ctrl+click to add/remove, shift+click for a range, rubber-band
+//! selection by dragging from the background. The selection logic lives here
+//! as a pure function (testable without `egui::Ui`); the panel drawing stays
+//! in `main.rs`.
 
 use std::collections::BTreeSet;
 use vv_core::MediaId;
@@ -28,36 +28,36 @@ impl Default for Sort {
 #[derive(Default)]
 pub struct MediaPoolState {
     pub selected: BTreeSet<MediaId>,
-    /// Origine del range per il prossimo shift+click (che *non* la sposta,
-    /// come in `timeline_ui::TimelineState::selection_anchor`).
+    /// Range origin for the next shift+click (which does *not* move it,
+    /// as in `timeline_ui::TimelineState::selection_anchor`).
     anchor: Option<MediaId>,
-    /// Rettangolo di selezione in corso, in coordinate schermo.
+    /// Selection rectangle in progress, in screen coordinates.
     pub marquee: Option<(egui::Pos2, egui::Pos2)>,
-    /// Il media pool ha ricevuto l'ultimo click: Canc/Backspace cancella i
-    /// media selezionati invece delle clip in timeline.
+    /// The media pool got the last click: Del/Backspace deletes the selected
+    /// media instead of the clips on the timeline.
     pub focused: bool,
     pub sort: Sort,
 }
 
 impl MediaPoolState {
-    /// `order` è l'ordine con cui gli elementi sono disegnati nel pannello:
-    /// è quello che definisce il range di uno shift+click.
+    /// `order` is the order the items are drawn in the panel: that is what
+    /// defines the range of a shift+click.
     pub fn click(&mut self, clicked: MediaId, modifiers: egui::Modifiers, order: &[MediaId]) {
         let (selected, anchor) = apply_click(&self.selected, self.anchor, clicked, modifiers, order);
         self.selected = selected;
         self.anchor = anchor;
     }
 
-    /// `hits` in ordine di disegno: il primo diventa l'ancora per un
-    /// eventuale shift+click successivo.
+    /// `hits` in drawing order: the first becomes the anchor for a possible
+    /// later shift+click.
     pub fn set_marquee_selection(&mut self, hits: impl IntoIterator<Item = MediaId>) {
         let hits: Vec<MediaId> = hits.into_iter().collect();
         self.anchor = hits.first().copied();
         self.selected = hits.into_iter().collect();
     }
 
-    /// Click sull'intestazione di una colonna: ordina per quel criterio,
-    /// oppure inverte il verso se era già quello attivo.
+    /// Click on a column header: sorts by that criterion, or flips the
+    /// direction if it was already the active one.
     pub fn toggle_sort(&mut self, key: SortKey) {
         if self.sort.key == key {
             self.sort.ascending = !self.sort.ascending;
@@ -72,8 +72,8 @@ impl MediaPoolState {
     }
 }
 
-/// Ordina gli elementi del pannello secondo `sort`. A parità di durata
-/// l'ordine resta quello per nome, così la lista non salta a ogni ridisegno.
+/// Sorts the panel items according to `sort`. On equal duration the order
+/// stays the one by name, so the list does not jump on every redraw.
 pub fn sort_items<T>(
     items: &mut [T],
     sort: Sort,
@@ -128,7 +128,7 @@ fn apply_click(
 mod tests {
     use super::*;
 
-    /// `MediaId` è una chiave slotmap, non costruibile a mano.
+    /// `MediaId` is a slotmap key, not constructible by hand.
     fn ids(n: usize) -> Vec<MediaId> {
         let mut project = vv_core::Project::default();
         (0..n)
@@ -195,7 +195,7 @@ mod tests {
             state.selected,
             BTreeSet::from([order[1], order[2], order[3]])
         );
-        // L'ancora è rimasta la prima: un secondo shift+click parte ancora da lì.
+        // The anchor stayed the first one: a second shift+click still starts from there.
         state.click(order[0], shift(), &order);
         assert_eq!(state.selected, BTreeSet::from([order[0], order[1]]));
     }

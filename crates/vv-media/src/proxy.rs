@@ -1,10 +1,10 @@
-//! Proxy tutto-intra a bassa risoluzione, generati in background. Su
-//! sorgenti long-GOP uno scrub deve decodificare dal keyframe precedente a
-//! ogni frame e non tiene il passo; nel proxy ogni frame è un keyframe.
-//! Solo anteprima: l'export usa sempre gli originali.
+//! Low-resolution all-intra proxies, generated in the background. On
+//! long-GOP sources a scrub has to decode from the previous keyframe on
+//! every frame and cannot keep up; in the proxy every frame is a keyframe.
+//! Preview only: the export always uses the originals.
 //!
-//! Cache globale a chiave `content_hash`, non accanto al progetto: vale per
-//! ogni progetto che usa lo stesso file, anche prima di salvare.
+//! Global cache keyed by `content_hash`, not next to the project: it serves
+//! every project using the same file, even before saving.
 
 use crate::decode::{ColorMatrix, Decoder};
 use ffmpeg::Dictionary;
@@ -15,29 +15,29 @@ use ffmpeg::util::color;
 use ffmpeg_next as ffmpeg;
 use std::path::{Path, PathBuf};
 
-/// Larghezza massima di un proxy; altezza in proporzione, pari per il
-/// 4:2:0. Un sorgente più stretto non viene ingrandito.
+/// Maximum width of a proxy; height in proportion, even for 4:2:0. A
+/// narrower source is not enlarged.
 pub const PROXY_MAX_WIDTH: u32 = 960;
 
 pub fn proxies_dir() -> PathBuf {
     crate::cache_dir("proxies")
 }
 
-/// Path del file proxy per questo `content_hash`, che il file esista o
-/// no ancora — vedi `proxy_exists`.
+/// Path of the proxy file for this `content_hash`, whether the file exists
+/// yet or not — see `proxy_exists`.
 pub fn proxy_path_for(content_hash: u64) -> PathBuf {
     proxies_dir().join(format!("{content_hash:016x}.mp4"))
 }
 
-/// Un `stat` a ogni chiamata invece di uno stato in memoria: il file lo
-/// scrive un altro thread e così non serve sincronizzazione.
+/// One `stat` per call instead of in-memory state: the file is written by
+/// another thread, so no synchronization is needed this way.
 pub fn proxy_exists(content_hash: u64) -> bool {
     proxy_path_for(content_hash).is_file()
 }
 
-/// Genera il proxy e lo scrive atomicamente (file temporaneo + `rename`).
-/// `on_frame(frame_scritti)` può bloccare (pausa); `false` annulla senza
-/// lasciare file su disco.
+/// Generates the proxy and writes it atomically (temporary file + `rename`).
+/// `on_frame(frames_written)` may block (pause); `false` cancels without
+/// leaving files on disk.
 pub fn generate_proxy(
     source_path: &Path,
     content_hash: u64,
@@ -46,8 +46,8 @@ pub fn generate_proxy(
     crate::probe::ensure_init();
 
     let mut decoder = Decoder::open(source_path)?;
-    // Dimensioni reali e metadati colore dal primo frame decodificato, come
-    // nel path di anteprima.
+    // Real dimensions and color metadata from the first decoded frame, as
+    // in the preview path.
     let Some((_, first_frame)) = decoder.next_frame()? else {
         return Err(crate::MediaError::NoStream(format!(
             "nessun frame decodificabile in {}",
@@ -99,9 +99,9 @@ pub fn generate_proxy(
     Ok(final_path)
 }
 
-/// Dimensioni scalate mantenendo l'aspect ratio, larghezza al più
-/// `max_w`, entrambe pari (richiesto da YUV420P). Un sorgente già più
-/// stretto di `max_w` resta alla sua risoluzione nativa.
+/// Dimensions scaled preserving the aspect ratio, width at most `max_w`,
+/// both even (required by YUV420P). A source already narrower than `max_w`
+/// stays at its native resolution.
 fn scaled_dimensions(src_w: u32, src_h: u32, max_w: u32) -> (u32, u32) {
     if src_w <= max_w {
         return (even(src_w), even(src_h));
@@ -131,9 +131,9 @@ fn to_ffmpeg_range(full_range: bool) -> color::Range {
     }
 }
 
-/// Encoder del proxy: solo video (l'audio in anteprima viene dagli
-/// originali), tarato per velocità e non qualità. Obiettivi opposti
-/// all'`Encoder` di export, per questo non condiviso.
+/// Proxy encoder: video only (preview audio comes from the originals),
+/// tuned for speed and not quality. Opposite goals to the export `Encoder`,
+/// hence not shared.
 struct ProxyEncoder {
     octx: format::context::Output,
     encoder: encoder::Video,
@@ -180,10 +180,10 @@ impl ProxyEncoder {
         }
 
         let mut opts = Dictionary::new();
-        // Veloce da codificare e decodificare; la qualità basta per lo scrub.
+        // Fast to encode and decode; the quality is enough for scrubbing.
         opts.set("preset", "veryfast");
         opts.set("crf", "26");
-        // Tutto-intra: la ragione d'essere del proxy.
+        // All-intra: the whole point of the proxy.
         opts.set("g", "1");
         opts.set("keyint_min", "1");
         opts.set("sc_threshold", "0");
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn scaled_dimensions_downscales_preserving_aspect_ratio_to_even_numbers() {
         assert_eq!(scaled_dimensions(1920, 1080, 960), (960, 540));
-        // 1280x717 -> larghezza 960, altezza 960*717/1280=537.75 -> 538 (pari).
+        // 1280x717 -> width 960, height 960*717/1280=537.75 -> 538 (even).
         assert_eq!(scaled_dimensions(1280, 717, 960), (960, 538));
     }
 
@@ -300,11 +300,11 @@ mod tests {
     fn generate_proxy_produces_a_smaller_all_intra_file_that_decodes_back_correctly() {
         let path = make_test_clip("source.mp4", "640x360", 2);
         let content_hash = 0xABCDEF;
-        // Pulizia da un run precedente: `generate_proxy` non sovrascrive
-        // in place (scrive un temporaneo e fa rename), ma un file finale
-        // già presente da un test precedente fallito a metà potrebbe
-        // confondere l'asserzione su `proxy_exists` prima della
-        // generazione.
+        // Cleanup from a previous run: `generate_proxy` does not overwrite
+        // in place (it writes a temporary and renames), but a final file
+        // already present from a previous test that failed halfway could
+        // confuse the assertion on `proxy_exists` before the
+        // generation.
         let _ = std::fs::remove_file(proxy_path_for(content_hash));
 
         assert!(!proxy_exists(content_hash));
@@ -312,9 +312,9 @@ mod tests {
         assert_eq!(proxy_path, proxy_path_for(content_hash));
         assert!(proxy_exists(content_hash));
 
-        // Il proxy deve essere un file H.264 valido, ridecodificabile con
-        // lo stesso `Decoder` usato per i sorgenti normali, con la stessa
-        // durata (in frame) del sorgente.
+        // The proxy must be a valid H.264 file, re-decodable with the same
+        // `Decoder` used for normal sources, with the same duration (in
+        // frames) as the source.
         let mut source_decoder = Decoder::open(&path).unwrap();
         let mut source_frames: i32 = 0;
         while source_decoder.next_frame().unwrap().is_some() {
@@ -331,14 +331,14 @@ mod tests {
         while proxy_decoder.next_frame().unwrap().is_some() {
             proxy_frames += 1;
         }
-        // Tolleranza di 1 frame in coda: il muxer MP4 di `write_interleaved`
-        // (condiviso con `encode.rs`, non specifico al proxy) perde in modo
-        // riproducibile l'ultimissimo pacchetto scritto quando non c'è una
-        // seconda traccia a forzare il flush dell'interleaving — bug
-        // preesistente e più ampio (probabilmente affligge anche l'export),
-        // non qualcosa da nascondere qui ma nemmeno da risolvere in questo
-        // modulo. Un frame di tolleranza in coda non compromette l'uso da
-        // scrub/editing di un proxy.
+        // Tolerance of 1 trailing frame: the MP4 muxer of `write_interleaved`
+        // (shared with `encode.rs`, not proxy-specific) reproducibly loses
+        // the very last packet written when there is no second track to
+        // force the interleaving flush — a pre-existing and broader bug
+        // (it probably affects the export too), not something to hide here
+        // but not something to fix in this module either. One frame of
+        // trailing tolerance does not compromise the scrub/editing use of
+        // a proxy.
         assert!(
             (source_frames - proxy_frames).abs() <= 1,
             "il proxy deve avere lo stesso numero di frame del sorgente (tolleranza 1 in coda): sorgente={source_frames} proxy={proxy_frames}"

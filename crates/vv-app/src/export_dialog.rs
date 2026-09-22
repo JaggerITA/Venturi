@@ -1,4 +1,4 @@
-//! Finestra delle impostazioni di export, mostrata prima di avviarlo.
+//! Export settings window, shown before starting the export.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -10,12 +10,12 @@ use crate::properties_panel::preview_combo;
 use crate::export::ExportSettings;
 use crate::format_duration;
 
-/// Dati della timeline che la finestra mostra ma non modifica.
+/// Timeline data the window shows but does not modify.
 pub struct TimelineInfo {
     pub resolution: (u32, u32),
     pub fps: Rational,
     pub total_frames: FrameIdx,
-    /// Intervallo in/out, `None` se copre tutta la timeline.
+    /// In/out range, `None` if it covers the whole timeline.
     pub marks: Option<(FrameIdx, FrameIdx)>,
     pub has_audio: bool,
 }
@@ -33,10 +33,10 @@ pub struct ExportDialog {
     settings: ExportSettings,
     path_text: String,
     whole_timeline: bool,
-    /// Tenute da parte mentre "Includi audio" è spento, per ritrovarle.
+    /// Kept aside while "Include audio" is off, so they can be restored.
     audio_settings: vv_media::AudioSettings,
-    /// File dialog aperto in un thread a parte (su quello dell'event loop
-    /// GNOME/Wayland segnala l'app come bloccata).
+    /// File dialog opened on a separate thread (on the GNOME/Wayland event
+    /// loop thread it marks the app as unresponsive).
     browsing: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 }
 
@@ -311,7 +311,7 @@ impl ExportDialog {
     }
 }
 
-/// Percorso di output valido, con estensione `.mp4` aggiunta se manca.
+/// Valid output path, with the `.mp4` extension added if missing.
 fn validate_path(text: &str) -> Result<PathBuf, Cow<'static, str>> {
     let text = text.trim();
     if text.is_empty() {
@@ -334,7 +334,7 @@ fn validate_path(text: &str) -> Result<PathBuf, Cow<'static, str>> {
     Ok(path)
 }
 
-/// Percorso proposto al primo export: accanto al progetto, col suo nome.
+/// Path proposed on the first export: next to the project, with its name.
 pub fn default_output_path(project_path: Option<&Path>) -> PathBuf {
     match project_path {
         Some(project) => project.with_extension("mp4"),

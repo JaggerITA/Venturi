@@ -1,11 +1,11 @@
-# Ambiente di build dell'AppImage. Debian 13 (glibc 2.41) e non l'immagine
-# di test Fedora: un binario glibc gira solo su glibc >= a quella di build,
-# quindi la release va compilata sulla distro più vecchia che supportiamo.
-# Il repo non è dentro l'immagine, va montato a runtime.
+# AppImage build environment. Debian 13 (glibc 2.41) and not the Fedora
+# test image: a glibc binary only runs on a glibc >= the build one,
+# so the release must be built on the oldest distro we support.
+# The repo is not inside the image, it must be mounted at runtime.
 FROM docker.io/library/debian:13
 
-# rust di trixie è troppo vecchio per la edition 2024 di alcune dipendenze:
-# toolchain da rustup.
+# trixie's rust is too old for the 2024 edition of some dependencies:
+# toolchain from rustup.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git make nasm pkg-config \
         gcc g++ clang libclang-dev \

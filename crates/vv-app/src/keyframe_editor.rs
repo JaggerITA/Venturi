@@ -1,10 +1,10 @@
-//! Editor di keyframe: finestra fluttuante con, sotto, una riga per ogni
-//! parametro animato della clip selezionata e, sopra, la curva della riga
-//! scelta. Disegnato col painter e con hit-test a mano, come la timeline:
-//! i punti sono troppi e troppo piccoli per dei widget.
+//! Keyframe editor: floating window with, at the bottom, one row per
+//! animated parameter of the selected clip and, at the top, the curve of the
+//! chosen row. Drawn with the painter and with hand-written hit-testing, like
+//! the timeline: the points are too many and too small for widgets.
 //!
-//! I keyframe vivono in frame *sorgente* della clip: tutte le coordinate
-//! qui sono in quello spazio, la conversione col playhead sta ai bordi.
+//! Keyframes live in *source* frames of the clip: all the coordinates here
+//! are in that space, the conversion with the playhead happens at the edges.
 
 use std::collections::HashSet;
 
@@ -19,59 +19,59 @@ const LABEL_WIDTH: f32 = 110.0;
 const ROW_HEIGHT: f32 = 18.0;
 const RULER_HEIGHT: f32 = 18.0;
 const CURVE_HEIGHT: f32 = 170.0;
-/// Raggio del bersaglio di un keyframe: più largo del punto disegnato,
-/// che altrimenti sarebbe quasi impossibile prendere.
+/// Hit radius of a keyframe: wider than the drawn point, which would
+/// otherwise be nearly impossible to grab.
 const PICK_RADIUS: f32 = 7.0;
 const POINT_RADIUS: f32 = 4.0;
 const HANDLE_RADIUS: f32 = 5.0;
-/// Gli handle stanno sulla curva, fra i punti: il loro bersaglio è più
-/// generoso, o prenderli col mouse è un terno al lotto.
+/// The handles sit on the curve, between the points: their hit area is more
+/// generous, or grabbing them with the mouse is a lottery.
 const HANDLE_PICK_RADIUS: f32 = 10.0;
 const PLAYHEAD_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
 const CURVE_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 150, 230);
 
-/// Cosa sta trascinando il puntatore.
+/// What the pointer is dragging.
 #[derive(Debug, Clone, Copy)]
 enum Drag {
-    /// Spostamento nel tempo della selezione. `applied` è il delta già
-    /// mandato alla history: ogni frame se ne manda solo la differenza.
+    /// Moving the selection in time. `applied` is the delta already sent
+    /// to the history: each frame only the difference is sent.
     Time { origin_frame: FrameIdx, applied: FrameIdx },
-    /// Punto della curva: tempo come sopra, più il valore.
+    /// Point of the curve: time as above, plus the value.
     Point { pick: KeyframePick, origin_frame: FrameIdx, applied: FrameIdx },
-    /// Handle di una bezier: `outgoing` distingue quello del keyframe di
-    /// partenza da quello del keyframe di arrivo del segmento.
+    /// Handle of a bezier: `outgoing` tells the one of the segment's start
+    /// keyframe from the one of its end keyframe.
     Handle { pick: KeyframePick, outgoing: bool },
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct KeyframeEditorState {
-    /// La clip di cui si stanno mostrando i keyframe.
+    /// The clip whose keyframes are being shown.
     clip: Option<(TimelineId, usize, ClipId)>,
-    /// Riga di cui si vede la curva.
+    /// Row whose curve is visible.
     row: Option<KeyframeTarget>,
     selection: HashSet<KeyframePick>,
     drag: Option<Drag>,
-    /// Rettangolo di selezione in corso: origine, angolo corrente e se è
-    /// partito nella curva (le due aree non se lo devono rubare).
+    /// Selection rectangle in progress: origin, current corner and whether it
+    /// started in the curve (the two areas must not steal it from each other).
     box_select: Option<(egui::Pos2, egui::Pos2, bool)>,
-    /// Porzione di clip visibile (primo frame, durata) quando si è zoomato;
-    /// `None` = tutta la clip.
+    /// Visible portion of the clip (first frame, duration) when zoomed;
+    /// `None` = the whole clip.
     view: Option<(FrameIdx, FrameIdx)>,
-    /// L'ultimo click è caduto qui dentro: come per il media pool, decide
-    /// chi si prende il Canc.
+    /// The last click landed in here: as for the media pool, it decides
+    /// who takes Del.
     focused: bool,
 }
 
 impl KeyframeEditorState {
-    /// Il Canc cancella i keyframe selezionati solo se l'editor ha
-    /// l'ultimo click e qualcosa di selezionato; altrimenti resta alla
-    /// timeline, che cancella la clip.
+    /// Del deletes the selected keyframes only if the editor has the last
+    /// click and something selected; otherwise it stays with the timeline,
+    /// which deletes the clip.
     pub(crate) fn owns_delete(&self) -> bool {
         self.focused && !self.selection.is_empty()
     }
 
-    /// I comandi per togliere i keyframe selezionati, che smettono di
-    /// esserlo.
+    /// The commands to remove the selected keyframes, which stop being
+    /// selected.
     pub(crate) fn remove_selected(&mut self, zoom_link: bool) -> Vec<BoxedCommand> {
         let Some((timeline, track_index, clip_id)) = self.clip else {
             return Vec::new();
@@ -87,8 +87,8 @@ impl KeyframeEditorState {
             .collect()
     }
 
-    /// La clip è cambiata sotto i piedi (altra selezione, undo): quel che
-    /// era selezionato non esiste più.
+    /// The clip changed underneath (another selection, undo): what was
+    /// selected no longer exists.
     fn reset_for(&mut self, clip: (TimelineId, usize, ClipId)) {
         if self.clip != Some(clip) {
             self.clip = Some(clip);
@@ -101,7 +101,7 @@ impl KeyframeEditorState {
     }
 }
 
-/// Le righe da mostrare: i parametri con almeno un keyframe.
+/// The rows to show: the parameters with at least one keyframe.
 fn rows(effects: &EffectStack) -> Vec<KeyframeTarget> {
     let mut rows: Vec<KeyframeTarget> = TransformParam::ALL
         .iter()
@@ -117,7 +117,7 @@ fn rows(effects: &EffectStack) -> Vec<KeyframeTarget> {
     rows
 }
 
-/// I frame dei keyframe di una riga.
+/// The frames of the keyframes of a row.
 fn frames_of(effects: &EffectStack, target: KeyframeTarget) -> Vec<FrameIdx> {
     match target {
         KeyframeTarget::TransformParam(p) => {
@@ -132,8 +132,8 @@ fn frames_of(effects: &EffectStack, target: KeyframeTarget) -> Vec<FrameIdx> {
     }
 }
 
-/// Valore e interpolazione di un keyframe scalare; `None` per il colore,
-/// che non ha una curva da disegnare.
+/// Value and interpolation of a scalar keyframe; `None` for the color,
+/// which has no curve to draw.
 fn scalar_at(
     effects: &EffectStack,
     target: KeyframeTarget,
@@ -146,7 +146,7 @@ fn scalar_at(
     }
 }
 
-/// I keyframe scalari di una riga, valore e interpolazione compresi.
+/// The scalar keyframes of a row, value and interpolation included.
 fn scalar_keyframes(
     effects: &EffectStack,
     target: KeyframeTarget,
@@ -158,8 +158,8 @@ fn scalar_keyframes(
     }
 }
 
-/// La curva a tempo continuo: `Keyframed::value_at` lavora a frame interi,
-/// e da vicino la sua scaletta è quella dei frame, non della curva.
+/// The continuous-time curve: `Keyframed::value_at` works on whole frames,
+/// and up close its staircase is the frames', not the curve's.
 fn sample(keyframes: &[(FrameIdx, f32, Interpolation)], at: f32) -> Option<f32> {
     let first = keyframes.first()?;
     let last = keyframes.last()?;
@@ -218,7 +218,7 @@ fn preset_label(interpolation: Interpolation) -> String {
     .to_string()
 }
 
-/// Mappa fra frame sorgente della clip e x sullo schermo.
+/// Mapping between source frames of the clip and x on screen.
 #[derive(Clone, Copy)]
 struct TimeAxis {
     left: f32,
@@ -228,7 +228,7 @@ struct TimeAxis {
 }
 
 impl TimeAxis {
-    /// `view` è la porzione di clip visibile: primo frame e durata.
+    /// `view` is the visible portion of the clip: first frame and duration.
     fn new(rect: egui::Rect, view: (FrameIdx, FrameIdx)) -> Self {
         Self {
             left: rect.left(),
@@ -238,7 +238,7 @@ impl TimeAxis {
         }
     }
 
-    /// Quanti frame vale uno spostamento orizzontale di `dx` pixel.
+    /// How many frames a horizontal movement of `dx` pixels is worth.
     fn delta(&self, dx: f32) -> FrameIdx {
         (dx / self.width * self.span as f32).round() as FrameIdx
     }
@@ -251,7 +251,7 @@ impl TimeAxis {
         self.time(x).round() as FrameIdx
     }
 
-    /// Come `frame`, ma senza arrotondare al frame: per disegnare.
+    /// Like `frame`, but without rounding to the frame: for drawing.
     fn time(&self, x: f32) -> f32 {
         self.first as f32 + (x - self.left) / self.width * self.span as f32
     }
@@ -259,12 +259,12 @@ impl TimeAxis {
 
 pub(crate) struct KeyframeEditorResponse {
     pub(crate) commands: Vec<BoxedCommand>,
-    /// Frame di timeline a cui portare la testina.
+    /// Timeline frame to move the playhead to.
     pub(crate) playhead: Option<FrameIdx>,
 }
 
-/// Disegna la finestra. `target` è la clip da mostrare (la prima
-/// selezionata) e `playhead` il frame di timeline corrente.
+/// Draws the window. `target` is the clip to show (the first selected one)
+/// and `playhead` the current timeline frame.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn show_keyframe_editor(
     ctx: &egui::Context,
@@ -273,8 +273,8 @@ pub(crate) fn show_keyframe_editor(
     project: &Project,
     target: Option<(TimelineId, usize, ClipId)>,
     playhead: FrameIdx,
-    // Zoom bloccato in proporzioni nell'inspector: qui X e Y si muovono
-    // insieme, altrimenti l'editor romperebbe il vincolo.
+    // Zoom locked to proportions in the inspector: here X and Y move
+    // together, otherwise the editor would break the constraint.
     zoom_link: bool,
 ) -> KeyframeEditorResponse {
     let mut response = KeyframeEditorResponse { commands: Vec::new(), playhead: None };
@@ -298,7 +298,7 @@ pub(crate) fn show_keyframe_editor(
                 ui.label(t!("keyframes.no_keyframes"));
                 return;
             }
-            // Una riga sparita (undo, keyframe tolti) non deve restare aperta.
+            // A row that disappeared (undo, keyframes removed) must not stay open.
             if !state.row.is_some_and(|r| rows.contains(&r)) {
                 state.row = Some(rows[0]);
             }
@@ -369,8 +369,8 @@ pub(crate) fn show_keyframe_editor(
             });
         });
     *open = window_open;
-    // Chi ha ricevuto l'ultimo click decide a chi va il Canc, come fra
-    // media pool e timeline.
+    // Whoever got the last click decides who takes Del, as between
+    // media pool and timeline.
     if let Some(pos) =
         ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
     {
@@ -379,16 +379,16 @@ pub(crate) fn show_keyframe_editor(
     response
 }
 
-/// Alt+scroll (o pinch) zooma attorno al puntatore come sulla timeline;
-/// lo scroll orizzontale fa scorrere la porzione visibile.
+/// Alt+scroll (or pinch) zooms around the pointer as on the timeline;
+/// horizontal scroll pans the visible portion.
 fn handle_zoom(
     ui: &egui::Ui,
     state: &mut KeyframeEditorState,
     rect: egui::Rect,
     full: (FrameIdx, FrameIdx),
 ) {
-    // Solo se il puntatore è davvero su questa finestra: sotto c'è la
-    // timeline, che zooma con lo stesso gesto.
+    // Only if the pointer is really over this window: underneath there is the
+    // timeline, which zooms with the same gesture.
     let Some(pos) = ui
         .ctx()
         .pointer_hover_pos()
@@ -403,7 +403,7 @@ fn handle_zoom(
     let axis = TimeAxis::new(rect, state.view.unwrap_or(full));
     let anchor = axis.frame(pos.x);
     let span = ((axis.span as f32 / zoom).round() as FrameIdx).clamp(2, full.1);
-    // Il frame sotto il puntatore resta dov'è.
+    // The frame under the pointer stays where it is.
     let first = anchor
         - ((anchor - axis.first) as f32 * span as f32 / axis.span as f32).round() as FrameIdx
         - axis.delta(pan);
@@ -412,8 +412,8 @@ fn handle_zoom(
     });
 }
 
-/// Con lo zoom bloccato in proporzioni X e Y sono gemelli: quel che si fa
-/// al keyframe di uno va fatto a quello dell'altro allo stesso frame.
+/// With zoom locked to proportions, X and Y are twins: whatever is done
+/// to the keyframe of one must be done to the other's at the same frame.
 fn with_zoom_link(picks: Vec<KeyframePick>, zoom_link: bool) -> Vec<KeyframePick> {
     if !zoom_link {
         return picks;
@@ -461,8 +461,8 @@ fn show_toolbar(
     });
 }
 
-/// Tacche col timecode del frame di *timeline* corrispondente: è quello
-/// che si legge sulla barra di riproduzione.
+/// Ticks with the timecode of the corresponding *timeline* frame: that is
+/// what one reads on the playback bar.
 fn draw_ruler(
     ui: &egui::Ui,
     rect: egui::Rect,
@@ -476,7 +476,7 @@ fn draw_ruler(
     let visuals = ui.visuals();
     painter.rect_filled(rect, 0.0, visuals.extreme_bg_color);
     let fps = project.timelines[timeline].fps.as_f64().max(1.0);
-    // Una tacca ogni ~90 px, arrotondata a un numero tondo di frame.
+    // A tick every ~90 px, rounded to a round number of frames.
     let per_tick = ((axis.span as f32 * 90.0 / axis.width.max(1.0)).ceil() as FrameIdx).max(1);
     let step = round_step(per_tick);
     let mut frame = axis.first - axis.first.rem_euclid(step);
@@ -504,7 +504,7 @@ fn draw_ruler(
     );
 }
 
-/// Passo "tondo" (1, 2, 5, 10, 20, 50, …) più vicino per eccesso.
+/// Nearest "round" step (1, 2, 5, 10, 20, 50, …), rounding up.
 fn round_step(minimum: FrameIdx) -> FrameIdx {
     let mut step = 1;
     while step < minimum {
@@ -561,7 +561,7 @@ fn draw_curve(
     let y = |v: f32| plot.bottom() - (v - low) / (high - low) * plot.height();
     let value_at_y = |py: f32| low + (plot.bottom() - py) / plot.height() * (high - low);
 
-    // Griglia e scala dei valori nella colonna di sinistra.
+    // Grid and value scale in the left column.
     for i in 0..=4 {
         let value = low + (high - low) * i as f32 / 4.0;
         let py = y(value);
@@ -578,8 +578,8 @@ fn draw_curve(
         );
     }
 
-    // Una colonna di pixel per campione, a tempo continuo: a zoom alto un
-    // campione per frame darebbe una scaletta.
+    // One pixel column per sample, in continuous time: at high zoom one
+    // sample per frame would give a staircase.
     let curve = scalar_keyframes(&clip.effects, row);
     let mut points = Vec::new();
     let mut x = plot.left();
@@ -601,9 +601,9 @@ fn draw_curve(
         scalar_value_at(&clip.effects, row, frame).map(|v| egui::pos2(axis.x(frame), y(v)))
     };
 
-    // Segmenti su cui mostrare gli handle: quello che esce da un keyframe
-    // selezionato e quello che ci entra, così anche un solo keyframe
-    // selezionato ne ha uno addosso.
+    // Segments to show the handles on: the one leaving a selected keyframe
+    // and the one entering it, so even a single selected keyframe has one
+    // attached.
     let mut segments: Vec<usize> = Vec::new();
     for (i, &frame) in frames.iter().enumerate() {
         if !state.selection.contains(&(row, frame)) {
@@ -708,8 +708,8 @@ fn draw_curve(
                     } else {
                         0.5
                     };
-                    // Su un segmento piatto la y normalizzata non esiste:
-                    // l'handle resta dov'è e si muove solo in orizzontale.
+                    // On a flat segment the normalized y does not exist:
+                    // the handle stays where it is and moves only horizontally.
                     let ny = if (v1 - v0).abs() > 1e-6 {
                         (value_at_y(pos.y) - v0) / (v1 - v0)
                     } else if outgoing {
@@ -748,16 +748,16 @@ fn draw_curve(
                         applied: wanted,
                     });
                 }
-                // Il valore segue il puntatore sul keyframe trascinato,
-                // non su tutta la selezione: muoverli tutti in verticale
-                // vorrebbe dire scale diverse per parametri diversi.
+                // The value follows the pointer on the dragged keyframe,
+                // not on the whole selection: moving them all vertically
+                // would mean different scales for different parameters.
                 let frame = pick.1 + step;
-                // `clip` è ancora quello di prima dei comandi di questo
-                // frame: l'interpolazione si legge alla vecchia posizione.
+                // `clip` is still the one from before this frame's commands:
+                // the interpolation is read at the old position.
                 if let Some((_, interp)) = scalar_at(&clip.effects, row, pick.1) {
                     let value = value_at_y(pos.y);
-                    // Anche il valore va replicato sul gemello, o lo zoom
-                    // bloccato resterebbe tale solo di nome.
+                    // The value must be replicated on the twin too, or the locked
+                    // zoom would stay locked in name only.
                     for (target, _) in with_zoom_link(vec![(row, pick.1)], zoom_link) {
                         if scalar_at(&clip.effects, target, pick.1).is_none() {
                             continue;
@@ -806,7 +806,7 @@ fn keyframe_value(target: KeyframeTarget, value: f32) -> vv_core::KeyframeValue 
     match target {
         KeyframeTarget::TransformParam(p) => vv_core::KeyframeValue::TransformParam(p, value),
         KeyframeTarget::Gain => vv_core::KeyframeValue::Gain(value),
-        // Senza curva non si arriva qui; il colore si modifica dall'inspector.
+        // Without a curve one does not get here; the color is edited from the inspector.
         KeyframeTarget::Color => vv_core::KeyframeValue::Gain(value),
     }
 }
@@ -823,8 +823,8 @@ fn draw_rows(
     zoom_link: bool,
     response: &mut KeyframeEditorResponse,
 ) {
-    // Anche lo spazio che avanza sotto l'ultima riga fa parte dell'area:
-    // ci si deve poter cominciare un riquadro di selezione.
+    // The space left over under the last row is part of the area too:
+    // one must be able to start a selection box there.
     let height = rows.len() as f32 * ROW_HEIGHT;
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height.max(ui.available_height())),

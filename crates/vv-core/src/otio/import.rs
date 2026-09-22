@@ -1,8 +1,8 @@
-//! Le posizioni arrivano in secondi a un rate qualunque e vengono
-//! quantizzate al frame della timeline. Le track si leggono accumulando i
-//! secondi e arrotondando inizio e fine di ogni elemento, così non si
-//! accumula deriva lungo la track. Un file esportato da Venturi torna
-//! identico grazie a `metadata.venturi`.
+//! Positions arrive in seconds at an arbitrary rate and are quantized to
+//! the timeline frame. Tracks are read by accumulating the seconds and
+//! rounding the start and end of each element, so no drift accumulates
+//! along the track. A file exported by Venturi comes back identical thanks
+//! to `metadata.venturi`.
 
 use super::OtioError;
 use crate::model::{
@@ -13,16 +13,16 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-/// Metadati di un media e il suo `content_hash`, o un errore leggibile.
+/// Metadata of a media and its `content_hash`, or a readable error.
 pub type ProbeResult = Result<(MediaMeta, u64), String>;
 
 pub struct OtioImport {
     pub project: Project,
-    /// Quel che non è stato importato o è stato approssimato, per l'utente.
+    /// What was not imported or was approximated, for the user.
     pub warnings: Vec<OtioWarning>,
 }
 
-/// Il testo lo compone la UI, nella sua lingua.
+/// The text is composed by the UI, in its own language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OtioWarning {
     EffectIgnored { effect: String, clips: usize },
@@ -48,7 +48,7 @@ pub fn import_otio(
     project_from_otio(&value, base_dir, &mut probe)
 }
 
-/// `base_dir` risolve i `target_url` relativi.
+/// `base_dir` resolves relative `target_url`s.
 pub fn project_from_otio(
     value: &Value,
     base_dir: &Path,
@@ -83,23 +83,23 @@ struct Importer<'a> {
     project: Project,
     warnings: Vec<OtioWarning>,
     media: HashMap<PathBuf, Option<MediaId>>,
-    /// Nome dell'effetto → quante clip lo avevano: un avviso per effetto,
-    /// non uno per clip.
+    /// Effect name → how many clips had it: one warning per effect,
+    /// not one per clip.
     ignored_effects: BTreeMap<String, usize>,
     base_dir: &'a Path,
     probe: &'a mut dyn FnMut(&Path) -> ProbeResult,
 }
 
-/// Spazio dei numeri di gruppo collegato nel file: i nostri e quelli di
-/// Resolve non vanno mescolati.
+/// Space of linked group numbers in the file: ours and Resolve's must not
+/// be mixed.
 #[derive(PartialEq, Eq, Hash)]
 enum GroupKey {
     Venturi(u64),
     Resolve(u64),
 }
 
-/// Una clip letta da un file non nostro, candidata al collegamento
-/// automatico video+audio.
+/// A clip read from a file not our own, a candidate for automatic
+/// video+audio linking.
 struct ForeignClip {
     track: usize,
     index: usize,
@@ -136,7 +136,7 @@ impl Importer<'_> {
             for item in children(otio_track) {
                 let start = to_frames(cursor, fps);
                 let duration = match schema(item) {
-                    // Non occupa tempo sulla track: si sovrappone alle vicine.
+                    // Takes no time on the track: it overlaps its neighbours.
                     "Transition" => {
                         self.warn(OtioWarning::TransitionIgnored);
                         continue;
@@ -185,8 +185,8 @@ impl Importer<'_> {
         });
     }
 
-    /// Durata occupata sulla track (anche se la clip non viene importata)
-    /// e la clip, con `true` se non viene da Venturi.
+    /// Duration occupied on the track (even if the clip is not imported)
+    /// and the clip, with `true` if it does not come from Venturi.
     #[allow(clippy::too_many_arguments)]
     fn clip(
         &mut self,
@@ -223,8 +223,8 @@ impl Importer<'_> {
         let venturi = &item["metadata"]["venturi"];
         let mut effects = serde_json::from_value::<EffectStack>(venturi["effects"].clone())
             .unwrap_or_default();
-        // Secondi nel media all'inizio della clip e fps del media, per
-        // tradurre i keyframe degli effetti di altri editor.
+        // Seconds into the media at the start of the clip and the media fps, to
+        // translate the effect keyframes of other editors.
         let (source, rate, source_offset, media_start) = match schema(reference) {
             "ExternalReference" => {
                 let url = reference["target_url"].as_str().unwrap_or("");
@@ -312,10 +312,10 @@ impl Importer<'_> {
         (duration, Some((clip, is_foreign)))
     }
 
-    /// Porta in `effects` quel che si sa tradurre; il resto finisce in
-    /// `ignored_effects`, salvo effetti spenti o ai default (Resolve li
-    /// esporta tutti). `media_start`: secondi nel media e fps del media;
-    /// `rate`: fps dei keyframe di Resolve.
+    /// Brings into `effects` what it knows how to translate; the rest ends up
+    /// in `ignored_effects`, except for effects that are off or at their defaults
+    /// (Resolve exports them all). `media_start`: seconds into the media and the
+    /// media fps; `rate`: fps of Resolve's keyframes.
     fn effect(
         &mut self,
         effect: &Value,
@@ -346,7 +346,7 @@ impl Importer<'_> {
         }
     }
 
-    /// Il media al `target_url`, sondato una volta sola per file.
+    /// The media at `target_url`, probed once per file.
     fn media(&mut self, url: &str) -> Option<MediaId> {
         let Some(path) = url_to_path(url, self.base_dir) else {
             self.warn(OtioWarning::UnsupportedUrl { url: url.to_owned() });
@@ -371,8 +371,8 @@ impl Importer<'_> {
         media
     }
 
-    /// Gli altri editor esportano video e audio dello stesso media come
-    /// clip separate: si ricollegano quelle che coincidono in tutto.
+    /// Other editors export video and audio of the same media as separate
+    /// clips: the ones that coincide in everything get relinked.
     fn link_foreign_clips(&mut self, tracks: &mut [Track], foreign: &[ForeignClip]) {
         let mut by_span: HashMap<(MediaId, FrameIdx, FrameIdx, FrameIdx), Vec<&ForeignClip>> =
             HashMap::new();
@@ -418,8 +418,8 @@ fn is_default_parameter(parameter: &Value) -> bool {
     no_keyframes && parameter["Parameter Value"] == parameter["Default Parameter Value"]
 }
 
-/// Il volume di Resolve è in dB, come `gain_db`; i keyframe diventano
-/// keyframe lineari sul frame sorgente corrispondente.
+/// Resolve's volume is in dB, like `gain_db`; the keyframes become linear
+/// keyframes on the corresponding source frame.
 fn resolve_volume(
     parameter: &Value,
     effects: &mut EffectStack,
@@ -445,8 +445,8 @@ fn resolve_volume(
     }
 }
 
-/// Lo stream audio del media da cui Resolve prende i canali della clip,
-/// se vengono tutti dallo stesso.
+/// The audio stream of the media Resolve takes the clip's channels from,
+/// if they all come from the same one.
 fn resolve_source_track(resolve: &Value) -> Option<u64> {
     let mut tracks = children_of(resolve, "Channels").map(|c| c["Source Track ID"].as_u64());
     let first = tracks.next()??;
@@ -465,7 +465,7 @@ fn collect_timelines<'v>(value: &'v Value, out: &mut Vec<&'v Value>) {
     }
 }
 
-/// Il nome dello schema senza versione (`"Clip.2"` → `"Clip"`).
+/// The schema name without the version (`"Clip.2"` → `"Clip"`).
 fn schema(value: &Value) -> &str {
     let full = value["OTIO_SCHEMA"].as_str().unwrap_or("");
     full.split('.').next().unwrap_or(full)
@@ -484,13 +484,13 @@ fn seconds(time: &Value) -> Option<f64> {
     (rate > 0.0).then(|| time["value"].as_f64().unwrap_or(0.0) / rate)
 }
 
-/// `(inizio, durata)` in secondi.
+/// `(start, duration)` in seconds.
 fn time_range(range: &Value) -> Option<(f64, f64)> {
     Some((seconds(&range["start_time"])?, seconds(&range["duration"])?))
 }
 
-/// Durata di un elemento non importato: `source_range`, oppure quella dei
-/// figli (in sequenza per una track, la più lunga per uno stack).
+/// Duration of a non-imported element: `source_range`, or that of the
+/// children (in sequence for a track, the longest for a stack).
 fn item_duration(item: &Value) -> f64 {
     if let Some((_, duration)) = time_range(&item["source_range"]) {
         return duration;
@@ -572,8 +572,8 @@ mod tests {
         (clip.timeline_start, clip.source_offset, clip.timeline_len, clip.rate)
     }
 
-    /// Export e import di un progetto Venturi restituiscono le stesse
-    /// clip, anche divise a metà frame sorgente.
+    /// Exporting and importing a Venturi project returns the same clips,
+    /// even split mid source frame.
     #[test]
     fn a_venturi_export_imports_back_unchanged() {
         let media_meta = meta(Rational::new(30_000, 1001), 1000);
@@ -661,7 +661,7 @@ mod tests {
 
     const B_ROLL: &str = "file:///media/b%20roll.mov";
 
-    /// Sorgente a 24 fps da `start` frame per `duration`.
+    /// Source at 24 fps from frame `start` for `duration`.
     fn clip_1(name: &str, url: &str, start: f64, duration: f64, enabled: bool) -> Value {
         json!({
             "OTIO_SCHEMA": "Clip.1",
@@ -672,15 +672,15 @@ mod tests {
             "media_reference": {
                 "OTIO_SCHEMA": "ExternalReference.1",
                 "target_url": url,
-                // Media con timecode di partenza 01:00:00:00 a 24 fps.
+                // Media with a start timecode of 01:00:00:00 at 24 fps.
                 "available_range": range(86_400.0, 2400.0, 24.0),
             },
         })
     }
 
-    /// File di un altro editor: `Clip.1`, tempi nel rate del media con
-    /// timecode di partenza, transizioni, clip disattivate e media
-    /// mancanti; video e audio dello stesso tratto vanno ricollegati.
+    /// File from another editor: `Clip.1`, times in the media rate with a
+    /// start timecode, transitions, disabled clips and missing media;
+    /// video and audio of the same stretch must be relinked.
     #[test]
     fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
         let fps = 24_000.0 / 1001.0;
@@ -765,10 +765,10 @@ mod tests {
         }])
     }
 
-    /// Resolve esporta tutto lo stack di effetti di ogni clip: il volume
-    /// diventa gain, spenti e default spariscono, il resto è riassunto in
-    /// un avviso per effetto. Gruppi e stream audio vengono dai suoi
-    /// metadati.
+    /// Resolve exports the whole effect stack of every clip: volume
+    /// becomes gain, disabled and default ones disappear, the rest is
+    /// summarized in one warning per effect. Groups and audio streams come
+    /// from its metadata.
     #[test]
     fn resolve_effects_links_and_channels_are_translated() {
         let resolve_clip = |start: f64, effects: Value, link: u64, source_track: u64| {
@@ -850,9 +850,9 @@ mod tests {
         }
     }
 
-    /// Un media solo audio torna identico da un export nostro, si legge a
-    /// qualunque rate da un altro editor e su una track video viene
-    /// scartato con un avviso.
+    /// An audio-only media comes back identical from an export of ours, reads
+    /// at any rate from another editor, and on a video track is discarded
+    /// with a warning.
     #[test]
     fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
         let mut project = Project::default();

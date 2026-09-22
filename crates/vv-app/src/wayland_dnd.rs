@@ -1,6 +1,6 @@
-//! Drop di file dal file manager su Wayland, dove winit 0.30 non lo gestisce
-//! (solo X11). Un thread con una propria coda sulla connessione di winit,
-//! come fa smithay-clipboard; i file arrivano a egui in `raw_input_hook`.
+//! Dropping files from the file manager on Wayland, where winit 0.30 does not
+//! handle it (X11 only). A thread with its own queue on winit's connection,
+//! like smithay-clipboard does; the files reach egui in `raw_input_hook`.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -37,12 +37,12 @@ pub struct WaylandDnd {
 }
 
 impl WaylandDnd {
-    /// `None` fuori da Wayland o se il compositor non offre il DnD.
+    /// `None` outside Wayland or if the compositor does not offer DnD.
     pub fn start(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawDisplayHandle::Wayland(handle) = cc.display_handle().ok()?.as_raw() else {
             return None;
         };
-        // Il display resta valido per tutta la vita del processo: è di winit.
+        // The display stays valid for the whole process lifetime: it is winit's.
         let backend = unsafe { Backend::from_foreign_display(handle.display.as_ptr().cast()) };
         let conn = Connection::from_backend(backend);
         let (globals, mut queue) = registry_queue_init::<State>(&conn).ok()?;
@@ -164,7 +164,7 @@ impl DataDeviceHandler for State {
             return;
         };
         let _ = self.conn.flush();
-        // La lettura aspetta il client sorgente: non deve bloccare la coda.
+        // The read waits for the source client: it must not block the queue.
         let conn = self.conn.clone();
         let shared = self.shared.clone();
         let ctx = self.ctx.clone();
@@ -251,8 +251,8 @@ delegate_data_device!(State);
 delegate_seat!(State);
 delegate_registry!(State);
 
-/// Path locali di un `text/uri-list` (RFC 2483): commenti e URI non `file:`
-/// si scartano.
+/// Local paths from a `text/uri-list` (RFC 2483): comments and non-`file:`
+/// URIs are discarded.
 fn parse_uri_list(bytes: &[u8]) -> Vec<PathBuf> {
     bytes
         .split(|&b| b == b'\n')
@@ -260,7 +260,7 @@ fn parse_uri_list(bytes: &[u8]) -> Vec<PathBuf> {
         .filter(|line| !line.starts_with(b"#"))
         .filter_map(|line| line.strip_prefix(b"file://"))
         .filter_map(|rest| {
-            // Dopo `file://` c'è l'host, di solito vuoto o `localhost`.
+            // After `file://` comes the host, usually empty or `localhost`.
             let path = &rest[rest.iter().position(|&b| b == b'/')?..];
             Some(PathBuf::from(OsString::from_vec(percent_decode(path))))
         })
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn uri_list_yields_decoded_local_paths() {
-        let list = b"# commento\r\nfile:///home/me/a%20b.mp4\r\nfile://localhost/tmp/%C3%A8.wav\r\nhttps://x/y\r\n";
+        let list = b"# comment\r\nfile:///home/me/a%20b.mp4\r\nfile://localhost/tmp/%C3%A8.wav\r\nhttps://x/y\r\n";
         assert_eq!(
             parse_uri_list(list),
             vec![PathBuf::from("/home/me/a b.mp4"), PathBuf::from("/tmp/è.wav")]

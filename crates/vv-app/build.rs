@@ -13,7 +13,7 @@ fn main() {
     let hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=VV_GIT_HASH={hash}");
 
-    // Senza questi il build script non riparte a ogni commit e l'hash resta vecchio.
+    // Without these the build script doesn't rerun on every commit and the hash goes stale.
     if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
         let git_dir = Path::new(&git_dir);
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());

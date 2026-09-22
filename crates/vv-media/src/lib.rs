@@ -1,5 +1,5 @@
-//! Probe, decode, cache dei frame, encode, proxy e waveform (vedi
-//! ARCHITECTURE.md). Proxy e waveform sono cache su disco a chiave
+//! Probe, decode, frame cache, encode, proxy and waveform (see
+//! ARCHITECTURE.md). Proxy and waveform are on-disk caches keyed by
 //! `content_hash`.
 
 pub mod audio;
@@ -37,8 +37,8 @@ pub enum MediaError {
     Io(#[from] std::io::Error),
 }
 
-/// Cartella di cache globale `$XDG_CACHE_HOME/venturi/<name>` (o
-/// `~/.cache/...`, o la temp di sistema senza `HOME`).
+/// Global cache directory `$XDG_CACHE_HOME/venturi/<name>` (or
+/// `~/.cache/...`, or the system temp dir without `HOME`).
 pub(crate) fn cache_dir(name: &str) -> std::path::PathBuf {
     use std::path::PathBuf;
     let base = std::env::var_os("XDG_CACHE_HOME")
@@ -48,7 +48,7 @@ pub(crate) fn cache_dir(name: &str) -> std::path::PathBuf {
     base.join("venturi").join(name)
 }
 
-/// Fixture dei test (anche di vv-app): genera `output` con la CLI di ffmpeg.
+/// Test fixture (vv-app's too): generates `output` with the ffmpeg CLI.
 #[doc(hidden)]
 pub mod test_support {
     pub fn ffmpeg(args: &[&str], output: &std::path::Path) {

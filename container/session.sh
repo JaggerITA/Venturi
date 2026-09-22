@@ -1,24 +1,24 @@
 #!/bin/bash
-# Sessione persistente del container di test (Xvfb + repo montato) per
-# poter avviare vv-app una volta e interagirci in più passi (mouse,
-# screenshot) con comandi separati — un container `--rm` one-shot per
-# comando (come run.sh) non va bene qui: l'app e Xvfb dovrebbero restare
-# vivi tra un `podman exec` e l'altro.
+# Persistent session of the test container (Xvfb + mounted repo) so that
+# vv-app can be started once and interacted with in several steps (mouse,
+# screenshots) using separate commands — a one-shot `--rm` container per
+# command (like run.sh) does not work here: the app and Xvfb need to stay
+# alive between one `podman exec` and the next.
 #
-# Uso:
-#   container/session.sh start          # avvia la sessione in background
-#   container/session.sh exec <cmd...>  # esegue un comando nella sessione
-#   container/session.sh shot <nome>    # screenshot in container/shots/<nome>.png
-#   container/session.sh stop           # ferma e rimuove la sessione
+# Usage:
+#   container/session.sh start          # starts the session in the background
+#   container/session.sh exec <cmd...>  # runs a command in the session
+#   container/session.sh shot <name>    # screenshot into container/shots/<name>.png
+#   container/session.sh stop           # stops and removes the session
 #
-# Esempio di giro completo:
+# Example of a full round:
 #   container/session.sh start
 #   container/session.sh exec cargo build -p vv-app
 #   container/session.sh exec bash -c 'DISPLAY=:99 ./target-container.../vv-app &'
-#   (in realtà usa CARGO_TARGET_DIR=/cargo-target, vedi Containerfile)
-#   container/session.sh shot avvio
+#   (it actually uses CARGO_TARGET_DIR=/cargo-target, see Containerfile)
+#   container/session.sh shot startup
 #   container/session.sh exec xdotool mousemove 640 400 click 1
-#   container/session.sh shot dopo-click
+#   container/session.sh shot after-click
 #   container/session.sh stop
 
 set -euo pipefail
@@ -32,7 +32,7 @@ case "${1:-}" in
         podman volume create venturi-target >/dev/null 2>&1 || true
         mkdir -p container/shots
         if podman container exists "$NAME"; then
-            echo "Sessione '$NAME' già attiva (container/session.sh stop per fermarla)." >&2
+            echo "Session '$NAME' already running (container/session.sh stop to stop it)." >&2
             exit 1
         fi
         podman run -d --name "$NAME" \
@@ -41,10 +41,10 @@ case "${1:-}" in
             -v venturi-target:/cargo-target \
             venturi-test \
             sleep infinity
-        # L'entrypoint di norma fa `exec "$@"` dopo aver avviato Xvfb, ma
-        # qui il processo principale è `sleep infinity` (per restare vivo
-        # tra un `exec` e l'altro): Xvfb va avviato esplicitamente come
-        # primo comando dentro il container appena partito.
+        # The entrypoint normally does `exec "$@"` after starting Xvfb, but
+        # here the main process is `sleep infinity` (to stay alive
+        # between one `exec` and the next): Xvfb must be started explicitly as
+        # the first command inside the freshly started container.
         podman exec -d "$NAME" bash -c '
             Xvfb "$DISPLAY" -screen 0 "$XVFB_RESOLUTION" -nolisten tcp >/tmp/xvfb.log 2>&1 &
             for _ in $(seq 1 50); do
@@ -55,12 +55,12 @@ case "${1:-}" in
         '
         for _ in $(seq 1 50); do
             if podman exec "$NAME" xdpyinfo -display :99 >/dev/null 2>&1; then
-                echo "Sessione '$NAME' pronta (Xvfb su :99)."
+                echo "Session '$NAME' ready (Xvfb on :99)."
                 exit 0
             fi
             sleep 0.2
         done
-        echo "Xvfb non pronto entro il timeout, vedi 'podman exec $NAME cat /tmp/xvfb.log'." >&2
+        echo "Xvfb not ready within the timeout, see 'podman exec $NAME cat /tmp/xvfb.log'." >&2
         exit 1
         ;;
     exec)
@@ -75,10 +75,10 @@ case "${1:-}" in
         ;;
     stop)
         podman rm -f "$NAME" >/dev/null 2>&1 || true
-        echo "Sessione '$NAME' fermata."
+        echo "Session '$NAME' stopped."
         ;;
     *)
-        echo "Uso: $0 {start|exec <cmd...>|shot [nome]|stop}" >&2
+        echo "Usage: $0 {start|exec <cmd...>|shot [name]|stop}" >&2
         exit 1
         ;;
 esac

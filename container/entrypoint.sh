@@ -1,9 +1,9 @@
 #!/bin/bash
-# Avvia Xvfb in background e aspetta che sia pronto prima di eseguire il
-# comando richiesto — senza l'attesa, un `cargo run` lanciato subito dopo
-# può connettersi a un X server non ancora in ascolto e fallire in modo
-# intermittente (dipende da quanto Xvfb impiega ad avviarsi sulla macchina
-# ospite).
+# Starts Xvfb in the background and waits for it to be ready before running the
+# requested command — without the wait, a `cargo run` launched right after
+# may connect to an X server not listening yet and fail
+# intermittently (it depends on how long Xvfb takes to start on the host
+# machine).
 set -euo pipefail
 
 Xvfb "$DISPLAY" -screen 0 "$XVFB_RESOLUTION" -nolisten tcp >/tmp/xvfb.log 2>&1 &
@@ -17,7 +17,7 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
-    echo "Xvfb non si è avviato entro il timeout, log:" >&2
+    echo "Xvfb did not start within the timeout, log:" >&2
     cat /tmp/xvfb.log >&2
     exit 1
 fi

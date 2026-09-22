@@ -1,5 +1,5 @@
-//! Generazione waveform su un thread dedicato, una alla volta: decodificare
-//! l'audio di un file lungo richiede secondi.
+//! Waveform generation on a dedicated thread, one at a time: decoding the
+//! audio of a long file takes seconds.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -15,7 +15,7 @@ struct Job {
 
 pub struct WaveformWorker {
     worker: Worker<Job>,
-    /// `(content_hash, stream_index)` delle waveform pronte su disco.
+    /// `(content_hash, stream_index)` of the waveforms ready on disk.
     ready_rx: mpsc::Receiver<(u64, usize)>,
 }
 
@@ -34,13 +34,13 @@ impl WaveformWorker {
         Self { worker, ready_rx }
     }
 
-    /// Waveform completate dall'ultima chiamata.
+    /// Waveforms completed since the last call.
     pub fn drain_ready(&self) -> Vec<(u64, usize)> {
         self.ready_rx.try_iter().collect()
     }
 
-    /// Accoda la generazione delle waveform di tutti gli stream audio di
-    /// `path` che non sono già su disco — non bloccante, ritorna subito.
+    /// Queues generation of the waveforms of all audio streams of `path`
+    /// that are not already on disk — non-blocking, returns immediately.
     pub fn enqueue(&self, path: PathBuf, content_hash: u64, audio_streams: usize, num_peaks: usize) {
         self.worker.send(Job {
             path,
@@ -52,8 +52,8 @@ impl WaveformWorker {
 }
 
 
-/// Genera in una passata le waveform mancanti di `job`; restituisce le
-/// chiavi di quelle pronte su disco.
+/// Generates the missing waveforms of `job` in one pass; returns the keys
+/// of those ready on disk.
 fn generate(job: &Job) -> Vec<(u64, usize)> {
     let (ready, missing): (Vec<usize>, Vec<usize>) = (0..job.audio_streams)
         .partition(|&i| vv_media::waveform::waveform_exists(job.content_hash, i));

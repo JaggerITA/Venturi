@@ -1,14 +1,14 @@
-//! Buffer video a livello di timeline: un thread cammina dal playhead in
-//! avanti (e un po' indietro) attraversando tagli, vuoti e track senza casi
-//! speciali, e riempie una `SharedFrameCache` unica a budget globale (vedi
-//! REFACTOR_PIPELINE.md §2). Solo decode: il compositing resta sul thread UI,
-//! l'audio lo suona il mixer.
+//! Video buffer at timeline level: a thread walks forward from the playhead
+//! (and a little backwards) crossing cuts, gaps and tracks without special
+//! cases, and fills a single `SharedFrameCache` on a global budget (see
+//! REFACTOR_PIPELINE.md §2). Decode only: the compositing stays on the UI thread,
+//! the audio is played by the mixer.
 //!
-//! Una compound clip non si decodifica e non si mette in cache: il suo
-//! contenuto è una timeline, composta al volo da chi compone il frame
-//! esterno (`frame_provider::GpuCompounds`). Qui si cammina comunque dentro
-//! la sua timeline annidata, a qualunque profondità, per tenere caldi i
-//! media veri che quella composizione andrà a leggere.
+//! A compound clip is not decoded and not cached: its
+//! content is a timeline, composed on the fly by whoever composes the outer
+//! frame (`frame_provider::GpuCompounds`). Here its nested timeline is walked
+//! anyway, at any depth, to keep warm the
+//! real media that composition will read.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -23,27 +23,27 @@ use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
 
-/// Secondi bufferizzati avanti dal playhead, di default.
+/// Seconds buffered ahead of the playhead, by default.
 pub const DEFAULT_LOOKAHEAD_SECS: f64 = 3.0;
 
-/// Secondi bufferizzati dietro la testina, di default. Pochi apposta:
-/// servono solo a uno scrub avanti-indietro ravvicinato; la finestra in
-/// avanti ha sempre la precedenza sul budget.
+/// Seconds buffered behind the playhead, by default. Few on purpose:
+/// they only serve a close back-and-forth scrub; the forward window
+/// always has priority on the budget.
 pub const DEFAULT_BEHIND_SECS: f64 = 2.0;
 
-/// Margine minimo di lookahead/behind anche se configurati a 0: senza
-/// cuscinetto il playback va a scatti per la normale variabilità di timing.
+/// Minimum lookahead/behind margin even if configured to 0: without a
+/// cushion the playback stutters from the normal timing variability.
 const MIN_MARGIN_FRAMES: FrameIdx = 4;
 
-/// Blocchi in cui si spezza la finestra dietro la testina. Decodificarla in
-/// un solo seek produrrebbe per ultimi i frame vicini alla testina, e uno
-/// scrub all'indietro continuo non li raggiungerebbe mai: dal blocco più
-/// vicino al più lontano il buco resta al più di un blocco.
+/// Chunks the window behind the playhead is split into. Decoding it in
+/// a single seek would produce last the frames near the playhead, and a
+/// continuous backwards scrub would never reach them: from the nearest
+/// chunk to the farthest the hole stays at most one chunk wide.
 const BEHIND_CHUNK_FRAMES: FrameIdx = 15;
 
-/// Tetto al transito (frame decodificati prima del tratto voluto) in frame,
-/// non in byte del budget: un budget stretto non dice nulla sulla lunghezza
-/// del GOP. Generoso: serve solo contro GOP patologici.
+/// Cap on the transit (frames decoded before the wanted stretch) in frames,
+/// not in budget bytes: a tight budget says nothing about the GOP
+/// length. Generous: it only guards against pathological GOPs.
 const TRANSIT_SAFETY_CAP_FRAMES: FrameIdx = 3000;
 
 fn store_secs(atomic: &AtomicU64, secs: f64) {
@@ -54,53 +54,53 @@ fn load_secs(atomic: &AtomicU64) -> f64 {
     f64::from_bits(atomic.load(Ordering::Relaxed))
 }
 
-/// Un ciclo che trova tutto in cache torna subito: un poll breve costa poco.
+/// A cycle finding everything cached returns immediately: a short poll costs little.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Soglia di seek finché il GOP del media non è stato osservato. Bassa: un
-/// seek di troppo costa poco, riusa il decoder aperto.
+/// Seek threshold until the GOP of the media has been observed. Low: one
+/// seek too many costs little, it reuses the open decoder.
 const DEFAULT_SEEK_THRESHOLD_FRAMES: FrameIdx = 30;
 
-/// Tetto alla stima del GOP, finché non arriva un'osservazione più stretta.
+/// Cap on the GOP estimate, until a tighter observation arrives.
 const MAX_SEEK_THRESHOLD_FRAMES: FrameIdx = 300;
 
-/// Soglia di seek sui proxy: sono tutto-intra, seekare costa quasi nulla.
-/// La stima adattiva lì resterebbe alta durante uno scrub veloce e farebbe
-/// decodificare in sequenza decine di frame inutili.
+/// Seek threshold on the proxies: they are all-intra, seeking costs almost nothing.
+/// The adaptive estimate there would stay high during a fast scrub and would
+/// make dozens of useless frames be decoded in sequence.
 const PROXY_SEEK_THRESHOLD_FRAMES: FrameIdx = 1;
 
 enum Command {
     UpdateProject(Box<Project>, TimelineId),
-    /// Passa dai comandi e non da un atomico: il worker deve reagire al cambio
-    /// svuotando cache e decoder (i frame hanno la risoluzione sbagliata).
+    /// Goes through the commands and not through an atomic: the worker must react to the change
+    /// by emptying caches and decoders (the frames have the wrong resolution).
     SetProxyEnabled(bool),
-    /// Sveglia il worker subito invece di aspettare `POLL_INTERVAL`.
+    /// Wakes the worker immediately instead of waiting for `POLL_INTERVAL`.
     Wake,
     Stop,
 }
 
-/// Log diagnostico su stderr con `VV_DEBUG_RENDER_AHEAD=1`.
+/// Diagnostic log on stderr with `VV_DEBUG_RENDER_AHEAD=1`.
 fn debug_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("VV_DEBUG_RENDER_AHEAD").is_ok())
 }
 
-/// Stato condiviso tra `RenderAhead` (thread UI) e il worker.
+/// State shared between `RenderAhead` (UI thread) and the worker.
 struct SharedState {
     caches: SharedFrameCache,
     target: AtomicI64,
     cache_budget_bytes: AtomicUsize,
-    /// L'ultimo ciclo del worker ha trovato tutta la finestra in cache: la
-    /// UI smette di chiedere repaint per la striscia "buffered".
+    /// The worker's last cycle found the whole window cached: the
+    /// UI stops asking for repaints for the "buffered" strip.
     caught_up: AtomicBool,
-    /// Secondi (bit di un `f64`, vedi `store_secs`) da bufferizzare avanti
-    /// e dietro la testina. Atomici e non `Command`: il worker li rilegge a
-    /// ogni ciclo, non c'è una transizione a cui reagire.
+    /// Seconds (bits of an `f64`, see `store_secs`) to buffer ahead of
+    /// and behind the playhead. Atomics and not `Command`s: the worker re-reads them on
+    /// every cycle, there is no transition to react to.
     lookahead_secs: AtomicU64,
     behind_secs: AtomicU64,
 }
 
-/// Vedi il doc del modulo. Uno per `VenturiApp`.
+/// See the module docs. One per `VenturiApp`.
 pub struct RenderAhead {
     shared: Arc<SharedState>,
     tx: mpsc::Sender<Command>,
@@ -136,9 +136,9 @@ impl RenderAhead {
         }
     }
 
-    /// Nuovo playhead. Se cambia segna subito "non bufferizzato" (o la UI
-    /// smetterebbe di chiedere repaint su uno stato vecchio) e sveglia il
-    /// worker: con finestre strette 50 ms di attesa limitano il playback.
+    /// New playhead. If it changes it immediately marks "not buffered" (or the UI
+    /// would stop asking for repaints on a stale state) and wakes the
+    /// worker: with narrow windows 50 ms of waiting limit the playback.
     pub fn set_target(&self, frame: FrameIdx) {
         let previous = self.shared.target.swap(frame, Ordering::Relaxed);
         if previous != frame {
@@ -151,22 +151,22 @@ impl RenderAhead {
         self.shared.cache_budget_bytes.store(bytes, Ordering::Relaxed);
     }
 
-    /// Secondi bufferizzati avanti (menu Playback > Proxy), mai sotto
+    /// Seconds buffered ahead (menu Playback > Proxy), never below
     /// `MIN_MARGIN_FRAMES`.
     pub fn set_lookahead_secs(&self, secs: f64) {
         store_secs(&self.shared.lookahead_secs, secs);
         self.shared.caught_up.store(false, Ordering::Relaxed);
     }
 
-    /// Quanti secondi di timeline bufferizzare anche *dietro* la testina
-    /// (menu Playback > Proxy) — vedi doc di `DEFAULT_BEHIND_SECS`.
+    /// How many seconds of timeline to buffer *behind* the playhead too
+    /// (menu Playback > Proxy) — see the docs of `DEFAULT_BEHIND_SECS`.
     pub fn set_behind_secs(&self, secs: f64) {
         store_secs(&self.shared.behind_secs, secs);
         self.shared.caught_up.store(false, Ordering::Relaxed);
     }
 
-    /// Il worker lavora su una copia del progetto: va aggiornata a ogni
-    /// cambio della history.
+    /// The worker works on a copy of the project: it must be updated on every
+    /// change of the history.
     pub fn update_project(&self, project: &Project, timeline_id: TimelineId) {
         self.shared.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::UpdateProject(
@@ -175,27 +175,27 @@ impl RenderAhead {
         ));
     }
 
-    /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy): il worker
-    /// svuota la cache condivisa e riapre da zero ogni decoder sul path
-    /// giusto per il nuovo stato — vedi doc di `Command::SetProxyEnabled`.
+    /// "Use proxy" toggle (REFACTOR_PIPELINE.md proxy): the worker
+    /// empties the shared cache and reopens from scratch every decoder on the
+    /// right path for the new state — see the docs of `Command::SetProxyEnabled`.
     pub fn set_proxy_enabled(&self, enabled: bool) {
         self.shared.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::SetProxyEnabled(enabled));
     }
 
-    /// Il frame decodificato per `(media_id, source_frame)`, se già in
-    /// cache.
+    /// The decoded frame for `(media_id, source_frame)`, if already
+    /// cached.
     pub fn get_frame(&self, media_id: MediaId, source_frame: FrameIdx) -> Option<Arc<FrameYuv420>> {
         self.shared.caches.get(media_id, source_frame)
     }
 
-    /// `false` finché resta lavoro per la finestra corrente: la UI continua a
-    /// chiedere repaint per far avanzare la striscia "buffered".
+    /// `false` while work remains for the current window: the UI keeps
+    /// asking for repaints to advance the "buffered" strip.
     pub fn is_caught_up(&self) -> bool {
         self.shared.caught_up.load(Ordering::Relaxed)
     }
 
-    /// Intervalli in cache di un media, in frame sorgente.
+    /// Cached intervals of a media, in source frames.
     pub fn cached_ranges_for(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
         self.shared.caches.cached_ranges(media_id)
     }
@@ -210,8 +210,8 @@ impl Drop for RenderAhead {
     }
 }
 
-/// Non bloccante e mai un errore: un media che non si decodifica il
-/// worker lo salta.
+/// Non-blocking and never an error: a media that does not decode is
+/// skipped by the worker.
 impl crate::frame_provider::FrameProvider for RenderAhead {
     fn frame_for(
         &mut self,
@@ -228,23 +228,23 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
     }
 }
 
-/// Decoder aperto per un media, con il prossimo frame che produrrà: dice se
-/// conviene decodificare in sequenza o seekare. Uno per media, così un
-/// taglio tra due media non li fa riaprire.
+/// Decoder open for a media, with the next frame it will produce: it says whether
+/// it is better to decode in sequence or to seek. One per media, so a
+/// cut between two media does not make them reopen.
 struct OpenDecoder {
     decoder: Decoder,
-    /// Path aperto: se il proxy diventa disponibile o cambia il toggle, il
-    /// decoder va riaperto sul nuovo.
+    /// Open path: if the proxy becomes available or the toggle changes, the
+    /// decoder must be reopened on the new one.
     resolved_path: std::path::PathBuf,
-    /// `true` quando `resolved_path` è un proxy (REFACTOR_PIPELINE.md
-    /// proxy) — vedi `PROXY_SEEK_THRESHOLD_FRAMES` sul perché bypassa la
-    /// stima adattiva del GOP invece di limitarsi a inizializzarla.
+    /// `true` when `resolved_path` is a proxy (REFACTOR_PIPELINE.md
+    /// proxy) — see `PROXY_SEEK_THRESHOLD_FRAMES` on why it bypasses the
+    /// adaptive GOP estimate instead of merely initializing it.
     is_all_intra: bool,
     next_frame: FrameIdx,
-    /// Dopo un seek o un'apertura il primo frame è un keyframe: serve a
-    /// imparare il GOP del media.
+    /// After a seek or an open the first frame is a keyframe: it serves to
+    /// learn the GOP of the media.
     just_repositioned: bool,
-    /// Ultimo atterraggio da seek e GOP stimato dalla distanza tra atterraggi.
+    /// Last seek landing and GOP estimated from the distance between landings.
     last_keyframe_landed: Option<FrameIdx>,
     estimated_gop: Option<FrameIdx>,
 }
@@ -262,7 +262,7 @@ impl OpenDecoder {
         }
     }
 
-    /// Circa un GOP osservato, un fallback finché non c'è; fisso sui proxy.
+    /// About one observed GOP, a fallback while there is none; fixed on the proxies.
     fn seek_threshold_frames(&self) -> FrameIdx {
         if self.is_all_intra {
             return PROXY_SEEK_THRESHOLD_FRAMES;
@@ -270,8 +270,8 @@ impl OpenDecoder {
         self.estimated_gop.unwrap_or(DEFAULT_SEEK_THRESHOLD_FRAMES)
     }
 
-    /// Aggiorna la stima del GOP con un nuovo atterraggio. Tiene il minimo:
-    /// un salto di più GOP la sovrastimerebbe.
+    /// Updates the GOP estimate with a new landing. It keeps the minimum:
+    /// a jump of several GOPs would overestimate it.
     fn record_keyframe_landing(&mut self, idx: FrameIdx) {
         if let Some(prev) = self.last_keyframe_landed
             && idx > prev
@@ -300,13 +300,13 @@ fn worker_loop(
     mut proxy_enabled: bool,
 ) {
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    // Decoder separati per la finestra dietro la testina: vedi `walk_and_fill`.
+    // Separate decoders for the window behind the playhead: see `walk_and_fill`.
     let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    // `from` del ciclo precedente (solo quello, mai un min/max storico):
-    // dice se la testina è tornata indietro.
+    // `from` of the previous cycle (only that, never a historical min/max):
+    // it says whether the playhead went backwards.
     let mut last_from_frame: Option<FrameIdx> = None;
-    // Ciclo precedente interrotto da un salto della testina: si riparte
-    // subito invece di aspettare `POLL_INTERVAL`.
+    // Previous cycle interrupted by a playhead jump: it restarts
+    // immediately instead of waiting for `POLL_INTERVAL`.
     let mut retry_immediately = false;
     loop {
         let first = if retry_immediately {
@@ -322,7 +322,7 @@ fn worker_loop(
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         };
-        // Anche i comandi già in coda: conta solo lo stato finale.
+        // The commands already queued too: only the final state counts.
         for cmd in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             match cmd {
                 Command::Stop => return,
@@ -364,45 +364,45 @@ fn worker_loop(
     }
 }
 
-/// Cosa ha fatto `position_decoder` per soddisfare la richiesta.
+/// What `position_decoder` did to satisfy the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Positioned {
-    /// Decoder già aperto e già posizionato bene: nessun seek, il fronte
-    /// del buffer avanza in sequenza senza alcun costo aggiuntivo.
+    /// Decoder already open and already well positioned: no seek, the front
+    /// of the buffer advances in sequence at no extra cost.
     Reused,
-    /// Decoder già aperto, riposizionato con un seek sul decoder
-    /// esistente (`seek_to_time`, non una riapertura).
+    /// Decoder already open, repositioned with a seek on the existing
+    /// decoder (`seek_to_time`, not a reopen).
     Seeked,
-    /// Nessun decoder aperto per questo media: aperto da zero.
+    /// No decoder open for this media: opened from scratch.
     Opened,
-    /// Apertura del media fallita: il chiamante salta il segmento.
+    /// Opening the media failed: the caller skips the segment.
     Failed,
 }
 
-/// Tratto di una clip Media nella finestra, in frame sorgente, con la sua
-/// posizione in timeline (serve a misurare la distanza dalla testina).
+/// Stretch of a Media clip in the window, in source frames, with its
+/// position on the timeline (used to measure the distance from the playhead).
 #[derive(Clone, Copy, Debug)]
 struct MediaSegment {
     media_id: MediaId,
     source_start: FrameIdx,
     source_end: FrameIdx,
     timeline_start: FrameIdx,
-    /// `Clip::rate` della clip da cui viene il segmento: serve a
-    /// `chunk_behind_segments_near_to_far` per tradurre un offset in
-    /// frame sorgente nel corrispondente offset di timeline.
+    /// `Clip::rate` of the clip the segment comes from: needed by
+    /// `chunk_behind_segments_near_to_far` to translate an offset in
+    /// source frames into the corresponding timeline offset.
     rate: vv_core::Rational,
 }
 
-/// Segmenti di `[from_frame, end_frame)`, uno per clip Media di ogni track
-/// video (anche quelle sotto: si vedono nelle bande di letterbox),
-/// dal più vicino alla testina e, a pari posizione, dalla track più alta.
-/// Solo media veri: una compound clip non si decodifica, ci si cammina
-/// dentro (a qualunque profondità di nesting).
-/// Limite alla profondità di nesting di compound clip che questo modulo
-/// segue: da quando anche la timeline del progetto compare nel media pool
-/// (vedi `MediaItem::compound`), trascinarla dentro se stessa (o dentro una
-/// sua compound clip) creerebbe un ciclo — senza un limite, uno stack
-/// overflow invece di un semplice "non composto". Generoso per l'uso reale.
+/// Segments of `[from_frame, end_frame)`, one per Media clip of every video
+/// track (including those below: they show in the letterbox bars),
+/// from the nearest to the playhead and, at equal position, from the highest track.
+/// Real media only: a compound clip is not decoded, it is walked
+/// into (at any nesting depth).
+/// Limit on the nesting depth of compound clips this module
+/// follows: since the project timeline shows up in the media pool too
+/// (see `MediaItem::compound`), dragging it inside itself (or inside one of
+/// its compound clips) would create a cycle — without a limit, a stack
+/// overflow instead of a plain "not composed". Generous for real use.
 const MAX_COMPOUND_DEPTH: u32 = 16;
 
 fn collect_media_segments(
@@ -416,8 +416,8 @@ fn collect_media_segments(
     strip_track(real)
 }
 
-/// Come `collect_media_segments` per la finestra dietro: dal più vicino
-/// alla testina, cioè dal più avanti in timeline.
+/// Like `collect_media_segments` for the window behind: from the nearest
+/// to the playhead, i.e. from the farthest ahead on the timeline.
 fn collect_media_segments_behind(
     project: &Project,
     timeline: &Timeline,
@@ -433,13 +433,13 @@ fn strip_track(segments: Vec<(usize, MediaSegment)>) -> Vec<MediaSegment> {
     segments.into_iter().map(|(_, s)| s).collect()
 }
 
-/// La parte comune delle due funzioni sopra: ogni clip Media di ogni track
-/// video ritagliata su `[from_frame, end_frame)`, con l'indice della sua
-/// track per poterle poi ordinare. Non ordinati. Ricorsiva: una clip che
-/// referenzia una compound clip (`MediaItem::compound`) non genera un
-/// segmento da decodificare, ma — sullo stesso range, tradotto in frame
-/// della sua timeline annidata da `Clip::source_frame_at` — i segmenti
-/// raccolti dentro quella timeline, a qualunque profondità (entro
+/// The part common to the two functions above: every Media clip of every video
+/// track clipped to `[from_frame, end_frame)`, with the index of its
+/// track so they can be sorted afterwards. Not sorted. Recursive: a clip
+/// referencing a compound clip (`MediaItem::compound`) does not generate a
+/// segment to decode, but — on the same range, translated into frames
+/// of its nested timeline by `Clip::source_frame_at` — the segments
+/// collected inside that timeline, at any depth (within
 /// `MAX_COMPOUND_DEPTH`).
 fn clipped_media_segments(
     project: &Project,
@@ -465,9 +465,9 @@ fn clipped_media_segments(
             if segment_end <= segment_start {
                 continue;
             }
-            // Mappatura clip→frame-sorgente condivisa con l'export
-            // (`vv_core::Clip::source_frame_at`, vedi doc lì per il
-            // perché — REFACTOR_PIPELINE.md B1).
+            // clip→source-frame mapping shared with the export
+            // (`vv_core::Clip::source_frame_at`, see the docs there for the
+            // reason — REFACTOR_PIPELINE.md B1).
             let source_start = clip.source_frame_at(segment_start);
             let source_end = clip.source_frame_at(segment_end - 1);
             let segment = MediaSegment {
@@ -483,10 +483,10 @@ fn clipped_media_segments(
     real
 }
 
-/// Aggiunge `segment` ai media da decodificare, o — se `segment.media_id` è
-/// una compound clip, che non si decodifica mai — ricorre nella sua
-/// timeline annidata sullo stesso range (in frame sorgente, cioè già nello
-/// spazio di quella timeline).
+/// Adds `segment` to the media to decode, or — if `segment.media_id` is
+/// a compound clip, which is never decoded — recurses into its
+/// nested timeline on the same range (in source frames, i.e. already in the
+/// space of that timeline).
 fn push_or_recurse(
     project: &Project,
     track_index: usize,
@@ -504,18 +504,18 @@ fn push_or_recurse(
     }
 }
 
-/// Segmenti "in prestito" per le crossing transition attive in
+/// Segments "lent" for the crossing transitions active in
 /// `[from_frame, end_frame)`: `extrapolated_frame_for` (`frame_provider.rs`)
-/// non congela mai una clip sul suo ultimo/primo frame reale, ma continua a
-/// giocare il girato che il trim aveva scartato finché non arriva alla vera
-/// fine del media — cioè, oltre il proprio bordo dichiarato, chiede un
-/// range di frame sorgente crescente, non un singolo frame fisso. Nessun
-/// segmento di `clipped_media_segments` lo copre mai (è ritagliato stretto
-/// sul range dichiarato di ciascuna clip), quindi senza questo
-/// `SharedFrameCache::reconcile` lo sfratta (o non lo scarica mai) appena
-/// la testina supera il taglio, congelando il compositing per quella metà
-/// della finestra della crossing. Come `clipped_media_segments`, solo media
-/// veri: dentro una compound clip si cammina.
+/// never freezes a clip on its last/first real frame, but keeps
+/// playing the footage the trim had discarded until it reaches the real
+/// end of the media — that is, past its own declared edge, it asks for a
+/// growing range of source frames, not a single fixed frame. No
+/// segment of `clipped_media_segments` ever covers it (it is clipped tightly
+/// to the declared range of each clip), so without this
+/// `SharedFrameCache::reconcile` evicts it (or never fetches it) as soon as
+/// the playhead passes the cut, freezing the compositing for that half
+/// of the crossing window. Like `clipped_media_segments`, real media
+/// only: a compound clip is walked into.
 fn crossing_borrowed_segments(
     project: &Project,
     timeline: &Timeline,
@@ -535,9 +535,9 @@ fn crossing_borrowed_segments(
             if window.end <= from_frame || window.start >= end_frame {
                 continue;
             }
-            // `left` presta il tratto dopo il proprio bordo dichiarato,
-            // `right` quello prima: l'altra metà di ciascuna è già coperta
-            // dal proprio segmento normale.
+            // `left` lends the stretch after its own declared edge,
+            // `right` the one before: the other half of each is already covered
+            // by its own normal segment.
             if window.end > left.timeline_end() {
                 push_borrowed_segment(project, left, left.timeline_end(), window.end - 1, &mut real);
             }
@@ -549,11 +549,11 @@ fn crossing_borrowed_segments(
     real
 }
 
-/// Un segmento sorgente per il tratto di `clip` prestato a una crossing,
-/// `[from_timeline, to_timeline]` (inclusivo) in frame di timeline,
-/// clampato agli stessi bordi di `media.meta.duration_frames` che userebbe
-/// `held_timeline_frame` — altrimenti si chiederebbe di bufferizzare un
-/// frame sorgente che il decoder non produrrà mai.
+/// A source segment for the stretch of `clip` lent to a crossing,
+/// `[from_timeline, to_timeline]` (inclusive) in timeline frames,
+/// clamped to the same edges of `media.meta.duration_frames` that
+/// `held_timeline_frame` would use — otherwise it would ask to buffer a
+/// source frame the decoder will never produce.
 fn push_borrowed_segment(
     project: &Project,
     clip: &vv_core::Clip,
@@ -593,8 +593,8 @@ fn push_borrowed_segment(
     }
 }
 
-/// Spezza i segmenti dietro la testina in blocchi di `BEHIND_CHUNK_FRAMES`,
-/// dal bordo vicino alla testina (`source_end`) verso quello lontano.
+/// Splits the segments behind the playhead into chunks of `BEHIND_CHUNK_FRAMES`,
+/// from the edge near the playhead (`source_end`) towards the far one.
 fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
     let mut chunks = Vec::new();
     for segment in segments {
@@ -619,9 +619,9 @@ fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegm
     chunks
 }
 
-/// Toglie i blocchi già in cache. Nella finestra dietro il decoder resta
-/// fermo sul blocco più lontano del ciclo prima: senza filtro ogni blocco
-/// sembrerebbe da riseekare a ogni ciclo, anche a testina ferma.
+/// Removes the chunks already cached. In the window behind, the decoder stays
+/// parked on the farthest chunk of the previous cycle: without the filter every chunk
+/// would look like it needs reseeking on every cycle, even with the playhead still.
 fn without_already_cached_chunks(
     caches: &SharedFrameCache,
     chunks: Vec<MediaSegment>,
@@ -634,13 +634,13 @@ fn without_already_cached_chunks(
         .collect()
 }
 
-/// Porta `open[media_id]` dove può coprire `segment_start` decodificando in
-/// avanti. Un decoder già oltre il segmento è lo stato normale e si riusa.
-/// Si seeka (sul decoder aperto, mai riaprendo: riparsare il container può
-/// costare secondi) solo se il segmento è troppo avanti, se la testina è
-/// tornata indietro e il decoder l'ha superata, o se la cache ha un buco
-/// dove il decoder crede di essere già passato. `went_backward` è deciso
-/// una volta per ciclo: per media lo sporcherebbe l'ordine dei segmenti.
+/// Brings `open[media_id]` where it can cover `segment_start` by decoding
+/// forward. A decoder already past the segment is the normal state and is reused.
+/// It seeks (on the open decoder, never reopening: reparsing the container can
+/// cost seconds) only if the segment is too far ahead, if the playhead went
+/// back and the decoder passed it, or if the cache has a hole
+/// where the decoder thinks it already went through. `went_backward` is decided
+/// once per cycle: per media the order of the segments would dirty it.
 fn position_decoder(
     caches: &SharedFrameCache,
     open: &mut HashMap<MediaId, OpenDecoder>,
@@ -657,8 +657,8 @@ fn position_decoder(
     if let Some(o) = open.get_mut(&media_id) {
         let needs_seek = segment_start > o.next_frame + o.seek_threshold_frames()
             || (went_backward && segment_start < o.next_frame)
-            // Uno sfratto può aver tolto la coda che il decoder crede di aver già
-            // prodotto: si verifica sulla cache.
+            // An eviction may have removed the tail the decoder thinks it already
+            // produced: it is checked against the cache.
             || (o.next_frame > segment_start
                 && !caches.covers(media_id, segment_start, o.next_frame - 1));
         if !needs_seek {
@@ -673,16 +673,16 @@ fn position_decoder(
                 t.elapsed()
             );
         }
-        // Placeholder: il prossimo frame dirà dove il seek è atterrato davvero.
+        // Placeholder: the next frame will say where the seek really landed.
         o.next_frame = 0;
         o.just_repositioned = true;
         return Positioned::Seeked;
     }
-    // Nessun decoder aperto per questo media: qui l'apertura reale è
-    // inevitabile (prima volta, o media diverso da quello aperto finora).
+    // No decoder open for this media: here the real open is
+    // unavoidable (first time, or a media different from the one open so far).
     let debug_start = debug_enabled().then(std::time::Instant::now);
-    // Un'immagine va aperta con `open_image`, o andrebbe in EOF dopo il
-    // primo frame.
+    // An image must be opened with `open_image`, or it would hit EOF after the
+    // first frame.
     let opened = if is_image { Decoder::open_image(path) } else { Decoder::open(path) };
     let Ok(mut decoder) = opened else {
         return Positioned::Failed;
@@ -703,13 +703,13 @@ fn position_decoder(
     Positioned::Opened
 }
 
-/// Esito di un ciclo di `walk_and_fill`.
+/// Outcome of one `walk_and_fill` cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalkOutcome {
-    /// La testina si è spostata abbastanza da rendere obsoleto il lavoro
-    /// rimasto: si riparte subito col target nuovo.
+    /// The playhead moved enough to make the remaining work obsolete:
+    /// it restarts immediately with the new target.
     interrupted: bool,
-    /// Tutta la finestra è in cache: la UI può smettere di chiedere repaint.
+    /// The whole window is cached: the UI can stop asking for repaints.
     caught_up: bool,
 }
 
@@ -718,7 +718,7 @@ impl WalkOutcome {
         interrupted: false,
         caught_up: true,
     };
-    /// Fermato da budget o transito: c'è ancora lavoro, ma non subito.
+    /// Stopped by the budget or by transit: there is still work, but not right away.
     const UNFINISHED: Self = Self {
         interrupted: false,
         caught_up: false,
@@ -771,8 +771,8 @@ fn walk_and_fill(
             rate: s.rate,
         })
         .collect();
-    // Scarta ciò che è fuori da entrambe le finestre e, oltre il budget, il
-    // più lontano dalla testina.
+    // Discards what is outside both windows and, past the budget, the
+    // farthest from the playhead.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
     if debug_enabled() {
         for id in forward_media
@@ -796,13 +796,13 @@ fn walk_and_fill(
         proxy_enabled,
         target,
     };
-    // Prima la finestra in avanti: dietro riceve solo il budget che avanza.
+    // The forward window first: behind gets only the budget left over.
     if let ControlFlow::Break(outcome) = fill_segments(&forward_segments, &ctx, open) {
         return outcome;
     }
-    // Decoder separati da quelli in avanti: uno stesso decoder resterebbe
-    // oltre ogni segmento dietro e li salterebbe tutti. Per i blocchi rimasti
-    // un seek serve sempre, quindi `went_backward` è forzato.
+    // Decoders separate from the forward ones: a single decoder would stay
+    // past every segment behind and would skip them all. For the remaining chunks
+    // a seek is always needed, so `went_backward` is forced.
     let all_behind_chunks = chunk_behind_segments_near_to_far(&behind_segments);
     let behind_chunks = without_already_cached_chunks(caches, all_behind_chunks.clone());
     if debug_enabled() {
@@ -836,29 +836,29 @@ fn walk_and_fill(
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
         return outcome;
     }
-    // Toglie subito i frame di transito rimasti: la UI legge lo stato appena
-    // dichiarato `caught_up` e non deve vedere una striscia più larga del vero.
+    // Immediately removes the leftover transit frames: the UI reads the state just
+    // declared `caught_up` and must not see a strip wider than the truth.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
     WalkOutcome::SETTLED
 }
 
-/// Parametri di `fill_segments` comuni alle due finestre.
+/// Parameters of `fill_segments` common to both windows.
 struct FillContext<'a> {
     project: &'a Project,
     caches: &'a SharedFrameCache,
     went_backward: bool,
     cache_budget_bytes: usize,
     from_frame: FrameIdx,
-    /// Toggle "usa proxy" (REFACTOR_PIPELINE.md proxy) come letto
-    /// dall'ultimo `Command::SetProxyEnabled` — vedi `fill_segments`
-    /// dove decide se risolvere il path sorgente o quello del proxy.
+    /// "Use proxy" toggle (REFACTOR_PIPELINE.md proxy) as read
+    /// from the last `Command::SetProxyEnabled` — see `fill_segments`
+    /// where it decides whether to resolve the source path or the proxy one.
     proxy_enabled: bool,
     target: &'a AtomicI64,
 }
 
-/// Decodifica quanto serve a coprire `segments`, fermandosi se il budget è
-/// saturo o se la testina live si è spostata troppo. `Break` porta l'esito
-/// finale.
+/// Decodes what is needed to cover `segments`, stopping if the budget is
+/// saturated or if the live playhead moved too far. `Break` carries the final
+/// outcome.
 fn fill_segments(
     segments: &[MediaSegment],
     ctx: &FillContext,
@@ -868,14 +868,14 @@ fn fill_segments(
         let Some(item) = ctx.project.media_pool.get(segment.media_id) else {
             continue;
         };
-        // Già tutto in cache: non ci si fida della posizione che il decoder crede
-        // di avere.
+        // Already all cached: the position the decoder believes it has is not
+        // trusted.
         if ctx.caches.covers(segment.media_id, segment.source_start, segment.source_end) {
             continue;
         }
-        // Senza spazio nemmeno per un frame non si comincia: si pagherebbe il
-        // transito per un frame poi rifiutato, ciclo dopo ciclo. Il transito non
-        // conta mai contro il budget del tratto voluto.
+        // Without room for even one frame it does not start: it would pay the
+        // transit for a frame then rejected, cycle after cycle. The transit never
+        // counts against the budget of the wanted stretch.
         let estimated_frame_bytes = vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
         if ctx.caches.bytes_used() + estimated_frame_bytes > ctx.cache_budget_bytes {
             if debug_enabled() {
@@ -890,8 +890,8 @@ fn fill_segments(
             }
             return ControlFlow::Break(WalkOutcome::UNFINISHED);
         }
-        // Proxy solo se attivo e già generato; altrimenti il sorgente, finché il
-        // proxy non compare su disco.
+        // Proxy only if enabled and already generated; otherwise the source, until the
+        // proxy shows up on disk.
         let is_proxy = ctx.proxy_enabled && vv_media::proxy::proxy_exists(item.content_hash);
         let path = if is_proxy {
             vv_media::proxy::proxy_path_for(item.content_hash)
@@ -912,11 +912,11 @@ fn fill_segments(
             continue;
         }
 
-        // `next_frame` è un placeholder finché il primo frame dopo il seek non
-        // dice la posizione vera.
+        // `next_frame` is a placeholder until the first frame after the seek
+        // tells the real position.
         let mut resumed = false;
-        // Byte di transito di questo giro: non devono impedire al segmento di
-        // raggiungere sé stesso con un budget stretto.
+        // Transit bytes of this round: they must not prevent the segment from
+        // reaching itself with a tight budget.
         let mut transit_bytes: usize = 0;
         let mut transit_frames: FrameIdx = 0;
         loop {
@@ -924,9 +924,9 @@ fn fill_segments(
             if od.next_frame > segment.source_end {
                 break;
             }
-            // Ricongiunti con una parte già in cache fino in fondo al segmento: il
-            // resto c'è già. Serve un unico intervallo contiguo, non due punti
-            // presenti su isole diverse.
+            // Rejoined with a part already cached all the way to the end of the segment: the
+            // rest is already there. A single contiguous interval is needed, not two points
+            // present on different islands.
             if resumed
                 && ctx.caches.covers(segment.media_id, od.next_frame, segment.source_end)
             {
@@ -965,8 +965,8 @@ fn fill_segments(
                             return ControlFlow::Break(WalkOutcome::UNFINISHED);
                         }
                     } else {
-                        // Transito prima del segmento: si tiene comunque, un segmento vicino in
-                        // questo stesso giro lo riusa invece di riattraversare il GOP.
+                        // Transit before the segment: kept anyway, a nearby segment in
+                        // this same round reuses it instead of crossing the GOP again.
                         if transit_frames >= TRANSIT_SAFETY_CAP_FRAMES {
                             if debug_enabled() {
                                 eprintln!(
@@ -1011,8 +1011,8 @@ fn fill_segments(
                     break;
                 }
             }
-            // Target live: se la testina si è spostata oltre la soglia il prefetch è
-            // obsoleto e si ricomincia subito.
+            // Live target: if the playhead moved past the threshold the prefetch is
+            // obsolete and it restarts immediately.
             let live = ctx.target.load(Ordering::Relaxed);
             if (live - ctx.from_frame).abs() > threshold_frames {
                 if debug_enabled() {
@@ -1094,13 +1094,13 @@ mod tests {
         path
     }
 
-    /// Regressione end-to-end per il supporto immagini
-    /// (`Decoder::open_image`, `position_decoder`): un'immagine ferma
-    /// stirata su una clip di 2.4s a 25fps chiede frame sorgente fino a
-    /// ~60 — ben oltre l'unico frame reale che un'immagine ha. Prima del
-    /// supporto dedicato, un vero `Decoder::open` sarebbe andato in EOF
-    /// su qualunque posizione oltre la prima, lasciando la cache scoperta
-    /// per il resto della clip.
+    /// End-to-end regression for image support
+    /// (`Decoder::open_image`, `position_decoder`): a still image
+    /// stretched over a 2.4s clip at 25fps asks for source frames up to
+    /// ~60 — well past the single real frame an image has. Before the
+    /// dedicated support, a plain `Decoder::open` would have hit EOF
+    /// on any position past the first, leaving the cache uncovered
+    /// for the rest of the clip.
     #[test]
     fn walk_and_fill_decodes_a_stretched_image_clip_past_its_only_real_frame() {
         let path = make_test_image("vv-app-render-ahead-image-test", "still.png");
@@ -1121,10 +1121,10 @@ mod tests {
             content_hash: 0,
             compound: None,
         });
-        // 60 frame (2.4s a 25fps): dentro a `DEFAULT_LOOKAHEAD_SECS`
-        // (3s), altrimenti l'ultimo frame resterebbe fuori dalla finestra
-        // per un motivo indipendente da questo test (il lookahead, non il
-        // supporto immagini).
+        // 60 frames (2.4s at 25fps): within `DEFAULT_LOOKAHEAD_SECS`
+        // (3s), otherwise the last frame would stay outside the window
+        // for a reason independent of this test (the lookahead, not the
+        // image support).
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_a, 0, 60)],
@@ -1162,16 +1162,16 @@ mod tests {
         }
     }
 
-    /// Come `make_test_clip`, ma con un GOP corto ed esplicito: senza
-    /// questo, il keyframe più vicino a un target lontano dall'inizio
-    /// resta comunque quello iniziale (keyint di default 250, più lungo
-    /// della durata dei clip di test), quindi un seek più avanti nel
-    /// file dovrebbe comunque riattraversare in sequenza tutto ciò che
-    /// lo precede — mascherando un'eventuale sfratto scorretto di una
-    /// porzione già bufferizzata, perché verrebbe rigenerata comunque
-    /// nel passaggio. Con un GOP corto il seek può saltare direttamente
-    /// vicino al target senza toccare le porzioni precedenti già in
-    /// cache, rendendo visibile un eventuale sfratto indebito.
+    /// Like `make_test_clip`, but with a short and explicit GOP: without
+    /// this, the keyframe nearest to a target far from the start
+    /// is still the initial one (default keyint 250, longer
+    /// than the duration of the test clips), so a seek further into
+    /// the file would still have to cross in sequence everything
+    /// preceding it — masking a possible incorrect eviction of a
+    /// portion already buffered, because it would be regenerated anyway
+    /// on the way. With a short GOP the seek can jump directly
+    /// near the target without touching the preceding portions already
+    /// cached, making an undue eviction visible.
     fn make_test_clip_with_short_gop(
         dir_name: &str,
         file_name: &str,
@@ -1201,9 +1201,9 @@ mod tests {
         path
     }
 
-    /// Due `MediaId` distinti (slotmap key, non generabili a mano):
-    /// bastano per i test puri di `collect_media_segments`, che non
-    /// hanno bisogno di un `MediaItem` reale dietro.
+    /// Two distinct `MediaId`s (slotmap keys, not generatable by hand):
+    /// enough for the pure tests of `collect_media_segments`, which do not
+    /// need a real `MediaItem` behind them.
     fn dummy_media_item() -> MediaItem {
         MediaItem {
             path: "dummy.mp4".into(),
@@ -1230,9 +1230,9 @@ mod tests {
         (a, b)
     }
 
-    /// Frame 1x1 fittizio: basta per popolare `SharedFrameCache` nei
-    /// test puri di `without_already_cached_chunks`, che verificano solo
-    /// quali indici risultano coperti, mai il contenuto vero e proprio.
+    /// Dummy 1x1 frame: enough to populate `SharedFrameCache` in the
+    /// pure tests of `without_already_cached_chunks`, which only check
+    /// which indices come out covered, never the actual content.
     fn dummy_frame() -> FrameYuv420 {
         FrameYuv420 {
             width: 1,
@@ -1259,10 +1259,10 @@ mod tests {
         )
     }
 
-    /// Come `media_clip`, ma con un `source_in` esplicito — serve a
-    /// simulare due clip sulla timeline che sono *tagli* dello stesso
-    /// file lungo (source range sequenziali, non entrambe da 0), il
-    /// caso comune che espone il bug del `evict_before` per-segmento.
+    /// Like `media_clip`, but with an explicit `source_in` — used to
+    /// simulate two clips on the timeline that are *cuts* of the same
+    /// long file (sequential source ranges, not both from 0), the
+    /// common case that exposes the per-segment `evict_before` bug.
     fn media_clip_trimmed(
         id: u64,
         media_id: MediaId,
@@ -1327,7 +1327,7 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![
                 media_clip(1, media_a, 0, 10),
-                // vuoto 10..20
+                // gap 10..20
                 solid_clip(2, 20, 10),
                 media_clip(3, media_a, 30, 10),
             ],
@@ -1347,9 +1347,9 @@ mod tests {
         assert_eq!((segments[1].source_start, segments[1].source_end), (0, 9));
     }
 
-    /// Con più track video il buffer deve coprirle tutte, non solo quella
-    /// in cima: sotto le bande di una clip con aspect diverso da quello
-    /// della timeline si vede il layer sotto, che quindi va decodificato.
+    /// With several video tracks the buffer must cover them all, not only the
+    /// top one: under the bars of a clip with an aspect different from the
+    /// timeline's, the layer below shows, so it must be decoded.
     #[test]
     fn collect_media_segments_covers_every_video_track_topmost_first() {
         let (media_a, media_b) = two_media_ids();
@@ -1402,16 +1402,16 @@ mod tests {
             crossings: Vec::new(),
         }]);
 
-        // Finestra dietro [40,60): attraversa il taglio a 50 andando
-        // all'indietro, simmetrico al test forward sopra.
+        // Window behind [40,60): crosses the cut at 50 going
+        // backwards, symmetric to the forward test above.
         let segments = collect_media_segments_behind(&Project::default(), &tl, 60, 40);
         assert_eq!(
             segments.len(),
             2,
             "deve attraversare il taglio all'indietro in un colpo solo"
         );
-        // Ordine di scoperta: dal più vicino alla testina (60) al più
-        // lontano — prima il pezzo di media_b [50,60), poi quello di
+        // Discovery order: from the nearest to the playhead (60) to the
+        // farthest — first the piece of media_b [50,60), then the one of
         // media_a [40,50).
         assert_eq!(segments[0].source_start, 0);
         assert_eq!(segments[0].source_end, 9);
@@ -1426,7 +1426,7 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![
                 media_clip(1, media_a, 0, 10),
-                // vuoto 10..20
+                // gap 10..20
                 solid_clip(2, 20, 10),
                 media_clip(3, media_a, 30, 10),
             ],
@@ -1454,9 +1454,9 @@ mod tests {
 
     #[test]
     fn collect_media_segments_behind_stops_at_the_start_frame_bound() {
-        // Un'unica clip lunga [0,200): la finestra dietro deve fermarsi
-        // esattamente a `start_frame`, non proseguire fino all'inizio
-        // della clip.
+        // A single long clip [0,200): the window behind must stop
+        // exactly at `start_frame`, not continue to the start
+        // of the clip.
         let (media_a, _) = two_media_ids();
         let tl = timeline_with(vec![Track {
             kind: TrackKind::Video,
@@ -1474,11 +1474,11 @@ mod tests {
         assert_eq!(segments[0].source_end, 149);
     }
 
-    /// Un progetto con una compound clip: il suo media vero (dentro la
-    /// timeline annidata) deve comparire fra i segmenti da decodificare,
-    /// nello spazio della timeline annidata — non in quello della timeline
-    /// di partenza — mentre la compound clip stessa non compare mai (non si
-    /// decodifica: si compone al volo, vedi `frame_provider::GpuCompounds`).
+    /// A project with a compound clip: its real media (inside the
+    /// nested timeline) must show up among the segments to decode,
+    /// in the space of the nested timeline — not in that of the outer
+    /// timeline — while the compound clip itself never shows up (it is not
+    /// decoded: it is composed on the fly, see `frame_provider::GpuCompounds`).
     fn project_with_compound_clip() -> (Project, Timeline, MediaId, MediaId) {
         let mut project = Project::default();
         let real_media = project.media_pool.insert(dummy_media_item());
@@ -1534,11 +1534,11 @@ mod tests {
         assert_eq!(real[0].source_end, 29);
     }
 
-    /// Da quando anche la timeline del progetto compare nel media pool
-    /// (vedi `MediaItem::compound`), un utente può trascinarla dentro se
-    /// stessa: un ciclo, non solo un nesting profondo. Senza
-    /// `MAX_COMPOUND_DEPTH` questo andrebbe in stack overflow invece di
-    /// fermarsi.
+    /// Since the project timeline shows up in the media pool too
+    /// (see `MediaItem::compound`), a user can drag it inside
+    /// itself: a cycle, not just a deep nesting. Without
+    /// `MAX_COMPOUND_DEPTH` this would stack overflow instead of
+    /// stopping.
     #[test]
     fn collect_media_segments_stops_at_a_cyclic_compound_clip_instead_of_overflowing() {
         let mut project = Project::default();
@@ -1559,7 +1559,7 @@ mod tests {
             content_hash: 1,
             compound: Some(timeline_id),
         });
-        // La timeline referenzia se stessa tramite la propria voce nel pool.
+        // The timeline references itself through its own entry in the pool.
         project.timelines[timeline_id].tracks.push(Track {
             kind: TrackKind::Video,
             clips: vec![media_clip(1, media_id, 0, 100)],
@@ -1574,10 +1574,10 @@ mod tests {
         assert!(real.is_empty(), "nessun media vero da decodificare in un ciclo puro");
     }
 
-    /// Un segmento dietro la testina più lungo di `BEHIND_CHUNK_FRAMES`
-    /// va spezzato in blocchi dal bordo vicino (`source_end`) al bordo
-    /// lontano (`source_start`), ognuno da al più `BEHIND_CHUNK_FRAMES`,
-    /// senza buchi né sovrapposizioni — vedi doc di
+    /// A segment behind the playhead longer than `BEHIND_CHUNK_FRAMES`
+    /// must be split into chunks from the near edge (`source_end`) to the
+    /// far edge (`source_start`), each at most `BEHIND_CHUNK_FRAMES` long,
+    /// with no holes nor overlaps — see the docs of
     /// `chunk_behind_segments_near_to_far`.
     #[test]
     fn chunk_behind_segments_near_to_far_splits_from_the_near_edge_without_gaps() {
@@ -1585,7 +1585,7 @@ mod tests {
         let segment = MediaSegment {
             media_id: media_a,
             source_start: 100,
-            source_end: 132, // 33 frame: 2 blocchi da 15 + 1 da 3
+            source_end: 132, // 33 frames: 2 chunks of 15 + 1 of 3
             timeline_start: 500,
             rate: Rational::one(),
         };
@@ -1600,15 +1600,15 @@ mod tests {
             vec![(118, 132), (103, 117), (100, 102)],
             "dal bordo vicino (132) al lontano (100), ognuno da al più BEHIND_CHUNK_FRAMES"
         );
-        // `timeline_start` segue lo stesso offset di `source_start`
-        // rispetto al segmento originale (mappatura affine, vedi doc).
+        // `timeline_start` follows the same offset as `source_start`
+        // relative to the original segment (affine mapping, see the docs).
         assert_eq!(chunks[0].timeline_start, 518);
         assert_eq!(chunks[1].timeline_start, 503);
         assert_eq!(chunks[2].timeline_start, 500);
     }
 
-    /// Un segmento più corto di un blocco produce un solo blocco
-    /// identico al segmento originale — nessuna divisione superflua.
+    /// A segment shorter than a chunk produces a single chunk
+    /// identical to the original segment — no superfluous splitting.
     #[test]
     fn chunk_behind_segments_near_to_far_keeps_a_short_segment_whole() {
         let (media_a, _) = two_media_ids();
@@ -1627,27 +1627,27 @@ mod tests {
         assert_eq!(chunks[0].source_end, 44);
     }
 
-    /// `without_already_cached_chunks` deve scartare solo i blocchi
-    /// interamente coperti da un *singolo* intervallo in cache — un
-    /// blocco scoperto o solo parzialmente coperto resta nella lista
-    /// (la riverifica in quel caso è comunque economica, vedi doc della
-    /// funzione).
+    /// `without_already_cached_chunks` must discard only the chunks
+    /// entirely covered by a *single* cached interval — an
+    /// uncovered or only partially covered chunk stays in the list
+    /// (rechecking in that case is cheap anyway, see the docs of the
+    /// function).
     #[test]
     fn without_already_cached_chunks_drops_only_fully_covered_chunks() {
         let (media_a, media_b) = two_media_ids();
         let caches = SharedFrameCache::new();
-        // media_a: [100,132] interamente in cache (un unico frame fittizio
-        // per ogni indice, giusto per popolare `cached_ranges`).
+        // media_a: [100,132] entirely cached (a single dummy frame
+        // for each index, just to populate `cached_ranges`).
         for idx in 100..=132 {
             caches.insert(media_a, idx, Arc::new(dummy_frame()));
         }
-        // media_b: solo [100,110] in cache, non l'intero blocco richiesto.
+        // media_b: only [100,110] cached, not the whole requested chunk.
         for idx in 100..=110 {
             caches.insert(media_b, idx, Arc::new(dummy_frame()));
         }
 
         let chunks = vec![
-            // media_a: interamente coperto, va scartato.
+            // media_a: entirely covered, must be discarded.
             MediaSegment {
                 media_id: media_a,
                 source_start: 118,
@@ -1655,7 +1655,7 @@ mod tests {
                 timeline_start: 118,
                 rate: Rational::one(),
             },
-            // media_b: solo parzialmente coperto, resta.
+            // media_b: only partially covered, stays.
             MediaSegment {
                 media_id: media_b,
                 source_start: 95,
@@ -1663,7 +1663,7 @@ mod tests {
                 timeline_start: 95,
                 rate: Rational::one(),
             },
-            // media_a: fuori dall'intervallo in cache, resta.
+            // media_a: outside the cached interval, stays.
             MediaSegment {
                 media_id: media_a,
                 source_start: 50,
@@ -1680,11 +1680,11 @@ mod tests {
         assert_eq!(remaining[1].source_start, 50);
     }
 
-    /// Test end-to-end: il worker attraversa un taglio netto tra due
-    /// media diversi in un'unica finestra di lookahead, bufferizzando
-    /// *entrambi* senza bisogno di alcun caso speciale — esattamente il
-    /// comportamento richiesto ("buffer a livello di timeline, non di
-    /// singola clip").
+    /// End-to-end test: the worker crosses a hard cut between two
+    /// different media in a single lookahead window, buffering
+    /// *both* without needing any special case — exactly the
+    /// required behavior ("buffer at timeline level, not at single
+    /// clip level").
     #[test]
     fn render_ahead_buffers_across_a_straight_cut_between_two_different_media() {
         let path_a = make_test_clip("vv-app-render-ahead-test", "a.mp4", 2);
@@ -1727,7 +1727,7 @@ mod tests {
             kind: TrackKind::Video,
             clips: vec![
                 media_clip(1, media_a, 0, 50),  // [0,50)
-                media_clip(2, media_b, 50, 50), // [50,100), adiacente
+                media_clip(2, media_b, 50, 50), // [50,100), adjacent
             ],
             muted: false,
             solo: false,
@@ -1743,9 +1743,9 @@ mod tests {
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
-        // Target vicino alla fine della prima clip: la finestra di
-        // lookahead (3s = 75 frame a 25fps) attraversa abbondantemente il
-        // taglio a 50.
+        // Target near the end of the first clip: the lookahead
+        // window (3s = 75 frames at 25fps) amply crosses the
+        // cut at 50.
         render_ahead.set_target(45);
 
         let start = std::time::Instant::now();
@@ -1763,18 +1763,18 @@ mod tests {
         }
     }
 
-    /// Riproduzione end-to-end del bug segnalato dall'utente: durante una
+    /// End-to-end reproduction of the bug reported by the user: during a
     /// crossing transition, `extrapolated_frame_for` (`frame_provider.rs`)
-    /// chiede per il lato "in prestito" un tratto di frame sorgente che
-    /// appartiene al range NORMALE di una clip ma cade fuori dal range
-    /// dichiarato dell'ALTRA — nessun `MediaSegment` normale lo copre, e
-    /// senza `crossing_borrowed_segments` `SharedFrameCache::reconcile` lo
-    /// sfratta (o non lo scarica mai) appena la testina supera il taglio,
-    /// congelando il compositing per metà della finestra della crossing.
-    /// `clip_a` è tagliata corta (30 delle 50 frame reali disponibili) e
-    /// `clip_b` parte da `source_in=5`: la crossing mangia sia il girato
-    /// scartato dal trim di `clip_a` sia quello prima dell'inizio
-    /// dichiarato di `clip_b`.
+    /// asks, for the "lent" side, for a stretch of source frames that
+    /// belongs to the NORMAL range of one clip but falls outside the range
+    /// declared by the OTHER — no normal `MediaSegment` covers it, and
+    /// without `crossing_borrowed_segments` `SharedFrameCache::reconcile`
+    /// evicts it (or never fetches it) as soon as the playhead passes the cut,
+    /// freezing the compositing for half of the crossing window.
+    /// `clip_a` is trimmed short (30 of the 50 real frames available) and
+    /// `clip_b` starts at `source_in=5`: the crossing eats both the footage
+    /// discarded by the trim of `clip_a` and the one before the declared
+    /// start of `clip_b`.
     #[test]
     fn render_ahead_keeps_both_sides_of_a_crossing_readable_through_the_whole_window() {
         let path_a = make_test_clip("vv-app-render-ahead-test", "crossing_a.mp4", 2);
@@ -1832,8 +1832,8 @@ mod tests {
             DEFAULT_BEHIND_SECS,
         );
 
-        // Finestra della crossing (duration=16, split 8/8 attorno al
-        // taglio a 30): [22,38). Copre un buon margine prima e dopo.
+        // Crossing window (duration=16, split 8/8 around the
+        // cut at 30): [22,38). It covers a good margin before and after.
         let mut missing = Vec::new();
         for frame in 15..45 {
             render_ahead.set_target(frame);
@@ -1873,15 +1873,15 @@ mod tests {
         assert!(missing.is_empty(), "frame con layer mancanti (frame, ok, expected): {missing:?}");
     }
 
-    /// Riproduzione end-to-end (thread worker reale, non `walk_and_fill`
-    /// diretto) dello scenario originale segnalato dall'utente: taglia
-    /// una clip, posiziona la testina *ferma* appena prima del punto di
-    /// taglio (finestra di lookahead che include un pezzo di entrambe le
-    /// metà, due segmenti dello stesso media). Con la testina davvero
-    /// ferma per diversi cicli di poll reali (non solo due chiamate
-    /// dirette a `walk_and_fill` come nel test unitario equivalente), il
-    /// buffer deve convergere e restare stabile — non ricalcolarsi né
-    /// restringersi a ripetizione.
+    /// End-to-end reproduction (real worker thread, not a direct
+    /// `walk_and_fill`) of the original scenario reported by the user: cut
+    /// a clip, place the playhead *still* just before the cut
+    /// point (lookahead window including a piece of both
+    /// halves, two segments of the same media). With the playhead really
+    /// still for several real poll cycles (not just two direct
+    /// calls to `walk_and_fill` as in the equivalent unit test), the
+    /// buffer must converge and stay stable — not recompute itself nor
+    /// shrink repeatedly.
     #[test]
     fn render_ahead_does_not_loop_when_the_playhead_sits_still_just_before_a_cut() {
         let path = make_test_clip_with_short_gop(
@@ -1907,9 +1907,9 @@ mod tests {
             content_hash: 0,
             compound: None,
         });
-        // Taglio a timeline_start=50 tra due pezzi *contigui* dello
-        // stesso file (un plain split, non un trim con buco in mezzo):
-        // source [0,50) e poi [50,150).
+        // Cut at timeline_start=50 between two *contiguous* pieces of the
+        // same file (a plain split, not a trim with a hole in between):
+        // source [0,50) and then [50,150).
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
             clips: vec![
@@ -1932,7 +1932,7 @@ mod tests {
         );
         render_ahead.set_target(40);
 
-        // Aspetta che il buffer arrivi almeno fino al taglio.
+        // Waits for the buffer to reach at least the cut.
         let start = std::time::Instant::now();
         loop {
             let ranges = render_ahead.cached_ranges_for(media_a);
@@ -1946,11 +1946,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // Testina ferma per una manciata di cicli di poll reali (50ms
-        // l'uno): se ci fosse un loop calcola/invalida, qui l'intervallo
-        // bufferizzato attorno alla testina sparirebbe e riapparirebbe
-        // a ripetizione invece di restare semplicemente stabile (o
-        // crescere in avanti, mai restringersi da dietro la testina).
+        // Playhead still for a handful of real poll cycles (50ms
+        // each): if there were a compute/invalidate loop, the buffered
+        // interval around the playhead would disappear and reappear
+        // repeatedly instead of simply staying stable (or
+        // growing forward, never shrinking from behind the playhead).
         let mut samples = Vec::new();
         for _ in 0..10 {
             std::thread::sleep(Duration::from_millis(50));
@@ -1964,8 +1964,8 @@ mod tests {
         }
     }
 
-    /// REFACTOR_PIPELINE.md §3.3: una `OpenDecoder` appena aperta non ha
-    /// ancora osservazioni, quindi usa il fallback di default.
+    /// REFACTOR_PIPELINE.md §3.3: a freshly opened `OpenDecoder` has no
+    /// observations yet, so it uses the default fallback.
     #[test]
     fn open_decoder_seek_threshold_uses_the_default_fallback_before_any_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_fresh.mp4", 2);
@@ -1974,8 +1974,8 @@ mod tests {
         assert_eq!(od.seek_threshold_frames(), DEFAULT_SEEK_THRESHOLD_FRAMES);
     }
 
-    /// Due atterraggi consecutivi da seek aggiornano la stima del GOP
-    /// alla distanza osservata tra loro.
+    /// Two consecutive seek landings update the GOP estimate
+    /// to the distance observed between them.
     #[test]
     fn open_decoder_records_the_observed_gap_between_two_consecutive_landings() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_observed.mp4", 2);
@@ -1988,10 +1988,10 @@ mod tests {
         assert_eq!(od.seek_threshold_frames(), 25);
     }
 
-    /// La stima è un *minimo*: un salto accidentale di più GOP alla
-    /// volta (qui una distanza di 200 dopo una di 25) non deve far
-    /// salire la soglia — solo un'osservazione più *stretta* la
-    /// stringe ulteriormente, mai il contrario.
+    /// The estimate is a *minimum*: an accidental jump of several GOPs at
+    /// once (here a distance of 200 after one of 25) must not make
+    /// the threshold rise — only a *tighter* observation
+    /// narrows it further, never the opposite.
     #[test]
     fn open_decoder_gop_estimate_never_grows_from_a_wider_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_min.mp4", 2);
@@ -1999,24 +1999,24 @@ mod tests {
         let mut od = OpenDecoder::fresh(decoder, path.clone(), false);
 
         od.record_keyframe_landing(0);
-        od.record_keyframe_landing(25); // distanza 25: stima = 25
+        od.record_keyframe_landing(25); // distance 25: estimate = 25
         assert_eq!(od.seek_threshold_frames(), 25);
 
-        od.record_keyframe_landing(225); // distanza 200: non deve salire a 200
+        od.record_keyframe_landing(225); // distance 200: must not rise to 200
         assert_eq!(
             od.seek_threshold_frames(),
             25,
             "un salto più largo di uno già osservato non deve far crescere la stima"
         );
 
-        od.record_keyframe_landing(235); // distanza 10: deve stringersi
+        od.record_keyframe_landing(235); // distance 10: must narrow
         assert_eq!(od.seek_threshold_frames(), 10);
     }
 
-    /// Senza il tetto (`MAX_SEEK_THRESHOLD_FRAMES`), la *prima*
-    /// osservazione da sola potrebbe far esplodere la soglia se due
-    /// seek capitano per caso a molti GOP di distanza prima che ne
-    /// arrivi una più stretta.
+    /// Without the cap (`MAX_SEEK_THRESHOLD_FRAMES`), the *first*
+    /// observation alone could blow up the threshold if two
+    /// seeks happen to land many GOPs apart before a tighter
+    /// one arrives.
     #[test]
     fn open_decoder_gop_estimate_is_capped_even_on_the_first_observation() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_cap.mp4", 2);
@@ -2029,15 +2029,15 @@ mod tests {
         assert_eq!(od.seek_threshold_frames(), MAX_SEEK_THRESHOLD_FRAMES);
     }
 
-    /// Regressione: uno scrub veloce e monotono (target sempre più
-    /// avanti, mai un atterraggio ravvicinato) su un proxy non deve far
-    /// restare `seek_threshold_frames` bloccata su una stima larga come
-    /// per il sorgente reale (`PROXY_SEEK_THRESHOLD_FRAMES` bypassa del
-    /// tutto la stima, vedi la sua doc) — è esattamente lo scenario
-    /// diagnosticato con `VV_DEBUG_RENDER_AHEAD=1`: senza il bypass, ogni
-    /// ciclo del worker restava bloccato 15-60ms a decodificare in
-    /// sequenza invece di seekare (quasi gratis su un proxy all-intra),
-    /// più del tempo tra due tick di uno scrub veloce.
+    /// Regression: a fast and monotonic scrub (target always further
+    /// ahead, never a close landing) on a proxy must not leave
+    /// `seek_threshold_frames` stuck on an estimate as wide as
+    /// for the real source (`PROXY_SEEK_THRESHOLD_FRAMES` bypasses the
+    /// estimate entirely, see its docs) — this is exactly the scenario
+    /// diagnosed with `VV_DEBUG_RENDER_AHEAD=1`: without the bypass, every
+    /// worker cycle stayed stuck 15-60ms decoding in
+    /// sequence instead of seeking (almost free on an all-intra proxy),
+    /// more than the time between two ticks of a fast scrub.
     #[test]
     fn open_decoder_ignores_the_learned_gop_estimate_for_an_all_intra_proxy() {
         let path = make_test_clip("vv-app-render-ahead-test", "gop_proxy_bypass.mp4", 2);
@@ -2045,10 +2045,10 @@ mod tests {
         let mut od = OpenDecoder::fresh(decoder, path.clone(), true);
         assert_eq!(od.seek_threshold_frames(), PROXY_SEEK_THRESHOLD_FRAMES);
 
-        // Atterraggi larghi e mai ravvicinati, come durante uno scrub
-        // veloce e monotono: per un decoder "normale" la stima
-        // convergerebbe su un valore grande (il minimo osservato finora,
-        // qui 90) invece di stringersi verso il vero GOP.
+        // Wide landings, never close together, as during a fast and
+        // monotonic scrub: for a "normal" decoder the estimate
+        // would converge on a large value (the minimum observed so far,
+        // here 90) instead of narrowing towards the real GOP.
         od.record_keyframe_landing(90);
         od.record_keyframe_landing(180);
         od.record_keyframe_landing(270);
@@ -2060,23 +2060,23 @@ mod tests {
         );
     }
 
-    /// Regressione: un seek reale per un media già aperto deve riusare
-    /// il decoder esistente (`seek_to_time`), non buttarlo via per
-    /// riaprire il file da zero — per un file grande/non ottimizzato per
-    /// lo streaming, riaprire vuol dire riparsare l'intero indice ogni
-    /// volta (anche secondi), e se quel costo eccede la tolleranza il
-    /// target avanza oltre durante l'apertura stessa, scatenandone
-    /// un'altra al giro successivo: un loop che non recupera mai
-    /// (osservato: un frame ogni pochi secondi). Verificato dal valore
-    /// di ritorno: `Seeked` (riuso) invece di `Opened` (riapertura) alla
-    /// seconda chiamata sullo stesso path.
+    /// Regression: a real seek for an already open media must reuse
+    /// the existing decoder (`seek_to_time`), not throw it away to
+    /// reopen the file from scratch — for a large file not optimized for
+    /// streaming, reopening means reparsing the whole index every
+    /// time (seconds, even), and if that cost exceeds the tolerance the
+    /// target moves further during the opening itself, triggering
+    /// another one on the next round: a loop that never recovers
+    /// (observed: one frame every few seconds). Verified by the return
+    /// value: `Seeked` (reuse) instead of `Opened` (reopen) on the
+    /// second call on the same path.
     ///
-    /// Nota: qui il path è lo stesso a entrambe le chiamate di
-    /// proposito — un path *diverso* per lo stesso media_id forza ora
-    /// una riapertura anche a parità di posizione (vedi
+    /// Note: here the path is the same on both calls on
+    /// purpose — a *different* path for the same media_id now forces
+    /// a reopen even at the same position (see
     /// `position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek`,
-    /// il proxy che diventa disponibile a metà sessione ha bisogno
-    /// esattamente di questo).
+    /// the proxy becoming available mid-session needs
+    /// exactly this).
     #[test]
     fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening_the_file() {
         let path = make_test_clip("vv-app-render-ahead-test", "reuse.mp4", 3);
@@ -2096,12 +2096,12 @@ mod tests {
         );
     }
 
-    /// REFACTOR_PIPELINE.md proxy: un proxy che diventa disponibile in
-    /// background (o il toggle "usa proxy" che cambia) fa risolvere un
-    /// path diverso per lo stesso media_id — il decoder aperto sul path
-    /// vecchio non ha alcun senso da riusare/seekare (punta a un file
-    /// diverso), va riaperto da zero anche se la posizione richiesta
-    /// sarebbe altrimenti "abbastanza vicina" da non giustificare un
+    /// REFACTOR_PIPELINE.md proxy: a proxy becoming available in the
+    /// background (or the "use proxy" toggle changing) makes a
+    /// different path resolve for the same media_id — the decoder open on the
+    /// old path makes no sense to reuse/seek (it points at a
+    /// different file), it must be reopened from scratch even if the requested position
+    /// would otherwise be "close enough" not to justify a
     /// seek.
     #[test]
     fn position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek() {
@@ -2116,11 +2116,11 @@ mod tests {
             Positioned::Opened
         );
 
-        // Stessa posizione richiesta (0): senza il controllo sul path
-        // risolto, `needs_seek` sarebbe `false` (0 non è "troppo avanti"
-        // rispetto a un decoder appena aperto) e la chiamata
-        // restituirebbe `Reused` — riusando un decoder che punta al file
-        // sbagliato.
+        // Same requested position (0): without the check on the resolved
+        // path, `needs_seek` would be `false` (0 is not "too far ahead"
+        // relative to a freshly opened decoder) and the call
+        // would return `Reused` — reusing a decoder pointing at the
+        // wrong file.
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path_b, 0, false, false, false),
             Positioned::Opened,
@@ -2128,17 +2128,17 @@ mod tests {
         );
     }
 
-    /// Regressione per un bug reale, confermato dall'utente: `next_frame`
-    /// è solo quel che il decoder *crede* di aver già prodotto, non una
-    /// garanzia che sia ancora in cache — uno sfratto tra un ciclo e
-    /// l'altro (`reconcile`, o un budget stretto durante un fill
-    /// precedente) può aver rimosso la coda che il decoder pensa di
-    /// avere già dietro di sé. Qui si simula esattamente questo: un
-    /// decoder "avanzato" con `next_frame` oltre il target, ma con il
-    /// contenuto che next_frame presume di avere copiato rimosso a mano
-    /// dalla cache (come farebbe un `reconcile` reale) — `position_decoder`
-    /// deve accorgersene e forzare un seek reale, non fidarsi di
-    /// `next_frame` e restituire `Reused` su un buco.
+    /// Regression for a real bug, confirmed by the user: `next_frame`
+    /// is only what the decoder *believes* it has already produced, not a
+    /// guarantee that it is still cached — an eviction between one cycle
+    /// and the next (`reconcile`, or a tight budget during an earlier
+    /// fill) may have removed the tail the decoder thinks it
+    /// already has behind it. Here exactly this is simulated: a
+    /// decoder "advanced" with `next_frame` past the target, but with the
+    /// content next_frame assumes it covered removed by hand
+    /// from the cache (as a real `reconcile` would) — `position_decoder`
+    /// must notice and force a real seek, not trust
+    /// `next_frame` and return `Reused` over a hole.
     #[test]
     fn position_decoder_reseeks_when_next_frame_claims_coverage_the_cache_no_longer_has() {
         let path = make_test_clip("vv-app-render-ahead-test", "stale_next_frame.mp4", 3);
@@ -2150,9 +2150,9 @@ mod tests {
             position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Opened
         );
-        // Decodifica e mette in cache qualche frame, come farebbe
-        // walk_and_fill — il decoder ora "crede" di essere avanti con
-        // tutto quel tratto genuinamente dietro di sé in cache.
+        // Decodes and caches a few frames, as
+        // walk_and_fill would — the decoder now "believes" it is ahead with
+        // that whole stretch genuinely cached behind it.
         for _ in 0..20 {
             let od = open.get_mut(&media_a).unwrap();
             match od.decoder.next_frame() {
@@ -2169,11 +2169,11 @@ mod tests {
             "il decoder deve aver avanzato di parecchio"
         );
 
-        // Simula uno sfratto reale: `reconcile` con una finestra che
-        // esclude deliberatamente un solo frame nel mezzo di quel che
-        // `next_frame` presume coperto — la cache perde quel frame senza
-        // che il decoder ne sappia nulla (esattamente quel che farebbe
-        // un budget stretto o una finestra che si restringe).
+        // Simulates a real eviction: `reconcile` with a window that
+        // deliberately excludes a single frame in the middle of what
+        // `next_frame` assumes covered — the cache loses that frame without
+        // the decoder knowing anything about it (exactly what
+        // a tight budget or a shrinking window would do).
         let gap_at = advanced_next_frame - 3;
         let window = [
             WantedRange {
@@ -2201,13 +2201,13 @@ mod tests {
         );
     }
 
-    /// Regressione per il bug segnalato: durante il playback normale il
-    /// decoder è quasi sempre *avanti* rispetto al target (è lo stato
-    /// sano di un buffer che lavora bene). Prima del fix,
-    /// `position_decoder` interpretava questo come "troppo indietro" e
-    /// riapriva il file con un seek reale a ogni ciclo di poll,
-    /// invalidando il lavoro appena fatto — da cui l'indicatore che
-    /// "gira in tondo" senza mai avanzare stabilmente.
+    /// Regression for the reported bug: during normal playback the
+    /// decoder is almost always *ahead* of the target (it is the healthy
+    /// state of a buffer working well). Before the fix,
+    /// `position_decoder` read this as "too far behind" and
+    /// reopened the file with a real seek on every poll cycle,
+    /// invalidating the work just done — hence the indicator
+    /// "going in circles" without ever advancing steadily.
     #[test]
     fn position_decoder_does_not_reseek_when_already_usefully_ahead_of_the_segment_start() {
         let path = make_test_clip("vv-app-render-ahead-test", "steady.mp4", 3);
@@ -2220,12 +2220,12 @@ mod tests {
             Positioned::Opened
         );
 
-        // Decodifica qualche frame in avanti "a mano" *e* li inserisce in
-        // cache, come farebbe walk_and_fill, per simulare un decoder già
-        // bufferizzato oltre il target attuale — dalla riverifica di
-        // copertura in `position_decoder` (vedi la sua doc), un
-        // `next_frame` avanzato senza contenuto in cache dietro di sé
-        // non basterebbe più a evitare un seek.
+        // Decodes a few frames forward "by hand" *and* inserts them into
+        // the cache, as walk_and_fill would, to simulate a decoder already
+        // buffered past the current target — since the coverage recheck
+        // in `position_decoder` (see its docs), an
+        // advanced `next_frame` without cached content behind it
+        // would no longer be enough to avoid a seek.
         for _ in 0..20 {
             let od = open.get_mut(&media_a).unwrap();
             match od.decoder.next_frame() {
@@ -2239,9 +2239,9 @@ mod tests {
         let advanced_next_frame = open.get(&media_a).unwrap().next_frame;
         assert!(advanced_next_frame > 0, "il decoder deve aver avanzato");
 
-        // Un ciclo successivo con il target ancora dietro alla posizione
-        // del decoder — lo stato normale durante il playback in avanti —
-        // non deve riaprire/riazzerare il decoder.
+        // A later cycle with the target still behind the decoder's
+        // position — the normal state during forward playback —
+        // must not reopen/reset the decoder.
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Reused
@@ -2253,11 +2253,11 @@ mod tests {
         );
     }
 
-    /// `WalkOutcome::caught_up` è la base di `RenderAhead::is_caught_up`,
-    /// che la UI usa per decidere se vale la pena richiedere un altro
-    /// repaint (vedi doc lì): con un budget ampio a sufficienza per
-    /// l'intera finestra di lookahead, un ciclo deve bastare a coprirla
-    /// tutta e segnalarlo.
+    /// `WalkOutcome::caught_up` is the basis of `RenderAhead::is_caught_up`,
+    /// which the UI uses to decide whether it is worth requesting another
+    /// repaint (see the docs there): with a budget ample enough for
+    /// the whole lookahead window, one cycle must be enough to cover it
+    /// all and signal so.
     #[test]
     fn walk_and_fill_reports_caught_up_when_the_whole_window_fits_the_budget() {
         let path = make_test_clip("vv-app-render-ahead-test", "caught_up.mp4", 3);
@@ -2290,7 +2290,7 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let generous_budget = 320 * 240 * 4 * 200; // ben oltre i 75 frame della finestra
+        let generous_budget = 320 * 240 * 4 * 200; // well past the 75 frames of the window
         let outcome = walk_and_fill(
             &project,
             timeline_id,
@@ -2300,8 +2300,8 @@ mod tests {
             0,
             generous_budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
         );
@@ -2313,11 +2313,11 @@ mod tests {
         assert!(!outcome.interrupted);
     }
 
-    /// La finestra di retention dietro la testina (`behind_secs`) non è
-    /// solo "non scartare quel che c'è già": su una zona *mai visitata
-    /// prima* deve venire davvero decodificata, non solo trattenuta se
-    /// già presente — altrimenti uno scrub in una zona nuova poco dopo
-    /// l'inizio della clip non avrebbe nulla da retention dietro di sé.
+    /// The retention window behind the playhead (`behind_secs`) is not
+    /// just "do not discard what is already there": on a zone *never visited
+    /// before* it must really be decoded, not only retained if
+    /// already present — otherwise a scrub in a new zone shortly after
+    /// the start of the clip would have nothing to retain behind it.
     #[test]
     fn walk_and_fill_decodes_the_behind_window_on_a_fresh_area() {
         let path = make_test_clip("vv-app-render-ahead-test", "fresh_behind.mp4", 4);
@@ -2350,13 +2350,13 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget generoso: niente sfratto per capacità a confondere il
-        // risultato, qui interessa solo "viene decodificato" o no.
+        // Generous budget: no capacity eviction to confuse the
+        // result, here only "does it get decoded" or not matters.
         let generous_budget = 320 * 240 * 3 / 2 * 200;
 
-        // Prima volta che questa zona viene vista: playhead a 60, mai
-        // stato altrove prima (`went_backward` irrilevante al primo
-        // ciclo).
+        // First time this zone is seen: playhead at 60, never
+        // anywhere else before (`went_backward` irrelevant on the first
+        // cycle).
         walk_and_fill(
             &project,
             timeline_id,
@@ -2366,8 +2366,8 @@ mod tests {
             60,
             generous_budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(60),
         );
@@ -2383,28 +2383,28 @@ mod tests {
         );
     }
 
-    /// Regressione segnalata dall'utente: durante uno scrub all'indietro
-    /// il frame utile *subito* è quello adiacente alla testina (il bordo
-    /// vicino della finestra dietro), non quello sul bordo lontano — ma
-    /// decodificare un intero segmento dietro in un solo seek (come per
-    /// la finestra in avanti) produce i frame nell'ordine sbagliato:
-    /// ffmpeg decodifica solo in avanti da `source_start` (lontano) verso
-    /// `source_end` (vicino), quindi il frame più utile arriva per
-    /// ultimo. Con un budget che copre la finestra in avanti (piccola,
-    /// vicino alla fine della clip) più solo il primo blocco della
-    /// finestra dietro (`BEHIND_CHUNK_FRAMES`), il frame adiacente alla
-    /// testina deve comunque essere in cache, quello sul bordo lontano
-    /// no — prova diretta che `chunk_behind_segments_near_to_far`
-    /// riordina davvero la priorità di decodifica, non solo sulla carta.
+    /// Regression reported by the user: during a backwards scrub
+    /// the frame useful *right away* is the one adjacent to the playhead (the near
+    /// edge of the window behind), not the one on the far edge — but
+    /// decoding a whole segment behind in a single seek (as for
+    /// the forward window) produces the frames in the wrong order:
+    /// ffmpeg decodes only forwards from `source_start` (far) towards
+    /// `source_end` (near), so the most useful frame arrives
+    /// last. With a budget covering the forward window (small,
+    /// near the end of the clip) plus only the first chunk of the
+    /// window behind (`BEHIND_CHUNK_FRAMES`), the frame adjacent to the
+    /// playhead must still be cached, the one on the far edge
+    /// not — direct proof that `chunk_behind_segments_near_to_far`
+    /// really reorders the decoding priority, not just on paper.
     #[test]
     fn walk_and_fill_decodes_the_behind_window_nearest_frames_first_under_a_tight_budget() {
-        // GOP=1 (ogni frame un keyframe, come un proxy): un seek atterra
-        // esattamente dove richiesto, così il budget necessario per ogni
-        // blocco è prevedibile in frame esatti — con un GOP lungo (video
-        // "normale") il seek atterrerebbe al keyframe più vicino
-        // *prima* del bersaglio, rendendo il conto qui sotto fragile
-        // senza aggiungere nulla alla cosa sotto test (l'ordine di
-        // priorità dei blocchi, non quanto costi arrivarci).
+        // GOP=1 (every frame a keyframe, like a proxy): a seek lands
+        // exactly where requested, so the budget needed for each
+        // chunk is predictable in exact frames — with a long GOP (a
+        // "normal" video) the seek would land on the keyframe nearest
+        // *before* the target, making the computation below fragile
+        // without adding anything to what is under test (the priority
+        // order of the chunks, not how much it costs to get there).
         let path =
             make_test_clip_with_short_gop("vv-app-render-ahead-test", "behind_priority.mp4", 4, 1);
         let mut project = Project::default();
@@ -2436,12 +2436,12 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Testina a 95: finestra in avanti minuscola (solo [95,99], la
-        // clip finisce a 100), finestra dietro normale (2s = 50 frame,
-        // [45,94]). Budget per la finestra in avanti (5 frame) più *solo*
-        // il primo blocco della finestra dietro (`BEHIND_CHUNK_FRAMES`
-        // = 15 frame, [80,94]) — non abbastanza per raggiungere il bordo
-        // lontano a 45.
+        // Playhead at 95: tiny forward window (only [95,99], the
+        // clip ends at 100), normal window behind (2s = 50 frames,
+        // [45,94]). Budget for the forward window (5 frames) plus *only*
+        // the first chunk of the window behind (`BEHIND_CHUNK_FRAMES`
+        // = 15 frames, [80,94]) — not enough to reach the far
+        // edge at 45.
         let frame_bytes = 320 * 240 * 3 / 2;
         let tight_budget = frame_bytes * (5 + 15);
         walk_and_fill(
@@ -2453,8 +2453,8 @@ mod tests {
             95,
             tight_budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(95),
         );
@@ -2471,20 +2471,20 @@ mod tests {
         );
     }
 
-    /// Regressione: a testina *ferma* (nessun cambio tra due cicli), un
-    /// secondo `walk_and_fill` sulla finestra dietro già completamente
-    /// riempita non deve toccare il decoder — vedi doc di
-    /// `without_already_cached_chunks`. Senza il filtro, l'ordine dal
-    /// blocco più vicino al più lontano fa sì che il decoder, a inizio
-    /// ciclo, sia sempre posizionato *dietro* al primo blocco richiesto
-    /// (si era fermato dove finiva il blocco più lontano del ciclo
-    /// prima), quindi ogni blocco verrebbe riseekato e almeno un frame
-    /// ributtato via — a ogni singolo ciclo, per sempre, anche senza
-    /// alcuno scrub in corso. Un seek reale coinvolge il processo
-    /// `ffmpeg`/il container: anche uno solo costa ordini di grandezza
-    /// più di un giro di controlli `cached_ranges` in memoria, quindi un
-    /// tetto di tempo stretto sul secondo giro distingue in modo
-    /// affidabile "non ha toccato il decoder" da "ha rifatto lavoro".
+    /// Regression: with the playhead *still* (no change between two cycles), a
+    /// second `walk_and_fill` on an already entirely filled window behind
+    /// must not touch the decoder — see the docs of
+    /// `without_already_cached_chunks`. Without the filter, the order from the
+    /// nearest chunk to the farthest means the decoder, at the start of a
+    /// cycle, is always positioned *behind* the first requested chunk
+    /// (it had stopped where the farthest chunk of the previous cycle
+    /// ended), so every chunk would be reseeked and at least one frame
+    /// thrown away again — on every single cycle, forever, even without
+    /// any scrub going on. A real seek involves the
+    /// `ffmpeg` process/the container: even one costs orders of magnitude
+    /// more than a round of in-memory `cached_ranges` checks, so a
+    /// tight time cap on the second round reliably distinguishes
+    /// "it did not touch the decoder" from "it redid work".
     #[test]
     fn walk_and_fill_does_not_reseek_an_already_complete_behind_window_when_idle() {
         let path = make_test_clip_with_short_gop(
@@ -2524,8 +2524,8 @@ mod tests {
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let generous_budget = 320 * 240 * 3 / 2 * 200;
 
-        // Primo giro: riempie per intero sia avanti che dietro (più
-        // blocchi, [45,94] a 25fps/2s).
+        // First round: fills entirely both ahead and behind (several
+        // chunks, [45,94] at 25fps/2s).
         let first = walk_and_fill(
             &project,
             timeline_id,
@@ -2545,16 +2545,16 @@ mod tests {
             "il primo giro deve completare la finestra: {first:?}"
         );
 
-        // 20 giri successivi, stessa testina, nulla cambia: devono
-        // completarsi quasi istantaneamente (nessun seek reale, solo
-        // controlli `cached_ranges` in memoria). Un singolo giro non è
-        // una misura abbastanza stabile (jitter di scheduling del SO
-        // dell'ordine di qualche ms può capitare anche senza alcun
-        // lavoro reale) — sommare 20 giri indipendenti amplifica il
-        // segnale: se anche uno solo tocca il decoder, il costo di un
-        // vero seek+decodifica (1-2ms, già misurato altrove in questo
-        // file) domina il totale, mentre 20 giri di soli controlli in
-        // memoria restano nell'ordine del centinaio di µs.
+        // 20 later rounds, same playhead, nothing changes: they must
+        // complete almost instantly (no real seek, only
+        // in-memory `cached_ranges` checks). A single round is not
+        // a stable enough measure (OS scheduling jitter
+        // of a few ms can happen even without any real
+        // work) — summing 20 independent rounds amplifies the
+        // signal: if even one touches the decoder, the cost of a
+        // real seek+decode (1-2ms, already measured elsewhere in this
+        // file) dominates the total, while 20 rounds of in-memory checks
+        // only stay in the hundreds of µs.
         let start = std::time::Instant::now();
         for _ in 0..20 {
             let outcome = walk_and_fill(
@@ -2582,11 +2582,11 @@ mod tests {
         );
     }
 
-    /// `lookahead_secs`/`behind_secs` configurati a `0`: la finestra si
-    /// riduce al margine minimo (`MIN_MARGIN_FRAMES`), non a zero — anche
-    /// con budget generoso e una zona mai vista prima (che con una
-    /// finestra normale farebbe scattare sia la finestra in avanti sia
-    /// quella di retention, vedi il test sopra).
+    /// `lookahead_secs`/`behind_secs` configured to `0`: the window
+    /// shrinks to the minimum margin (`MIN_MARGIN_FRAMES`), not to zero — even
+    /// with a generous budget and a zone never seen before (which with a
+    /// normal window would trigger both the forward window and
+    /// the retention one, see the test above).
     #[test]
     fn walk_and_fill_buffers_only_a_minimal_margin_when_configured_to_zero_seconds() {
         let path = make_test_clip("vv-app-render-ahead-test", "no_read_ahead.mp4", 4);
@@ -2630,29 +2630,29 @@ mod tests {
             60,
             generous_budget,
             false,
-            false, // proxy_enabled: irrilevante per questo test
-            0.0,   // lookahead_secs: quello sotto esame
-            0.0,   // behind_secs: quello sotto esame
+            false, // proxy_enabled: irrelevant for this test
+            0.0,   // lookahead_secs: the one under test
+            0.0,   // behind_secs: the one under test
             &AtomicI64::new(60),
         );
 
-        // [56,63], non un intervallo più ampio: con keyint di default
-        // (250) e una clip di soli 100 frame, l'unico keyframe è a 0 —
-        // raggiungere il frame 63 (= 60 + MIN_MARGIN_FRAMES) richiede di
-        // decodificare in sequenza da lì, e quei frame *di transito*
-        // restano in cache come sottoprodotto DURANTE il giro (vedi doc
-        // di `transit_bytes` in `fill_segments`: serve a far sì che il
-        // blocco dietro [56,59] li trovi già pronti invece di
-        // riattraversare da capo lo stesso GOP), ma un `reconcile` finale
-        // li scarta di nuovo prima che `walk_and_fill` dichiari
-        // `caught_up` (vedi il commento lì sul perché: altrimenti la UI,
-        // che smette di richiedere repaint su `caught_up`, può restare
-        // bloccata a mostrare quel transito come se fosse "buffered" fino
-        // al prossimo repaint per altri motivi — bug segnalato
-        // dall'utente, la striscia "si ridimensiona" solo muovendo il
-        // mouse). Il riuso *tra* i due segmenti di questo stesso giro è
-        // comunque già avvenuto prima di questo `reconcile` finale, solo
-        // la sua sopravvivenza oltre la fine del giro si perde.
+        // [56,63], not a wider interval: with the default keyint
+        // (250) and a clip of only 100 frames, the only keyframe is at 0 —
+        // reaching frame 63 (= 60 + MIN_MARGIN_FRAMES) requires
+        // decoding in sequence from there, and those *transit* frames
+        // stay cached as a by-product DURING the round (see the docs
+        // of `transit_bytes` in `fill_segments`: it serves to make the
+        // chunk behind [56,59] find them already there instead of
+        // crossing the same GOP from scratch again), but a final `reconcile`
+        // discards them again before `walk_and_fill` declares
+        // `caught_up` (see the comment there on why: otherwise the UI,
+        // which stops requesting repaints on `caught_up`, can stay
+        // stuck showing that transit as if it were "buffered" until
+        // the next repaint for other reasons — bug reported
+        // by the user, the strip "resizes itself" only by moving the
+        // mouse). The reuse *between* the two segments of this same round has
+        // already happened before this final `reconcile`, only
+        // its survival past the end of the round is lost.
         assert_eq!(
             caches.cached_ranges(media_a),
             vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
@@ -2664,11 +2664,11 @@ mod tests {
         );
     }
 
-    /// Regressione: se il budget non basta a coprire tutta la finestra
-    /// di lookahead, il buffer deve comunque partire dalla testina (i
-    /// frame più vicini, i più utili da mostrare subito) e non da una
-    /// coda arbitraria della finestra — altrimenti l'indicatore mostra
-    /// un intervallo che "cade dopo" la testina senza mai coprirla.
+    /// Regression: if the budget is not enough to cover the whole lookahead
+    /// window, the buffer must still start from the playhead (the
+    /// nearest frames, the most useful to show right away) and not from an
+    /// arbitrary tail of the window — otherwise the indicator shows
+    /// an interval that "falls after" the playhead without ever covering it.
     #[test]
     fn walk_and_fill_prioritizes_frames_near_the_playhead_when_the_budget_is_too_small_for_the_full_window()
      {
@@ -2702,8 +2702,8 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget minuscolo: la finestra di lookahead (3s = 75 frame a
-        // 25fps) non ci sta tutta nella cache.
+        // Tiny budget: the lookahead window (3s = 75 frames at
+        // 25fps) does not fit entirely in the cache.
         let tiny_budget = 320 * 240 * 4 * 5;
         walk_and_fill(
             &project,
@@ -2714,8 +2714,8 @@ mod tests {
             0,
             tiny_budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
         );
@@ -2732,13 +2732,13 @@ mod tests {
         );
     }
 
-    /// REFACTOR_PIPELINE.md §3.1 (reattività): se il target *live* si è
-    /// già spostato oltre la soglia di fallback (nessuna osservazione
-    /// del GOP ancora fatta per questo media) rispetto a `from_frame`
-    /// prima ancora di iniziare, il fill deve accorgersene alla prima
-    /// occasione (dopo il primo frame decodificato) e interrompersi
-    /// restituendo `true`, invece di continuare a decodificare per tutta
-    /// la finestra un prefetch ormai obsoleto.
+    /// REFACTOR_PIPELINE.md §3.1 (responsiveness): if the *live* target has
+    /// already moved past the fallback threshold (no GOP observation
+    /// made for this media yet) relative to `from_frame`
+    /// before even starting, the fill must notice at the first
+    /// opportunity (after the first decoded frame) and stop
+    /// returning `true`, instead of continuing to decode for the whole
+    /// window a prefetch that is by now obsolete.
     #[test]
     fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_drifted() {
         let path = make_test_clip_with_short_gop(
@@ -2776,9 +2776,9 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Il target live è già oltre soglia rispetto a from_frame=0 prima
-        // ancora che il fill inizi: simula la testina che è saltata
-        // altrove mentre questo ciclo stava per partire.
+        // The live target is already past the threshold relative to from_frame=0 before
+        // the fill even starts: it simulates the playhead having jumped
+        // elsewhere while this cycle was about to start.
         let drifted_target = AtomicI64::new(DEFAULT_SEEK_THRESHOLD_FRAMES + 200);
 
         let outcome = walk_and_fill(
@@ -2790,8 +2790,8 @@ mod tests {
             0,
             100_000_000,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &drifted_target,
         );
@@ -2812,16 +2812,16 @@ mod tests {
         );
     }
 
-    /// Regressione per il bug segnalato dall'utente: due clip sulla
-    /// timeline che condividono lo stesso media (un unico file tagliato
-    /// in più pezzi, comunissimo) generano due `MediaSegment` per lo
-    /// stesso `media_id` nella stessa finestra, con `source_start`
-    /// diversi. Chiamare `evict_before` con il `source_start` del
-    /// *singolo* segmento in elaborazione (come si faceva prima)
-    /// scartava, elaborando il secondo segmento, tutto ciò che il primo
-    /// aveva appena decodificato — "il buffer si ricalcola da capo
-    /// invalidando i frame successivi" segnalato dall'utente,
-    /// riproducibile ad ogni taglio tra due pezzi dello stesso file.
+    /// Regression for the bug reported by the user: two clips on the
+    /// timeline sharing the same media (a single file cut
+    /// into several pieces, very common) generate two `MediaSegment`s for the
+    /// same `media_id` in the same window, with different `source_start`s.
+    /// Calling `evict_before` with the `source_start` of the
+    /// *single* segment being processed (as was done before)
+    /// discarded, while processing the second segment, everything the first
+    /// had just decoded — "the buffer recomputes itself from scratch
+    /// invalidating the following frames" reported by the user,
+    /// reproducible at every cut between two pieces of the same file.
     #[test]
     fn walk_and_fill_does_not_invalidate_one_segment_while_processing_another_segment_of_the_same_media()
      {
@@ -2844,10 +2844,10 @@ mod tests {
             content_hash: 0,
             compound: None,
         });
-        // Taglio a timeline_start=60 tra due pezzi dello stesso file:
-        // il primo usa il sorgente [0,60), il secondo riparte da un
-        // punto molto più avanti nel sorgente [200,300) — esattamente
-        // come tagliare via una parte centrale dello stesso file.
+        // Cut at timeline_start=60 between two pieces of the same file:
+        // the first uses source [0,60), the second restarts from a
+        // point much further into the source [200,300) — exactly
+        // like cutting away a middle part of the same file.
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
             clips: vec![
@@ -2865,9 +2865,9 @@ mod tests {
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let budget = 100_000_000;
 
-        // La finestra di lookahead (3s = 75 frame a 25fps) da 40
-        // attraversa il taglio a 60, includendo un pezzo di entrambe le
-        // clip nello stesso ciclo.
+        // The lookahead window (3s = 75 frames at 25fps) from 40
+        // crosses the cut at 60, including a piece of both
+        // clips in the same cycle.
         walk_and_fill(
             &project,
             timeline_id,
@@ -2877,8 +2877,8 @@ mod tests {
             40,
             budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
         );
@@ -2894,20 +2894,20 @@ mod tests {
         );
     }
 
-    /// Regressione per il bug segnalato dall'utente ("il caching non deve
-    /// essere per clip ma per timeline"): il test precedente usa un
-    /// budget enorme (100MB) che non mette mai sotto pressione la
-    /// capacità reale della cache, quindi non lo scopre. Con un budget
-    /// stretto, due segmenti dello stesso media in questa finestra (un
-    /// taglio con in mezzo una parte scartata: sorgenti lontani tra
-    /// loro) chiedevano *insieme* più frame di quanti la `FrameCache`
-    /// condivisa potesse contenerne — il secondo segmento elaborato
-    /// (`[200,254]`) sfrattava per limite di capacità (LRU ordinaria,
-    /// non `evict_before`) tutto ciò che il primo (`[40,59]`) aveva
-    /// appena decodificato nello stesso identico ciclo, anche se
-    /// `evict_before` da solo l'avrebbe protetto. Visto dall'utente:
-    /// ogni clip sembra bufferizzare "per conto suo", a spese delle
-    /// altre — da cui "il caching sembra per-clip, non per-timeline".
+    /// Regression for the bug reported by the user ("the caching must not
+    /// be per clip but per timeline"): the previous test uses a
+    /// huge budget (100MB) that never puts the real capacity of the
+    /// cache under pressure, so it does not catch it. With a tight
+    /// budget, two segments of the same media in this window (a
+    /// cut with a discarded part in between: sources far from
+    /// each other) asked *together* for more frames than the shared
+    /// `FrameCache` could hold — the second segment processed
+    /// (`[200,254]`) evicted by capacity limit (ordinary LRU,
+    /// not `evict_before`) everything the first (`[40,59]`) had
+    /// just decoded in the very same cycle, even though
+    /// `evict_before` alone would have protected it. As seen by the user:
+    /// every clip seems to buffer "on its own", at the expense of the
+    /// others — hence "the caching looks per-clip, not per-timeline".
     #[test]
     fn walk_and_fill_does_not_let_one_segment_of_a_media_evict_another_via_capacity_when_the_budget_is_tight()
      {
@@ -2934,7 +2934,7 @@ mod tests {
             content_hash: 0,
             compound: None,
         });
-        // Stesso taglio del test precedente: [0,60) poi [200,300).
+        // Same cut as the previous test: [0,60) then [200,300).
         let timeline_id = project.timelines.insert(timeline_with(vec![Track {
             kind: TrackKind::Video,
             clips: vec![
@@ -2950,10 +2950,10 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Capacità ~60 frame YUV420 (width*height*3/2 byte/frame):
-        // meno di quanto i due segmenti insieme chiederebbero (~20 + ~55),
-        // ma più di quanto ciascuno chiede da solo — costringe la
-        // condivisione della stessa cache a contare davvero.
+        // Capacity ~60 YUV420 frames (width*height*3/2 bytes/frame):
+        // less than what the two segments together would ask for (~20 + ~55),
+        // but more than what each asks for alone — it forces the
+        // sharing of the same cache to really count.
         let budget = 60 * 320 * 240 * 3 / 2;
 
         let outcome = walk_and_fill(
@@ -2965,8 +2965,8 @@ mod tests {
             40,
             budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
         );
@@ -2986,25 +2986,25 @@ mod tests {
         );
     }
 
-    /// Regressione per il bug segnalato dall'utente: con la testina
-    /// ferma subito prima di un taglio (basta tagliare una clip e
-    /// posizionare la testina appena prima del punto di taglio: la
-    /// finestra di lookahead include comunque un pezzo di entrambe le
-    /// metà, due segmenti dello stesso media), ogni ciclo di poll
-    /// rielabora gli stessi due segmenti nello stesso ordine: il secondo
-    /// segmento non deve far sembrare "tornato indietro" il primo e
-    /// scatenare un seek reale a ogni ciclo pur restando fermi (vedi doc
-    /// di `position_decoder` su `went_backward`). Verificato passando
-    /// `false` (testina ferma) a entrambi i segmenti in entrambi i cicli.
+    /// Regression for the bug reported by the user: with the playhead
+    /// still just before a cut (it is enough to cut a clip and
+    /// place the playhead just before the cut point: the
+    /// lookahead window includes a piece of both
+    /// halves anyway, two segments of the same media), every poll cycle
+    /// reprocesses the same two segments in the same order: the second
+    /// segment must not make the first look like it "went backwards" and
+    /// trigger a real seek on every cycle while standing still (see the docs
+    /// of `position_decoder` on `went_backward`). Verified by passing
+    /// `false` (playhead still) to both segments in both cycles.
     ///
-    /// Gap tra i due segmenti (10 e 25) scelto apposta sotto
-    /// `DEFAULT_SEEK_THRESHOLD_FRAMES`: qui `position_decoder` viene
-    /// chiamato direttamente, senza mai decodificare un frame reale, quindi
-    /// nessuna osservazione del GOP avviene mai e la soglia resta al
-    /// fallback per tutto il test — un gap più ampio farebbe scattare
-    /// legittimamente il ramo "troppo avanti", mascherando la cosa che
-    /// questo test vuole isolare (la contaminazione tra segmenti dello
-    /// stesso media, non quella soglia).
+    /// Gap between the two segments (10 and 25) chosen on purpose below
+    /// `DEFAULT_SEEK_THRESHOLD_FRAMES`: here `position_decoder` is
+    /// called directly, without ever decoding a real frame, so
+    /// no GOP observation ever happens and the threshold stays at the
+    /// fallback for the whole test — a wider gap would legitimately trigger
+    /// the "too far ahead" branch, masking the thing
+    /// this test wants to isolate (the contamination between segments of the
+    /// same media, not that threshold).
     #[test]
     fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments()
     {
@@ -3013,8 +3013,8 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
 
-        // Ciclo 1: due segmenti dello stesso media nella stessa finestra
-        // (come ai due lati di un taglio), source_start 10 e poi 25.
+        // Cycle 1: two segments of the same media in the same window
+        // (as on the two sides of a cut), source_start 10 and then 25.
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
             Positioned::Opened
@@ -3025,10 +3025,10 @@ mod tests {
             "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
         );
 
-        // Ciclo 2, testina ferma (`went_backward=false` per entrambi):
-        // stessi due segmenti. Rielaborare il *primo* segmento (10) non
-        // deve sembrare "tornato indietro" solo perché l'ultima chiamata
-        // vista nel ciclo precedente era per il segmento successivo (25).
+        // Cycle 2, playhead still (`went_backward=false` for both):
+        // the same two segments. Reprocessing the *first* segment (10) must
+        // not look like it "went backwards" just because the last call
+        // seen in the previous cycle was for the following segment (25).
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
             Positioned::Reused,
@@ -3040,16 +3040,16 @@ mod tests {
         );
     }
 
-    /// Regressione (ex-A2, REFACTOR_PIPELINE.md): con la vecchia
-    /// architettura (una `FrameCache` per media, capacità fissata al
-    /// momento della creazione) questo test verificava che la capacità
-    /// di `media_b` si allargasse quando `media_a` usciva dalla finestra
-    /// — un problema che con la `SharedFrameCache` a budget globale (§2)
-    /// non può più presentarsi *per costruzione*: non esiste più una
-    /// capacità per-media da tenere sincronizzata, il budget è uno solo
-    /// e sempre quello reale. Verifica quindi l'equivalente diretto: con
-    /// meno media a contendersi il budget, `media_b` arriva a
-    /// bufferizzare *più* frame (non più capacità, ma copertura reale).
+    /// Regression (ex-A2, REFACTOR_PIPELINE.md): with the old
+    /// architecture (one `FrameCache` per media, capacity fixed at
+    /// creation time) this test checked that the capacity
+    /// of `media_b` widened when `media_a` left the window
+    /// — a problem that with the globally budgeted `SharedFrameCache` (§2)
+    /// can no longer arise *by construction*: there is no longer a
+    /// per-media capacity to keep in sync, the budget is a single one
+    /// and always the real one. So it checks the direct equivalent: with
+    /// fewer media contending for the budget, `media_b` gets to
+    /// buffer *more* frames (no longer capacity, but real coverage).
     #[test]
     fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_budget() {
         let path_a = make_test_clip("vv-app-render-ahead-test", "resize_a.mp4", 2);
@@ -3103,18 +3103,18 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget che a 320x240 (307_200 B/frame) basta per ~60 frame
-        // totali: con due media a contendersi la finestra ce ne stanno
-        // pochi a testa, con uno solo molti di più.
+        // A budget that at 320x240 (307_200 B/frame) is enough for ~60 frames
+        // in total: with two media contending for the window few fit
+        // each, with only one many more.
         let total_budget = 60 * 320 * 240 * 4;
 
         let frames_cached = |ranges: &[(FrameIdx, FrameIdx)]| -> FrameIdx {
             ranges.iter().map(|&(s, e)| e - s + 1).sum()
         };
 
-        // Primo ciclo: la finestra di lookahead (3s = 75 frame) attraversa
-        // il taglio a 40, quindi media_a e media_b sono entrambi nella
-        // finestra e condividono lo stesso budget globale.
+        // First cycle: the lookahead window (3s = 75 frames) crosses
+        // the cut at 40, so media_a and media_b are both in the
+        // window and share the same global budget.
         walk_and_fill(
             &project,
             timeline_id,
@@ -3124,17 +3124,17 @@ mod tests {
             0,
             total_budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
         );
         let frames_b_shared = frames_cached(&caches.cached_ranges(media_b));
 
-        // Secondo ciclo: il target è ben oltre il taglio, solo media_b è
-        // nella finestra — reconcile scarta media_a (Tier A), quindi
-        // media_b ha l'intero budget globale per sé, senza bisogno di
-        // nessuna capacità da "ridimensionare verso l'alto" a parte.
+        // Second cycle: the target is well past the cut, only media_b is
+        // in the window — reconcile discards media_a (Tier A), so
+        // media_b has the whole global budget to itself, without needing
+        // any separate capacity to "resize upwards".
         walk_and_fill(
             &project,
             timeline_id,
@@ -3144,8 +3144,8 @@ mod tests {
             200,
             total_budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(200),
         );
@@ -3156,19 +3156,19 @@ mod tests {
             "con un solo media nella finestra deve arrivare a bufferizzarne di più, non restare fermo alla quota di quando la condivideva: {frames_b_shared} -> {frames_b_alone}"
         );
 
-        // source_start per il secondo ciclo: clip b ha source_in=0,
-        // timeline_start=40, quindi 200-40=160.
+        // source_start for the second cycle: clip b has source_in=0,
+        // timeline_start=40, hence 200-40=160.
         assert!(
             ranges.iter().any(|&(s, _)| s <= 160),
             "con più budget disponibile il buffer deve poter partire dalla nuova testina, non da una coda arbitraria più avanti: {ranges:?}"
         );
     }
 
-    /// Regressione: dopo uno scrub molto indietro rispetto a dove il
-    /// worker aveva già bufferizzato in avanti, il buffer deve
-    /// raggiungere anche la nuova posizione — il decoder può solo
-    /// decodificare in avanti, quindi senza un riapertura esplicita
-    /// resterebbe bloccato oltre il nuovo target per sempre.
+    /// Regression: after a scrub far back relative to where the
+    /// worker had already buffered forward, the buffer must
+    /// reach the new position too — the decoder can only
+    /// decode forwards, so without an explicit reopen
+    /// it would stay stuck past the new target forever.
     #[test]
     fn render_ahead_catches_up_after_a_large_backward_seek() {
         let path = make_test_clip("vv-app-render-ahead-test", "backward_seek.mp4", 4);
@@ -3220,9 +3220,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // Scrub indietro oltre la soglia di seek: il decoder che ha
-        // bufferizzato attorno a 80 non può proseguire in avanti per
-        // raggiungere 0.
+        // Scrub back past the seek threshold: the decoder that
+        // buffered around 80 cannot continue forwards to
+        // reach 0.
         render_ahead.set_target(0);
         let start = std::time::Instant::now();
         loop {
@@ -3238,24 +3238,24 @@ mod tests {
         }
     }
 
-    /// Regressione per il bug segnalato dall'utente: uno scrub
-    /// all'indietro deve rigenerare il buffer per la nuova posizione,
-    /// non restare bloccato sul frame in cache più vicino. Lo scrub qui
-    /// (70 frame) è scelto apposta *oltre* la finestra di retention
-    /// dietro la testina (`DEFAULT_BEHIND_SECS`, 2s = 50 frame a 25fps): un
-    /// vero scrub oltre quella finestra deve ancora comportarsi come
-    /// prima di quella finestra — rigenerare da zero — perché qui non
-    /// c'è nulla da riusare. Uno scrub *dentro* la finestra invece non
-    /// deve rigenerare nulla per costruzione (vedi
+    /// Regression for the bug reported by the user: a backwards
+    /// scrub must regenerate the buffer for the new position,
+    /// not stay stuck on the nearest cached frame. The scrub here
+    /// (70 frames) is chosen on purpose *past* the retention window
+    /// behind the playhead (`DEFAULT_BEHIND_SECS`, 2s = 50 frames at 25fps): a
+    /// real scrub past that window must still behave as
+    /// before that window existed — regenerate from scratch — because here there
+    /// is nothing to reuse. A scrub *inside* the window, on the other hand, must
+    /// not regenerate anything by construction (see
     /// `walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek`,
-    /// che verifica esattamente quello). Prima del fix originale di
-    /// questa regressione, restava bloccato sul frame in cache più
-    /// vicino perché `position_decoder` considerava "abbastanza avanti"
-    /// qualunque target ancora dietro a `next_frame` più di una soglia —
-    /// ma `walk_and_fill` scarta ad ogni ciclo tutto ciò che è fuori
-    /// dalla finestra corrente, quindi anche un piccolo passo indietro
-    /// oltre la finestra di retention cade in territorio già scartato e
-    /// irraggiungibile decodificando solo in avanti.
+    /// which checks exactly that). Before the original fix of
+    /// this regression, it stayed stuck on the nearest cached
+    /// frame because `position_decoder` considered "far enough ahead"
+    /// any target still behind `next_frame` by more than a threshold —
+    /// but `walk_and_fill` discards on every cycle everything outside
+    /// the current window, so even a small step back
+    /// past the retention window falls into already discarded territory and
+    /// is unreachable by decoding only forwards.
     #[test]
     fn render_ahead_catches_up_after_a_backward_seek_beyond_the_retention_window() {
         let path = make_test_clip("vv-app-render-ahead-test", "small_backward_seek.mp4", 6);
@@ -3295,14 +3295,14 @@ mod tests {
         );
         render_ahead.set_target(100);
 
-        // Attendi non solo che il buffer copra 100, ma che i cicli di
-        // poll successivi abbiano anche già scartato ciò che è rimasto
-        // fuori dalla finestra (avanti+dietro) di 100 — compreso 30, che
-        // è 70 frame dietro, oltre i 50 della finestra di retention.
-        // Altrimenti il test passerebbe per caso, perché il primo
-        // riempimento (che decodifica dal keyframe più vicino, qui
-        // l'inizio del file) include già 30 prima ancora che venga
-        // scartato.
+        // Wait not only for the buffer to cover 100, but for the later poll
+        // cycles to have also already discarded what is left
+        // outside the window (forward+behind) of 100 — including 30, which
+        // is 70 frames behind, past the 50 of the retention window.
+        // Otherwise the test would pass by accident, because the first
+        // fill (which decodes from the nearest keyframe, here
+        // the start of the file) already includes 30 before it is even
+        // discarded.
         let covers = |ranges: &[(FrameIdx, FrameIdx)], f: FrameIdx| {
             ranges.iter().any(|&(s, e)| s <= f && f <= e)
         };
@@ -3319,12 +3319,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // Scrub indietro di 70 frame (oltre la finestra di retention di
-        // 50): deve comunque rigenerare il buffer per la nuova
-        // posizione, non restare bloccato sul frame più vicino già in
-        // cache. Copertura di 30 (non "un range che parte esattamente
-        // lì"): il seek atterra sul keyframe più vicino a 30, che può
-        // essere anche prima di 30 stesso.
+        // Scrub back by 70 frames (past the retention window of
+        // 50): it must still regenerate the buffer for the new
+        // position, not stay stuck on the nearest frame already
+        // cached. Coverage of 30 (not "a range starting exactly
+        // there"): the seek lands on the keyframe nearest to 30, which may
+        // be even before 30 itself.
         render_ahead.set_target(30);
         let start = std::time::Instant::now();
         loop {
@@ -3340,21 +3340,21 @@ mod tests {
         }
     }
 
-    /// Regressione per il bug segnalato dall'utente: playback a scatti
-    /// anche a 1x con `lookahead_secs`/`behind_secs` a `0`, perché
-    /// `set_target` aggiornava solo un atomico letto dal worker al più ogni
-    /// `POLL_INTERVAL` (50ms) — un tetto reale a ~20 frame/sec a
-    /// prescindere da quanto la decodifica fosse veloce (succedeva
-    /// anche coi proxy).
+    /// Regression for the bug reported by the user: stuttering playback
+    /// even at 1x with `lookahead_secs`/`behind_secs` at `0`, because
+    /// `set_target` updated only an atomic read by the worker at most every
+    /// `POLL_INTERVAL` (50ms) — a real cap at ~20 frames/sec
+    /// regardless of how fast the decoding was (it happened
+    /// with the proxies too).
     ///
-    /// Verifica la sola sveglia immediata (`Command::Wake`), isolata dal
-    /// margine minimo: un salto isolato per volta, con una scadenza
-    /// di 40ms *dopo* aver aspettato che il worker si stabilizzi sul
-    /// target precedente. Senza sveglia immediata l'attesa sarebbe
-    /// uniforme tra 0 e 50ms: ognuno degli 11 salti resta sotto i 40ms per
-    /// caso all'80%, tutti insieme ~9%. La scadenza non è più stretta
-    /// perché sotto il carico degli altri test in parallelo anche la
-    /// decodifica del frame può sforare.
+    /// It checks the immediate wake-up alone (`Command::Wake`), isolated from the
+    /// minimum margin: one isolated jump at a time, with a deadline
+    /// of 40ms *after* waiting for the worker to settle on the
+    /// previous target. Without the immediate wake-up the wait would be
+    /// uniform between 0 and 50ms: each of the 11 jumps stays under 40ms by
+    /// chance 80% of the time, all together ~9%. The deadline is no tighter
+    /// because under the load of the other tests in parallel even
+    /// decoding the frame can overrun.
     #[test]
     fn render_ahead_reacts_to_each_target_change_faster_than_the_old_poll_interval() {
         let path = make_test_clip("vv-app-render-ahead-test", "wake_on_change.mp4", 2);
@@ -3400,8 +3400,8 @@ mod tests {
             }
         };
 
-        // Primo target: nessuna scadenza stretta, il worker deve solo
-        // avviarsi (apertura del decoder inclusa).
+        // First target: no tight deadline, the worker only has to
+        // start up (opening the decoder included).
         render_ahead.set_target(0);
         loop {
             if render_ahead.get_frame(media_a, 0).is_some() {
@@ -3410,20 +3410,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
 
-        // Da qui in poi, ogni salto isolato ha 40ms per essere pronto.
+        // From here on, every isolated jump has 40ms to be ready.
         for target in (8..=48).step_by(4) {
             render_ahead.set_target(target);
             wait_for(target);
         }
     }
 
-    /// Regressione generale: dopo un po' di playback in avanti su più
-    /// cicli, uno scrub all'indietro verso una posizione più recente del
-    /// primissimo target mai visto deve comunque far ricalcolare il
-    /// buffer per la nuova posizione. Verifica che `went_backward`,
-    /// calcolato una volta per ciclo (qui simulato come farebbe
-    /// `worker_loop`), regga una sequenza realistica di cicli, non solo un
-    /// singolo salto indietro isolato.
+    /// General regression: after some forward playback over several
+    /// cycles, a backwards scrub towards a position more recent than the
+    /// very first target ever seen must still make the buffer
+    /// recompute for the new position. It checks that `went_backward`,
+    /// computed once per cycle (simulated here as
+    /// `worker_loop` would), holds over a realistic sequence of cycles, not just a
+    /// single isolated backwards jump.
     #[test]
     fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum() {
         let path = make_test_clip_with_short_gop(
@@ -3461,16 +3461,16 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget stretto: la finestra intera non ci sta in cache, quindi
-        // avanzando `evict_before` scarta davvero i frame dietro la
-        // testina invece di lasciarli semplicemente ancora presenti per
-        // caso.
+        // Tight budget: the whole window does not fit in the cache, so
+        // as it advances `evict_before` really discards the frames behind
+        // the playhead instead of just leaving them still present by
+        // chance.
         let budget = 43_000_000;
 
-        // Playback in avanti su più cicli: `went_backward` è sempre
-        // `false` (ogni target è >= al precedente), esattamente come lo
-        // calcolerebbe `worker_loop` confrontando `from` col ciclo
-        // prima.
+        // Forward playback over several cycles: `went_backward` is always
+        // `false` (every target is >= the previous one), exactly as
+        // `worker_loop` would compute it comparing `from` with the previous
+        // cycle.
         let mut prev = None;
         for from in [0, 50, 100, 150, 200] {
             let went_backward = prev.is_some_and(|p| from < p);
@@ -3484,24 +3484,24 @@ mod tests {
                 from,
                 budget,
                 went_backward,
-                false,                  // proxy_enabled: irrilevante per questo test
-                DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+                false,                  // proxy_enabled: irrelevant for this test
+                DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(from),
             );
         }
 
-        // A questo punto i frame intorno a 0 sono sicuramente sfrattati
-        // (evict_before ha scartato tutto ciò che è dietro alla testina
-        // ad ogni ciclo, l'ultimo dei quali è 200).
+        // At this point the frames around 0 are certainly evicted
+        // (evict_before discarded everything behind the playhead
+        // on every cycle, the last of which is 200).
         let ranges_before = caches.cached_ranges(media_a);
         assert!(
             !ranges_before.iter().any(|&(s, e)| s <= 80 && e >= 80),
             "80 non deve essere già in cache per coincidenza, altrimenti il test non prova nulla: {ranges_before:?}"
         );
 
-        // Scrub indietro a 80: più indietro della testina attuale (200),
-        // ma più avanti del target più vecchio mai visto (0).
+        // Scrub back to 80: further back than the current playhead (200),
+        // but further ahead than the oldest target ever seen (0).
         walk_and_fill(
             &project,
             timeline_id,
@@ -3511,8 +3511,8 @@ mod tests {
             80,
             budget,
             true,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(80),
         );
@@ -3524,33 +3524,33 @@ mod tests {
         );
     }
 
-    /// Verifica l'ottimizzazione richiesta: dopo un piccolo scrub
-    /// all'indietro, la porzione già bufferizzata che ricade ancora
-    /// nella *nuova* finestra (avanti + dietro, vedi `behind_secs`) non
-    /// deve essere ridecodificata — anzi, il decoder non va toccato per
-    /// niente (`SharedFrameCache::covers`, controllato *prima* di interpellarlo:
-    /// vedi la sua doc su un bug reale, confermato in produzione, causato
-    /// dal fidarsi della posizione che il decoder *crede* di avere invece
-    /// di chiedere alla cache). Con la finestra di retention dietro la
-    /// testina, lo scrub di 30 frame qui sotto ricade interamente
-    /// *dentro* quella finestra (50 frame): il tratto [250,269] non viene
-    /// nemmeno scartato da `reconcile`, quindi l'intero segmento richiesto
-    /// risulta già coperto e viene saltato di netto — `OpenDecoder::
-    /// next_frame` deve restare esattamente dov'era prima di questa
-    /// chiamata, prova diretta che nessun seek/decodifica è avvenuto.
+    /// Checks the requested optimization: after a small backwards
+    /// scrub, the already buffered portion still falling within
+    /// the *new* window (forward + behind, see `behind_secs`) must
+    /// not be re-decoded — indeed, the decoder must not be touched at
+    /// all (`SharedFrameCache::covers`, checked *before* consulting it:
+    /// see its docs on a real bug, confirmed in production, caused
+    /// by trusting the position the decoder *believes* it has instead
+    /// of asking the cache). With the retention window behind the
+    /// playhead, the 30-frame scrub below falls entirely
+    /// *inside* that window (50 frames): the stretch [250,269] is not
+    /// even discarded by `reconcile`, so the whole requested segment
+    /// comes out already covered and is skipped outright — `OpenDecoder::
+    /// next_frame` must stay exactly where it was before this
+    /// call, direct proof that no seek/decode happened.
     ///
-    /// Nota (REFACTOR_PIPELINE.md §2, Tier A): con la `SharedFrameCache`
-    /// a budget globale, `reconcile` scarta anche ciò che è *oltre*
-    /// l'orizzonte della nuova finestra (qui: oltre 344, dato che la
-    /// nuova testina è 270) — a differenza della vecchia `evict_before`,
-    /// che scartava solo ciò che era dietro e lasciava intatto tutto ciò
-    /// che era avanti, qualunque fosse l'orizzonte. È voluto: il budget
-    /// della finestra è sempre esattamente quello della finestra
-    /// corrente, non un accumulo indefinito di code storiche. Quindi qui
-    /// si verifica solo che [250,344] (l'intersezione tra vecchia coda e
-    /// nuova finestra allargata dalla retention) sia raggiungibile senza
-    /// ridecodificarla — non che tutta la vecchia coda fino a 374
-    /// sopravviva.
+    /// Note (REFACTOR_PIPELINE.md §2, Tier A): with the globally budgeted
+    /// `SharedFrameCache`, `reconcile` also discards what is *past*
+    /// the horizon of the new window (here: past 344, given that the
+    /// new playhead is 270) — unlike the old `evict_before`,
+    /// which discarded only what was behind and left intact everything
+    /// that was ahead, whatever the horizon. This is intended: the budget
+    /// of the window is always exactly that of the current
+    /// window, not an indefinite accumulation of historical tails. So here
+    /// it only checks that [250,344] (the intersection between the old tail and
+    /// the new window widened by the retention) is reachable without
+    /// re-decoding it — not that the whole old tail up to 374
+    /// survives.
     #[test]
     fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backward_seek() {
         let path = make_test_clip("vv-app-render-ahead-test", "reconnect.mp4", 20);
@@ -3583,11 +3583,11 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let budget = 43_000_000; // capacità ~139 frame
+        let budget = 43_000_000; // capacity ~139 frames
 
-        // Bufferizza attorno a 300: con keyint=250 (default libx264) il
-        // decoder riparte dal keyframe 250 e riempie fino al limite di
-        // capacità.
+        // Buffers around 300: with keyint=250 (libx264 default) the
+        // decoder restarts from keyframe 250 and fills up to the capacity
+        // limit.
         walk_and_fill(
             &project,
             timeline_id,
@@ -3597,8 +3597,8 @@ mod tests {
             300,
             budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(300),
         );
@@ -3608,9 +3608,9 @@ mod tests {
             "il primo riempimento deve aver bufferizzato ben oltre 300 (fino all'orizzonte di lookahead): {filled_up_to}"
         );
 
-        // Scrub indietro di soli 30 frame: sotto la vecchia soglia di
-        // 120, ma comunque un vero spostamento all'indietro (deve
-        // riaprire/riseekare, `went_backward=true`).
+        // Scrub back by only 30 frames: below the old threshold of
+        // 120, but still a real backwards move (it must
+        // reopen/reseek, `went_backward=true`).
         walk_and_fill(
             &project,
             timeline_id,
@@ -3620,8 +3620,8 @@ mod tests {
             270,
             budget,
             true,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(270),
         );
@@ -3634,14 +3634,14 @@ mod tests {
              toccato affatto, next_frame deve restare dov'era: next_frame={next_frame_after}"
         );
 
-        // L'intersezione tra la vecchia coda e la nuova finestra
-        // allargata dalla retention ([250,344]) deve essere raggiungibile
-        // come un range contiguo, senza buchi dovuti a una ridecodifica
-        // sprecata. Il fatto che `filled_up_to` (374) sia più avanti
-        // dell'orizzonte della nuova finestra è atteso: quella parte è
-        // stata scartata dal Tier A di `reconcile` perché non più nella
-        // finestra corrente (vedi nota sopra), non perché la
-        // riconnessione abbia fallito.
+        // The intersection between the old tail and the new window
+        // widened by the retention ([250,344]) must be reachable
+        // as a contiguous range, without holes due to a wasted
+        // re-decode. The fact that `filled_up_to` (374) is further ahead
+        // than the horizon of the new window is expected: that part was
+        // discarded by Tier A of `reconcile` because it is no longer in the
+        // current window (see the note above), not because the
+        // reconnection failed.
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 250 && e >= 344),
@@ -3649,20 +3649,20 @@ mod tests {
         );
     }
 
-    /// Regressione per il loop infinito segnalato dall'utente e
-    /// diagnosticato con `VV_DEBUG_RENDER_AHEAD` su un file reale
-    /// (1080p60fps, GOP lungo, proxy disattivo): un piccolo scrub
-    /// all'indietro riaggancia il decoder in anticipo (come nel test
-    /// sopra) lasciando `next_frame` fermo *prima* di `source_start` —
-    /// abbastanza indietro da superare la soglia adattiva. Prima del
-    /// fix, ogni ciclo successivo con la testina *ferma* alla stessa
-    /// posizione vedeva comunque `segment_start > next_frame + soglia`
-    /// (la posizione del decoder non viene mai aggiornata da un ciclo
-    /// che lo salta), quindi riseekava, ridecodificava lo stesso tratto
-    /// già in cache fino a riagganciarsi allo stesso punto di prima — un
-    /// loop stabile e infinito, mai autolimitantesi. `SharedFrameCache::covers`
-    /// lo previene chiedendo alla cache *prima* di guardare la posizione
-    /// (presunta) del decoder.
+    /// Regression for the infinite loop reported by the user and
+    /// diagnosed with `VV_DEBUG_RENDER_AHEAD` on a real file
+    /// (1080p60fps, long GOP, proxy off): a small backwards
+    /// scrub reconnects the decoder early (as in the test
+    /// above) leaving `next_frame` parked *before* `source_start` —
+    /// far enough back to exceed the adaptive threshold. Before the
+    /// fix, every later cycle with the playhead *still* at the same
+    /// position still saw `segment_start > next_frame + threshold`
+    /// (the decoder position is never updated by a cycle
+    /// that skips it), so it reseeked, re-decoded the same stretch
+    /// already cached until reconnecting at the same point as before — a
+    /// stable and infinite loop, never self-limiting. `SharedFrameCache::covers`
+    /// prevents it by asking the cache *before* looking at the
+    /// (presumed) position of the decoder.
     #[test]
     fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_seek() {
         let path = make_test_clip("vv-app-render-ahead-test", "reconnect_loop.mp4", 20);
@@ -3695,10 +3695,10 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        let budget = 43_000_000; // capacità ~139 frame, come sopra
+        let budget = 43_000_000; // capacity ~139 frames, as above
 
-        // Stesso setup del test sopra: riempimento iniziale a 300, poi
-        // un piccolo scrub indietro a 290 che riaggancia in anticipo.
+        // Same setup as the test above: initial fill at 300, then
+        // a small scrub back to 290 that reconnects early.
         walk_and_fill(
             &project,
             timeline_id,
@@ -3728,11 +3728,11 @@ mod tests {
             &AtomicI64::new(290),
         );
 
-        // 20 cicli successivi, testina ferma a 290 (nessuno scrub): nel
-        // bug originale ognuno riseekava e ridecodificava da capo,
-        // dominando il tempo totale (seek+decodifica reali, non solo
-        // controlli in memoria) — stessa soglia/logica del test di
-        // stabilità a riposo sopra.
+        // 20 later cycles, playhead still at 290 (no scrub): in the
+        // original bug each one reseeked and re-decoded from scratch,
+        // dominating the total time (real seek+decode, not just
+        // in-memory checks) — same threshold/logic as the
+        // stability-at-rest test above.
         let start = std::time::Instant::now();
         for _ in 0..20 {
             walk_and_fill(
@@ -3759,21 +3759,21 @@ mod tests {
         );
     }
 
-    /// Regressione per un bug reale, confermato dall'utente con un log
-    /// diagnostico su un file 1080p60fps: il controllo di riaggancio
-    /// dentro `fill_segments` verificava due punti (`next_frame` e
-    /// `segment.source_end`) con due `contains` *indipendenti* — se
-    /// entrambi capitano per caso in due isole di cache separate (un
-    /// buco tra loro, lasciato da un fill precedente saturo di budget),
-    /// il controllo passava comunque, facendo credere che il segmento
-    /// fosse già coperto quando in realtà c'era un buco proprio nel
-    /// mezzo mai raggiunto né prima né dopo — permanente, perché il
-    /// decoder si fermava lì convinto di aver finito.
+    /// Regression for a real bug, confirmed by the user with a
+    /// diagnostic log on a 1080p60fps file: the reconnection check
+    /// inside `fill_segments` checked two points (`next_frame` and
+    /// `segment.source_end`) with two *independent* `contains` — if
+    /// both happen by chance to fall in two separate cache islands (a
+    /// hole between them, left by an earlier fill saturated on budget),
+    /// the check passed anyway, making it believe the segment
+    /// was already covered when in reality there was a hole right in the
+    /// middle, never reached before nor after — permanent, because the
+    /// decoder stopped there convinced it had finished.
     #[test]
     fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
-        // GOP=10 esplicito: keyframe a 0,10,20,... — serve solo poterne
-        // prevedere uno vicino all'inizio del segmento richiesto, nessun
-        // altro requisito sulla distanza tra le due isole sotto.
+        // Explicit GOP=10: keyframes at 0,10,20,... — it only needs to make
+        // one predictable near the start of the requested segment, no
+        // other requirement on the distance between the two islands below.
         let path =
             make_test_clip_with_short_gop("vv-app-render-ahead-test", "bridge_gap.mp4", 4, 10);
         let mut project = Project::default();
@@ -3793,13 +3793,13 @@ mod tests {
             content_hash: 0,
             compound: None,
         });
-        // `fill_segments` non ha bisogno di una timeline: lavora già a
-        // livello di segmento risolto.
+        // `fill_segments` does not need a timeline: it already works at
+        // the level of a resolved segment.
 
         let caches = SharedFrameCache::new();
-        // Due isole disconnesse, un buco vero in mezzo ([16,39], mai
-        // toccato da niente finora) — come lascerebbe un fill precedente
-        // saturo di budget.
+        // Two disconnected islands, a real hole in between ([16,39], never
+        // touched by anything so far) — as an earlier fill saturated
+        // on budget would leave.
         for idx in 5..=15 {
             caches.insert(media_a, idx, Arc::new(dummy_frame()));
         }
@@ -3834,23 +3834,23 @@ mod tests {
         );
     }
 
-    /// Regressione per lo stesso bug reale confermato dall'utente: anche
-    /// dopo aver corretto il riaggancio prematuro sopra, un budget
-    /// stretto poteva comunque impedire di colmare un buco lontano dal
-    /// keyframe più vicino — perché i frame di puro transito (decodificati
-    /// solo per attraversare un GOP lungo verso il segmento richiesto,
-    /// mai parte di nessuna finestra voluta) venivano inseriti in cache e
-    /// contati contro il budget come tutto il resto, potendo saturarlo
-    /// prima ancora di raggiungere il tratto realmente richiesto. Qui un
-    /// budget che basta per il segmento richiesto ma non per anche tutto
-    /// il transito che lo precede deve comunque riuscire a colmarlo.
+    /// Regression for the same real bug confirmed by the user: even
+    /// after fixing the premature reconnection above, a tight budget
+    /// could still prevent filling a hole far from the
+    /// nearest keyframe — because the pure transit frames (decoded
+    /// only to cross a long GOP towards the requested segment,
+    /// never part of any wanted window) were inserted into the cache and
+    /// counted against the budget like everything else, and could saturate it
+    /// before even reaching the stretch actually requested. Here a
+    /// budget that is enough for the requested segment but not for all
+    /// the transit preceding it too must still manage to fill it.
     #[test]
     fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wanted_range() {
         let path = make_test_clip_with_short_gop(
             "vv-app-render-ahead-test",
             "transit_budget.mp4",
             4,
-            250, // GOP lungo: nessun keyframe tra 0 e il segmento richiesto
+            250, // long GOP: no keyframe between 0 and the requested segment
         );
         let mut project = Project::default();
         let media_a = project.media_pool.insert(MediaItem {
@@ -3872,9 +3872,9 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget che basta solo per il segmento richiesto (80,90], 11
-        // frame, non per anche gli 80 frame di puro transito da
-        // decodificare per raggiungerlo dal keyframe a 0.
+        // A budget that is only enough for the requested segment (80,90], 11
+        // frames, not for the 80 frames of pure transit to
+        // decode to reach it from the keyframe at 0.
         let frame_bytes = 320 * 240 * 3 / 2;
         let tight_budget = frame_bytes * 11;
         let segment = MediaSegment {
@@ -3903,24 +3903,24 @@ mod tests {
         );
     }
 
-    /// Regressione per un bug reale, confermato dall'utente con un log
-    /// diagnostico durante il playback normale su un file 1080p60fps
-    /// reale con GOP=250: un primo tentativo di questo controllo
-    /// stimava il transito necessario dal GOP osservato e saltava il
-    /// segmento se quella stima da sola eccedeva il budget — violando
-    /// la stessa regola che il controllo di budget sul frame *voluto*
-    /// rispetta apposta (il transito non conta mai contro il budget del
-    /// proprio tratto). L'effetto reale: il segmento *in avanti* (non
-    /// solo quelli dietro) restava bloccato per centinaia di frame
-    /// consecutivi ogni volta che la stima del transito appariva
-    /// grande, anche con ampio budget libero — playback che si blocca
-    /// per secondi ogni volta che la testina attraversa un confine di
-    /// GOP. Qui si verifica che un decoder "esperto" (che conosce già
-    /// GOP e ultimo keyframe, quindi stimerebbe un transito enorme per
-    /// un segmento lontano) NON impedisca comunque di riempire un
-    /// segmento vicino alla testina quando c'è budget di sobra — solo
-    /// la disponibilità di spazio per il tratto voluto conta, mai una
-    /// stima di quanto transito serva per arrivarci.
+    /// Regression for a real bug, confirmed by the user with a
+    /// diagnostic log during normal playback on a real 1080p60fps file
+    /// with GOP=250: a first attempt at this check
+    /// estimated the necessary transit from the observed GOP and skipped the
+    /// segment if that estimate alone exceeded the budget — violating
+    /// the very rule the budget check on the *wanted* frame
+    /// respects on purpose (the transit never counts against the budget of
+    /// its own stretch). The real effect: the *forward* segment (not
+    /// only those behind) stayed stuck for hundreds of consecutive
+    /// frames every time the transit estimate looked
+    /// large, even with plenty of free budget — playback stalling
+    /// for seconds every time the playhead crossed a GOP
+    /// boundary. Here it checks that an "experienced" decoder (which already knows
+    /// the GOP and the last keyframe, hence would estimate a huge transit for
+    /// a far segment) does NOT prevent filling a
+    /// segment near the playhead when there is plenty of budget — only
+    /// the availability of room for the wanted stretch counts, never an
+    /// estimate of how much transit it takes to get there.
     #[test]
     fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_would_be_large() {
         let path = make_test_clip_with_short_gop(
@@ -3949,14 +3949,14 @@ mod tests {
 
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Decoder "esperto": conosce già GOP=25 e un keyframe a 0. Il
-        // segmento sotto (24,34) richiede un transito *reale* di 24
-        // frame (quasi un intero GOP) per essere raggiunto dal keyframe
-        // più vicino — genuino, non frutto di un ancoraggio vecchio: se
-        // il controllo lo stimasse e lo confrontasse col budget stretto
-        // sotto (che basta comunque per il tratto voluto, 11 frame),
-        // bloccherebbe il segmento nonostante sia in realtà
-        // raggiungibile.
+        // "Experienced" decoder: it already knows GOP=25 and a keyframe at 0. The
+        // segment below (24,34) requires a *real* transit of 24
+        // frames (almost a whole GOP) to be reached from the nearest
+        // keyframe — genuine, not the result of a stale anchor: if
+        // the check estimated it and compared it with the tight budget
+        // below (which is enough for the wanted stretch anyway, 11 frames),
+        // it would block the segment despite it being actually
+        // reachable.
         let frame_bytes = 320 * 240 * 3 / 2;
         let mut od = OpenDecoder::fresh(Decoder::open(&path).unwrap(), path, false);
         od.record_keyframe_landing(0);
@@ -3970,11 +3970,11 @@ mod tests {
             timeline_start: 24,
             rate: Rational::one(),
         };
-        // Basta per il tratto voluto (11 frame) con ampio margine, ma
-        // meno del transito stimato (24 frame): con budget=frame_bytes*20
-        // il vecchio controllo (stima transito >= spazio libero, anche
-        // se quello spazio non serve affatto al transito) bloccava
-        // comunque.
+        // Enough for the wanted stretch (11 frames) with plenty of margin, but
+        // less than the estimated transit (24 frames): with budget=frame_bytes*20
+        // the old check (estimated transit >= free space, even
+        // if that space is not needed by the transit at all) blocked it
+        // anyway.
         let budget_enough_for_the_wanted_range_but_not_the_full_transit = frame_bytes * 20;
         let ctx = FillContext {
             project: &project,
@@ -4002,23 +4002,23 @@ mod tests {
         );
     }
 
-    /// Regressione per il bug segnalato dall'utente e confermato dal log
-    /// diagnostico reale: quando la testina avanza a piccoli passi (mai
-    /// abbastanza da superare la soglia di seek e forzare un seek
-    /// reale) il decoder resta comodamente avanti e continua da dove si
-    /// trovava — corretto e voluto (vedi `position_decoder`) — ma la
-    /// cache veniva sfrattata dalla sola LRU standard, che rimuove i più
-    /// vecchi solo quando *arrivano* nuovi frame, non quando la *testina
-    /// si sposta*: il fronte del buffer restava quindi bloccato molto
-    /// indietro rispetto alla testina per un tempo indefinito, mentre la
-    /// coda si allungava di pochi frame ad ogni ciclo — esattamente lo
-    /// scarto fisso "il buffer inizia sempre qualche frame dopo la
-    /// testina" segnalato dall'utente (confermato con un budget stretto
-    /// che costringe a superare la capacità ad ogni ciclo). Con la
-    /// finestra di retention dietro la testina, il buffer copre anche un
-    /// tratto *prima* di ciascun target: la verifica giusta ora è che la
-    /// testina sia coperta (non più in un vuoto), non che un range parta
-    /// esattamente lì.
+    /// Regression for the bug reported by the user and confirmed by the real
+    /// diagnostic log: when the playhead advances in small steps (never
+    /// enough to exceed the seek threshold and force a real
+    /// seek) the decoder stays comfortably ahead and continues from where it
+    /// was — correct and intended (see `position_decoder`) — but the
+    /// cache was evicted by the standard LRU alone, which removes the
+    /// oldest only when new frames *arrive*, not when the *playhead
+    /// moves*: the front of the buffer therefore stayed stuck far
+    /// behind the playhead for an indefinite time, while the
+    /// tail grew by a few frames on every cycle — exactly the
+    /// fixed gap "the buffer always starts a few frames after the
+    /// playhead" reported by the user (confirmed with a tight budget
+    /// forcing the capacity to be exceeded on every cycle). With the
+    /// retention window behind the playhead, the buffer also covers a
+    /// stretch *before* each target: the right check now is that the
+    /// playhead is covered (no longer in a gap), not that a range starts
+    /// exactly there.
     #[test]
     fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_reseek() {
         let path = make_test_clip("vv-app-render-ahead-test", "front_tracks_target.mp4", 20);
@@ -4052,9 +4052,9 @@ mod tests {
         let caches = SharedFrameCache::new();
         let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
         let mut open_behind: HashMap<MediaId, OpenDecoder> = HashMap::new();
-        // Budget stretto: ogni avanzamento di 10 frame aggiunge più
-        // frame di quanti la cache possa contenere senza sfrattarne,
-        // costringendo lo sfratto ad agire ad ogni ciclo.
+        // Tight budget: every advance of 10 frames adds more
+        // frames than the cache can hold without evicting some,
+        // forcing the eviction to act on every cycle.
         let budget = 43_000_000;
 
         walk_and_fill(
@@ -4066,8 +4066,8 @@ mod tests {
             10,
             budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(10),
         );
@@ -4082,8 +4082,8 @@ mod tests {
             target,
             budget,
             false,
-            false,                  // proxy_enabled: irrilevante per questo test
-            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+            false,                  // proxy_enabled: irrelevant for this test
+            DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(target),
         );
@@ -4098,8 +4098,8 @@ mod tests {
                 target,
                 budget,
                 false,
-                false,                  // proxy_enabled: irrilevante per questo test
-                DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrilevante per questo test
+                false,                  // proxy_enabled: irrelevant for this test
+                DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(target),
             );

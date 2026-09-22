@@ -1,4 +1,4 @@
-//! Impostazioni utente del programma (non del progetto), salvate in
+//! User settings of the program (not of the project), saved in
 //! `~/.config/venturi/settings.json`.
 
 use std::borrow::Cow;
@@ -67,7 +67,7 @@ impl Action {
         Action::ZoomOut,
     ];
 
-    /// Chiave nel file di impostazioni: non va mai cambiata.
+    /// Key in the settings file: must never be changed.
     pub fn id(self) -> &'static str {
         match self {
             Action::TogglePlayback => "toggle_playback",
@@ -150,7 +150,7 @@ impl Action {
             Action::Cut => vec![ctrl(Key::X)],
             Action::Paste => vec![ctrl(Key::V)],
             Action::Delete => vec![plain(Key::Delete), plain(Key::Backspace)],
-            // Tasto ISO tra Shift sinistro e Z ("<" sui layout italiani).
+            // ISO key between left Shift and Z ("<" on Italian layouts).
             Action::RippleDelete => vec![plain(Key::IntlBackslash)],
             Action::Split => vec![plain(Key::T)],
             Action::ToggleDisabled => vec![plain(Key::D)],
@@ -161,7 +161,7 @@ impl Action {
             Action::SaveProjectAs => vec![ctrl_shift(Key::S)],
             Action::ImportMedia => vec![ctrl(Key::I)],
             Action::Export => vec![ctrl_shift(Key::E)],
-            // "=" è il "+" non shiftato dei layout US.
+            // "=" is the unshifted "+" of US layouts.
             Action::ZoomIn => vec![ctrl(Key::Plus), ctrl(Key::Equals)],
             Action::ZoomOut => vec![ctrl(Key::Minus)],
         }
@@ -172,7 +172,7 @@ impl Action {
     }
 }
 
-/// `ctrl` è Cmd su macOS (`Modifiers::command`).
+/// `ctrl` is Cmd on macOS (`Modifiers::command`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shortcut {
     pub key: egui::Key,
@@ -199,8 +199,8 @@ impl Shortcut {
     }
 
     fn modifiers_match(self, current: egui::Modifiers) -> bool {
-        // Sui simboli Shift può servire solo a produrre il tasto ("+" sui
-        // layout US): lì si ignora se la scorciatoia non lo chiede.
+        // On symbols Shift may only be needed to produce the key ("+" on US
+        // layouts): there it is ignored if the shortcut does not ask for it.
         if is_symbol(self.key) {
             current.matches_logically(self.modifiers()) && (self.alt || !current.alt)
         } else {
@@ -208,8 +208,8 @@ impl Shortcut {
         }
     }
 
-    /// Ctrl+C/X/V arrivano da eframe come eventi `Copy`/`Cut`/`Paste`,
-    /// non come pressioni di tasto.
+    /// Ctrl+C/X/V arrive from eframe as `Copy`/`Cut`/`Paste` events,
+    /// not as key presses.
     fn clipboard_event(self) -> Option<fn(&egui::Event) -> bool> {
         if !self.ctrl || self.shift || self.alt {
             return None;
@@ -235,14 +235,14 @@ impl Shortcut {
         input.key_down(self.key) && self.modifiers_match(input.modifiers)
     }
 
-    /// Formato del file di impostazioni, es. `Ctrl+Shift+S`.
+    /// Settings file format, e.g. `Ctrl+Shift+S`.
     fn to_config(self) -> String {
         self.join(self.key.name())
     }
 
     fn from_config(text: &str) -> Option<Self> {
         let mut parts: Vec<&str> = text.split('+').collect();
-        // "Ctrl++": l'ultimo "+" è il tasto, non un separatore.
+        // "Ctrl++": the last "+" is the key, not a separator.
         let key_name = if text.ends_with("++") {
             parts.truncate(parts.len() - 2);
             "+"
@@ -340,7 +340,7 @@ impl Keymap {
         self.shortcuts(action).iter().any(|s| s.down(input))
     }
 
-    /// `"testo (scorciatoia)"`, o solo `"testo"` se l'azione non ne ha.
+    /// `"text (shortcut)"`, or just `"text"` if the action has none.
     pub fn menu_label(&self, text: &str, action: Action) -> String {
         match self.shortcuts(action).first() {
             Some(shortcut) => format!("{text} ({shortcut})"),
@@ -348,9 +348,9 @@ impl Keymap {
         }
     }
 
-    /// Assegna `shortcut` ad `action` (al posto di `slot`, o in aggiunta se
-    /// `None`), togliendola da qualunque altra azione. Restituisce le
-    /// azioni a cui è stata tolta.
+    /// Assigns `shortcut` to `action` (replacing `slot`, or in addition if
+    /// `None`), removing it from any other action. Returns the actions it
+    /// was taken away from.
     pub fn assign(&mut self, action: Action, slot: Option<usize>, shortcut: Shortcut) -> Vec<Action> {
         let mut stolen = Vec::new();
         for (&other, shortcuts) in &mut self.bindings {
@@ -384,8 +384,8 @@ impl Keymap {
 
 const MAX_RECENT_PROJECTS: usize = 10;
 
-/// Stato dei pannelli della UI (dimensione, aperto/chiuso): salvato per
-/// ritrovare l'interfaccia com'è stata lasciata alla riapertura.
+/// State of the UI panels (size, open/closed): saved to find the interface
+/// as it was left on reopening.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PanelLayout {
     pub media_pool_open: bool,
@@ -415,12 +415,12 @@ impl Default for PanelLayout {
 pub struct Settings {
     pub keymap: Keymap,
     pub language: Language,
-    /// Scrolling cinetico (inerzia dopo lo swipe da touchpad) sulla timeline.
+    /// Kinetic scrolling (inertia after a touchpad swipe) on the timeline.
     pub kinetic_scroll: bool,
-    /// Anteprima dal proxy tutto-intra quando pronto: scrub fluido su sorgenti
-    /// long-GOP. L'export usa sempre i sorgenti.
+    /// Preview from the all-intra proxy once ready: smooth scrubbing on
+    /// long-GOP sources. Export always uses the originals.
     pub proxy_enabled: bool,
-    /// Progetti aperti di recente, più recente per primo.
+    /// Recently opened projects, most recent first.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
 }
@@ -489,8 +489,8 @@ impl Settings {
         Some(config.join("venturi").join("settings.json"))
     }
 
-    /// File assente o illeggibile = impostazioni predefinite; le azioni
-    /// assenti dal file tengono le scorciatoie predefinite.
+    /// Missing or unreadable file = default settings; actions absent from
+    /// the file keep the default shortcuts.
     pub fn load(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();

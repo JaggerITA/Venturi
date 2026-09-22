@@ -1,5 +1,5 @@
-//! OpenTimelineIO (`.otio`, JSON): export di una timeline e import di un
-//! file in un progetto nuovo.
+//! OpenTimelineIO (`.otio`, JSON): exporting a timeline and importing a
+//! file into a new project.
 
 mod export;
 mod import;

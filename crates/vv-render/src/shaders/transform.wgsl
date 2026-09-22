@@ -1,32 +1,32 @@
-// Transform (crop, zoom, rotazione, posizione) e conversione YUV420->RGB
-// in un triangolo fullscreen, senza vertex buffer.
+// Transform (crop, zoom, rotation, position) and YUV420->RGB conversion
+// in a fullscreen triangle, without a vertex buffer.
 
 struct TransformUniform {
-    // left, top, right, bottom in coordinate normalizzate [0,1] sul source.
+    // left, top, right, bottom in normalized [0,1] coordinates on the source.
     crop: vec4<f32>,
     // zoom.x, zoom.y, position.x, position.y
     zoom_pos: vec4<f32>,
-    // x/y: fattori di letterbox (>1 sull'asse scoperto). z: rotazione in
-    // radianti, oraria. w: sfumatura del crop in frazioni del sorgente
-    // (negativa verso l'interno).
+    // x/y: letterbox factors (>1 on the uncovered axis). z: rotation in
+    // radians, clockwise. w: crop softness in fractions of the source
+    // (negative towards the inside).
     fit_rot: vec4<f32>,
-    // anchor.x, anchor.y (pivot di zoom e rotazione, in frazioni del
-    // frame di output dal centro della clip), flip.x, flip.y (0 o 1).
+    // anchor.x, anchor.y (zoom and rotation pivot, in fractions of the
+    // output frame from the center of the clip), flip.x, flip.y (0 or 1).
     anchor_flip: vec4<f32>,
-    // x: matrice (0=BT.601, 1=BT.709, 2=BT.2020). y: 1 se full range.
-    // z: aspect dell'output, per ruotare senza deformare.
-    // w: 0 video, 1 colore pieno, 2 colore pieno con copertura nel piano Y
-    // (testo), 3 texture RGBA premoltiplicata al posto dei piani.
+    // x: matrix (0=BT.601, 1=BT.709, 2=BT.2020). y: 1 if full range.
+    // z: output aspect, to rotate without deforming.
+    // w: 0 video, 1 solid color, 2 solid color with coverage in the Y plane
+    // (text), 3 premultiplied RGBA texture in place of the planes.
     color: vec4<f32>,
-    // RGBA del layer a colore pieno, al posto dei piani Y/U/V.
+    // RGBA of the solid color layer, in place of the Y/U/V planes.
     solid: vec4<f32>,
-    // x: opacità dell'intero layer (dissolvenze di clip e opacità della
-    // clip). y: id del metodo di composizione (vedi `blend_shader_id`).
-    // z/w inutilizzati.
+    // x: opacity of the whole layer (clip fades and clip
+    // opacity). y: id of the compositing method (see `blend_shader_id`).
+    // z/w unused.
     extra: vec4<f32>,
-    // Id shader dei filtri attivi della clip, in ordine di applicazione
-    // (0 = slot vuoto); vedi `filter_shader_id` in compositor.rs, l'unico
-    // punto che sa a quale `FilterKind` corrisponde ciascun id.
+    // Shader ids of the clip's active filters, in order of application
+    // (0 = empty slot); see `filter_shader_id` in compositor.rs, the only
+    // place that knows which `FilterKind` each id corresponds to.
     filters: array<vec4<f32>, 2>,
 };
 
@@ -35,13 +35,13 @@ struct TransformUniform {
 @group(0) @binding(2) var v_tex: texture_2d<f32>;
 @group(0) @binding(3) var input_sampler: sampler;
 @group(0) @binding(4) var<uniform> transform: TransformUniform;
-// Copertura per pixel (1x1 opaco per un layer senza vera trasparenza, es.
-// un video decodificato — vedi YuvFrame::alpha in compositor.rs).
+// Per-pixel coverage (1x1 opaque for a layer without real transparency, e.g.
+// a decoded video — see YuvFrame::alpha in compositor.rs).
 @group(0) @binding(5) var a_tex: texture_2d<f32>;
-// Copia di quel che è già stato composto sotto, premoltiplicato: serve solo
-// ai metodi di composizione diversi da Normal, che devono leggere lo sfondo
-// (l'alpha blending fisso della pipeline non basta). Con Normal è un
-// placeholder 1x1 mai campionato.
+// Copy of what has already been composed underneath, premultiplied: needed only
+// by the compositing methods other than Normal, which must read the backdrop
+// (the pipeline's fixed alpha blending is not enough). With Normal it is a
+// 1x1 placeholder, never sampled.
 @group(0) @binding(6) var backdrop_tex: texture_2d<f32>;
 
 struct VertexOutput {
@@ -51,8 +51,8 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Trucco del "triangolo fullscreen": 3 vertici che coprono l'intero
-    // viewport senza bisogno di un vertex buffer.
+    // The "fullscreen triangle" trick: 3 vertices covering the whole
+    // viewport without needing a vertex buffer.
     let x = f32((vertex_index << 1u) & 2u);
     let y = f32(vertex_index & 2u);
 
@@ -62,20 +62,20 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Coefficienti Kr/Kb per la matrice richiesta (REFACTOR_PIPELINE.md B3,
-// vedi doc di vv_media::ColorMatrix per la scelta di quale matrice usare
-// caso per caso — qui solo l'applicazione).
+// Kr/Kb coefficients for the requested matrix (REFACTOR_PIPELINE.md B3,
+// see the docs of vv_media::ColorMatrix for the choice of which matrix to use
+// case by case — here only the application).
 fn kr_kb(matrix_id: i32) -> vec2<f32> {
     if (matrix_id == 1) {
         return vec2<f32>(0.2126, 0.0722); // BT.709
     } else if (matrix_id == 2) {
         return vec2<f32>(0.2627, 0.0593); // BT.2020
     }
-    return vec2<f32>(0.299, 0.114); // BT.601 (anche il fallback per matrici non gestite)
+    return vec2<f32>(0.299, 0.114); // BT.601 (also the fallback for unhandled matrices)
 }
 
-// Slot `i` (0..8) dentro i due vec4 di `TransformUniform.filters`: un
-// array<vec4,2> non si indicizza linearmente in WGSL, va spacchettato.
+// Slot `i` (0..8) inside the two vec4s of `TransformUniform.filters`: an
+// array<vec4,2> cannot be indexed linearly in WGSL, it must be unpacked.
 fn filter_id_at(filters: array<vec4<f32>, 2>, i: i32) -> f32 {
     let group = filters[i / 4];
     let lane = i % 4;
@@ -85,9 +85,9 @@ fn filter_id_at(filters: array<vec4<f32>, 2>, i: i32) -> f32 {
     return group.w;
 }
 
-// Applica un filtro in sequenza a `rgb`; l'ordine di chiamata (vedi il
-// loop in `fs_main`) è l'ordine scelto dall'utente. Nuovi filtri: un nuovo
-// id (`filter_shader_id`) e un nuovo ramo qui, nient'altro nella pipeline.
+// Applies a filter in sequence to `rgb`; the call order (see the
+// loop in `fs_main`) is the order chosen by the user. New filters: a new
+// id (`filter_shader_id`) and a new branch here, nothing else in the pipeline.
 fn apply_filter(rgb: vec3<f32>, id: f32) -> vec3<f32> {
     if (id > 0.5 && id < 1.5) { // Grayscale
         let luma = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
@@ -105,9 +105,9 @@ fn yuv_to_rgb(y_sample: f32, u_sample: f32, v_sample: f32, matrix_id: i32, full_
         u_n = u_sample - 0.5;
         v_n = v_sample - 0.5;
     } else {
-        // Limited/MPEG: codici 16-235 (luma) / 16-240 (croma) su 8 bit,
-        // già normalizzati [0,1] dal sampler (16/255..235/255 ecc.) —
-        // riespande all'intervallo pieno prima di applicare la matrice.
+        // Limited/MPEG: codes 16-235 (luma) / 16-240 (chroma) on 8 bits,
+        // already normalized to [0,1] by the sampler (16/255..235/255 etc.) —
+        // re-expands to the full range before applying the matrix.
         y_n = (y_sample - 16.0 / 255.0) * (255.0 / 219.0);
         u_n = (u_sample - 128.0 / 255.0) * (255.0 / 224.0);
         v_n = (v_sample - 128.0 / 255.0) * (255.0 / 224.0);
@@ -124,7 +124,7 @@ fn yuv_to_rgb(y_sample: f32, u_sample: f32, v_sample: f32, matrix_id: i32, full_
     return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Colore del layer da solo, non premoltiplicato.
+// Color of the layer alone, not premultiplied.
 fn shade(in: VertexOutput) -> vec4<f32> {
     let zoom = max(abs(transform.zoom_pos.xy), vec2<f32>(0.0001, 0.0001));
     let position = transform.zoom_pos.zw;
@@ -132,11 +132,11 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     let angle = transform.fit_rot.z;
     let aspect = max(transform.color.z, 0.0001);
 
-    // Dall'output al sorgente: inverso di position, poi di rotazione e zoom
-    // attorno all'anchor, poi del fit.
+    // From the output to the source: inverse of position, then of rotation and zoom
+    // around the anchor, then of the fit.
     var q = in.uv - vec2<f32>(0.5, 0.5) - position - anchor;
-    // La rotazione va fatta in uno spazio isotropo, altrimenti un frame non
-    // quadrato la trasformerebbe in una deformazione a taglio.
+    // The rotation must be done in an isotropic space, otherwise a non-square
+    // frame would turn it into a shear.
     q = vec2<f32>(q.x * aspect, q.y);
     let cs = cos(angle);
     let sn = sin(angle);
@@ -154,14 +154,14 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     let crop_max = transform.crop.zw;
     let softness = transform.fit_rot.w;
 
-    // Fuori dalla clip non c'è nulla da mostrare (la sfumatura verso
-    // l'esterno non deve spalmare il bordo del sorgente).
+    // Outside the clip there is nothing to show (the softness towards the
+    // outside must not smear the edge of the source).
     if (any(source_uv < vec2<f32>(0.0, 0.0)) || any(source_uv > vec2<f32>(1.0, 1.0))) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Distanza dal bordo di crop più vicino, negativa fuori: la sfumatura è
-    // una rampa di alpha attorno a quel bordo.
+    // Distance from the nearest crop edge, negative outside: the softness is
+    // an alpha ramp around that edge.
     let inside = min(source_uv - crop_min, crop_max - source_uv);
     let edge_distance = min(inside.x, inside.y);
     var alpha = 1.0;
@@ -176,14 +176,14 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         }
         alpha = smoothstep(-softness, 0.0, edge_distance);
     } else if (edge_distance < 0.0) {
-        // Crop netto: si vede il layer sotto.
+        // Hard crop: the layer below shows through.
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     alpha = alpha * transform.extra.x;
 
-    // U/V sono a metà risoluzione (4:2:0): campionarli alla stessa uv
-    // del piano Y con un sampler bilineare fa anche l'upsampling della
-    // croma, gratis.
+    // U/V are at half resolution (4:2:0): sampling them at the same uv
+    // as the Y plane with a bilinear sampler also does the chroma
+    // upsampling, for free.
     let mode = transform.color.w;
     var rgb: vec3<f32>;
     var out_alpha: f32;
@@ -191,9 +191,9 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         rgb = transform.solid.rgb;
         out_alpha = alpha * transform.solid.a;
     } else if (mode > 2.5) {
-        // Il frame è stato composto in alpha-over su uno sfondo
-        // trasparente: il colore è già moltiplicato per l'alpha, e
-        // l'alpha-over di questo pass lo rimoltiplicherebbe.
+        // The frame was composed in alpha-over onto a transparent
+        // background: the color is already multiplied by the alpha, and
+        // the alpha-over of this pass would multiply it again.
         let texel = textureSample(y_tex, input_sampler, source_uv);
         rgb = clamp(texel.rgb / max(texel.a, 1.0 / 255.0), vec3<f32>(0.0), vec3<f32>(1.0));
         out_alpha = alpha * texel.a;
@@ -217,13 +217,13 @@ fn shade(in: VertexOutput) -> vec4<f32> {
             rgb = apply_filter(rgb, id);
         }
     }
-    // Placeholder 1x1 per un layer senza vera copertura per pixel: campiona
-    // sempre 1.0, nessun effetto (vedi doc di `a_tex`).
+    // 1x1 placeholder for a layer without real per-pixel coverage: it always
+    // samples 1.0, no effect (see the docs of `a_tex`).
     out_alpha = out_alpha * textureSample(a_tex, input_sampler, source_uv).r;
     return vec4<f32>(rgb, out_alpha);
 }
 
-// B(Cb, Cs) dei metodi separabili, canale per canale; `id` viene da
+// B(Cb, Cs) of the separable methods, channel by channel; `id` comes from
 // `blend_shader_id` in compositor.rs.
 fn blend_channel(id: i32, cb: f32, cs: f32) -> f32 {
     switch (id) {
@@ -273,13 +273,13 @@ fn blend_channel(id: i32, cb: f32, cs: f32) -> f32 {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = shade(in);
     let blend_id = i32(transform.extra.y);
-    // Normal: ci pensa l'alpha blending della pipeline, il colore esce
-    // non premoltiplicato.
+    // Normal: the pipeline's alpha blending takes care of it, the color comes out
+    // non-premultiplied.
     if (blend_id == 0) {
         return src;
     }
-    // Gli altri modi scrivono in REPLACE il risultato già composto, quindi
-    // premoltiplicato come il backdrop che hanno letto.
+    // The other modes write the already composed result in REPLACE, hence
+    // premultiplied like the backdrop they read.
     let dst = textureLoad(backdrop_tex, vec2<i32>(floor(in.clip_position.xy)), 0);
     let dst_rgb = dst.rgb / max(dst.a, 1.0 / 255.0);
     var blended = vec3<f32>(
@@ -287,8 +287,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         blend_channel(blend_id, dst_rgb.g, src.g),
         blend_channel(blend_id, dst_rgb.b, src.b),
     );
-    // Dove sotto non c'è niente il blend non ha un fondo su cui agire: lì
-    // vale il colore sorgente e basta.
+    // Where there is nothing underneath the blend has no backdrop to act on: there
+    // the source color alone applies.
     blended = mix(src.rgb, blended, dst.a);
     return vec4<f32>(blended * src.a + dst.rgb * (1.0 - src.a), src.a + dst.a * (1.0 - src.a));
 }

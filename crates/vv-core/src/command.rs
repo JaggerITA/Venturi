@@ -1,5 +1,5 @@
-//! Command pattern per undo/redo. Ogni comando cattura da sé lo stato
-//! necessario a invertirsi nel momento in cui viene applicato.
+//! Command pattern for undo/redo. Every command captures by itself the state
+//! needed to invert itself at the moment it is applied.
 
 use crate::model::{
     Clip, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
@@ -16,7 +16,7 @@ pub trait Command: std::fmt::Debug {
     fn label(&self) -> CommandLabel;
 }
 
-/// Nome di un passo di history; il testo tradotto lo sceglie l'app.
+/// Name of a history step; the translated text is chosen by the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandLabel {
     AddTrack,
@@ -55,7 +55,7 @@ pub enum CommandLabel {
     SetInterpolation,
 }
 
-/// Più comandi in un solo passo di history.
+/// Several commands in a single history step.
 #[derive(Debug)]
 pub struct CompositeCommand {
     commands: Vec<Box<dyn Command>>,
@@ -86,7 +86,7 @@ impl Command for CompositeCommand {
     }
 }
 
-/// Punto di inizio di un gruppo di undo, vedi `History::begin_group`.
+/// Start point of an undo group, see `History::begin_group`.
 #[derive(Debug, Clone, Copy)]
 pub struct GroupMark(usize);
 
@@ -105,19 +105,19 @@ impl History {
         self.generation += 1;
     }
 
-    /// Da qui a `end_group` i comandi diventano un unico passo di undo: per
-    /// un'azione che si scompone in più comandi (es. un drop di più media).
+    /// From here to `end_group` the commands become a single undo step: for
+    /// an action that decomposes into several commands (e.g. a drop of several media).
     pub fn begin_group(&mut self) -> GroupMark {
         GroupMark(self.undo_stack.len())
     }
 
-    /// Il gruppo prende il nome del suo primo comando.
+    /// The group takes the name of its first command.
     pub fn end_group(&mut self, mark: GroupMark) {
         self.close_group(mark, None);
     }
 
-    /// Per i gruppi il cui primo comando è accessorio (es. la track creata
-    /// al volo da un drop) e non darebbe il nome giusto.
+    /// For groups whose first command is incidental (e.g. the track created
+    /// on the fly by a drop) and would not give the right name.
     pub fn end_group_as(&mut self, mark: GroupMark, label: CommandLabel) {
         self.close_group(mark, Some(label));
     }
@@ -149,8 +149,8 @@ impl History {
         }
     }
 
-    /// Tutti i passi, dal più vecchio: i primi `position()` sono applicati,
-    /// gli altri si possono rifare.
+    /// All the steps, oldest first: the first `position()` are applied,
+    /// the others can be redone.
     pub fn labels(&self) -> impl Iterator<Item = CommandLabel> + '_ {
         self.undo_stack
             .iter()
@@ -162,7 +162,7 @@ impl History {
         self.undo_stack.len()
     }
 
-    /// Annulla o rifà fino a lasciare applicati i primi `position` passi.
+    /// Undoes or redoes until the first `position` steps are left applied.
     pub fn go_to(&mut self, project: &mut Project, position: usize) {
         while self.undo_stack.len() > position {
             self.undo(project);
@@ -172,21 +172,21 @@ impl History {
         }
     }
 
-    /// Cambia a ogni modifica effettiva: basta confrontarla per sapere se il
-    /// progetto è cambiato, senza diffarlo.
+    /// Changes on every effective modification: comparing it is enough to know whether the
+    /// project changed, without diffing it.
     pub fn generation(&self) -> u64 {
         self.generation
     }
 }
 
-/// Aggiunge una track vuota in coda: per il compositing conta solo
-/// l'ordine relativo tra track video.
+/// Appends an empty track: for compositing only the relative order
+/// between video tracks matters.
 #[derive(Debug)]
 pub struct AddTrack {
     pub timeline: TimelineId,
     pub kind: TrackKind,
-    /// Indice assegnato da `apply` (l'ultimo di `tracks` in quel momento),
-    /// noto solo a posteriori.
+    /// Index assigned by `apply` (the last of `tracks` at that moment),
+    /// known only afterwards.
     index: Option<usize>,
 }
 
@@ -199,7 +199,7 @@ impl AddTrack {
         }
     }
 
-    /// L'indice della track appena creata, noto solo dopo `apply`.
+    /// The index of the just created track, known only after `apply`.
     pub fn track_index(&self) -> Option<usize> {
         self.index
     }
@@ -227,8 +227,8 @@ impl Command for AddTrack {
     }
 }
 
-/// Rimuove una track con le sue clip. Tenerne almeno una per tipo è una
-/// regola della UI, non del modello.
+/// Removes a track with its clips. Keeping at least one per kind is a
+/// rule of the UI, not of the model.
 #[derive(Debug)]
 pub struct RemoveTrack {
     pub timeline: TimelineId,
@@ -269,7 +269,7 @@ impl Command for RemoveTrack {
     }
 }
 
-/// Stato di una track modificabile dalla sua intestazione.
+/// State of a track editable from its header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackFlag {
     Muted,
@@ -336,7 +336,7 @@ impl Command for SetTrackFlag {
     }
 }
 
-/// Attiva o disattiva (tasto D) un insieme di clip.
+/// Enables or disables (key D) a set of clips.
 #[derive(Debug)]
 pub struct SetClipsDisabled {
     pub timeline: TimelineId,
@@ -382,8 +382,8 @@ impl Command for SetClipsDisabled {
     }
 }
 
-/// Inserisce una clip in una track a una posizione. Se sovrappone clip
-/// esistenti, quelle sotto vengono spostate a destra (insert, non overwrite).
+/// Inserts a clip into a track at a position. If it overlaps existing clips,
+/// those underneath are moved right (insert, not overwrite).
 #[derive(Debug)]
 pub struct InsertClip {
     pub timeline: TimelineId,
@@ -406,15 +406,15 @@ impl Command for InsertClip {
     }
 }
 
-/// Normal delete ("lift"): rimuove la clip, lascia un vuoto al suo posto.
+/// Normal delete ("lift"): removes the clip, leaves a gap in its place.
 #[derive(Debug)]
 pub struct LiftDelete {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
     removed: Option<Clip>,
-    /// Crossing transition tolte insieme alla clip (vedi doc di
-    /// `Track::crossings`), da restituire su undo.
+    /// Crossing transitions removed together with the clip (see the docs of
+    /// `Track::crossings`), to be restored on undo.
     removed_crossings: Vec<CrossTransition>,
 }
 
@@ -458,9 +458,9 @@ fn resort(track: &mut Track) {
     track.clips.sort_by_key(|c| c.timeline_start);
 }
 
-/// Chiude uno spazio vuoto (nessuna clip da rimuovere) su tutte le track,
-/// shiftando indietro di `gap_len` ogni clip che inizia a `gap_start` o
-/// dopo — mantiene il sync A/V globale.
+/// Closes a gap (no clip to remove) on all the tracks,
+/// shifting back by `gap_len` every clip starting at `gap_start` or
+/// later — preserves the global A/V sync.
 #[derive(Debug)]
 pub struct RippleDeleteGap {
     pub timeline: TimelineId,
@@ -516,17 +516,17 @@ impl Command for RippleDeleteGap {
     }
 }
 
-/// Sposta più clip in un solo passo di history (es. un gruppo trascinato).
+/// Moves several clips in a single history step (e.g. a dragged group).
 #[derive(Debug)]
 pub struct MoveClips {
     pub timeline: TimelineId,
     /// (clip_id, from_track, to_track, new_start)
     pub moves: Vec<(ClipId, usize, usize, FrameIdx)>,
     old_starts: Vec<Option<FrameIdx>>,
-    /// Crossing tolte da `from_track` per ogni move che cambia track (vedi
-    /// doc di `Track::crossings`); vuoto per un move sulla stessa track,
-    /// dove l'adiacenza si può rompere ma la clip resta lì e la crossing
-    /// resta semplicemente inerte finché non torna adiacente.
+    /// Crossings removed from `from_track` for every move changing track (see
+    /// the docs of `Track::crossings`); empty for a move on the same track,
+    /// where adjacency can break but the clip stays there and the crossing
+    /// simply stays inert until it becomes adjacent again.
     removed_crossings: Vec<Vec<CrossTransition>>,
 }
 
@@ -586,26 +586,26 @@ impl Command for MoveClips {
     }
 }
 
-/// Quale bordo di una clip viene trimmato: `Start` sposta l'inizio
-/// insieme al contenuto (la fine sulla timeline resta ferma), `End` sposta
-/// solo la fine.
+/// Which edge of a clip is trimmed: `Start` moves the beginning
+/// together with the content (the end on the timeline stays put), `End` moves
+/// only the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrimEdge {
     Start,
     End,
 }
 
-/// Trim di un bordo di una clip. Nessun clamp né collision-avoidance: il
-/// chiamante calcola `new_value`.
+/// Trim of one edge of a clip. No clamping nor collision avoidance: the
+/// caller computes `new_value`.
 #[derive(Debug)]
 pub struct TrimClip {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
     pub edge: TrimEdge,
-    /// Nuova posizione di timeline del bordo.
+    /// New timeline position of the edge.
     pub new_value: FrameIdx,
-    /// `(timeline_start, source_offset, timeline_len)` precedenti.
+    /// Previous `(timeline_start, source_offset, timeline_len)`.
     old: Option<(FrameIdx, FrameIdx, FrameIdx)>,
 }
 
@@ -668,15 +668,15 @@ impl Command for TrimClip {
     }
 }
 
-/// Quale dissolvenza tocca un `SetClipFade`.
+/// Which fade a `SetClipFade` concerns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FadeEdge {
     In,
     Out,
 }
 
-/// Imposta la durata (in frame di timeline) della dissolvenza in entrata o
-/// uscita di una clip, trascinata dall'handle in timeline.
+/// Sets the duration (in timeline frames) of the fade in or
+/// out of a clip, dragged from the handle on the timeline.
 #[derive(Debug)]
 pub struct SetClipFade {
     pub timeline: TimelineId,
@@ -740,13 +740,13 @@ impl Command for SetClipFade {
     }
 }
 
-/// Scioglie l'intero gruppo collegato della clip, non solo lei.
+/// Dissolves the whole linked group of the clip, not just the clip itself.
 #[derive(Debug)]
 pub struct UnlinkClip {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
-    /// Gruppo sciolto e suoi membri, per l'undo.
+    /// Dissolved group and its members, for the undo.
     dissolved: Option<(LinkGroupId, Vec<(usize, ClipId)>)>,
 }
 
@@ -794,14 +794,14 @@ impl Command for UnlinkClip {
     }
 }
 
-/// Collega le clip in un gruppo nuovo, sovrascrivendo quelli precedenti.
-/// No-op con meno di 2 clip.
+/// Links the clips into a new group, overwriting the previous ones.
+/// No-op with fewer than 2 clips.
 #[derive(Debug)]
 pub struct LinkClips {
     pub timeline: TimelineId,
     pub targets: Vec<(usize, ClipId)>,
-    /// Allocato la prima volta che `apply` gira, poi riusato invariato sui
-    /// redo successivi — mai un nuovo id ad ogni redo.
+    /// Allocated the first time `apply` runs, then reused unchanged on the
+    /// later redos — never a new id on every redo.
     group_id: Option<LinkGroupId>,
     previous: Option<Vec<Option<LinkGroupId>>>,
 }
@@ -862,9 +862,9 @@ impl Command for LinkClips {
     }
 }
 
-/// Divide una clip a `split_at`; la metà destra ha un id nuovo. Su una clip
-/// conformata le due metà possono condividere il frame sorgente a cavallo
-/// del taglio.
+/// Splits a clip at `split_at`; the right half gets a new id. On a conformed
+/// clip the two halves can share the source frame straddling
+/// the cut.
 #[derive(Debug)]
 pub struct SplitClip {
     pub timeline: TimelineId,
@@ -874,12 +874,12 @@ pub struct SplitClip {
     original_len: Option<FrameIdx>,
     original_effects: Option<EffectStack>,
     new_clip_id: Option<ClipId>,
-    /// Id della metà destra deciso dal chiamante, per ricollegare le metà di
-    /// più split con un comando successivo.
+    /// Id of the right half decided by the caller, to relink the halves of
+    /// several splits with a later command.
     preallocated_new_clip_id: Option<ClipId>,
-    /// Crossing transition tolte da `clip_id` durante lo split (di
-    /// entrambe le metà nessuna resta la controparte geometrica attesa
-    /// dalla transizione), da restituire su undo.
+    /// Crossing transitions removed from `clip_id` during the split (neither
+    /// of the two halves remains the geometric counterpart expected by
+    /// the transition), to be restored on undo.
     removed_crossings: Vec<CrossTransition>,
 }
 
@@ -908,7 +908,7 @@ impl SplitClip {
         self
     }
 
-    /// L'id assegnato alla metà destra, noto solo dopo `apply`.
+    /// The id assigned to the right half, known only after `apply`.
     pub fn new_clip_id(&self) -> Option<ClipId> {
         self.new_clip_id
     }
@@ -928,15 +928,15 @@ impl Command for SplitClip {
             return;
         };
         if self.split_at <= clip.timeline_start || self.split_at >= clip.timeline_end() {
-            return; // fuori dal corpo della clip: niente da dividere
+            return; // outside the body of the clip: nothing to split
         }
 
         self.original_len = Some(clip.timeline_len);
         let mut second_half = clip.clone();
         let left_len = self.split_at - clip.timeline_start;
         clip.timeline_len = left_len;
-        // La metà sinistra è la stessa clip e resta nel suo gruppo; la destra è
-        // nuova e parte scollegata.
+        // The left half is the same clip and stays in its group; the right one is
+        // new and starts unlinked.
         second_half.id = new_id;
         second_half.timeline_start = self.split_at;
         second_half.source_offset += left_len;
@@ -944,18 +944,18 @@ impl Command for SplitClip {
         second_half.linked_group = None;
         self.new_clip_id = Some(new_id);
 
-        // Ogni metà si tiene solo i keyframe del proprio lato del taglio:
-        // altrimenti la destra interpolerebbe dai keyframe della sinistra.
+        // Each half keeps only the keyframes on its own side of the cut:
+        // otherwise the right one would interpolate from the left one's keyframes.
         self.original_effects = Some(clip.effects.clone());
         clip.effects.drop_keyframes_from(clip.source_out());
         second_half.effects.drop_keyframes_before(second_half.source_in());
 
         track.insert_sorted(second_half);
 
-        // Una crossing su `clip_id` puntava a un bordo che ora appartiene a
-        // una delle due metà ma non più alla clip intera: invece di lasciarla
-        // pendente (vedi doc di `Track::crossings`) la si toglie qui, valido
-        // per qualunque tipo di crossing transition presente o futuro.
+        // A crossing on `clip_id` pointed at an edge that now belongs to
+        // one of the two halves but no longer to the whole clip: instead of leaving it
+        // dangling (see the docs of `Track::crossings`) it is removed here, valid
+        // for any kind of crossing transition present or future.
         self.removed_crossings = track.take_crossings_for(self.clip_id);
     }
 
@@ -976,8 +976,8 @@ impl Command for SplitClip {
     }
 }
 
-/// Sostituisce un valore di una clip (scelto da `access`) ricordando il
-/// precedente per l'undo.
+/// Replaces a value of a clip (chosen by `access`) remembering the
+/// previous one for the undo.
 pub struct SetClipValue<T> {
     pub timeline: TimelineId,
     pub track_index: usize,
@@ -1039,7 +1039,7 @@ impl<T: Clone> Command for SetClipValue<T> {
     }
 }
 
-/// Valore statico (il `default`) di un parametro del transform.
+/// Static value (the `default`) of a transform parameter.
 pub fn set_clip_transform_param(
     timeline: TimelineId,
     track_index: usize,
@@ -1061,7 +1061,7 @@ pub fn set_clip_flip(
     SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Flip, value, |c| &mut c.effects.transform.flip)
 }
 
-/// Gain statico (dB).
+/// Static gain (dB).
 pub fn set_clip_gain(
     timeline: TimelineId,
     track_index: usize,
@@ -1071,7 +1071,7 @@ pub fn set_clip_gain(
     SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Gain, value, |c| &mut c.effects.gain_db.default)
 }
 
-/// Gain a 0 dB, keyframe compresi.
+/// Gain at 0 dB, keyframes included.
 pub fn reset_clip_gain(
     timeline: TimelineId,
     track_index: usize,
@@ -1091,9 +1091,9 @@ pub fn set_clip_title(
     SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Title, Some(value), |c| &mut c.effects.title)
 }
 
-/// Sostituisce l'intera lista filtri, ordine incluso: aggiungerne uno,
-/// toglierlo, attivarlo/disattivarlo o riordinarli sono tutti "scrivi la
-/// nuova lista" — chi chiama la calcola da quella attuale.
+/// Replaces the whole filter list, order included: adding one,
+/// removing it, enabling/disabling it or reordering them are all "write the
+/// new list" — the caller computes it from the current one.
 pub fn set_clip_filters(
     timeline: TimelineId,
     track_index: usize,
@@ -1105,7 +1105,7 @@ pub fn set_clip_filters(
     })
 }
 
-/// Metodo di composizione del layer della clip.
+/// Compositing method of the clip's layer.
 pub fn set_clip_blend_mode(
     timeline: TimelineId,
     track_index: usize,
@@ -1117,7 +1117,7 @@ pub fn set_clip_blend_mode(
     })
 }
 
-/// Imposta (o rimuove, con `None`) la transizione di un bordo della clip.
+/// Sets (or removes, with `None`) the transition of one edge of the clip.
 pub fn set_clip_transition(
     timeline: TimelineId,
     track_index: usize,
@@ -1133,9 +1133,9 @@ pub fn set_clip_transition(
     })
 }
 
-/// Aggiunge, sostituisce o rimuove (`value: None`) la crossing transition il
-/// cui `left_clip` è `left_clip`: una clip ha al più una transizione sul suo
-/// bordo destro, quindi la identifica da sola, senza bisogno dell'id di
+/// Adds, replaces or removes (`value: None`) the crossing transition whose
+/// `left_clip` is `left_clip`: a clip has at most one transition on its
+/// right edge, so that identifies it on its own, without needing the id of
 /// `right_clip`.
 #[derive(Debug)]
 pub struct SetCrossTransition {
@@ -1143,8 +1143,8 @@ pub struct SetCrossTransition {
     pub track_index: usize,
     pub left_clip: ClipId,
     pub value: Option<CrossTransition>,
-    /// `None` finché non applicato; poi il valore precedente (che a sua
-    /// volta può essere `None` se non c'era nessuna crossing lì).
+    /// `None` until applied; then the previous value (which in turn
+    /// can be `None` if there was no crossing there).
     old: Option<Option<CrossTransition>>,
 }
 
@@ -1187,16 +1187,16 @@ impl Command for SetCrossTransition {
     }
 }
 
-/// Riporta un gruppo di parametri del transform al valore di default,
-/// keyframe compresi: è il reset di una sezione del pannello proprietà
-/// (Transform o Cropping), non di un parametro singolo.
+/// Brings a group of transform parameters back to their default value,
+/// keyframes included: it is the reset of a section of the properties panel
+/// (Transform or Cropping), not of a single parameter.
 #[derive(Debug)]
 pub struct ResetTransformParams {
     pub timeline: TimelineId,
     pub track_index: usize,
     pub clip_id: ClipId,
     pub params: Vec<TransformParam>,
-    /// `true` per il gruppo Transform, che comprende anche il flip.
+    /// `true` for the Transform group, which includes the flip too.
     pub reset_flip: bool,
     previous: Option<(Vec<Keyframed<f32>>, [bool; 2])>,
 }
@@ -1260,8 +1260,8 @@ impl Command for ResetTransformParams {
     }
 }
 
-/// Colore statico di una clip SolidColor; il primo lo inizializza. I
-/// comandi keyframe presuppongono un colore già presente.
+/// Static color of a SolidColor clip; the first one initializes it. The
+/// keyframe commands assume a color is already present.
 #[derive(Debug)]
 pub struct SetClipColor {
     pub timeline: TimelineId,
@@ -1317,7 +1317,7 @@ impl Command for SetClipColor {
     }
 }
 
-/// Parametro animabile di `UpsertKeyframe`/`RemoveKeyframe`.
+/// Animatable parameter of `UpsertKeyframe`/`RemoveKeyframe`.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyframeValue {
     TransformParam(TransformParam, f32),
@@ -1325,7 +1325,7 @@ pub enum KeyframeValue {
     Color(Rgba),
 }
 
-/// Inserisce o sostituisce un keyframe di un parametro animabile.
+/// Inserts or replaces a keyframe of an animatable parameter.
 #[derive(Debug)]
 pub struct UpsertKeyframe {
     pub timeline: TimelineId,
@@ -1334,9 +1334,9 @@ pub struct UpsertKeyframe {
     pub frame: FrameIdx,
     pub value: KeyframeValue,
     pub interpolation: Interpolation,
-    /// Valore/interpolazione che c'era prima a questo stesso frame, se
-    /// c'era: `None` significa che il frame non aveva un keyframe, quindi
-    /// l'undo deve rimuoverlo anziché ripristinarne uno vecchio.
+    /// Value/interpolation that was there before at this same frame, if
+    /// there was one: `None` means the frame had no keyframe, so
+    /// the undo must remove it instead of restoring an old one.
     previous: Option<(KeyframeValue, Interpolation)>,
 }
 
@@ -1390,7 +1390,7 @@ impl Command for UpsertKeyframe {
             }
             KeyframeValue::Color(v) => {
                 let Some(color) = &mut clip.effects.color else {
-                    return; // nessun colore inizializzato: vedi doc di SetClipColor
+                    return; // no color initialized: see the docs of SetClipColor
                 };
                 self.previous = color
                     .keyframe_at(self.frame)
@@ -1453,11 +1453,11 @@ impl KeyframeValue {
     }
 }
 
-/// Un keyframe indicato per parametro e frame: la moneta con cui l'editor
-/// di keyframe passa una selezione ai comandi.
+/// A keyframe named by parameter and frame: the currency with which the keyframe
+/// editor passes a selection to the commands.
 pub type KeyframePick = (KeyframeTarget, FrameIdx);
 
-/// Toglie dal parametro il keyframe a `frame`, restituendolo.
+/// Removes from the parameter the keyframe at `frame`, returning it.
 fn take_keyframe(
     effects: &mut EffectStack,
     target: KeyframeTarget,
@@ -1519,8 +1519,8 @@ fn set_keyframe_interpolation(
     }
 }
 
-/// Sposta nel tempo un gruppo di keyframe (anche di parametri diversi)
-/// tutti dello stesso `delta`.
+/// Moves a group of keyframes in time (even of different parameters)
+/// all by the same `delta`.
 #[derive(Debug)]
 pub struct MoveKeyframes {
     pub timeline: TimelineId,
@@ -1528,9 +1528,9 @@ pub struct MoveKeyframes {
     pub clip_id: ClipId,
     pub picks: Vec<KeyframePick>,
     pub delta: FrameIdx,
-    /// I keyframe effettivamente spostati, alla posizione di partenza.
+    /// The keyframes actually moved, at their starting position.
     moved: Vec<(KeyframeTarget, FrameIdx, KeyframeValue, Interpolation)>,
-    /// Keyframe finiti sotto quelli spostati: l'undo li rimette.
+    /// Keyframes landed under the moved ones: the undo puts them back.
     overwritten: Vec<(FrameIdx, KeyframeValue, Interpolation)>,
 }
 
@@ -1563,9 +1563,9 @@ impl Command for MoveKeyframes {
         let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
             return;
         };
-        // Prima si tolgono tutti, poi si riappoggiano: altrimenti uno
-        // spostamento di un frame sovrascriverebbe il vicino che sta per
-        // spostarsi a sua volta.
+        // First they are all removed, then put back down: otherwise a
+        // move of one frame would overwrite the neighbour that is about to
+        // move in turn.
         let moved: Vec<_> = self
             .picks
             .iter()
@@ -1601,7 +1601,7 @@ impl Command for MoveKeyframes {
     }
 }
 
-/// Cambia l'interpolazione uscente di un gruppo di keyframe.
+/// Changes the outgoing interpolation of a group of keyframes.
 #[derive(Debug)]
 pub struct SetKeyframeInterpolation {
     pub timeline: TimelineId,
@@ -1660,7 +1660,7 @@ impl Command for SetKeyframeInterpolation {
     }
 }
 
-/// Rimuove il keyframe di `target` esattamente al frame indicato, se c'è.
+/// Removes the keyframe of `target` exactly at the given frame, if there is one.
 #[derive(Debug)]
 pub struct RemoveKeyframe {
     pub timeline: TimelineId,
@@ -1743,11 +1743,11 @@ impl Command for RemoveKeyframe {
     }
 }
 
-/// Rimuove un media dal pool; le sue clip restano offline. `slotmap` non
-/// reinserisce con la stessa chiave: l'undo riscrive le clip col nuovo id,
-/// da cui `Cell`/`RefCell` (`undo` prende `&self`). Di una compound clip
-/// sparisce anche la timeline annidata, altrimenti resterebbe orfana nel
-/// progetto (e il suo nome occupato, vedi `alloc_compound_name`).
+/// Removes a media from the pool; its clips stay offline. `slotmap` does not
+/// reinsert with the same key: the undo rewrites the clips with the new id,
+/// hence `Cell`/`RefCell` (`undo` takes `&self`). For a compound clip
+/// the nested timeline disappears too, otherwise it would stay orphaned in the
+/// project (and its name taken, see `alloc_compound_name`).
 #[derive(Debug)]
 pub struct RemoveMedia {
     media: Cell<MediaId>,
@@ -1800,7 +1800,7 @@ impl Command for RemoveMedia {
     }
 }
 
-/// Relink: nuovo percorso (e `content_hash`) per un media del pool.
+/// Relink: new path (and `content_hash`) for a media of the pool.
 #[derive(Debug)]
 pub struct SetMediaPath {
     media: MediaId,
@@ -1845,7 +1845,7 @@ impl Command for SetMediaPath {
     }
 }
 
-/// `(timeline_start, timeline_end)` di una clip, se esiste.
+/// `(timeline_start, timeline_end)` of a clip, if it exists.
 fn clip_bounds(
     project: &Project,
     timeline_id: TimelineId,
@@ -1856,9 +1856,9 @@ fn clip_bounds(
     Some((clip.timeline_start, clip.timeline_end()))
 }
 
-/// Accoda i comandi che liberano `[new_start, new_end)` da una clip che lo
-/// invade: rimossa se coperta, accorciata se sporge da un lato, divisa se
-/// il tratto cade nel mezzo (restituisce la metà destra).
+/// Appends the commands freeing `[new_start, new_end)` from a clip invading
+/// it: removed if covered, shortened if it sticks out on one side, split if
+/// the stretch falls in the middle (returns the right half).
 #[allow(clippy::too_many_arguments)]
 fn resolve_overlap(
     project: &mut Project,
@@ -1879,8 +1879,8 @@ fn resolve_overlap(
         )));
         None
     } else if old_start < new_start && old_end > new_end {
-        // Il nuovo intervallo cade nel mezzo: divide la clip in due,
-        // poi accorcia la metà destra dal suo bordo sinistro fino a
+        // The new interval falls in the middle: splits the clip in two,
+        // then shortens the right half from its left edge up to
         // `new_end`.
         let right_id = project.alloc_clip_id();
         commands.push(Box::new(
@@ -1896,8 +1896,8 @@ fn resolve_overlap(
         )));
         Some(right_id)
     } else if old_start < new_start {
-        // La coda sporge oltre `new_start`: accorcia il bordo destro
-        // (fine) fin lì.
+        // The tail sticks out past `new_start`: shortens the right edge
+        // (end) up to there.
         commands.push(Box::new(TrimClip::new(
             timeline_id,
             track_index,
@@ -1907,8 +1907,8 @@ fn resolve_overlap(
         )));
         None
     } else {
-        // La testa sporge prima di `new_end`: accorcia il bordo
-        // sinistro (inizio) fin lì.
+        // The head sticks out before `new_end`: shortens the left
+        // edge (start) up to there.
         commands.push(Box::new(TrimClip::new(
             timeline_id,
             track_index,
@@ -1920,10 +1920,10 @@ fn resolve_overlap(
     }
 }
 
-/// Accoda i comandi che liberano i tratti `ranges` (track, inizio, fine):
-/// le clip sotto vengono accorciate, divise o rimosse, mai lasciate
-/// sovrapposte. Se un taglio divide più membri di uno stesso gruppo tra le
-/// track coinvolte, le loro metà destre vengono ricollegate.
+/// Appends the commands freeing the stretches in `ranges` (track, start, end):
+/// the clips underneath are shortened, split or removed, never left
+/// overlapping. If a cut splits several members of the same group across the
+/// tracks involved, their right halves get relinked.
 pub fn make_room_for_ranges(
     project: &mut Project,
     timeline_id: TimelineId,
@@ -2019,9 +2019,9 @@ pub fn make_room_for_ranges(
 }
 
 
-/// Comandi che inseriscono `clips` (track, clip, gruppo) sovrascrivendo
-/// quel che c'è sotto; le clip con la stessa chiave di gruppo finiscono in
-/// un gruppo collegato nuovo.
+/// Commands inserting `clips` (track, clip, group) overwriting
+/// what is underneath; the clips with the same group key end up in
+/// a new linked group.
 pub fn insert_overwriting<K: PartialEq>(
     project: &mut Project,
     timeline_id: TimelineId,
@@ -2055,8 +2055,8 @@ pub fn insert_overwriting<K: PartialEq>(
     commands
 }
 
-/// Accoda i tagli per le sovrapposizioni rimaste: vince la clip che
-/// comincia dopo. Rete di sicurezza dopo gli spostamenti in blocco.
+/// Appends the cuts for the remaining overlaps: the clip starting later
+/// wins. A safety net after the bulk moves.
 pub fn cut_overlaps(
     project: &mut Project,
     timeline_id: TimelineId,
@@ -2078,8 +2078,8 @@ pub fn cut_overlaps(
                 .filter(|&&(_, other_start, _)| other_start > start && other_start < end)
                 .min_by_key(|&&(_, other_start, _)| other_start)
             else {
-                // Nessuna clip che comincia dentro questa: o non si
-                // sovrappone a nulla, o è lei quella coperta del tutto.
+                // No clip starting inside this one: either it does not
+                // overlap anything, or it is the one fully covered.
                 if clips[i + 1..]
                     .iter()
                     .any(|&(_, other_start, other_end)| {
@@ -2101,30 +2101,30 @@ pub fn cut_overlaps(
     }
 }
 
-/// Il risultato di `plan_compound_clip`: la timeline annidata pronta da
-/// inserire nel pool, e dove va la nuova clip risultante nella timeline di
-/// partenza. Pura lettura: non tocca `project`, il chiamante decide se e
-/// come applicarla (vedi `compound_clip_commands`).
+/// The result of `plan_compound_clip`: the nested timeline ready to
+/// insert into the pool, and where the resulting new clip goes in the outer
+/// timeline. Pure reading: it does not touch `project`, the caller decides whether and
+/// how to apply it (see `compound_clip_commands`).
 pub struct CompoundPlan {
     pub nested_timeline: Timeline,
     pub range_start: FrameIdx,
     pub len: FrameIdx,
     pub has_video: bool,
     pub has_audio: bool,
-    /// Track (nella timeline di partenza) su cui posizionare la clip video
-    /// risultante: la più in basso fra quelle coinvolte, `Some` solo se
+    /// Track (in the outer timeline) to place the resulting video clip
+    /// on: the lowest among those involved, `Some` only if
     /// `has_video`.
     pub video_track: Option<usize>,
-    /// Come `video_track`, per la clip audio risultante.
+    /// Like `video_track`, for the resulting audio clip.
     pub audio_track: Option<usize>,
 }
 
-/// Selezione di clip (anche su più track, video e audio insieme) →
-/// contenuto di una nuova timeline annidata, con l'ordine relativo delle
-/// track coinvolte preservato. `None` se `clips` non risolve a nessuna clip
-/// reale. Il chiamante inserisce `nested_timeline`/una `MediaItem` che la
-/// referenzia (`MediaItem::compound`) nel `Project`, poi usa
-/// `compound_clip_commands` per la parte da mandare in history.
+/// Selection of clips (across several tracks, video and audio together) →
+/// contents of a new nested timeline, with the relative order of the
+/// tracks involved preserved. `None` if `clips` resolves to no real
+/// clip. The caller inserts `nested_timeline`/a `MediaItem` referencing it
+/// (`MediaItem::compound`) into the `Project`, then uses
+/// `compound_clip_commands` for the part to send to the history.
 pub fn plan_compound_clip(
     project: &Project,
     timeline_id: TimelineId,
@@ -2195,16 +2195,16 @@ pub fn plan_compound_clip(
     })
 }
 
-/// Comandi (da mandare in history come un unico gruppo, es. dentro una
-/// `CompositeCommand`) che tolgono `clips` dalla timeline di partenza e
-/// mettono al loro posto la clip risultante — o le due, video e audio,
-/// linkate — che punta a `media_id`. `plan` è quello di `plan_compound_clip`
-/// per la stessa `clips`; `media_id` è già stato inserito nel pool dal
-/// chiamante (con `MediaItem::compound` che punta alla timeline annidata
-/// già inserita anch'essa). Il pool e la timeline annidata restano fuori
-/// dalla history, come un import: `RemoveMedia` è l'unico comando che
-/// tocca `media_pool`, un undo qui non li cancella, esattamente come un
-/// undo dopo un trim non de-importa il media appena arrivato.
+/// Commands (to be sent to the history as a single group, e.g. inside a
+/// `CompositeCommand`) that remove `clips` from the outer timeline and
+/// put in their place the resulting clip — or the two, video and audio,
+/// linked — pointing at `media_id`. `plan` is the one from `plan_compound_clip`
+/// for the same `clips`; `media_id` has already been inserted into the pool by the
+/// caller (with `MediaItem::compound` pointing at the nested timeline,
+/// already inserted too). The pool and the nested timeline stay out
+/// of the history, like an import: `RemoveMedia` is the only command
+/// touching `media_pool`, an undo here does not delete them, exactly like an
+/// undo after a trim does not un-import the media that just arrived.
 pub fn compound_clip_commands(
     project: &mut Project,
     timeline_id: TimelineId,

@@ -1,11 +1,11 @@
-//! Compositing GPU: input YUV420 planare convertito a RGB nello shader,
-//! layer composti in alpha-over dal basso verso l'alto.
+//! GPU compositing: planar YUV420 input converted to RGB in the shader,
+//! layers composed in alpha-over from bottom to top.
 //!
-//! - `render_layers` / `render_layers_i420`: readback in RGBA o I420
+//! - `render_layers` / `render_layers_i420`: readback in RGBA or I420
 //!   (export).
-//! - `render_layers_to_texture`: resta sulla GPU, per l'anteprima che
-//!   registra la texture in egui-wgpu. Richiede `Compositor::new` sullo
-//!   stesso device di egui.
+//! - `render_layers_to_texture`: stays on the GPU, for the preview that
+//!   registers the texture in egui-wgpu. Requires `Compositor::new` on the
+//!   same device as egui.
 
 use std::sync::{Arc, Mutex};
 use vv_core::{BlendMode, ColorMatrix, Transform};
@@ -36,15 +36,15 @@ const SOLID_PLACEHOLDER: YuvFrame<'static> = YuvFrame {
     full_range: true,
     alpha: OPAQUE,
 };
-/// Placeholder di `YuvFrame::alpha` quando il layer non porta una vera
-/// copertura per pixel: un solo byte, campionato ovunque (`ClampToEdge`) —
-/// zero costo per il caso comune (video/solid/text, sempre opachi).
+/// Placeholder for `YuvFrame::alpha` when the layer carries no real
+/// per-pixel coverage: a single byte, sampled everywhere (`ClampToEdge`) —
+/// zero cost for the common case (video/solid/text, always opaque).
 const OPAQUE: &[u8] = &[255];
-/// Formato dei tre piani di input (Y/U/V): un solo canale 8 bit, letto
-/// come `.r` nello shader.
+/// Format of the three input planes (Y/U/V): a single 8-bit channel, read
+/// as `.r` in the shader.
 const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
-/// Selettore della matrice per lo shader: deve restare allineato a
+/// Matrix selector for the shader: must stay aligned with
 /// `kr_kb` in `transform.wgsl`.
 fn shader_matrix_id(matrix: ColorMatrix) -> f32 {
     match matrix {
@@ -54,56 +54,56 @@ fn shader_matrix_id(matrix: ColorMatrix) -> f32 {
     }
 }
 
-/// Frame YUV420 8 bit con i metadati colore. Piani densi, senza padding.
+/// 8-bit YUV420 frame with the color metadata. Dense planes, no padding.
 pub struct YuvFrame<'a> {
     pub y: &'a [u8],
     pub width: u32,
     pub height: u32,
     pub u: &'a [u8],
     pub v: &'a [u8],
-    /// Dimensioni dei piani U/V (sottocampionati 4:2:0, tipicamente
-    /// `(width+1)/2` x `(height+1)/2` ma non ricalcolate qui: il
-    /// chiamante passa le dimensioni reali allocate dal decoder).
+    /// Dimensions of the U/V planes (4:2:0 subsampled, typically
+    /// `(width+1)/2` x `(height+1)/2` but not recomputed here: the
+    /// caller passes the real dimensions allocated by the decoder).
     pub chroma_width: u32,
     pub chroma_height: u32,
     pub matrix: ColorMatrix,
-    /// `true` = range JPEG/full (0-255), `false` = range MPEG/limited.
+    /// `true` = JPEG/full range (0-255), `false` = MPEG/limited range.
     pub full_range: bool,
-    /// Copertura per pixel, non sottocampionata: un solo byte (`&[255]`,
-    /// vedi `SOLID_PLACEHOLDER`) per "opaco ovunque" (un file decodificato
-    /// non ha canale alpha), altrimenti `width`x`height` byte come Y — vedi
-    /// `FrameYuv420::alpha`, da cui viene quando non è il placeholder.
+    /// Per-pixel coverage, not subsampled: a single byte (`&[255]`,
+    /// see `SOLID_PLACEHOLDER`) for "opaque everywhere" (a decoded file
+    /// has no alpha channel), otherwise `width`x`height` bytes like Y — see
+    /// `FrameYuv420::alpha`, where it comes from when it is not the placeholder.
     pub alpha: &'a [u8],
 }
 
-/// Un layer dello stack. `Solid` e `Text` si trattano come sorgenti grandi
-/// quanto la timeline: stesso transform/crop.
+/// A layer of the stack. `Solid` and `Text` are treated as sources as large
+/// as the timeline: same transform/crop.
 pub enum Layer<'a> {
     Video {
         frame: YuvFrame<'a>,
         transform: Transform,
-        /// Risoluzione *nativa* del media, in cui è espresso il crop in
-        /// pixel del `Transform`: non quella di `frame`, che può essere un
-        /// proxy a risoluzione ridotta.
+        /// *Native* resolution of the media, in which the `Transform`'s crop
+        /// in pixels is expressed: not that of `frame`, which can be a
+        /// reduced-resolution proxy.
         source_size: (u32, u32),
-        /// Moltiplicatore di alpha di tutto il layer (dissolvenze di clip):
-        /// 1.0 = nessuna attenuazione.
+        /// Alpha multiplier of the whole layer (clip fades):
+        /// 1.0 = no attenuation.
         opacity: f32,
-        /// Filtri attivi della clip (`EffectStack::filters`), nell'ordine
-        /// in cui vanno applicati: vv-render non sa cosa ciascuno significhi,
-        /// solo l'id dello shader che gli corrisponde (`filter_shader_id`).
+        /// Active filters of the clip (`EffectStack::filters`), in the order
+        /// they must be applied: vv-render does not know what each one means,
+        /// only the id of the shader corresponding to it (`filter_shader_id`).
         filters: &'a [vv_core::FilterKind],
-        /// Come il layer si compone su quelli sotto.
+        /// How the layer composes onto those below.
         blend: BlendMode,
     },
-    /// Un frame già composto e residente sulla GPU: la timeline annidata di
-    /// una compound clip, che torna layer nella timeline esterna senza
-    /// passare dalla CPU. RGBA premoltiplicato — vedi `Fill::Rgba`.
+    /// A frame already composed and resident on the GPU: the nested timeline of
+    /// a compound clip, which becomes a layer again in the outer timeline without
+    /// going through the CPU. Premultiplied RGBA — see `Fill::Rgba`.
     Texture {
         texture: &'a wgpu::Texture,
         transform: Transform,
-        /// Come in `Video`: le unità del crop, che possono non essere le
-        /// dimensioni di `texture` (anteprima a risoluzione ridotta).
+        /// As in `Video`: the units of the crop, which may not be the
+        /// dimensions of `texture` (reduced-resolution preview).
         source_size: (u32, u32),
         opacity: f32,
         filters: &'a [vv_core::FilterKind],
@@ -116,8 +116,8 @@ pub enum Layer<'a> {
         filters: &'a [vv_core::FilterKind],
         blend: BlendMode,
     },
-    /// Titolo: rasterizzato alla risoluzione di output (vedi `text`), poi
-    /// trattato come un `Solid` grande quanto la timeline.
+    /// Title: rasterized at the output resolution (see `text`), then
+    /// treated like a `Solid` as large as the timeline.
     Text {
         title: &'a vv_core::TitleParams,
         transform: Transform,
@@ -127,21 +127,21 @@ pub enum Layer<'a> {
     },
 }
 
-/// Fino a quanti filtri per layer può portare l'uniform (vedi `filters` in
-/// `TransformUniform`): oltre, i filtri in eccesso sono ignorati. Generoso
-/// per l'uso reale, evita un buffer di dimensione dinamica per lo shader.
+/// How many filters per layer the uniform can carry (see `filters` in
+/// `TransformUniform`): past that, the excess filters are ignored. Generous
+/// for real use, avoids a dynamically sized buffer for the shader.
 const MAX_LAYER_FILTERS: usize = 8;
 
-/// Id per lo shader di ciascun `FilterKind`; 0 è riservato a "slot vuoto".
+/// Shader id of each `FilterKind`; 0 is reserved for "empty slot".
 fn filter_shader_id(kind: vv_core::FilterKind) -> f32 {
     match kind {
         vv_core::FilterKind::Grayscale => 1.0,
     }
 }
 
-/// Id per lo shader di ciascun `BlendMode`, allineato allo `switch` di
-/// `blend_channel` in `transform.wgsl`; 0 = Normal, l'unico che usa
-/// l'alpha blending della pipeline invece di leggere il backdrop.
+/// Shader id of each `BlendMode`, aligned with the `switch` of
+/// `blend_channel` in `transform.wgsl`; 0 = Normal, the only one using
+/// the pipeline's alpha blending instead of reading the backdrop.
 fn blend_shader_id(mode: BlendMode) -> f32 {
     match mode {
         BlendMode::Normal => 0.0,
@@ -162,22 +162,22 @@ fn blend_shader_id(mode: BlendMode) -> f32 {
     }
 }
 
-/// Cosa colora un layer: i piani Y/U/V, un colore pieno, o un colore
-/// pieno con la copertura presa dal piano Y.
+/// What colors a layer: the Y/U/V planes, a solid color, or a solid
+/// color with the coverage taken from the Y plane.
 #[derive(Clone, Copy)]
 enum Fill {
     Video,
     Solid(vv_core::Rgba),
     Mask(vv_core::Rgba),
-    /// Texture RGBA già composta, con il colore premoltiplicato per l'alpha
-    /// (è il risultato di un `ALPHA_BLENDING` su clear trasparente): lo
-    /// shader lo divide prima di rimetterlo in alpha-over.
+    /// Already composed RGBA texture, with the color premultiplied by the alpha
+    /// (it is the result of an `ALPHA_BLENDING` onto a transparent clear): the
+    /// shader divides it out before putting it back into alpha-over.
     Rgba,
 }
 
-/// Risoluzione in pixel della texture prodotta e quella logica della
-/// timeline, in cui sono espressi posizione e anchor. Coincidono
-/// nell'export; l'anteprima compone alla risoluzione del frame decodificato.
+/// Pixel resolution of the produced texture and the logical one of the
+/// timeline, in which position and anchor are expressed. They coincide
+/// on export; the preview composes at the resolution of the decoded frame.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputFrame {
     pub width: u32,
@@ -186,7 +186,7 @@ pub struct OutputFrame {
 }
 
 impl OutputFrame {
-    /// Output alla risoluzione della timeline.
+    /// Output at the timeline resolution.
     pub fn exact(width: u32, height: u32) -> Self {
         Self {
             width,
@@ -195,8 +195,8 @@ impl OutputFrame {
         }
     }
 
-    /// Output a una risoluzione diversa da quella della timeline, con lo
-    /// stesso aspect ratio.
+    /// Output at a resolution different from the timeline's, with the
+    /// same aspect ratio.
     pub fn scaled(width: u32, height: u32, timeline_size: (u32, u32)) -> Self {
         Self {
             width,
@@ -215,12 +215,12 @@ struct TransformUniform {
     anchor_flip: [f32; 4],
     color: [f32; 4],
     solid: [f32; 4],
-    /// x: opacità dell'intero layer. y: id del metodo di composizione
-    /// (`blend_shader_id`). z/w inutilizzati.
+    /// x: opacity of the whole layer. y: id of the compositing method
+    /// (`blend_shader_id`). z/w unused.
     extra: [f32; 4],
-    /// Id shader dei filtri attivi, nell'ordine di applicazione (vedi
-    /// `filter_shader_id`); 0 = slot vuoto. `MAX_LAYER_FILTERS` in due vec4
-    /// per l'allineamento dell'uniform.
+    /// Shader ids of the active filters, in order of application (see
+    /// `filter_shader_id`); 0 = empty slot. `MAX_LAYER_FILTERS` in two vec4s
+    /// for the uniform alignment.
     filters: [[f32; 4]; MAX_LAYER_FILTERS / 4],
 }
 
@@ -243,24 +243,24 @@ impl TransformUniform {
             Fill::Mask(c) => (2.0, Some(c)),
             Fill::Rgba => (3.0, None),
         };
-        // Il `Transform` è in pixel — di timeline per posizione e anchor,
-        // del media per il crop; lo shader lavora in coordinate
-        // normalizzate.
+        // The `Transform` is in pixels — of the timeline for position and anchor,
+        // of the media for the crop; the shader works in normalized
+        // coordinates.
         let (frame_w, frame_h) = (
             output.timeline_size.0.max(1) as f32,
             output.timeline_size.1.max(1) as f32,
         );
         let (source_w, source_h) = (source_size.0.max(1) as f32, source_size.1.max(1) as f32);
         Self {
-            // Dai tagli per lato al rettangolo che lo shader campiona.
+            // From the per-side cuts to the rectangle the shader samples.
             crop: [
                 t.crop[0] / source_w,
                 t.crop[1] / source_h,
                 1.0 - t.crop[2] / source_w,
                 1.0 - t.crop[3] / source_h,
             ],
-            // L'asse Y del modello punta in alto (come in un NLE), quello
-            // delle uv in basso.
+            // The model's Y axis points up (as in an NLE), the uv one
+            // points down.
             zoom_pos: [
                 t.zoom[0],
                 t.zoom[1],
@@ -271,8 +271,8 @@ impl TransformUniform {
                 fit[0],
                 fit[1],
                 t.rotation.to_radians(),
-                // La sfumatura segue il crop: pixel del media, e sull'asse
-                // più corto, così resta isotropa.
+                // The softness follows the crop: media pixels, and on the
+                // shorter axis, so it stays isotropic.
                 t.crop_softness / source_w.min(source_h),
             ],
             anchor_flip: [
@@ -311,17 +311,17 @@ pub struct Compositor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::RenderPipeline,
-    /// Come `pipeline`, ma in REPLACE: la usano i metodi di composizione
-    /// diversi da Normal (vedi `blend_shader_id`).
+    /// Like `pipeline`, but in REPLACE: used by the compositing methods
+    /// other than Normal (see `blend_shader_id`).
     blend_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     i420_pipeline: wgpu::ComputePipeline,
-    /// Texture riusate da un frame all'altro, per dimensione: allocarne di
-    /// nuove a ogni frame costa più del disegno stesso.
+    /// Textures reused from one frame to the next, by size: allocating new
+    /// ones on every frame costs more than the drawing itself.
     pool: Mutex<TexturePool>,
-    /// Pool a parte per gli intermedi (vedi `PooledTexture`): ci tornano
-    /// quando chi li usa li lascia andare, non a fine render.
+    /// A separate pool for the intermediates (see `PooledTexture`): they go back
+    /// there when whoever uses them lets them go, not at the end of the render.
     scratch: Arc<Mutex<Vec<wgpu::Texture>>>,
 }
 
@@ -332,7 +332,7 @@ struct TexturePool {
     i420: Option<I420Buffers>,
 }
 
-/// Buffer della conversione I420, per la dimensione dell'ultimo frame.
+/// Buffer of the I420 conversion, for the size of the last frame.
 struct I420Buffers {
     size: wgpu::BufferAddress,
     storage: wgpu::Buffer,
@@ -340,18 +340,18 @@ struct I420Buffers {
     readback: wgpu::Buffer,
 }
 
-/// Se la texture di output torna subito nel pool dei frame o esce come
-/// `PooledTexture`, che ce la rimette quando chi la usa la lascia andare.
+/// Whether the output texture goes straight back into the frame pool or comes out as
+/// a `PooledTexture`, which puts it back when whoever uses it lets it go.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Recycle {
     Immediately,
     OnDrop,
 }
 
-/// Una texture intermedia (il frame composto di una timeline annidata) che
-/// torna al pool da sé: finché qualcuno la tiene come layer nessun altro
-/// render ci disegna sopra, e quando la lascia andare è di nuovo
-/// disponibile, senza riallocare 8 MB a ogni frame.
+/// An intermediate texture (the composed frame of a nested timeline) that
+/// returns to the pool by itself: while someone holds it as a layer no other
+/// render draws over it, and when they let it go it is available
+/// again, without reallocating 8 MB on every frame.
 pub struct PooledTexture {
     texture: Option<wgpu::Texture>,
     pool: Arc<Mutex<Vec<wgpu::Texture>>>,
@@ -373,7 +373,7 @@ impl Drop for PooledTexture {
     }
 }
 
-/// Oltre, le texture di dimensioni non più usate vengono lasciate andare.
+/// Past that, the textures of no longer used sizes are let go.
 const MAX_POOLED: usize = 32;
 
 fn take_sized(pool: &mut Vec<wgpu::Texture>, width: u32, height: u32) -> Option<wgpu::Texture> {
@@ -396,9 +396,9 @@ impl Compositor {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/transform.wgsl").into()),
         });
 
-        // Tre texture di input (Y/U/V, binding 0-2) invece di una sola
-        // RGBA: la conversione YUV→RGB avviene nello shader
-        // (REFACTOR_PIPELINE.md B3), qui arrivano solo i piani grezzi.
+        // Three input textures (Y/U/V, bindings 0-2) instead of a single
+        // RGBA one: the YUV→RGB conversion happens in the shader
+        // (REFACTOR_PIPELINE.md B3), only the raw planes arrive here.
         let plane_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -431,8 +431,8 @@ impl Compositor {
                     },
                     count: None,
                 },
-                plane_entry(5), // Alpha (copertura per pixel, vedi YuvFrame::alpha)
-                plane_entry(6), // Backdrop (vedi `backdrop_tex` nello shader)
+                plane_entry(5), // Alpha (per-pixel coverage, see YuvFrame::alpha)
+                plane_entry(6), // Backdrop (see `backdrop_tex` in the shader)
             ],
         });
 
@@ -469,10 +469,10 @@ impl Compositor {
                 cache: None,
             })
         };
-        // Normal: non REPLACE, perché le zone scoperte (letterbox) escono con
-        // alpha 0 e devono mostrare il layer sotto. Gli altri metodi di
-        // composizione il layer sotto se lo leggono da soli (`backdrop_tex`) e
-        // scrivono il risultato già composto.
+        // Normal: not REPLACE, because the uncovered areas (letterbox) come out with
+        // alpha 0 and must show the layer below. The other compositing
+        // methods read the layer below themselves (`backdrop_tex`) and
+        // write the already composed result.
         let pipeline = transform_pipeline(
             "vv-render transform pipeline",
             Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -515,9 +515,9 @@ impl Compositor {
         }
     }
 
-    /// Crea un device wgpu indipendente (headless, nessuna surface) per
-    /// usare il compositor fuori da un contesto eframe/egui-wgpu — utile
-    /// per l'app oggi e per i test.
+    /// Creates an independent wgpu device (headless, no surface) to
+    /// use the compositor outside an eframe/egui-wgpu context — useful
+    /// for the app today and for the tests.
     pub fn new_headless() -> Self {
         let (device, queue) = pollster::block_on(async {
             let instance = wgpu::Instance::default();
@@ -536,8 +536,8 @@ impl Compositor {
         Self::new(Arc::new(device), Arc::new(queue))
     }
 
-    /// Come `render_layers`, ma I420 denso BT.709 limited: la conversione su
-    /// GPU risparmia quella su CPU e dimezza il readback.
+    /// Like `render_layers`, but dense I420 BT.709 limited: doing the conversion on
+    /// the GPU saves doing it on the CPU and halves the readback.
     pub fn render_layers_i420(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
         const WORKGROUP: u32 = 256;
         const MAX_GROUPS_PER_DIM: u32 = 65535;
@@ -619,19 +619,19 @@ impl Compositor {
         self.map_read(readback, |data| data[..len].to_vec())
     }
 
-    /// Come `render_layers_i420`, ma RGBA8 con lo sfondo trasparente
-    /// invece che nero opaco e senza conversione a YUV: usata per comporre
-    /// la timeline annidata di una compound clip, il cui risultato torna a
-    /// sua volta un layer altrove — l'alpha vera va preservata, `_i420` la
-    /// perderebbe (l'I420 non ha canale alpha).
+    /// Like `render_layers_i420`, but RGBA8 with a transparent background
+    /// instead of opaque black and without conversion to YUV: used to compose
+    /// the nested timeline of a compound clip, whose result becomes
+    /// a layer elsewhere in turn — the real alpha must be preserved, `_i420`
+    /// would lose it (I420 has no alpha channel).
     pub fn render_layers_rgba_transparent(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
         let output_texture = self.render_layers_to_texture_transparent(layers, output);
         self.read_rgba_texture(&output_texture, output.width, output.height)
     }
 
-    /// Legge una texture RGBA8 (`OUTPUT_FORMAT`) in un `Vec<u8>` denso,
-    /// rimuovendo il padding di riga che `wgpu` richiede sul buffer di
-    /// destinazione.
+    /// Reads an RGBA8 texture (`OUTPUT_FORMAT`) into a dense `Vec<u8>`,
+    /// removing the row padding `wgpu` requires on the destination
+    /// buffer.
     fn read_rgba_texture(&self, texture: &wgpu::Texture, width: u32, height: u32) -> Vec<u8> {
         let unpadded_bytes_per_row = width * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -677,27 +677,27 @@ impl Compositor {
         })
     }
 
-    /// Versione multi-layer di [`Compositor::render_frame_to_texture`]
-    /// (vedi [`Compositor::render_layers`]). Sfondo nero opaco: per il
-    /// video finale (anteprima, export) non esiste "trasparente".
+    /// Multi-layer version of [`Compositor::render_frame_to_texture`]
+    /// (see [`Compositor::render_layers`]). Opaque black background: for the
+    /// final video (preview, export) there is no "transparent".
     pub fn render_layers_to_texture(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
         self.render_layers_to_texture_with_clear(layers, output, BLACK, Recycle::Immediately)
     }
 
-    /// Come `render_layers_to_texture`, ma senza forzare uno sfondo opaco:
-    /// usata per comporre la timeline annidata di una compound clip, il cui
-    /// risultato torna a sua volta un layer altrove — le zone dove quella
-    /// timeline non ha nulla da mostrare devono restare trasparenti, non
-    /// nere, o coprirebbero quel che c'è sotto invece di lasciarlo vedere
-    /// (vedi `YuvFrame::alpha`, che porta questa trasparenza in giro).
+    /// Like `render_layers_to_texture`, but without forcing an opaque background:
+    /// used to compose the nested timeline of a compound clip, whose
+    /// result becomes a layer elsewhere in turn — the areas where that
+    /// timeline has nothing to show must stay transparent, not
+    /// black, or they would cover what is below instead of letting it show
+    /// (see `YuvFrame::alpha`, which carries this transparency around).
     pub fn render_layers_to_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
         self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::Immediately)
     }
 
-    /// Come `render_layers_to_texture_transparent`, ma la texture resta a
-    /// chi la riceve finché non la lascia andare, per usarla nel frattempo
-    /// come `Layer::Texture`: col riciclo immediato il primo render della
-    /// stessa dimensione le disegnerebbe sopra.
+    /// Like `render_layers_to_texture_transparent`, but the texture stays with
+    /// whoever receives it until they let it go, so it can be used in the meantime
+    /// as a `Layer::Texture`: with immediate recycling the first render of the
+    /// same size would draw over it.
     pub fn render_layers_to_owned_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> PooledTexture {
         PooledTexture {
             texture: Some(self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::OnDrop)),
@@ -718,11 +718,11 @@ impl Compositor {
         };
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut planes = Vec::new();
-        // Segnaposto per lo slot del backdrop dei layer in Normal, che non
-        // lo campionano (vedi `backdrop_tex` nello shader).
+        // Placeholder for the backdrop slot of the Normal layers, which do not
+        // sample it (see `backdrop_tex` in the shader).
         let no_backdrop = self.plane_texture(OPAQUE, 1, 1);
         let no_backdrop_view = no_backdrop.create_view(&wgpu::TextureViewDescriptor::default());
-        // Copia dello stack già composto, una per pass che ne ha bisogno.
+        // Copy of the already composed stack, one per pass that needs it.
         let mut backdrops: Vec<Option<wgpu::Texture>> = Vec::new();
 
         let mut encoder = self
@@ -731,7 +731,7 @@ impl Compositor {
                 label: Some("vv-render transform encoder"),
             });
 
-        // Nessun layer: resta il solo clear.
+        // No layers: only the clear remains.
         if layers.is_empty() {
             self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
         }
@@ -788,7 +788,7 @@ impl Compositor {
                     blend,
                     &backdrop_view(&mut backdrops),
                 )],
-                // Il colore arriva dall'uniform: i piani sono solo segnaposto.
+                // The color comes from the uniform: the planes are only placeholders.
                 Layer::Solid { color, transform, opacity, filters, .. } => vec![self.layer_bind_group(
                     &mut planes,
                     &SOLID_PLACEHOLDER,
@@ -816,8 +816,8 @@ impl Compositor {
                             height: mask.height,
                             ..SOLID_PLACEHOLDER
                         };
-                        // Ombra, sfondo e testo sono pass distinti: ognuno si
-                        // compone su quelli prima, backdrop compreso.
+                        // Shadow, background and text are distinct passes: each one
+                        // composes onto the earlier ones, backdrop included.
                         let view = backdrop_view(&mut backdrops);
                         groups.push(self.layer_bind_group(
                             &mut planes,
@@ -843,9 +843,9 @@ impl Compositor {
             };
             for (bind_group, backdrop) in bind_groups.iter().zip(&backdrops[backdrop_start..]) {
                 if let Some(backdrop) = backdrop {
-                    // Il backdrop va letto da una copia: la texture di output
-                    // è già attaccata al pass che lo compone. Se questo è il
-                    // primo layer, il clear va fatto prima di copiarlo.
+                    // The backdrop must be read from a copy: the output texture
+                    // is already attached to the pass composing it. If this is the
+                    // first layer, the clear must happen before copying it.
                     if first {
                         self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
                         first = false;
@@ -872,15 +872,15 @@ impl Compositor {
         planes.push(no_backdrop);
         give_back(&mut pool.planes, planes);
         if recycle == Recycle::Immediately {
-            // Una copia resta nel pool: il prossimo frame della stessa
-            // dimensione ci ridisegna sopra, dopo che la GPU ha finito con
-            // questo (stessa coda).
+            // A copy stays in the pool: the next frame of the same
+            // size draws over it, after the GPU has finished with
+            // this one (same queue).
             give_back(&mut pool.outputs, [output_texture.clone()]);
         }
         output_texture
     }
 
-    /// Mappa `buffer` in lettura (aspettando la GPU) e passa i byte a `read`.
+    /// Maps `buffer` for reading (waiting for the GPU) and passes the bytes to `read`.
     fn map_read<R>(&self, buffer: &wgpu::Buffer, read: impl FnOnce(&[u8]) -> R) -> R {
         let slice = buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -898,9 +898,9 @@ impl Compositor {
         out
     }
 
-    /// Upload dei tre piani del layer e bind group pronto per il pass:
-    /// crop/zoom, letterbox e conversione YUV→RGB stanno tutti nello
-    /// shader, qui si preparano solo i suoi input.
+    /// Uploads the three planes of the layer and the bind group ready for the pass:
+    /// crop/zoom, letterbox and YUV→RGB conversion are all in the
+    /// shader, here only its inputs are prepared.
     fn layer_bind_group(
         &self,
         planes: &mut Vec<wgpu::Texture>,
@@ -918,9 +918,9 @@ impl Compositor {
         let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
         let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
         let v_texture = self.plane_texture(frame.v, frame.chroma_width, frame.chroma_height);
-        // Un solo byte = placeholder "opaco ovunque" (vedi doc di
-        // `YuvFrame::alpha`): la texture resta 1x1, campionata ovunque
-        // dal `ClampToEdge` come già Y/U/V per Solid/Text.
+        // A single byte = "opaque everywhere" placeholder (see the docs of
+        // `YuvFrame::alpha`): the texture stays 1x1, sampled everywhere
+        // by the `ClampToEdge` as Y/U/V already are for Solid/Text.
         let (alpha_w, alpha_h) = if frame.alpha.len() == 1 { (1, 1) } else { (frame.width, frame.height) };
         let a_texture = self.plane_texture(frame.alpha, alpha_w, alpha_h);
         let y_view = y_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -948,12 +948,12 @@ impl Compositor {
         bind_group
     }
 
-    /// Come `layer_bind_group`, ma la sorgente è una texture RGBA già
-    /// composta (`Layer::Texture`): occupa lo slot del piano Y — il layout
-    /// chiede solo una texture 2D float filtrabile, e `Rgba8Unorm` lo
-    /// soddisfa quanto `R8Unorm` — e gli altri slot prendono i placeholder
-    /// 1x1, che con `Fill::Rgba` lo shader non campiona (tranne l'alpha,
-    /// che deve restare opaco).
+    /// Like `layer_bind_group`, but the source is an already composed RGBA
+    /// texture (`Layer::Texture`): it takes the Y plane slot — the layout
+    /// only asks for a filterable float 2D texture, and `Rgba8Unorm` satisfies
+    /// it as much as `R8Unorm` — and the other slots take the 1x1
+    /// placeholders, which with `Fill::Rgba` the shader does not sample (except the alpha,
+    /// which must stay opaque).
     fn texture_bind_group(
         &self,
         planes: &mut Vec<wgpu::Texture>,
@@ -994,8 +994,8 @@ impl Compositor {
         bind_group
     }
 
-    /// Il bind group del pass: le view nell'ordine `[sorgente, U, V, alpha,
-    /// backdrop]` (la prima è il piano Y o la texture RGBA, vedi `Fill`).
+    /// The bind group of the pass: the views in the order `[source, U, V, alpha,
+    /// backdrop]` (the first is the Y plane or the RGBA texture, see `Fill`).
     fn bind_group_for(&self, views: [&wgpu::TextureView; 5], uniform: &TransformUniform) -> wgpu::BindGroup {
         let uniform_buffer = self
             .device
@@ -1040,8 +1040,8 @@ impl Compositor {
         })
     }
 
-    /// Un piano R8 con `data`, preso dal pool se ce n'è uno della stessa
-    /// dimensione.
+    /// An R8 plane with `data`, taken from the pool if there is one of the same
+    /// size.
     fn plane_texture(&self, data: &[u8], width: u32, height: u32) -> wgpu::Texture {
         let pooled = take_sized(&mut self.pool.lock().unwrap().planes, width, height);
         let texture = pooled.unwrap_or_else(|| {
@@ -1073,9 +1073,9 @@ impl Compositor {
         texture
     }
 
-    /// Come `output_texture`, ma dal pool degli intermedi (vedi
-    /// `PooledTexture`), separato perché lì una texture resta occupata
-    /// finché chi la usa non la restituisce.
+    /// Like `output_texture`, but from the intermediates pool (see
+    /// `PooledTexture`), separate because there a texture stays taken
+    /// until whoever uses it gives it back.
     fn scratch_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
         take_sized(&mut self.scratch.lock().unwrap(), output_w, output_h)
             .unwrap_or_else(|| self.new_output_texture(output_w, output_h))
@@ -1101,7 +1101,7 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OUTPUT_FORMAT,
-            // TEXTURE_BINDING serve al path zero-copy: egui-wgpu la campiona.
+            // TEXTURE_BINDING is needed by the zero-copy path: egui-wgpu samples it.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST
@@ -1110,8 +1110,8 @@ impl Compositor {
         })
     }
 
-    /// Un pass sulla texture di output: `bind_group` assente = solo il
-    /// `load` (clear di un colore pieno o di nero), nessun draw.
+    /// One pass on the output texture: `bind_group` absent = only the
+    /// `load` (clear of a solid color or of black), no draw.
     fn pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1143,7 +1143,7 @@ impl Compositor {
     }
 }
 
-/// Il metodo di composizione di un layer, qualunque sia la sua sorgente.
+/// The compositing method of a layer, whatever its source.
 fn layer_blend(layer: &Layer) -> BlendMode {
     match layer {
         Layer::Video { blend, .. }
@@ -1153,8 +1153,8 @@ fn layer_blend(layer: &Layer) -> BlendMode {
     }
 }
 
-/// Fattori di letterbox/pillarbox passati allo shader: >1 sull'asse che
-/// resta scoperto (bande nere), 1 sull'altro.
+/// Letterbox/pillarbox factors passed to the shader: >1 on the axis that
+/// stays uncovered (black bars), 1 on the other.
 fn fit_factors(source: (f32, f32), output: (f32, f32)) -> [f32; 2] {
     let source_aspect = source.0 / source.1;
     let output_aspect = output.0 / output.1;
@@ -1165,8 +1165,8 @@ fn fit_factors(source: (f32, f32), output: (f32, f32)) -> [f32; 2] {
     }
 }
 
-/// Dimensioni con l'aspect ratio di `aspect` che contengono `source` senza
-/// scalarlo: si aggiungono solo le bande.
+/// Dimensions with the aspect ratio of `aspect` containing `source` without
+/// scaling it: only the bars are added.
 pub fn fit_output_size(source: (u32, u32), aspect: (u32, u32)) -> (u32, u32) {
     let (sw, sh) = (source.0.max(1) as f64, source.1.max(1) as f64);
     let (aw, ah) = (aspect.0.max(1) as f64, aspect.1.max(1) as f64);
@@ -1186,13 +1186,13 @@ impl<'a> YuvFrame<'a> {
 
 #[cfg(test)]
 impl Compositor {
-    /// Compone lo stack in alpha-over e legge il risultato in RGBA.
+    /// Composes the stack in alpha-over and reads the result in RGBA.
     pub fn render_layers(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
         let output_texture = self.render_layers_to_texture(layers, output);
         self.read_rgba_texture(&output_texture, output.width, output.height)
     }
 
-    /// Un solo frame con `transform`, letto in RGBA8.
+    /// A single frame with `transform`, read in RGBA8.
     pub fn render_frame(
         &self,
         frame: &YuvFrame,
@@ -1211,8 +1211,8 @@ impl Compositor {
             output,
         )
     }
-    /// Come `render_frame` ma resta sulla GPU. Nessuna attesa: il pass di egui
-    /// che la campiona è sottomesso dopo sulla stessa coda.
+    /// Like `render_frame` but stays on the GPU. No waiting: the egui pass
+    /// sampling it is submitted afterwards on the same queue.
     pub fn render_frame_to_texture(
         &self,
         frame: &YuvFrame,
@@ -1237,9 +1237,9 @@ impl Compositor {
 mod tests {
     use super::*;
 
-    /// Frame YUV420 posseduto dal test (i piani di `YuvFrame` sono
-    /// riferimenti in prestito): dimensioni croma calcolate come
-    /// `vv_media::FrameYuv420` le calcolerebbe, arrotondate per eccesso.
+    /// YUV420 frame owned by the test (the planes of `YuvFrame` are
+    /// borrowed references): chroma dimensions computed as
+    /// `vv_media::FrameYuv420` would compute them, rounded up.
     struct OwnedYuvFrame {
         width: u32,
         height: u32,
@@ -1269,7 +1269,7 @@ mod tests {
         }
     }
 
-    /// Frame uniforme: stesso Y/U/V su ogni pixel.
+    /// Uniform frame: same Y/U/V on every pixel.
     fn solid_frame(
         w: u32,
         h: u32,
@@ -1294,11 +1294,11 @@ mod tests {
         }
     }
 
-    /// Frame 4x4 con quattro quadranti a Y diverso, croma neutra
-    /// (U=V=128) e range full: con croma neutra R=G=B=Y esattamente
-    /// (vedi `yuv_to_rgb_reference`), utile per verificare *dove* il
-    /// crop va a pescare guardando solo il canale rosso, senza che la
-    /// conversione colore aggiunga un'altra variabile al test.
+    /// 4x4 frame with four quadrants at different Y, neutral chroma
+    /// (U=V=128) and full range: with neutral chroma R=G=B=Y exactly
+    /// (see `yuv_to_rgb_reference`), useful to check *where* the
+    /// crop picks from by looking at the red channel alone, without the
+    /// color conversion adding another variable to the test.
     fn quadrant_frame() -> OwnedYuvFrame {
         let w: u32 = 4;
         let h: u32 = 4;
@@ -1306,10 +1306,10 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let level = match (x < w / 2, y < h / 2) {
-                    (true, true) => 40u8,    // alto-sinistra
-                    (false, true) => 100u8,  // alto-destra
-                    (true, false) => 160u8,  // basso-sinistra
-                    (false, false) => 220u8, // basso-destra
+                    (true, true) => 40u8,    // top-left
+                    (false, true) => 100u8,  // top-right
+                    (true, false) => 160u8,  // bottom-left
+                    (false, false) => 220u8, // bottom-right
                 };
                 y_plane[(y * w + x) as usize] = level;
             }
@@ -1330,12 +1330,12 @@ mod tests {
     }
 
 
-    /// Anche per una croma "neutra" (128), 128/255 non è esattamente
-    /// 0.5: un residuo di pochi livelli negli 8 bit è quantizzazione
-    /// attesa della matrice YUV→RGB (lo stesso residuo compare
-    /// nell'implementazione di riferimento in f64, non solo nello
-    /// shader f32), non un errore — da qui una tolleranza piccola invece
-    /// di un'uguaglianza esatta.
+    /// Even for a "neutral" chroma (128), 128/255 is not exactly
+    /// 0.5: a residue of a few levels in the 8 bits is expected
+    /// quantization of the YUV→RGB matrix (the same residue appears
+    /// in the f64 reference implementation, not just in the
+    /// f32 shader), not an error — hence a small tolerance instead
+    /// of an exact equality.
     fn assert_close_rgba(got: [u8; 4], expected: [u8; 4]) {
         for i in 0..4 {
             assert!(
@@ -1345,11 +1345,11 @@ mod tests {
         }
     }
 
-    /// Implementazione di riferimento (CPU, f64) della stessa formula
-    /// usata nello shader (`transform.wgsl`, `yuv_to_rgb`): serve a
-    /// verificare che il calcolo sulla GPU (f32) sia effettivamente
-    /// quella formula, non una approssimazione silenziosamente diversa
-    /// (REFACTOR_PIPELINE.md §5, accuratezza del frame non negoziabile).
+    /// Reference implementation (CPU, f64) of the same formula
+    /// used in the shader (`transform.wgsl`, `yuv_to_rgb`): it serves to
+    /// check that the computation on the GPU (f32) is effectively
+    /// that formula, not a silently different approximation
+    /// (REFACTOR_PIPELINE.md §5, frame accuracy is non-negotiable).
     fn yuv_to_rgb_reference(y: u8, u: u8, v: u8, matrix: ColorMatrix, full_range: bool) -> [u8; 3] {
         let (y_n, u_n, v_n) = if full_range {
             (
@@ -1383,17 +1383,17 @@ mod tests {
         let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(8, 8));
 
         assert_eq!(out.len(), 8 * 8 * 4);
-        // Croma neutra (128) e range full: Y=128 mappa a R=G=B=128 a
-        // meno di un residuo di quantizzazione (vedi assert_close_rgba).
+        // Neutral chroma (128) and full range: Y=128 maps to R=G=B=128 within
+        // a quantization residue (see assert_close_rgba).
         for px in out.as_chunks::<4>().0 {
             assert_close_rgba(*px, [128, 128, 128, 255]);
         }
     }
 
-    /// Verifica la formula di conversione stessa (non solo che "un
-    /// colore passa"): per ogni matrice/range, l'output della GPU deve
-    /// combaciare con la stessa formula calcolata su CPU, a meno di un
-    /// piccolo scarto di arrotondamento f32-vs-f64.
+    /// Checks the conversion formula itself (not just that "a
+    /// color gets through"): for every matrix/range, the GPU output must
+    /// match the same formula computed on the CPU, within a
+    /// small f32-vs-f64 rounding difference.
     #[test]
     fn yuv_to_rgb_matches_the_reference_formula_across_matrices_and_ranges() {
         let compositor = Compositor::new_headless();
@@ -1405,8 +1405,8 @@ mod tests {
             (ColorMatrix::Bt2020, false),
             (ColorMatrix::Bt2020, true),
         ];
-        // Y/U/V non degeneri (non tutti a metà scala): esercita davvero
-        // la matrice invece di ridursi a un grigio neutro.
+        // Non-degenerate Y/U/V (not all at half scale): really exercises
+        // the matrix instead of reducing to a neutral grey.
         let (y, u, v) = (100u8, 90u8, 180u8);
 
         for (matrix, full_range) in cases {
@@ -1423,16 +1423,16 @@ mod tests {
         }
     }
 
-    /// Il crop taglia e basta: quel che resta continua a cadere dov'era
-    /// nel frame, non viene ricentrato né ingrandito per riempirlo (dove è
-    /// stato tagliato si vede il layer sotto, qui il nero del clear).
+    /// The crop just cuts: what is left keeps falling where it was
+    /// in the frame, it is not recentered nor enlarged to fill it (where it was
+    /// cut the layer below shows, here the black of the clear).
     #[test]
     fn crop_cuts_without_moving_what_is_left() {
         let compositor = Compositor::new_headless();
         let input = quadrant_frame();
 
         let transform = Transform {
-            crop: [0.0, 0.0, 2.0, 2.0], // via metà destra e metà bassa (2 px su 4)
+            crop: [0.0, 0.0, 2.0, 2.0], // away with the right half and the bottom half (2 px of 4)
             zoom: [1.0, 1.0],
             position: [0.0, 0.0],
             ..Transform::default()
@@ -1443,7 +1443,7 @@ mod tests {
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
 
-        // Croma neutra: R combacia esattamente con la Y del quadrante (40).
+        // Neutral chroma: R matches the quadrant's Y exactly (40).
         assert_close_rgba(pixel(4, 4), [40, 40, 40, 255]);
         assert_eq!(pixel(12, 4), [0, 0, 0, 255], "alto-destra: tagliato");
         assert_eq!(pixel(4, 12), [0, 0, 0, 255], "basso-sinistra: tagliato");
@@ -1481,7 +1481,7 @@ mod tests {
             let i = (y * 32 + x) * 4;
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
-        // 8:16 in 32:16 -> contenuto largo 8 px, centrato: colonne 12..20.
+        // 8:16 into 32:16 -> content 8 px wide, centered: columns 12..20.
         assert_eq!(pixel(0, 8), [0, 0, 0, 255]);
         assert_eq!(pixel(31, 8), [0, 0, 0, 255]);
         assert_close_rgba(pixel(16, 8), [255, 255, 255, 255]);
@@ -1502,9 +1502,9 @@ mod tests {
         }
     }
 
-    /// Lo zoom ingrandisce la clip *rispetto al frame di output*: una 9:16
-    /// zoomata abbastanza arriva a coprire tutto un frame 16:9, bande
-    /// comprese (caso segnalato dall'utente).
+    /// The zoom enlarges the clip *relative to the output frame*: a 9:16
+    /// zoomed enough comes to cover a whole 16:9 frame, bars
+    /// included (case reported by the user).
     #[test]
     fn zoom_enlarges_the_clip_until_it_covers_the_whole_output_frame() {
         let compositor = Compositor::new_headless();
@@ -1515,7 +1515,7 @@ mod tests {
 
         let transform = Transform {
             crop: [0.0; 4],
-            zoom: [5.0, 5.0], // > 32/16 : 8/16, cioè il fattore che copre la larghezza
+            zoom: [5.0, 5.0], // > 32/16 : 8/16, i.e. the factor covering the width
             position: [0.0, 0.0],
             ..Transform::default()
         };
@@ -1525,8 +1525,8 @@ mod tests {
         }
     }
 
-    /// La posizione sposta la clip *dentro* il frame, non il contenuto
-    /// dentro la clip.
+    /// The position moves the clip *inside* the frame, not the content
+    /// inside the clip.
     #[test]
     fn position_moves_the_clip_inside_the_output_frame() {
         let compositor = Compositor::new_headless();
@@ -1535,7 +1535,7 @@ mod tests {
         let transform = Transform {
             crop: [0.0; 4],
             zoom: [1.0, 1.0],
-            position: [8.0, 0.0], // mezzo frame a destra (output 16x16)
+            position: [8.0, 0.0], // half a frame to the right (output 16x16)
             ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
@@ -1548,8 +1548,8 @@ mod tests {
         assert_close_rgba(pixel(14, 8), [255, 255, 255, 255]);
     }
 
-    /// Rotazione di 90°: il quadrante alto-sinistra finisce in alto a
-    /// destra (rotazione oraria), e su un output quadrato non si deforma.
+    /// 90° rotation: the top-left quadrant ends up at the top
+    /// right (clockwise rotation), and on a square output it is not deformed.
     #[test]
     fn rotation_turns_the_clip_clockwise_around_its_center() {
         let compositor = Compositor::new_headless();
@@ -1568,15 +1568,15 @@ mod tests {
         assert_close_rgba(pixel(4, 4), [160, 160, 160, 255]);
     }
 
-    /// L'anchor point sposta il pivot dello zoom: zoomando attorno
-    /// all'angolo alto-sinistra della clip, quell'angolo resta fermo.
+    /// The anchor point moves the zoom pivot: zooming around
+    /// the top-left corner of the clip, that corner stays put.
     #[test]
     fn zoom_scales_around_the_anchor_point() {
         let compositor = Compositor::new_headless();
         let input = quadrant_frame();
         let transform = Transform {
             zoom: [2.0, 2.0],
-            anchor: [-8.0, 8.0], // angolo alto-sinistra della clip (output 16x16)
+            anchor: [-8.0, 8.0], // top-left corner of the clip (output 16x16)
             ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
@@ -1585,27 +1585,27 @@ mod tests {
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
 
-        // Con il pivot sull'angolo alto-sinistra della clip, il quadrante
-        // alto-sinistra si allarga fino a coprire da solo tutto il frame:
-        // con il pivot al centro, a (10, 10) si vedrebbe invece il
-        // quadrante basso-destra.
+        // With the pivot on the top-left corner of the clip, the top-left
+        // quadrant widens until it covers the whole frame by itself:
+        // with the pivot at the center, at (10, 10) one would instead see the
+        // bottom-right quadrant.
         assert_close_rgba(pixel(2, 2), [40, 40, 40, 255]);
         assert_close_rgba(pixel(10, 10), [40, 40, 40, 255]);
     }
 
-    /// Posizione e anchor sono in pixel *di timeline*: l'anteprima compone
-    /// a risoluzione ridotta (proxy), ma una clip spostata di mezzo frame
-    /// resta spostata di mezzo frame.
+    /// Position and anchor are in *timeline* pixels: the preview composes
+    /// at reduced resolution (proxy), but a clip moved by half a frame
+    /// stays moved by half a frame.
     #[test]
     fn position_is_in_timeline_pixels_whatever_the_output_resolution() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false);
         let transform = Transform {
-            position: [960.0, 0.0], // mezzo frame su una timeline 1920x1080
+            position: [960.0, 0.0], // half a frame on a 1920x1080 timeline
             ..Transform::default()
         };
-        // Output a 1/120 della timeline: la clip deve comunque partire da
-        // metà frame.
+        // Output at 1/120 of the timeline: the clip must still start from
+        // half the frame.
         let out = compositor.render_frame(
             &input.as_yuv_frame(),
             &transform,
@@ -1620,15 +1620,15 @@ mod tests {
         assert_close_rgba(pixel(13, 4), [255, 255, 255, 255]);
     }
 
-    /// Il crop è in pixel del media alla sua risoluzione nativa: su un
-    /// proxy (frame decodificato più piccolo) taglia la stessa porzione.
+    /// The crop is in media pixels at its native resolution: on a
+    /// proxy (smaller decoded frame) it cuts the same portion.
     #[test]
     fn crop_is_in_native_source_pixels_even_on_a_proxy_frame() {
         let compositor = Compositor::new_headless();
-        // Frame decodificato 4x4 per un media nativo 1920x1080.
+        // 4x4 decoded frame for a 1920x1080 native media.
         let input = quadrant_frame();
         let transform = Transform {
-            crop: [0.0, 0.0, 960.0, 540.0], // via metà destra e metà bassa
+            crop: [0.0, 0.0, 960.0, 540.0], // away with the right half and the bottom half
             ..Transform::default()
         };
         let out = compositor.render_layers(
@@ -1651,13 +1651,13 @@ mod tests {
         assert_eq!(pixel(12, 12), [0, 0, 0, 255]);
     }
 
-    /// L'asse Y è quello di un NLE, non quello delle uv: positivo = in alto.
+    /// The Y axis is an NLE's, not the uv one: positive = up.
     #[test]
     fn a_positive_y_position_lifts_the_clip() {
         let compositor = Compositor::new_headless();
         let input = quadrant_frame();
         let transform = Transform {
-            position: [0.0, 8.0], // mezzo frame in su (output 16x16)
+            position: [0.0, 8.0], // half a frame up (output 16x16)
             ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
@@ -1666,8 +1666,8 @@ mod tests {
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
 
-        // Alzata di mezzo frame: in alto resta la metà bassa della clip, in
-        // basso non c'è più niente.
+        // Raised by half a frame: at the top the bottom half of the clip remains, at the
+        // bottom there is nothing left.
         assert_close_rgba(pixel(4, 4), [160, 160, 160, 255]);
         assert_eq!(pixel(4, 12), [0, 0, 0, 255]);
     }
@@ -1690,22 +1690,22 @@ mod tests {
         assert_close_rgba(pixel(4, 4), [100, 100, 100, 255]);
     }
 
-    /// La sfumatura agisce sull'alpha: sul bordo del crop il layer diventa
-    /// via via trasparente invece di tagliare di netto. Negativa = verso
-    /// l'interno del crop.
+    /// The softness acts on the alpha: at the crop edge the layer becomes
+    /// progressively transparent instead of cutting sharply. Negative = towards
+    /// the inside of the crop.
     #[test]
     fn negative_crop_softness_fades_inward_from_the_edge() {
         let compositor = Compositor::new_headless();
         let input = solid_frame(16, 16, 235, 128, 128, ColorMatrix::Bt709, false);
         let transform = Transform {
-            crop: [0.0, 0.0, 8.0, 0.0], // via la metà destra (8 px su 16)
+            crop: [0.0, 0.0, 8.0, 0.0], // away with the right half (8 px of 16)
             crop_softness: -1.6,
             ..Transform::default()
         };
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
 
-        // Clear nero sotto: più ci si avvicina al bordo del crop, più scuro.
+        // Black clear below: the closer to the crop edge, the darker.
         assert!(luma(4, 8) > 200, "lontano dal bordo: pieno");
         assert!(
             luma(7, 8) < luma(6, 8) && luma(6, 8) < luma(4, 8),
@@ -1717,8 +1717,8 @@ mod tests {
         assert_eq!(luma(9, 8), 0, "oltre il crop non si sfuma, si taglia");
     }
 
-    /// Sfumatura positiva: la rampa cade *oltre* il bordo di crop, quindi
-    /// si vede solo dove qualcosa è stato tagliato.
+    /// Positive softness: the ramp falls *past* the crop edge, so
+    /// it shows only where something was cut.
     #[test]
     fn positive_crop_softness_fades_outward_past_the_edge() {
         let compositor = Compositor::new_headless();
@@ -1741,13 +1741,13 @@ mod tests {
         assert_eq!(luma(12, 8), 0, "oltre la rampa non resta nulla");
     }
 
-    /// Il caso segnalato dall'utente: clip 9:16 in cima a una 16:9 in una
-    /// timeline 16:9 — sulle bande laterali si deve vedere la clip sotto,
-    /// non il nero.
+    /// The case reported by the user: a 9:16 clip on top of a 16:9 one in a
+    /// 16:9 timeline — on the side bars the clip below must show,
+    /// not black.
     #[test]
     fn side_bars_of_the_top_layer_show_the_layer_below() {
         let compositor = Compositor::new_headless();
-        // Bianco sotto (16:8 come l'output), nero sopra (8:16, stretto).
+        // White below (16:8 like the output), black above (8:16, narrow).
         let below = solid_frame(32, 16, 235, 128, 128, ColorMatrix::Bt709, false);
         let above = solid_frame(8, 16, 16, 128, 128, ColorMatrix::Bt709, false);
         let out = compositor.render_layers(
@@ -1808,8 +1808,8 @@ mod tests {
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
     }
 
-    /// Il filtro bianco e nero converte in luma qualunque tipo di layer,
-    /// non solo il video.
+    /// The black and white filter converts any kind of layer to luma,
+    /// not just video.
     #[test]
     fn grayscale_flattens_a_solid_layer_to_its_luma() {
         let compositor = Compositor::new_headless();
@@ -1905,17 +1905,17 @@ mod tests {
         a: 1.0,
     };
 
-    /// Comporre in un intermedio (la timeline annidata di una compound
-    /// clip) e riusarlo come `Layer::Texture` deve dare gli stessi pixel
-    /// che comporre i suoi layer direttamente: l'alpha-over è associativo,
-    /// e il round-trip attraverso la texture non deve introdurre
-    /// differenze.
+    /// Composing into an intermediate (the nested timeline of a compound
+    /// clip) and reusing it as a `Layer::Texture` must give the same pixels
+    /// as composing its layers directly: alpha-over is associative,
+    /// and the round-trip through the texture must not introduce
+    /// differences.
     #[test]
     fn a_texture_layer_composites_like_the_layers_it_was_made_of() {
         let compositor = Compositor::new_headless();
         let output = OutputFrame::exact(16, 16);
-        // Zoom < 1: attorno al rosso resta scoperto, cioè trasparente
-        // nell'intermedio — è la parte che deve lasciar vedere il blu.
+        // Zoom < 1: around the red it stays uncovered, i.e. transparent
+        // in the intermediate — it is the part that must let the blue show.
         let inner = Transform {
             zoom: [0.5, 0.5],
             ..Transform::default()
@@ -1960,10 +1960,10 @@ mod tests {
         }
     }
 
-    /// Un intermedio è composto su sfondo trasparente con
-    /// `ALPHA_BLENDING`, quindi il suo colore è già moltiplicato per
-    /// l'alpha: riusarlo come layer senza dividerlo lo attenuerebbe una
-    /// seconda volta (alpha al quadrato sui bordi e sulle dissolvenze).
+    /// An intermediate is composed onto a transparent background with
+    /// `ALPHA_BLENDING`, so its color is already multiplied by the
+    /// alpha: reusing it as a layer without dividing it out would attenuate it a
+    /// second time (alpha squared on the edges and on the fades).
     #[test]
     fn a_semitransparent_texture_layer_is_not_faded_twice() {
         let compositor = Compositor::new_headless();
@@ -1998,13 +1998,13 @@ mod tests {
             ],
             output,
         );
-        // Rosso al 50% sopra il bianco. Con la doppia moltiplicazione il
-        // rosso scenderebbe a ~191.
+        // Red at 50% over white. With the double multiplication the
+        // red would drop to ~191.
         assert_close_rgba(out.as_chunks::<4>().0[0], [255, 128, 128, 255]);
     }
 
-    /// L'intermedio torna nel suo pool appena chi lo usa lo lascia andare,
-    /// e il render successivo lo ritrova invece di allocare.
+    /// The intermediate goes back to its pool as soon as whoever uses it lets it go,
+    /// and the next render finds it again instead of allocating.
     #[test]
     fn an_owned_texture_returns_to_the_pool_when_dropped() {
         let compositor = Compositor::new_headless();
@@ -2019,9 +2019,9 @@ mod tests {
         assert!(compositor.scratch.lock().unwrap().is_empty(), "ripresa dal pool, non allocata");
     }
 
-    /// `render_layers_to_owned_texture_transparent` non rimette la texture
-    /// nel pool: un render successivo della stessa dimensione non deve
-    /// disegnarci sopra, o il frame annidato conservato si corromperebbe.
+    /// `render_layers_to_owned_texture_transparent` does not put the texture
+    /// back into the pool: a later render of the same size must not
+    /// draw over it, or the retained nested frame would be corrupted.
     #[test]
     fn an_owned_texture_is_not_recycled_by_the_next_render() {
         let compositor = Compositor::new_headless();
@@ -2059,8 +2059,8 @@ mod tests {
     #[test]
     fn a_solid_layer_is_cropped_and_moved_like_a_video_layer() {
         let compositor = Compositor::new_headless();
-        // Crop in pixel di timeline: metà destra tagliata, poi spostata
-        // di un quarto a destra.
+        // Crop in timeline pixels: right half cut, then moved
+        // a quarter to the right.
         let out = compositor.render_layers(
             &[Layer::Solid {
                 color: RED,
@@ -2081,12 +2081,12 @@ mod tests {
         assert_eq!(px(6, 2), &[0, 0, 0, 255], "oltre il crop");
     }
 
-    /// L'opacità del layer (dissolvenze di clip) attenua l'alpha con cui si
-    /// compone sul layer sotto, sia per il video sia per un colore pieno.
+    /// The layer opacity (clip fades) attenuates the alpha it composes with
+    /// onto the layer below, both for video and for a solid color.
     #[test]
     fn layer_opacity_blends_with_what_is_below() {
         let compositor = Compositor::new_headless();
-        let below = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false); // bianco
+        let below = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false); // white
         let out = compositor.render_layers(
             &[
                 Layer::Video {
@@ -2110,9 +2110,9 @@ mod tests {
         let px = |out: &[u8], x: usize, y: usize| -> [u8; 4] {
             out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].try_into().unwrap()
         };
-        assert_close_rgba(px(&out, 2, 2), [255, 127, 127, 255]); // 50% rosso su bianco = rosa
+        assert_close_rgba(px(&out, 2, 2), [255, 127, 127, 255]); // 50% red over white = pink
 
-        // Opacità 0: il layer sopra non si vede affatto.
+        // Opacity 0: the layer above is not visible at all.
         let out = compositor.render_layers(
             &[
                 Layer::Video {
@@ -2143,7 +2143,7 @@ mod tests {
             }],
             OutputFrame::exact(5, 3),
         );
-        // Croma 3x2; 15 + 6 + 6 = 27 byte, non multiplo di 4.
+        // Chroma 3x2; 15 + 6 + 6 = 27 bytes, not a multiple of 4.
         let mut expected = vec![63u8; 15];
         expected.extend([102; 6]);
         expected.extend([240; 6]);
@@ -2179,11 +2179,11 @@ mod tests {
         assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[0, 0, 0, 255]));
     }
 
-    /// `render_layers_rgba_transparent` è quel che compone la timeline
-    /// annidata di una compound clip: le zone senza nulla sopra devono
-    /// restare trasparenti (alpha 0), non nere come per il video finale —
-    /// altrimenti coprirebbero quel che c'è sotto quando la compound clip
-    /// diventa a sua volta un layer altrove.
+    /// `render_layers_rgba_transparent` is what composes the nested
+    /// timeline of a compound clip: the areas with nothing above must
+    /// stay transparent (alpha 0), not black as for the final video —
+    /// otherwise they would cover what is below when the compound clip
+    /// becomes a layer elsewhere in turn.
     #[test]
     fn no_layers_renders_fully_transparent_with_the_transparent_variant() {
         let compositor = Compositor::new_headless();
@@ -2194,7 +2194,7 @@ mod tests {
     #[test]
     fn render_layers_rgba_transparent_leaves_uncovered_areas_transparent_not_black() {
         let compositor = Compositor::new_headless();
-        // Crop in pixel di timeline: metà destra tagliata via.
+        // Crop in timeline pixels: right half cut away.
         let out = compositor.render_layers_rgba_transparent(
             &[Layer::Solid {
                 color: RED,
@@ -2213,16 +2213,16 @@ mod tests {
         assert_eq!(px(12, 4), &[0, 0, 0, 0], "scoperto: trasparente, non nero");
     }
 
-    /// Il meccanismo con cui una compound clip già composta ritorna un
-    /// layer altrove: `YuvFrame::alpha` porta la vera copertura per pixel,
-    /// non solo il moltiplicatore uniforme `opacity` — dove vale 0 deve
-    /// lasciar vedere quel che c'è sotto, esattamente come farebbe un
-    /// buco della timeline annidata da cui viene.
+    /// The mechanism by which an already composed compound clip comes back as a
+    /// layer elsewhere: `YuvFrame::alpha` carries the real per-pixel coverage,
+    /// not just the uniform `opacity` multiplier — where it is 0 it must
+    /// let what is below show, exactly as a hole in the nested timeline
+    /// it comes from would.
     #[test]
     fn a_videos_own_alpha_plane_lets_the_layer_below_show_through() {
         let compositor = Compositor::new_headless();
-        let frame = solid_frame(4, 4, 255, 128, 128, ColorMatrix::Bt709, true); // bianco
-        // Sinistra opaca, destra trasparente.
+        let frame = solid_frame(4, 4, 255, 128, 128, ColorMatrix::Bt709, true); // white
+        // Left opaque, right transparent.
         let alpha: Vec<u8> = (0..16u32).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
         let out = compositor.render_layers(
             &[Layer::Video {
@@ -2255,13 +2255,13 @@ mod tests {
         assert_eq!(out.len(), 37 * 21 * 4);
     }
 
-    /// Legge indietro una texture creata da questo stesso `Compositor`
-    /// (stesso device/queue) — non fa parte dell'API pubblica, serve solo
-    /// a verificare nel test che il path zero-copy produca esattamente
-    /// gli stessi byte del path con readback: un cambio di sola
-    /// performance non deve alterare un solo pixel di quel che viene
-    /// mostrato (REFACTOR_PIPELINE.md §5, accuratezza del frame non
-    /// negoziabile).
+    /// Reads back a texture created by this same `Compositor`
+    /// (same device/queue) — it is not part of the public API, it only serves
+    /// to check in the test that the zero-copy path produces exactly
+    /// the same bytes as the readback path: a performance-only
+    /// change must not alter a single pixel of what is
+    /// shown (REFACTOR_PIPELINE.md §5, frame accuracy is
+    /// non-negotiable).
     fn read_back(compositor: &Compositor, texture: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
         let unpadded_bytes_per_row = w * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -2338,8 +2338,8 @@ mod tests {
         );
     }
 
-    /// I metodi di composizione diversi da Normal leggono lo stack già
-    /// composto e ci applicano la loro formula, canale per canale.
+    /// The compositing methods other than Normal read the already composed
+    /// stack and apply their formula to it, channel by channel.
     #[test]
     fn a_blend_mode_combines_the_layer_with_what_is_below() {
         let compositor = Compositor::new_headless();
@@ -2375,9 +2375,9 @@ mod tests {
         assert_close_rgba(blended(BlendMode::Subtract), [0, 0, 0, 255]);
     }
 
-    /// Un layer in blend non cancella lo sfondo dove non copre: fuori dal
-    /// crop resta quel che c'era sotto (la pipeline in REPLACE scriverebbe
-    /// zeri se lo shader non ricomponesse il backdrop).
+    /// A blended layer does not erase the background where it does not cover: outside the
+    /// crop what was below remains (the REPLACE pipeline would write
+    /// zeros if the shader did not recompose the backdrop).
     #[test]
     fn a_blended_layer_leaves_the_backdrop_where_it_does_not_cover() {
         let compositor = Compositor::new_headless();
@@ -2393,7 +2393,7 @@ mod tests {
                 },
                 Layer::Solid {
                     color: WHITE,
-                    // Via la metà destra: lì deve restare il blu.
+                    // Away with the right half: the blue must remain there.
                     transform: Transform {
                         crop: [0.0, 0.0, 8.0, 0.0],
                         ..Transform::default()
@@ -2410,8 +2410,8 @@ mod tests {
         assert_close_rgba(pixels[12], [0, 0, 255, 255]);
     }
 
-    /// Il primo layer di uno stack può essere in blend: il clear va fatto
-    /// prima, o il backdrop che legge sarebbe il frame precedente.
+    /// The first layer of a stack can be blended: the clear must happen
+    /// first, or the backdrop it reads would be the previous frame.
     #[test]
     fn the_first_layer_can_be_blended_over_the_clear() {
         let compositor = Compositor::new_headless();
@@ -2426,7 +2426,7 @@ mod tests {
             }],
             output,
         );
-        // Screen su nero (il clear) lascia il colore com'è.
+        // Screen over black (the clear) leaves the color as it is.
         assert_close_rgba(out.as_chunks::<4>().0[0], [255, 0, 0, 255]);
     }
 

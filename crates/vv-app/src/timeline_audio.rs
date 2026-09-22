@@ -1,7 +1,7 @@
-//! Audio e clock del playback della timeline: il mixer suona tutte le track
-//! audio e la sua posizione è il playhead. In fast forward suona finestre
-//! del mix già stretchate in background. Senza device audio il clock è a
-//! parete e non suona nulla.
+//! Audio and playback clock of the timeline: the mixer plays all the audio
+//! tracks and its position is the playhead. In fast forward it plays windows
+//! of the mix already stretched in the background. Without an audio device
+//! the clock is wall time and nothing plays.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,14 +18,14 @@ use crate::mix_buffers::MixBufferCache;
 
 const SCRUB_SNIPPET: Duration = Duration::from_millis(80);
 
-/// Durata (frame audio di timeline) di ogni finestra stretchata: stretchare
-/// tutto in un colpo ritarderebbe di secondi il primo suono, 8s tornano in
-/// ~150-200ms. Multiplo di ogni tempo (2/4/8) così la finestra stretchata
-/// ha una lunghezza esatta e le finestre accodate non derivano.
+/// Duration (timeline audio frames) of each stretched window: stretching
+/// everything in one go would delay the first sound by seconds, 8s come back
+/// in ~150-200ms. A multiple of every tempo (2/4/8) so the stretched window
+/// has an exact length and the queued windows do not drift.
 const WINDOW_FRAMES: u64 = 8 * PROJECT_SAMPLE_RATE as u64;
 
-/// Audio non ancora suonato sotto cui si accoda la finestra successiva:
-/// a 8x sono 0.5s reali contro ~200ms di stretch.
+/// Unplayed audio below which the next window is queued: at 8x it is 0.5s
+/// real time against ~200ms of stretching.
 const EXTEND_MARGIN_FRAMES: u64 = 4 * PROJECT_SAMPLE_RATE as u64;
 
 #[derive(Clone, Copy)]
@@ -33,7 +33,7 @@ struct StretchRequest {
     id: u64,
     tempo: u64,
     start: u64,
-    /// `false`: estende la finestra corrente invece di sostituirla.
+    /// `false`: extends the current window instead of replacing it.
     new_window: bool,
 }
 
@@ -48,17 +48,17 @@ pub struct TimelineAudio {
     mix: Arc<MixSnapshot>,
     stretched: Option<StretchedWindow>,
     playing: bool,
-    /// Velocità effettiva: una richiesta di fast forward si applica solo
-    /// quando la sua prima finestra è pronta.
+    /// Effective speed: a fast forward request applies only when its first
+    /// window is ready.
     speed: f64,
     wall_base_sample: u64,
     wall_started_at: Option<Instant>,
-    /// Fine del frammento di scrub e posizione da ripristinare.
+    /// End of the scrub fragment and position to restore.
     scrub_snippet: Option<(Instant, u64)>,
     synced: Option<(TimelineId, u64)>,
-    /// Media dell'anteprima del media pool attualmente nello snapshot.
+    /// Media of the media pool preview currently in the snapshot.
     synced_media: Option<PathBuf>,
-    /// Al più uno stretch in volo; un risultato con altro id è superato.
+    /// At most one stretch in flight; a result with another id is stale.
     stretch_request: Option<StretchRequest>,
     next_request_id: u64,
     stretch_tx: mpsc::Sender<StretchResult>,
@@ -95,8 +95,8 @@ impl TimelineAudio {
         self.mix.channels
     }
 
-    /// Da chiamare a ogni frame: ricostruisce lo snapshot del mix se il
-    /// progetto è cambiato o sono arrivati nuovi buffer decodificati.
+    /// To be called every frame: rebuilds the mix snapshot if the project
+    /// changed or new decoded buffers arrived.
     pub fn sync(&mut self, project: &Project, timeline_id: TimelineId, generation: u64) {
         let buffers_arrived = self.buffers.poll();
         if !buffers_arrived && self.synced == Some((timeline_id, generation)) {
@@ -111,10 +111,10 @@ impl TimelineAudio {
             return;
         };
         let (rate, channels) = (self.mix.sample_rate, self.mix.channels);
-        // Calcolati prima, non da una chiusura: `get_or_compute_compound`
-        // vuole `&mut self.buffers` quanto `get_or_request` sotto, e le due
-        // non possono essere due chiusure vive sulla stessa cache insieme
-        // (vedi doc di `MixBufferCache::get_or_compute_compound`).
+        // Computed beforehand, not from a closure: `get_or_compute_compound`
+        // wants `&mut self.buffers` just like `get_or_request` below, and the
+        // two cannot be two closures alive on the same cache at once
+        // (see the docs of `MixBufferCache::get_or_compute_compound`).
         let mut compound_buffers: HashMap<MediaId, Arc<Vec<f32>>> = HashMap::new();
         for (_, track) in timeline.audible_tracks() {
             for clip in track.clips.iter().filter(|c| !c.disabled) {
@@ -141,8 +141,8 @@ impl TimelineAudio {
         self.publish();
     }
 
-    /// Come `sync`, ma per l'anteprima di un media: suona tutti i suoi
-    /// `audio_streams` da inizio file, senza timeline.
+    /// Like `sync`, but for the preview of a media: plays all its
+    /// `audio_streams` from the start of the file, without a timeline.
     pub fn sync_media(&mut self, path: &Path, audio_streams: usize, fps: f64) {
         let buffers_arrived = self.buffers.poll();
         if !buffers_arrived && self.synced_media.as_deref() == Some(path) {
@@ -184,7 +184,7 @@ impl TimelineAudio {
         }
     }
 
-    /// Il mix che il callback suonerebbe da `frame` a 1x, per i test.
+    /// The mix the callback would play from `frame` at 1x, for the tests.
     #[cfg(test)]
     pub fn render(&self, frame: FrameIdx, fps: f64, len_frames: FrameIdx) -> Vec<f32> {
         let rate = self.mix.sample_rate;
@@ -195,7 +195,7 @@ impl TimelineAudio {
         out
     }
 
-    /// Picco dell'audio stretchato caricato, per i test.
+    /// Peak of the loaded stretched audio, for the tests.
     #[cfg(test)]
     pub fn stretched_peak(&self) -> Option<f32> {
         let window = self.stretched.as_ref()?;
@@ -208,8 +208,8 @@ impl TimelineAudio {
         self.buffers.has_pending()
     }
 
-    /// Forza la ricostruzione dello snapshot al prossimo `sync` (es. progetto
-    /// sostituito senza passare dalla history).
+    /// Forces a snapshot rebuild on the next `sync` (e.g. project replaced
+    /// without going through the history).
     pub fn invalidate(&mut self) {
         self.synced = None;
     }
@@ -257,8 +257,8 @@ impl TimelineAudio {
         if let Some(window) = &self.stretched
             && !(window.origin..window.covered_until(channels)).contains(&sample)
         {
-            // Fuori finestra: si riparte da lì. Nell'attesa il clock avanza
-            // in silenzio alla stessa velocità, senza riaprire lo stream.
+            // Outside the window: restart from there. While waiting the clock
+            // advances silently at the same speed, without reopening the stream.
             let tempo = match self.stretch_request {
                 Some(req) if req.new_window => req.tempo,
                 _ => window.tempo,
@@ -297,8 +297,8 @@ impl TimelineAudio {
         self.speed
     }
 
-    /// 1x si applica subito; 2x/4x/8x quando la prima finestra stretchata è
-    /// pronta (intanto si prosegue alla velocità corrente).
+    /// 1x applies immediately; 2x/4x/8x when the first stretched window is
+    /// ready (meanwhile playback continues at the current speed).
     pub fn request_speed(&mut self, speed: f64) {
         let tempo = speed.round().max(1.0) as u64;
         if self.mixer.is_none() {
@@ -371,7 +371,7 @@ impl TimelineAudio {
             let channels = self.channels();
             if request.new_window {
                 let pos = self.position_sample();
-                // Mentre si stretchava il playhead è andato oltre, o è stato spostato.
+                // While stretching, the playhead moved past it, or was moved.
                 if !(request.start..request.start + WINDOW_FRAMES).contains(&pos) {
                     self.request_window(request.tempo, pos, true);
                     continue;
@@ -397,8 +397,8 @@ impl TimelineAudio {
         }
     }
 
-    /// Scarta le finestre già suonate: in un fast forward lungo si
-    /// accumulerebbero.
+    /// Discards the windows already played: in a long fast forward they
+    /// would pile up.
     fn drop_played_chunks(&mut self) {
         let channels = self.channels().max(1) as usize;
         let pos = self.position_sample();
@@ -428,8 +428,8 @@ impl TimelineAudio {
         }
     }
 
-    /// Breve frammento dalla posizione corrente senza entrare in
-    /// riproduzione. No-op se si sta già riproducendo o senza device.
+    /// Short fragment from the current position without entering playback.
+    /// No-op if already playing or without a device.
     pub fn play_scrub_snippet(&mut self) {
         if self.playing {
             return;
@@ -524,8 +524,8 @@ mod tests {
         assert!(paused_pos >= playing_pos);
     }
 
-    /// Finché la prima finestra non è pronta si resta a 1x; quando arriva la
-    /// testina continua da dove è arrivata, non da dove era alla richiesta.
+    /// Until the first window is ready playback stays at 1x; when it arrives the
+    /// playhead continues from where it got to, not from where it was at the request.
     #[test]
     fn fast_forward_applies_when_the_first_window_is_ready_without_jumping_back() {
         let mut audio = TimelineAudio::new();
@@ -587,8 +587,8 @@ mod tests {
         assert_window_extends_seamlessly(8.0);
     }
 
-    /// Seek fuori dalla finestra in fast forward: riparte da lì, senza
-    /// tornare a 1x né bloccarsi.
+    /// Seek outside the window during fast forward: restarts from there, without
+    /// going back to 1x nor stalling.
     #[test]
     fn seeking_outside_the_window_restarts_fast_forward_from_there() {
         let mut audio = TimelineAudio::new();

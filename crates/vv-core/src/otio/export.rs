@@ -1,7 +1,7 @@
-//! `source_range` è espresso all'fps della timeline, come `source_offset`/
-//! `timeline_len` (vedi `Clip`): esatto anche per le clip conformate, dove
-//! nell'fps del media l'inizio cadrebbe a metà frame. Quel che OTIO non sa
-//! rappresentare (effetti, gruppi collegati, stream audio) finisce in
+//! `source_range` is expressed at the timeline fps, like `source_offset`/
+//! `timeline_len` (see `Clip`): exact even for conformed clips, where in
+//! the media's fps the start would fall mid-frame. What OTIO cannot
+//! represent (effects, linked groups, audio streams) ends up in
 //! `metadata.venturi`.
 
 use super::OtioError;
@@ -48,7 +48,7 @@ pub fn timeline_to_otio(project: &Project, timeline_id: TimelineId) -> Value {
     })
 }
 
-/// OTIO vuole le track sequenziali: i buchi tra le clip diventano `Gap`.
+/// OTIO wants sequential tracks: the holes between clips become `Gap`s.
 fn track_to_otio(project: &Project, track: &Track, name: String, fps: Rational) -> Value {
     let mut children = Vec::new();
     let mut cursor = 0;
@@ -270,8 +270,8 @@ mod tests {
         assert_eq!(generator["parameters"]["color"], json!([1.0, 0.0, 0.0, 1.0]));
     }
 
-    /// Dopo uno split a metà frame sorgente la metà destra comincia dove
-    /// finisce la sinistra, sia sulla timeline sia nel media.
+    /// After a split mid source frame the right half starts where the left
+    /// one ends, both on the timeline and in the media.
     #[test]
     fn a_split_conformed_clip_exports_contiguous_source_ranges() {
         let (mut project, timeline_id, media) = project();

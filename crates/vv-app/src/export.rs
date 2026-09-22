@@ -1,6 +1,6 @@
-//! Export: cammina la timeline e scrive H.264+AAC con gli stessi layer e
-//! lo stesso mix dell'anteprima. Gira su un thread dedicato, su uno
-//! snapshot del progetto. `EffectStack::speed` non è ancora applicato.
+//! Export: walks the timeline and writes H.264+AAC with the same layers and
+//! the same mix as the preview. Runs on a dedicated thread, on a
+//! snapshot of the project. `EffectStack::speed` is not applied yet.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -21,18 +21,18 @@ use crate::frame_provider::{FrameProvider, GpuCompounds, OwnedLayer, media_sourc
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
-/// Stesso limite e stesso motivo di `MAX_COMPOUND_DEPTH` in
-/// `render_ahead.rs`: da quando la timeline del progetto è anche lei nel
-/// media pool, un ciclo di compound clip è possibile.
+/// Same limit and same reason as `MAX_COMPOUND_DEPTH` in
+/// `render_ahead.rs`: since the project timeline is in the media pool
+/// too, a cycle of compound clips is possible.
 const MAX_COMPOUND_DEPTH: u32 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportSettings {
     pub output_path: PathBuf,
-    /// Percentuale della risoluzione della timeline.
+    /// Percentage of the timeline resolution.
     pub scale_percent: u32,
     pub video: vv_media::VideoSettings,
-    /// `None` = export senza audio.
+    /// `None` = export without audio.
     pub audio: Option<vv_media::AudioSettings>,
 }
 
@@ -48,8 +48,8 @@ impl ExportSettings {
         }
     }
 
-    /// Come `new`, ma con gli encoder più veloci disponibili su questa
-    /// macchina (NVENC, FDK). `new` resta deterministico per i test.
+    /// Like `new`, but with the fastest encoders available on this
+    /// machine (NVENC, FDK). `new` stays deterministic for the tests.
     pub fn preferred(output_path: PathBuf) -> Self {
         let mut settings = Self::new(output_path);
         if vv_media::VideoCodec::Nvenc.is_available() {
@@ -64,8 +64,8 @@ impl ExportSettings {
         settings
     }
 
-    /// Ridotta a dimensioni pari (richiesto dal 4:2:0 degli encoder);
-    /// al 100% resta esattamente quella della timeline.
+    /// Reduced to even dimensions (required by the encoders' 4:2:0);
+    /// at 100% it stays exactly the timeline's.
     pub fn output_size(&self, timeline_size: (u32, u32)) -> (u32, u32) {
         if self.scale_percent >= 100 {
             return timeline_size;
@@ -84,19 +84,19 @@ pub struct ExportProgress {
     pub elapsed: std::time::Duration,
 }
 
-/// Decoder tenuto aperto per la clip video attiva, con seek/riapertura solo
-/// quando la clip cambia (non un decoder nuovo per ogni frame di output:
-/// ogni seek è un flush a keyframe, troppo lento fatto ad ogni frame).
+/// Decoder kept open for the active video clip, with a seek/reopen only
+/// when the clip changes (not a new decoder for every output frame:
+/// every seek is a flush to a keyframe, too slow to do on every frame).
 struct ActiveClipDecoder {
     decoder: vv_media::Decoder,
-    /// Una clip conformata chiede lo stesso frame sorgente su frame di
-    /// timeline consecutivi, e il decoder non torna indietro.
+    /// A conformed clip asks for the same source frame on consecutive
+    /// timeline frames, and the decoder does not go back.
     last: Option<(FrameIdx, Arc<vv_media::FrameYuv420>)>,
 }
 
 impl ActiveClipDecoder {
     fn open_for(path: &Path, target_source_frame: FrameIdx, is_image: bool) -> Result<Self, String> {
-        // `Decoder::open` su un'immagine andrebbe in EOF dopo il primo frame.
+        // `Decoder::open` on an image would hit EOF after the first frame.
         let mut decoder = if is_image {
             vv_media::Decoder::open_image(path)
         } else {
@@ -113,8 +113,8 @@ impl ActiveClipDecoder {
         Ok(me)
     }
 
-    /// Decodifica in avanti fino a `target`; se già raggiunto ridà l'ultimo
-    /// frame. `None` a fine stream.
+    /// Decodes forward up to `target`; if already reached it returns the last
+    /// frame again. `None` at the end of the stream.
     fn advance_to(
         &mut self,
         target: FrameIdx,
@@ -138,12 +138,12 @@ impl ActiveClipDecoder {
     }
 }
 
-/// Decoder tenuti aperti tra un frame e l'altro, riaperti solo al cambio
-/// di clip.
+/// Decoders kept open from one frame to the next, reopened only when the
+/// clip changes.
 #[derive(Default)]
 struct StreamingFrameProvider {
-    /// Uno per clip: più track possono essere attive allo stesso frame.
-    /// Potato da `retain_clips`.
+    /// One per clip: several tracks can be active on the same frame.
+    /// Pruned by `retain_clips`.
     active: HashMap<ClipId, ActiveClipDecoder>,
 }
 
@@ -169,9 +169,9 @@ impl FrameProvider for StreamingFrameProvider {
             .get(media_id)
             .ok_or_else(|| t!("export.error_media_not_found").into_owned())?;
 
-        // Una compound clip non si decodifica: la compone `GpuCompounds`.
-        // Arrivare qui vuol dire che si è fermato al limite di nesting —
-        // niente layer per questa clip, come per un media mancante.
+        // A compound clip is not decoded: `GpuCompounds` composes it.
+        // Getting here means it stopped at the nesting limit —
+        // no layer for this clip, as for a missing media.
         if item.compound.is_some() {
             return Ok(None);
         }
@@ -187,7 +187,7 @@ impl FrameProvider for StreamingFrameProvider {
     }
 }
 
-/// Esporta i frame `range` in `output_path`. Bloccante.
+/// Exports the frames in `range` to `output_path`. Blocking.
 pub fn export_timeline(
     project: &Project,
     timeline_id: TimelineId,
@@ -233,18 +233,18 @@ pub fn export_timeline(
     )
     .map_err(|e| e.to_string())?;
 
-    // Decode, composizione GPU ed encode su tre thread: in serie ognuno
-    // aspettava gli altri e nessuno saturava la macchina.
+    // Decode, GPU composition and encode on three threads: in series each one
+    // waited for the others and none saturated the machine.
     let (decoded_tx, decoded_rx) =
         std::sync::mpsc::sync_channel::<Result<Vec<OwnedLayer>, String>>(RENDER_AHEAD_FRAMES);
     let (composed_tx, composed_rx) =
         std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(RENDER_AHEAD_FRAMES);
     let resolution = timeline.resolution;
     let output = vv_render::OutputFrame::scaled(out_w, out_h, resolution);
-    // Uno solo per i due stadi GPU: la texture di una compound clip nasce
-    // nello stadio di decode e viene campionata in quello di composizione,
-    // quindi devono stare sullo stesso device. Headless, per non contendere
-    // quello della UI.
+    // A single one for the two GPU stages: the texture of a compound clip is born
+    // in the decode stage and sampled in the composition one,
+    // so they must be on the same device. Headless, so as not to contend
+    // with the UI's.
     let compositor = vv_render::Compositor::new_headless();
     let compositor = &compositor;
     std::thread::scope(|scope| {
@@ -263,7 +263,7 @@ pub fn export_timeline(
                 let decoded =
                     decode_video_frame(project, timeline, &mut provider, compositor, frame, resolution);
                 let failed = decoded.is_err();
-                // `send` fallisce solo se lo stadio dopo ha già smesso.
+                // `send` fails only if the next stage has already stopped.
                 if decoded_tx.send(decoded).is_err() || failed {
                     return;
                 }
@@ -281,12 +281,12 @@ pub fn export_timeline(
             }
         });
 
-        // Dentro la closure: se l'encoder esce in errore `composed_rx` va
-        // chiuso prima del join, o gli stadi a monte restano su `send`.
+        // Inside the closure: if the encoder exits with an error `composed_rx` must
+        // be closed before the join, or the upstream stages stay on `send`.
         let composed_rx = composed_rx;
-        // L'audio va scritto man mano col video: tutto in coda al video, il
-        // muxer si tiene in RAM l'intero video e l'interleave diventa
-        // quadratico (minuti su una timeline di pochi minuti).
+        // The audio must be written along with the video: all of it after the video and
+        // the muxer keeps the whole video in RAM and the interleaving becomes
+        // quadratic (minutes on a timeline of a few minutes).
         let mut audio = AudioInterleaver::new(timeline, range.start);
         for frame in range.clone() {
             if cancel.load(Ordering::Relaxed) {
@@ -331,8 +331,8 @@ fn render_video_frame(
     Ok(compose_video_frame(compositor, &layers, output))
 }
 
-/// I layer del frame, dal basso verso l'alto. Un frame media assente
-/// (oltre la fine reale del file) lascia fuori solo quel layer.
+/// The layers of the frame, from bottom to top. A missing media frame
+/// (past the real end of the file) leaves out only that layer.
 fn decode_video_frame(
     project: &Project,
     timeline: &Timeline,
@@ -342,9 +342,9 @@ fn decode_video_frame(
     resolution: (u32, u32),
 ) -> Result<Vec<OwnedLayer>, String> {
     let clips = timeline.active_video_clips_at(frame);
-    // In più delle clip "naturalmente" attive, anche l'altra metà di una
-    // crossing transition in corso: `track_layers_at` la decodifica pure lei,
-    // altrimenti `retain_clips` la chiuderebbe a ogni frame appena aperta.
+    // In addition to the "naturally" active clips, the other half of a
+    // crossing transition in progress too: `track_layers_at` decodes it as well,
+    // otherwise `retain_clips` would close it on every frame as soon as it is opened.
     let mut keep: Vec<ClipId> = clips.iter().map(|(_, c)| c.id).collect();
     for &(track_index, _) in &clips {
         if let Some((left, right, _)) = timeline.tracks[track_index].crossing_at(frame) {
@@ -379,7 +379,7 @@ fn join_audio_mix(
         .expect("thread di mix audio andato in panic")
 }
 
-/// Scrive il mix audio all'encoder a pezzi, allineato ai frame video.
+/// Writes the audio mix to the encoder in pieces, aligned to the video frames.
 struct AudioInterleaver {
     mixed: Option<Vec<f32>>,
     written: usize,
@@ -398,8 +398,8 @@ impl AudioInterleaver {
         }
     }
 
-    /// Scrive i campioni fino all'inizio di `frame` (esclusivo); no-op
-    /// finché il mix non è pronto.
+    /// Writes the samples up to the start of `frame` (exclusive); no-op
+    /// until the mix is ready.
     fn write_until(
         &mut self,
         encoder: &mut vv_media::Encoder,
@@ -421,17 +421,17 @@ impl AudioInterleaver {
     }
 }
 
-/// Mix di tutte le track audio a `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
-/// sui frame `range` di timeline: stessa `mix_range` dell'anteprima.
+/// Mix of all the audio tracks at `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
+/// over the timeline frames in `range`: the same `mix_range` as the preview.
 fn mix_audio_track(
     project: &Project,
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, String> {
-    // Stessa decodifica dell'anteprima (`mix_buffers`): swresample a
-    // `PROJECT_SAMPLE_RATE`, tutti gli stream di un file in una passata.
-    // Ricorsivo: i media veri dentro una compound clip finiscono nella
-    // stessa raccolta, come se fossero clip di `timeline`.
+    // The same decoding as the preview (`mix_buffers`): swresample to
+    // `PROJECT_SAMPLE_RATE`, all the streams of a file in one pass.
+    // Recursive: the real media inside a compound clip end up in the
+    // same collection, as if they were clips of `timeline`.
     let mut streams_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     collect_audio_streams(project, timeline, &mut streams_by_path, 0);
     let mut buffers: HashMap<(PathBuf, usize), Arc<Vec<f32>>> = HashMap::new();
@@ -471,10 +471,10 @@ fn mix_audio_track(
     Ok(mixed)
 }
 
-/// Ogni clip Media di `timeline` (a qualunque profondità di nesting dentro
-/// le compound clip) che referenzia un file vero, raccolta in
-/// `streams_by_path`: una compound clip stessa non genera una voce (il suo
-/// "file" non esiste), solo quel che referenzia la sua timeline annidata.
+/// Every Media clip of `timeline` (at any nesting depth inside the
+/// compound clips) referencing a real file, collected into
+/// `streams_by_path`: a compound clip itself does not generate an entry (its
+/// "file" does not exist), only what its nested timeline references.
 fn collect_audio_streams(
     project: &Project,
     timeline: &Timeline,
@@ -509,12 +509,12 @@ fn collect_audio_streams(
     }
 }
 
-/// Il mixdown della timeline annidata di una compound clip, a
-/// `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`: qui non serve cacharlo (l'export
-/// lo chiede una volta sola per l'intero export) né controllare che i media
-/// veri siano pronti (`buffers` li ha già tutti, decodificati prima di
-/// arrivare qui da `collect_audio_streams`). Ricorsiva per una compound
-/// clip dentro un'altra.
+/// The mixdown of the nested timeline of a compound clip, at
+/// `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`: no caching is needed here (the export
+/// asks for it once for the whole export) nor checking that the real media
+/// are ready (`buffers` already has them all, decoded before getting
+/// here by `collect_audio_streams`). Recursive for a compound clip
+/// inside another.
 fn compound_mix_buffer(
     project: &Project,
     media_id: MediaId,
@@ -567,7 +567,7 @@ mod tests {
         }
     }
 
-    // BT.709 range limitato, come `Compositor::render_layers_i420`.
+    // BT.709 limited range, like `Compositor::render_layers_i420`.
     const BLACK_I420: [u8; 3] = [16, 128, 128];
     const RED_I420: [u8; 3] = [63, 102, 240];
     const BLUE_I420: [u8; 3] = [32, 240, 118];
@@ -633,10 +633,10 @@ mod tests {
         assert_eq!(frame, solid_i420(2, 2, RED_I420));
     }
 
-    /// Una clip video dentro la timeline annidata di una compound clip deve
-    /// comparire nel frame esportato, alla posizione della compound clip
-    /// nella timeline di partenza — non prima/dopo, e non a quella che
-    /// avrebbe nella sua timeline annidata.
+    /// A video clip inside the nested timeline of a compound clip must
+    /// show up in the exported frame, at the position of the compound clip
+    /// in the outer timeline — not before/after, and not at the one it
+    /// would have in its nested timeline.
     #[test]
     fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
         let mut project = Project::default();
@@ -689,15 +689,15 @@ mod tests {
         assert_eq!(during, solid_i420(2, 2, RED_I420), "dentro: il contenuto della timeline annidata");
     }
 
-    /// Bug segnalato dall'utente: una compound clip è una timeline come le
-    /// altre, quindi dove la sua timeline annidata non ha nulla da
-    /// mostrare deve restare trasparente e lasciar vedere la track sotto —
-    /// non coprirla di nero.
+    /// Bug reported by the user: a compound clip is a timeline like any
+    /// other, so where its nested timeline has nothing to show it must
+    /// stay transparent and let the track below show through —
+    /// not cover it with black.
     #[test]
     fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty_area() {
         let mut project = Project::default();
         let mut nested_clip = solid_color_clip(1, 0, 10, red());
-        // Taglia via la metà destra (crop in pixel di timeline, nested 4x2).
+        // Cuts away the right half (crop in timeline pixels, nested 4x2).
         nested_clip.effects.transform = vv_core::TransformTracks::constant(vv_core::Transform {
             crop: [0.0, 0.0, 2.0, 0.0],
             ..Default::default()
@@ -755,21 +755,21 @@ mod tests {
         let mut provider = StreamingFrameProvider::default();
 
         let frame = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (4, 2)).unwrap();
-        // Piano Y, un byte per pixel: sinistra coperta dal rosso della
-        // compound clip, destra scoperta (deve vedersi il blu sotto).
+        // Y plane, one byte per pixel: left covered by the red of the
+        // compound clip, right uncovered (the blue below must show).
         assert_eq!(frame[0], RED_I420[0], "sinistra: il rosso della compound clip");
         assert_eq!(frame[3], BLUE_I420[0], "destra: il blu della track sotto, non nero");
     }
 
-    /// Una PNG con trasparenza importata nel pool deve lasciar vedere la
-    /// track sotto dove è trasparente, non coprirla: la sua alpha va
-    /// conservata dal decode fino al compositing.
+    /// A PNG with transparency imported into the pool must let the track
+    /// below show through where it is transparent, not cover it: its alpha must
+    /// be preserved from decode all the way to compositing.
     #[test]
     fn render_video_frame_lets_the_track_below_show_through_a_transparent_png() {
         let dir = std::env::temp_dir().join("vv-app-export-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("half_transparent.png");
-        // Metà sinistra rossa opaca, metà destra completamente trasparente.
+        // Left half opaque red, right half fully transparent.
         vv_media::test_support::ffmpeg(
             &[
                 "-f",
@@ -834,7 +834,7 @@ mod tests {
     fn render_video_frame_applies_the_transform_to_a_solid_color_clip() {
         let project = Project::default();
         let mut clip = solid_color_clip(1, 0, 5, red());
-        // Crop in pixel di timeline (4x2): via la metà destra.
+        // Crop in timeline pixels (4x2): away with the right half.
         clip.effects.transform = vv_core::TransformTracks::constant(vv_core::Transform {
             crop: [0.0, 0.0, 2.0, 0.0],
             ..Default::default()
@@ -851,12 +851,12 @@ mod tests {
         let mut active = StreamingFrameProvider::default();
         let frame =
             render_video_frame(&project, &tl, &compositor, &mut active, 0, (4, 2)).unwrap();
-        // Prima riga del piano Y.
+        // First row of the Y plane.
         assert_eq!(frame[0], RED_I420[0]);
         assert_eq!(frame[3], BLACK_I420[0]);
     }
 
-    /// Un media assente dal pool è un `Err`, non un frame nero.
+    /// A media missing from the pool is an `Err`, not a black frame.
     #[test]
     fn render_video_frame_fails_loudly_when_the_clip_references_a_missing_media() {
         let missing_media_id = {
@@ -901,7 +901,7 @@ mod tests {
         assert!(err.contains("media not found"), "err={err}");
     }
 
-    /// Dove la track in alto non ha clip si vede quella sotto.
+    /// Where the top track has no clip, the one below shows.
     #[test]
     fn render_video_frame_prefers_the_topmost_video_track() {
         let project = Project::default();
@@ -964,10 +964,10 @@ mod tests {
         assert!(mixed.iter().all(|&s| s == 0.0));
     }
 
-    /// Un file audio vero dentro la timeline annidata di una compound clip
-    /// deve arrivare nel mix dell'export, alla posizione della compound
-    /// clip nella timeline di partenza — non a quella che avrebbe nella sua
-    /// timeline annidata.
+    /// A real audio file inside the nested timeline of a compound clip
+    /// must reach the export mix, at the position of the compound
+    /// clip in the outer timeline — not at the one it would have in its
+    /// nested timeline.
     #[test]
     fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
         let dir = std::env::temp_dir().join("vv-app-export-test");
@@ -1026,7 +1026,7 @@ mod tests {
             content_hash: 2,
             compound: Some(nested_id),
         });
-        // A 25 (1s dopo l'inizio): silenzio prima, sine wave durante.
+        // At 25 (1s after the start): silence before, sine wave during.
         let compound_clip =
             Clip::from_source_range(ClipId(1), ClipSource::Media(compound_media), 0, 25, 25, vv_core::Rational::one());
         let tl = timeline_with(vec![Track {
@@ -1047,11 +1047,11 @@ mod tests {
         );
     }
 
-    /// End-to-end: costruisce una timeline vera (via `VenturiApp`, non
-    /// `Clip`/`Track` a mano) con un vero file video+audio generato da
-    /// ffmpeg CLI (stesso pattern dei test in `main.rs`), esporta, e
-    /// verifica il risultato rileggendolo con `vv_media` — l'unico modo di
-    /// verificare l'export in questo ambiente, senza display.
+    /// End-to-end: builds a real timeline (via `VenturiApp`, not
+    /// `Clip`/`Track` by hand) with a real video+audio file generated by
+    /// the ffmpeg CLI (same pattern as the tests in `main.rs`), exports, and
+    /// checks the result by reading it back with `vv_media` — the only way to
+    /// verify the export in this environment, without a display.
     #[test]
     fn export_timeline_produces_a_playable_file_matching_the_timeline() {
         let dir = std::env::temp_dir().join("vv-app-export-test");
@@ -1109,8 +1109,8 @@ mod tests {
         while decoder.next_frame().unwrap().is_some() {
             count += 1;
         }
-        // ~25fps per 1s, stessa tolleranza già usata per il riordino
-        // encoder B-frame vista nei test di `vv_media::encode`.
+        // ~25fps for 1s, the same tolerance already used for the B-frame
+        // encoder reordering seen in the `vv_media::encode` tests.
         assert!((24..=25).contains(&count), "count={count}");
 
         let audio = vv_media::decode_audio_track(&output_path, 0)
@@ -1120,19 +1120,19 @@ mod tests {
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
     }
 
-    /// Regressione per una segnalazione utente di audio in anticipo
-    /// sul video nell'export (percepito con mpv, 2-3 frame): un flash
-    /// nero->bianco (`ClipSource::SolidColor`, nessun encode/decode video
-    /// in gioco per la sua posizione) e un beep (clip audio vera) che
-    /// iniziano allo stesso frame di timeline, a un fps frazionario NTSC
-    /// (30000/1001) apposta perché `PROJECT_SAMPLE_RATE / fps` non sia un
-    /// intero (a 24fps invece è esattamente 2000, che nasconderebbe un
-    /// bug di arrotondamento) — il caso reale isolato dalla segnalazione
-    /// era già a fps intero, e qui risulta comunque perfettamente in
-    /// sync: se questo test si rompe, il bug è nell'arrotondamento
-    /// frame<->sample di `export.rs`/`encode.rs`/`vv_audio::mixer`, non
-    /// nella causa originale della segnalazione (probabilmente lato
-    /// player, non in questo export).
+    /// Regression for a user report of audio running ahead of the
+    /// video on export (perceived with mpv, 2-3 frames): a black->white
+    /// flash (`ClipSource::SolidColor`, no video encode/decode
+    /// involved in its position) and a beep (a real audio clip) that
+    /// start at the same timeline frame, at a fractional NTSC fps
+    /// (30000/1001) on purpose so that `PROJECT_SAMPLE_RATE / fps` is not an
+    /// integer (at 24fps it is exactly 2000, which would hide a
+    /// rounding bug) — the real case isolated from the report
+    /// was already at an integer fps, and here it comes out perfectly in
+    /// sync anyway: if this test breaks, the bug is in the
+    /// frame<->sample rounding of `export.rs`/`encode.rs`/`vv_audio::mixer`, not
+    /// in the original cause of the report (probably on the
+    /// player side, not in this export).
     #[test]
     fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
         let dir = std::env::temp_dir().join("vv-app-diag-avsync-frac");
@@ -1247,12 +1247,12 @@ mod tests {
         Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
     }
 
-    /// Regressione end-to-end per l'export di un'immagine (vedi
-    /// `ActiveClipDecoder::open_for`): la clip di default (5s = 125
-    /// frame a 25fps) copre ben oltre l'unico frame reale che
-    /// un'immagine ha — prima del supporto dedicato l'export sarebbe
-    /// andato in errore (o si sarebbe fermato) appena superata la prima
-    /// posizione richiesta.
+    /// End-to-end regression for exporting an image (see
+    /// `ActiveClipDecoder::open_for`): the default clip (5s = 125
+    /// frames at 25fps) covers well past the single real frame
+    /// an image has — before the dedicated support the export would
+    /// have errored out (or stopped) as soon as it went past the first
+    /// requested position.
     #[test]
     fn export_timeline_covers_a_stretched_image_clip_past_its_only_real_frame() {
         let dir = std::env::temp_dir().join("vv-app-export-image-test");
@@ -1299,20 +1299,20 @@ mod tests {
         let mut decoder = vv_media::Decoder::open(&output_path).unwrap();
         let mut count = 0;
         while let Some((_, frame)) = decoder.next_frame().unwrap() {
-            // Gialla su tutto il fotogramma, in tutto l'export: se
-            // l'immagine "finisse" a metà, qui comparirebbe nero (o un
-            // errore avrebbe già interrotto l'export sopra).
+            // Yellow over the whole frame, for the whole export: if
+            // the image "ended" halfway, black would appear here (or an
+            // error would already have interrupted the export above).
             assert!(frame.y[0] > 150, "atteso ancora il frame dell'immagine, non nero");
             count += 1;
         }
         assert!((total - 1..=total).contains(&count), "count={count}");
     }
 
-    /// Il caso del bug, end-to-end: una clip a 23,976 fps accodata su una
-    /// timeline a 25 (creata dal primo media, a 25). Conformata, la
-    /// seconda clip occupa in timeline il suo tempo reale, quindi il file
-    /// esportato dura quanto le due clip insieme e l'audio della seconda
-    /// arriva fino in fondo invece di finire prima del video.
+    /// The bug case, end-to-end: a clip at 23.976 fps appended onto a
+    /// timeline at 25 (created from the first media, at 25). Conformed, the
+    /// second clip occupies its real time on the timeline, so the exported
+    /// file lasts as long as the two clips together and the audio of the second
+    /// reaches the very end instead of finishing before the video.
     #[test]
     fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
         let dir = std::env::temp_dir().join("vv-app-export-conform-test");
@@ -1341,7 +1341,7 @@ mod tests {
             &mute_25,
         );
 
-        // 24000/1001 = 23,976 fps: 48 frame sorgente per 2 s reali.
+        // 24000/1001 = 23.976 fps: 48 source frames for 2 real s.
         let sine_23976 = dir.join("sine23976.mp4");
         vv_media::test_support::ffmpeg(
             &[
@@ -1393,8 +1393,8 @@ mod tests {
             .expect("clip conformata attesa");
         assert_ne!(conformed.rate, vv_core::Rational::one());
         let total = app.project.timelines[timeline_id].total_frames();
-        // 1 s a 25 fps + 2 s conformati a 25 fps, a meno di un frame di
-        // arrotondamento sulla durata riportata da ffmpeg.
+        // 1 s at 25 fps + 2 s conformed to 25 fps, within one frame of
+        // rounding on the duration reported by ffmpeg.
         assert!((74..=76).contains(&total), "total={total}");
 
         let output_path = dir.join("out.mp4");
@@ -1427,9 +1427,9 @@ mod tests {
             "audio {secs}s contro {expected_secs}s di video"
         );
 
-        // L'audio della seconda clip copre il suo tratto fino alla fine:
-        // se il video fosse mappato 1:1 sui frame sorgente, la timeline
-        // finirebbe prima e la coda del sine sarebbe tagliata.
+        // The audio of the second clip covers its stretch to the end:
+        // if the video were mapped 1:1 onto the source frames, the timeline
+        // would end earlier and the tail of the sine would be cut off.
         let peak_in = |from_secs: f64, to_secs: f64| {
             let ch = audio.channels as usize;
             let from = (from_secs * audio.sample_rate as f64) as usize * ch;

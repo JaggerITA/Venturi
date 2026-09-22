@@ -1,6 +1,6 @@
-//! Probe dei file da importare su più thread: il probe di un video costa
-//! ~100 ms (vedi `vv_media::probe`), che su un import multiplo bloccherebbe
-//! la UI per secondi.
+//! Probing the files to import on several threads: probing a video costs
+//! ~100 ms (see `vv_media::probe`), which on a multiple import would block
+//! the UI for seconds.
 
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
@@ -16,9 +16,9 @@ struct Job {
 
 pub struct ImportWorker {
     rx: mpsc::Receiver<(usize, ProbeResult)>,
-    /// Risultati arrivati ma non ancora consegnati: si consegnano in
-    /// ordine di selezione, non di completamento, o il media pool
-    /// finirebbe in un ordine diverso a ogni import.
+    /// Results that arrived but were not delivered yet: they are delivered
+    /// in selection order, not completion order, or the media pool would
+    /// end up in a different order on every import.
     buffer: Vec<Option<ProbeResult>>,
     paths: Vec<PathBuf>,
     next: usize,
@@ -75,9 +75,8 @@ impl ImportWorker {
         }
     }
 
-    /// Media probati da consegnare al pool adesso, in ordine di selezione:
-    /// un risultato arrivato fuori ordine resta in coda finché non tocca a
-    /// lui.
+    /// Probed media to hand to the pool now, in selection order: a result
+    /// that arrived out of order stays queued until its turn comes.
     pub fn drain_ready(&mut self) -> Vec<(PathBuf, ProbeResult)> {
         for (index, result) in self.rx.try_iter() {
             self.buffer[index] = Some(result);
@@ -98,7 +97,7 @@ impl ImportWorker {
         self.next == self.paths.len()
     }
 
-    /// `(probati, totali)` per la barra di avanzamento.
+    /// `(probed, total)` for the progress bar.
     pub fn progress(&self) -> (usize, usize) {
         (self.completed, self.paths.len())
     }

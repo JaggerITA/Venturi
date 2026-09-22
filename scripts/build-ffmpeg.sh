@@ -1,14 +1,14 @@
 #!/bin/bash
-# Compila da sorgente FFmpeg (librerie condivise) con libx264, zlib e NVENC
-# in un prefix locale. Usato da build-appimage.sh.
+# Builds FFmpeg from source (shared libraries) with libx264, zlib and NVENC
+# into a local prefix. Used by build-appimage.sh.
 #
-# Uso: scripts/build-ffmpeg.sh <prefix>
+# Usage: scripts/build-ffmpeg.sh <prefix>
 set -euo pipefail
 
 PREFIX="$(realpath -m "$1")"
 
 FFMPEG_TAG="n9.0.1"
-# SDK NVENC 12.2: basta un driver NVIDIA >= 550.
+# NVENC SDK 12.2: an NVIDIA driver >= 550 is enough.
 NV_HEADERS_TAG="n12.2.72.0"
 X264_BRANCH="stable"
 
@@ -41,8 +41,8 @@ git clone --depth 1 --branch "$FFMPEG_TAG" \
     https://github.com/FFmpeg/FFmpeg.git "$SRC/ffmpeg"
 (
     cd "$SRC/ffmpeg"
-    # --disable-autodetect: niente dipendenze prese a caso dalla macchina di
-    # build; quelle che servono sono abilitate esplicitamente.
+    # --disable-autodetect: no dependencies picked up at random from the build
+    # machine; the ones we need are enabled explicitly.
     ./configure --prefix="$PREFIX" --enable-shared --disable-static \
         --enable-gpl --disable-autodetect --disable-programs --disable-doc \
         --enable-libx264 --enable-zlib \

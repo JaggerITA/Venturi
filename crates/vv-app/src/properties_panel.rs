@@ -1,11 +1,11 @@
-//! Pannello proprietà (inspector): schede Video/Audio, righe dei parametri
-//! con keyframe, editor del titolo.
+//! Properties panel (inspector): Video/Audio tabs, parameter rows
+//! with keyframes, title editor.
 
 use std::borrow::Cow;
 
 use super::*;
 
-/// Schede del pannello: etichette, l'attiva sottolineata.
+/// Panel tabs: labels, the active one underlined.
 pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab) {
     let tabs = [
         (PropertiesTab::Video, t!("props.tab_video")),
@@ -53,8 +53,8 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
     });
 }
 
-/// Title/Settings della scheda Video di una clip di testo: due metà a
-/// tutta larghezza.
+/// Title/Settings of the Video tab of a text clip: two full-width
+/// halves.
 pub(crate) fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
     ui.columns(2, |cols| {
         for (col, (tab, label)) in cols
@@ -70,8 +70,8 @@ pub(crate) fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
     });
 }
 
-/// Pulsante di allineamento del testo: righe disegnate come l'icona
-/// classica, più corte dove il testo non arriva al margine.
+/// Text alignment button: lines drawn like the classic icon,
+/// shorter where the text does not reach the margin.
 pub(crate) fn text_align_button(ui: &mut egui::Ui, selected: bool, align: vv_core::TextAlign) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 20.0), egui::Sense::click());
     let visuals = ui.style().interact_selectable(&response, selected);
@@ -100,7 +100,7 @@ pub(crate) fn text_align_button(ui: &mut egui::Ui, selected: bool, align: vv_cor
     response
 }
 
-/// Scheda Title: modifica `title` in place, `true` se è cambiato qualcosa.
+/// Title tab: edits `title` in place, `true` if anything changed.
 pub(crate) fn title_editor(
     ui: &mut egui::Ui,
     title: &mut vv_core::TitleParams,
@@ -279,8 +279,8 @@ pub(crate) fn title_editor(
         title.anchor = defaults.anchor;
     }
 
-    // Mostrata dall'angolo in basso a sinistra, come nel riferimento
-    // (960x540 = centro di un frame 1080p); salvata dal centro.
+    // Shown from the bottom-left corner, as in the reference
+    // (960x540 = center of a 1080p frame); saved from the center.
     let row = param_row(ui, &t!("props.position"), None, |ui| {
         let mut x = title.position[0] + frame_w / 2.0;
         let mut y = title.position[1] + frame_h / 2.0;
@@ -378,8 +378,8 @@ pub(crate) fn color_row(ui: &mut egui::Ui, label: &str, color: &mut vv_core::Rgb
     })
 }
 
-/// Intestazione di una sezione attivabile: interruttore, titolo e ripristino
-/// dell'intera sezione (`true` se cliccato).
+/// Header of a toggleable section: switch, title and reset of the
+/// whole section (`true` if clicked).
 pub(crate) fn title_section_header(ui: &mut egui::Ui, title: &str, enabled: &mut bool) -> bool {
     let mut reset = false;
     ui.horizontal(|ui| {
@@ -416,9 +416,9 @@ pub(crate) fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response 
     response
 }
 
-/// Porta su `target` solo i campi che l'utente ha cambiato (`before` ->
-/// `after`, letti dalla clip primaria): con più titoli selezionati, cambiare
-/// il colore non deve sovrascrivere il testo degli altri.
+/// Brings onto `target` only the fields the user changed (`before` ->
+/// `after`, read from the primary clip): with several titles selected, changing
+/// the color must not overwrite the text of the others.
 pub(crate) fn apply_title_edit(
     target: &vv_core::TitleParams,
     before: &vv_core::TitleParams,
@@ -468,33 +468,33 @@ pub(crate) fn apply_title_edit(
     out
 }
 
-/// Larghezza della colonna delle etichette nel pannello dei parametri:
-/// tutte allineate a destra, come nell'inspector di un NLE.
+/// Width of the label column in the parameters panel:
+/// all right-aligned, as in the inspector of an NLE.
 pub(crate) const PARAM_LABEL_WIDTH: f32 = 96.0;
 
-/// Lo stato di keyframe di una riga del pannello, per il suo diamante.
+/// The keyframe state of a panel row, for its diamond.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RowKeyframe {
     pub(crate) on_keyframe: bool,
-    /// Keyframe più vicini prima/dopo il frame corrente, in frame
-    /// sorgente: dove portano le frecce di navigazione.
+    /// Nearest keyframes before/after the current frame, in source
+    /// frames: where the navigation arrows lead.
     pub(crate) prev: Option<FrameIdx>,
     pub(crate) next: Option<FrameIdx>,
 }
 
-/// Cosa è successo in una riga del pannello durante questo frame di UI.
+/// What happened in a panel row during this UI frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RowResponse {
     pub(crate) changed: bool,
     pub(crate) reset: bool,
     pub(crate) toggled_keyframe: bool,
-    /// Frame sorgente a cui portare la testina (freccia cliccata).
+    /// Source frame to move the playhead to (arrow clicked).
     pub(crate) goto: Option<FrameIdx>,
 }
 
-/// Una riga del pannello dei parametri: etichetta, controlli, il diamante
-/// di keyframe con le sue frecce di navigazione (assente per i parametri
-/// non animabili) e il ripristino di quella sola riga.
+/// A row of the parameters panel: label, controls, the keyframe
+/// diamond with its navigation arrows (absent for non-animatable
+/// parameters) and the reset of that single row.
 pub(crate) fn param_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -507,10 +507,10 @@ pub(crate) fn param_row(
             egui::vec2(PARAM_LABEL_WIDTH, 18.0),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                // Troncata, non a capo né debordante: il pannello si dà come
-                // larghezza minima quella che ha (`set_min_width`), quindi
-                // un'etichetta più larga di `PARAM_LABEL_WIDTH` lo allarga, e
-                // al frame dopo si allarga di nuovo, senza fermarsi.
+                // Truncated, not wrapped nor overflowing: the panel takes as its
+                // minimum width the one it has (`set_min_width`), so
+                // a label wider than `PARAM_LABEL_WIDTH` widens it, and
+                // on the next frame it widens again, without ever stopping.
                 ui.add(egui::Label::new(label).truncate())
                     .on_hover_text(label);
             },
@@ -520,12 +520,12 @@ pub(crate) fn param_row(
                 .small_button("↺")
                 .on_hover_text(t!("props.reset_param"))
                 .clicked();
-            // Stacca i controlli dei keyframe dal ripristino, che sta subito
-            // a destra (siamo in un layout destra->sinistra).
+            // Separates the keyframe controls from the reset, which sits right
+            // to the right (we are in a right->left layout).
             ui.add_space(8.0);
             if let Some(keyframe) = keyframe {
-                // Frecce e diamante in un'area fissa: il diamante non deve spostarsi
-                // quando una freccia sparisce.
+                // Arrows and diamond in a fixed area: the diamond must not move
+                // when an arrow disappears.
                 let spacing = ui.spacing().item_spacing.x;
                 let width =
                     KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_DIAMOND_SIZE.x + spacing * 2.0;
@@ -559,7 +559,7 @@ pub(crate) fn param_row(
     response
 }
 
-/// Gli effetti di una clip bersaglio del pannello.
+/// The effects of a clip targeted by the panel.
 pub(crate) fn target_effects<'a>(
     tl: Option<&'a vv_core::Timeline>,
     t: &PanelTarget,
@@ -568,9 +568,9 @@ pub(crate) fn target_effects<'a>(
         .map(|c| &c.effects)
 }
 
-/// Comandi per i parametri cambiati rispetto a `before`, così le altre
-/// clip tengono i propri valori. Default se il parametro non è animato,
-/// keyframe altrimenti. La posizione si sposta dello stesso delta su tutte.
+/// Commands for the parameters changed relative to `before`, so the other
+/// clips keep their own values. Default if the parameter is not animated,
+/// a keyframe otherwise. Position moves by the same delta on all of them.
 pub(crate) fn push_param_changes(
     pending: &mut Vec<BoxedCommand>,
     tl: Option<&vv_core::Timeline>,
@@ -604,7 +604,7 @@ pub(crate) fn push_param_changes(
     }
 }
 
-/// Un campo numerico di un parametro a due assi (X/Y).
+/// A numeric field of a two-axis parameter (X/Y).
 pub(crate) fn axis_field(
     ui: &mut egui::Ui,
     axis: &str,
@@ -622,12 +622,12 @@ pub(crate) fn axis_field(
     changed
 }
 
-/// Campo numerico trascinabile. Mentre si trascina il puntatore viene
-/// bloccato dov'è e il valore segue il movimento relativo del mouse: se
-/// invece lo si lasciasse correre, arrivato al bordo dello schermo il
-/// trascinamento si fermerebbe. egui da solo non ci arriva, perché a
-/// puntatore bloccato riceve solo `pointer.motion()` e non più le
-/// posizioni assolute su cui si basa `DragValue`.
+/// Draggable numeric field. While dragging, the pointer is locked where it is
+/// and the value follows the relative mouse movement: if it were
+/// let run instead, the drag would stop once it reached the edge of the
+/// screen. egui does not get there on its own, because with a locked pointer
+/// it only receives `pointer.motion()` and no longer the absolute positions
+/// `DragValue` is based on.
 pub(crate) fn drag_field(
     ui: &mut egui::Ui,
     value: &mut f64,
@@ -672,8 +672,8 @@ pub(crate) fn drag_field(
     changed
 }
 
-/// Un parametro a un valore solo: slider più campo numerico, come
-/// nell'inspector di riferimento.
+/// A single-value parameter: slider plus numeric field, as in the
+/// reference inspector.
 pub(crate) fn slider_field(
     ui: &mut egui::Ui,
     value: &mut f32,
@@ -681,8 +681,8 @@ pub(crate) fn slider_field(
     speed: f64,
     decimals: usize,
 ) -> bool {
-    // La riga ha già speso la sua parte per etichetta, keyframe e reset:
-    // quel che resta (meno il campo numerico) va tutto allo slider.
+    // The row has already spent its share on label, keyframe and reset:
+    // what is left (minus the numeric field) all goes to the slider.
     ui.spacing_mut().slider_width = (ui.available_width() - 76.0).clamp(80.0, 260.0);
     let slider = ui.add(
         egui::Slider::new(value, range.clone())
@@ -704,23 +704,23 @@ pub(crate) fn slider_field(
     slider.changed() || drag_changed
 }
 
-/// Id del menu a tendina attualmente aperto, per chi deve sapere che c'è
-/// un'anteprima in corso.
+/// Id of the currently open dropdown menu, for whoever needs to know there is
+/// a preview in progress.
 const OPEN_COMBO: &str = "preview_combo_open";
 
-/// C'è un menu a tendina aperto che sta applicando l'anteprima delle voci?
-/// Finché dura, le modifiche vanno raggruppate in un solo passo di undo.
+/// Is there an open dropdown applying the preview of its entries?
+/// While it lasts, the changes must be grouped into a single undo step.
 pub(crate) fn preview_combo_open(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new(OPEN_COMBO)))
         .is_some_and(|id| egui::ComboBox::is_open(ctx, id))
 }
 
-/// Menu a tendina con anteprima: la rotella lo scorre anche da chiuso e, da
-/// aperto, la voce sotto il puntatore viene applicata subito. Se si chiude
-/// senza confermare con un click (Esc, click fuori) torna al valore che
-/// aveva prima di aprirsi.
+/// Dropdown with preview: the wheel scrolls it even when closed and, when
+/// open, the entry under the pointer is applied immediately. If it closes
+/// without confirming with a click (Esc, click outside) it goes back to the value
+/// it had before opening.
 ///
-/// `items` sono `(valore, etichetta, abilitato)`.
+/// `items` are `(value, label, enabled)`.
 pub(crate) fn preview_combo<T>(
     ui: &mut egui::Ui,
     id_salt: &str,
@@ -797,7 +797,7 @@ where
                 i += step;
             }
         }
-        // La rotella sul menu non deve anche scorrere il pannello sotto.
+        // The wheel over the menu must not also scroll the panel underneath.
         ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
     }
 
@@ -825,7 +825,7 @@ where
     *value != before
 }
 
-/// Il lucchetto che tiene insieme i due assi dello zoom.
+/// The lock holding the two zoom axes together.
 pub(crate) fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Response {
     let mut response = ui
         .selectable_label(*linked, "🔗")
@@ -837,8 +837,8 @@ pub(crate) fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Respons
     response
 }
 
-/// Diamante del keyframe, disegnato a mano: su alcune piattaforme (Asahi)
-/// i font di egui non hanno ◇/◆.
+/// Keyframe diamond, drawn by hand: on some platforms (Asahi)
+/// egui's fonts do not have ◇/◆.
 pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Response {
     let tooltip = if on_keyframe {
         t!("props.remove_keyframe")
@@ -860,8 +860,8 @@ pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Res
             c + egui::vec2(-r, 0.0),
         ];
         if on_keyframe {
-            // Pieno e rosso quando la testina è *su* un keyframe, come
-            // nell'inspector di riferimento.
+            // Filled and red when the playhead is *on* a keyframe, as
+            // in the reference inspector.
             painter.add(egui::Shape::convex_polygon(
                 diamond,
                 KEYFRAME_HERE_COLOR,
@@ -874,13 +874,13 @@ pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Res
     response.on_hover_text(tooltip)
 }
 
-/// Spazio di una freccia di navigazione tra keyframe: riservato anche
-/// quando la freccia non c'è, altrimenti il diamante si sposterebbe a ogni
-/// cambio di testina.
+/// Space for a keyframe navigation arrow: reserved even
+/// when the arrow is absent, otherwise the diamond would move on every
+/// playhead change.
 pub(crate) const KEYFRAME_ARROW_SIZE: egui::Vec2 = egui::Vec2::new(16.0, 18.0);
 
-/// Freccia di navigazione tra keyframe. Senza keyframe da quella parte
-/// occupa lo stesso spazio, invisibile.
+/// Keyframe navigation arrow. Without keyframes on that side it
+/// takes the same space, invisible.
 pub(crate) fn keyframe_arrow(
     ui: &mut egui::Ui,
     label: &str,
@@ -903,13 +903,13 @@ pub(crate) fn keyframe_arrow(
     }
 }
 
-/// Dimensione del diamante di keyframe.
+/// Size of the keyframe diamond.
 pub(crate) const KEYFRAME_DIAMOND_SIZE: egui::Vec2 = egui::Vec2::new(20.0, 20.0);
 
-/// Il rosso del diamante quando la testina è su un keyframe.
+/// The red of the diamond when the playhead is on a keyframe.
 pub(crate) const KEYFRAME_HERE_COLOR: egui::Color32 = egui::Color32::from_rgb(225, 70, 70);
 
-/// La clip su cui agisce un comando del pannello: timeline, track, id.
+/// The clip a panel command acts on: timeline, track, id.
 pub(crate) type ClipRef = (TimelineId, usize, ClipId);
 
 pub(crate) type BoxedCommand = Box<dyn vv_core::Command>;
@@ -979,10 +979,10 @@ pub(crate) fn set_filters((tl, track, clip): ClipRef, value: Vec<vv_core::ClipFi
     Box::new(vv_core::set_clip_filters(tl, track, clip, value))
 }
 
-/// Comando per salvare (o rimuovere, con `value: None`) la transizione
-/// `sel`, bordo singolo o crossing: quest'ultima ha bisogno di ritrovare
-/// `right_clip` dalla crossing esistente, non lo porta con sé
-/// `TransitionSelection::Crossing` (che identifica solo `left_clip`).
+/// Command to save (or remove, with `value: None`) the transition
+/// `sel`, single edge or crossing: the latter needs to find
+/// `right_clip` from the existing crossing, it is not carried by
+/// `TransitionSelection::Crossing` (which identifies only `left_clip`).
 pub(crate) fn set_transition_command(
     project: &vv_core::Project,
     timeline_id: TimelineId,
@@ -1067,9 +1067,9 @@ pub(crate) fn remove_color_keyframe(clip: ClipRef, frame: FrameIdx) -> BoxedComm
 }
 
 impl VenturiApp {
-    /// La scheda "Selezione": tutto quel che è selezionato, video e audio
-    /// insieme, con i dati che prima stavano in cima al pannello dei
-    /// parametri (track, start, durata, frame corrente).
+    /// The "Selection" tab: everything that is selected, video and audio
+    /// together, with the data that used to sit at the top of the parameters
+    /// panel (track, start, duration, current frame).
     pub(crate) fn show_selection_list(
         &self,
         ui: &mut egui::Ui,
@@ -1131,15 +1131,15 @@ impl VenturiApp {
             });
     }
 
-    /// I valori da mostrare nel pannello proprietà per una clip bersaglio,
-    /// valutati al suo `source_frame`.
+    /// The values to show in the properties panel for a target clip,
+    /// evaluated at its `source_frame`.
     pub(crate) fn clip_panel_info(&self, target: PanelTarget) -> Option<ClipPanelInfo> {
         let timeline_id = self.timeline_id?;
         let timeline_size = self.project.timelines[timeline_id].resolution;
         let clip = self.project.timelines[timeline_id]
             .clip(target.track_index, target.clip_id)?;
         let frame = target.source_frame;
-        // Un keyframe fuori dal trim porterebbe la testina fuori dalla clip.
+        // A keyframe outside the trim would take the playhead outside the clip.
         let in_clip = |f: &FrameIdx| (clip.source_in()..clip.source_out()).contains(f);
         Some(ClipPanelInfo {
             is_solid_color: target.is_solid_color,
@@ -1196,9 +1196,9 @@ impl VenturiApp {
         }
     }
 
-    /// Pannello di una transizione selezionata (bordo singolo o crossing):
-    /// prende il posto delle schede Video/Audio/Selezione finché resta
-    /// selezionata (vedi `TimelineState::selected_transition`).
+    /// Panel of a selected transition (single edge or crossing):
+    /// takes the place of the Video/Audio/Selection tabs while it stays
+    /// selected (see `TimelineState::selected_transition`).
     fn show_transition_panel(
         &mut self,
         ui: &mut egui::Ui,
@@ -1209,9 +1209,9 @@ impl VenturiApp {
             return;
         };
         let tl = &self.project.timelines[timeline_id];
-        // `before`/`max_duration` distinguono i due casi solo qui: da qui in
-        // giù i controlli sono identici, e il salvataggio/la rimozione in
-        // fondo scelgono da sé il comando giusto in base a `sel`.
+        // `before`/`max_duration` tell the two cases apart only here: from here
+        // down the controls are identical, and the saving/removal at the
+        // bottom picks the right command itself based on `sel`.
         let (before, max_duration) = match sel {
             timeline_ui::TransitionSelection::Edge((track_index, clip_id), edge) => {
                 let Some(clip) = tl.clip(track_index, clip_id) else {
@@ -1239,9 +1239,9 @@ impl VenturiApp {
                 (crossing.transition.clone(), max_duration)
             }
         };
-        // La clip (o la coppia) è stata cancellata o la transizione tolta
-        // da sotto la selezione (es. undo): niente da mostrare, già gestito
-        // sopra coi `return`.
+        // The clip (or the pair) was deleted or the transition removed
+        // from under the selection (e.g. undo): nothing to show, already handled
+        // above with the `return`s.
         let mut transition = before.clone();
         let fps = tl.fps.as_f64().max(1.0);
 
@@ -1296,8 +1296,8 @@ impl VenturiApp {
         }
     }
 
-    /// Restituisce le modifiche agli effetti e l'eventuale salto della testina,
-    /// da applicare dopo il disegno.
+    /// Returns the effect changes and the playhead jump, if any,
+    /// to be applied after the drawing.
     pub(crate) fn show_properties_panel(
         &mut self,
         ui: &mut egui::Ui,
@@ -1305,8 +1305,8 @@ impl VenturiApp {
         audio_targets: &[PanelTarget],
     ) -> (Vec<BoxedCommand>, Option<FrameIdx>) {
         let mut pending_effects: Vec<BoxedCommand> = Vec::new();
-        // Le frecce di navigazione tra keyframe del pannello spostano la
-        // testina: applicato dopo il disegno, come le modifiche agli effetti.
+        // The panel's keyframe navigation arrows move the
+        // playhead: applied after the drawing, like the effect changes.
         let mut pending_playhead: Option<FrameIdx> = None;
 
         if self.settings.panels.inspector_open {
@@ -1314,11 +1314,11 @@ impl VenturiApp {
                 .resizable(true)
                 .default_size(self.settings.panels.inspector_width)
                 .show(ui, |ui| {
-                    // Senza, il pannello si restringerebbe al contenuto e il suo resize
-                    // tornerebbe indietro.
+                    // Without it, the panel would shrink to its content and its resize
+                    // would spring back.
                     ui.set_min_width(ui.available_width());
 
-                    // Barra fissa: quella flottante coprirebbe i ripristini a destra.
+                    // Fixed bar: a floating one would cover the resets on the right.
                     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -1333,7 +1333,7 @@ impl VenturiApp {
                             properties_tab_bar(ui, &mut self.properties_tab);
                             ui.separator();
 
-                            // Valori dalla prima clip della scheda, modifiche a tutte.
+                            // Values from the first clip of the tab, changes to all of them.
                             if self.properties_tab == PropertiesTab::Selection {
                                 self.show_selection_list(ui, video_targets, audio_targets);
                             } else {
@@ -1372,8 +1372,8 @@ impl VenturiApp {
                                         ui.add_space(4.0);
                                     }
                                     match self.properties_tab {
-                                        // La scheda Selezione non arriva qui:
-                                        // è servita prima, senza clip primaria.
+                                        // The Selection tab does not get here:
+                                        // it was served earlier, without a primary clip.
                                         PropertiesTab::Selection => {}
                                         PropertiesTab::Video
                                             if is_text && self.video_subtab == VideoSubTab::Title =>
@@ -1401,7 +1401,7 @@ impl VenturiApp {
                                             let (source_w, source_h) =
                                                 (source_size.0 as f32, source_size.1 as f32);
 
-                                            // Diamante di una riga: su un keyframe se lo sono tutti i suoi parametri.
+                                            // Diamond of a row: on a keyframe if all its parameters are.
                                             let row_keyframe = |params: &[P]| RowKeyframe {
                                                 on_keyframe: params
                                                     .iter()
@@ -1452,8 +1452,8 @@ impl VenturiApp {
                                                 P::CropSoftness,
                                             ];
 
-                                            // Righe con i parametri che il loro diamante anima; il reset di una riga
-                                            // li azzera, keyframe compresi.
+                                            // Rows with the parameters their diamond animates; resetting a row
+                                            // clears them, keyframes included.
                                             let mut rows: Vec<(Vec<P>, RowResponse)> = Vec::new();
                                             let mut reset_groups: Vec<(Vec<P>, bool)> = Vec::new();
 
@@ -1490,9 +1490,9 @@ impl VenturiApp {
                                                         changed = true;
                                                     }
                                                     if self.zoom_link {
-                                                        // Il link vale in entrambi
-                                                        // i versi: chi è stato
-                                                        // mosso detta l'altro.
+                                                        // The link works both
+                                                        // ways: whichever was
+                                                        // moved dictates the other.
                                                         if changed {
                                                             transform.zoom[1] = transform.zoom[0];
                                                         } else if y_changed {
@@ -1575,8 +1575,8 @@ impl VenturiApp {
                                             );
                                             rows.push((anchor_params, row));
 
-                                            // Il flip non si anima: niente
-                                            // diamante, solo il ripristino.
+                                            // The flip is not animated: no
+                                            // diamond, only the reset.
                                             let flip_row = param_row(ui, &t!("props.flip"), None, |ui| {
                                                 let x = ui
                                                     .selectable_label(transform.flip[0], "⬌")
@@ -1596,7 +1596,7 @@ impl VenturiApp {
                                                     let Some(effects) = target_effects(tl, t) else {
                                                         continue;
                                                     };
-                                                    // Solo l'asse cliccato.
+                                                    // Only the clicked axis.
                                                     let mut flip = effects.transform.flip;
                                                     for axis in 0..2 {
                                                         if transform.flip[axis] != info.transform.flip[axis] {
@@ -1638,9 +1638,9 @@ impl VenturiApp {
                                                 );
                                                 rows.push((params, row));
                                             }
-                                            // I due tagli opposti non possono
-                                            // mangiarsi tutto il frame a vicenda:
-                                            // almeno un pixel resta.
+                                            // The two opposite crops cannot
+                                            // eat the whole frame from each other:
+                                            // at least one pixel is left.
                                             transform.crop[0] =
                                                 transform.crop[0].min(source_w - 1.0 - transform.crop[2]);
                                             transform.crop[1] =
@@ -1733,8 +1733,8 @@ impl VenturiApp {
                                                         .iter()
                                                         .all(|p| info.params[p.index()].on_keyframe);
                                                     for t in targets {
-                                                        // Il keyframe fissa il valore che
-                                                        // ha già ciascuna clip.
+                                                        // The keyframe pins the value
+                                                        // each clip already has.
                                                         let Some(effects) = target_effects(tl, t) else {
                                                             continue;
                                                         };
@@ -1753,7 +1753,7 @@ impl VenturiApp {
                                                 if row.reset {
                                                     reset_groups.push((params.clone(), false));
                                                 }
-                                                // Le frecce danno un frame sorgente, la testina vuole un frame di timeline.
+                                                // The arrows give a source frame, the playhead wants a timeline frame.
                                                 if let Some(source_frame) = row.goto {
                                                     pending_playhead = self
                                                         .timeline_id
@@ -1773,9 +1773,9 @@ impl VenturiApp {
                                                 }
                                             }
 
-                                            // Una riga per filtro, nell'ordine in cui sono
-                                            // stati trascinati sulla clip dal pannello
-                                            // Effects; vuota finché non ce n'è nessuno.
+                                            // One row per filter, in the order they were
+                                            // dragged onto the clip from the Effects
+                                            // panel; empty until there is one.
                                             if !info.filters.is_empty() {
                                                 ui.add_space(6.0);
                                                 ui.label(egui::RichText::new(t!("props.filters")).strong());
@@ -1810,9 +1810,9 @@ impl VenturiApp {
                                                 }
                                             }
 
-                                            // Il colore vale solo per le clip
-                                            // generatore: le altre clip video
-                                            // selezionate restano fuori.
+                                            // The color applies only to generator
+                                            // clips: the other selected video
+                                            // clips stay out of it.
                                             if is_solid_color {
                                                 let solid: Vec<&PanelTarget> =
                                                     targets.iter().filter(|t| t.is_solid_color).collect();

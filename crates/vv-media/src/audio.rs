@@ -1,6 +1,6 @@
-//! Decodifica di tracce audio intere in f32 interleaved. La traccia sta
-//! tutta in RAM; la versione streaming la consegna a blocchi così il mixer
-//! può suonarne l'inizio prima della fine del decode.
+//! Decoding whole audio tracks into interleaved f32. The track sits
+//! entirely in RAM; the streaming version delivers it in chunks so the mixer
+//! can play its start before the decode is over.
 
 use ffmpeg::ChannelLayout;
 use ffmpeg::format::sample::{Sample, Type as SampleType};
@@ -13,12 +13,12 @@ use std::path::Path;
 pub struct AudioBuffer {
     pub sample_rate: u32,
     pub channels: u16,
-    /// Interleaved f32, lunghezza = frame_totali * channels.
+    /// Interleaved f32, length = total_frames * channels.
     pub samples: Vec<f32>,
 }
 
-/// Decodifica lo stream audio N-esimo (ordine di `probe::audio_streams`).
-/// `Ok(None)` se non esiste.
+/// Decodes the N-th audio stream (order of `probe::audio_streams`).
+/// `Ok(None)` if it does not exist.
 pub fn decode_audio_track(
     path: &Path,
     stream_index: usize,
@@ -73,7 +73,7 @@ impl StreamDecoder {
         })
     }
 
-    /// Ricampiona e consegna tutti i frame pronti nel decoder.
+    /// Resamples and delivers all the frames ready in the decoder.
     fn drain(
         &mut self,
         slot: usize,
@@ -82,8 +82,8 @@ impl StreamDecoder {
     ) -> Result<ControlFlow<()>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Audio::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
-            // `Resampler::run` alloca l'uscita grande quanto l'ingresso, che
-            // non basta quando si ricampiona verso l'alto.
+            // `Resampler::run` allocates the output as large as the input, which
+            // is not enough when resampling upwards.
             let capacity =
                 decoded.samples() * self.out_rate as usize / self.in_rate.max(1) as usize + 64;
             let mut resampled =
@@ -133,11 +133,11 @@ fn emit(
     }
 }
 
-/// Più stream in una sola lettura, a blocchi: `on_chunk(i, canali,
-/// campioni)` con `i` indice in `stream_indices`; `Break` interrompe.
-/// `out_rate` ricampiona con un contesto swresample per stream, senza
-/// discontinuità tra blocchi. Ritorna `(rate, canali)` per stream, `None`
-/// se non esiste.
+/// Several streams in a single read, in chunks: `on_chunk(i, channels,
+/// samples)` with `i` an index into `stream_indices`; `Break` interrupts.
+/// `out_rate` resamples with one swresample context per stream, without
+/// discontinuities between chunks. Returns `(rate, channels)` per stream,
+/// `None` if it does not exist.
 pub fn decode_audio_streams_streaming(
     path: &Path,
     stream_indices: &[usize],
@@ -151,7 +151,7 @@ pub fn decode_audio_streams_streaming(
         .streams()
         .filter(|s| s.parameters().medium() == Type::Audio)
         .collect();
-    // (indice nel contenitore, decoder) per slot.
+    // (index in the container, decoder) per slot.
     let mut decoders: Vec<Option<(usize, StreamDecoder)>> = stream_indices
         .iter()
         .map(|&i| {
@@ -206,9 +206,9 @@ pub fn decode_audio_streams_streaming(
     Ok(formats)
 }
 
-/// Layout canali del decoder, con uno di default al posto di uno non
-/// specificato (es. PCM in MKV): swresample altrimenti rifiuta ogni frame
-/// con "Input changed".
+/// Decoder channel layout, with a default one in place of an unspecified
+/// one (e.g. PCM in MKV): otherwise swresample rejects every frame with
+/// "Input changed".
 pub(crate) fn decoder_channel_layout(decoder: &ffmpeg::decoder::Audio) -> ChannelLayout {
     let layout = decoder.channel_layout();
     if layout.is_empty() {
@@ -218,8 +218,8 @@ pub(crate) fn decoder_channel_layout(decoder: &ffmpeg::decoder::Audio) -> Channe
     }
 }
 
-/// `Resampler::run` dopo aver allineato il layout del frame a quello del
-/// resampler (vedi `decoder_channel_layout`).
+/// `Resampler::run` after aligning the frame layout to the resampler's
+/// (see `decoder_channel_layout`).
 pub(crate) fn run_resampler(
     resampler: &mut Resampler,
     decoded: &mut ffmpeg::frame::Audio,
@@ -247,8 +247,8 @@ fn append_f32(frame: &ffmpeg::frame::Audio, out: &mut Vec<f32>) {
 mod tests {
     use super::*;
 
-    /// PCM stereo in MKV ha layout canali "unknown": falliva con
-    /// "Input changed".
+    /// Stereo PCM in MKV has an "unknown" channel layout: it used to fail
+    /// with "Input changed".
     #[test]
     fn decode_audio_track_handles_unspecified_channel_layout() {
         let dir = std::env::temp_dir().join("vv-media-audio-test");
@@ -297,13 +297,13 @@ mod tests {
         assert_eq!(audio.channels, 1);
 
         let total_frames = audio.samples.len() / audio.channels as usize;
-        // ~1s a 48kHz: l'encoder AAC aggiunge un po' di priming/padding.
+        // ~1s at 48kHz: the AAC encoder adds some priming/padding.
         assert!(
             (45_000..=52_000).contains(&total_frames),
             "total_frames={total_frames}"
         );
 
-        // Un seno a 440Hz non è silenzioso: il picco deve essere ben sopra 0.
+        // A 440Hz sine is not silent: the peak must be well above 0.
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
     }
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(formats, vec![Some((48_000, 1))]);
         assert!(chunks > 1, "chunks={chunks}");
         assert!((samples.len() as i64 - 96_000).abs() < 100, "len={}", samples.len());
-        // Un seno continuo: nessun salto tra campioni vicini ai confini dei blocchi.
+        // A continuous sine: no jumps between samples near the chunk boundaries.
         let max_step = samples.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
         assert!(max_step < 0.1, "max_step={max_step}");
     }
@@ -408,16 +408,16 @@ mod tests {
         for len in lengths {
             assert!((len as i64 - 144_000).abs() < 3_000, "{lengths:?}");
         }
-        // Interleaved: il primo blocco di ogni stream arriva ben prima della fine.
+        // Interleaved: the first chunk of each stream arrives well before the end.
         let first_of = |slot| order.iter().position(|&s| s == slot).unwrap();
         assert!([0, 1, 3].iter().all(|&s| first_of(s) < order.len() / 4), "{order:?}");
     }
 
-    /// Un file con *due* stream audio (caso reale: mix stereo + 5.1
-    /// separato) deve poter decodificare l'uno o l'altro in base a
-    /// `stream_index`, non sempre "il migliore" secondo ffmpeg — qui
-    /// distinti per sample_rate (44100 vs 48000) per verificarlo senza
-    /// analisi spettrale.
+    /// A file with *two* audio streams (real case: stereo mix + separate
+    /// 5.1) must be able to decode one or the other based on
+    /// `stream_index`, not always "the best one" according to ffmpeg — here
+    /// they are told apart by sample_rate (44100 vs 48000) to check it
+    /// without spectral analysis.
     #[test]
     fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
         let dir = std::env::temp_dir().join("vv-media-audio-test");

@@ -1,13 +1,13 @@
-//! Miniature del media pool in background: aprire il file e fare seek
-//! costa decine di ms per media, troppo sul thread UI con un import
-//! multiplo.
+//! Media pool thumbnails in the background: opening a file and seeking
+//! costs tens of ms per media, too much on the UI thread with a multiple
+//! import.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crate::worker::Worker;
 
-/// Larghezza in pixel delle miniature generate.
+/// Width in pixels of the generated thumbnails.
 pub const THUMBNAIL_WIDTH: u32 = 96;
 
 struct Job {
@@ -57,7 +57,7 @@ impl ThumbnailWorker {
         }
     }
 
-    /// Miniature completate dall'ultima chiamata (`None` se fallite).
+    /// Thumbnails completed since the last call (`None` if they failed).
     pub fn drain(&mut self) -> Vec<(u64, Option<vv_media::Thumbnail>)> {
         let ready: Vec<_> = self.rx.try_iter().collect();
         self.pending -= ready.len();

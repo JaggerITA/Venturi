@@ -1,9 +1,9 @@
 #!/bin/bash
-# Costruisce (se serve) l'immagine Debian 13 di build e ci esegue dentro
-# scripts/build-appimage.sh, che ne esce con l'AppImage in
-# target/appimage/ sull'host.
+# Builds (if needed) the Debian 13 build image and runs
+# scripts/build-appimage.sh inside it, which comes out with the AppImage in
+# target/appimage/ on the host.
 #
-# Uso: container/build-appimage.sh
+# Usage: container/build-appimage.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO_ROOT="$(pwd)"
@@ -12,9 +12,9 @@ IMAGE=venturi-appimage
 podman image exists "$IMAGE" ||
     podman build -t "$IMAGE" -f container/Containerfile.appimage container/
 
-# Artefatti cargo e FFmpeg compilato in un volume nominato: restano tra
-# una run e l'altra e non si mescolano al target/ dell'host, costruito con
-# un'altra toolchain. Solo l'AppImage finita viene scritta sull'host.
+# Cargo artifacts and the compiled FFmpeg in a named volume: they persist
+# between runs and do not mix with the host's target/, built with
+# another toolchain. Only the finished AppImage is written to the host.
 podman volume create venturi-appimage-cargo >/dev/null 2>&1 || true
 podman volume create venturi-appimage-target >/dev/null 2>&1 || true
 mkdir -p "$REPO_ROOT/target/appimage"

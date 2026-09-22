@@ -1,21 +1,21 @@
-//! `SharedFrameCache`: cache dei frame decodificati di tutti i media della
-//! finestra, a budget globale, vedi REFACTOR_PIPELINE.md §2.
+//! `SharedFrameCache`: cache of the decoded frames of every media in the
+//! window, on a global budget, see REFACTOR_PIPELINE.md §2.
 
 use crate::decode::FrameYuv420;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use vv_core::{FrameIdx, MediaId};
 
-/// Tratto di frame sorgente voluto dalla finestra corrente, con la sua
-/// posizione in timeline: serve a misurare la distanza dalla testina.
+/// Stretch of source frames wanted by the current window, with its
+/// position on the timeline: used to measure the distance from the playhead.
 #[derive(Debug, Clone, Copy)]
 pub struct WantedRange {
     pub media_id: MediaId,
     pub source_start: FrameIdx,
     pub source_end: FrameIdx,
-    /// Dove `source_start` cade in spazio timeline.
+    /// Where `source_start` falls in timeline space.
     pub timeline_start: FrameIdx,
-    /// `Clip::rate` della clip: frame di timeline per frame sorgente.
+    /// The clip's `Clip::rate`: timeline frames per source frame.
     pub rate: vv_core::Rational,
 }
 
@@ -34,9 +34,9 @@ struct SharedInner {
     bytes_used: usize,
 }
 
-/// Cache dei frame di tutti i media della finestra, a chiave
-/// `(MediaId, frame sorgente)` e budget in byte (risoluzioni diverse
-/// pesano diversamente). Cosa tenere lo decide solo `reconcile`.
+/// Cache of the frames of every media in the window, keyed by
+/// `(MediaId, source frame)` with a budget in bytes (different resolutions
+/// weigh differently). What to keep is decided by `reconcile` alone.
 pub struct SharedFrameCache {
     inner: Mutex<SharedInner>,
 }
@@ -74,13 +74,13 @@ impl SharedFrameCache {
             .contains_key(&(media_id, idx))
     }
 
-    /// Byte occupati, sulla dimensione reale di ogni frame.
+    /// Bytes used, on the real size of each frame.
     pub fn bytes_used(&self) -> usize {
         self.inner.lock().unwrap().bytes_used
     }
 
-    /// Non applica il budget: il chiamante inserisce in ordine di priorità e
-    /// si ferma da sé.
+    /// Does not enforce the budget: the caller inserts in priority order and
+    /// stops on its own.
     pub fn insert(&self, media_id: MediaId, idx: FrameIdx, frame: Arc<FrameYuv420>) {
         let mut inner = self.inner.lock().unwrap();
         let bytes = frame.byte_len();
@@ -90,19 +90,19 @@ impl SharedFrameCache {
         inner.bytes_used += bytes;
     }
 
-    /// Svuota tutto: per quando i frame vengono da una sorgente sbagliata (es.
-    /// cambia il toggle proxy), che `reconcile` non saprebbe riconoscere.
+    /// Empties everything: for when the frames come from a wrong source (e.g.
+    /// the proxy toggle changes), which `reconcile` would not be able to tell.
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.entries.clear();
         inner.bytes_used = 0;
     }
 
-    /// Unica politica di sfratto, a ogni ciclo prima del fill.
-    /// Tier A: via ciò che non cade in nessun intervallo di `window`.
-    /// Tier B: oltre `budget_bytes`, via i frame più lontani dalla testina in
-    /// frame di timeline. Mai per recency: durante il fill il frame alla
-    /// testina è il meno recente.
+    /// The only eviction policy, run every cycle before the fill.
+    /// Tier A: out goes whatever falls in no interval of `window`.
+    /// Tier B: past `budget_bytes`, out go the frames farthest from the playhead
+    /// in timeline frames. Never by recency: during the fill the frame at the
+    /// playhead is the least recent one.
     pub fn reconcile(&self, playhead: FrameIdx, window: &[WantedRange], budget_bytes: usize) {
         let mut inner = self.inner.lock().unwrap();
         let inner = &mut *inner;
@@ -129,7 +129,7 @@ impl SharedFrameCache {
                     ((media_id, idx), distance(media_id, idx, playhead, window))
                 })
                 .collect();
-            // Più lontano prima: si sfratta dalla coda.
+            // Farthest first: eviction works from the tail.
             scored.sort_unstable_by_key(|&(_, dist)| std::cmp::Reverse(dist));
             for (key, _) in scored {
                 if inner.bytes_used <= budget_bytes {
@@ -142,15 +142,15 @@ impl SharedFrameCache {
         }
     }
 
-    /// Tutti i frame `start..=end` del media sono in cache. Si ferma al
-    /// primo mancante, senza costruire gli intervalli.
+    /// All the frames `start..=end` of the media are cached. Stops at the
+    /// first missing one, without building the intervals.
     pub fn covers(&self, media_id: MediaId, start: FrameIdx, end: FrameIdx) -> bool {
         let inner = self.inner.lock().unwrap();
         (start..=end).all(|idx| inner.entries.contains_key(&(media_id, idx)))
     }
 
-    /// Intervalli contigui (inclusivi) attualmente in cache per un
-    /// media — per l'indicatore "buffered" nella UI.
+    /// Contiguous (inclusive) intervals currently cached for a media — for
+    /// the "buffered" indicator in the UI.
     pub fn cached_ranges(&self, media_id: MediaId) -> Vec<(FrameIdx, FrameIdx)> {
         let inner = self.inner.lock().unwrap();
         let mut indices: Vec<FrameIdx> = inner
@@ -172,7 +172,7 @@ impl SharedFrameCache {
     }
 }
 
-/// Distanza in frame di timeline dalla testina; `MAX` se fuori finestra.
+/// Distance in timeline frames from the playhead; `MAX` if outside the window.
 fn distance(
     media_id: MediaId,
     idx: FrameIdx,
@@ -215,9 +215,9 @@ mod tests {
         (a, b)
     }
 
-    /// Frame con `bytes` byte totali, tutti nel piano Y (i test che lo
-    /// usano verificano solo la contabilità byte/eviction, non pixel
-    /// reali — dove finiscono i byte tra i tre piani non conta).
+    /// Frame with `bytes` total bytes, all in the Y plane (the tests using
+    /// it only check the byte/eviction accounting, not real pixels — where
+    /// the bytes land among the three planes does not matter).
     fn frame_of_size(bytes: usize) -> Arc<FrameYuv420> {
         Arc::new(FrameYuv420 {
             width: 1,
@@ -240,7 +240,7 @@ mod tests {
         for idx in [5, 50, 100] {
             cache.insert(media_a, idx, frame_of_size(4));
         }
-        // Solo 50 è dentro l'unico intervallo voluto in questo ciclo.
+        // Only 50 is inside the single interval wanted in this cycle.
         let window = [WantedRange {
             media_id: media_a,
             source_start: 40,
@@ -275,7 +275,7 @@ mod tests {
         cache.insert(media_a, 10, frame_of_size(4));
         cache.insert(media_b, 10, frame_of_size(4));
 
-        // Solo media_a compare nella finestra di questo ciclo.
+        // Only media_a shows up in the window of this cycle.
         let window = [WantedRange {
             media_id: media_a,
             source_start: 0,
@@ -289,12 +289,12 @@ mod tests {
         assert!(!cache.contains(media_b, 10));
     }
 
-    /// Il cuore della sottigliezza in REFACTOR_PIPELINE.md §2: durante un
-    /// fill in avanti il frame *alla testina* è il primo inserito — il
-    /// "meno recente" per qualunque LRU classica. Una LRU-per-recency lo
-    /// sfratterebbe per primo quando il budget non basta; il Tier B deve
-    /// invece sfrattare il frame più LONTANO dalla testina, tenendo
-    /// quello più vicino anche se è il più vecchio.
+    /// The heart of the subtlety in REFACTOR_PIPELINE.md §2: during a
+    /// forward fill the frame *at the playhead* is the first inserted — the
+    /// "least recent" for any classic LRU. An LRU by recency would evict it
+    /// first when the budget runs short; Tier B must instead evict the frame
+    /// FARTHEST from the playhead, keeping the closest one even if it is the
+    /// oldest.
     #[test]
     fn shared_cache_reconcile_tier_b_evicts_by_distance_not_by_recency() {
         let (media_a, _) = two_media_ids();
@@ -306,14 +306,14 @@ mod tests {
             timeline_start: 0,
             rate: vv_core::Rational::one(),
         }];
-        // Inserito per primo (il "meno recente"), ma è il frame alla
-        // testina: deve sopravvivere.
+        // Inserted first (the "least recent"), but it is the frame at the
+        // playhead: it must survive.
         cache.insert(media_a, 0, frame_of_size(4));
-        // Inserito per ultimo (il "più recente"), ma è il più lontano
-        // dalla testina: deve essere il primo a saltare.
+        // Inserted last (the "most recent"), but it is the farthest from
+        // the playhead: it must be the first to go.
         cache.insert(media_a, 90, frame_of_size(4));
 
-        // Budget per un solo frame: forza una scelta tra i due.
+        // Budget for a single frame: forces a choice between the two.
         cache.reconcile(0, &window, 4);
 
         assert!(
@@ -323,8 +323,8 @@ mod tests {
         assert!(!cache.contains(media_a, 90));
     }
 
-    /// Su una clip conformata (25 fps su timeline a 50) un frame sorgente
-    /// vale due frame di timeline: la distanza va misurata lì.
+    /// On a conformed clip (25 fps on a 50 fps timeline) one source frame
+    /// is worth two timeline frames: the distance must be measured there.
     #[test]
     fn shared_cache_reconcile_measures_distance_in_timeline_frames() {
         let (media_a, media_b) = two_media_ids();
@@ -345,7 +345,7 @@ mod tests {
                 rate: vv_core::Rational::one(),
             },
         ];
-        // Frame 30 di A = timeline 60; frame 50 di B = timeline 50.
+        // Frame 30 of A = timeline 60; frame 50 of B = timeline 50.
         cache.insert(media_a, 30, frame_of_size(4));
         cache.insert(media_b, 50, frame_of_size(4));
         cache.reconcile(0, &window, 4);

@@ -88,8 +88,8 @@ mod tests {
         };
         assert!(project.media_pool.get(dangling).is_none());
 
-        // L'undo reinserisce con una chiave slotmap nuova: la clip deve
-        // puntare a quella, non alla vecchia.
+        // The undo reinserts with a new slotmap key: the clip must
+        // point to that one, not to the old one.
         history.undo(&mut project);
         assert_eq!(project.media_pool.len(), 1);
         let restored = project.media_pool.keys().next().unwrap();
@@ -267,7 +267,7 @@ mod tests {
             }),
         );
 
-        // Trimma il bordo sinistro da 10 a 15: source_in passa da 0 a 5.
+        // Trims the left edge from 10 to 15: source_in goes from 0 to 5.
         history.do_command(
             &mut project,
             Box::new(command::TrimClip::new(
@@ -574,9 +574,9 @@ mod tests {
         (clip.timeline_start, clip.source_offset, clip.timeline_len)
     }
 
-    /// Anche su una clip conformata il taglio cade esattamente dove
-    /// richiesto, e ogni frame di timeline mostra lo stesso frame sorgente
-    /// di prima: la metà destra non perde la fase.
+    /// Even on a conformed clip the cut falls exactly where
+    /// requested, and every timeline frame shows the same source frame
+    /// as before: the right half does not lose its phase.
     #[test]
     fn split_clip_cuts_exactly_and_preserves_every_frame_at_any_rate() {
         for rate in RATES {
@@ -627,7 +627,7 @@ mod tests {
         }
     }
 
-    /// Stesso principio dello split per i due bordi di un trim.
+    /// Same principle as the split, for the two edges of a trim.
     #[test]
     fn trim_cuts_exactly_and_preserves_every_remaining_frame_at_any_rate() {
         for rate in RATES {
@@ -736,7 +736,7 @@ mod tests {
             }),
         );
 
-        // split_at fuori dal corpo della clip (>= end): nessun effetto.
+        // split_at outside the body of the clip (>= end): no effect.
         history.do_command(
             &mut project,
             Box::new(command::SplitClip::new(timeline, 0, a_id, 20)),
@@ -806,8 +806,8 @@ mod tests {
         assert_eq!(zoom_x(&project), 1.0);
     }
 
-    /// Il reset di una sezione del pannello: i parametri tornano al
-    /// default, keyframe compresi, e l'undo li rimette com'erano.
+    /// Resetting a section of the panel: the parameters go back to their
+    /// defaults, keyframes included, and the undo puts them back as they were.
     #[test]
     fn reset_transform_params_clears_keyframes_and_undo_restores_them() {
         let (mut project, timeline) = make_project_with_two_tracks();
@@ -953,7 +953,7 @@ mod tests {
         );
     }
 
-    /// Clip con due keyframe di gain, pronta per i comandi di gruppo.
+    /// Clip with two gain keyframes, ready for the group commands.
     fn clip_with_two_gain_keyframes() -> (Project, History, TimelineId, ClipId) {
         let (mut project, timeline) = make_project_with_two_tracks();
         let mut history = History::default();
@@ -1158,11 +1158,11 @@ mod tests {
         assert_eq!(clip.effects.color.as_ref().unwrap().default.r, 1.0);
         assert_eq!(clip.effects.color.as_ref().unwrap().default.g, 1.0);
 
-        history.undo(&mut project); // torna a rosso
+        history.undo(&mut project); // back to red
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         assert_eq!(clip.effects.color.as_ref().unwrap().default.g, 0.0);
 
-        history.undo(&mut project); // torna a "nessun colore"
+        history.undo(&mut project); // back to "no color"
         assert!(
             project.timelines[timeline].tracks[0].clips[0]
                 .effects
@@ -1369,8 +1369,8 @@ mod tests {
             Box::new(command::InsertClip { timeline, track_index: 1, clip: c }),
         );
 
-        // "Scollega" invocato su *a* soltanto: deve sciogliere l'intero
-        // gruppo (bug segnalato: lasciava b e c ancora collegate tra loro).
+        // "Unlink" invoked on *a* alone: it must dissolve the whole
+        // group (reported bug: it left b and c still linked to each other).
         history.do_command(
             &mut project,
             Box::new(command::UnlinkClip::new(timeline, 0, a_id)),
@@ -1498,7 +1498,7 @@ mod tests {
             }),
         );
 
-        // "Taglia tutto al frame 8": due SplitClip in un solo passo di history.
+        // "Cut everything at frame 8": two SplitClips in a single history step.
         history.do_command(
             &mut project,
             Box::new(command::CompositeCommand::new(CommandLabel::SplitClips, vec![
@@ -1511,7 +1511,7 @@ mod tests {
         assert_eq!(tl.tracks[0].clips.len(), 2);
         assert_eq!(tl.tracks[1].clips.len(), 2);
 
-        // Un solo undo riporta indietro entrambi i tagli.
+        // A single undo takes both cuts back.
         history.undo(&mut project);
         let tl = &project.timelines[timeline];
         assert_eq!(tl.tracks[0].clips.len(), 1);
@@ -1675,13 +1675,13 @@ mod tests {
         });
         let frame_size = (1920.0, 1080.0);
         let zoom = [1.0, 1.0];
-        // All'inizio della clip: fuori schermo dal lato opposto a quello
-        // d'arrivo ("Right" è il verso con cui il contenuto raggiunge il
-        // centro).
+        // At the start of the clip: off screen on the opposite side to the one
+        // it arrives from ("Right" is the direction the content reaches the
+        // center from).
         assert_eq!(clip.transition_offset_at(0, frame_size, zoom), [-1920.0, 0.0]);
         let mid = clip.transition_offset_at(10, frame_size, zoom);
         assert!((mid[0] - (-960.0)).abs() < 1.0);
-        // Finita la transizione: a posto, nessun offset residuo.
+        // Transition over: in place, no residual offset.
         assert_eq!(clip.transition_offset_at(20, frame_size, zoom), [0.0, 0.0]);
         assert_eq!(clip.transition_offset_at(50, frame_size, zoom), [0.0, 0.0]);
     }
@@ -1689,7 +1689,7 @@ mod tests {
     #[test]
     fn cross_transition_window_straddles_the_cut_and_progresses_from_zero_to_one() {
         let left = Clip::from_source_range(ClipId(1), ClipSource::Media(MediaId::default()), 0, 100, 0, Rational::one());
-        // Adiacente: comincia esattamente dove finisce `left` (100).
+        // Adjacent: starts exactly where `left` ends (100).
         let right = Clip::from_source_range(ClipId(2), ClipSource::Media(MediaId::default()), 0, 100, 100, Rational::one());
         let crossing = CrossTransition {
             left_clip: left.id,
@@ -1702,20 +1702,20 @@ mod tests {
                 curve: 0.0,
             },
         };
-        // Finestra simmetrica sul taglio: 10 frame prima, 10 dopo.
+        // Symmetric window on the cut: 10 frames before, 10 after.
         assert_eq!(crossing.window(&left, &right), 90..110);
         assert_eq!(crossing.eased_progress_at(90, &left, &right), 0.0);
         assert!((crossing.eased_progress_at(100, &left, &right) - 0.5).abs() < 1e-6);
         assert_eq!(crossing.eased_progress_at(110, &left, &right), 1.0);
 
         let frame_size = (1920.0, 1080.0);
-        // A progresso 0: sinistra del tutto a posto, destra del tutto fuori
-        // (dal lato opposto a "Right", da cui arriva).
+        // At progress 0: left entirely in place, right entirely out
+        // (on the opposite side to "Right", which it comes from).
         let zoom = [1.0, 1.0];
         let (left_off, right_off) = crossing.offsets(0.0, frame_size, zoom, zoom);
         assert_eq!(left_off, [0.0, 0.0]);
         assert_eq!(right_off, [-1920.0, 0.0]);
-        // A progresso 1: l'opposto.
+        // At progress 1: the opposite.
         let (left_off, right_off) = crossing.offsets(1.0, frame_size, zoom, zoom);
         assert_eq!(left_off, [1920.0, 0.0]);
         assert_eq!(right_off, [0.0, 0.0]);
@@ -1744,8 +1744,8 @@ mod compound_clip_tests {
         id
     }
 
-    /// Inserisce nel pool una compound clip che referenzia `plan`, come farebbe
-    /// il chiamante reale (main.rs) prima di girare `compound_clip_commands`.
+    /// Inserts into the pool a compound clip referencing `plan`, as the real
+    /// caller (main.rs) would before running `compound_clip_commands`.
     fn insert_compound_media(project: &mut Project, plan: &CompoundPlan) -> MediaId {
         let nested = project.timelines.insert(Timeline {
             name: plan.nested_timeline.name.clone(),
@@ -1782,7 +1782,7 @@ mod compound_clip_tests {
         let plan = plan_compound_clip(&project, timeline, &[(0, video_id), (1, audio_id)]).unwrap();
 
         assert_eq!(plan.range_start, 10);
-        assert_eq!(plan.len, 40); // fino a 50 (fine della clip audio), da 10
+        assert_eq!(plan.len, 40); // up to 50 (end of the audio clip), from 10
         assert!(plan.has_video && plan.has_audio);
         assert_eq!(plan.video_track, Some(0));
         assert_eq!(plan.audio_track, Some(1));
@@ -1876,7 +1876,7 @@ mod compound_clip_tests {
         let group = video_track.clips[0].linked_group.expect("video collegato all'audio");
         assert_eq!(audio_track.clips[0].linked_group, Some(group));
 
-        // Il pool e la timeline annidata restano fuori dalla history.
+        // The pool and the nested timeline stay out of the history.
         assert_eq!(project.media_pool.len(), 1);
         assert_eq!(project.timelines.len(), 2);
 
@@ -1885,7 +1885,7 @@ mod compound_clip_tests {
         assert_eq!(project.timelines[timeline].tracks[0].clips[0].id, video_id);
         assert_eq!(project.timelines[timeline].tracks[0].clips[0].timeline_start, 10);
         assert_eq!(project.timelines[timeline].tracks[1].clips[0].id, audio_id);
-        // Undo non de-importa la compound clip dal pool, come un import.
+        // Undo does not un-import the compound clip from the pool, like an import.
         assert_eq!(project.media_pool.len(), 1);
     }
 
@@ -1939,8 +1939,8 @@ mod compound_clip_tests {
         });
         let media_a = compound_media_for(&mut project, a);
         let media_b = compound_media_for(&mut project, b);
-        // B contiene già una clip che referenzia A: importare B dentro A
-        // chiuderebbe il ciclo A -> B -> A.
+        // B already contains a clip referencing A: importing B inside A
+        // would close the cycle A -> B -> A.
         project.timelines[b].tracks.push(Track {
             kind: TrackKind::Video,
             clips: vec![Clip::from_source_range(ClipId(1), ClipSource::Media(media_a), 0, 10, 0, Rational::one())],

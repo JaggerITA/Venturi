@@ -1,8 +1,8 @@
 #!/bin/bash
-# Installa vv-app, il .desktop e le icone nel prefix indicato.
+# Installs vv-app, the .desktop file and the icons into the given prefix.
 #
-# Uso: scripts/install-linux.sh [--uninstall] [--prefix DIR]
-# Default: ~/.local, oppure /usr/local se lanciato da root.
+# Usage: scripts/install-linux.sh [--uninstall] [--prefix DIR]
+# Default: ~/.local, or /usr/local when run as root.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -13,7 +13,7 @@ while [ $# -gt 0 ]; do
         --uninstall) UNINSTALL=1 ;;
         --prefix) PREFIX="$2"; shift ;;
         --prefix=*) PREFIX="${1#--prefix=}" ;;
-        *) echo "argomento sconosciuto: $1" >&2; exit 1 ;;
+        *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
 done
@@ -26,7 +26,7 @@ DESKTOP="$PREFIX/share/applications/venturi.desktop"
 ICONS="$PREFIX/share/icons/hicolor"
 
 refresh_caches() {
-    # Senza questo i menu continuano a mostrare la voce/icona vecchia.
+    # Without this the menus keep showing the old entry/icon.
     command -v gtk-update-icon-cache >/dev/null && \
         gtk-update-icon-cache -q -t -f "$ICONS" 2>/dev/null || true
     command -v update-desktop-database >/dev/null && \
@@ -38,7 +38,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
     find "$ICONS" -name 'venturi.png' -o -name 'venturi.svg' 2>/dev/null \
         | while read -r f; do rm -f "$f"; done
     refresh_caches
-    echo "rimosso da $PREFIX"
+    echo "removed from $PREFIX"
     exit 0
 fi
 
@@ -50,7 +50,7 @@ fi
 install -Dm755 "$TARGET_DIR/release/vv-app" "$BIN"
 install -Dm644 packaging/appimage/venturi.desktop "$DESKTOP"
 
-# Il nome del file icona deve combaciare con la chiave Icon= del .desktop.
+# The icon file name must match the Icon= key of the .desktop.
 for dir in media/icons/linux/hicolor/*/apps; do
     size="$(basename "$(dirname "$dir")")"
     for f in "$dir"/venturi-video.*; do
@@ -60,8 +60,8 @@ done
 
 refresh_caches
 
-echo "installato in $PREFIX"
+echo "installed into $PREFIX"
 case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;
-    *) echo "nota: $PREFIX/bin non è nel PATH" ;;
+    *) echo "note: $PREFIX/bin is not in PATH" ;;
 esac

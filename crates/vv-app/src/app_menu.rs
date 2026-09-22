@@ -1,16 +1,16 @@
-//! Barra dei menu e scorciatoie da tastiera.
+//! Menu bar and keyboard shortcuts.
 
 use super::*;
 
 impl VenturiApp {
     pub(crate) fn handle_shortcuts(&mut self, ui: &mut egui::Ui) {
-        // Copia/incolla si gestiscono fuori da `ui.input`: `ctx.copy_text` prende
-        // lo stesso lock e dentro andrebbe in deadlock.
+        // Copy/paste are handled outside `ui.input`: `ctx.copy_text` takes
+        // the same lock and would deadlock inside it.
         let mut clipboard_events: Vec<egui::Event> = Vec::new();
         let mut arrow_input = (None, 0.0);
         let mut set_fullscreen = None;
-        // I tasti scritti in un campo di testo (es. il titolo) non sono
-        // scorciatoie: "T" taglierebbe le clip, Backspace le cancellerebbe.
+        // Keys typed into a text field (e.g. the title) are not shortcuts:
+        // "T" would cut the clips, Backspace would delete them.
         let typing = ui.ctx().egui_wants_keyboard_input();
         if let Some(timeline_id) = self.timeline_id {
             self.timeline_state
@@ -33,8 +33,8 @@ impl VenturiApp {
                 _ => None,
             };
             if pressed(Action::Delete) {
-                // Il pannello che ha ricevuto l'ultimo click decide chi
-                // cancella: editor di keyframe, media pool o timeline.
+                // The panel that got the last click decides who deletes:
+                // keyframe editor, media pool or timeline.
                 if self.keyframe_editor.owns_delete() {
                     self.delete_selected_keyframes();
                 } else if self.media_pool_state.focused {
@@ -71,8 +71,8 @@ impl VenturiApp {
                 self.handle_fast_playback_key();
             }
             if pressed(Action::SelectAll) {
-                // Stessa regola del Canc: il pannello con l'ultimo
-                // click decide cosa seleziona Ctrl+A.
+                // Same rule as Del: the panel with the last click
+                // decides what Ctrl+A selects.
                 if self.media_pool_state.focused {
                     self.select_all_media();
                 } else {
@@ -97,7 +97,7 @@ impl VenturiApp {
             if pressed(Action::Export) {
                 self.start_export();
             }
-            // Solo raccolti: gestiti fuori da qui, vedi sopra.
+            // Only collected: handled outside here, see above.
             for (action, event) in [
                 (Action::Copy, egui::Event::Copy),
                 (Action::Cut, egui::Event::Cut),
@@ -120,7 +120,7 @@ impl VenturiApp {
                 set_fullscreen = Some(false);
             }
         });
-        // Fuori da `ui.input`: `send_viewport_cmd` riprende lo stesso lock.
+        // Outside `ui.input`: `send_viewport_cmd` takes the same lock again.
         if let Some(on) = set_fullscreen.take() {
             self.viewer_fullscreen = on;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
@@ -209,7 +209,7 @@ impl VenturiApp {
                         )
                         .clicked()
                     {
-                        // Scrive anche il segnaposto nella clipboard di sistema, vedi
+                        // Also writes the placeholder to the system clipboard, see
                         // `handle_clipboard_events`.
                         self.handle_clipboard_events(ui, &[egui::Event::Copy]);
                         ui.close();
@@ -261,8 +261,8 @@ impl VenturiApp {
                 });
 
                 ui.menu_button(t!("menu.timeline"), |ui| {
-                    // Checkbox: restano aperti al click, a differenza dei
-                    // pulsanti-azione altrove nei menu.
+                    // Checkboxes: they stay open on click, unlike the
+                    // action buttons elsewhere in the menus.
                     ui.checkbox(
                         &mut self.selection_follows_playhead,
                         t!("menu.selection_follows_playhead"),
@@ -336,7 +336,7 @@ impl VenturiApp {
                         });
                         ui.horizontal(|ui| {
                             ui.label(t!("menu.video_cache"));
-                            // Espresso in MB nella UI, `cache_budget_bytes` in byte.
+                            // Expressed in MB in the UI, `cache_budget_bytes` in bytes.
                             let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
                             if ui
                                 .add(
@@ -406,7 +406,7 @@ impl VenturiApp {
             });
     }
 
-    /// Texture dell'icona dell'app, caricata alla prima apertura dell'about.
+    /// App icon texture, loaded the first time the about box is opened.
     fn about_icon(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
         if self.about_icon.is_none() {
             let icon = app_icon()?;
@@ -441,8 +441,8 @@ impl VenturiApp {
         }
     }
 
-    /// Come in Blender: dal più recente, il pallino sullo stato attuale e un
-    /// click per saltare a qualunque punto, avanti o indietro.
+    /// As in Blender: newest first, the dot on the current state and one
+    /// click to jump to any point, forwards or backwards.
     fn undo_history_menu(&mut self, ui: &mut egui::Ui) {
         let labels: Vec<vv_core::CommandLabel> = self.history.labels().collect();
         let current = self.history.position();

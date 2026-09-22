@@ -1,4 +1,4 @@
-//! Lettura dei metadata di un media.
+//! Reading the metadata of a media.
 
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
@@ -13,13 +13,13 @@ pub(crate) fn ensure_init() {
     });
 }
 
-/// Fps nominale di un media solo audio: non ha frame propri, ma
-/// `source_in`/`source_out` e i keyframe del gain si contano comunque in
-/// frame sorgente.
+/// Nominal fps of an audio-only media: it has no frames of its own, but
+/// `source_in`/`source_out` and the gain keyframes are counted in source
+/// frames all the same.
 pub const AUDIO_ONLY_FPS: Rational = Rational::new(30, 1);
 
-/// Fps nominale di un'immagine: serve solo un'unità coerente per
-/// `source_in`/`source_out`.
+/// Nominal fps of an image: only a consistent unit for `source_in`/`source_out`
+/// is needed.
 pub const IMAGE_FPS: Rational = Rational::new(25, 1);
 
 pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
@@ -60,11 +60,11 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     let (fps, width, height) = video.unwrap_or((AUDIO_ONLY_FPS, 0, 0));
     let duration_secs = input.duration() as f64 / f64::from(ffmpeg::ffi::AV_TIME_BASE);
     let nominal_duration_frames = (duration_secs * fps.as_f64()).round() as i64;
-    // Il container spesso dichiara più frame di quanti il decoder ne
-    // produca davvero (drop frame, indice CFR impreciso...): chi chiede
-    // il frame `duration_frames - 1` come "ultimo frame" (es. il freeze
-    // di `extrapolated_frame_for`) riceverebbe per sempre `None` se ci
-    // fidassimo ciecamente del calcolo aritmetico.
+    // The container often declares more frames than the decoder actually
+    // produces (drop frames, imprecise CFR index...): whoever asks for
+    // frame `duration_frames - 1` as the "last frame" (e.g. the freeze in
+    // `extrapolated_frame_for`) would get `None` forever if we blindly
+    // trusted the arithmetic.
     let duration_frames = if video.is_some() {
         verify_last_decodable_frame(path, fps, nominal_duration_frames)
     } else {
@@ -83,14 +83,14 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     })
 }
 
-/// Corregge `nominal` (durata*fps) al vero conteggio di frame che lo
-/// stream produce. Due passate, entrambe sulla sola coda del file: un
-/// demux (nessuna decodifica) che trova il pts dell'ultimo pacchetto
-/// video e dell'ultimo keyframe, poi la decodifica del solo ultimo GOP
-/// per confermare che quel frame esca davvero dal decoder. Non alza mai
-/// `nominal`: se qualcosa fallisce si tiene il valore aritmetico e
-/// l'eventuale eccedenza si ignora — questo fix corregge solo la
-/// sovrastima, non ne introduce una nuova.
+/// Corrects `nominal` (duration*fps) to the true count of frames the stream
+/// produces. Two passes, both on the tail of the file only: a demux (no
+/// decoding) that finds the pts of the last video packet and of the last
+/// keyframe, then decoding of the last GOP alone to confirm that that frame
+/// really comes out of the decoder. It never raises `nominal`: if something
+/// fails the arithmetic value is kept and the excess, if any, is ignored —
+/// this fix corrects only the overestimate, it does not introduce a new
+/// one.
 fn verify_last_decodable_frame(path: &Path, fps: Rational, nominal: i64) -> i64 {
     let idx_of = |secs: f64| (secs * fps.as_f64()).round() as FrameIdx;
     let Some((last_packet_secs, last_key_secs)) = scan_tail(path, fps, nominal) else {
@@ -98,16 +98,16 @@ fn verify_last_decodable_frame(path: &Path, fps: Rational, nominal: i64) -> i64 
     };
     match decode_from(path, last_key_secs) {
         Some(secs) => (idx_of(secs) + 1).min(nominal),
-        // Il GOP finale non si decodifica: ci si ferma al demux, che è
-        // comunque più vicino al vero del calcolo aritmetico.
+        // The final GOP does not decode: stop at the demux, which is
+        // closer to the truth than the arithmetic anyway.
         None => (idx_of(last_packet_secs) + 1).min(nominal),
     }
 }
 
-/// `(pts dell'ultimo pacchetto video, pts dell'ultimo keyframe)` in
-/// secondi, demuxando dalla coda dello stream. Se il seek atterra oltre
-/// la vera fine (è il caso che stiamo correggendo) si rilegge dall'inizio:
-/// senza decodifica costa comunque pochi ms anche su file lunghi.
+/// `(pts of the last video packet, pts of the last keyframe)` in seconds,
+/// demuxing from the tail of the stream. If the seek lands past the real
+/// end (which is the case we are fixing) it re-reads from the start:
+/// without decoding it costs a few ms even on long files.
 fn scan_tail(path: &Path, fps: Rational, nominal: i64) -> Option<(f64, f64)> {
     const SAFETY_MARGIN_SECS: f64 = 15.0;
     let nominal_secs = nominal as f64 / fps.as_f64();
@@ -144,9 +144,9 @@ fn scan_tail(path: &Path, fps: Rational, nominal: i64) -> Option<(f64, f64)> {
     None
 }
 
-/// Pts dell'ultimo frame che il decoder produce partendo dal keyframe a
-/// `from_secs`, in secondi. Nessuno scaler: serve solo il timestamp, non
-/// i pixel.
+/// Pts of the last frame the decoder produces starting from the keyframe at
+/// `from_secs`, in seconds. No scaler: only the timestamp is needed, not
+/// the pixels.
 fn decode_from(path: &Path, from_secs: f64) -> Option<f64> {
     let mut input = ffmpeg::format::input(&path).ok()?;
     let stream = input.streams().best(ffmpeg::media::Type::Video)?;
@@ -192,7 +192,7 @@ fn seconds_per_tick(time_base: ffmpeg::Rational) -> f64 {
     time_base.numerator() as f64 / time_base.denominator() as f64
 }
 
-/// Come `probe` per un'immagine: `duration_frames` è il sentinel
+/// Like `probe` but for an image: `duration_frames` is the sentinel
 /// `vv_core::IMAGE_DURATION_FRAMES`.
 pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     ensure_init();
@@ -217,16 +217,16 @@ pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     })
 }
 
-/// Info su uno stream audio del contenitore, per l'import multi-traccia
-/// (vedi `audio_streams`).
+/// Info on an audio stream of the container, for multi-track import
+/// (see `audio_streams`).
 pub struct AudioStreamInfo {
     pub sample_rate: u32,
     pub channels: u16,
 }
 
-/// Tutti gli stream audio nell'ordine del contenitore (non il "best" di
-/// ffmpeg): è l'indice di `Clip::audio_stream_index`. Un file multi-audio si
-/// importa con una clip per stream.
+/// All the audio streams in container order (not ffmpeg's "best"): this is
+/// the index of `Clip::audio_stream_index`. A multi-audio file is imported
+/// with one clip per stream.
 pub fn audio_streams(path: &Path) -> Result<Vec<AudioStreamInfo>, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
@@ -246,11 +246,11 @@ pub fn audio_streams(path: &Path) -> Result<Vec<AudioStreamInfo>, crate::MediaEr
     Ok(out)
 }
 
-/// Fingerprint (path canonico + dimensione + mtime, FNV-1a) usato come
-/// `content_hash` per le cache derivate. Non legge i byte: un file
-/// sovrascritto con stessa dimensione e mtime userebbe una cache stantia,
-/// compromesso accettato per import istantanei. Stabile tra riavvii, a
-/// differenza di `DefaultHasher`.
+/// Fingerprint (canonical path + size + mtime, FNV-1a) used as the
+/// `content_hash` for the derived caches. It does not read the bytes: a file
+/// overwritten with the same size and mtime would use a stale cache, a
+/// tradeoff accepted for instant imports. Stable across restarts, unlike
+/// `DefaultHasher`.
 pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
     let metadata = std::fs::metadata(path)?;
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -278,11 +278,11 @@ pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
 mod tests {
     use super::*;
 
-    /// Riproduce lo scenario del bug: un container che dichiara più frame
-    /// di quanti il decoder ne produca davvero (qui simulato passando a
-    /// `verify_last_decodable_frame` un `nominal` gonfiato oltre il vero
-    /// conteggio, invece di un container reale rotto). Deve correggerlo
-    /// al vero ultimo frame decodificabile, non fidarsi del valore dato.
+    /// Reproduces the bug scenario: a container declaring more frames than
+    /// the decoder actually produces (simulated here by passing
+    /// `verify_last_decodable_frame` a `nominal` inflated past the true
+    /// count, instead of a real broken container). It must correct it to
+    /// the true last decodable frame, not trust the given value.
     #[test]
     fn verify_last_decodable_frame_corrects_an_inflated_nominal() {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
@@ -301,9 +301,9 @@ mod tests {
         assert!(corrected <= 15, "10 frame veri a 10fps: il conteggio corretto non deve restare vicino al nominal gonfiato ({corrected})");
     }
 
-    /// Caso reale della sovrastima: l'audio dura più del video, quindi la
-    /// durata del container (il massimo fra gli stream) moltiplicata per
-    /// gli fps promette molti più frame di quanti il video ne abbia.
+    /// Real case of the overestimate: the audio lasts longer than the video, so
+    /// the container duration (the maximum across the streams) multiplied by
+    /// the fps promises many more frames than the video has.
     #[test]
     fn probe_ignores_frames_promised_by_an_audio_track_longer_than_the_video() {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
@@ -326,9 +326,9 @@ mod tests {
         );
     }
 
-    /// Genera un vero file x264 (con audio AAC) via ffmpeg CLI e verifica
-    /// che il probe legga metadata coerenti. Questo è il caso d'uso
-    /// primario dichiarato dall'utente (compressed x264), non un mock.
+    /// Generates a real x264 file (with AAC audio) via the ffmpeg CLI and checks
+    /// that the probe reads coherent metadata. This is the primary use case
+    /// stated by the user (compressed x264), not a mock.
     #[test]
     fn probe_reads_x264_metadata() {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
@@ -362,7 +362,7 @@ mod tests {
         assert!(meta.has_audio);
         assert_eq!(meta.sample_rate, 48000);
         assert_eq!(meta.audio_streams, 1);
-        // ~2s a 25fps: tollera qualche frame di arrotondamento sul container.
+        // ~2s at 25fps: tolerates a few rounding frames on the container.
         assert!((meta.duration_frames - 50).abs() <= 2);
     }
 
@@ -463,10 +463,10 @@ mod tests {
         std::fs::write(&path, "prima versione").unwrap();
         let before = content_fingerprint(&path).unwrap();
 
-        // Dimensione diversa garantisce che il fingerprint cambi anche
-        // se il filesystem ha una risoluzione della mtime troppo bassa
-        // per registrare la scrittura come "più tardi" della precedente
-        // entro la durata del test.
+        // A different size guarantees the fingerprint changes even
+        // if the filesystem has an mtime resolution too coarse
+        // to record the write as "later" than the previous one
+        // within the duration of the test.
         std::fs::write(&path, "seconda versione, più lunga della prima").unwrap();
         let after = content_fingerprint(&path).unwrap();
 

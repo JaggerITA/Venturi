@@ -1,6 +1,6 @@
-//! Encoding + mux in MP4 (H.264 x264/NVENC + AAC). Riceve frame I420 già
-//! compositati (BT.709 limited) e PCM già mixato; converte solo l'audio nel
-//! formato nativo dell'encoder AAC.
+//! Encoding + muxing into MP4 (H.264 x264/NVENC + AAC). It receives already
+//! composited I420 frames (BT.709 limited) and already mixed PCM; it only
+//! converts the audio into the AAC encoder's native format.
 
 use ffmpeg::codec::{self, encoder};
 use ffmpeg::format::sample::{Sample, Type as SampleType};
@@ -27,7 +27,7 @@ impl VideoCodec {
         }
     }
 
-    /// Dal più veloce al più lento.
+    /// From fastest to slowest.
     pub fn presets(self) -> &'static [&'static str] {
         match self {
             Self::X264 => &[
@@ -47,16 +47,16 @@ impl VideoCodec {
 
     pub fn default_preset(self) -> &'static str {
         match self {
-            // A parità di CRF qualità simile a "medium", ~3× più veloce e
-            // file ~2× più grande.
+            // At equal CRF, quality similar to "medium", ~3× faster and
+            // ~2× larger files.
             Self::X264 => "superfast",
             Self::Nvenc => "p5",
         }
     }
 
-    /// Prova ad aprire davvero l'encoder (risultato in cache): NVENC è
-    /// compilato in molte build di ffmpeg anche dove non c'è una GPU
-    /// NVIDIA, e la prima apertura può costare un secondo.
+    /// Tries to actually open the encoder (result cached): NVENC is
+    /// compiled into many ffmpeg builds even where there is no NVIDIA GPU,
+    /// and the first open can cost a second.
     pub fn is_available(self) -> bool {
         static CACHE: [OnceLock<bool>; 2] = [OnceLock::new(), OnceLock::new()];
         *CACHE[self as usize].get_or_init(|| {
@@ -82,9 +82,9 @@ impl VideoCodec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoSettings {
     pub codec: VideoCodec,
-    /// Uno di `codec.presets()`.
+    /// One of `codec.presets()`.
     pub preset: String,
-    /// CRF per x264, CQ per NVENC: più basso = qualità più alta.
+    /// CRF for x264, CQ for NVENC: lower = higher quality.
     pub quality: u8,
 }
 
@@ -124,8 +124,8 @@ impl AudioCodec {
 pub struct AudioSettings {
     pub codec: AudioCodec,
     pub bitrate_kbps: u32,
-    /// Solo per `AudioCodec::Aac`: coder "fast" invece di "twoloop", molto
-    /// più rapido in stereo a qualità un po' inferiore.
+    /// Only for `AudioCodec::Aac`: "fast" coder instead of "twoloop", much
+    /// quicker in stereo at slightly lower quality.
     pub fast_coder: bool,
 }
 
@@ -142,9 +142,9 @@ impl Default for AudioSettings {
 struct VideoState {
     encoder: encoder::Video,
     stream_index: usize,
-    /// Time base dell'encoder (1/fps: un pts in unità = un frame), diverso
-    /// da quello dello stream di output (`ost_time_base`) su cui vanno
-    /// riscalati i pacchetti prima di scriverli (muxer MP4).
+    /// Encoder time base (1/fps: one pts unit = one frame), different from
+    /// the output stream's (`ost_time_base`), onto which the packets must be
+    /// rescaled before writing them (MP4 muxer).
     time_base: ffmpeg::Rational,
     ost_time_base: ffmpeg::Rational,
     next_pts: i64,
@@ -152,25 +152,25 @@ struct VideoState {
 
 struct AudioState {
     encoder: encoder::Audio,
-    /// F32 packed -> formato dell'encoder AAC, stesso rate (il ricampionamento
-    /// è già fatto a monte).
+    /// F32 packed -> AAC encoder format, same rate (resampling is already
+    /// done upstream).
     resampler: Resampler,
     input_layout: ChannelLayout,
     stream_index: usize,
     time_base: ffmpeg::Rational,
     ost_time_base: ffmpeg::Rational,
-    /// Campioni per canale che l'encoder AAC si aspetta in ogni frame
-    /// (fisso per l'encoder nativo `aac`, non a frame size variabile).
+    /// Samples per channel the AAC encoder expects in each frame
+    /// (fixed for the native `aac` encoder, not variable frame size).
     frame_size: usize,
     channels: u16,
     rate: u32,
-    /// Campioni interleaved accumulati in attesa di raggiungere un multiplo
-    /// di `frame_size * channels`.
+    /// Interleaved samples accumulated while waiting to reach a multiple
+    /// of `frame_size * channels`.
     pending: Vec<f32>,
     next_pts: i64,
 }
 
-/// Encoder video + audio opzionale + muxer, un frame alla volta. Uno per
+/// Video encoder + optional audio + muxer, one frame at a time. One per
 /// export.
 pub struct Encoder {
     octx: format::context::Output,
@@ -179,8 +179,8 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// `audio`: `Some((sample_rate, channels, impostazioni))` se il progetto
-    /// ha una traccia audio da esportare, `None` per un export solo video.
+    /// `audio`: `Some((sample_rate, channels, settings))` if the project
+    /// has an audio track to export, `None` for a video-only export.
     pub fn new(
         path: &Path,
         width: u32,
@@ -214,7 +214,7 @@ impl Encoder {
         video_ctx.set_frame_rate(Some(ffmpeg::Rational::new(fps.num, fps.den)));
         video_ctx.set_colorspace(ffmpeg::color::Space::BT709);
         video_ctx.set_color_range(ffmpeg::color::Range::MPEG);
-        // ffmpeg-next non ha setter per primaries/trc.
+        // ffmpeg-next has no setter for primaries/trc.
         unsafe {
             let raw = video_ctx.as_mut_ptr();
             (*raw).color_primaries = ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_BT709;
@@ -229,8 +229,8 @@ impl Encoder {
         match video.codec {
             VideoCodec::X264 => video_opts.set("crf", &quality),
             VideoCodec::Nvenc => {
-                // Senza bit_rate a 0 NVENC ignora `cq` e resta sul bitrate
-                // di default del contesto.
+                // Without bit_rate at 0, NVENC ignores `cq` and stays on the
+                // context's default bitrate.
                 video_ctx.set_bit_rate(0);
                 video_opts.set("rc", "vbr");
                 video_opts.set("cq", &quality);
@@ -240,7 +240,7 @@ impl Encoder {
         let mut video_ost = video_ost;
         video_ost.set_parameters(&video_encoder);
 
-        // --- audio: AAC (opzionale) ---
+        // --- audio: AAC (optional) ---
         let audio_state = match audio {
             Some((sample_rate, channels, settings)) => {
                 let audio_codec =
@@ -308,7 +308,7 @@ impl Encoder {
                         input_layout,
                         stream_index: audio_stream_index,
                         time_base: audio_time_base,
-                        // Aggiornato dopo `write_header`.
+                        // Updated after `write_header`.
                         ost_time_base: audio_time_base,
                         frame_size,
                         channels,
@@ -322,9 +322,9 @@ impl Encoder {
 
         octx.write_header()?;
 
-        // Il muxer può normalizzare il time_base dichiarato in fase di
-        // `write_header`: quello *effettivo* dello stream di output va
-        // riletto da lì, non assunto uguale a quello dell'encoder.
+        // The muxer may normalize the time_base declared during
+        // `write_header`: the *effective* one of the output stream must be
+        // read back from there, not assumed equal to the encoder's.
         let video_ost_time_base = octx.stream(video_stream_index).unwrap().time_base();
         let video = VideoState {
             encoder: video_encoder,
@@ -342,9 +342,9 @@ impl Encoder {
         Ok(Self { octx, video, audio })
     }
 
-    /// `i420`: piani Y, U, V densi e consecutivi, croma `(w+1)/2 x (h+1)/2`
-    /// (formato di `vv_render::Compositor::render_layers_i420`) — un
-    /// avanzamento di un frame video in output.
+    /// `i420`: dense and consecutive Y, U, V planes, chroma `(w+1)/2 x (h+1)/2`
+    /// (the format of `vv_render::Compositor::render_layers_i420`) — one
+    /// video frame of output advanced.
     pub fn write_video_frame(&mut self, i420: &[u8]) -> Result<(), crate::MediaError> {
         let video = &mut self.video;
         let width = video.encoder.width() as usize;
@@ -369,16 +369,16 @@ impl Encoder {
             video.ost_time_base,
         )
     }
-    /// `samples`: PCM f32 interleaved, già al sample rate/canali dichiarati
-    /// in `new`. Bufferizza internamente ai confini di frame AAC
-    /// (`frame_size`); no-op se il progetto non ha audio.
+    /// `samples`: interleaved f32 PCM, already at the sample rate/channels declared
+    /// in `new`. Buffers internally at AAC frame boundaries
+    /// (`frame_size`); no-op if the project has no audio.
     pub fn write_audio_samples(&mut self, samples: &[f32]) -> Result<(), crate::MediaError> {
         let Self { octx, audio, .. } = self;
         let Some(audio) = audio else {
             return Ok(());
         };
-        // Mai `drain` dalla testa di `pending` blocco per blocco: con tutto
-        // l'audio dell'export in un colpo diventa quadratico (minuti).
+        // Never `drain` from the head of `pending` block by block: with all
+        // the export audio at once it becomes quadratic (minutes).
         let mut pending = std::mem::take(&mut audio.pending);
         pending.extend_from_slice(samples);
         let frame_len = audio.frame_size * audio.channels as usize;
@@ -390,8 +390,8 @@ impl Encoder {
         Ok(())
     }
 
-    /// Flush degli encoder e `write_trailer`. L'ultimo blocco audio va
-    /// imbottito di silenzio: l'AAC nativo accetta solo frame di `frame_size`.
+    /// Flushes the encoders and `write_trailer`. The last audio block must be
+    /// padded with silence: native AAC only accepts frames of `frame_size`.
     pub fn finish(mut self) -> Result<(), crate::MediaError> {
         self.video.encoder.send_eof()?;
         let video = &mut self.video;
@@ -460,7 +460,7 @@ fn write_audio_chunk(
     )
 }
 
-/// Scrive nel muxer i pacchetti già pronti di `encoder`.
+/// Writes the packets already ready from `encoder` into the muxer.
 pub(crate) fn drain_packets(
     octx: &mut format::context::Output,
     encoder: &mut encoder::Encoder,
@@ -477,8 +477,8 @@ pub(crate) fn drain_packets(
     Ok(())
 }
 
-/// Copia un piano denso (righe di `row_width` byte) in un piano di `frame`,
-/// che può avere uno stride più largo.
+/// Copies a dense plane (rows of `row_width` bytes) into a plane of `frame`,
+/// which may have a wider stride.
 pub(crate) fn fill_plane(frame: &mut ffmpeg::frame::Video, plane: usize, src: &[u8], row_width: usize) {
     let stride = frame.stride(plane);
     let data = frame.data_mut(plane);
@@ -491,12 +491,12 @@ pub(crate) fn fill_plane(frame: &mut ffmpeg::frame::Video, plane: usize, src: &[
 mod tests {
     use super::*;
 
-    // Verifica il file prodotto rileggendolo con le funzioni di decodifica
-    // già esistenti/testate in questo stesso crate (`probe`/`Decoder`/
-    // `decode_audio_track`), invece di introdurre una dipendenza da
-    // ffprobe/JSON solo per i test: lo stesso principio "dogfooding" già
-    // implicito nel resto della test suite (i fixture generati con
-    // `ffmpeg` CLI vengono verificati decodificandoli con questo crate).
+    // Checks the produced file by re-reading it with the decoding functions
+    // already existing/tested in this same crate (`probe`/`Decoder`/
+    // `decode_audio_track`), instead of introducing a dependency on
+    // ffprobe/JSON just for the tests: the same "dogfooding" principle already
+    // implicit in the rest of the test suite (the fixtures generated with the
+    // `ffmpeg` CLI are verified by decoding them with this crate).
 
     fn solid_i420(width: usize, height: usize, [y, u, v]: [u8; 3]) -> Vec<u8> {
         let chroma = width.div_ceil(2) * height.div_ceil(2);
@@ -515,7 +515,7 @@ mod tests {
         let fps = vv_core::Rational::new(25, 1);
         let mut encoder =
             Encoder::new(&path, 16, 16, fps, &VideoSettings::default(), None).unwrap();
-        // Rosso in BT.709 range limitato.
+        // Red in BT.709 limited range.
         let red = solid_i420(16, 16, [63, 102, 240]);
         for _ in 0..25 {
             encoder.write_video_frame(&red).unwrap();
@@ -532,10 +532,10 @@ mod tests {
         while decoder.next_frame().unwrap().is_some() {
             count += 1;
         }
-        // Con B-frame (preset x264 di default) il riordino encoder/muxer
-        // può accorciare di un frame quel che si rilegge dal container:
-        // stessa tolleranza già usata altrove in questo crate per
-        // arrotondamenti GOP/container, non un conteggio esatto.
+        // With B-frames (default x264 preset) the encoder/muxer reordering
+        // can shorten by one frame what is read back from the container:
+        // the same tolerance already used elsewhere in this crate for
+        // GOP/container rounding, not an exact count.
         assert!((24..=25).contains(&count), "count={count}");
     }
 
@@ -559,7 +559,7 @@ mod tests {
         for _ in 0..25 {
             encoder.write_video_frame(&black).unwrap();
         }
-        // 1s di audio stereo a 48kHz, un semplice seno generato a mano.
+        // 1s of stereo audio at 48kHz, a simple hand-generated sine.
         let samples: Vec<f32> = (0..48000 * 2)
             .map(|i| {
                 let t = (i / 2) as f32 / 48000.0;
@@ -580,8 +580,8 @@ mod tests {
         assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
     }
 
-    /// Ogni combinazione di encoder disponibile su questa macchina deve
-    /// produrre un file con entrambi gli stream.
+    /// Every encoder combination available on this machine must produce a
+    /// file with both streams.
     #[test]
     fn encodes_with_every_available_codec_and_preset_choice() {
         let dir = std::env::temp_dir().join("vv-media-encode-test");

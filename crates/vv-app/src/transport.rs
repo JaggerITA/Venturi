@@ -1,21 +1,21 @@
-//! Barra di riproduzione sotto al viewer: testina, marker in/out e
-//! pulsante play/pausa. Vale sia per l'anteprima di un media del media pool
-//! (in/out = porzione da portare sulla timeline) sia per la timeline
-//! (in/out = porzione da esportare).
+//! Playback bar under the viewer: playhead, in/out markers and play/pause
+//! button. It serves both the preview of a media pool item (in/out = the
+//! portion to bring onto the timeline) and the timeline (in/out = the
+//! portion to export).
 
 use vv_core::FrameIdx;
 
-/// Marker in/out: `None` = estremo della barra, così seguono la durata
-/// quando il contenuto cambia.
+/// In/out markers: `None` = end of the bar, so they follow the duration
+/// when the content changes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MarkRange {
     pub mark_in: Option<FrameIdx>,
-    /// Esclusivo: "o" sul frame `p` lo include.
+    /// Exclusive: "o" on frame `p` includes it.
     pub mark_out: Option<FrameIdx>,
 }
 
 impl MarkRange {
-    /// `(in, out)` effettivi dentro `0..=total`, con `in <= out`.
+    /// Effective `(in, out)` within `0..=total`, with `in <= out`.
     pub fn resolve(&self, total: FrameIdx) -> (FrameIdx, FrameIdx) {
         let total = total.max(0);
         let out = self.mark_out.unwrap_or(total).clamp(0, total);
@@ -55,7 +55,7 @@ const TRACK_Y: f32 = 12.0;
 const SIDE_PADDING: f32 = 10.0;
 const PLAY_BUTTON_SIZE: f32 = 26.0;
 
-/// `total` frame di contenuto; la testina può stare su `0..total`.
+/// `total` frames of content; the playhead can sit on `0..total`.
 pub fn show_transport(
     ui: &mut egui::Ui,
     total: FrameIdx,
@@ -102,7 +102,7 @@ pub fn show_transport(
             track.top()..=track.bottom() + 6.0,
             egui::Stroke::new(1.0, marker_color),
         );
-        // Bandierina rivolta verso l'interno della regione.
+        // Flag pointing towards the inside of the region.
         let flag_w = if is_in { 7.0 } else { -7.0 };
         let top = track.bottom() + 6.0;
         let mut points = vec![
@@ -111,7 +111,7 @@ pub fn show_transport(
             egui::pos2(x + flag_w, top + 10.0),
             egui::pos2(x, top + 10.0),
         ];
-        // Il tessellatore di egui vuole i vertici in senso orario.
+        // egui's tessellator wants the vertices in clockwise order.
         if !is_in {
             points.reverse();
         }
@@ -145,7 +145,7 @@ pub fn show_transport(
             .rect_filled(button_rect, 4.0, visuals.weak_bg_fill);
         let color = visuals.fg_stroke.color;
         let c = button_rect.center();
-        // Icone disegnate: i glifi ▶/⏸ non sono garantiti nei font di egui.
+        // Icons drawn by hand: the ▶/⏸ glyphs are not guaranteed in egui's fonts.
         if playing {
             for dx in [-4.0, 4.0] {
                 ui.painter().rect_filled(

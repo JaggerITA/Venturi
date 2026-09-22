@@ -1,21 +1,119 @@
 # Venturi
 
-Editor video "solo edit page" in Rust — vedi [ARCHITECTURE.md](ARCHITECTURE.md)
-per il design. Sviluppato e testato principalmente su Fedora Asahi Remix
-(Apple Silicon), ma non dipende da nulla di specifico ad Asahi: build su
-altre distro Linux dovrebbe funzionare allo stesso modo, a patto delle
-librerie di sistema sotto.
+A fast, focused video editor for Linux, written in Rust.
 
-## Dipendenze
+Venturi is an "edit page only" NLE: multi-track cutting, the transforms you
+actually reach for while editing (crop, zoom, rotation, position, speed,
+opacity, audio gain, titles, solid colours), keyframes on every parameter,
+transitions, compound clips, ripple/normal delete. No node editor, no colour
+grading page, no fusion-style compositor. The scope is deliberate: the edit
+page is where the time goes, so that is the part that gets to be excellent.
 
-- **Rust** 1.85 o più recente (edition 2024) — [rustup.rs](https://rustup.rs)
-- **FFmpeg** (header/lib di sviluppo + `pkg-config`, per `ffmpeg-next`, il
-  binding usato per decode/encode)
-- **clang/libclang** (per il bindgen di `ffmpeg-next`)
-- **Wayland/X11 + Vulkan** (per `eframe`/`wgpu`, la UI e il compositor GPU)
-- **ALSA** (per `cpal`, l'audio)
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
-Su Fedora (compreso Asahi Remix):
+## Why another editor
+
+Venturi started from a simple frustration: on a modern laptop, cutting 1080p
+H.264 footage should feel instant, and usually it does not. Most editors treat
+the timeline as a collection of clips, each with its own decoder, its own
+cache, its own idea of what to keep in memory. Scrub across a cut and
+everything starts over. Group a few clips and playback falls off a cliff.
+
+Venturi is built the other way around.
+
+### The timeline is the unit, not the clip
+
+There is one frame cache for the whole project, with a single global byte
+budget (1.2 GB by default, configurable). A single worker thread walks the
+timeline forward from the playhead — through cuts, gaps, and every video
+track at once — and fills it. Crossing a cut is not a special case; it is just
+the next frame.
+
+Eviction is not LRU. During a forward fill the frame *at the playhead* is the
+oldest one inserted, so any recency-based policy would throw away exactly the
+frame you are about to need. Instead a single reconcile pass drops whatever
+falls outside the current window, then evicts by **distance from the playhead
+in timeline frames**. The frame you need next is the last one to go.
+
+### Nothing is baked
+
+Transforms are evaluated at runtime from their keyframes and handed to the
+shader as uniforms — never baked into cached frames. Dragging a crop slider
+does not invalidate a single buffered frame. The same applies to the
+audio gain curve, which is sampled per block inside the mixer.
+
+### No readback in the preview path
+
+The compositor is wgpu on Vulkan, sharing its device with the egui UI. The
+preview composes straight into a texture that stays on the GPU and is handed
+to `egui-wgpu` as-is — no `copy_texture_to_buffer`, no `map_read`, no
+pipeline stall per frame. Compound clips compose into a pooled intermediate
+texture that is sampled directly by the outer pass, instead of making a round
+trip through RGB↔YUV on the CPU.
+
+Export uses the same code path with a different tail: decode, GPU compositing
+and encode run as three pipelined threads, and the RGBA→I420 conversion is a
+compute shader, so the readback is half the size and happens once per frame
+instead of twice.
+
+### The audio clock is the playback clock
+
+The mixer's position, in timeline samples, *is* the playhead; the video
+chases it. A gap is silence and the clock keeps running. The `cpal` callback
+mixes from an immutable snapshot published by the UI thread with a
+non-blocking `try_lock` — no allocation, no blocking lock, and old snapshots
+are dropped on the UI thread so a deallocation can never land in the audio
+callback. Fast-forward (2×/4×/8×) renders 8-second windows of the mix,
+pitch-preserved through `rubberband`, in the background and queues them
+without ever reopening the stream.
+
+### Scrubbing gets its own format
+
+Long-GOP H.264 cannot be scrubbed: every frame needs a decode from the
+previous keyframe. So every imported file gets a low-resolution all-intra
+proxy generated in the background, keyed by a content fingerprint in a global
+cache — it is reused by every project that touches the same file, even before
+you save. Preview uses it; **export always reads the originals**.
+
+### Correctness the same way
+
+Fast is only worth something if the frames are right. A clip whose media runs
+at a different rate than the timeline is *conformed*: `Clip::rate` is the one
+place where the two frame spaces meet, so a 59.94 clip on a 60 fps timeline
+occupies its real duration and duplicates a frame roughly every 17 seconds
+instead of drifting out of sync with its own audio. Splits and trims land
+exactly where you put them, even mid source frame. Preview and export share
+one `mix_range` for audio and one layer-building path for video, so what you
+hear and see while editing is what gets written out.
+
+### The rest of the shape
+
+- **Data-oriented model, no node graph.** A single `Project` owned by the UI
+  thread; media and timelines in `slotmap` arenas, clips in time-sorted
+  `Vec`s. Workers get snapshots or copies.
+- **Undo/redo by command pattern.** Every command captures what it needs to
+  invert itself. The history is light and unbounded.
+- **Projects are RON.** Readable, diffable, greppable, reviewable in git.
+- **Rust, no GC.** No pause is ever someone else's decision.
+- **Immediate-mode UI (egui).** The timeline is painted, not built from
+  nested widgets — cheaper for a dense grid of rectangles, and it shares the
+  wgpu device with the compositor.
+- **OpenTimelineIO in and out**, so a project can leave.
+
+Primary development and testing happens on Fedora Asahi Remix (Apple
+Silicon), but nothing here depends on Asahi: building on other Linux distros
+should work the same way, given the system libraries below.
+
+## Dependencies
+
+- **Rust** 1.85 or newer (edition 2024) — [rustup.rs](https://rustup.rs)
+- **FFmpeg** (development headers/libs + `pkg-config`, for `ffmpeg-next`, the
+  binding used for decode/encode)
+- **clang/libclang** (for `ffmpeg-next`'s bindgen)
+- **Wayland/X11 + Vulkan** (for `eframe`/`wgpu`, the UI and the GPU compositor)
+- **ALSA** (for `cpal`, the audio)
+
+On Fedora (including Asahi Remix):
 
 ```sh
 sudo dnf install \
@@ -27,13 +125,13 @@ sudo dnf install \
   alsa-lib-devel
 ```
 
-`ffmpeg-devel` su Fedora richiede il repo RPM Fusion (free) abilitato — la
-build di sistema di FFmpeg di Fedora stesso non include libx264 per motivi
-di licenza, ma questo progetto lo richiede sia per il decode di sorgenti
-H.264 comuni sia per l'export/i proxy.
+`ffmpeg-devel` on Fedora requires the RPM Fusion (free) repository to be
+enabled — Fedora's own system build of FFmpeg does not include libx264 for
+licensing reasons, but this project needs it both for decoding common H.264
+sources and for export/proxies.
 
-Su Debian/Ubuntu gli equivalenti (non verificati in questa sessione, solo
-tradotti dai pacchetti Fedora sopra):
+On Debian/Ubuntu the equivalents (not verified in this session, only
+translated from the Fedora packages above):
 
 ```sh
 sudo apt install \
@@ -45,35 +143,35 @@ sudo apt install \
   libasound2-dev
 ```
 
-### Versione di libav
+### libav version
 
-Se il tuo sistema dispone di una versione differente rispetto a quella linkata, es:
+If your system has a different version than the one linked against, e.g.:
 
 ```
 error while loading shared libraries: libavutil.so.60: cannot open shared object file: No such file or directory
 ```
 
-è possibile forzare una versione specifica di `libavutil` tramite la variabile `LD_LIBRARY_PATH`, es:
+you can force a specific `libavutil` version through the `LD_LIBRARY_PATH`
+environment variable, e.g.:
 
 ```
-export LD_LIBRARY_PATH="/percorso/libreria/locale/:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="/path/to/local/library/:$LD_LIBRARY_PATH"
 ./vv-app
 ```
 
-per utilizzare una versione differente locale.
-
+to use a different local version.
 
 ## Build
 
-Dalla root del workspace:
+From the workspace root:
 
 ```sh
 cargo build -p vv-app            # debug
-cargo build -p vv-app --release  # release (ottimizzato, molto più lento da compilare)
+cargo build -p vv-app --release  # release (optimised, much slower to compile)
 ```
 
-Il primo build è lento (bindgen di `ffmpeg-next` + compilazione di `wgpu`);
-i successivi sono incrementali.
+The first build is slow (`ffmpeg-next`'s bindgen + compiling `wgpu`);
+subsequent ones are incremental.
 
 ### AppImage
 
@@ -81,34 +179,34 @@ i successivi sono incrementali.
 scripts/build-appimage.sh
 ```
 
-Produce `target/appimage/Venturi-<arch>.AppImage` con dentro FFmpeg
-compilato da sorgente (librerie condivise, con libx264, zlib e NVENC) e
-libx264: sulla macchina di destinazione non servono né FFmpeg né RPM Fusion.
-glibc, ALSA, Vulkan e l'eventuale driver NVIDIA (NVENC richiede >= 550)
-restano quelli di sistema.
+Produces `target/appimage/Venturi-<arch>.AppImage` with FFmpeg compiled from
+source inside it (shared libraries, with libx264, zlib and NVENC) plus
+libx264: the target machine needs neither FFmpeg nor RPM Fusion. glibc, ALSA,
+Vulkan and the NVIDIA driver, if any (NVENC requires >= 550), stay the system
+ones.
 
-Lo script si esegue da solo dentro un container Debian 13
-(`container/Containerfile.appimage`, costruito al primo uso): un binario
-glibc gira solo su glibc >= a quella della macchina di build, quindi la
-release non va compilata su Fedora. Sull'host serve solo `podman`.
+The script re-runs itself inside a Debian 13 container
+(`container/Containerfile.appimage`, built on first use): a glibc binary only
+runs on a glibc >= the build one, so the release must not be compiled on
+Fedora. All the host needs is `podman`.
 
-FFmpeg viene compilato una volta sola dentro il volume di build
-(`venturi-appimage-target`); per ripartire da zero:
+FFmpeg is compiled once inside the build volume
+(`venturi-appimage-target`); to start over from scratch:
 `podman volume rm venturi-appimage-cargo venturi-appimage-target`,
-e `podman rmi venturi-appimage` se cambi il `Containerfile.appimage`.
+and `podman rmi venturi-appimage` if you change `Containerfile.appimage`.
 
-L'AppImage è GPL (include libx264) e non include FDK-AAC: l'export usa
-l'encoder AAC nativo di FFmpeg.
+The AppImage is GPL (it includes libx264) and does not include FDK-AAC:
+export uses FFmpeg's native AAC encoder.
 
-## Eseguire
+## Run
 
 ```sh
 cargo run -p vv-app
 ```
 
-Serve un backend grafico funzionante a runtime (Vulkan su Linux, tramite
-`mesa-vulkan-drivers` o il driver GPU proprietario): senza, `wgpu` non trova
-un adapter e la finestra non si apre.
+A working graphics backend is required at runtime (Vulkan on Linux, through
+`mesa-vulkan-drivers` or the proprietary GPU driver): without one, `wgpu`
+finds no adapter and the window does not open.
 
 ## Test
 
@@ -116,11 +214,11 @@ un adapter e la finestra non si apre.
 cargo test -p vv-app -- --test-threads=1
 ```
 
-`--test-threads=1` non è opzionale per ora: c'è un flake intermittente
-(SIGSEGV, non ancora indagato) quando i test girano in parallelo — a thread
-singolo sono stabili. Alcuni test invocano `ffmpeg` da riga di comando per
-generare clip sintetiche in `/tmp`, quindi serve anche il binario `ffmpeg`
-(non solo le librerie di sviluppo) nel `PATH`.
+`--test-threads=1` is not optional for now: there is an intermittent flake
+(SIGSEGV, not yet investigated) when the tests run in parallel — single
+threaded they are stable. Some tests invoke `ffmpeg` from the command line to
+generate synthetic clips in `/tmp`, so the `ffmpeg` binary (not just the
+development libraries) also needs to be in `PATH`.
 
 ## Lint
 
@@ -129,13 +227,13 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-## Container di test headless
+## Headless test container
 
-[`container/`](container/README.md) contiene un ambiente Podman per
-compilare/eseguire/screenshottare vv-app senza una sessione grafica reale
-(Xvfb + Vulkan software) — utile per verificare la UI in isolamento o da
-un agente senza accesso al display dell'utente.
+[`container/`](container/README.md) contains a Podman environment to
+build/run/screenshot vv-app without a real graphical session (Xvfb + software
+Vulkan) — useful for checking the UI in isolation, or from an agent without
+access to the user's display.
 
-## Licenza
+## Licence
 
-GPL-3.0-or-later, vedi [LICENSE](LICENSE).
+GPL-3.0-or-later, see [LICENSE](LICENSE).

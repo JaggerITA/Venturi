@@ -1,13 +1,13 @@
-# Ambiente per compilare/eseguire/testare vv-app "headless" (Xvfb, nessuna
-# GPU reale — Vulkan software via lavapipe, già dentro mesa-vulkan-drivers)
-# senza toccare la sessione grafica reale dell'utente. Vedi container/README.md
-# per come usarlo. Non contiene il sorgente: il repo va montato a runtime
-# (bind mount), così riflette sempre lo stato locale corrente senza dover
-# ricostruire l'immagine a ogni modifica.
+# Environment to build/run/test vv-app "headless" (Xvfb, no real
+# GPU — software Vulkan via lavapipe, already inside mesa-vulkan-drivers)
+# without touching the user's real graphical session. See container/README.md
+# for how to use it. It does not contain the source: the repo must be mounted at
+# runtime (bind mount), so it always reflects the current local state without
+# having to rebuild the image on every change.
 FROM fedora:44
 
-# ffmpeg-devel (con libx264) sta su RPM Fusion free, non nei repo Fedora
-# base — stesso motivo spiegato in ../README.md.
+# ffmpeg-devel (with libx264) lives on RPM Fusion free, not in the base Fedora
+# repos — same reason explained in ../README.md.
 RUN dnf install -y \
         https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm && \
     dnf install -y \
@@ -26,18 +26,18 @@ RUN dnf install -y \
         procps-ng \
     && dnf clean all
 
-# ALSA senza scheda audio reale: un device nullo evita che cpal fallisca
-# l'apertura dello stream all'avvio invece di limitarsi a non riprodurre
-# nulla (vv-app non ha bisogno dell'audio per essere testato visivamente).
+# ALSA without a real sound card: a null device keeps cpal from failing
+# to open the stream at startup instead of simply playing
+# nothing (vv-app does not need audio to be tested visually).
 RUN printf 'pcm.!default {\n  type null\n}\nctl.!default {\n  type null\n}\n' \
         > /etc/asound.conf
 
-# VK_ICD_FILENAMES fissato a lavapipe (software, aarch64 — il progetto
-# è comunque a target Apple Silicon/Asahi, vedi ARCHITECTURE.md): senza,
-# il loader Vulkan prova anche gli ICD hardware elencati in
-# /usr/share/vulkan/icd.d (nessuno reale nel container) prima di arrivare
-# a quello buono, riempiendo i log di errori "vkEnumeratePhysicalDevices
-# failed" innocui ma rumorosi.
+# VK_ICD_FILENAMES pinned to lavapipe (software, aarch64 — the project
+# targets Apple Silicon/Asahi anyway, see ARCHITECTURE.md): without it,
+# the Vulkan loader also tries the hardware ICDs listed in
+# /usr/share/vulkan/icd.d (none real in the container) before reaching
+# the right one, filling the logs with harmless but noisy
+# "vkEnumeratePhysicalDevices failed" errors.
 ENV DISPLAY=:99 \
     XVFB_RESOLUTION=1280x800x24 \
     LIBGL_ALWAYS_SOFTWARE=1 \

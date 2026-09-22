@@ -1,6 +1,6 @@
-//! Mix delle track audio (gain, resample, time-stretch) e output `cpal`
-//! (vedi ARCHITECTURE.md § Pipeline audio). La posizione del mixer è il
-//! clock del playback.
+//! Audio track mixing (gain, resample, time-stretch) and `cpal` output
+//! (see ARCHITECTURE.md § Audio pipeline). The mixer position is the
+//! playback clock.
 
 pub mod mixer;
 pub mod stretch;

@@ -1,4 +1,4 @@
-//! Lingua dell'interfaccia; i testi sono in `locales/*.yml`.
+//! Interface language; the texts live in `locales/*.yml`.
 
 use std::borrow::Cow;
 
@@ -13,7 +13,7 @@ pub enum Language {
 impl Language {
     pub const ALL: [Language; 3] = [Language::System, Language::English, Language::Italian];
 
-    /// Chiave nel file di impostazioni: non va mai cambiata.
+    /// Key in the settings file: must never be changed.
     pub fn id(self) -> &'static str {
         match self {
             Language::System => "system",
@@ -26,8 +26,8 @@ impl Language {
         Self::ALL.into_iter().find(|l| l.id() == id)
     }
 
-    /// I nomi delle lingue restano nella lingua stessa, per ritrovarla
-    /// anche da un'interfaccia che non si capisce.
+    /// Language names stay in the language itself, so it can be found again
+    /// even from an interface one cannot read.
     pub fn label(self) -> Cow<'static, str> {
         match self {
             Language::System => t!("settings.language_system"),
@@ -56,8 +56,8 @@ fn system_locale() -> String {
 
 #[cfg(test)]
 mod tests {
-    /// Ogni chiave passata a `t!` nel sorgente deve esistere in tutte le lingue:
-    /// una chiave mancante comparirebbe così com'è nell'interfaccia.
+    /// Every key passed to `t!` in the source must exist in all languages:
+    /// a missing key would show up verbatim in the interface.
     #[test]
     fn every_key_used_in_the_source_is_translated_in_every_locale() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

@@ -1,7 +1,7 @@
-//! Buffer audio già nel formato del mixer, per `(path, audio_stream_index)`.
-//! Decodifica + resample su un thread dedicato. Il buffer viene pubblicato
-//! parziale mentre cresce: il mixer suona l'inizio della traccia prima che
-//! la decodifica finisca, oltre la parte pronta c'è silenzio.
+//! Audio buffers already in the mixer's format, per `(path, audio_stream_index)`.
+//! Decode + resample on a dedicated thread. The buffer is published
+//! partially while it grows: the mixer plays the start of the track before
+//! the decode finishes, past the ready part there is silence.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
@@ -21,20 +21,20 @@ struct Ready {
     done: bool,
 }
 
-/// Secondi di audio dopo cui esce la prima pubblicazione; le successive a
-/// ogni raddoppio, così le copie del buffer costano ~2x la decodifica.
+/// Seconds of audio after which the first publication goes out; the following
+/// ones at every doubling, so the buffer copies cost ~2x the decode.
 const FIRST_PUBLISH_SECS: usize = 1;
 
 pub struct MixBufferCache {
-    /// `None` = nessun campione ancora, oppure senza audio a quell'indice.
+    /// `None` = no samples yet, or no audio at that index.
     entries: HashMap<Key, Option<Arc<Vec<f32>>>>,
     in_progress: HashSet<Key>,
     worker: Worker<(Key, bool)>,
     ready_rx: mpsc::Receiver<Ready>,
     sample_rate: u32,
     channels: u16,
-    /// Mixdown già calcolati di una compound clip, chiave `MediaId` +
-    /// `content_hash` con cui sono stati calcolati: vedi
+    /// Already computed mixdowns of a compound clip, keyed by `MediaId` +
+    /// the `content_hash` they were computed with: see
     /// `get_or_compute_compound`.
     compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
 }
@@ -58,8 +58,8 @@ impl MixBufferCache {
                 let Some(key) = queue.pop_front() else {
                     continue;
                 };
-                // Gli altri stream in coda dello stesso file vanno nella
-                // stessa passata: arrivano tutti subito invece che in fila.
+                // The other queued streams of the same file go in the
+                // same pass: they all arrive at once instead of in line.
                 let mut streams = vec![key.1];
                 queue.retain(|(path, stream)| {
                     let same_file = *path == key.0;
@@ -68,7 +68,7 @@ impl MixBufferCache {
                     }
                     !same_file
                 });
-                // Una richiesta prioritaria duplica una già in coda.
+                // A priority request duplicates one already queued.
                 streams.retain(|&stream| done.insert((key.0.clone(), stream)));
                 if streams.is_empty() {
                     continue;
@@ -89,14 +89,14 @@ impl MixBufferCache {
         }
     }
 
-    /// Non bloccante: se il buffer non c'è ne accoda la decodifica (una
-    /// volta sola per chiave). Il buffer restituito può essere parziale.
+    /// Non-blocking: if the buffer is not there it queues its decode (once
+    /// per key only). The returned buffer may be partial.
     pub fn get_or_request(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
         self.request(path, stream, false)
     }
 
-    /// Come `get_or_request`, ma la decodifica passa davanti a quelle in coda
-    /// (non interrompe quella in corso).
+    /// Like `get_or_request`, but the decode jumps ahead of the queued ones
+    /// (it does not interrupt the one in progress).
     pub fn get_or_request_first(&mut self, path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
         self.request(path, stream, true)
     }
@@ -104,7 +104,7 @@ impl MixBufferCache {
     fn request(&mut self, path: &Path, stream: usize, first: bool) -> Option<Arc<Vec<f32>>> {
         let key = (path.to_path_buf(), stream);
         if let Some(entry) = self.entries.get(&key) {
-            // Già in coda: ripetuta davanti, il worker scarta il duplicato.
+            // Already queued: repeated at the front, the worker discards the duplicate.
             if first && entry.is_none() && self.in_progress.contains(&key) {
                 self.worker.send((key.clone(), true));
             }
@@ -116,25 +116,24 @@ impl MixBufferCache {
         None
     }
 
-    /// Il mixdown della timeline annidata di una compound clip, a
-    /// `sample_rate`/`channels` di questa cache — trattato da lì in poi
-    /// come un file già decodificato. Cachato per `content_hash`: `None`
-    /// finché anche solo una delle clip audio coinvolte (a qualunque
-    /// profondità di nesting) non ha ancora un buffer pronto — un mixdown a
-    /// cui manca un pezzo, cachato, resterebbe sbagliato finché
-    /// `content_hash` non cambia di nuovo. Non passa da
-    /// `MixSnapshot::from_timeline` (che prenderebbe due chiusure entrambe
-    /// mutabili su `self`, in conflitto): costruisce le `MixClip` a mano
-    /// con `vv_audio::mixer::mix_clip_from`, la stessa funzione che usa
-    /// `from_timeline`.
+    /// The mixdown of the nested timeline of a compound clip, at this
+    /// cache's `sample_rate`/`channels` — treated from there on like an
+    /// already decoded file. Cached by `content_hash`: `None` until even
+    /// a single one of the audio clips involved (at any nesting depth) has
+    /// a ready buffer — a mixdown missing a piece, once cached, would stay
+    /// wrong until `content_hash` changes again. It does not go through
+    /// `MixSnapshot::from_timeline` (which would take two closures both
+    /// mutable on `self`, in conflict): it builds the `MixClip`s by hand
+    /// with `vv_audio::mixer::mix_clip_from`, the same function
+    /// `from_timeline` uses.
     pub fn get_or_compute_compound(&mut self, project: &Project, media_id: MediaId) -> Option<Arc<Vec<f32>>> {
         self.get_or_compute_compound_at_depth(project, media_id, 0)
     }
 
-    /// Limite alla profondità di nesting: da quando la timeline del
-    /// progetto è anche lei nel media pool, trascinarla dentro se stessa
-    /// (o dentro una sua compound clip) creerebbe un ciclo — senza un
-    /// limite, uno stack overflow invece di un semplice "non pronto".
+    /// Limit on the nesting depth: since the project timeline is in the
+    /// media pool too, dragging it inside itself (or inside one of its
+    /// compound clips) would create a cycle — without a limit, a stack
+    /// overflow instead of a plain "not ready".
     const MAX_COMPOUND_DEPTH: u32 = 16;
 
     fn get_or_compute_compound_at_depth(
@@ -165,11 +164,11 @@ impl MixBufferCache {
                 let Some(inner_item) = project.media_pool.get(*inner_id) else {
                     continue;
                 };
-                // `get_or_request` risponde `None` sia "non ancora deciso"
-                // sia "niente audio a questo stream" (stesso trattamento per
-                // l'ascolto dal vivo, dove non fa differenza): solo qui, che
-                // deve decidere se cachare, i due casi contano — `in_progress`
-                // li distingue.
+                // `get_or_request` answers `None` both for "not decided yet"
+                // and "no audio on this stream" (same treatment for live
+                // listening, where it makes no difference): only here, where
+                // it has to decide whether to cache, do the two cases matter —
+                // `in_progress` tells them apart.
                 let buffer = if inner_item.compound.is_some() {
                     let Some(buffer) = self.get_or_compute_compound_at_depth(project, *inner_id, depth + 1) else {
                         return None;
@@ -204,8 +203,8 @@ impl MixBufferCache {
         Some(buffer)
     }
 
-    /// Raccoglie i buffer pronti (anche parziali); `true` se ne è arrivato
-    /// almeno uno (lo snapshot del mixer va ricostruito).
+    /// Collects the ready buffers (partial ones too); `true` if at least one
+    /// arrived (the mixer snapshot must be rebuilt).
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         while let Ok(ready) = self.ready_rx.try_recv() {
@@ -235,7 +234,7 @@ fn enqueue(queue: &mut VecDeque<Key>, (key, first): (Key, bool)) {
     }
 }
 
-/// `false` se il ricevente non c'è più (il worker deve uscire).
+/// `false` if the receiver is gone (the worker must exit).
 fn decode_progressively(
     path: &Path,
     streams: &[usize],
@@ -386,8 +385,8 @@ mod tests {
         };
         assert!(buffer.iter().any(|&s| s.abs() > 0.01), "il sine wave deve arrivare nel mixdown");
 
-        // Stesso content_hash: la seconda chiamata restituisce il buffer
-        // cachato, non ne ricalcola uno nuovo.
+        // Same content_hash: the second call returns the cached buffer,
+        // it does not recompute a new one.
         let cached = cache.get_or_compute_compound(&project, compound_media).unwrap();
         assert!(Arc::ptr_eq(&buffer, &cached));
     }
@@ -397,7 +396,7 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("two_streams.mkv");
-        // Stream 0 mono 44.1 kHz da 1s, stream 1 stereo 48 kHz da 0.5s.
+        // Stream 0 mono 44.1 kHz of 1s, stream 1 stereo 48 kHz of 0.5s.
         vv_media::test_support::ffmpeg(
             &[
                 "-f",

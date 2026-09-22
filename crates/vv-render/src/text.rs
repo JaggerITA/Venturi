@@ -1,7 +1,7 @@
-//! Rasterizzazione dei titoli (`ClipSource::Text`) via `cosmic-text`. Ogni
-//! elemento (sfondo, bordo, ombra, testo) è di un solo colore: basta una
-//! maschera di copertura a 8 bit per ciascuno, che il compositor colora e
-//! sovrappone (`Layer::Text`).
+//! Title rasterization (`ClipSource::Text`) via `cosmic-text`. Each element
+//! (background, outline, shadow, text) is a single color: an 8-bit coverage
+//! mask per element is enough, which the compositor colors and stacks
+//! (`Layer::Text`).
 
 use cosmic_text::{
     Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
@@ -10,15 +10,15 @@ use cosmic_text::{
 use std::sync::{Arc, Mutex, OnceLock};
 use vv_core::{HAnchor, Rgba, TextAlign, TitleParams, VAnchor};
 
-/// Copertura del testo (0 = trasparente), grande quanto il frame di output.
+/// Text coverage (0 = transparent), as large as the output frame.
 pub struct TextMask {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
 }
 
-/// Le maschere di un titolo dal basso verso l'alto, col colore di
-/// ciascuna (opacità già nell'alpha).
+/// The masks of a title from bottom to top, with the color of each one
+/// (opacity already in the alpha).
 pub struct TitleRender {
     pub layers: Vec<(TextMask, Rgba)>,
 }
@@ -41,7 +41,7 @@ type CacheKey = (TitleParams, (u32, u32), (u32, u32));
 struct TextState {
     font_system: FontSystem,
     swash: SwashCache,
-    /// Più recente in coda.
+    /// Most recent last.
     cache: Vec<(CacheKey, Arc<TitleRender>)>,
 }
 
@@ -62,8 +62,8 @@ fn lock() -> std::sync::MutexGuard<'static, TextState> {
     state().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// La scansione dei font di sistema richiede un po': farla in anticipo
-/// evita un blocco al primo titolo.
+/// Scanning the system fonts takes a while: doing it ahead of time
+/// avoids a stall on the first title.
 pub fn warm_up() {
     let _ = state();
 }
@@ -121,8 +121,8 @@ pub fn face_name(weight: u16, italic: bool) -> String {
     }
 }
 
-/// Maschere del titolo per un frame di output `output_size`; le misure di
-/// `params` sono in pixel di una timeline `timeline_size`.
+/// Title masks for an output frame of `output_size`; the measures in
+/// `params` are in pixels of a timeline of `timeline_size`.
 pub fn render_title(
     params: &TitleParams,
     timeline_size: (u32, u32),
@@ -192,9 +192,9 @@ fn rasterize(
     buffer.set_size(None, None);
     buffer.set_text(&params.display_text(), &attrs, Shaping::Advanced, Some(align));
     buffer.shape_until_scroll(font_system, false);
-    // Senza larghezza l'allineamento non ha un riferimento: si rifà il
-    // layout sulla riga più lunga. Il pixel in più evita che l'arrotondamento
-    // mandi a capo proprio quella riga.
+    // Without a width, alignment has no reference: the layout is redone on
+    // the longest line. The extra pixel keeps rounding from wrapping
+    // precisely that line.
     let block_w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
     buffer.set_size(Some(block_w + 1.0), None);
     buffer.shape_until_scroll(font_system, false);
@@ -233,7 +233,7 @@ fn rasterize(
                     continue;
                 }
                 let dst = &mut data[(py as u32 * width + px as u32) as usize];
-                // Glifi sovrapposti (tracking negativo): "over" fra coperture.
+                // Overlapping glyphs (negative tracking): "over" between coverages.
                 *dst = (*dst as u32 + coverage * (255 - *dst as u32) / 255) as u8;
             }
         }
@@ -286,8 +286,8 @@ fn rasterize(
     TitleRender { layers }
 }
 
-/// Riempimento e (se `outline > 0`) bordo interno di un rettangolo
-/// arrotondato, con i bordi antialiasati dalla distanza con segno.
+/// Fill and (if `outline > 0`) inner border of a rounded rectangle, with
+/// the edges antialiased from the signed distance.
 fn rounded_rect_masks(
     width: u32,
     height: u32,
@@ -349,16 +349,16 @@ fn shifted(mask: &TextMask, dx: i32, dy: i32) -> TextMask {
     }
 }
 
-/// Tre box blur separabili, un'approssimazione economica di una gaussiana:
-/// l'alone si estende di circa `radius` pixel.
+/// Three separable box blurs, a cheap approximation of a gaussian:
+/// the halo extends by about `radius` pixels.
 fn blur(mask: &mut TextMask, radius: f32) {
     let box_radius = (radius / 3.0).round() as usize;
     if box_radius == 0 {
         return;
     }
     let (w, h) = (mask.width as usize, mask.height as usize);
-    // Fuori dal riquadro coperto, allargato di quanto i tre passaggi
-    // spargono, è tutto zero e resta zero: si sfuma solo lì dentro.
+    // Outside the covered box, widened by how much the three passes
+    // spread, everything is zero and stays zero: only blur inside it.
     let Some((x0, y0, x1, y1)) = coverage_bounds(mask) else {
         return;
     };
@@ -380,7 +380,7 @@ fn blur(mask: &mut TextMask, radius: f32) {
     }
 }
 
-/// `(x0, y0, x1, y1)` inclusivi dei pixel non nulli.
+/// `(x0, y0, x1, y1)` inclusive of the non-zero pixels.
 fn coverage_bounds(mask: &TextMask) -> Option<(usize, usize, usize, usize)> {
     let w = mask.width as usize;
     let mut bounds: Option<(usize, usize, usize, usize)> = None;
@@ -398,7 +398,7 @@ fn coverage_bounds(mask: &TextMask) -> Option<(usize, usize, usize, usize)> {
     bounds
 }
 
-/// Media mobile su `2 * radius + 1` campioni, con zeri oltre i bordi.
+/// Moving average over `2 * radius + 1` samples, with zeros past the edges.
 fn box_blur_line(src: &[u8], radius: usize, mut write: impl FnMut(usize, u8)) {
     let window = (2 * radius + 1) as u32;
     let mut sum: u32 = src.iter().take(radius + 1).map(|&v| v as u32).sum();
@@ -468,7 +468,7 @@ mod tests {
         let (tx0, ty0, tx1, ty1) = covered_bounds(render.text()).unwrap();
         let (bx0, by0, bx1, by1) = covered_bounds(&render.layers[0].0).unwrap();
         assert!(bx0 < tx0 && by0 < ty0 && bx1 > tx1 && by1 > ty1);
-        // Il bordo sta sul perimetro: al centro del rettangolo non c'è.
+        // The border sits on the perimeter: at the center of the rectangle there is none.
         let ring = &render.layers[1].0;
         let (cx, cy) = ((bx0 + bx1) / 2, (by0 + by1) / 2);
         assert_eq!(ring.data[(cy * ring.width + cx) as usize], 0);

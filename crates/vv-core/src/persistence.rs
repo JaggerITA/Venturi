@@ -1,5 +1,5 @@
-//! Salvataggio e caricamento del progetto in RON. Le chiavi `SlotMap`
-//! sopravvivono intatte al round-trip.
+//! Saving and loading the project in RON. `SlotMap` keys survive the
+//! round-trip intact.
 
 use crate::model::Project;
 use std::path::Path;
@@ -23,9 +23,9 @@ pub fn save_project(project: &Project, path: &Path) -> Result<(), PersistenceErr
 pub fn load_project(path: &Path) -> Result<Project, PersistenceError> {
     let contents = std::fs::read_to_string(path)?;
     let mut project: Project = ron::from_str(&contents)?;
-    // `Clip::rate` è derivato dagli fps: ricalcolarlo qui sistema i
-    // progetti salvati prima che il campo esistesse (clip a fps diverso
-    // da quello della timeline, fuori sync).
+    // `Clip::rate` is derived from the fps: recomputing it here fixes
+    // projects saved before the field existed (clips at an fps different
+    // from the timeline's, out of sync).
     project.refresh_clip_rates();
     Ok(project)
 }
