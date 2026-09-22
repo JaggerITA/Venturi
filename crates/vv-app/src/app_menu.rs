@@ -398,7 +398,7 @@ impl VenturiApp {
                     if let Some(texture) = &icon {
                         ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(96.0, 96.0)));
                     }
-                    ui.heading("Venturi");
+                    ui.heading("Venturi video editor");
                     ui.label(t!("about.version", version = env!("VV_GIT_HASH")));
                     ui.add_space(8.0);
                     ui.label(t!("about.author", author = "Moreno Razzoli a.k.a. Morrolinux"));
