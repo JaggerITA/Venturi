@@ -3,6 +3,7 @@
 
 mod export;
 mod import;
+mod resolve;
 
 pub use export::{export_otio, timeline_to_otio};
 pub use import::{OtioImport, OtioWarning, import_otio, project_from_otio};

@@ -84,6 +84,14 @@ otio.effect_ignored:
   en: "effect \"%{effect}\" ignored on %{clips} clips"
   it: "effetto \"%{effect}\" ignorato su %{clips} clip"
 
+otio.effect_partly_ignored:
+  en: "effect \"%{effect}\" imported only in part on %{clips} clips"
+  it: "effetto \"%{effect}\" importato solo in parte su %{clips} clip"
+
+otio.speed_not_applied:
+  en: "speed %{percent}% of clip \"%{clip}\" kept but not played back"
+  it: "velocità %{percent}% della clip \"%{clip}\" conservata ma non riprodotta"
+
 otio.unsupported_in_stack:
   en: "%{schema} is not supported at track level"
   it: "%{schema} non supportato a livello di track"

@@ -6,8 +6,9 @@
 
 use super::OtioError;
 use crate::model::{
-    Clip, ClipSource, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
-    MediaItem, MediaMeta, Project, Rational, Rgba, Timeline, Track, TrackKind,
+    Clip, ClipSource, Ease, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
+    MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline, Track, TrackKind,
+    TransformParam, Transition, TransitionKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -26,6 +27,8 @@ pub struct OtioImport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OtioWarning {
     EffectIgnored { effect: String, clips: usize },
+    EffectPartlyIgnored { effect: String, clips: usize },
+    SpeedNotApplied { clip: String, percent: i64 },
     UnsupportedInStack { schema: String },
     TrackKindIgnored { kind: Option<String> },
     TransitionIgnored,
@@ -70,8 +73,11 @@ pub fn project_from_otio(
     for timeline in timelines {
         importer.timeline(timeline);
     }
-    for (effect, clips) in std::mem::take(&mut importer.ignored_effects) {
-        importer.warn(OtioWarning::EffectIgnored { effect, clips });
+    for ((effect, partial), clips) in std::mem::take(&mut importer.ignored_effects) {
+        importer.warn(match partial {
+            true => OtioWarning::EffectPartlyIgnored { effect, clips },
+            false => OtioWarning::EffectIgnored { effect, clips },
+        });
     }
     Ok(OtioImport {
         project: importer.project,
@@ -84,8 +90,8 @@ struct Importer<'a> {
     warnings: Vec<OtioWarning>,
     media: HashMap<PathBuf, Option<MediaId>>,
     /// Effect name → how many clips had it: one warning per effect,
-    /// not one per clip.
-    ignored_effects: BTreeMap<String, usize>,
+    /// not one per clip. `partial`: something of the effect was translated.
+    ignored_effects: BTreeMap<(String, bool), usize>,
     base_dir: &'a Path,
     probe: &'a mut dyn FnMut(&Path) -> ProbeResult,
 }
@@ -133,19 +139,23 @@ impl Importer<'_> {
             let mut track = Track::new(kind);
             track.muted = otio_track["enabled"] == false;
             let mut cursor = 0.0;
+            let mut pending_in = None;
             for item in children(otio_track) {
                 let start = to_frames(cursor, fps);
                 let duration = match schema(item) {
                     // Takes no time on the track: it overlaps its neighbours.
                     "Transition" => {
-                        self.warn(OtioWarning::TransitionIgnored);
+                        pending_in = self.transition(item, fps, &mut track);
                         continue;
                     }
                     "Gap" => item_duration(item),
                     "Clip" => {
                         let (duration, clip) =
                             self.clip(item, kind, fps, start, cursor, &mut groups);
-                        if let Some((clip, is_foreign)) = clip {
+                        if let Some((mut clip, is_foreign)) = clip {
+                            if let Some(transition) = pending_in.take() {
+                                clip.effects.transition_in = Some(transition);
+                            }
                             if is_foreign {
                                 foreign.push(ForeignClip {
                                     track: tracks.len(),
@@ -185,6 +195,39 @@ impl Importer<'_> {
         });
     }
 
+    /// A transition straddles the cut: `in_offset` extends into the clip
+    /// before it, which takes it as its `transition_out`, and `out_offset`
+    /// into the one after, returned so the caller can attach it.
+    fn transition(&mut self, item: &Value, fps: Rational, track: &mut Track) -> Option<Transition> {
+        let venturi = &item["metadata"]["venturi"];
+        let saved = serde_json::from_value::<Transition>(venturi["transition"].clone()).ok();
+        let offset = |key: &str| to_frames(seconds(&item[key]).unwrap_or(0.0), fps);
+        let (into_previous, into_next) = (offset("in_offset"), offset("out_offset"));
+        if into_previous <= 0 && into_next <= 0 {
+            return None;
+        }
+        let build = |duration: FrameIdx| match &saved {
+            Some(transition) => Transition { duration, ..transition.clone() },
+            None => {
+                let effect = &item["metadata"]["Resolve_OTIO"]["Effects"];
+                Transition {
+                    kind: TransitionKind::Push,
+                    duration,
+                    direction: PushDirection::Left,
+                    ease: resolve_ease(effect),
+                    curve: resolve_curve(effect, duration),
+                }
+            }
+        };
+        if into_previous > 0 {
+            match track.clips.last_mut() {
+                Some(clip) => clip.effects.transition_out = Some(build(into_previous)),
+                None => self.warn(OtioWarning::TransitionIgnored),
+            }
+        }
+        (into_next > 0).then(|| build(into_next))
+    }
+
     /// Duration occupied on the track (even if the clip is not imported)
     /// and the clip, with `true` if it does not come from Venturi.
     #[allow(clippy::too_many_arguments)]
@@ -221,8 +264,13 @@ impl Importer<'_> {
             return (duration, None);
         }
         let venturi = &item["metadata"]["venturi"];
+        let ours = !venturi["effects"].is_null();
         let mut effects = serde_json::from_value::<EffectStack>(venturi["effects"].clone())
             .unwrap_or_default();
+        let mut fades = (
+            venturi["fade_in"].as_i64().unwrap_or(0) as FrameIdx,
+            venturi["fade_out"].as_i64().unwrap_or(0) as FrameIdx,
+        );
         // Seconds into the media at the start of the clip and the media fps, to
         // translate the effect keyframes of other editors.
         let (source, rate, source_offset, media_start) = match schema(reference) {
@@ -278,10 +326,31 @@ impl Importer<'_> {
         };
 
         let resolve = &item["metadata"]["Resolve_OTIO"];
-        let keyframe_rate =
-            item["source_range"]["start_time"]["rate"].as_f64().unwrap_or(fps.as_f64());
-        for effect in children_of(item, "effects") {
-            self.effect(effect, &mut effects, media_start, keyframe_rate);
+        // Our own file already carries everything in `venturi`: translating
+        // Resolve's effects again would fight with it.
+        if !ours {
+            let frame = self.timeline_resolution(venturi, &source);
+            let media = self.media_resolution(&source).unwrap_or(frame);
+            let fit = (frame.0 / media.0).min(frame.1 / media.1);
+            let context = ResolveContext {
+                media_start,
+                rate: item["source_range"]["start_time"]["rate"]
+                    .as_f64()
+                    .unwrap_or(fps.as_f64()),
+                display: (media.0 * fit, media.1 * fit),
+                media,
+            };
+            for effect in children_of(item, "effects") {
+                self.effect(effect, &mut effects, &mut fades, &context);
+            }
+        }
+        // The speed survives in the project but nothing plays it back yet:
+        // the clip would show its first frames at 1x.
+        if !effects.speed.is_constant() || effects.speed.default != 1.0 {
+            self.warn(OtioWarning::SpeedNotApplied {
+                clip: name.to_owned(),
+                percent: (effects.speed.default * 100.0).round() as i64,
+            });
         }
 
         let group_key = venturi["linked_group"]
@@ -306,43 +375,69 @@ impl Importer<'_> {
             audio_stream_index,
             rate,
             disabled: false,
-            fade_in: 0,
-            fade_out: 0,
+            fade_in: fades.0.clamp(0, timeline_len),
+            fade_out: fades.1.clamp(0, timeline_len),
         };
         (duration, Some((clip, is_foreign)))
     }
 
-    /// Brings into `effects` what it knows how to translate; the rest ends up
-    /// in `ignored_effects`, except for effects that are off or at their defaults
-    /// (Resolve exports them all). `media_start`: seconds into the media and the
-    /// media fps; `rate`: fps of Resolve's keyframes.
+    /// Brings into `effects` and `fades` what it knows how to translate; the
+    /// rest ends up in `ignored_effects`, except for effects that are off or
+    /// at their defaults (Resolve exports them all).
     fn effect(
         &mut self,
         effect: &Value,
         effects: &mut EffectStack,
-        media_start: Option<(f64, Rational)>,
-        rate: f64,
+        fades: &mut (FrameIdx, FrameIdx),
+        context: &ResolveContext,
     ) {
+        if schema(effect) == "LinearTimeWarp" {
+            if let Some(scalar) = effect["time_scalar"].as_f64() {
+                effects.speed = Keyframed::constant(scalar as f32);
+            }
+            return;
+        }
         let resolve = &effect["metadata"]["Resolve_OTIO"];
         if resolve.is_null() {
             let name = effect["effect_name"].as_str().unwrap_or_else(|| schema(effect));
-            *self.ignored_effects.entry(name.to_owned()).or_default() += 1;
+            *self.ignored_effects.entry((name.to_owned(), false)).or_default() += 1;
             return;
         }
         if resolve["Enabled"] == false {
             return;
         }
         let name = resolve["Effect Name"].as_str().unwrap_or("Resolve Effect");
-        let mut untranslated = false;
+        let (mut translated, mut untranslated) = (false, false);
         for parameter in children_of(resolve, "Parameters") {
-            if name == "Fairlight Clip Volume and Fades" && parameter["Parameter ID"] == "volume" {
-                resolve_volume(parameter, effects, media_start, rate);
+            let id = parameter["Parameter ID"].as_str().unwrap_or("");
+            if resolve_parameter(name, id, parameter, effects, fades, context) {
+                translated = true;
             } else if !is_default_parameter(parameter) {
                 untranslated = true;
             }
         }
         if untranslated {
-            *self.ignored_effects.entry(name.to_owned()).or_default() += 1;
+            *self.ignored_effects.entry((name.to_owned(), translated)).or_default() += 1;
+        }
+    }
+
+    /// Resolution of the timeline, which the clip gets fitted into.
+    fn timeline_resolution(&self, venturi: &Value, source: &ClipSource) -> (f32, f32) {
+        serde_json::from_value::<(u32, u32)>(venturi["resolution"].clone())
+            .ok()
+            .map(|(w, h)| (w as f32, h as f32))
+            .or_else(|| self.media_resolution(source))
+            .unwrap_or((1920.0, 1080.0))
+    }
+
+    fn media_resolution(&self, source: &ClipSource) -> Option<(f32, f32)> {
+        match source {
+            ClipSource::Media(id) => self
+                .project
+                .media_pool
+                .get(*id)
+                .map(|m| (m.meta.width as f32, m.meta.height as f32)),
+            ClipSource::SolidColor | ClipSource::Text => None,
         }
     }
 
@@ -413,6 +508,139 @@ impl Importer<'_> {
     }
 }
 
+/// What is needed to bring a Resolve parameter back into our units:
+/// `media_start` (seconds into the media at the start of the clip and the
+/// media fps) and `rate` (fps of Resolve's keyframes) place the keyframes,
+/// `frame` and `media` denormalize the values.
+struct ResolveContext {
+    media_start: Option<(f64, Rational)>,
+    rate: f64,
+    display: (f32, f32),
+    media: (f32, f32),
+}
+
+/// `true` if the parameter was translated. The `multiplier` is the inverse
+/// of the one used on export: see `otio::resolve`.
+fn resolve_parameter(
+    effect: &str,
+    id: &str,
+    parameter: &Value,
+    effects: &mut EffectStack,
+    fades: &mut (FrameIdx, FrameIdx),
+    context: &ResolveContext,
+) -> bool {
+    use TransformParam::*;
+    let mut track = |param, multiplier| {
+        resolve_track(parameter, effects, param, multiplier, context);
+        true
+    };
+    match (effect, id) {
+        ("Transform", "transformationZoomX") => track(ZoomX, 1.0),
+        ("Transform", "transformationZoomY") => track(ZoomY, 1.0),
+        ("Transform", "transformationPan") => track(PositionX, context.display.0),
+        ("Transform", "transformationTilt") => track(PositionY, context.display.1),
+        ("Transform", "transformationRotationAngle") => track(Rotation, -1.0),
+        ("Transform", "transformationAnchorPoint") => {
+            resolve_point(parameter, effects, [AnchorX, AnchorY], context.display, context);
+            true
+        }
+        ("Transform", "transformationFlipX") => resolve_flip(parameter, effects, 0),
+        ("Transform", "transformationFlipY") => resolve_flip(parameter, effects, 1),
+        ("Cropping", "cropLeft") => track(CropLeft, context.media.0),
+        ("Cropping", "cropRight") => track(CropRight, context.media.0),
+        ("Cropping", "cropTop") => track(CropTop, context.media.1),
+        ("Cropping", "cropBottom") => track(CropBottom, context.media.1),
+        ("Cropping", "cropSoftness") => track(CropSoftness, 1.0),
+        ("Composite", "opacity") => track(Opacity, 1.0),
+        ("Video Faders", "videoFaderIn")
+        | ("Fairlight Clip Volume and Fades", "faderIn") => {
+            fades.0 = resolve_frames(parameter);
+            true
+        }
+        ("Video Faders", "videoFaderOut")
+        | ("Fairlight Clip Volume and Fades", "faderOut") => {
+            fades.1 = resolve_frames(parameter);
+            true
+        }
+        ("Fairlight Clip Volume and Fades", "volume") => {
+            resolve_volume(parameter, effects, context);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn resolve_flip(parameter: &Value, effects: &mut EffectStack, axis: usize) -> bool {
+    if let Some(flipped) = parameter["Parameter Value"].as_bool() {
+        effects.transform.flip[axis] = flipped;
+    }
+    true
+}
+
+fn resolve_frames(parameter: &Value) -> FrameIdx {
+    parameter["Parameter Value"].as_f64().unwrap_or(0.0).round().max(0.0) as FrameIdx
+}
+
+fn resolve_track(
+    parameter: &Value,
+    effects: &mut EffectStack,
+    param: TransformParam,
+    multiplier: f32,
+    context: &ResolveContext,
+) {
+    let track = effects.transform.track_mut(param);
+    if let Some(value) = parameter["Parameter Value"].as_f64() {
+        track.default = value as f32 * multiplier;
+    }
+    for (frame, value) in resolve_keyframes(parameter, context) {
+        let Some(value) = value.as_f64() else { continue };
+        track.upsert(frame, value as f32 * multiplier, Interpolation::Linear);
+    }
+}
+
+/// A `POINTF` feeds two tracks at once.
+fn resolve_point(
+    parameter: &Value,
+    effects: &mut EffectStack,
+    params: [TransformParam; 2],
+    multiplier: (f32, f32),
+    context: &ResolveContext,
+) {
+    let axis = |value: &Value, i: usize| value.get(i).and_then(Value::as_f64);
+    let multiplier = [multiplier.0, multiplier.1];
+    for (i, param) in params.into_iter().enumerate() {
+        let track = effects.transform.track_mut(param);
+        if let Some(value) = axis(&parameter["Parameter Value"], i) {
+            track.default = value as f32 * multiplier[i];
+        }
+        for (frame, value) in resolve_keyframes(parameter, context) {
+            let Some(value) = axis(&value, i) else { continue };
+            track.upsert(frame, value as f32 * multiplier[i], Interpolation::Linear);
+        }
+    }
+}
+
+/// Resolve indexes its keyframes by timeline frame from the start of the
+/// clip; ours go on the source frame shown there.
+fn resolve_keyframes<'v>(
+    parameter: &'v Value,
+    context: &ResolveContext,
+) -> Vec<(FrameIdx, &'v Value)> {
+    let (Some(keyframes), Some((start_secs, media_fps))) =
+        (parameter["Key Frames"].as_object(), context.media_start)
+    else {
+        return Vec::new();
+    };
+    keyframes
+        .iter()
+        .filter_map(|(frame, keyframe)| {
+            let frame = frame.parse::<f64>().ok()?;
+            let secs = start_secs + frame / context.rate;
+            Some(((secs * media_fps.as_f64()).round() as FrameIdx, &keyframe["Value"]))
+        })
+        .collect()
+}
+
 fn is_default_parameter(parameter: &Value) -> bool {
     let no_keyframes = parameter["Key Frames"].as_object().is_none_or(|k| k.is_empty());
     no_keyframes && parameter["Parameter Value"] == parameter["Default Parameter Value"]
@@ -420,29 +648,41 @@ fn is_default_parameter(parameter: &Value) -> bool {
 
 /// Resolve's volume is in dB, like `gain_db`; the keyframes become linear
 /// keyframes on the corresponding source frame.
-fn resolve_volume(
-    parameter: &Value,
-    effects: &mut EffectStack,
-    media_start: Option<(f64, Rational)>,
-    rate: f64,
-) {
+fn resolve_volume(parameter: &Value, effects: &mut EffectStack, context: &ResolveContext) {
     if let Some(db) = parameter["Parameter Value"].as_f64() {
         effects.gain_db.default = db as f32;
     }
-    let (Some(keyframes), Some((start_secs, media_fps))) =
-        (parameter["Key Frames"].as_object(), media_start)
-    else {
-        return;
-    };
-    for (frame, keyframe) in keyframes {
-        let (Ok(frame), Some(db)) = (frame.parse::<f64>(), keyframe["Value"].as_f64()) else {
-            continue;
-        };
-        let source_frame = ((start_secs + frame / rate) * media_fps.as_f64()).round();
-        effects
-            .gain_db
-            .upsert(source_frame as FrameIdx, db as f32, Interpolation::Linear);
+    for (frame, value) in resolve_keyframes(parameter, context) {
+        let Some(db) = value.as_f64() else { continue };
+        effects.gain_db.upsert(frame, db as f32, Interpolation::Linear);
     }
+}
+
+/// The intensity of the ease, read back from the longest bezier handle of
+/// the progress curve (see `resolve::transition_curve`).
+fn resolve_curve(effect: &Value, duration: FrameIdx) -> f32 {
+    let handles = children_of(effect, "Parameters")
+        .find(|p| p["Parameter ID"] == "transitionCustomCurvesKeyframes")
+        .and_then(|p| p["Key Frames"].as_object())
+        .into_iter()
+        .flatten()
+        .flat_map(|(_, key)| ["InBez", "OutBez"].map(|h| key[h][h][0].as_f64()))
+        .flatten()
+        .map(f64::abs);
+    let longest = handles.fold(0.0, f64::max);
+    match duration > 0 {
+        true => (longest as f32 / (0.6 * duration as f32)).clamp(0.0, 1.0),
+        false => 0.5,
+    }
+}
+
+/// The `ease` of a Resolve transition, by position in `Ease::ALL`.
+fn resolve_ease(effect: &Value) -> Ease {
+    children_of(effect, "Parameters")
+        .find(|p| p["Parameter ID"] == "ease")
+        .and_then(|p| p["Parameter Value"].as_u64())
+        .and_then(|i| Ease::ALL.get(i as usize).copied())
+        .unwrap_or(Ease::InOut)
 }
 
 /// The audio stream of the media Resolve takes the clip's channels from,
@@ -612,6 +852,15 @@ mod tests {
         let mut color =
             Clip::from_source_range(ClipId(3), ClipSource::SolidColor, 0, 45, 300, Rational::one());
         color.effects.color = Some(Keyframed::constant(Rgba { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }));
+        color.fade_in = 5;
+        color.fade_out = 7;
+        color.effects.transition_in = Some(Transition {
+            kind: TransitionKind::Push,
+            duration: 9,
+            direction: PushDirection::Up,
+            ease: Ease::In,
+            curve: 0.25,
+        });
         let tl = &mut project.timelines[timeline_id];
         tl.tracks[0].clips.push(video);
         tl.tracks[1].clips.push(color);
@@ -643,8 +892,119 @@ mod tests {
         assert!(audio.linked_group.is_some());
         assert_eq!(back.tracks[0].clips[0].linked_group, audio.linked_group);
         assert_eq!(back.tracks[0].clips[1].linked_group, None, "metà destra scollegata");
-        let color = back.tracks[1].clips[0].effects.color.as_ref().unwrap().default;
+        let generated = &back.tracks[1].clips[0];
+        let color = generated.effects.color.as_ref().unwrap().default;
         assert_eq!((color.r, color.g, color.b), (0.2, 0.4, 0.6));
+        assert_eq!((generated.fade_in, generated.fade_out), (5, 7));
+        assert_eq!(
+            generated.effects.transition_in.as_ref().map(|t| (t.direction, t.duration, t.ease)),
+            Some((PushDirection::Up, 9, Ease::In)),
+            "la transizione torna intera da metadata.venturi"
+        );
+    }
+
+    /// A clip exported by Resolve: the transform lives in `Effect.1` items
+    /// with normalized values and keyframes on the frames of the clip.
+    #[test]
+    fn reads_the_transform_of_a_resolve_clip() {
+        let parameter = |id: &str, value: Value| {
+            json!({
+                "Parameter ID": id,
+                "Parameter Value": value,
+                "Default Parameter Value": 0.0,
+                "Variant Type": "Double",
+                "Key Frames": {},
+            })
+        };
+        let effect = |name: &str, parameters: Value| {
+            json!({
+                "OTIO_SCHEMA": "Effect.1",
+                "name": "",
+                "effect_name": "Resolve Effect",
+                "metadata": { "Resolve_OTIO": {
+                    "Effect Name": name,
+                    "Name": name,
+                    "Enabled": true,
+                    "Parameters": parameters,
+                }},
+            })
+        };
+        let otio = json!({
+            "OTIO_SCHEMA": "Timeline.1",
+            "name": "Da Resolve",
+            "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "kind": "Video",
+                "children": [{
+                    "OTIO_SCHEMA": "Clip.2",
+                    "name": "uno",
+                    "source_range": range(0.0, 100.0, 24.0),
+                    "media_references": { "DEFAULT_MEDIA": {
+                        "OTIO_SCHEMA": "ExternalReference.1",
+                        "target_url": B_ROLL,
+                        "available_range": range(0.0, 2400.0, 24.0),
+                    }},
+                    "effects": [
+                        json!({
+                            "OTIO_SCHEMA": "LinearTimeWarp.1",
+                            "name": "",
+                            "effect_name": "",
+                            "time_scalar": 2.0,
+                        }),
+                        effect("Transform", json!([
+                            parameter("transformationZoomX", json!(1.07)),
+                            parameter("transformationPan", json!(0.05)),
+                            parameter("transformationTilt", json!(-0.05)),
+                            parameter("transformationRotationAngle", json!(7.8)),
+                            json!({
+                                "Parameter ID": "transformationAnchorPoint",
+                                "Parameter Value": [0.1, 0.0],
+                                "Default Parameter Value": [0.0, 0.0],
+                                "Variant Type": "POINTF",
+                                "Key Frames": {
+                                    "0": { "Value": [0.1, 0.0], "Variant Type": "POINTF" },
+                                    "10": { "Value": [0.5, 0.0], "Variant Type": "POINTF" },
+                                },
+                            }),
+                            json!({
+                                "Parameter ID": "transformationFlipY",
+                                "Parameter Value": true,
+                                "Default Parameter Value": false,
+                                "Variant Type": "Bool",
+                            }),
+                        ])),
+                        effect("Cropping", json!([parameter("cropTop", json!(0.25))])),
+                        effect("Composite", json!([parameter("opacity", json!(80.0))])),
+                        effect("Video Faders", json!([parameter("videoFaderIn", json!(12.0))])),
+                    ],
+                }],
+            }]},
+        });
+        let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+        let imported = project_from_otio(&otio, Path::new("/media"), &mut probe).unwrap();
+        assert_eq!(
+            imported.warnings,
+            vec![OtioWarning::SpeedNotApplied { clip: "uno".into(), percent: 200 }],
+            "la velocità si conserva ma non si riproduce"
+        );
+
+        let (_, tl) = imported.project.timelines.iter().next().unwrap();
+        let clip = &tl.tracks[0].clips[0];
+        assert_eq!(clip.effects.speed.default, 2.0);
+        assert_eq!(clip.effects.transform.flip, [false, true]);
+        let t = clip.effects.transform.value_at(0);
+        assert_eq!(t.zoom[0], 1.07);
+        assert_eq!(t.position, [64.0, -36.0], "denormalizzata su 1280x720");
+        assert_eq!(t.rotation, -7.8, "verso opposto a quello di Resolve");
+        assert_eq!(t.anchor[0], 128.0);
+        assert_eq!(t.crop[1], 180.0, "il crop è in pixel del media");
+        assert_eq!(t.opacity, 80.0);
+        assert_eq!(clip.fade_in, 12);
+        assert_eq!(
+            clip.effects.transform.value_at(10).anchor[0],
+            640.0,
+            "keyframe sul frame sorgente corrispondente"
+        );
     }
 
     fn rt(value: f64, rate: f64) -> Value {
@@ -721,10 +1081,9 @@ mod tests {
         let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
         let imported = project_from_otio(&otio, Path::new("/media"), &mut probe).unwrap();
 
-        assert_eq!(imported.warnings.len(), 3, "{:?}", imported.warnings);
-        assert_eq!(imported.warnings[0], OtioWarning::TransitionIgnored);
-        assert_eq!(imported.warnings[1], OtioWarning::ClipDisabled { clip: "spenta".into() });
-        assert!(matches!(&imported.warnings[2], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("manca.mov")));
+        assert_eq!(imported.warnings.len(), 2, "{:?}", imported.warnings);
+        assert_eq!(imported.warnings[0], OtioWarning::ClipDisabled { clip: "spenta".into() });
+        assert!(matches!(&imported.warnings[1], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("manca.mov")));
         assert_eq!(imported.project.media_pool.len(), 1, "stesso file sondato una volta");
 
         let (_, tl) = imported.project.timelines.iter().next().unwrap();
@@ -736,6 +1095,8 @@ mod tests {
         assert_eq!(video[0].source_in(), 48, "dal timecode di partenza del media");
         assert_eq!(video[1].timeline_start, 24 + 48 + 24 + 24, "dopo spenta e persa");
         assert_eq!(video[1].source_in(), 0, "percorso relativo");
+        let transition = video[0].effects.transition_out.as_ref().expect("transizione in uscita");
+        assert_eq!(transition.duration, 6, "in_offset entra nella clip precedente");
 
         let audio = &tl.tracks[1];
         assert!(audio.muted);

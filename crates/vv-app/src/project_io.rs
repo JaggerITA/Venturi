@@ -907,6 +907,12 @@ fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
     use vv_core::OtioWarning as W;
     match warning {
         W::EffectIgnored { effect, clips } => t!("otio.effect_ignored", effect = effect, clips = clips),
+        W::SpeedNotApplied { clip, percent } => {
+            t!("otio.speed_not_applied", clip = clip, percent = percent)
+        }
+        W::EffectPartlyIgnored { effect, clips } => {
+            t!("otio.effect_partly_ignored", effect = effect, clips = clips)
+        }
         W::UnsupportedInStack { schema } => t!("otio.unsupported_in_stack", schema = schema),
         W::TrackKindIgnored { kind } => {
             t!("otio.track_kind_ignored", kind = kind.as_deref().unwrap_or("?"))
