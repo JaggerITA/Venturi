@@ -1,6 +1,6 @@
-//! Finestra egui: media pool, viewer, pannello proprietà, timeline. Il
-//! viewer compone sulla GPU le clip attive di tutte le track video e passa
-//! la texture a egui-wgpu senza readback (REFACTOR_PIPELINE.md B2).
+//! egui window: media pool, viewer, properties panel, timeline. The
+//! viewer composes on the GPU the active clips of all the video tracks and passes
+//! the texture to egui-wgpu without readback (REFACTOR_PIPELINE.md B2).
 
 #[macro_use]
 extern crate rust_i18n;
@@ -15,6 +15,7 @@ mod keyframe_editor;
 mod media_pool;
 mod media_pool_ui;
 mod mix_buffers;
+mod new_timeline_dialog;
 mod project_io;
 mod properties_panel;
 mod proxy_worker;
@@ -34,6 +35,7 @@ mod worker;
 
 use eframe::wgpu;
 use media_pool_ui::*;
+use new_timeline_dialog::NewTimelineDialog;
 use project_io::*;
 use properties_panel::*;
 use settings::Action;
@@ -45,34 +47,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
-/// ~6 s di margine a 1080p, ~1,5 s a 4K.
+/// ~6 s of margin at 1080p, ~1.5 s at 4K.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 
-/// Colore di una clip Solid Color appena creata.
+/// Color of a freshly created Solid Color clip.
 const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba { r: 1.0, g: 1.0, b: 0.0, a: 1.0 };
 
-/// Dopo quanto (s) una freccia tenuta premuta smette di fare il passo
-/// singolo e inizia a scorrere a `ARROW_HOLD_SPEED`.
+/// After how long (s) an arrow held down stops doing the single
+/// step and starts scrolling at `ARROW_HOLD_SPEED`.
 const ARROW_HOLD_DELAY_SECS: f64 = 0.3;
 const ARROW_HOLD_SPEED: f64 = 0.5;
 
-/// Freccia sinistra/destra tenuta premuta (`VenturiApp::arrow_hold`).
+/// Left/right arrow held down (`VenturiApp::arrow_hold`).
 struct ArrowHold {
     direction: FrameIdx,
     pressed_at: f64,
     start_frame: FrameIdx,
 }
 
-/// Posizione della testina con una freccia premuta da `elapsed` secondi:
-/// un frame subito, poi scorrimento continuo dopo `ARROW_HOLD_DELAY_SECS`.
+/// Playhead position with an arrow held for `elapsed` seconds:
+/// one frame immediately, then continuous scrolling after `ARROW_HOLD_DELAY_SECS`.
 fn arrow_hold_target(hold: &ArrowHold, elapsed: f64, fps: f64) -> FrameIdx {
     let scrolled = ((elapsed - ARROW_HOLD_DELAY_SECS).max(0.0) * fps * ARROW_HOLD_SPEED) as FrameIdx;
     (hold.start_frame + hold.direction * (1 + scrolled)).max(0)
 }
 
-/// Le due velocità di riproduzione accelerata raggiungibili col tasto "a"
-/// (vedi `VenturiApp::handle_fast_playback_key`) — non un `f64` libero:
-/// solo questi due fattori vengono mai richiesti a `vv_audio::stretch_samples`.
+/// The two fast playback speeds reachable with the "a" key
+/// (see `VenturiApp::handle_fast_playback_key`) — not a free `f64`:
+/// only these two factors are ever requested of `vv_audio::stretch_samples`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpeedTier {
     X2,
@@ -89,8 +91,8 @@ impl SpeedTier {
         }
     }
 
-    /// Il tier raggiunto premendo "a" un'altra volta rispetto a questo —
-    /// vedi `VenturiApp::handle_fast_playback_key`. Resta a X8 oltre.
+    /// The tier reached by pressing "a" one more time relative to this one —
+    /// see `VenturiApp::handle_fast_playback_key`. It stays at X8 past that.
     fn next(self) -> Self {
         match self {
             SpeedTier::X2 => SpeedTier::X4,
@@ -111,8 +113,8 @@ impl SpeedTier {
     }
 }
 
-/// Una clip selezionata, bersaglio del pannello proprietà. `source_frame`
-/// è il playhead nello spazio sorgente di *questa* clip.
+/// A selected clip, target of the properties panel. `source_frame`
+/// is the playhead in the source space of *this* clip.
 #[derive(Debug, Clone, Copy)]
 struct PanelTarget {
     timeline: TimelineId,
@@ -124,8 +126,8 @@ struct PanelTarget {
     is_text: bool,
 }
 
-/// Scheda del pannello proprietà: i parametri di una clip video, quelli
-/// della sua parte audio, o l'elenco di tutto quel che è selezionato.
+/// Tab of the properties panel: the parameters of a video clip, those
+/// of its audio part, or the list of everything that is selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PropertiesTab {
     Video,
@@ -133,14 +135,14 @@ enum PropertiesTab {
     Selection,
 }
 
-/// Sotto-scheda della scheda Video per le clip di testo.
+/// Sub-tab of the Video tab for text clips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VideoSubTab {
     Title,
     Settings,
 }
 
-/// Font di sistema per il pannello Title, letti la prima volta che servono.
+/// System fonts for the Title panel, read the first time they are needed.
 #[derive(Default)]
 struct FontCatalog {
     families: Option<Vec<String>>,
@@ -162,36 +164,36 @@ impl FontCatalog {
 #[derive(Debug, Clone)]
 struct ClipPanelInfo {
     is_solid_color: bool,
-    /// Risoluzione nativa del media della clip e risoluzione della
-    /// timeline: le unità dei parametri in pixel del `Transform` (il crop
-    /// nella prima, posizione e anchor nella seconda).
+    /// Native resolution of the clip's media and resolution of the
+    /// timeline: the units of the pixel parameters of the `Transform` (the crop
+    /// in the former, position and anchor in the latter).
     source_size: (u32, u32),
     timeline_size: (u32, u32),
-    /// Stato dei keyframe di ogni parametro, indicizzato da
+    /// Keyframe state of every parameter, indexed by
     /// `TransformParam::index`.
     params: Vec<RowKeyframe>,
     transform: vv_core::Transform,
     gain_kf_here: bool,
     gain: f32,
-    /// Keyframe di gain più vicini prima/dopo, in frame sorgente: le frecce
-    /// di navigazione della riga Volume.
+    /// Nearest gain keyframes before/after, in source frames: the navigation
+    /// arrows of the Volume row.
     gain_prev: Option<FrameIdx>,
     gain_next: Option<FrameIdx>,
     color_kf_here: bool,
     color: vv_core::Rgba,
     title: Option<vv_core::TitleParams>,
-    /// Vuota finché non si trascina un filtro sulla clip dal pannello
-    /// Effects; poi uno per ciascuno, nell'ordine di applicazione.
+    /// Empty until a filter is dragged onto the clip from the Effects
+    /// panel; then one per filter, in order of application.
     filters: Vec<vv_core::ClipFilter>,
     blend_mode: vv_core::BlendMode,
 }
 
-/// Dove atterrano le clip di un drop dal media pool, risolto una volta per
-/// l'intero drop (vedi `resolve_drop_tracks`): `extra_audio` è la track
-/// audio creata al volo, che ha la precedenza sulle esistenti.
+/// Where the clips of a drop from the media pool land, resolved once for
+/// the whole drop (see `resolve_drop_tracks`): `extra_audio` is the audio
+/// track created on the fly, which takes precedence over the existing ones.
 #[derive(Debug, Clone, Copy)]
 struct DropTracks {
-    /// `None` se nel drop non c'è video: nessuna track video da creare.
+    /// `None` if there is no video in the drop: no video track to create.
     video: Option<usize>,
     extra_audio: Option<usize>,
 }
@@ -199,7 +201,7 @@ struct DropTracks {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewerFrameKind {
     Video,
-    /// La clip sotto la testina punta a un media non più nel media pool.
+    /// The clip under the playhead points at a media no longer in the media pool.
     Offline,
 }
 
@@ -207,170 +209,171 @@ struct VenturiApp {
     project: vv_core::Project,
     history: vv_core::History,
     timeline_id: Option<TimelineId>,
-    /// Le timeline "sopra" `timeline_id`, dalla radice in giù, quando si è
-    /// entrati in una compound clip con un doppio click (vedi
-    /// `enter_compound_timeline`): vuoto quando si sta editando la
-    /// timeline del progetto. Il breadcrumb sopra la timeline le mostra.
+    /// The timelines "above" `timeline_id`, from the root down, when one has
+    /// entered a compound clip with a double click (see
+    /// `enter_compound_timeline`): empty when editing the
+    /// project timeline. The breadcrumb above the timeline shows them.
     timeline_stack: Vec<TimelineId>,
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
     keyframe_editor: keyframe_editor::KeyframeEditorState,
-    /// Media o elementi non importati, mostrati in una finestra a parte
-    /// finché l'utente non la chiude.
+    /// Media or elements not imported, shown in a separate window
+    /// until the user closes it.
     import_warnings: Vec<String>,
-    /// Probe dei file di un import multiplo, in corso in background.
+    /// Probing of the files of a multiple import, in progress in the background.
     pending_import: Option<project_io::PendingImport>,
-    /// File scelti mentre un import era già in corso: partono dopo.
+    /// Files chosen while an import was already in progress: they start afterwards.
     import_queue: Vec<PathBuf>,
 
     preview_meta: Option<vv_core::MediaMeta>,
     preview_error: Option<String>,
-    /// Texture del viewer registrata in egui-wgpu una volta sola, poi
-    /// aggiornata: registrarne una nuova a ogni frame perderebbe la precedente.
-    /// `None` senza device condiviso (test).
+    /// Viewer texture registered in egui-wgpu once, then
+    /// updated: registering a new one on every frame would lose the previous one.
+    /// `None` without a shared device (tests).
     video_texture_id: Option<egui::TextureId>,
     video_display_size: Option<egui::Vec2>,
-    /// Cosa mostra il viewer: l'ultima composizione, anche se in questo
-    /// frame non se n'è fatta una nuova (niente flash a vuoto).
+    /// What the viewer shows: the last composition, even if in this
+    /// frame no new one was made (no empty flash).
     last_viewer_frame_kind: Option<ViewerFrameKind>,
-    /// Device/queue di egui-wgpu, condivisi col compositor: una texture di un
-    /// altro device non si può registrare in egui. `None` nei test.
+    /// egui-wgpu device/queue, shared with the compositor: a texture from
+    /// another device cannot be registered in egui. `None` in the tests.
     egui_render_state: Option<eframe::egui_wgpu::RenderState>,
-    /// Buffer video dell'anteprima del media pool: un `RenderAhead` su una
-    /// timeline con la sola clip del media, e l'id del media lì dentro.
+    /// Video buffer of the media pool preview: a `RenderAhead` on a
+    /// timeline with only the clip of the media, and the id of the media in there.
     browsing_render_ahead: Option<(render_ahead::RenderAhead, MediaId)>,
 
-    /// Budget di memoria (byte) per la cache dei frame decodificati di ogni
-    /// `RenderAhead`, configurabile dal menu.
+    /// Memory budget (bytes) for the decoded frame cache of every
+    /// `RenderAhead`, configurable from the menu.
     cache_budget_bytes: usize,
 
-    /// Creato al primo import; buttato via quando l'utente spegne i proxy.
+    /// Created on the first import; thrown away when the user turns the proxies off.
     proxy_worker: Option<proxy_worker::ProxyWorker>,
-    /// L'export ha messo in pausa i proxy e deve riprenderli; `false` se la
-    /// pausa era dell'utente.
+    /// The export paused the proxies and must resume them; `false` if the
+    /// pause was the user's.
     proxy_paused_for_export: bool,
-    /// Genera in background le waveform dei media con audio. Creato al primo
+    /// Generates in the background the waveforms of the media with audio. Created on the first
     /// import.
     waveform_worker: Option<waveform_worker::WaveformWorker>,
     thumbnail_worker: Option<thumbnail_worker::ThumbnailWorker>,
-    /// Miniature del media pool per `content_hash`; `None` = richiesta in
-    /// corso o fallita (evita di riaccodarla a ogni frame).
+    /// Media pool thumbnails per `content_hash`; `None` = request in
+    /// progress or failed (avoids requeuing it on every frame).
     thumbnails: HashMap<u64, Option<egui::TextureHandle>>,
-    /// Waveform lette dai file di cache, per `(content_hash, stream_index)`:
-    /// la timeline le disegna a ogni frame, rileggerle da disco no.
+    /// Waveforms read from the cache files, per `(content_hash, stream_index)`:
+    /// the timeline draws them on every frame, re-reading them from disk it does not.
     waveform_cache: HashMap<(u64, usize), vv_media::Waveform>,
-    /// Waveform cercate su disco e non trovate: si riprova solo quando il
-    /// worker le segnala pronte, non a ogni frame.
+    /// Waveforms looked for on disk and not found: retried only when the
+    /// worker reports them ready, not on every frame.
     waveform_missing: std::collections::HashSet<(u64, usize)>,
-    /// Compound clip la cui waveform è stata composta con dei sorgenti
-    /// non ancora pronti: da rifare quando arrivano.
+    /// Compound clips whose waveform was composed with sources
+    /// not ready yet: to be redone when they arrive.
     waveform_partial: std::collections::HashSet<(u64, usize)>,
-    /// Secondi bufferizzati avanti/dietro la testina (menu Playback > Proxy).
+    /// Seconds buffered ahead of/behind the playhead (menu Playback > Proxy).
     lookahead_secs: f64,
     behind_secs: f64,
 
-    /// Clip video mostrata nel viewer (quella sotto al playhead), da cui si
-    /// leggono frame e transform. `None` su un vuoto o durante l'anteprima
-    /// dal media pool.
+    /// Video clip shown in the viewer (the one under the playhead), from which
+    /// frames and transform are read. `None` on a gap or during the preview
+    /// from the media pool.
     active_clip: Option<(usize, ClipId)>,
     compositor: vv_render::Compositor,
-    /// Aperto alla prima modifica fatta a puntatore premuto, chiuso al
-    /// rilascio: un trascinamento è un solo passo di undo.
+    /// Opened on the first change made with the pointer down, closed on
+    /// release: a drag is a single undo step.
     edit_drag_group: Option<vv_core::GroupMark>,
 
-    /// Ultimo playhead gestito: distingue quello mosso dal clock (nessun seek)
-    /// da quello spostato dall'utente.
+    /// Last handled playhead: it tells the one moved by the clock (no seek)
+    /// from the one moved by the user.
     last_synced_playhead: FrameIdx,
 
-    /// Media in anteprima dal pool: il viewer mostra lui invece della timeline,
-    /// finché non si interagisce con la timeline.
+    /// Media previewed from the pool: the viewer shows it instead of the timeline,
+    /// until the timeline is interacted with.
     browsing_media: Option<MediaId>,
     browse_playhead: FrameIdx,
-    /// In/out dell'anteprima: la porzione trascinata dal viewer sulla timeline.
+    /// In/out of the preview: the portion dragged from the viewer onto the timeline.
     browse_marks: transport::MarkRange,
     browse_audio_streams: usize,
 
-    /// Buffer video della timeline. `None` finché non c'è una timeline.
+    /// Video buffer of the timeline. `None` until there is a timeline.
     render_ahead: Option<render_ahead::RenderAhead>,
-    /// `history.generation()` all'ultimo aggiornamento di `render_ahead`.
+    /// `history.generation()` at the last update of `render_ahead`.
     render_ahead_generation: u64,
-    /// `history.generation()` all'ultimo `sync_root_timeline_media`.
+    /// `history.generation()` at the last `sync_root_timeline_media`.
     root_timeline_media_generation: u64,
 
-    /// Mixer delle track audio e clock del playback della timeline.
-    /// `None` finché non serve (nei test si apre solo se usato).
+    /// Mixer of the audio tracks and playback clock of the timeline.
+    /// `None` until needed (in the tests it opens only if used).
     timeline_audio: Option<TimelineAudio>,
 
-    /// Moltiplicatore di velocità (1/2/4/8x) impostato dal tasto "a"; la
-    /// barra spaziatrice mette in pausa e lo riporta a 1x.
+    /// Speed multiplier (1/2/4/8x) set by the "a" key; the
+    /// space bar pauses and brings it back to 1x.
     playback_speed: f64,
 
-    /// Spostando il playhead, tagliando o cancellando si seleziona la clip
-    /// video sotto al playhead.
+    /// Moving the playhead, cutting or deleting selects the video clip
+    /// under the playhead.
     selection_follows_playhead: bool,
 
-    /// Audio durante lo scrub (menu Timeline): attivo di default.
+    /// Audio during scrubbing (menu Timeline): on by default.
     scrub_audio: bool,
 
     arrow_hold: Option<ArrowHold>,
 
-    /// Calamita: nei drag le clip si agganciano ai bordi vicini.
+    /// Snapping: in drags the clips snap to the nearby edges.
     snapping_enabled: bool,
-    /// Handle di transform sopra il viewer (pulsante sotto al viewer).
+    /// Transform handles over the viewer (button under the viewer).
     show_transform_overlay: bool,
     overlay_drag: Option<viewer_overlay::OverlayDrag>,
 
-    /// Zoom X e Y del pannello Transform tenuti insieme (il lucchetto tra i
-    /// due campi): preferenza della UI, non del progetto.
+    /// X and Y zoom of the Transform panel kept together (the lock between the
+    /// two fields): a UI preference, not a project one.
     zoom_link: bool,
 
-    /// Scheda aperta nel pannello proprietà.
+    /// Tab open in the properties panel.
     properties_tab: PropertiesTab,
     video_subtab: VideoSubTab,
     fonts: FontCatalog,
 
     export: Option<ExportUiState>,
     export_dialog: Option<export_dialog::ExportDialog>,
-    /// Riproposte al prossimo export della sessione.
+    new_timeline_dialog: Option<NewTimelineDialog>,
+    /// Proposed again at the next export of the session.
     last_export_settings: Option<export::ExportSettings>,
 
-    /// `None` finché non salvato: "Salva" si comporta come "Salva con nome".
+    /// `None` until saved: "Save" behaves like "Save as".
     current_project_path: Option<PathBuf>,
-    /// Ultimo titolo inviato al compositor: il comando si manda solo quando cambia.
+    /// Last title sent to the compositor: the command is sent only when it changes.
     window_title: String,
     about_icon: Option<egui::TextureHandle>,
-    /// `history.generation()` all'ultimo salvataggio o apertura.
+    /// `history.generation()` at the last save or open.
     saved_generation: u64,
-    /// Media importati dopo l'ultimo salvataggio: il media pool cambia
-    /// senza passare dalla history.
+    /// Media imported after the last save: the media pool changes
+    /// without going through the history.
     unsaved_media: bool,
-    /// Apertura, import o uscita in attesa della risposta a "salvare le
-    /// modifiche?".
+    /// Open, import or exit waiting for the answer to "save the
+    /// changes?".
     pending_project_switch: Option<ProjectSwitch>,
-    /// L'utente ha già risposto per l'uscita: la prossima richiesta di
-    /// chiusura passa.
+    /// The user already answered for the exit: the next close request
+    /// goes through.
     quit_confirmed: bool,
-    /// Ultimo errore di salvataggio/apertura progetto, mostrato in
-    /// toolbar accanto ai pulsanti — separato da `import_warnings` (quelli sono
-    /// per l'import media, contesto diverso).
+    /// Last project save/open error, shown in the
+    /// toolbar next to the buttons — separate from `import_warnings` (those are
+    /// for the media import, a different context).
     project_error: Option<String>,
-    /// Esito dell'ultimo relink dal menu contestuale del media pool,
-    /// mostrato in una finestrella a parte (vedi `show_relink_message`).
+    /// Outcome of the last relink from the media pool context menu,
+    /// shown in a separate small window (see `show_relink_message`).
     relink_message: Option<String>,
-    /// File dialog aperto in un thread a parte: sul thread dell'event loop
-    /// GNOME/Wayland segnala l'app come bloccata.
+    /// File dialog opened on a separate thread: on the GNOME/Wayland event
+    /// loop thread it marks the app as unresponsive.
     pending_dialog: Option<PendingDialog>,
 
-    /// Audiometer (toggle in Visualizza): una fascia stretta a destra
-    /// della timeline con il livello dell'audio in uscita. Attivo di
-    /// default, come nella maggior parte degli NLE.
+    /// Audio meter (toggle in View): a narrow band on the right
+    /// of the timeline with the level of the outgoing audio. On by
+    /// default, as in most NLEs.
     audiometer_enabled: bool,
-    /// Livelli del meter, con un decadimento: il picco istantaneo farebbe
-    /// scendere le barre a scatti.
+    /// Meter levels, with a decay: the instantaneous peak would make
+    /// the bars drop abruptly.
     audiometer_level: (f32, f32),
     viewer_fullscreen: bool,
     settings: settings::Settings,
-    /// `None` nei test: le impostazioni non vengono mai scritte su disco.
+    /// `None` in the tests: the settings are never written to disk.
     settings_path: Option<PathBuf>,
     settings_dialog: Option<settings_dialog::SettingsDialog>,
     about_open: bool,
@@ -434,6 +437,7 @@ impl Default for VenturiApp {
             fonts: FontCatalog::default(),
             export: None,
             export_dialog: None,
+            new_timeline_dialog: None,
             last_export_settings: None,
             current_project_path: None,
             window_title: String::new(),
@@ -460,7 +464,7 @@ impl Default for VenturiApp {
 
 impl VenturiApp {
 
-    /// Meter stereo del picco d'uscita, con decadimento.
+    /// Stereo output peak meter, with decay.
     fn draw_audiometer(&mut self, ui: &mut egui::Ui) {
         const DECAY: f32 = 0.85;
         let (raw_l, raw_r) = self
@@ -498,9 +502,9 @@ impl VenturiApp {
                     egui::pos2(bar_rect.left(), bar_rect.bottom() - fill_height),
                     bar_rect.right_bottom(),
                 );
-                // Verde fino al 70%, giallo fino al 90%, rosso oltre
-                // (vicino al clipping) — stessa convenzione di un VU-meter
-                // comune.
+                // Green up to 70%, yellow up to 90%, red past that
+                // (near clipping) — the same convention as a common
+                // VU meter.
                 let color = if level > 0.9 {
                     egui::Color32::from_rgb(220, 50, 50)
                 } else if level > 0.7 {
@@ -512,14 +516,14 @@ impl VenturiApp {
             }
         }
 
-        // Repaint finché le barre scendono.
+        // Repaint while the bars are falling.
         if level_l > 0.001 || level_r > 0.001 {
             ui.ctx().request_repaint();
         }
     }
 
-    /// Anteprima "grezza" di un media dal media pool, non legata alla
-    /// timeline: mostra il primo frame da un decode-ahead dedicato.
+    /// "Raw" preview of a media from the media pool, not tied to the
+    /// timeline: it shows the first frame from a dedicated decode-ahead.
     fn preview_media(&mut self, media_id: MediaId) {
         self.browsing_render_ahead = None;
         let Some(item) = self.project.media_pool.get(media_id) else {
@@ -539,8 +543,8 @@ impl VenturiApp {
         if !has_video {
             return;
         }
-        // Il buffer apre il file per conto suo e salta quelli che non si
-        // aprono: l'errore va visto qui.
+        // The buffer opens the file on its own and skips the ones that do not
+        // open: the error must be seen here.
         if let Err(e) = vv_media::Decoder::open(&path) {
             self.preview_error = Some(e.to_string());
             return;
@@ -548,8 +552,8 @@ impl VenturiApp {
         self.browsing_render_ahead = Some(self.spawn_browsing_render_ahead(media_id));
     }
 
-    /// Una timeline all'fps del media con solo lui sopra: i frame di
-    /// timeline coincidono con quelli sorgente.
+    /// A timeline at the media fps with only it on top: the timeline frames
+    /// coincide with the source ones.
     fn spawn_browsing_render_ahead(&self, media_id: MediaId) -> (render_ahead::RenderAhead, MediaId) {
         let item = self.project.media_pool[media_id].clone();
         let meta = item.meta.clone();
@@ -581,16 +585,16 @@ impl VenturiApp {
         (render_ahead, preview_media)
     }
 
-    /// Il buffer della timeline e quello dell'anteprima, se ci sono.
+    /// The timeline buffer and the preview one, if they exist.
     fn render_aheads(&self) -> impl Iterator<Item = &render_ahead::RenderAhead> {
         self.render_ahead
             .iter()
             .chain(self.browsing_render_ahead.as_ref().map(|(r, _)| r))
     }
 
-    /// La clip Video attiva (track più in alto tra quelle che ne hanno una
-    /// in quel punto, `Timeline::active_video_clip_at`) al frame `frame`,
-    /// con la sua track — quella che il viewer mostra.
+    /// The active Video clip (topmost track among those having one
+    /// at that point, `Timeline::active_video_clip_at`) at frame `frame`,
+    /// with its track — the one the viewer shows.
     fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, ClipId)> {
         let timeline_id = self.timeline_id?;
         self.project.timelines[timeline_id]
@@ -598,8 +602,8 @@ impl VenturiApp {
             .map(|(t, c)| (t, c.id))
     }
 
-    /// Con "selection follows playhead" attivo, seleziona la clip video sotto
-    /// al playhead e il suo gruppo (niente su un vuoto).
+    /// With "selection follows playhead" on, it selects the video clip under
+    /// the playhead and its group (nothing on a gap).
     fn sync_selection_to_playhead(&mut self) {
         if !self.selection_follows_playhead {
             return;
@@ -621,8 +625,8 @@ impl VenturiApp {
         }
     }
 
-    /// Allinea la clip del viewer al playhead e, se l'ha mosso l'utente
-    /// (`force_seek` anche in riproduzione), il clock audio.
+    /// Aligns the viewer clip to the playhead and, if the user moved it
+    /// (`force_seek` even during playback), the audio clock.
     fn ensure_active_clip_matches_playhead(&mut self, force_seek: bool) {
         if self.browsing_media.is_some() {
             return;
@@ -673,8 +677,8 @@ impl VenturiApp {
         self.browsing_media = None;
         self.browsing_render_ahead = None;
         self.preview_meta = None;
-        // Il clock è rimasto alla posizione dell'anteprima: forza il seek al
-        // playhead della timeline.
+        // The clock stayed at the preview position: force the seek to the
+        // timeline playhead.
         self.last_synced_playhead = FrameIdx::MIN;
     }
 
@@ -686,7 +690,7 @@ impl VenturiApp {
         self.preview_meta.as_ref().map_or(1.0, |m| m.fps.as_f64().max(1e-9))
     }
 
-    /// Il clock del mixer fa da testina anche per l'anteprima, come per la
+    /// The mixer clock acts as the playhead for the preview too, as for the
     /// timeline.
     fn toggle_browse_playback(&mut self) {
         if self.is_timeline_playing() {
@@ -734,7 +738,7 @@ impl VenturiApp {
         }
     }
 
-    /// Tasti I/O: sull'anteprima se attiva, altrimenti sulla timeline.
+    /// I/O keys: on the preview if active, otherwise on the timeline.
     fn mark_at_playhead(&mut self, is_in: bool) {
         let (marks, frame, total) = if self.browsing_media.is_some() {
             let total = self.browse_total_frames();
@@ -753,9 +757,9 @@ impl VenturiApp {
         }
     }
 
-    /// Frecce sinistra/destra: un frame indietro/avanti, tenendo premuto
-    /// scorre a `ARROW_HOLD_SPEED`. Mette in pausa se si sta riproducendo.
-    /// Ritorna `true` finché una freccia è premuta.
+    /// Left/right arrows: one frame back/forward, holding them down
+    /// scrolls at `ARROW_HOLD_SPEED`. It pauses if playing.
+    /// Returns `true` while an arrow is held.
     fn step_playhead_with_arrows(&mut self, direction: Option<FrameIdx>, time: f64) -> bool {
         let Some(direction) = direction else {
             self.arrow_hold = None;
@@ -802,9 +806,9 @@ impl VenturiApp {
         audio.play_scrub_snippet();
     }
 
-    /// Play/pausa della timeline dal playhead, senza bisogno di selezione:
-    /// vuoti inclusi (suonano silenzio), fermo solo oltre la fine del
-    /// contenuto.
+    /// Play/pause of the timeline from the playhead, with no need for a selection:
+    /// gaps included (they play silence), stopping only past the end of the
+    /// content.
     fn toggle_playback(&mut self) {
         if self.browsing_media.is_some() {
             self.toggle_browse_playback();
@@ -815,8 +819,8 @@ impl VenturiApp {
         };
         if self.is_timeline_playing() {
             self.timeline_audio().pause();
-            // La barra spaziatrice mette sempre in pausa a 1x: un "a"
-            // successivo riparte a velocità normale.
+            // The space bar always pauses at 1x: a later "a"
+            // restarts at normal speed.
             self.reset_playback_speed_to_normal();
             return;
         }
@@ -835,8 +839,8 @@ impl VenturiApp {
         self.active_clip = self.active_video_clip_at(playhead);
     }
 
-    /// Durante la riproduzione il playhead segue il clock del mixer; a fine
-    /// contenuto si ferma.
+    /// During playback the playhead follows the mixer clock; at the end of the
+    /// content it stops.
     fn drive_playback(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -857,8 +861,8 @@ impl VenturiApp {
         self.active_clip = self.active_video_clip_at(frame);
     }
 
-    /// Tasto "a": da fermo come la barra spaziatrice (1x), in riproduzione
-    /// accelera 2x -> 4x -> 8x. Solo la barra spaziatrice mette in pausa.
+    /// "a" key: when stopped like the space bar (1x), during playback it
+    /// accelerates 2x -> 4x -> 8x. Only the space bar pauses.
     fn handle_fast_playback_key(&mut self) {
         if self.browsing_media.is_some() {
             if !self.is_timeline_playing() {
@@ -881,8 +885,8 @@ impl VenturiApp {
         self.request_playback_speed(1.0);
     }
 
-    /// 1x subito; le velocità accelerate quando il loro audio stretchato
-    /// è pronto (vedi `TimelineAudio::request_speed`).
+    /// 1x immediately; the fast speeds when their stretched audio
+    /// is ready (see `TimelineAudio::request_speed`).
     fn request_playback_speed(&mut self, speed: f64) {
         match &mut self.timeline_audio {
             Some(audio) => {
@@ -893,7 +897,7 @@ impl VenturiApp {
         }
     }
 
-    /// Intervalli di timeline già decodificati, per la striscia "buffered".
+    /// Timeline intervals already decoded, for the "buffered" strip.
     fn buffered_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
@@ -905,10 +909,10 @@ impl VenturiApp {
         self.cached_ranges_of_timeline(timeline_id, &mut cached, 0)
     }
 
-    /// Intervalli decodificati di `timeline_id`, in frame di quella
-    /// timeline. Una compound clip non ha frame in cache propri (non è un
-    /// media da decodificare): i suoi valgono quelli della sua timeline
-    /// annidata, rimappati attraverso la clip.
+    /// Decoded intervals of `timeline_id`, in frames of that
+    /// timeline. A compound clip has no cached frames of its own (it is not a
+    /// media to decode): its intervals are those of its nested
+    /// timeline, remapped through the clip.
     fn cached_ranges_of_timeline(
         &self,
         timeline_id: TimelineId,
@@ -948,8 +952,8 @@ impl VenturiApp {
         ranges
     }
 
-    /// Intervalli di timeline delle clip Media servite dal proxy (tutta la
-    /// clip, non solo la parte già decodificata).
+    /// Timeline intervals of the Media clips served by the proxy (the whole
+    /// clip, not only the part already decoded).
     fn proxy_timeline_ranges(&self) -> Vec<(FrameIdx, FrameIdx)> {
         let Some(timeline_id) = self.timeline_id else {
             return Vec::new();
@@ -974,16 +978,16 @@ impl VenturiApp {
         ranges
     }
 
-    /// Carica in `waveform_cache` le waveform delle clip audio in timeline,
-    /// leggendo il file di cache una volta sola per chiave.
+    /// Loads into `waveform_cache` the waveforms of the audio clips on the timeline,
+    /// reading the cache file once per key.
     fn ensure_waveforms_loaded(&mut self) {
         if let Some(worker) = &self.waveform_worker {
             let arrived = worker.drain_ready();
             for key in &arrived {
                 self.waveform_missing.remove(key);
             }
-            // Le compound composte con dei sorgenti ancora mancanti vanno
-            // rifatte ora che ne è arrivato qualcuno.
+            // The compounds composed with still missing sources must be
+            // redone now that some of them have arrived.
             if !arrived.is_empty() {
                 for key in self.waveform_partial.drain() {
                     self.waveform_cache.remove(&key);
@@ -1028,9 +1032,9 @@ impl VenturiApp {
         }
     }
 
-    /// Waveform di una compound clip: non c'è un file da decodificare, si
-    /// compone da quelle delle clip della sua timeline annidata (vedi
-    /// `compose_compound_waveform`), caricandole prima se serve.
+    /// Waveform of a compound clip: there is no file to decode, it is
+    /// composed from those of the clips of its nested timeline (see
+    /// `compose_compound_waveform`), loading them first if needed.
     fn ensure_compound_waveform(&mut self, media_id: vv_core::MediaId, depth: usize) {
         if depth > MAX_COMPOUND_WALK_DEPTH {
             return;
@@ -1090,14 +1094,14 @@ impl VenturiApp {
         self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), true)
     }
 
-    /// Come `ensure_timeline`, ma una timeline nuova prende fps e risoluzione
-    /// da `meta` (solo media con video).
+    /// Like `ensure_timeline`, but a new timeline takes fps and resolution
+    /// from `meta` (media with video only).
     fn ensure_timeline_for(&mut self, meta: &vv_core::MediaMeta) -> TimelineId {
         self.ensure_timeline_with(meta.fps, (meta.width, meta.height), true)
     }
 
-    /// Come `ensure_timeline`, ma senza track video: un drop di solo audio non
-    /// deve crearne una vuota.
+    /// Like `ensure_timeline`, but without a video track: a drop of audio only must
+    /// not create an empty one.
     fn ensure_timeline_audio_only(&mut self) -> TimelineId {
         self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), false)
     }
@@ -1125,11 +1129,11 @@ impl VenturiApp {
         });
         self.timeline_id = Some(id);
         self.spawn_render_ahead_if_needed(id);
-        // La timeline del progetto è a tutti gli effetti una timeline come
-        // le altre (vedi doc di `MediaItem::compound`): compare nel media
-        // pool esattamente come una compound clip, trascinabile altrove.
-        // `meta` iniziale qualunque, `sync_root_timeline_media` la
-        // corregge subito al primo giro (chiamata da `update`).
+        // The project timeline is to all effects a timeline like
+        // the others (see the docs of `MediaItem::compound`): it shows up in the media
+        // pool exactly like a compound clip, draggable elsewhere.
+        // Any initial `meta`, `sync_root_timeline_media` corrects it
+        // immediately on the first round (called by `update`).
         let media_id = self.project.media_pool.insert(vv_core::MediaItem {
             path: name.into(),
             meta: vv_core::MediaMeta {
@@ -1150,8 +1154,55 @@ impl VenturiApp {
         id
     }
 
-    /// Spawna `render_ahead` la prima volta che esiste una timeline (una
-    /// per sessione: non viene più ricreato dopo, solo aggiornato via
+    /// New timeline of the project: like the initial one it also shows up in
+    /// the media pool as a compound clip (see `ensure_timeline_with`).
+    pub(crate) fn create_timeline(
+        &mut self,
+        name: String,
+        fps: vv_core::Rational,
+        resolution: (u32, u32),
+    ) -> TimelineId {
+        let id = self.project.timelines.insert(vv_core::Timeline {
+            name: name.clone(),
+            fps,
+            resolution,
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        });
+        let media_id = self.project.media_pool.insert(vv_core::MediaItem {
+            path: name.into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 0,
+                fps,
+                width: resolution.0,
+                height: resolution.1,
+                has_video: true,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 2,
+                audio_streams: 1,
+            },
+            content_hash: 0,
+            compound: Some(id),
+        });
+        self.project.sync_compound_meta(media_id);
+        // Creating a timeline does not go through the history (like a media
+        // import): without this, Ctrl+S would not be offered.
+        self.unsaved_media = true;
+        id
+    }
+
+    /// Opens a timeline as the top level one: the breadcrumb of the compound
+    /// clips one was inside no longer applies.
+    pub(crate) fn open_timeline(&mut self, timeline_id: TimelineId) {
+        if self.timeline_id == Some(timeline_id) {
+            return;
+        }
+        self.timeline_stack.clear();
+        self.switch_to_timeline(timeline_id);
+    }
+
+    /// Spawns `render_ahead` the first time a timeline exists (one
+    /// per session: it is not recreated afterwards, only updated via
     /// `sync_render_ahead`/`RenderAhead::update_project`).
     fn spawn_render_ahead_if_needed(&mut self, timeline_id: TimelineId) {
         if self.render_ahead.is_none() {
@@ -1167,27 +1218,27 @@ impl VenturiApp {
         }
     }
 
-    /// Apre `nested_id` come se fosse la timeline del progetto: dal doppio
-    /// click su una compound clip (`timeline_ui::show_timeline`). Tutta la
-    /// UI di editing esistente resta invariata (è già parametrizzata su
-    /// `self.timeline_id`), qui serve solo spostare il "quale" e impilare
-    /// da dove si viene per il breadcrumb.
+    /// Opens `nested_id` as if it were the project timeline: from the double
+    /// click on a compound clip (`timeline_ui::show_timeline`). The whole
+    /// existing editing UI stays unchanged (it is already parameterized on
+    /// `self.timeline_id`), here only the "which" has to be moved and
+    /// where one came from stacked for the breadcrumb.
     pub(crate) fn enter_compound_timeline(&mut self, nested_id: TimelineId) {
         let Some(current) = self.timeline_id else {
             return;
         };
         if current == nested_id || self.timeline_stack.contains(&nested_id) {
-            // Già su questo livello, o già un antenato in pila: un ciclo
-            // residuo (vedi `MAX_COMPOUND_DEPTH` in render_ahead.rs) non
-            // deve far crescere la pila all'infinito.
+            // Already on this level, or already an ancestor on the stack: a
+            // residual cycle (see `MAX_COMPOUND_DEPTH` in render_ahead.rs) must
+            // not make the stack grow indefinitely.
             return;
         }
         self.timeline_stack.push(current);
         self.switch_to_timeline(nested_id);
     }
 
-    /// Torna alla timeline in posizione `index` di `timeline_stack` (0 =
-    /// la radice): un segmento del breadcrumb cliccato.
+    /// Goes back to the timeline at position `index` of `timeline_stack` (0 =
+    /// the root): a clicked breadcrumb segment.
     fn exit_to_timeline_stack_index(&mut self, index: usize) {
         let Some(target) = self.timeline_stack.get(index).copied() else {
             return;
@@ -1196,14 +1247,14 @@ impl VenturiApp {
         self.switch_to_timeline(target);
     }
 
-    /// La parte comune delle due funzioni sopra: azzera lo stato che
-    /// appartiene al livello lasciato (selezione, playhead, clip attiva) e
-    /// sveglia subito `render_ahead` sulla nuova timeline, ignorando il
-    /// generation-gate di `sync_render_ahead` (qui cambia la timeline
-    /// stessa, non il suo contenuto — `sync_render_ahead` non se ne
-    /// accorgerebbe da sola). La clipboard sopravvive: copiare da una
-    /// timeline/compound clip e incollare in un'altra deve funzionare
-    /// (`paste_clipboard_at_playhead` già conforma per fps diversi).
+    /// The part common to the two functions above: it clears the state
+    /// belonging to the level being left (selection, playhead, active clip) and
+    /// immediately wakes `render_ahead` on the new timeline, ignoring the
+    /// generation gate of `sync_render_ahead` (here the timeline itself
+    /// changes, not its content — `sync_render_ahead` would not
+    /// notice on its own). The clipboard survives: copying from one
+    /// timeline/compound clip and pasting into another must work
+    /// (`paste_clipboard_at_playhead` already conforms for different fps).
     fn switch_to_timeline(&mut self, timeline_id: TimelineId) {
         self.timeline_id = Some(timeline_id);
         let clipboard = std::mem::take(&mut self.timeline_state.clipboard);
@@ -1216,9 +1267,9 @@ impl VenturiApp {
         }
     }
 
-    /// Nome da mostrare per `id` nel breadcrumb sopra la timeline: quello
-    /// della sua voce nel media pool (vedi `MediaItem::compound`), che è
-    /// quello che l'utente vede altrove (es. "Compound Clip 2").
+    /// Name to show for `id` in the breadcrumb above the timeline: that
+    /// of its entry in the media pool (see `MediaItem::compound`), which is
+    /// what the user sees elsewhere (e.g. "Compound Clip 2").
     fn timeline_display_name(&self, id: TimelineId) -> String {
         self.project
             .media_pool
@@ -1228,8 +1279,8 @@ impl VenturiApp {
             .unwrap_or_else(|| self.project.timelines[id].name.clone())
     }
 
-    /// Manda a `render_ahead` una copia del progetto solo quando la history è
-    /// cambiata.
+    /// Sends `render_ahead` a copy of the project only when the history has
+    /// changed.
     fn sync_render_ahead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1242,9 +1293,9 @@ impl VenturiApp {
             render_ahead.update_project(&self.project, timeline_id);
             self.render_ahead_generation = generation;
         }
-        // A velocità >1x il playhead avanza più veloce nel tempo reale:
-        // serve più margine bufferizzato in avanti per non superare il
-        // prefetch (vedi doc di `effective_lookahead_secs`).
+        // At speeds >1x the playhead advances faster in real time:
+        // more buffered margin ahead is needed so as not to overtake the
+        // prefetch (see the docs of `effective_lookahead_secs`).
         if self.playback_speed != 1.0 {
             render_ahead.set_lookahead_secs(self.effective_lookahead_secs(timeline_id));
         } else {
@@ -1253,10 +1304,10 @@ impl VenturiApp {
         render_ahead.set_target(self.timeline_state.playhead);
     }
 
-    /// La voce nel media pool della timeline del progetto (vedi
-    /// `ensure_timeline_with`) riflette sempre il suo contenuto vero, non
-    /// solo quello al momento della creazione: durata, presenza di
-    /// video/audio possono cambiare a ogni modifica.
+    /// The media pool entry of the project timeline (see
+    /// `ensure_timeline_with`) always reflects its real content, not
+    /// just the one at creation time: duration, presence of
+    /// video/audio can change on every modification.
     fn sync_root_timeline_media(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1278,8 +1329,8 @@ impl VenturiApp {
         self.project.sync_compound_meta(media_id);
     }
 
-    /// `lookahead_secs` scalato per la velocità di riproduzione, entro quanto
-    /// sta nel budget di cache (tolto `behind_secs`), mai sotto la base.
+    /// `lookahead_secs` scaled by the playback speed, within what
+    /// fits in the cache budget (minus `behind_secs`), never below the base.
     fn effective_lookahead_secs(&self, timeline_id: TimelineId) -> f64 {
         let scaled = self.lookahead_secs * self.playback_speed;
         let timeline = &self.project.timelines[timeline_id];
@@ -1291,8 +1342,8 @@ impl VenturiApp {
         scaled.min(max_secs)
     }
 
-    /// Drop di un effetto dal pannello Effects: la clip generatore va sulla
-    /// track video indicata da `target`, a `start`.
+    /// Drop of an effect from the Effects panel: the generator clip goes on the
+    /// video track indicated by `target`, at `start`.
     fn add_generator_to_timeline_at(
         &mut self,
         generator: timeline_ui::Generator,
@@ -1302,8 +1353,8 @@ impl VenturiApp {
         let timeline_id = self.ensure_timeline();
         let group = self.history.begin_group();
         if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, true, false) {
-            // Un generatore ha sempre video: `resolve_drop_tracks` con
-            // `any_video: true` risolve sempre `Some`.
+            // A generator always has video: `resolve_drop_tracks` with
+            // `any_video: true` always resolves to `Some`.
             let video_track = tracks.video.expect("generatore: track video sempre risolta");
             match generator {
                 timeline_ui::Generator::SolidColor => {
@@ -1333,8 +1384,8 @@ impl VenturiApp {
         }
     }
 
-    /// Il colore iniziale è grigio medio, modificabile subito dal pannello
-    /// proprietà una volta selezionata.
+    /// The initial color is mid grey, editable right away from the properties
+    /// panel once selected.
     fn insert_solid_color_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
         let default_len =
             timeline_ui::Generator::SolidColor.default_len(self.project.timelines[timeline_id].fps);
@@ -1370,8 +1421,8 @@ impl VenturiApp {
         self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)], vv_core::CommandLabel::InsertClips);
     }
 
-    /// Come un vero NLE, le clip già presenti sotto a quelle nuove vengono
-    /// accorciate, divise o rimosse invece di restare sovrapposte.
+    /// As in a real NLE, the clips already present under the new ones are
+    /// shortened, split or removed instead of staying overlapped.
     fn insert_clips_overwriting(
         &mut self,
         timeline_id: TimelineId,
@@ -1385,8 +1436,8 @@ impl VenturiApp {
         );
     }
 
-    /// Compone `layers` e mostra la texture risultante nel viewer, senza
-    /// readback. Non fa nulla senza device condiviso (test).
+    /// Composes `layers` and shows the resulting texture in the viewer, without
+    /// readback. It does nothing without a shared device (tests).
     fn show_composited(&mut self, layers: &[vv_render::Layer], output: vv_render::OutputFrame) {
         let Some(render_state) = self.egui_render_state.clone() else {
             return;
@@ -1415,10 +1466,10 @@ impl VenturiApp {
         self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
     }
 
-    /// I layer da comporre al playhead, dal basso verso l'alto. `None` se il
-    /// frame media in cima non è pronto: si tiene quello mostrato; un layer
-    /// sotto non pronto si salta. Durante una crossing transition "in cima"
-    /// conta se manca anche una sola delle due metà.
+    /// The layers to compose at the playhead, from bottom to top. `None` if the
+    /// media frame on top is not ready: the one already shown is kept; a layer
+    /// below that is not ready is skipped. During a crossing transition "on top"
+    /// counts if even one of the two halves is missing.
     fn timeline_video_layers(&mut self) -> Option<Vec<frame_provider::OwnedLayer>> {
         let timeline = &self.project.timelines[self.timeline_id?];
         let render_ahead = self.render_ahead.as_mut()?;
@@ -1460,23 +1511,23 @@ impl VenturiApp {
             .map(|c| &c.effects)
     }
 
-    /// Il frame dell'anteprima del media pool alla sua testina, se già
-    /// decodificato.
+    /// The frame of the media pool preview at its playhead, if already
+    /// decoded.
     fn browsing_video_frame(&mut self) -> Option<std::sync::Arc<vv_media::FrameYuv420>> {
         let (render_ahead, media_id) = self.browsing_render_ahead.as_ref()?;
         render_ahead.set_target(self.browse_playhead);
         render_ahead.get_frame(*media_id, self.browse_playhead)
     }
 
-    /// Aggiunge il media in coda alla track video (e le clip audio accanto).
+    /// Appends the media to the video track (and the audio clips alongside).
     #[cfg(test)]
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
         let Some(item) = self.project.media_pool.get(media_id) else {
             return;
         };
         let meta = item.meta.clone();
-        // Se non esiste ancora una timeline (es. primo drag&drop dal media
-        // pool), viene creata al volo ereditando fps/risoluzione da questo
+        // If a timeline does not exist yet (e.g. first drag&drop from the media
+        // pool), it is created on the fly inheriting fps/resolution from this
         // media.
         let timeline_id = self.ensure_timeline_for(&meta);
         if self.project.would_create_a_cycle(media_id, timeline_id) {
@@ -1498,8 +1549,8 @@ impl VenturiApp {
         );
     }
 
-    /// Come `add_media_to_timeline`, ma piazza la clip a `start` (posizione
-    /// e `target` dal drag&drop sulla timeline, vedi `MediaDropTarget`).
+    /// Like `add_media_to_timeline`, but places the clip at `start` (position
+    /// and `target` from the drag&drop onto the timeline, see `MediaDropTarget`).
     #[cfg(test)]
     fn add_media_to_timeline_at(
         &mut self,
@@ -1514,8 +1565,8 @@ impl VenturiApp {
         );
     }
 
-    /// Drop di uno o più media: accodati da `start` nell'ordine del pool. Le
-    /// track nuove si creano una volta per tutto il drop.
+    /// Drop of one or more media: appended from `start` in pool order. The
+    /// new tracks are created once for the whole drop.
     fn add_media_set_to_timeline_at(
         &mut self,
         set: &timeline_ui::MediaDragSet,
@@ -1534,15 +1585,15 @@ impl VenturiApp {
         if drops.is_empty() {
             return;
         }
-        // fps e risoluzione dal primo media *video* del set: un audio in testa
-        // non ha una risoluzione da dare alla timeline.
+        // fps and resolution from the first *video* media of the set: an audio at the
+        // head has no resolution to give the timeline.
         let timeline_id = match drops.iter().find(|(d, meta)| d.takes_video(meta)) {
             Some((_, video_meta)) => self.ensure_timeline_for(video_meta),
             None => self.ensure_timeline_audio_only(),
         };
-        // Un drop che chiuderebbe un ciclo (una timeline importata dentro
-        // se stessa, direttamente o attraverso una sua compound clip) si
-        // scarta invece di corrompere il progetto — vedi
+        // A drop that would close a cycle (a timeline imported inside
+        // itself, directly or through one of its compound clips) is
+        // discarded instead of corrupting the project — see
         // `Project::would_create_a_cycle`.
         let drops: Vec<(timeline_ui::MediaDrag, vv_core::MediaMeta)> = drops
             .into_iter()
@@ -1553,8 +1604,8 @@ impl VenturiApp {
         }
         let any_video = drops.iter().any(|(d, meta)| d.takes_video(meta));
         let any_audio = drops.iter().any(|(d, meta)| d.takes_audio(meta));
-        // Un drop solo = un solo Ctrl+Z, anche se dentro sono N clip (una
-        // per stream audio di ogni media) più le track create al volo.
+        // One drop = one Ctrl+Z, even if inside there are N clips (one
+        // per audio stream of each media) plus the tracks created on the fly.
         let group = self.history.begin_group();
         let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_video, any_audio) else {
             self.history.end_group(group);
@@ -1571,8 +1622,8 @@ impl VenturiApp {
         self.history.end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
-    /// Crea le track richieste da `target` (una volta sola per drop) e
-    /// restituisce dove andranno le clip.
+    /// Creates the tracks required by `target` (once per drop) and
+    /// returns where the clips will go.
     fn resolve_drop_tracks(
         &mut self,
         timeline_id: TimelineId,
@@ -1595,7 +1646,7 @@ impl VenturiApp {
                 }
                 _ => match self.project.timelines[timeline_id].first_unlocked_track_index(TrackKind::Video) {
                     Some(track) => track,
-                    // Nessuna track video libera: se ne crea una.
+                    // No free video track: one is created.
                     None => {
                         timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Video)
                     }
@@ -1613,8 +1664,8 @@ impl VenturiApp {
         })
     }
 
-    /// Inserisce la clip video e una clip audio per stream a `start`, tutte
-    /// nello stesso gruppo collegato; crea le track audio che mancano.
+    /// Inserts the video clip and one audio clip per stream at `start`, all
+    /// in the same linked group; creates the missing audio tracks.
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
@@ -1637,15 +1688,15 @@ impl VenturiApp {
             .map(|(i, _)| i)
             .collect();
 
-        // In testa: il primo stream deve atterrare sulla track appena
-        // creata per questo drop, non su una già esistente.
+        // At the head: the first stream must land on the track just
+        // created for this drop, not on an already existing one.
         if let Some(extra) = tracks.extra_audio {
             audio_track_indices.retain(|i| *i != extra);
             audio_track_indices.insert(0, extra);
         }
 
-        // Senza track audio l'audio di un video si scarta, ma un media o un
-        // drag solo audio se ne crea una. Se sono tutte bloccate se ne creano di nuove.
+        // Without an audio track the audio of a video is discarded, but a media or an
+        // audio-only drag creates one. If they are all locked, new ones are created.
         let takes_video = drag.takes_video(meta);
         let num_audio_streams = if !drag.takes_audio(meta) {
             0
@@ -1673,9 +1724,9 @@ impl VenturiApp {
                 start,
                 rate,
             );
-            // `tracks.video` è `Some` di sicuro: `resolve_drop_tracks` lo
-            // risolve solo se almeno un media del drop ha video, e questo
-            // è uno di quelli.
+            // `tracks.video` is certainly `Some`: `resolve_drop_tracks`
+            // resolves it only if at least one media of the drop has video, and this
+            // is one of those.
             new_clips.push((
                 tracks.video.expect("drop con video ma nessuna track risolta"),
                 video_clip,
@@ -1699,8 +1750,8 @@ impl VenturiApp {
         self.insert_clips_overwriting(timeline_id, new_clips, vv_core::CommandLabel::InsertClips);
     }
 
-    /// Handle di transform della prima clip video selezionata, se è sotto
-    /// alla testina e il viewer mostra la timeline ferma.
+    /// Transform handles of the first selected video clip, if it is under
+    /// the playhead and the viewer shows the timeline stopped.
     fn show_settings_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = &mut self.settings_dialog else {
             return;
@@ -1714,8 +1765,8 @@ impl VenturiApp {
         }
     }
 
-    /// Impostazioni utente su disco, incluso il layout dei pannelli: chiamata
-    /// dalla finestra Impostazioni e periodicamente/alla chiusura (vedi
+    /// User settings on disk, including the panel layout: called
+    /// from the Settings window and periodically/on close (see
     /// `eframe::App::save`).
     fn persist_settings(&mut self) {
         if let Some(path) = &self.settings_path
@@ -1725,7 +1776,7 @@ impl VenturiApp {
         }
     }
 
-    /// `(total, playhead, (in, out), playing)` della barra di riproduzione.
+    /// `(total, playhead, (in, out), playing)` of the playback bar.
     fn transport_state(&self) -> (FrameIdx, FrameIdx, (FrameIdx, FrameIdx), bool) {
         let playing = self.is_timeline_playing();
         if self.browsing_media.is_some() {
@@ -1744,9 +1795,9 @@ impl VenturiApp {
         }
     }
 
-    /// Player a tutto schermo sopra al resto dell'interfaccia, che resta
-    /// disegnata sotto (e continua a gestire le scorciatoie) ma non riceve
-    /// più il mouse. La barra di riproduzione compare solo col mouse in basso.
+    /// Full-screen player over the rest of the interface, which stays
+    /// drawn underneath (and keeps handling the shortcuts) but no longer
+    /// receives the mouse. The playback bar appears only with the mouse at the bottom.
     fn show_fullscreen_viewer(&mut self, ctx: &egui::Context) -> transport::TransportResponse {
         const BAR_ZONE: f32 = 90.0;
         let screen = ctx.content_rect();
@@ -1852,7 +1903,7 @@ impl VenturiApp {
         );
     }
 
-    /// D: disattiva le clip selezionate, o le riattiva se lo sono già tutte.
+    /// D: disables the selected clips, or re-enables them if they are all already disabled.
     fn toggle_disabled_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1878,25 +1929,25 @@ impl VenturiApp {
         );
     }
 
-    /// Ctrl+A: seleziona tutte le clip della timeline.
+    /// Ctrl+A: selects all the clips of the timeline.
     fn select_all_clips(&mut self) {
         self.select_clips(|_| true);
     }
 
-    /// Ctrl+A col media pool a fuoco: seleziona tutti i media del pool.
+    /// Ctrl+A with the media pool focused: selects all the media of the pool.
     fn select_all_media(&mut self) {
         let ids: Vec<MediaId> = self.project.media_pool.keys().collect();
         self.media_pool_state.set_marquee_selection(ids);
     }
 
-    /// Alt+Y: seleziona dalla testina in avanti — la clip sotto alla
-    /// testina è inclusa, quelle che finiscono prima restano fuori.
+    /// Alt+Y: selects from the playhead forward — the clip under the
+    /// playhead is included, those ending earlier stay out.
     fn select_clips_from_playhead(&mut self) {
         let playhead = self.timeline_state.playhead;
         self.select_clips(|clip| clip.timeline_end() > playhead);
     }
 
-    /// Seleziona le clip delle track sbloccate per cui `keep` è vero.
+    /// Selects the clips of the unlocked tracks for which `keep` is true.
     fn select_clips(&mut self, keep: impl Fn(&vv_core::Clip) -> bool) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -1918,7 +1969,7 @@ impl VenturiApp {
         self.timeline_state.set_selection(selected, anchor);
     }
 
-    /// Canc nell'editor di keyframe: tocca i keyframe, non la clip.
+    /// Del in the keyframe editor: it touches the keyframes, not the clip.
     fn delete_selected_keyframes(&mut self) {
         let commands = self.keyframe_editor.remove_selected(self.zoom_link);
         self.apply_effect_changes(commands, false);
@@ -1955,8 +2006,8 @@ impl VenturiApp {
         self.sync_selection_to_playhead();
     }
 
-    /// Canc/Backspace sul media pool: toglie i media selezionati. Le clip
-    /// che li usano restano in timeline e diventano offline (vedi
+    /// Del/Backspace on the media pool: removes the selected media. The clips
+    /// using them stay on the timeline and become offline (see
     /// `vv_core::RemoveMedia`).
     fn delete_selected_media(&mut self) {
         if self.media_pool_state.selected.is_empty() {
@@ -1983,9 +2034,9 @@ impl VenturiApp {
         self.leave_removed_timelines();
     }
 
-    /// Cancellare una compound clip ne cancella la timeline annidata
-    /// (`vv_core::RemoveMedia`): se la si stava editando si risale al
-    /// livello superiore ancora esistente.
+    /// Deleting a compound clip deletes its nested timeline
+    /// (`vv_core::RemoveMedia`): if it was being edited, one goes back up to the
+    /// upper level that still exists.
     fn leave_removed_timelines(&mut self) {
         while self
             .timeline_id
@@ -2003,7 +2054,7 @@ impl VenturiApp {
         }
     }
 
-    /// La clip attiva punta a un media non piu' nel media pool.
+    /// The active clip points at a media no longer in the media pool.
     fn active_clip_media_offline(&self) -> bool {
         if self.browsing_media.is_some() {
             return false;
@@ -2020,9 +2071,9 @@ impl VenturiApp {
             })
     }
 
-    /// Copia/taglia/incolla da tastiera. Dopo una copia scrive un segnaposto
-    /// nella clipboard di sistema: egui-winit genera `Event::Paste` solo se
-    /// quella non è vuota.
+    /// Copy/cut/paste from the keyboard. After a copy it writes a placeholder
+    /// into the system clipboard: egui-winit generates `Event::Paste` only if
+    /// that is not empty.
     fn handle_clipboard_events(&mut self, ui: &egui::Ui, events: &[egui::Event]) {
         for event in events {
             match event {
@@ -2032,7 +2083,7 @@ impl VenturiApp {
                         ui.ctx().copy_text("venturi:clip".to_owned());
                     }
                 }
-                // Ctrl+X in un campo di testo taglia il testo, non le clip.
+                // Ctrl+X in a text field cuts the text, not the clips.
                 egui::Event::Cut if !ui.ctx().egui_wants_keyboard_input() => {
                     if self.timeline_state.selected.is_empty() {
                         continue;
@@ -2047,8 +2098,8 @@ impl VenturiApp {
         }
     }
 
-    /// Copia le clip selezionate (i gruppi collegati sono già tutti dentro la
-    /// selezione).
+    /// Copies the selected clips (the linked groups are all already inside the
+    /// selection).
     fn copy_selected_clips(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -2058,7 +2109,7 @@ impl VenturiApp {
         }
 
         let tl = &self.project.timelines[timeline_id];
-        // I gruppi si rimappano su tag locali: al paste servono gruppi nuovi.
+        // The groups are remapped onto local tags: the paste needs new groups.
         let mut collected: Vec<(Option<vv_core::LinkGroupId>, timeline_ui::ClipboardEntry)> = self
             .timeline_state
             .selected
@@ -2105,8 +2156,8 @@ impl VenturiApp {
         self.timeline_state.clipboard = collected.into_iter().map(|(_, e)| e).collect();
     }
 
-    /// Incolla la clipboard al playhead mantenendo le distanze e i gruppi
-    /// collegati; le clip incollate sovrascrivono quel che c'era sotto.
+    /// Pastes the clipboard at the playhead preserving the distances and the linked
+    /// groups; the pasted clips overwrite what was underneath.
     fn paste_clipboard_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -2119,11 +2170,11 @@ impl VenturiApp {
             .timeline_state
             .clipboard
             .iter()
-            // Incollare una compound clip copiata dentro la sua stessa
-            // timeline annidata (direttamente o attraverso un'altra
-            // compound clip) chiuderebbe un ciclo — vedi
-            // `Project::would_create_a_cycle`, stesso controllo del drop
-            // dal media pool.
+            // Pasting a copied compound clip inside its own
+            // nested timeline (directly or through another
+            // compound clip) would close a cycle — see
+            // `Project::would_create_a_cycle`, the same check as the drop
+            // from the media pool.
             .filter(|e| match &e.clip.source {
                 vv_core::ClipSource::Media(media_id) => {
                     !self.project.would_create_a_cycle(*media_id, timeline_id)
@@ -2188,9 +2239,9 @@ impl VenturiApp {
         }
     }
 
-    /// Track mancanti per incollare `entries`: una compound clip di sole
-    /// track video incollata in una timeline che ne ha una sola deve
-    /// crearsi la V2, non finire sull'audio.
+    /// Tracks missing to paste `entries`: a compound clip with video
+    /// tracks only, pasted into a timeline having a single one, must
+    /// create its own V2, not end up on the audio.
     fn add_tracks_for_clipboard(
         &mut self,
         timeline_id: TimelineId,
@@ -2211,14 +2262,14 @@ impl VenturiApp {
         }
     }
 
-    /// Ripple delete: rimuove le clip selezionate (e i loro gruppi
-    /// collegati) e chiude i buchi su tutte le track, mantenendo il sync A/V.
+    /// Ripple delete: removes the selected clips (and their linked
+    /// groups) and closes the holes on all the tracks, preserving the A/V sync.
     fn ripple_delete_selected(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
         if self.timeline_state.selected.is_empty() {
-            // Nessuna clip selezionata: si chiude il vuoto selezionato, se c'è.
+            // No clip selected: the selected gap is closed, if there is one.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
                 let mark = self.history.begin_group();
                 self.history.do_command(
@@ -2264,8 +2315,8 @@ impl VenturiApp {
             }
         }
 
-        // Buchi uniti quando si sovrappongono: chiuderli una volta per clip
-        // farebbe arretrare il resto del doppio.
+        // Holes merged when they overlap: closing them once per clip
+        // would make the rest go back twice as far.
         let mut gaps: Vec<(FrameIdx, FrameIdx)> = removed
             .iter()
             .map(|&(_, _, start, end)| (start, end))
@@ -2287,9 +2338,9 @@ impl VenturiApp {
                     as Box<dyn vv_core::Command>
             })
             .collect();
-        // Da destra a sinistra: chiudere un buco sposta quel che gli sta
-        // dopo, non quel che gli sta prima, quindi i buchi ancora da
-        // chiudere restano dove li abbiamo misurati.
+        // From right to left: closing a hole moves what comes
+        // after it, not what comes before it, so the holes still to
+        // close stay where we measured them.
         for &(start, end) in merged.iter().rev() {
             commands.push(Box::new(vv_core::RippleDeleteGap::new(
                 timeline_id,
@@ -2312,9 +2363,9 @@ impl VenturiApp {
         self.sync_selection_to_playhead();
     }
 
-    /// Dopo uno spostamento in blocco, taglia le sovrapposizioni che ne
-    /// fossero rimaste (vedi `vv_core::cut_overlaps`): vince sempre la clip
-    /// che comincia dopo, quella appena arrivata lì.
+    /// After a bulk move, cuts the overlaps that may have
+    /// remained (see `vv_core::cut_overlaps`): the clip starting later
+    /// always wins, the one that just arrived there.
     fn cut_remaining_overlaps(&mut self, timeline_id: TimelineId) {
         let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
         vv_core::cut_overlaps(&mut self.project, timeline_id, &mut commands);
@@ -2327,8 +2378,8 @@ impl VenturiApp {
         );
     }
 
-    /// Porta la testina dove ora comincia la clip scivolata a chiudere il buco;
-    /// se non ne è arrivata nessuna resta dov'è.
+    /// Brings the playhead where the clip that slid in to close the hole now starts;
+    /// if none arrived it stays where it is.
     fn move_playhead_to_closed_gap(&mut self, timeline_id: vv_core::TimelineId, position: FrameIdx) {
         let landed = self.project.timelines[timeline_id]
             .tracks
@@ -2340,9 +2391,9 @@ impl VenturiApp {
         }
     }
 
-    /// Taglia al playhead le clip selezionate che lo coprono o, senza
-    /// selezione, tutte. Le metà destre di un gruppo collegato vengono
-    /// ricollegate tra loro.
+    /// Cuts at the playhead the selected clips covering it or, without a
+    /// selection, all of them. The right halves of a linked group get
+    /// relinked to each other.
     fn split_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;
@@ -2368,8 +2419,8 @@ impl VenturiApp {
             return;
         }
 
-        // Id della metà destra pre-allocato per ogni target, cosi da
-        // poterlo usare subito per i comandi di ricollegamento.
+        // Id of the right half pre-allocated for every target, so it can
+        // be used right away for the relinking commands.
         let new_ids: std::collections::HashMap<ClipId, ClipId> = targets
             .iter()
             .map(|(_, id, _)| (*id, self.project.alloc_clip_id()))
@@ -2406,8 +2457,8 @@ impl VenturiApp {
             Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::SplitClips, commands)),
         );
 
-        // Seleziona la metà *sinistra* (quella sotto il playhead sarebbe la
-        // destra): dopo un taglio di solito si lavora su ciò che sta prima.
+        // Selects the *left* half (the one under the playhead would be the
+        // right one): after a cut one usually works on what comes before.
         if self.selection_follows_playhead
             && let Some((video_track, video_clip_id, _)) = targets
                 .iter()
@@ -2425,8 +2476,8 @@ impl VenturiApp {
     }
 }
 
-/// Intervalli di cache in frame sorgente → frame di timeline di `clip`,
-/// limitati al suo trim.
+/// Cache intervals in source frames → timeline frames of `clip`,
+/// limited to its trim.
 fn map_source_ranges_to_timeline(
     clip: &vv_core::Clip,
     source_ranges: &[(FrameIdx, FrameIdx)],
@@ -2441,15 +2492,15 @@ fn map_source_ranges_to_timeline(
         .collect()
 }
 
-/// Quanti livelli di compound clip annidate si percorrono (waveform,
-/// striscia "buffered"): oltre, si rinuncia — come `MAX_COMPOUND_DEPTH`
-/// del render.
+/// How many levels of nested compound clips are walked (waveform,
+/// "buffered" strip): past that, it gives up — like the render's
+/// `MAX_COMPOUND_DEPTH`.
 const MAX_COMPOUND_WALK_DEPTH: usize = 8;
 
-/// Picchi di una compound clip, composti da quelli delle clip audio della
-/// sua timeline annidata: non c'è un file da decodificare, quindi il
-/// worker non può generarli. Il `bool` è `false` se qualche sorgente non
-/// era in cache — la waveform è parziale e va rifatta più tardi.
+/// Peaks of a compound clip, composed from those of the audio clips of
+/// its nested timeline: there is no file to decode, so the
+/// worker cannot generate them. The `bool` is `false` if some source was
+/// not cached — the waveform is partial and must be redone later.
 fn compose_compound_waveform(
     project: &vv_core::Project,
     cache: &HashMap<(u64, usize), vv_media::Waveform>,
@@ -2522,8 +2573,8 @@ fn track_end(project: &vv_core::Project, timeline_id: TimelineId, track_index: u
         .unwrap_or(0)
 }
 
-/// Durata di un media per la colonna del pannello: MM:SS, con le ore solo
-/// quando ci sono.
+/// Duration of a media for the panel column: MM:SS, with the hours only
+/// when there are any.
 pub(crate) fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> String {
     let secs = (duration_frames.max(0) as f64 / fps.max(1e-9)).round() as u64;
     let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
@@ -2534,8 +2585,8 @@ pub(crate) fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> S
     }
 }
 
-/// Estensioni trattate come immagini: il probe di un container non basta a
-/// distinguerle.
+/// Extensions treated as images: probing a container is not enough to
+/// tell them apart.
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
 
 fn is_image_path(path: &std::path::Path) -> bool {
@@ -2544,8 +2595,8 @@ fn is_image_path(path: &std::path::Path) -> bool {
         .is_some_and(|ext| IMAGE_EXTENSIONS.iter().any(|img| img.eq_ignore_ascii_case(ext)))
 }
 
-/// Calamita disegnata a mano: su alcune piattaforme (Asahi) i font di egui
-/// non hanno il glifo 🧲.
+/// Hand-drawn magnet: on some platforms (Asahi) egui's fonts
+/// do not have the 🧲 glyph.
 fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     let size = egui::vec2(26.0, 22.0);
     let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -2578,8 +2629,8 @@ fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
             ],
             stroke,
         );
-        // Arco inferiore: t=0 -> gamba sinistra, t=π -> gamba destra,
-        // passando per il punto più basso a t=π/2 (chiude la "U").
+        // Lower arc: t=0 -> left leg, t=π -> right leg,
+        // passing through the lowest point at t=π/2 (it closes the "U").
         let arc_points: Vec<egui::Pos2> = (0..=16)
             .map(|i| {
                 let t = std::f32::consts::PI * (i as f32 / 16.0);
@@ -2588,8 +2639,8 @@ fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
             .collect();
         painter.add(egui::Shape::line(arc_points, stroke));
 
-        // Poli alle due punte, colorati come un vero magnete a ferro di
-        // cavallo (convenzione da manuale scolastico: rosso e grigio).
+        // Poles at the two tips, colored like a real horseshoe
+        // magnet (schoolbook convention: red and grey).
         let pole_size = egui::vec2(r + 1.0, 3.0);
         painter.rect_filled(
             egui::Rect::from_center_size(egui::pos2(c.x - r, leg_top - 1.0), pole_size),
@@ -2605,7 +2656,7 @@ fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     response
 }
 
-/// Riquadro con quattro handle agli angoli e il pivot al centro.
+/// Box with four corner handles and the pivot at the center.
 fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     let size = egui::vec2(26.0, 22.0);
     let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -2628,8 +2679,8 @@ fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Resp
     response
 }
 
-/// Icone pellicola e waveform in basso sul viewer: trascinandole si porta in
-/// timeline solo il video o solo l'audio.
+/// Film strip and waveform icons at the bottom of the viewer: dragging them brings
+/// only the video or only the audio onto the timeline.
 fn show_stream_drag_handles(
     ui: &egui::Ui,
     viewer: egui::Rect,
@@ -2687,9 +2738,9 @@ fn show_stream_drag_handles(
     ]
 }
 
-/// Su Wayland winit manda `Started` per lo scroll ad alta risoluzione ma
-/// quasi mai `Ended`: egui tiene Alt premuto e lo zoom resta bloccato.
-/// Trattato come `Move`, ogni evento usa i modificatori correnti.
+/// On Wayland winit sends `Started` for high-resolution scrolling but
+/// almost never `Ended`: egui keeps Alt held and the zoom stays stuck.
+/// Treated as `Move`, every event uses the current modifiers.
 fn unstick_wheel_modifiers(raw_input: &mut egui::RawInput) {
     for event in &mut raw_input.events {
         if let egui::Event::MouseWheel { phase, .. } = event
@@ -2752,7 +2803,7 @@ impl eframe::App for VenturiApp {
                             .text(t!("project.import_progress", done = done, total = total)),
                     );
                 }
-                // Sopra al pannello che apre, come i toggle a sinistra.
+                // Above the panel it opens, like the toggles on the left.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.toggle_value(&mut self.settings.panels.inspector_open, t!("menu.inspector"));
                 });
@@ -2766,10 +2817,11 @@ impl eframe::App for VenturiApp {
         self.show_import_warnings(ui);
         self.show_relink_message(ui);
         self.show_unsaved_changes_dialog(ui);
+        self.show_new_timeline_dialog(ui.ctx());
 
-        // Bersagli del pannello: le clip selezionate per tipo di track, in ordine
-        // (track, inizio). Il frame di ciascuna è il playhead nel suo spazio
-        // sorgente; la prima dà i valori mostrati, le modifiche vanno a tutte.
+        // Targets of the panel: the selected clips by track kind, in order
+        // (track, start). The frame of each is the playhead in its own source
+        // space; the first gives the shown values, the changes go to all of them.
         let mut video_targets: Vec<PanelTarget> = Vec::new();
         let mut audio_targets: Vec<PanelTarget> = Vec::new();
         if let Some(timeline_id) = self.timeline_id {
@@ -2817,13 +2869,13 @@ impl eframe::App for VenturiApp {
                         } else {
                             ui.scope(|ui| self.show_media_pool(ui, &mut preview_action)).response
                         };
-                        // Chi ha ricevuto l'ultimo click decide a chi va Canc/Backspace.
+                        // Whoever got the last click decides who gets Del/Backspace.
                         if let Some(pos) = ui.ctx().input(|i| {
                             i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()
                         }) {
                             self.media_pool_state.focused = pool.rect.contains(pos);
                         }
-                        // Evidenzia il pool mentre si trascina un file dal file manager.
+                        // Highlights the pool while a file is dragged from the file manager.
                         if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
                             ui.ctx()
                                 .layer_painter(egui::LayerId::new(
@@ -2852,8 +2904,8 @@ impl eframe::App for VenturiApp {
 
         let selected_before_timeline_ui = self.timeline_state.selected.clone();
         let playhead_before_timeline_ui = self.timeline_state.playhead;
-        // Senza timeline non c'è una scala per posizionare il drop: si crea la
-        // timeline e si accoda a 0.
+        // Without a timeline there is no scale to position the drop: the
+        // timeline is created and it is appended at 0.
         let mut media_drop: Option<(
             timeline_ui::TimelineDrag,
             FrameIdx,
@@ -2866,9 +2918,9 @@ impl eframe::App for VenturiApp {
             .resizable(true)
             .show(ui, |ui| {
                 if self.audiometer_enabled {
-                    // Fascia stretta a destra, ritagliata *prima* di
-                    // mostrare la timeline: le ruba solo questa larghezza
-                    // fissa, non la comprime in proporzione.
+                    // Narrow band on the right, carved out *before*
+                    // showing the timeline: it steals only this fixed
+                    // width from it, it does not compress it proportionally.
                     egui::Panel::right("audiometer")
                         .default_size(40.0)
                         .resizable(false)
@@ -2901,14 +2953,14 @@ impl eframe::App for VenturiApp {
                         .collect();
                     let buffered_ranges = self.buffered_timeline_ranges();
                     let proxy_ranges = self.proxy_timeline_ranges();
-                    // Il buffer avanza su un altro thread: senza repaint la striscia
-                    // "buffered" non si aggiornerebbe.
+                    // The buffer advances on another thread: without a repaint the
+                    // "buffered" strip would not update.
                     if self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up()) {
                         ui.ctx().request_repaint();
                     }
-                    // Picchi audio già in memoria (caricati dal file di cache
-                    // la prima volta che servono, vedi `ensure_waveforms_loaded`):
-                    // la timeline li disegna come waveform sulle clip audio.
+                    // Audio peaks already in memory (loaded from the cache file
+                    // the first time they are needed, see `ensure_waveforms_loaded`):
+                    // the timeline draws them as waveforms on the audio clips.
                     self.ensure_waveforms_loaded();
                     let is_playing = self.is_timeline_playing();
                     let (drop, enter_compound) = timeline_ui::show_timeline(
@@ -2947,16 +2999,16 @@ impl eframe::App for VenturiApp {
             self.add_drop_to_timeline_at(&drag, start, target);
         }
 
-        // Uno scrub dell'utente va seguito anche durante la riproduzione, a
-        // differenza del playhead mosso da `drive_playback`.
+        // A user scrub must be followed during playback too, unlike
+        // the playhead moved by `drive_playback`.
         let user_scrubbed_playhead = self.timeline_state.playhead != playhead_before_timeline_ui;
         if user_scrubbed_playhead {
             self.sync_selection_to_playhead();
         }
 
-        // Interagire con la timeline (selezionare una clip o spostare il
-        // playhead) riprende il controllo del viewer dall'anteprima
-        // "grezza" del media pool, se attiva.
+        // Interacting with the timeline (selecting a clip or moving the
+        // playhead) takes control of the viewer back from the "raw"
+        // media pool preview, if active.
         if self.browsing_media.is_some()
             && (self.timeline_state.selected != selected_before_timeline_ui || user_scrubbed_playhead)
         {
@@ -2968,8 +3020,8 @@ impl eframe::App for VenturiApp {
             if user_scrubbed_playhead {
                 self.play_scrub_audio();
             }
-            // La selezione segue anche il playhead mosso dalla riproduzione, ma solo
-            // se si è mosso davvero: non tocca una selezione fatta in questo frame.
+            // The selection follows the playhead moved by playback too, but only
+            // if it really moved: it does not touch a selection made in this frame.
             let playhead_before_playback = self.timeline_state.playhead;
             self.drive_playback();
             if self.timeline_state.playhead != playhead_before_playback {
@@ -2977,7 +3029,7 @@ impl eframe::App for VenturiApp {
             }
         }
         self.drive_browse_playback();
-        // Il buffer della timeline resta caldo anche durante l'anteprima del pool.
+        // The timeline buffer stays warm during the pool preview too.
         self.sync_render_ahead();
         self.sync_root_timeline_media();
 
@@ -3004,8 +3056,8 @@ impl eframe::App for VenturiApp {
 
         if let Some(id) = preview_action {
             self.preview_media(id);
-            // Anteprima del pool: nessuna clip attiva, e il playhead non deve
-            // toglierla al frame dopo.
+            // Pool preview: no active clip, and the playhead must not
+            // take it away on the next frame.
             self.active_clip = None;
             self.browsing_media = Some(id);
         }
@@ -3013,22 +3065,22 @@ impl eframe::App for VenturiApp {
             self.timeline_state.playhead = frame.max(0);
         }
 
-        // Una modifica dal pannello può toccare più clip (selezione
-        // multipla): un solo comando composito, così l'undo le riporta
-        // indietro tutte insieme.
-        // Un menu a tendina aperto sta applicando l'anteprima delle voci:
-        // le sue modifiche vanno in un solo passo di undo, come un drag.
+        // A change from the panel can touch several clips (multiple
+        // selection): a single composite command, so the undo brings them
+        // all back together.
+        // An open dropdown is applying the preview of its entries:
+        // its changes go into a single undo step, like a drag.
         let holding = ui.input(|i| i.pointer.any_down()) || preview_combo_open(ui.ctx());
         self.apply_effect_changes(pending_effects, holding);
 
         let mut transport_action = transport::TransportResponse::default();
         let mut viewer_rect = None;
-        // Tutto il riquadro del player, bande comprese: gli handle vicini al
-        // bordo del frame devono restare afferrabili anche fuori.
+        // The whole player box, bars included: the handles near the
+        // edge of the frame must stay grabbable outside too.
         let mut viewer_area = None;
         let mut overlay_effects: Vec<BoxedCommand> = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
-            // Dentro il CentralPanel: occupa solo la colonna del viewer.
+            // Inside the CentralPanel: it occupies only the viewer column.
             egui::Panel::bottom("view_toggles")
                 .default_size(28.0)
                 .resizable(false)
@@ -3047,8 +3099,8 @@ impl eframe::App for VenturiApp {
                     transport_action = transport::show_transport(ui, total, playhead, marks, playing);
                 });
             let media_offline = self.active_clip_media_offline();
-            // Sfogliando un media "grezzo" dal media pool non c'è nessuna
-            // timeline da comporre: un layer solo, il suo frame com'è.
+            // Browsing a "raw" media from the media pool there is no
+            // timeline to compose: a single layer, its frame as it is.
             let layers = if media_offline || self.browsing_media.is_some() {
                 None
             } else {
@@ -3087,14 +3139,14 @@ impl eframe::App for VenturiApp {
                 let timeline_size = self
                     .timeline_id
                     .map(|id| self.project.timelines[id].resolution);
-                // Con sole clip SolidColor si compone alla risoluzione
-                // della timeline.
+                // With SolidColor clips only it composes at the resolution
+                // of the timeline.
                 let composite_size = video_size.or(timeline_size.filter(|_| !layers.is_empty()));
 
                 match composite_size {
                     Some(size) => {
-                        // Alla risoluzione del frame decodificato, allargata all'aspect della
-                        // timeline: le bande si vedono senza upscalare.
+                        // At the resolution of the decoded frame, widened to the aspect of the
+                        // timeline: the bars show without upscaling.
                         let timeline_size = timeline_size.unwrap_or(size);
                         let (out_w, out_h) = vv_render::fit_output_size(size, timeline_size);
                         let render_layers: Vec<vv_render::Layer> =
@@ -3104,8 +3156,8 @@ impl eframe::App for VenturiApp {
                             vv_render::OutputFrame::scaled(out_w, out_h, timeline_size),
                         );
                     }
-                    // Vuoto: nero, non l'ultimo frame rimasto. Basta una
-                    // texture minuscola con l'aspect della timeline.
+                    // Empty: black, not the last frame left. A tiny
+                    // texture with the aspect of the timeline is enough.
                     None => {
                         let (w, h) = timeline_size.unwrap_or((16, 9));
                         let step = (w.max(h) / 64).max(1);
@@ -3166,7 +3218,7 @@ impl eframe::App for VenturiApp {
                                 t!("viewer.empty_hint")
                             })
                         });
-                        // Si trascina in timeline anche senza immagine.
+                        // It can be dragged onto the timeline even without an image.
                         if audio_only {
                             viewer_rect = Some(label.inner.rect);
                         }
@@ -3243,7 +3295,7 @@ impl eframe::App for VenturiApp {
             ui.ctx().request_repaint();
         }
 
-        // Repaint durante i drag, altrimenti poco fluidi a player fermo.
+        // Repaint during the drags, otherwise they are not smooth with the player stopped.
         if ui
             .ctx()
             .input(|i| i.pointer.any_down() || i.pointer.any_released())
@@ -3252,9 +3304,9 @@ impl eframe::App for VenturiApp {
         }
     }
 
-    /// Chiamata da eframe alla chiusura e periodicamente (vedi
-    /// `auto_save_interval`): il layout dei pannelli aggiornato a ogni frame
-    /// in `ui()` finisce così su disco senza scriverlo ad ogni resize.
+    /// Called by eframe on close and periodically (see
+    /// `auto_save_interval`): the panel layout updated on every frame
+    /// in `ui()` thus ends up on disk without writing it on every resize.
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         self.persist_settings();
     }
@@ -3276,17 +3328,17 @@ fn app_icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
-    // Argomento opzionale: path di un video da importare subito all'avvio
-    // (comodo per debug/smoke test, oltre che per l'uso da riga di comando).
+    // Optional argument: path of a video to import immediately at startup
+    // (handy for debugging/smoke tests, as well as for command-line use).
     let startup_path = std::env::args().nth(1).map(PathBuf::from);
     std::thread::spawn(vv_render::text::warm_up);
-    // La prima verifica di NVENC inizializza CUDA: meglio non nella UI.
+    // The first NVENC check initializes CUDA: better not in the UI.
     std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Venturi")
-        // Deve combaciare con il nome del .desktop, altrimenti i compositor
-        // Wayland non associano l'icona alla finestra.
+        // It must match the name of the .desktop, otherwise the Wayland
+        // compositors do not associate the icon with the window.
         .with_app_id("venturi");
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
@@ -3302,7 +3354,7 @@ fn main() -> eframe::Result<()> {
         "venturi",
         options,
         Box::new(move |cc| {
-            // Zoom della timeline con Alt+scroll invece del Ctrl di default.
+            // Timeline zoom with Alt+scroll instead of the default Ctrl.
             cc.egui_ctx
                 .options_mut(|o| o.input_options.zoom_modifier = egui::Modifiers::ALT);
             let mut app = VenturiApp::default();
@@ -3311,7 +3363,7 @@ fn main() -> eframe::Result<()> {
                 app.settings = settings::Settings::load(path);
             }
             app.settings.language.apply();
-            // Aperto subito: aprire lo stream audio blocca per centinaia di ms.
+            // Opened immediately: opening the audio stream blocks for hundreds of ms.
             app.timeline_audio = Some(TimelineAudio::new());
             if let Some(render_state) = cc.wgpu_render_state.clone() {
                 app.compositor = vv_render::Compositor::new(
@@ -3335,6 +3387,31 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_timeline_becomes_current_and_shows_up_in_the_media_pool() {
+        let mut app = VenturiApp::default();
+        let first = app.ensure_timeline();
+        let second = app.create_timeline(
+            app.project.alloc_timeline_name(),
+            vv_core::Rational::new(30, 1),
+            (1280, 720),
+        );
+        assert_ne!(first, second);
+        assert_eq!(app.project.timelines[second].name, "Timeline 2");
+        app.open_timeline(second);
+        assert_eq!(app.timeline_id, Some(second));
+        assert!(app.timeline_stack.is_empty());
+        let pool_entry = app
+            .project
+            .media_pool
+            .values()
+            .find(|item| item.compound == Some(second))
+            .expect("the new timeline shows up in the media pool");
+        assert_eq!(pool_entry.meta.fps, vv_core::Rational::new(30, 1));
+        assert_eq!((pool_entry.meta.width, pool_entry.meta.height), (1280, 720));
+        assert!(app.has_unsaved_changes());
+    }
 
     fn make_timeline_with_clip(
         app: &mut VenturiApp,
@@ -3390,9 +3467,9 @@ mod tests {
         })
     }
 
-    /// Copiare da una compound clip di sole track video e incollare nella
-    /// timeline: V2 deve restare video, non finire sulla track audio che
-    /// lì ha lo stesso indice assoluto.
+    /// Copying from a compound clip with video tracks only and pasting into the
+    /// timeline: V2 must stay video, not end up on the audio track that
+    /// has the same absolute index there.
     #[test]
     fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
         let mut app = VenturiApp::default();
@@ -3456,8 +3533,8 @@ mod tests {
         assert!(!app.project.timelines.contains_key(nested_id));
     }
 
-    /// Una compound clip non ha un file da decodificare: i picchi si
-    /// compongono da quelli delle sue clip audio annidate.
+    /// A compound clip has no file to decode: the peaks are
+    /// composed from those of its nested audio clips.
     #[test]
     fn a_compound_waveform_is_composed_from_the_nested_clips() {
         let mut app = VenturiApp::default();
@@ -3545,8 +3622,8 @@ mod tests {
         let mut app = VenturiApp::default();
         let root_id = app.ensure_timeline();
 
-        // Voluto o per un ciclo residuo (vedi MAX_COMPOUND_DEPTH): non deve
-        // impilare la timeline corrente su se stessa.
+        // Intended or due to a residual cycle (see MAX_COMPOUND_DEPTH): it must not
+        // stack the current timeline on itself.
         app.enter_compound_timeline(root_id);
         assert_eq!(app.timeline_id, Some(root_id));
         assert!(app.timeline_stack.is_empty());
@@ -3561,15 +3638,15 @@ mod tests {
         app.enter_compound_timeline(nested_id);
         assert_eq!(app.timeline_stack, vec![root_id]);
 
-        // La radice è già un antenato in pila: rientrarci non deve
-        // impilare `nested_id` una seconda volta sopra se stessa.
+        // The root is already an ancestor on the stack: re-entering it must not
+        // stack `nested_id` a second time over itself.
         app.enter_compound_timeline(root_id);
         assert_eq!(app.timeline_id, Some(nested_id), "resta dov'era, il tentativo è ignorato");
         assert_eq!(app.timeline_stack, vec![root_id], "la pila non cresce");
     }
 
-    /// Copiare in una timeline, entrare in una compound clip e incollare
-    /// lì deve funzionare: la clipboard non è per-timeline.
+    /// Copying in one timeline, entering a compound clip and pasting
+    /// there must work: the clipboard is not per-timeline.
     #[test]
     fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
         let mut app = VenturiApp::default();
@@ -3612,11 +3689,11 @@ mod tests {
         assert!(app.project.timelines[root_id].tracks[0].clips.is_empty(), "non nella radice");
     }
 
-    /// Bug segnalato dall'utente: trascinare la voce di una timeline (la
-    /// timeline del progetto, o una compound clip) dal media pool dentro
-    /// se stessa deve essere rifiutato, non solo fermato durante il
-    /// rendering (`MAX_COMPOUND_DEPTH` in render_ahead.rs è solo la rete
-    /// di sicurezza, non deve mai scattare in uso normale).
+    /// Bug reported by the user: dragging the entry of a timeline (the
+    /// project timeline, or a compound clip) from the media pool inside
+    /// itself must be refused, not only stopped during the
+    /// rendering (`MAX_COMPOUND_DEPTH` in render_ahead.rs is only the safety
+    /// net, it must never trigger in normal use).
     #[test]
     fn dropping_a_timelines_own_media_into_itself_is_refused() {
         let mut app = VenturiApp::default();
@@ -3637,8 +3714,8 @@ mod tests {
         );
     }
 
-    /// Come sopra, ma indiretto: B contiene già una clip che referenzia A,
-    /// trascinare B dentro A chiuderebbe il ciclo A -> B -> A.
+    /// As above, but indirect: B already contains a clip referencing A,
+    /// dragging B inside A would close the cycle A -> B -> A.
     #[test]
     fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
         let mut app = VenturiApp::default();
@@ -3657,8 +3734,8 @@ mod tests {
             .find(|(_, item)| item.compound == Some(root_id))
             .map(|(id, _)| id)
             .unwrap();
-        // La timeline annidata contiene già una clip che referenzia la
-        // radice del progetto.
+        // The nested timeline already contains a clip referencing the
+        // root of the project.
         app.project.timelines[nested_id].tracks[0].clips.push(vv_core::Clip::from_source_range(
             ClipId(1),
             vv_core::ClipSource::Media(root_media),
@@ -3668,8 +3745,8 @@ mod tests {
             vv_core::Rational::one(),
         ));
 
-        // Trascinare la compound clip (che porta a `nested_id`, che porta
-        // già alla radice) dentro la radice chiuderebbe il ciclo.
+        // Dragging the compound clip (which leads to `nested_id`, which already
+        // leads to the root) inside the root would close the cycle.
         app.add_media_to_timeline(compound_media);
 
         assert!(
@@ -3678,15 +3755,15 @@ mod tests {
         );
     }
 
-    /// Due track video sovrapposte (REFACTOR_PIPELINE.md B4): la seconda
-    /// (aggiunta con `AddTrack`, quindi in coda a `tracks` — più in alto
-    /// di quella di default) ha una clip più corta al centro di quella
-    /// della prima. `active_video_clip_at` deve vedere quella in cima dove
-    /// c'è, e tornare a quella sotto appena finisce — la stessa
-    /// regola che il viewer usa per seguire il playhead.
-    /// Timeline a 30 fps + media a 29,97: la clip inserita porta il
-    /// `rate` di conformazione e dura in timeline il tempo reale del
-    /// media, non i suoi frame contati 1:1.
+    /// Two overlapping video tracks (REFACTOR_PIPELINE.md B4): the second
+    /// (added with `AddTrack`, hence at the end of `tracks` — higher
+    /// than the default one) has a shorter clip at the center of the one
+    /// of the first. `active_video_clip_at` must see the top one where
+    /// there is one, and go back to the one below as soon as it ends — the same
+    /// rule the viewer uses to follow the playhead.
+    /// Timeline at 30 fps + media at 29.97: the inserted clip carries the
+    /// conforming `rate` and lasts on the timeline the real time of the
+    /// media, not its frames counted 1:1.
     fn app_with_media_at(timeline_fps: vv_core::Rational, media_fps: vv_core::Rational, duration_frames: FrameIdx) -> (VenturiApp, MediaId) {
         let mut app = VenturiApp::default();
         let media_id = app.project.media_pool.insert(vv_core::MediaItem {
@@ -3761,8 +3838,8 @@ mod tests {
         assert!(matches!(clips[1].source, vv_core::ClipSource::Media(id) if id == media_b));
     }
 
-    /// Un drop = un solo Ctrl+Z, anche con più media, più stream audio e
-    /// una track creata al volo.
+    /// One drop = one Ctrl+Z, even with several media, several audio streams and
+    /// a track created on the fly.
     #[test]
     fn dropping_several_media_is_a_single_undo_step() {
         let (mut app, media_a) = app_with_media_at(
@@ -3813,8 +3890,8 @@ mod tests {
         assert_eq!(tl.tracks.len(), tracks_before, "e anche la track creata dal drop");
     }
 
-    /// Drop multiplo sulla fascia "nuova track video": la track si crea una
-    /// volta sola per l'intero drop, non una per media.
+    /// Multiple drop on the "new video track" band: the track is created once
+    /// for the whole drop, not one per media.
     #[test]
     fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
         let (mut app, media_a) = app_with_media_at(
@@ -3915,9 +3992,9 @@ mod tests {
         assert_eq!(app.media_pool_state.selected, BTreeSet::from([media_a, media_b]));
     }
 
-    /// Simula il cambio di postazione: il media punta a un percorso che
-    /// non esiste più, ma sotto una nuova cartella base c'è un file con
-    /// lo stesso nome, in una sottocartella qualsiasi.
+    /// Simulates moving workstation: the media points at a path that
+    /// no longer exists, but under a new base directory there is a file with
+    /// the same name, in some subdirectory.
     #[test]
     fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
         let dir = std::env::temp_dir().join(format!("vv-app-relink-test-{}", std::process::id()));
@@ -3990,8 +4067,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `relink_media` tocca solo i `targets` passati esplicitamente, mai
-    /// il resto del pool — anche se ricollegabile.
+    /// `relink_media` touches only the `targets` passed explicitly, never
+    /// the rest of the pool — even if relinkable.
     #[test]
     fn relink_media_with_a_selection_only_touches_the_selected_media() {
         let dir = std::env::temp_dir().join(format!("vv-app-relink-selection-test-{}", std::process::id()));
@@ -4037,10 +4114,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Solo `relink_media_dialog` (l'ingresso dal menu contestuale) salta
-    /// il file dialog senza selezione: `relink_media` di per sé opera
-    /// sempre sulla selezione data, vuota compresa (nessun target, quindi
-    /// nessun comando e nessun messaggio).
+    /// Only `relink_media_dialog` (the entry point from the context menu) skips
+    /// the file dialog without a selection: `relink_media` itself always
+    /// operates on the given selection, the empty one included (no target, hence
+    /// no command and no message).
     #[test]
     fn relink_media_dialog_is_a_no_op_without_a_selection() {
         let (mut app, media_id) = app_with_media_at(
@@ -4092,10 +4169,10 @@ mod tests {
         assert_eq!(clip.source_frame_at(clip.timeline_end() - 1), 2999);
     }
 
-    /// Allungare il bordo di una clip sopra la vicina la sovrascrive: la
-    /// vicina viene tagliata dove arriva il nuovo bordo, non spostata —
-    /// è quel che fa la UI al rilascio del trim (vedi
-    /// `PendingAction::Trim`), qui riprodotto con gli stessi comandi.
+    /// Lengthening the edge of a clip over the neighbor overwrites it: the
+    /// neighbor is cut where the new edge reaches, not moved —
+    /// this is what the UI does on trim release (see
+    /// `PendingAction::Trim`), reproduced here with the same commands.
     #[test]
     fn extending_a_clip_over_its_neighbor_cuts_the_neighbor() {
         let mut app = VenturiApp::default();
@@ -4114,7 +4191,7 @@ mod tests {
         assert_eq!(clips[1].timeline_end(), 20);
     }
 
-    /// Se l'allungamento copre la vicina per intero, la vicina sparisce.
+    /// If the lengthening covers the neighbor entirely, the neighbor disappears.
     #[test]
     fn extending_a_clip_over_a_whole_neighbor_removes_it() {
         let mut app = VenturiApp::default();
@@ -4133,14 +4210,14 @@ mod tests {
         assert_eq!(clips[1].timeline_start, 20, "quella dopo resta dov'è");
     }
 
-    /// Allungando il bordo *sinistro* all'indietro vale la stessa regola.
+    /// Lengthening the *left* edge backwards follows the same rule.
     #[test]
     fn extending_a_clip_backwards_cuts_the_previous_neighbor() {
         let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10);
         let timeline_id = app.timeline_id.unwrap();
-        // b nasce con source_in 8: ha davvero 8 frame di margine per
-        // risalire sopra la vicina.
+        // b is born with source_in 8: it really has 8 frames of margin to
+        // go back over the neighbor.
         let b = app.project.alloc_clip_id();
         app.history.do_command(
             &mut app.project,
@@ -4168,8 +4245,8 @@ mod tests {
         assert_eq!(clips[1].timeline_start, 6);
     }
 
-    /// Il trim di un bordo con l'overwrite di quel che incontra, come lo
-    /// compone la UI: prima si libera il tratto guadagnato, poi si trimma.
+    /// The trim of an edge with the overwrite of what it meets, as the UI
+    /// composes it: first the gained stretch is freed, then the trim happens.
     fn apply_trim_with_overwrite(
         app: &mut VenturiApp,
         timeline_id: TimelineId,
@@ -4214,9 +4291,9 @@ mod tests {
         );
     }
 
-    /// Copia/incolla di una clip conformata: la stessa durata di timeline,
-    /// e il tratto liberato per lei (`make_room_for_ranges`) è quello che
-    /// occuperà davvero.
+    /// Copy/paste of a conformed clip: the same timeline duration,
+    /// and the stretch freed for it (`make_room_for_ranges`) is the one it
+    /// will really occupy.
     #[test]
     fn pasting_a_conformed_clip_keeps_its_timeline_duration() {
         let (mut app, media_id) = app_with_media_at(
@@ -4245,8 +4322,8 @@ mod tests {
         assert_eq!(pasted.timeline_len, 3003);
     }
 
-    /// Incollare su una timeline a un altro fps conserva i secondi, e la
-    /// clip si conforma al nuovo fps.
+    /// Pasting onto a timeline at a different fps preserves the seconds, and the
+    /// clip conforms to the new fps.
     #[test]
     fn pasting_into_a_timeline_at_another_fps_keeps_the_duration_in_seconds() {
         let (mut app, media_id) = app_with_media_at(
@@ -4282,9 +4359,9 @@ mod tests {
         assert_eq!((pasted.source_in(), pasted.source_out()), (0, 300));
     }
 
-    /// Overwrite di una clip conformata (incollare sopra la sua coda):
-    /// il taglio deve cadere dove cade davvero sulla timeline, non a
-    /// `source_in + delta` (frame sorgente contati come di timeline).
+    /// Overwrite of a conformed clip (pasting over its tail):
+    /// the cut must fall where it really falls on the timeline, not at
+    /// `source_in + delta` (source frames counted as timeline ones).
     #[test]
     fn overwriting_the_tail_of_a_conformed_clip_trims_it_at_the_right_spot() {
         let (mut app, media_id) = app_with_media_at(
@@ -4350,18 +4427,18 @@ mod tests {
         app.timeline_state.selected = BTreeSet::from([(0, video_b)]);
         app.ripple_delete_selected();
 
-        // "Selection follows playhead" (attivo di default) riseleziona
-        // quel che ora si trova sotto al playhead (fermo a 0): video_a,
-        // che era già lì. Comodo per incatenare più ripple-delete senza
-        // dover ricliccare la prossima clip ogni volta.
+        // "Selection follows playhead" (on by default) reselects
+        // whatever is now under the playhead (still at 0): video_a,
+        // which was already there. Handy to chain several ripple-deletes without
+        // having to reclick the next clip every time.
         assert_eq!(app.timeline_state.selected, BTreeSet::from([(0, video_a)]));
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
         assert_eq!(tl.tracks[0].clips[0].id, video_a);
-        // La clip audio che partiva allo stesso istante si è spostata a 0
-        // anche se sta su un'altra track: comportamento ripple globale.
-        // Arrivando lì copre per intero quella che ci stava: vince chi
-        // arriva (vedi `cut_remaining_overlaps`), niente clip accatastate.
+        // The audio clip that started at the same instant moved to 0
+        // even though it is on another track: global ripple behavior.
+        // Arriving there it entirely covers the one that was there: the one that
+        // arrives wins (see `cut_remaining_overlaps`), no stacked clips.
         assert_eq!(tl.tracks[1].clips.len(), 1);
         assert_eq!(tl.tracks[1].clips[0].id, audio_b);
         assert_eq!(tl.tracks[1].clips[0].timeline_start, 0);
@@ -4382,9 +4459,9 @@ mod tests {
         assert!(app.timeline_state.selected.is_empty());
     }
 
-    /// Spostare una clip sopra un'altra la sovrascrive, come incollarcela
-    /// o allungarci un bordo sopra: è la stessa regola per tutti i modi di
-    /// piazzare una clip (`make_room_for_ranges`).
+    /// Moving a clip over another overwrites it, like pasting one there
+    /// or lengthening an edge over it: it is the same rule for all the ways of
+    /// placing a clip (`make_room_for_ranges`).
     #[test]
     fn moving_a_clip_onto_another_cuts_the_one_underneath() {
         let mut app = VenturiApp::default();
@@ -4417,11 +4494,11 @@ mod tests {
         assert_eq!(clips[1].timeline_start, 10);
     }
 
-    /// Due clip *non* collegate che coprono lo stesso tratto su track
-    /// diverse (il caso che nasce dividendo al playhead dopo aver
-    /// sovrascritto solo la parte video): quel tratto va chiuso una volta
-    /// sola, non una per clip — altrimenti il resto arretra del doppio e
-    /// finisce sopra a quel che c'era prima.
+    /// Two *unlinked* clips covering the same stretch on different
+    /// tracks (the case arising from splitting at the playhead after
+    /// overwriting only the video part): that stretch must be closed once
+    /// only, not once per clip — otherwise the rest goes back twice as far and
+    /// ends up over what was there before.
     #[test]
     fn ripple_delete_of_two_unlinked_clips_on_the_same_range_closes_it_once() {
         let mut app = VenturiApp::default();
@@ -4449,9 +4526,9 @@ mod tests {
         assert_eq!(tl.tracks[1].clips[1].id, audio_last);
     }
 
-    /// Se uno spostamento in blocco lascia comunque una sovrapposizione,
-    /// vince chi arriva: la clip sotto viene tagliata dove comincia
-    /// l'altra, non lasciata accatastata.
+    /// If a bulk move still leaves an overlap,
+    /// the one that arrives wins: the clip underneath is cut where the
+    /// other starts, not left stacked.
     #[test]
     fn ripple_delete_cuts_a_clip_the_shift_landed_on() {
         let mut app = VenturiApp::default();
@@ -4460,9 +4537,9 @@ mod tests {
         let audio_late = make_timeline_with_clip(&mut app, 1, 30, 10);
         let timeline_id = app.timeline_id.unwrap();
 
-        // Togliendo la clip video [0,10) tutto arretra di 10: l'audio
-        // lungo resta dov'è (comincia a 0) e quello dopo gli finisce
-        // sopra, da 20 invece che da 30.
+        // Removing the video clip [0,10) everything goes back by 10: the long
+        // audio stays where it is (it starts at 0) and the one after it ends
+        // over it, from 20 instead of from 30.
         app.timeline_state.selected = BTreeSet::from([(0, video)]);
         app.ripple_delete_selected();
 
@@ -4479,9 +4556,9 @@ mod tests {
         assert_eq!(tl.tracks[1].clips[1].timeline_start, 20);
     }
 
-    /// Dopo un ripple delete la testina si sposta dove è appena arrivata
-    /// la clip che ha chiuso il buco, così il prossimo play riparte dal
-    /// punto di giunzione invece che da dove stava prima.
+    /// After a ripple delete the playhead moves to where the clip that closed
+    /// the hole has just arrived, so the next play restarts from the
+    /// junction point instead of from where it was before.
     #[test]
     fn ripple_delete_selected_moves_playhead_to_the_clip_that_slid_back() {
         let mut app = VenturiApp::default();
@@ -4500,8 +4577,8 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
     }
 
-    /// Senza nessuna clip che scivoli indietro (si è tolta l'ultima) non
-    /// c'è nessun punto di giunzione: la testina non va spostata nel vuoto.
+    /// Without any clip sliding back (the last one was removed) there
+    /// is no junction point: the playhead must not be moved into the void.
     #[test]
     fn ripple_delete_selected_keeps_the_playhead_when_nothing_slides_back() {
         let mut app = VenturiApp::default();
@@ -4515,7 +4592,7 @@ mod tests {
         assert_eq!(app.timeline_state.playhead, 5);
     }
 
-    /// Stessa regola per il ripple delete di un vuoto selezionato.
+    /// Same rule for the ripple delete of a selected gap.
     #[test]
     fn ripple_delete_of_a_gap_moves_playhead_to_the_closed_gap() {
         let mut app = VenturiApp::default();
@@ -4533,9 +4610,9 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
     }
 
-    /// Multi-selezione: cancellare due clip non adiacenti insieme (bug
-    /// "voglio selezionare più clip con ctrl+click/shift+click") deve
-    /// chiudere entrambi i gap correttamente, non solo il primo.
+    /// Multi-selection: deleting two non-adjacent clips together (bug
+    /// "I want to select several clips with ctrl+click/shift+click") must
+    /// close both gaps correctly, not only the first.
     #[test]
     fn delete_selected_removes_every_selected_clip() {
         let mut app = VenturiApp::default();
@@ -4556,18 +4633,18 @@ mod tests {
         );
     }
 
-    /// Ripple-delete con due clip selezionate non adiacenti: elaborandole
-    /// da destra a sinistra (per `timeline_start` decrescente), ogni
-    /// rimozione non deve alterare la posizione, già calcolata, dell'altra
-    /// non ancora processata — altrimenti si otterrebbe un doppio
-    /// spostamento o un gap non chiuso correttamente.
+    /// Ripple-delete with two non-adjacent clips selected: processing them
+    /// from right to left (by decreasing `timeline_start`), every
+    /// removal must not alter the already computed position of the other
+    /// one not processed yet — otherwise one would get a double
+    /// move or a gap not closed correctly.
     #[test]
     fn ripple_delete_selected_multiple_clips_closes_every_gap() {
         let mut app = VenturiApp::default();
         let a = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
-        let b = make_timeline_with_clip(&mut app, 0, 10, 10); // [10,20), da rimuovere
+        let b = make_timeline_with_clip(&mut app, 0, 10, 10); // [10,20), to remove
         let c = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30)
-        let d = make_timeline_with_clip(&mut app, 0, 30, 10); // [30,40), da rimuovere
+        let d = make_timeline_with_clip(&mut app, 0, 30, 10); // [30,40), to remove
         let timeline_id = app.timeline_id.unwrap();
 
         app.timeline_state.selected = BTreeSet::from([(0, b), (0, d)]);
@@ -4583,7 +4660,7 @@ mod tests {
             "c deve scivolare fino a chiudere il gap lasciato da b, non restare a 20 né finire oltre"
         );
 
-        // Un solo undo ripristina tutto: entrambe le clip e le posizioni originali.
+        // A single undo restores everything: both clips and the original positions.
         app.history.undo(&mut app.project);
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 4);
@@ -4610,8 +4687,8 @@ mod tests {
         assert_eq!(tl.tracks[1].clips[1].timeline_start, 10);
     }
 
-    /// La clip media sotto al playhead diventa attiva e il gain impostato
-    /// via comando si legge dai suoi effetti.
+    /// The media clip under the playhead becomes active and the gain set
+    /// via command is read from its effects.
     #[test]
     fn loading_a_media_clip_sets_active_clip_and_gain() {
         let dir = std::env::temp_dir().join("vv-app-main-test");
@@ -4685,9 +4762,9 @@ mod tests {
         );
     }
 
-    /// Il diamante di keyframe deve stare sempre alla stessa distanza dal
-    /// bordo della riga, che le frecce di navigazione ci siano o no
-    /// (altrimenti balla a ogni spostamento della testina).
+    /// The keyframe diamond must always stay at the same distance from the
+    /// edge of the row, whether the navigation arrows are there or not
+    /// (otherwise it dances on every playhead move).
     #[test]
     fn keyframe_arrow_reserves_the_same_width_when_there_is_nowhere_to_go() {
         let ctx = egui::Context::default();
@@ -4735,8 +4812,8 @@ mod tests {
         assert_eq!(info.params[vv_core::TransformParam::ZoomX.index()].prev, None);
     }
 
-    /// Selezione multipla: il pannello costruisce un comando per clip e li
-    /// applica come uno solo, così l'undo le riporta indietro insieme.
+    /// Multiple selection: the panel builds one command per clip and
+    /// applies them as one, so the undo brings them back together.
     #[test]
     fn effect_changes_on_several_clips_are_one_undo_step() {
         let mut app = VenturiApp::default();
@@ -4792,7 +4869,7 @@ mod tests {
         let targets = [target(first, 0), target(second, 30)];
         let cmd = set_transform_param_default((timeline_id, 0, second), P::PositionX, 50.0);
         app.history.do_command(&mut app.project, cmd);
-        // Il secondo ha Y animata: la modifica va in un keyframe.
+        // The second has an animated Y: the change goes into a keyframe.
         let cmd = upsert_transform_keyframe((timeline_id, 0, second), 10, P::PositionY, 5.0);
         app.history.do_command(&mut app.project, cmd);
 
@@ -4818,7 +4895,7 @@ mod tests {
         assert_eq!(clips[1].effects.transform.value_at(0).position, [50.0, 85.0]);
         assert_eq!(clips[1].effects.transform.value_at(10).position, [50.0, 5.0]);
 
-        // Spostata di nuovo con coordinate diverse: stesso incremento a tutte.
+        // Moved again with different coordinates: the same increment to all of them.
         let before = clips[0].effects.transform.value_at(0);
         let mut after = before;
         after.position[0] += 10.0;
@@ -4938,7 +5015,7 @@ mod tests {
         let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
         assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
         assert!(clip.effects.color.is_some());
-        assert_eq!(clip.timeline_len, 125); // 5s a 25fps di default
+        assert_eq!(clip.timeline_len, 125); // 5s at 25fps by default
     }
 
     #[test]
@@ -4958,7 +5035,7 @@ mod tests {
         let clip = &tl.tracks[tracks_before].clips[0];
         assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
         assert_eq!(clip.timeline_start, 50);
-        // Track nuova e clip: un solo Ctrl+Z.
+        // New track and clip: a single Ctrl+Z.
         app.history.undo(&mut app.project);
         assert_eq!(app.project.timelines[timeline_id].tracks.len(), tracks_before);
     }
@@ -4975,7 +5052,7 @@ mod tests {
             )
         };
         drop(&mut app, 0); // [0, 125)
-        drop(&mut app, 50); // [50, 175): taglia la coda della prima
+        drop(&mut app, 50); // [50, 175): cuts the tail of the first one
 
         let spans: Vec<(FrameIdx, FrameIdx)> = app.project.timelines[timeline_id].tracks[0]
             .clips
@@ -5018,7 +5095,7 @@ mod tests {
         assert_eq!(merged.content, "Altro");
         assert_eq!(merged.size, 40.0);
 
-        // Dentro l'ombra, solo il campo toccato.
+        // Inside the shadow, only the touched field.
         let mut after = before.clone();
         after.shadow.blur = 30.0;
         let mut other = before.clone();
@@ -5094,7 +5171,7 @@ mod tests {
             .position_frame(TEST_FPS)
     }
 
-    /// Simula il mixer arrivato a `frame` senza aspettare in tempo reale.
+    /// Simulates the mixer having reached `frame` without waiting in real time.
     fn move_clock_to(app: &mut VenturiApp, frame: FrameIdx) {
         app.timeline_audio().seek_frame(frame, TEST_FPS);
     }
@@ -5114,7 +5191,7 @@ mod tests {
         assert_eq!(clock_frame(&app), 10);
     }
 
-    /// Bug: "il player mi ignora se sposto la playhead mentre riproduce".
+    /// Bug: "the player ignores me if I move the playhead while playing".
     #[test]
     fn scrubbing_during_playback_moves_the_clock_only_when_forced() {
         let mut app = VenturiApp::default();
@@ -5127,7 +5204,7 @@ mod tests {
         let after_scrub = clock_frame(&app);
         assert!((300..310).contains(&after_scrub), "clock={after_scrub}");
 
-        // Playhead mosso da `drive_playback`: nessun seek.
+        // Playhead moved by `drive_playback`: no seek.
         move_clock_to(&mut app, 100);
         app.timeline_state.playhead = 400;
         app.ensure_active_clip_matches_playhead(false);
@@ -5150,7 +5227,7 @@ mod tests {
         assert!(app.is_timeline_playing());
     }
 
-    /// Bug: "la selezione non segue durante la riproduzione".
+    /// Bug: "the selection does not follow during playback".
     #[test]
     fn selection_follows_playhead_during_normal_playback() {
         let mut app = VenturiApp::default();
@@ -5170,7 +5247,7 @@ mod tests {
         assert_eq!(app.timeline_state.selected, BTreeSet::from([(0, clip_b)]));
     }
 
-    /// Bug: "la riproduzione parte solo se seleziono la clip".
+    /// Bug: "playback starts only if I select the clip".
     #[test]
     fn toggle_playback_works_without_any_selection() {
         let mut app = VenturiApp::default();
@@ -5183,8 +5260,8 @@ mod tests {
         assert_eq!(app.active_clip, Some((0, clip)));
     }
 
-    /// Bug: "quando la playhead passa su un segmento vuoto, non deve
-    /// saltare alla prossima clip ma riprodurre una schermata nera".
+    /// Bug: "when the playhead passes over an empty segment, it must not
+    /// jump to the next clip but play a black screen".
     #[test]
     fn playback_runs_through_a_gap_and_picks_up_the_next_clip() {
         let mut app = VenturiApp::default();
@@ -5229,7 +5306,7 @@ mod tests {
         assert!(!app.is_timeline_playing());
     }
 
-    /// Una clip solo audio oltre l'ultima video fa parte del contenuto.
+    /// An audio-only clip past the last video one is part of the content.
     #[test]
     fn playback_reaches_the_end_of_audio_only_content_and_stops_there() {
         let mut app = VenturiApp::default();
@@ -5246,7 +5323,7 @@ mod tests {
         assert_eq!(app.timeline_state.playhead, 30);
     }
 
-    /// Come fa `ui()` a ogni frame, finché lo stretch non porta a `speed`.
+    /// As `ui()` does on every frame, until the stretch reaches `speed`.
     fn wait_for_playback_speed(app: &mut VenturiApp, speed: f64) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while app.playback_speed != speed {
@@ -5258,8 +5335,8 @@ mod tests {
         }
     }
 
-    /// Tasto "a": da fermo parte a 1x, poi 2x -> 4x -> 8x e resta a 8x; la
-    /// barra spaziatrice mette sempre in pausa e riporta a 1x.
+    /// "a" key: from stopped it starts at 1x, then 2x -> 4x -> 8x and stays at 8x; the
+    /// space bar always pauses and brings it back to 1x.
     #[test]
     fn fast_playback_key_cycles_speed_and_space_always_resets_it() {
         let mut app = VenturiApp::default();
@@ -5296,13 +5373,13 @@ mod tests {
         let before = app.timeline_state.playhead;
         std::thread::sleep(std::time::Duration::from_millis(400));
         app.drive_playback();
-        // 400ms a 4x = 1.6s = 40 frame.
+        // 400ms at 4x = 1.6s = 40 frames.
         let advanced = app.timeline_state.playhead - before;
         assert!((32..=50).contains(&advanced), "advanced={advanced}");
     }
 
-    /// Bug: spostare/mutare una clip audio non cambiava nulla in anteprima
-    /// (l'audio veniva sempre dal media della clip video).
+    /// Bug: moving/muting an audio clip changed nothing in the preview
+    /// (the audio always came from the media of the video clip).
     #[test]
     fn preview_mix_follows_audio_clip_edits() {
         let dir = std::env::temp_dir().join("vv-app-preview-mix-test");
@@ -5368,7 +5445,7 @@ mod tests {
         assert_eq!(peak(&app, 10), 0.0, "la vecchia posizione ora è silenzio");
         assert!(peak(&app, 60) > 0.1, "la clip suona nella nuova posizione");
 
-        // Il fast forward stretcha il mix, non un media.
+        // Fast forward stretches the mix, not a media.
         app.timeline_state.playhead = 50;
         app.toggle_playback();
         app.request_playback_speed(2.0);
@@ -5414,7 +5491,7 @@ mod tests {
         assert_eq!(zooms[2], 1.0, "rilasciato Alt lo scroll non zooma più");
     }
 
-    /// Senza selezione T taglia tutte le track in un colpo solo.
+    /// Without a selection, T cuts all the tracks in one go.
     #[test]
     fn split_at_playhead_cuts_every_track_without_selection() {
         let mut app = VenturiApp::default();
@@ -5436,7 +5513,7 @@ mod tests {
         assert_eq!(tl.tracks[0].clips[0].id, video_id);
         assert_eq!(tl.tracks[1].clips[0].id, audio_id);
 
-        // Un solo undo annulla entrambi i tagli (CompositeCommand).
+        // A single undo cancels both cuts (CompositeCommand).
         app.history.undo(&mut app.project);
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
@@ -5514,7 +5591,7 @@ mod tests {
         app.toggle_disabled_selected();
         assert_eq!(disabled(&app), vec![true, false]);
 
-        // Selezione mista: si disattiva tutto.
+        // Mixed selection: everything gets disabled.
         app.timeline_state
             .set_selection(BTreeSet::from([(0, a), (0, b)]), Some((0, a)));
         app.toggle_disabled_selected();
@@ -5594,13 +5671,13 @@ mod tests {
         assert_eq!(tl.tracks[1].clips.len(), 1, "clip non selezionata intatta");
     }
 
-    /// Bug: tagliare con T una coppia video+audio collegata scollegava
-    /// entrambe le metà (comportamento corretto per un taglio "singolo",
-    /// ma non quando entrambi i membri della coppia vengono tagliati
-    /// insieme nello stesso punto): dopo, selezionare il video non
-    /// evidenziava più l'audio. Le metà sinistre restano nel gruppo
-    /// originale (SplitClip non lo tocca), le metà destre vengono
-    /// ricollegate tra loro in un gruppo nuovo.
+    /// Bug: cutting with T a linked video+audio pair unlinked
+    /// both halves (correct behavior for a "single" cut,
+    /// but not when both members of the pair are cut
+    /// together at the same point): afterwards, selecting the video no longer
+    /// highlighted the audio. The left halves stay in the original
+    /// group (SplitClip does not touch it), the right halves get
+    /// relinked to each other in a new group.
     #[test]
     fn split_at_playhead_keeps_linked_group_on_both_halves() {
         let mut app = VenturiApp::default();
@@ -5642,17 +5719,17 @@ mod tests {
         assert_ne!(video_right.id, video_id);
         assert_ne!(audio_right.id, audio_id);
 
-        // "Selection follows playhead" seleziona la metà SINISTRA appena
-        // tagliata (quella che si presume già rivista) e la sua gemella
-        // audio collegata, non la metà destra sotto al playhead.
+        // "Selection follows playhead" selects the LEFT half just
+        // cut (the one presumed already reviewed) and its linked audio
+        // twin, not the right half under the playhead.
         assert_eq!(
             app.timeline_state.selected,
             BTreeSet::from([(0, video_id), (1, audio_id)])
         );
 
-        // Un solo undo annulla il taglio e il ricollegamento delle metà
-        // destre: le metà sinistre non erano mai state toccate, restano nel
-        // gruppo originale.
+        // A single undo cancels the cut and the relinking of the right
+        // halves: the left halves were never touched, they stay in the
+        // original group.
         app.history.undo(&mut app.project);
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
@@ -5663,8 +5740,8 @@ mod tests {
 
     #[test]
     fn map_source_ranges_to_timeline_translates_and_clamps_to_the_trim() {
-        // Clip: source_in=100, source_out=150 (trim di 50 frame), piazzata
-        // a timeline_start=20.
+        // Clip: source_in=100, source_out=150 (a 50-frame trim), placed
+        // at timeline_start=20.
         let clip = vv_core::Clip::from_source_range(
             ClipId(0),
             vv_core::ClipSource::SolidColor,
@@ -5674,22 +5751,22 @@ mod tests {
             vv_core::Rational::one(),
         );
 
-        // Dentro al trim: tradotto 1:1 con l'offset timeline_start-source_in.
+        // Inside the trim: translated 1:1 with the offset timeline_start-source_in.
         assert_eq!(
             map_source_ranges_to_timeline(&clip, &[(110, 120)]),
             vec![(30, 40)]
         );
 
-        // Sporge da entrambi i lati: accorciato al trim.
+        // Sticking out on both sides: shortened to the trim.
         assert_eq!(
             map_source_ranges_to_timeline(&clip, &[(50, 200)]),
             vec![(20, 69)]
         );
 
-        // Completamente fuori dal trim: scartato.
+        // Completely outside the trim: discarded.
         assert!(map_source_ranges_to_timeline(&clip, &[(0, 99)]).is_empty());
 
-        // Più intervalli: ognuno tradotto/filtrato indipendentemente.
+        // Several intervals: each translated/filtered independently.
         assert_eq!(
             map_source_ranges_to_timeline(&clip, &[(0, 99), (110, 115), (500, 600)]),
             vec![(30, 35)]
@@ -5711,10 +5788,10 @@ mod tests {
             )),
         );
 
-        // La selezione contiene già l'intero gruppo, come farebbe un click
-        // reale (vedi `timeline_ui::expand_to_linked_groups`):
-        // `delete_selected` si fida di questo invariante, non tira dentro
-        // esplicitamente i collegamenti.
+        // The selection already contains the whole group, as a real click
+        // would make it (see `timeline_ui::expand_to_linked_groups`):
+        // `delete_selected` trusts this invariant, it does not explicitly
+        // pull in the links.
         app.timeline_state.selected = BTreeSet::from([(0, video_id), (1, audio_id)]);
         app.delete_selected();
 
@@ -5723,7 +5800,7 @@ mod tests {
         assert!(tl.tracks[1].clips.is_empty());
         assert!(app.timeline_state.selected.is_empty());
 
-        // Un solo undo ripristina entrambe (CompositeCommand).
+        // A single undo restores both (CompositeCommand).
         app.history.undo(&mut app.project);
         let tl = &app.project.timelines[timeline_id];
         assert_eq!(tl.tracks[0].clips.len(), 1);
@@ -5740,7 +5817,7 @@ mod tests {
         assert_eq!(app.timeline_state.playhead, 101, "un frame subito");
         app.step_playhead_with_arrows(Some(1), 10.2);
         assert_eq!(app.timeline_state.playhead, 101, "prima del ritardo resta lì");
-        // 25fps a 0.5x: 1s dopo il ritardo = 12 frame in più.
+        // 25fps at 0.5x: 1s after the delay = 12 more frames.
         app.step_playhead_with_arrows(Some(1), 10.0 + ARROW_HOLD_DELAY_SECS + 1.0);
         assert_eq!(app.timeline_state.playhead, 113);
 
@@ -5790,15 +5867,15 @@ mod tests {
             )),
         );
 
-        // Selezione già completa (come da un click reale sul gruppo, vedi
+        // Selection already complete (as from a real click on the group, see
         // `timeline_ui::expand_to_linked_groups`).
         app.timeline_state.selected = BTreeSet::from([(0, video_id), (1, audio_id)]);
         app.copy_selected_clips();
         assert_eq!(app.timeline_state.clipboard.len(), 2);
 
-        // Playhead spostato oltre gli originali: qui si vuole verificare
-        // solo il ricollegamento, non l'"overwrite" di `make_room_for_ranges`
-        // (che ha un test dedicato più sotto).
+        // Playhead moved past the originals: here only the relinking is to
+        // be checked, not the "overwrite" of `make_room_for_ranges`
+        // (which has a dedicated test further below).
         app.timeline_state.playhead = 100;
         app.paste_clipboard_at_playhead();
 
@@ -5820,7 +5897,7 @@ mod tests {
     fn copy_then_paste_multiple_clips_preserves_their_relative_spacing() {
         let mut app = VenturiApp::default();
         let a_id = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
-        let b_id = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30), 10 frame di gap da "a"
+        let b_id = make_timeline_with_clip(&mut app, 0, 20, 10); // [20,30), 10 frames of gap from "a"
         let timeline_id = app.timeline_id.unwrap();
 
         app.timeline_state.selected = BTreeSet::from([(0, a_id), (0, b_id)]);
@@ -5833,8 +5910,8 @@ mod tests {
         assert_eq!(tl.tracks[0].clips.len(), 4);
         let pasted: Vec<_> = tl.tracks[0].clips[2..].iter().collect();
         let starts: BTreeSet<FrameIdx> = pasted.iter().map(|c| c.timeline_start).collect();
-        // "a" incollata a 100 (ancora = inizio più a sinistra), "b" 20
-        // frame dopo, esattamente come nell'originale.
+        // "a" pasted at 100 (anchor = the leftmost start), "b" 20
+        // frames later, exactly as in the original.
         assert_eq!(starts, BTreeSet::from([100, 120]));
     }
 
@@ -5850,15 +5927,15 @@ mod tests {
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
     }
 
-    /// Bug segnalato: "il copia-incolla funziona solo dal menu, non da
-    /// tastiera". Causa: `egui-winit` genera `Event::Paste` solo se la
-    /// clipboard di *sistema* non è vuota (vedi doc di
-    /// `handle_clipboard_events`) — questo test verifica che un
-    /// `Event::Copy` scriva sempre qualcosa di non vuoto lì, così un
-    /// successivo Ctrl+V da tastiera possa davvero generare l'evento.
-    /// Gira dentro un `egui::Context` "nudo" (`run_ui`), non il vero
-    /// `eframe::Frame` di `ui()` (non costruibile fuori da `eframe`):
-    /// stesso trucco già usato per `show_timeline` in `timeline_ui.rs`.
+    /// Reported bug: "copy-paste works only from the menu, not from the
+    /// keyboard". Cause: `egui-winit` generates `Event::Paste` only if the
+    /// *system* clipboard is not empty (see the docs of
+    /// `handle_clipboard_events`) — this test checks that an
+    /// `Event::Copy` always writes something non-empty there, so a
+    /// later Ctrl+V from the keyboard can really generate the event.
+    /// It runs inside a "bare" `egui::Context` (`run_ui`), not the real
+    /// `eframe::Frame` of `ui()` (not constructible outside `eframe`):
+    /// the same trick already used for `show_timeline` in `timeline_ui.rs`.
     #[test]
     fn handle_clipboard_events_primes_the_system_clipboard_after_a_copy() {
         let mut app = VenturiApp::default();
@@ -5900,10 +5977,10 @@ mod tests {
         assert!(app.project.timelines[timeline_id].tracks[0].clips.is_empty());
     }
 
-    /// Senza nulla di selezionato, `copy_selected_clips` è un no-op: non
-    /// deve nemmeno toccare la clipboard di sistema (altrimenti Ctrl+C a
-    /// vuoto cancellerebbe silenziosamente quel che l'utente avesse
-    /// eventualmente copiato altrove per incollarlo in un'altra app).
+    /// With nothing selected, `copy_selected_clips` is a no-op: it must
+    /// not even touch the system clipboard (otherwise an empty Ctrl+C
+    /// would silently erase whatever the user might have
+    /// copied elsewhere to paste into another app).
     #[test]
     fn handle_clipboard_events_does_not_touch_system_clipboard_when_nothing_is_selected() {
         let mut app = VenturiApp::default();
@@ -5922,9 +5999,9 @@ mod tests {
         );
     }
 
-    /// `Event::Paste` va gestito a prescindere dal suo payload testuale
-    /// (la clipboard vera è `timeline_state.clipboard`, non il testo di
-    /// sistema): incolla comunque quel che avevamo già copiato.
+    /// `Event::Paste` must be handled regardless of its text payload
+    /// (the real clipboard is `timeline_state.clipboard`, not the system
+    /// text): it pastes what we had already copied anyway.
     #[test]
     fn handle_clipboard_events_pastes_regardless_of_the_paste_events_payload() {
         let mut app = VenturiApp::default();
@@ -5943,34 +6020,34 @@ mod tests {
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 2);
     }
 
-    /// Bug segnalato: incollare una clip sopra un'altra la copriva solo
-    /// visivamente, ma l'anteprima continuava a riprodurre quella
-    /// sottostante. Se il nuovo intervallo copre *interamente* una clip
-    /// esistente, quella va rimossa del tutto (`make_room_for_ranges`).
+    /// Reported bug: pasting a clip over another covered it only
+    /// visually, but the preview kept playing the one
+    /// underneath. If the new interval covers an existing clip *entirely*,
+    /// that one must be removed altogether (`make_room_for_ranges`).
     #[test]
     fn paste_over_an_existing_clip_it_fully_covers_deletes_the_underlying_clip() {
         let mut app = VenturiApp::default();
         let existing = make_timeline_with_clip(&mut app, 0, 0, 10); // [0,10)
-        let source = make_timeline_with_clip(&mut app, 0, 50, 10); // da copiare, stessa lunghezza
+        let source = make_timeline_with_clip(&mut app, 0, 50, 10); // to copy, same length
         let timeline_id = app.timeline_id.unwrap();
 
         app.timeline_state.selected = BTreeSet::from([(0, source)]);
         app.copy_selected_clips();
         app.timeline_state.playhead = 0;
-        app.paste_clipboard_at_playhead(); // nuovo range [0,10), copre "existing" per intero
+        app.paste_clipboard_at_playhead(); // new range [0,10), covers "existing" entirely
 
         let tl = &app.project.timelines[timeline_id];
         assert!(
             tl.tracks[0].clips.iter().all(|c| c.id != existing),
             "la clip completamente coperta doveva essere rimossa"
         );
-        // "source" originale (a 50) + la nuova clip incollata (a 0).
+        // The original "source" (at 50) + the newly pasted clip (at 0).
         assert_eq!(tl.tracks[0].clips.len(), 2);
     }
 
-    /// La coda di una clip esistente sporge oltre l'inizio della nuova
-    /// clip incollata: va accorciata lì (bordo destro), non rimossa né
-    /// lasciata sovrapposta.
+    /// The tail of an existing clip sticks out past the start of the new
+    /// pasted clip: it must be shortened there (right edge), not removed nor
+    /// left overlapping.
     #[test]
     fn paste_overlapping_the_tail_of_an_existing_clip_trims_its_end() {
         let mut app = VenturiApp::default();
@@ -5981,7 +6058,7 @@ mod tests {
         app.timeline_state.selected = BTreeSet::from([(0, source)]);
         app.copy_selected_clips();
         app.timeline_state.playhead = 5;
-        app.paste_clipboard_at_playhead(); // nuovo range [5,15)
+        app.paste_clipboard_at_playhead(); // new range [5,15)
 
         let tl = &app.project.timelines[timeline_id];
         let trimmed = tl.tracks[0]
@@ -5993,8 +6070,8 @@ mod tests {
         assert_eq!(trimmed.timeline_end(), 5);
     }
 
-    /// La testa di una clip esistente sporge prima della fine della nuova
-    /// clip incollata: va accorciata lì (bordo sinistro).
+    /// The head of an existing clip sticks out before the end of the new
+    /// pasted clip: it must be shortened there (left edge).
     #[test]
     fn paste_overlapping_the_head_of_an_existing_clip_trims_its_start() {
         let mut app = VenturiApp::default();
@@ -6005,7 +6082,7 @@ mod tests {
         app.timeline_state.selected = BTreeSet::from([(0, source)]);
         app.copy_selected_clips();
         app.timeline_state.playhead = 5;
-        app.paste_clipboard_at_playhead(); // nuovo range [5,15)
+        app.paste_clipboard_at_playhead(); // new range [5,15)
 
         let tl = &app.project.timelines[timeline_id];
         let trimmed = tl.tracks[0]
@@ -6017,9 +6094,9 @@ mod tests {
         assert_eq!(trimmed.timeline_end(), 20);
     }
 
-    /// La nuova clip incollata cade interamente nel mezzo di una clip
-    /// esistente più lunga: quella va divisa in due, con il pezzo centrale
-    /// (coperto) che sparisce.
+    /// The new pasted clip falls entirely in the middle of a longer
+    /// existing clip: that one must be split in two, with the central piece
+    /// (covered) disappearing.
     #[test]
     fn paste_inside_an_existing_clip_splits_it_in_two() {
         let mut app = VenturiApp::default();
@@ -6030,12 +6107,12 @@ mod tests {
         app.timeline_state.selected = BTreeSet::from([(0, source)]);
         app.copy_selected_clips();
         app.timeline_state.playhead = 8;
-        app.paste_clipboard_at_playhead(); // nuovo range [8,13)
+        app.paste_clipboard_at_playhead(); // new range [8,13)
 
-        // Oltre a "existing" (destinata a dividersi) e alla clip appena
-        // incollata (a 8), resta in giro anche "source" (a 50, mai
-        // toccata: è il sorgente della copia, non sovrapposto a nulla).
-        // I due pezzi attesi sono esattamente a 0 e 13.
+        // Besides "existing" (due to split) and the clip just
+        // pasted (at 8), "source" is also still around (at 50, never
+        // touched: it is the source of the copy, not overlapping anything).
+        // The two expected pieces are exactly at 0 and 13.
         let tl = &app.project.timelines[timeline_id];
         let mut halves: Vec<_> = tl.tracks[0]
             .clips
@@ -6053,10 +6130,10 @@ mod tests {
         assert_eq!(halves[1].timeline_end(), 20);
     }
 
-    /// Se lo split coinvolge un gruppo collegato (paste della coppia
-    /// video+audio copiata insieme, che quindi taglia entrambe le track
-    /// nello stesso punto), le due metà nuove devono restare collegate
-    /// *tra loro*, non alla vecchia gemella (persa nello split).
+    /// If the split involves a linked group (paste of the video+audio pair
+    /// copied together, which therefore cuts both tracks
+    /// at the same point), the two new halves must stay linked
+    /// *to each other*, not to the old twin (lost in the split).
     #[test]
     fn paste_splitting_a_linked_group_relinks_the_new_halves_to_each_other() {
         let mut app = VenturiApp::default();
@@ -6080,17 +6157,17 @@ mod tests {
                 vec![(0, src_video), (1, src_audio)],
             )),
         );
-        // Selezione già completa (come da un click reale sul gruppo).
+        // Selection already complete (as from a real click on the group).
         app.timeline_state.selected = BTreeSet::from([(0, src_video), (1, src_audio)]);
         app.copy_selected_clips();
         assert_eq!(app.timeline_state.clipboard.len(), 2);
 
         app.timeline_state.playhead = 8;
-        app.paste_clipboard_at_playhead(); // nuovo range [8,13) su entrambe le track
+        app.paste_clipboard_at_playhead(); // new range [8,13) on both tracks
 
-        // Oltre alle due metà (a 0 e 13), restano in giro anche
-        // "src_video"/"src_audio" (a 100, mai toccate: sono il sorgente
-        // della copia).
+        // Besides the two halves (at 0 and 13), "src_video"/"src_audio"
+        // are also still around (at 100, never touched: they are the source
+        // of the copy).
         let tl = &app.project.timelines[timeline_id];
         let mut video_halves: Vec<_> = tl.tracks[0]
             .clips
@@ -6118,12 +6195,12 @@ mod tests {
         assert_ne!(left_group, right_group);
     }
 
-    /// Richiesta: "inserisci un indicatore visivo delle porzioni di
-    /// timeline presenti in memoria". Verifica l'integrazione end-to-end
-    /// (non solo la funzione pura `map_source_ranges_to_timeline`, già
-    /// coperta a parte): con `render_ahead` reale in corso su un thread
-    /// separato, la clip sotto al playhead produce intervalli bufferizzati
-    /// entro i propri limiti di timeline.
+    /// Request: "add a visual indicator of the portions of the
+    /// timeline present in memory". It checks the end-to-end integration
+    /// (not only the pure function `map_source_ranges_to_timeline`, already
+    /// covered separately): with a real `render_ahead` running on a
+    /// separate thread, the clip under the playhead produces buffered intervals
+    /// within its own timeline limits.
     #[test]
     fn buffered_timeline_ranges_reports_the_clip_under_the_playheads_decoded_frames() {
         let dir = std::env::temp_dir().join("vv-app-buffered-ranges-test");
@@ -6150,8 +6227,8 @@ mod tests {
         let timeline_id = app.timeline_id.unwrap();
         let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
 
-        // Manda a `render_ahead` la clip appena inserita (nell'app vera
-        // succede a ogni frame UI via `sync_render_ahead`).
+        // Sends `render_ahead` the just inserted clip (in the real app this
+        // happens on every UI frame via `sync_render_ahead`).
         app.sync_render_ahead();
 
         let start = std::time::Instant::now();
@@ -6176,8 +6253,8 @@ mod tests {
         }
     }
 
-    /// La striscia "buffered" non deve saltare le compound clip: i loro
-    /// frame in cache sono quelli dei media della timeline annidata.
+    /// The "buffered" strip must not skip the compound clips: their
+    /// cached frames are those of the media of the nested timeline.
     #[test]
     fn buffered_timeline_ranges_covers_a_compound_clip_through_its_nested_timeline() {
         let dir = std::env::temp_dir().join("vv-app-buffered-ranges-compound-test");
@@ -6209,8 +6286,8 @@ mod tests {
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
 
-        // La clip importata diventa il contenuto di una compound clip, e
-        // in timeline resta solo quest'ultima.
+        // The imported clip becomes the content of a compound clip, and
+        // on the timeline only the latter remains.
         let inner = app.project.timelines[timeline_id].tracks[0].clips.remove(0);
         let len = inner.timeline_len;
         let nested_id = app.project.timelines.insert(vv_core::Timeline {
@@ -6254,11 +6331,11 @@ mod tests {
         }
     }
 
-    /// `proxy_timeline_ranges` copre l'intera clip appena il proxy è
-    /// pronto su disco (non solo la parte già bufferizzata, a
-    /// differenza di `buffered_timeline_ranges` — vedi doc del metodo),
-    /// è vuoto finché non lo è, ed è vuoto a prescindere se il toggle è
-    /// disattivato.
+    /// `proxy_timeline_ranges` covers the whole clip as soon as the proxy is
+    /// ready on disk (not only the part already buffered, unlike
+    /// `buffered_timeline_ranges` — see the docs of the method),
+    /// it is empty until it is, and it is empty regardless if the toggle is
+    /// off.
     #[test]
     fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
         let dir = std::env::temp_dir().join("vv-app-proxy-ranges-test");
@@ -6278,17 +6355,17 @@ mod tests {
             &path,
         );
 
-        // Fingerprint calcolato prima dell'import vero e proprio, solo per
-        // ripulire un eventuale proxy rimasto da un run precedente di
-        // questo stesso test con lo stesso content_hash (path+dimensione+
-        // mtime coincidenti) — altrimenti l'asserzione "vuoto subito dopo
-        // l'import" sotto sarebbe fragile, non per una vera race ma per
-        // stato residuo su disco.
+        // Fingerprint computed before the actual import, only to
+        // clean up a proxy possibly left from an earlier run of
+        // this same test with the same content_hash (path+size+
+        // mtime coinciding) — otherwise the assertion "empty right after
+        // the import" below would be fragile, not because of a real race but because of
+        // residual state on disk.
         let content_hash = vv_media::content_fingerprint(&path).unwrap();
         let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash));
 
         let mut app = VenturiApp::default();
-        app.import_media(path); // accoda anche la generazione del proxy
+        app.import_media(path); // it also queues the proxy generation
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
         let timeline_id = app.timeline_id.unwrap();
@@ -6355,7 +6432,7 @@ mod tests {
         app.import_media_files(with_bad);
         app.wait_for_import();
 
-        // +1: la timeline del progetto compare anche lei nel pool.
+        // +1: the project timeline shows up in the pool too.
         assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 2);
         let warnings = &app.import_warnings;
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -6368,9 +6445,9 @@ mod tests {
         }
     }
 
-    /// Controparte minima di `egui::DroppedFile` per simulare un
-    /// trascinamento dal file manager senza un vero backend
-    /// windowing — solo `path()` serve a `poll_dropped_files`.
+    /// Minimal counterpart of `egui::DroppedFile` to simulate a
+    /// drag from the file manager without a real windowing
+    /// backend — only `path()` is needed by `poll_dropped_files`.
     #[derive(Debug)]
     struct TestDroppedFile(PathBuf);
     impl egui::DroppedFile for TestDroppedFile {
@@ -6382,9 +6459,9 @@ mod tests {
         }
     }
 
-    /// Drag & drop dal file manager: un file rilasciato sulla finestra
-    /// (`i.raw.dropped_files`) si importa nel media pool esattamente come
-    /// dal file dialog.
+    /// Drag & drop from the file manager: a file dropped on the window
+    /// (`i.raw.dropped_files`) is imported into the media pool exactly as
+    /// from the file dialog.
     #[test]
     fn dropping_a_file_from_the_file_manager_imports_it_into_the_pool() {
         let path = make_wav("dropped.wav");
@@ -6398,15 +6475,15 @@ mod tests {
         app.wait_for_import();
 
         assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
-        // +1: la timeline del progetto, creata al volo dall'import (vedi
-        // `ensure_timeline_for`), compare anche lei nel pool.
+        // +1: the project timeline, created on the fly by the import (see
+        // `ensure_timeline_for`), shows up in the pool too.
         assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 1);
         let item = app.project.media_pool.values().find(|m| m.compound.is_none()).unwrap();
         assert_eq!(item.path, path);
     }
 
-    /// Col toggle "usa proxy" spento non si genera nulla; riaccendendolo i
-    /// media già nel pool tornano in coda.
+    /// With the "use proxy" toggle off nothing is generated; turning it back on the
+    /// media already in the pool go back into the queue.
     #[test]
     fn disabling_proxies_stops_generation_and_enabling_requeues_the_pool() {
         let dir = std::env::temp_dir().join("vv-app-proxy-toggle-test");
@@ -6442,9 +6519,9 @@ mod tests {
         assert!(app.proxy_worker.is_none(), "spegnendo il toggle la coda va buttata via");
     }
 
-    /// L'export mette in pausa la generazione dei proxy (che altrimenti
-    /// gli contende CPU e ffmpeg, tenendolo fermo) e la riprende alla
-    /// fine — ma non riprende una pausa scelta dall'utente.
+    /// The export pauses the proxy generation (which would otherwise
+    /// contend for CPU and ffmpeg with it, holding it up) and resumes it at the
+    /// end — but it does not resume a pause chosen by the user.
     #[test]
     fn export_pauses_the_proxy_queue_and_resumes_it_afterwards() {
         let mut app = VenturiApp::default();
@@ -6604,12 +6681,12 @@ mod tests {
         assert_eq!(app.timeline_state.export_marks.resolve(100), (20, 60));
     }
 
-    /// Test end-to-end del bug segnalato ("il buffer si ferma sempre al
-    /// bordo della clip successiva"): a differenza del vecchio sistema
-    /// per-clip, `render_ahead` deve bufferizzare *oltre* la fine della
-    /// clip attiva, dentro la clip successiva, PRIMA che il playhead la
-    /// raggiunga — un taglio netto tra due media diversi, nessun caso
-    /// speciale necessario.
+    /// End-to-end test of the reported bug ("the buffer always stops at the
+    /// edge of the next clip"): unlike the old per-clip
+    /// system, `render_ahead` must buffer *past* the end of the
+    /// active clip, inside the next clip, BEFORE the playhead
+    /// reaches it — a hard cut between two different media, no special
+    /// case needed.
     #[test]
     fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it() {
         let dir = std::env::temp_dir().join("vv-app-buffered-ranges-cut-test");
@@ -6644,13 +6721,13 @@ mod tests {
             timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
         };
         app.add_media_to_timeline_at(whole(&app, media_a), 0, timeline_ui::MediaDropTarget::Default); // [0,50)
-        app.add_media_to_timeline_at(whole(&app, media_b), 50, timeline_ui::MediaDropTarget::Default); // [50,75), adiacente
+        app.add_media_to_timeline_at(whole(&app, media_b), 50, timeline_ui::MediaDropTarget::Default); // [50,75), adjacent
         let timeline_id = app.timeline_id.unwrap();
         let clip_b = app.project.timelines[timeline_id].tracks[0].clips[1].clone();
 
-        // Playhead vicino alla fine della prima clip: la finestra di
-        // lookahead di `render_ahead` (3s) attraversa abbondantemente il
-        // taglio a 50.
+        // Playhead near the end of the first clip: the lookahead
+        // window of `render_ahead` (3s) amply crosses the
+        // cut at 50.
         app.timeline_state.playhead = 45;
         app.sync_render_ahead();
 
@@ -6687,9 +6764,9 @@ mod tests {
         assert!(app.project_error.is_none(), "{:?}", app.project_error);
         assert_eq!(app.current_project_path, Some(path.clone()));
 
-        // Un progetto "nuovo" in memoria (un'altra clip, un'altra
-        // selezione/playhead): caricare deve sostituire tutto, non
-        // fondere.
+        // A "new" project in memory (another clip, another
+        // selection/playhead): loading must replace everything, not
+        // merge.
         let mut app = VenturiApp::default();
         make_timeline_with_clip(&mut app, 0, 0, 999);
         app.timeline_state.playhead = 42;
@@ -6707,8 +6784,8 @@ mod tests {
             app.project.timelines[loaded_timeline_id].tracks[0].clips[0].id,
             clip_id
         );
-        // Stato UI del progetto precedente azzerato, non ereditato dal
-        // vecchio `app` né rimasto dal progetto appena sovrascritto.
+        // UI state of the previous project cleared, not inherited from the
+        // old `app` nor left over from the project just overwritten.
         assert!(app.timeline_state.selected.is_empty());
         assert_eq!(app.timeline_state.playhead, 0);
     }
@@ -6722,8 +6799,8 @@ mod tests {
         app.load_project_from(std::env::temp_dir().join("vv-app-persistence-test/nope.vvproj"));
 
         assert!(app.project_error.is_some());
-        // Il progetto corrente (mai salvato) resta intatto: un load fallito
-        // non deve cancellare del lavoro non salvato.
+        // The current project (never saved) stays intact: a failed load
+        // must not erase unsaved work.
         assert_eq!(app.timeline_id, Some(timeline_id));
         assert_eq!(
             app.project.timelines[timeline_id].tracks[0].clips[0].id,
@@ -6825,8 +6902,8 @@ mod tests {
         assert!(app.has_unsaved_changes(), "media importato dopo il salvataggio");
     }
 
-    /// Con modifiche non salvate l'apertura aspetta la risposta; "Annulla"
-    /// e un salvataggio fallito lasciano il progetto com'è.
+    /// With unsaved changes, opening waits for the answer; "Cancel"
+    /// and a failed save leave the project as it is.
     #[test]
     fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure() {
         let mut app = VenturiApp::default();
@@ -6846,8 +6923,8 @@ mod tests {
         assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].id, clip_id);
     }
 
-    /// La cache delle waveform può mancare (cancellata, altra macchina):
-    /// aprire il progetto la rigenera.
+    /// The waveform cache may be missing (deleted, another machine):
+    /// opening the project regenerates it.
     #[test]
     fn opening_a_project_regenerates_missing_waveforms() {
         let dir = std::env::temp_dir().join("vv-app-waveform-on-load-test");
@@ -6874,7 +6951,7 @@ mod tests {
             &media,
         );
 
-        // Hash mai visto: nessuna waveform in cache per questo media.
+        // Hash never seen: no waveform cached for this media.
         let content_hash = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -6916,8 +6993,8 @@ mod tests {
         path
     }
 
-    /// Un media solo audio entra nel pool senza proxy né miniatura, e in
-    /// timeline diventa solo una clip audio (creando la track se manca).
+    /// An audio-only media enters the pool without a proxy or thumbnail, and on the
+    /// timeline it becomes only an audio clip (creating the track if missing).
     #[test]
     fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
         let path = make_wav("tono.wav");
@@ -6981,11 +7058,11 @@ mod tests {
         path
     }
 
-    /// Un'immagine entra nel pool come media video senza audio, senza
-    /// proxy, con `duration_frames` il sentinel di
-    /// `vv_core::IMAGE_DURATION_FRAMES` — e trascinata "intera" sulla
-    /// timeline produce una clip da 5s di default (accorciabile/
-    /// allungabile come una clip qualunque), non una lunga quanto il
+    /// An image enters the pool as a video media without audio, without
+    /// a proxy, with `duration_frames` the sentinel of
+    /// `vv_core::IMAGE_DURATION_FRAMES` — and dragged "whole" onto the
+    /// timeline it produces a 5s clip by default (shortenable/
+    /// lengthenable like any clip), not one as long as the
     /// sentinel.
     #[test]
     fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
@@ -7021,9 +7098,9 @@ mod tests {
         );
     }
 
-    /// Regressione: trascinare un media solo audio sulla timeline non
-    /// deve mai creare (né riusare da vuota) una track video — nemmeno
-    /// la prima volta, quando è anche lui a far nascere la timeline.
+    /// Regression: dragging an audio-only media onto the timeline must
+    /// never create (nor reuse from empty) a video track — not even
+    /// the first time, when it is also the one giving birth to the timeline.
     #[test]
     fn dropping_audio_only_media_creates_no_video_track() {
         let mut app = VenturiApp::default();
@@ -7078,8 +7155,8 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Chiudere la finestra con modifiche non salvate si ferma sul dialog;
-    /// senza modifiche, o dopo "Non salvare", si esce.
+    /// Closing the window with unsaved changes stops on the dialog;
+    /// without changes, or after "Don't save", it exits.
     #[test]
     fn closing_the_window_asks_to_save_unsaved_changes() {
         let mut app = VenturiApp::default();
@@ -7103,12 +7180,12 @@ mod tests {
         assert!(!commands.contains(&egui::ViewportCommand::CancelClose));
     }
 
-    /// Un media con *due* stream audio (es. mix stereo + 5.1 separato, il
-    /// bug reale che ha motivato `Clip::audio_stream_index`): l'import deve
-    /// creare una clip audio per stream, su track audio separate (la
-    /// seconda creata al volo, visto che di default la timeline ne ha una
-    /// sola), e collegarle tutte insieme (video compreso) nello stesso
-    /// gruppo — vedi doc di `insert_media_clip`.
+    /// A media with *two* audio streams (e.g. stereo mix + separate 5.1, the
+    /// real bug that motivated `Clip::audio_stream_index`): the import must
+    /// create one audio clip per stream, on separate audio tracks (the
+    /// second created on the fly, since by default the timeline has a single
+    /// one), and link them all together (video included) in the same
+    /// group — see the docs of `insert_media_clip`.
     #[test]
     fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
         let dir = std::env::temp_dir().join("vv-app-multi-audio-import-test");
@@ -7172,8 +7249,8 @@ mod tests {
         assert_eq!(audio_clip_0.audio_stream_index, 0);
         assert_eq!(audio_clip_1.audio_stream_index, 1);
 
-        // Video e *tutti* gli stream audio finiscono nello stesso gruppo
-        // collegato (`Clip::linked_group`), non solo il primo.
+        // Video and *all* the audio streams end up in the same linked
+        // group (`Clip::linked_group`), not only the first.
         let group = video_clip.linked_group.expect("il video è collegato");
         assert_eq!(audio_clip_0.linked_group, Some(group));
         assert_eq!(

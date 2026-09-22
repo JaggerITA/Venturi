@@ -127,3 +127,35 @@ transition.ease_in_out:
 pool.drag_to_clip_edge:
   en: "Drag near the left/right edge of a video clip"
   it: "Trascina vicino al bordo sinistro/destro di una clip video"
+
+pool.timelines:
+  en: "Timelines"
+  it: "Timeline"
+
+pool.new_timeline:
+  en: "New timeline..."
+  it: "Nuova timeline..."
+
+pool.new_timeline_title:
+  en: "New timeline"
+  it: "Nuova timeline"
+
+pool.timeline_name:
+  en: "Name"
+  it: "Nome"
+
+pool.timeline_fps:
+  en: "Frame rate"
+  it: "Frame rate"
+
+pool.timeline_resolution:
+  en: "Resolution"
+  it: "Risoluzione"
+
+pool.resolution_custom:
+  en: "Custom..."
+  it: "Personalizzata..."
+
+pool.create_timeline:
+  en: "Create"
+  it: "Crea"

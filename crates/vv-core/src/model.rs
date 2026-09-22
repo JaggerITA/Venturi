@@ -1,6 +1,6 @@
-//! Modello dati del progetto. Nessun grafo a nodi: ogni Clip ha uno
-//! `EffectStack` fisso. Le trasformazioni sono valutate a runtime a partire
-//! dai keyframe, mai "bake-ate" nei frame cachati (vedi ARCHITECTURE.md).
+//! Data model of the project. No node graph: every Clip has a fixed
+//! `EffectStack`. The transforms are evaluated at runtime from
+//! the keyframes, never "baked" into the cached frames (see ARCHITECTURE.md).
 
 use serde::{Deserialize, Serialize};
 use slotmap::{SlotMap, new_key_type};
@@ -11,17 +11,17 @@ new_key_type! {
     pub struct TimelineId;
 }
 
-/// Id di un gruppo di clip collegate: un contatore, l'appartenenza è solo
-/// il campo `Clip::linked_group`.
+/// Id of a group of linked clips: a counter, membership is only
+/// the `Clip::linked_group` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LinkGroupId(pub u64);
 
-/// Contatore: le clip vivono in `Vec` ordinati dentro le track, non in
-/// un'arena.
+/// Counter: the clips live in ordered `Vec`s inside the tracks, not in
+/// an arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClipId(pub u64);
 
-/// Frame rate come frazione esatta (es. 30000/1001 per 29.97fps).
+/// Frame rate as an exact fraction (e.g. 30000/1001 for 29.97fps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rational {
     pub num: i32,
@@ -37,8 +37,8 @@ impl Rational {
         Self { num: 1, den: 1 }
     }
 
-    /// Da un fps in virgola mobile (come in OTIO): riconosce gli fps NTSC
-    /// (`n * 1000/1001`), altrimenti approssima al millesimo.
+    /// From a floating point fps (as in OTIO): recognizes the NTSC fps
+    /// (`n * 1000/1001`), otherwise approximates to the thousandth.
     pub fn from_fps(fps: f64) -> Self {
         if !(fps.is_finite() && fps > 0.0) {
             return Self::new(30, 1);
@@ -64,8 +64,8 @@ impl Rational {
         self.den != 0 && self.num == self.den
     }
 
-    /// Frame di timeline per frame sorgente di un media a `media_fps` su
-    /// una timeline a `timeline_fps`, ridotto ai minimi termini (vedi
+    /// Timeline frames per source frame of a media at `media_fps` on
+    /// a timeline at `timeline_fps`, reduced to lowest terms (see
     /// `Clip::rate`).
     pub fn conform_rate(timeline_fps: Rational, media_fps: Rational) -> Self {
         let mut num = timeline_fps.num as i64 * media_fps.den as i64;
@@ -76,9 +76,9 @@ impl Rational {
         let g = gcd(num, den);
         num /= g;
         den /= g;
-        // Un rapporto irriducibile che non entra in i32 (fps esotici su
-        // entrambi i lati) viene approssimato: meglio un milionesimo di
-        // errore che un overflow.
+        // An irreducible ratio that does not fit in i32 (exotic fps on
+        // both sides) is approximated: better a millionth of
+        // error than an overflow.
         if num > i32::MAX as i64 || den > i32::MAX as i64 {
             let approx = (num as f64 / den as f64 * 1_000_000.0).round() as i64;
             return Self::new(approx.clamp(1, i32::MAX as i64) as i32, 1_000_000);
@@ -86,8 +86,8 @@ impl Rational {
         Self::new(num as i32, den as i32)
     }
 
-    /// `round(frames * self)`, mezzi verso l'alto. Identità esatta per
-    /// `1/1`, così una clip non conformata resta bit-per-bit come prima.
+    /// `round(frames * self)`, halves up. Exact identity for
+    /// `1/1`, so an unconformed clip stays bit-for-bit as before.
     pub fn scale_round(self, frames: FrameIdx) -> FrameIdx {
         if self.is_one() || self.num <= 0 || self.den <= 0 {
             return frames;
@@ -97,8 +97,8 @@ impl Rational {
         ((2 * v * num + den).div_euclid(2 * den)) as FrameIdx
     }
 
-    /// Il più grande `n` tale che `scale_round(n) <= scaled`: l'inverso di
-    /// `scale_round`, cioè "quale frame sorgente copre questa posizione".
+    /// The largest `n` such that `scale_round(n) <= scaled`: the inverse of
+    /// `scale_round`, i.e. "which source frame covers this position".
     pub fn unscale_round(self, scaled: FrameIdx) -> FrameIdx {
         if self.is_one() || self.num <= 0 || self.den <= 0 {
             return scaled;
@@ -118,8 +118,8 @@ fn gcd(a: i64, b: i64) -> i64 {
     a.max(1)
 }
 
-/// Matrice YUV→RGB di un frame decodificato. BT.2020 solo se il sorgente
-/// la segnala: mai indovinata.
+/// YUV→RGB matrix of a decoded frame. BT.2020 only if the source
+/// signals it: never guessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMatrix {
     Bt601,
@@ -127,39 +127,40 @@ pub enum ColorMatrix {
     Bt2020,
 }
 
-/// Indice di frame, sempre relativo al contesto in cui è usato: frame
-/// sorgente di un media (fps nativo) oppure frame di Timeline (fps della
-/// Timeline che lo contiene). I due spazi non vanno mai confusi.
+/// Frame index, always relative to the context it is used in: source
+/// frame of a media (native fps) or Timeline frame (fps of the
+/// Timeline containing it). The two spaces must never be confused.
 pub type FrameIdx = i64;
 
-/// `duration_frames` di un'immagine: ~463 giorni a `IMAGE_FPS`, nessuna
-/// durata reale lo raggiunge, così fa da segno "è un'immagine" senza un
-/// campo in più e non limita il trim.
+/// `duration_frames` of an image: ~463 days at `IMAGE_FPS`, no real
+/// duration reaches it, so it acts as an "it is an image" marker without an
+/// extra field and does not limit the trim.
 pub const IMAGE_DURATION_FRAMES: FrameIdx = 1_000_000_000;
 
-/// Prefisso del nome delle compound clip nel media pool.
+/// Name prefix of the compound clips in the media pool.
 pub const COMPOUND_NAME_PREFIX: &str = "Compound Clip ";
+pub const TIMELINE_NAME_PREFIX: &str = "Timeline ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMeta {
     pub duration_frames: FrameIdx,
     pub fps: Rational,
-    /// `width`/`height` a zero e `fps` nominale se `false`: un media solo
-    /// audio va solo su track audio.
+    /// `width`/`height` at zero and nominal `fps` if `false`: an audio-only
+    /// media goes only on audio tracks.
     pub width: u32,
     pub height: u32,
     pub has_video: bool,
     pub has_audio: bool,
     pub sample_rate: u32,
     pub channels: u16,
-    /// Stream audio nel contenitore. 0 nei progetti salvati prima che il
-    /// campo esistesse: l'app lo ricalcola all'apertura.
+    /// Audio streams in the container. 0 in projects saved before the
+    /// field existed: the app recomputes it on opening.
     #[serde(default)]
     pub audio_streams: u16,
 }
 
 impl MediaMeta {
-    /// Stream audio da usare: almeno uno se il media ha audio.
+    /// Audio streams to use: at least one if the media has audio.
     pub fn audio_stream_count(&self) -> usize {
         if self.has_audio {
             usize::from(self.audio_streams).max(1)
@@ -168,9 +169,9 @@ impl MediaMeta {
         }
     }
 
-    /// Un'immagine ferma importata nel pool: ha video ma non audio, e
-    /// `duration_frames` è il sentinel `IMAGE_DURATION_FRAMES` (vedi la
-    /// sua doc sul perché non serve un campo dedicato).
+    /// A still image imported into the pool: it has video but no audio, and
+    /// `duration_frames` is the `IMAGE_DURATION_FRAMES` sentinel (see its
+    /// docs on why a dedicated field is not needed).
     pub fn is_image(&self) -> bool {
         self.has_video && !self.has_audio && self.duration_frames == IMAGE_DURATION_FRAMES
     }
@@ -178,21 +179,21 @@ impl MediaMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaItem {
-    /// Per una compound clip (`compound.is_some()`) è solo il nome
-    /// visualizzato nel media pool ("Compound Clip N"), non un file reale.
+    /// For a compound clip (`compound.is_some()`) it is only the name
+    /// shown in the media pool ("Compound Clip N"), not a real file.
     pub path: PathBuf,
     pub meta: MediaMeta,
-    /// Chiave stabile per cache dei frame e proxy: hash del contenuto
-    /// (non del path), così spostare/rinominare il file non invalida nulla.
-    /// Per una compound clip, cambia ogni volta che la sua timeline
-    /// annidata cambia (vedi `Project::touch_compound`): invalida la cache
-    /// dei frame compositati senza dover confrontare l'intera timeline.
+    /// Stable key for the frame cache and the proxies: hash of the content
+    /// (not of the path), so moving/renaming the file invalidates nothing.
+    /// For a compound clip, it changes every time its nested timeline
+    /// changes (see `Project::touch_compound`): it invalidates the cache
+    /// of composited frames without having to compare the whole timeline.
     pub content_hash: u64,
-    /// `Some` se questo item è una compound clip: il suo contenuto è
-    /// `Project::timelines[_]` invece di un file su disco. `meta` resta
-    /// comunque valida (ricalcolata da `Project::sync_compound_meta`), così
-    /// il resto del programma (probe, drag&drop, durata in timeline) può
-    /// trattarla come un media qualunque.
+    /// `Some` if this item is a compound clip: its content is
+    /// `Project::timelines[_]` instead of a file on disk. `meta` stays
+    /// valid anyway (recomputed by `Project::sync_compound_meta`), so
+    /// the rest of the program (probe, drag&drop, duration on the timeline) can
+    /// treat it like any other media.
     #[serde(default)]
     pub compound: Option<TimelineId>,
 }
@@ -204,13 +205,13 @@ pub enum Interpolation {
     EaseInOut,
     EaseIn,
     EaseOut,
-    /// Curva libera: punti di controllo di una bezier cubica normalizzata
-    /// sul segmento (da `(0,0)` a `(1,1)`), come `cubic-bezier` di CSS.
+    /// Free curve: control points of a cubic bezier normalized
+    /// on the segment (from `(0,0)` to `(1,1)`), like CSS's `cubic-bezier`.
     Bezier { c1: [f32; 2], c2: [f32; 2] },
 }
 
 impl Interpolation {
-    /// I preset offerti dall'editor di keyframe, nell'ordine della barra.
+    /// The presets offered by the keyframe editor, in bar order.
     pub const PRESETS: [Self; 5] = [
         Self::Hold,
         Self::Linear,
@@ -219,7 +220,7 @@ impl Interpolation {
         Self::EaseOut,
     ];
 
-    /// Peso del keyframe di arrivo a `t` (0 = quello di partenza).
+    /// Weight of the arrival keyframe at `t` (0 = the starting one).
     pub fn ease(self, t: f32) -> f32 {
         match self {
             Self::Hold => 0.0,
@@ -231,8 +232,8 @@ impl Interpolation {
         }
     }
 
-    /// I punti di controllo equivalenti, per gli handle dell'editor: `Hold`
-    /// non ha una curva da manipolare.
+    /// The equivalent control points, for the editor handles: `Hold`
+    /// has no curve to manipulate.
     pub fn control_points(self) -> Option<([f32; 2], [f32; 2])> {
         match self {
             Self::Hold => None,
@@ -245,8 +246,8 @@ impl Interpolation {
     }
 }
 
-/// `x` di una bezier cubica normalizzata non è `t`: lo si inverte per
-/// bisezione (monotòna finché le ascisse dei controlli stanno in `0..=1`).
+/// The `x` of a normalized cubic bezier is not `t`: it is inverted by
+/// bisection (monotonic as long as the control abscissas stay in `0..=1`).
 fn bezier_ease(c1: [f32; 2], c2: [f32; 2], x: f32) -> f32 {
     let axis = |a: f32, b: f32, t: f32| {
         let u = 1.0 - t;
@@ -264,10 +265,10 @@ fn bezier_ease(c1: [f32; 2], c2: [f32; 2], x: f32) -> f32 {
     axis(c1[1], c2[1], 0.5 * (lo + hi))
 }
 
-/// Parametro animabile via keyframe. Sempre ordinato per tempo crescente.
+/// Parameter animatable via keyframes. Always sorted by increasing time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keyframed<T> {
-    /// Se vuoto, il parametro è costante e va letto da `default`.
+    /// If empty, the parameter is constant and must be read from `default`.
     keyframes: Vec<(FrameIdx, T, Interpolation)>,
     pub default: T,
 }
@@ -288,7 +289,7 @@ impl<T: Clone> Keyframed<T> {
         &self.keyframes
     }
 
-    /// Inserisce o sostituisce il keyframe a `frame`, mantenendo l'ordine.
+    /// Inserts or replaces the keyframe at `frame`, preserving the order.
     pub fn upsert(&mut self, frame: FrameIdx, value: T, interpolation: Interpolation) {
         match self.keyframes.binary_search_by_key(&frame, |(f, _, _)| *f) {
             Ok(idx) => self.keyframes[idx] = (frame, value, interpolation),
@@ -296,8 +297,8 @@ impl<T: Clone> Keyframed<T> {
         }
     }
 
-    /// Rimuove il keyframe esattamente a `frame`, se esiste. Restituisce il
-    /// valore rimosso (utile per l'undo).
+    /// Removes the keyframe exactly at `frame`, if it exists. Returns the
+    /// removed value (useful for the undo).
     pub fn remove_at(&mut self, frame: FrameIdx) -> Option<(T, Interpolation)> {
         let idx = self
             .keyframes
@@ -307,18 +308,18 @@ impl<T: Clone> Keyframed<T> {
         Some((value, interp))
     }
 
-    /// Frame del keyframe più vicino prima di `frame`.
+    /// Frame of the nearest keyframe before `frame`.
     pub fn keyframe_before(&self, frame: FrameIdx) -> Option<FrameIdx> {
         self.keyframes.iter().rev().map(|k| k.0).find(|&f| f < frame)
     }
 
-    /// Frame del keyframe più vicino dopo `frame`.
+    /// Frame of the nearest keyframe after `frame`.
     pub fn keyframe_after(&self, frame: FrameIdx) -> Option<FrameIdx> {
         self.keyframes.iter().map(|k| k.0).find(|&f| f > frame)
     }
 
-    /// Cambia l'interpolazione uscente del keyframe a `frame`, se c'è, e
-    /// restituisce quella che aveva.
+    /// Changes the outgoing interpolation of the keyframe at `frame`, if there is one, and
+    /// returns the one it had.
     pub fn set_interpolation(
         &mut self,
         frame: FrameIdx,
@@ -331,7 +332,7 @@ impl<T: Clone> Keyframed<T> {
         Some(std::mem::replace(&mut self.keyframes[idx].2, interpolation))
     }
 
-    /// Il keyframe esattamente a `frame`, se esiste.
+    /// The keyframe exactly at `frame`, if it exists.
     pub fn keyframe_at(&self, frame: FrameIdx) -> Option<(T, Interpolation)> {
         let idx = self
             .keyframes
@@ -342,9 +343,9 @@ impl<T: Clone> Keyframed<T> {
     }
 }
 
-/// Interpolazione lineare componente-per-componente tra due valori di un
-/// parametro animabile. `Keyframed::value_at` ne ha bisogno per calcolare
-/// il valore a un frame arbitrario tra due keyframe.
+/// Component-wise linear interpolation between two values of an
+/// animatable parameter. `Keyframed::value_at` needs it to compute
+/// the value at an arbitrary frame between two keyframes.
 pub trait Lerp {
     fn lerp(a: &Self, b: &Self, t: f32) -> Self;
 }
@@ -378,7 +379,7 @@ impl Lerp for Transform {
                 f32::lerp(&a.anchor[0], &b.anchor[0], t),
                 f32::lerp(&a.anchor[1], &b.anchor[1], t),
             ],
-            // Un flip non ha vie di mezzo: scatta a metà interpolazione.
+            // A flip has no middle ground: it snaps at half the interpolation.
             flip: if t < 0.5 { a.flip } else { b.flip },
         }
     }
@@ -389,8 +390,8 @@ fn smoothstep(t: f32) -> f32 {
 }
 
 impl<T: Lerp + Clone> Keyframed<T> {
-    /// `default` senza keyframe; prima del primo e dopo l'ultimo il valore
-    /// estremo; in mezzo l'interpolazione del keyframe di partenza.
+    /// `default` without keyframes; before the first and after the last the extreme
+    /// value; in between the interpolation of the starting keyframe.
     pub fn value_at(&self, frame: FrameIdx) -> T {
         if self.keyframes.is_empty() {
             return self.default.clone();
@@ -414,8 +415,8 @@ impl<T: Lerp + Clone> Keyframed<T> {
         }
     }
 
-    /// Scarta i keyframe prima di `start` preservando il valore da `start`
-    /// in poi: resta un keyframe di raccordo solo se l'animazione ne dipende.
+    /// Discards the keyframes before `start` preserving the value from `start`
+    /// on: a joining keyframe remains only if the animation depends on it.
     pub fn drop_before(&mut self, start: FrameIdx)
     where
         T: PartialEq,
@@ -433,7 +434,7 @@ impl<T: Lerp + Clone> Keyframed<T> {
         }
     }
 
-    /// Simmetrica di `drop_before`: tiene solo i keyframe prima di `end`.
+    /// Mirror of `drop_before`: keeps only the keyframes before `end`.
     pub fn drop_from(&mut self, end: FrameIdx)
     where
         T: PartialEq,
@@ -454,25 +455,25 @@ impl<T: Lerp + Clone> Keyframed<T> {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transform {
-    /// Pixel tagliati per lato (sinistra, alto, destra, basso) alla risoluzione
-    /// nativa del media, non del proxy. Il resto non si ricentra.
+    /// Pixels cut per side (left, top, right, bottom) at the native
+    /// resolution of the media, not of the proxy. The rest is not recentered.
     pub crop: [f32; 4], // left, top, right, bottom
-    /// Sfumatura del bordo di crop in pixel del media: negativa verso l'interno,
-    /// positiva verso l'esterno, 0 netto.
+    /// Softness of the crop edge in media pixels: negative towards the inside,
+    /// positive towards the outside, 0 hard.
     pub crop_softness: f32,
-    /// Ingrandimento per asse attorno all'`anchor`, rispetto al frame di output.
+    /// Magnification per axis around the `anchor`, relative to the output frame.
     pub zoom: [f32; 2],
-    /// Spostamento in pixel di timeline, Y verso l'alto.
+    /// Displacement in timeline pixels, Y upwards.
     pub position: [f32; 2],
-    /// Rotazione in gradi, oraria, attorno all'`anchor`.
+    /// Rotation in degrees, clockwise, around the `anchor`.
     pub rotation: f32,
-    /// Pivot di zoom e rotazione, in pixel di timeline a partire dal centro
-    /// della clip (`[0, 0]` = il suo centro), con gli stessi versi di
-    /// `position` (Y positivo verso l'alto).
+    /// Zoom and rotation pivot, in timeline pixels from the center
+    /// of the clip (`[0, 0]` = its center), with the same directions as
+    /// `position` (Y positive upwards).
     pub anchor: [f32; 2],
-    /// Specchiatura orizzontale (X) e verticale (Y).
+    /// Horizontal (X) and vertical (Y) mirroring.
     pub flip: [bool; 2],
-    /// Opacità del layer in percentuale, 0-100.
+    /// Layer opacity as a percentage, 0-100.
     pub opacity: f32,
 }
 
@@ -491,8 +492,8 @@ impl Default for Transform {
     }
 }
 
-/// Un parametro del transform, ognuno con i suoi keyframe. `flip` no: non
-/// si interpola.
+/// A transform parameter, each with its own keyframes. `flip` is not one: it
+/// does not interpolate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransformParam {
     ZoomX,
@@ -527,13 +528,13 @@ impl TransformParam {
         Self::Opacity,
     ];
 
-    /// Posizione in `TransformTracks::params` — l'ordine di `ALL`, che è
-    /// quello di dichiarazione.
+    /// Position in `TransformTracks::params` — the order of `ALL`, which is
+    /// the declaration order.
     pub fn index(self) -> usize {
         self as usize
     }
 
-    /// Il valore che ha in un `Transform` già valutato.
+    /// The value it has in an already evaluated `Transform`.
     pub fn of(self, t: &Transform) -> f32 {
         match self {
             Self::ZoomX => t.zoom[0],
@@ -553,17 +554,17 @@ impl TransformParam {
     }
 }
 
-/// Il transform di una clip: un `Keyframed<f32>` per parametro, così ogni
-/// parametro si anima per conto suo, più il flip (non animabile).
+/// The transform of a clip: one `Keyframed<f32>` per parameter, so every
+/// parameter animates on its own, plus the flip (not animatable).
 #[derive(Debug, Clone, Serialize)]
 pub struct TransformTracks {
-    /// Uno per `TransformParam`, nell'ordine di `TransformParam::ALL`.
+    /// One per `TransformParam`, in the order of `TransformParam::ALL`.
     params: Vec<Keyframed<f32>>,
     pub flip: [bool; 2],
 }
 
-/// I progetti salvati prima che un parametro esistesse hanno meno tracce di
-/// `TransformParam::ALL`: la coda mancante prende il valore di default.
+/// Projects saved before a parameter existed have fewer tracks than
+/// `TransformParam::ALL`: the missing tail takes the default value.
 impl<'de> Deserialize<'de> for TransformTracks {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -608,12 +609,12 @@ impl TransformTracks {
         &mut self.params[param.index()]
     }
 
-    /// `true` se nessun parametro ha keyframe.
+    /// `true` if no parameter has keyframes.
     pub fn is_constant(&self) -> bool {
         self.params.iter().all(|k| k.is_constant())
     }
 
-    /// `true` se il transform è ancora quello di default, keyframe compresi.
+    /// `true` if the transform is still the default one, keyframes included.
     pub fn is_pristine(&self) -> bool {
         let d = Transform::default();
         self.flip == d.flip
@@ -641,8 +642,8 @@ impl TransformTracks {
         }
     }
 
-    /// Il keyframe più vicino a `frame` *prima* di esso, tra quelli dei
-    /// parametri dati: serve alle frecce di navigazione del pannello.
+    /// The keyframe nearest to `frame` *before* it, among those of the
+    /// given parameters: used by the panel's navigation arrows.
     pub fn previous_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
         params
             .iter()
@@ -650,7 +651,7 @@ impl TransformTracks {
             .max()
     }
 
-    /// Simmetrica di `previous_keyframe`, in avanti.
+    /// Mirror of `previous_keyframe`, forwards.
     pub fn next_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
         params
             .iter()
@@ -671,7 +672,7 @@ impl Rgba {
     pub const BLACK: Self = Self::gray(0.0);
     pub const WHITE: Self = Self::gray(1.0);
 
-    /// Grigio opaco.
+    /// Opaque grey.
     pub const fn gray(v: f32) -> Self {
         Self {
             r: v,
@@ -735,29 +736,29 @@ pub enum FontCase {
     Title,
 }
 
-/// Parametri di una clip `ClipSource::Text`. Le misure sono in pixel di
-/// timeline, come quelle del `Transform`.
+/// Parameters of a `ClipSource::Text` clip. The measures are in timeline
+/// pixels, like those of the `Transform`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleParams {
     pub content: String,
-    /// Vuota = sans-serif di sistema.
+    /// Empty = system sans-serif.
     pub font_family: String,
-    /// 100-900, come in CSS.
+    /// 100-900, as in CSS.
     pub font_weight: u16,
     pub italic: bool,
     pub color: Rgba,
     pub size: f32,
-    /// Spaziatura fra le lettere, in millesimi di em.
+    /// Letter spacing, in thousandths of an em.
     pub tracking: f32,
-    /// Spazio extra fra le righe, in pixel.
+    /// Extra space between lines, in pixels.
     pub line_spacing: f32,
     pub underline: bool,
     pub strikethrough: bool,
     pub case: FontCase,
     pub align: TextAlign,
-    /// Quale punto del blocco di testo cade su `position`.
+    /// Which point of the text block falls on `position`.
     pub anchor: (HAnchor, VAnchor),
-    /// Dal centro del frame, Y verso l'alto.
+    /// From the center of the frame, Y upwards.
     pub position: [f32; 2],
     #[serde(default)]
     pub shadow: TitleShadow,
@@ -765,14 +766,14 @@ pub struct TitleParams {
     pub background: TitleBackground,
 }
 
-/// Ombra del solo testo.
+/// Shadow of the text alone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleShadow {
     pub enabled: bool,
     pub color: Rgba,
-    /// In pixel di timeline, Y verso l'alto.
+    /// In timeline pixels, Y upwards.
     pub offset: [f32; 2],
-    /// Raggio della sfocatura, in pixel di timeline.
+    /// Blur radius, in timeline pixels.
     pub blur: f32,
     /// 0-100.
     pub opacity: f32,
@@ -790,20 +791,20 @@ impl Default for TitleShadow {
     }
 }
 
-/// Rettangolo dietro al testo.
+/// Rectangle behind the text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleBackground {
     pub enabled: bool,
     pub color: Rgba,
     pub outline_color: Rgba,
-    /// In pixel di timeline, verso l'interno del rettangolo.
+    /// In timeline pixels, towards the inside of the rectangle.
     pub outline_width: f32,
-    /// Frazione della larghezza/altezza del frame; 0 = attorno al testo.
+    /// Fraction of the width/height of the frame; 0 = around the text.
     pub width: f32,
     pub height: f32,
-    /// Frazione del lato più corto del rettangolo, fino a 0.5.
+    /// Fraction of the shorter side of the rectangle, up to 0.5.
     pub corner_radius: f32,
-    /// Spostamento dal centro del testo, in pixel di timeline, Y verso l'alto.
+    /// Displacement from the center of the text, in timeline pixels, Y upwards.
     pub center: [f32; 2],
     /// 0-100.
     pub opacity: f32,
@@ -849,7 +850,7 @@ impl Default for TitleParams {
 }
 
 impl TitleParams {
-    /// Il testo da disegnare, con `case` già applicato.
+    /// The text to draw, with `case` already applied.
     pub fn display_text(&self) -> String {
         match self.case {
             FontCase::Mixed => self.content.clone(),
@@ -876,45 +877,45 @@ impl TitleParams {
 pub enum ClipSource {
     Media(MediaId),
     SolidColor,
-    /// Parametri in `EffectStack::title`.
+    /// Parameters in `EffectStack::title`.
     Text,
 }
 
-/// Estremi di `gain_db`: condivisi fra lo slider del pannello proprietà e la
-/// riga del volume in timeline, così restano sempre uno solo.
+/// Bounds of `gain_db`: shared between the properties panel slider and the
+/// volume line on the timeline, so they always stay a single one.
 pub const GAIN_DB_MIN: f32 = -100.0;
 pub const GAIN_DB_MAX: f32 = 30.0;
 
-/// Un filtro del pannello Effects: la varietà è aperta (nuove varianti per
-/// nuovi filtri), il rendering la traduce in un id per lo shader — vedi
-/// `vv_render`, che non conosce il significato di ciascuna, solo il suo id.
+/// A filter of the Effects panel: the variety is open (new variants for
+/// new filters), the rendering translates it into a shader id — see
+/// `vv_render`, which does not know the meaning of each one, only its id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterKind {
     Grayscale,
 }
 
-/// Un filtro applicato a una clip. L'ordine nel `Vec` di
-/// `EffectStack::filters` è l'ordine di applicazione, configurabile
-/// dall'utente (più filtri sulla stessa clip, in una sequenza scelta da
-/// lui); `enabled` lo sospende senza toglierlo dalla sequenza.
+/// A filter applied to a clip. The order in the `Vec` of
+/// `EffectStack::filters` is the order of application, configurable
+/// by the user (several filters on the same clip, in a sequence they choose);
+/// `enabled` suspends it without removing it from the sequence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClipFilter {
     pub kind: FilterKind,
     pub enabled: bool,
 }
 
-/// Una transizione del pannello Effects, sezione "Transizioni": come
-/// `FilterKind`, varietà aperta per transizioni future. A differenza dei
-/// filtri, si applica solo a un bordo della clip (`EffectStack::transition_in`
-/// o `transition_out`), non alla clip intera.
+/// A transition of the Effects panel, "Transitions" section: like
+/// `FilterKind`, an open variety for future transitions. Unlike the
+/// filters, it applies only to one edge of the clip (`EffectStack::transition_in`
+/// or `transition_out`), not to the whole clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransitionKind {
     Push,
 }
 
-/// Direzione di scorrimento di una transizione Push. Indipendente dal bordo
-/// della clip a cui è agganciata (`In`/`Out`): descrive solo il verso del
-/// movimento sullo schermo durante la transizione.
+/// Slide direction of a Push transition. Independent of the clip edge
+/// it is attached to (`In`/`Out`): it describes only the direction of the
+/// movement on screen during the transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PushDirection {
     Left,
@@ -926,8 +927,8 @@ pub enum PushDirection {
 impl PushDirection {
     pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Up, Self::Down];
 
-    /// Verso del movimento in unità di `Transform.position` (X, Y): `Y`
-    /// positivo verso l'alto, come il resto del transform.
+    /// Direction of the movement in `Transform.position` units (X, Y): `Y`
+    /// positive upwards, like the rest of the transform.
     fn vector(self) -> [f32; 2] {
         match self {
             Self::Left => [-1.0, 0.0],
@@ -938,24 +939,24 @@ impl PushDirection {
     }
 }
 
-/// Quanto vale davvero "fuori schermo" per una clip zoomata `zoom` volte
-/// sull'asse di `vec` (`direction` è sempre assiale, quindi solo una delle
-/// due componenti conta). Nello shader lo zoom si applica *dopo* la
-/// posizione (vedi `transform.wgsl`): il centro dell'immagine si sposta di
-/// `position` a schermo qualunque sia lo zoom, ma il suo bordo reale è
-/// `zoom` volte più lontano dal centro — a `push_clearance == 1` (zoom 1)
-/// un'unità di spinta basta a liberare tutto lo schermo, a zoom maggiore
-/// ne serve di più o si vedrebbe ancora l'interno dell'immagine invece del
-/// trasparente sotto per l'intera transizione. Non tiene conto di
-/// anchor/rotazione: un caso raro abbastanza da non giustificare il conto
-/// esatto, qui basta liberare lo schermo per lo zoom (il caso comune).
+/// What "off screen" really means for a clip zoomed `zoom` times
+/// on the axis of `vec` (`direction` is always axial, so only one of the
+/// two components matters). In the shader the zoom is applied *after* the
+/// position (see `transform.wgsl`): the center of the image moves by
+/// `position` on screen whatever the zoom, but its real edge is
+/// `zoom` times farther from the center — at `push_clearance == 1` (zoom 1)
+/// one unit of push is enough to clear the whole screen, at a higher zoom
+/// more is needed or one would still see the inside of the image instead of the
+/// transparent underneath for the whole transition. It does not account for
+/// anchor/rotation: a case rare enough not to justify the exact
+/// computation, here clearing the screen for the zoom (the common case) is enough.
 fn push_clearance(vec: [f32; 2], zoom: [f32; 2]) -> f32 {
     let z = vec[0].abs() * zoom[0] + vec[1].abs() * zoom[1];
     0.5 * (z + 1.0)
 }
 
-/// Curva di accelerazione di una transizione, applicata alla progressione
-/// 0..1 prima di tradurla in offset. Le stesse quattro opzioni di un NLE.
+/// Acceleration curve of a transition, applied to the 0..1 progression
+/// before translating it into an offset. The same four options as an NLE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ease {
     None,
@@ -968,10 +969,10 @@ impl Ease {
     pub const ALL: [Self; 4] = [Self::None, Self::In, Self::Out, Self::InOut];
 }
 
-/// `t` (0..1) rimodulato secondo `ease`; `curve` (0..1, "Transition Curve"
-/// nell'inspector) ne controlla l'intensità: 0 quasi lineare, 1 più
-/// pronunciata. Nessuna pretesa di uguagliare la curva esatta di un NLE
-/// specifico, solo una progressione monotona e simmetrica in InOut.
+/// `t` (0..1) reshaped according to `ease`; `curve` (0..1, "Transition Curve"
+/// in the inspector) controls its intensity: 0 nearly linear, 1 more
+/// pronounced. No claim to match the exact curve of a specific
+/// NLE, only a monotonic progression, symmetric in InOut.
 fn eased(t: f32, ease: Ease, curve: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     let exponent = 1.0 + curve.clamp(0.0, 1.0) * 4.0;
@@ -989,21 +990,21 @@ fn eased(t: f32, ease: Ease, curve: f32) -> f32 {
     }
 }
 
-/// Una transizione applicata a un bordo di una clip (vedi
-/// `EffectStack::transition_in`/`transition_out`). `duration` in frame di
-/// timeline dal bordo, come `Clip::fade_in`/`fade_out`.
+/// A transition applied to one edge of a clip (see
+/// `EffectStack::transition_in`/`transition_out`). `duration` in timeline
+/// frames from the edge, like `Clip::fade_in`/`fade_out`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transition {
     pub kind: TransitionKind,
     pub duration: FrameIdx,
     pub direction: PushDirection,
     pub ease: Ease,
-    /// "Transition Curve" nell'inspector, 0..1.
+    /// "Transition Curve" in the inspector, 0..1.
     pub curve: f32,
 }
 
-/// Metodo di composizione di un layer su quelli sotto ("Composite Mode"
-/// nell'inspector). Solo modi separabili, calcolati canale per canale.
+/// Compositing method of a layer onto those below ("Composite Mode"
+/// in the inspector). Separable modes only, computed channel by channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BlendMode {
     #[default]
@@ -1054,9 +1055,9 @@ pub struct EffectStack {
     pub title: Option<TitleParams>,
     #[serde(default)]
     pub filters: Vec<ClipFilter>,
-    /// Transizione agganciata al bordo iniziale/finale della clip, dal
-    /// pannello Effects. Coppia di campi come `Clip::fade_in`/`fade_out`,
-    /// non una mappa: al più una per bordo.
+    /// Transition attached to the starting/ending edge of the clip, from the
+    /// Effects panel. A pair of fields like `Clip::fade_in`/`fade_out`,
+    /// not a map: at most one per edge.
     #[serde(default)]
     pub transition_in: Option<Transition>,
     #[serde(default)]
@@ -1082,7 +1083,7 @@ impl Default for EffectStack {
 }
 
 impl EffectStack {
-    /// Vedi `Keyframed::drop_before`, su ogni parametro animabile.
+    /// See `Keyframed::drop_before`, on every animatable parameter.
     pub fn drop_keyframes_before(&mut self, start: FrameIdx) {
         self.for_each_f32_track(|k| k.drop_before(start));
         if let Some(c) = &mut self.color {
@@ -1090,7 +1091,7 @@ impl EffectStack {
         }
     }
 
-    /// Vedi `Keyframed::drop_from`, su ogni parametro animabile.
+    /// See `Keyframed::drop_from`, on every animatable parameter.
     pub fn drop_keyframes_from(&mut self, end: FrameIdx) {
         self.for_each_f32_track(|k| k.drop_from(end));
         if let Some(c) = &mut self.color {
@@ -1106,9 +1107,9 @@ impl EffectStack {
         f(&mut self.gain_db);
     }
 
-    /// `true` se nessuna proprietà è stata toccata rispetto al default: la
-    /// timeline disegna più scure le clip per cui è `false`. Il titolo non
-    /// conta: è il contenuto della clip, non un effetto.
+    /// `true` if no property was touched relative to the default: the
+    /// timeline draws the clips for which it is `false` darker. The title does not
+    /// count: it is the content of the clip, not an effect.
     pub fn is_pristine(&self) -> bool {
         self.transform.is_pristine()
             && self.speed.is_constant()
@@ -1124,40 +1125,40 @@ impl EffectStack {
 pub struct Clip {
     pub id: ClipId,
     pub source: ClipSource,
-    /// Inizio nel media in frame di *timeline* dal frame sorgente 0: una clip
-    /// conformata può cominciare a metà di un frame sorgente.
+    /// Start in the media in *timeline* frames from source frame 0: a conformed
+    /// clip can start in the middle of a source frame.
     pub source_offset: FrameIdx,
-    /// Posizione nello spazio della Timeline che contiene questa clip.
+    /// Position in the space of the Timeline containing this clip.
     pub timeline_start: FrameIdx,
     pub timeline_len: FrameIdx,
     pub effects: EffectStack,
-    /// Gruppo collegato (di solito video e tutti gli stream audio di un
-    /// import): selezione, drag e cancellazione lo trattano come un'unità.
+    /// Linked group (usually the video and all the audio streams of one
+    /// import): selection, drag and deletion treat it as a unit.
     #[serde(default)]
     pub linked_group: Option<LinkGroupId>,
-    /// Clip audio: quale stream del contenitore (ordine di
+    /// Audio clip: which stream of the container (order of
     /// `vv_media::audio_streams`).
     #[serde(default)]
     pub audio_stream_index: usize,
-    /// Frame di timeline per frame sorgente (`Rational::conform_rate`).
+    /// Timeline frames per source frame (`Rational::conform_rate`).
     #[serde(default = "Rational::one")]
     pub rate: Rational,
-    /// Esclusa da compositing e mix, ma resta in timeline.
+    /// Excluded from compositing and mixing, but stays on the timeline.
     #[serde(default)]
     pub disabled: bool,
-    /// Durata della dissolvenza in entrata, in frame di timeline dall'inizio
-    /// della clip. 0 = nessuna.
+    /// Duration of the fade in, in timeline frames from the start
+    /// of the clip. 0 = none.
     #[serde(default)]
     pub fade_in: FrameIdx,
-    /// Durata della dissolvenza in uscita, in frame di timeline dalla fine
-    /// della clip. 0 = nessuna.
+    /// Duration of the fade out, in timeline frames from the end
+    /// of the clip. 0 = none.
     #[serde(default)]
     pub fade_out: FrameIdx,
 }
 
 impl Clip {
-    /// Clip che mostra `source_in..source_out()` del sorgente a partire da
-    /// `timeline_start`, senza effetti né collegamenti.
+    /// Clip showing `source_in..source_out()` of the source starting from
+    /// `timeline_start`, without effects or links.
     pub fn from_source_range(
         id: ClipId,
         source: ClipSource,
@@ -1183,18 +1184,18 @@ impl Clip {
         }
     }
 
-    /// Primo frame sorgente mostrato.
+    /// First source frame shown.
     pub fn source_in(&self) -> FrameIdx {
         self.rate.unscale_round(self.source_offset)
     }
 
-    /// Esclusivo: l'ultimo frame sorgente mostrato, più uno.
+    /// Exclusive: the last source frame shown, plus one.
     pub fn source_out(&self) -> FrameIdx {
         self.rate.unscale_round(self.source_offset + self.timeline_len - 1) + 1
     }
 
-    /// Durata in frame *sorgente*, per i conti che vivono in quello
-    /// spazio (quanti frame del media serve decodificare).
+    /// Duration in *source* frames, for the computations living in that
+    /// space (how many frames of the media need decoding).
     pub fn source_len(&self) -> FrameIdx {
         self.source_out() - self.source_in()
     }
@@ -1203,33 +1204,33 @@ impl Clip {
         self.timeline_start + self.timeline_len
     }
 
-    /// `frame` (di timeline) cade dentro la clip.
+    /// `frame` (of the timeline) falls inside the clip.
     pub fn contains(&self, frame: FrameIdx) -> bool {
         frame >= self.timeline_start && frame < self.timeline_end()
     }
 
-    /// Frame sorgente mostrato alla posizione di timeline `timeline_frame`
-    /// (dentro la clip). Unico punto della mappatura, condiviso da anteprima
-    /// ed export: un futuro time-remap va applicato qui.
+    /// Source frame shown at timeline position `timeline_frame`
+    /// (inside the clip). The single point of the mapping, shared by preview
+    /// and export: a future time-remap must be applied here.
     pub fn source_frame_at(&self, timeline_frame: FrameIdx) -> FrameIdx {
         self.rate
             .unscale_round(timeline_frame - self.timeline_start + self.source_offset)
     }
 
-    /// Inverso di `source_frame_at`, anche fuori dal trim (serve ai limiti di
-    /// trim).
+    /// Inverse of `source_frame_at`, even outside the trim (needed by the trim
+    /// limits).
     pub fn timeline_frame_at(&self, source_frame: FrameIdx) -> FrameIdx {
         self.timeline_start + self.rate.scale_round(source_frame) - self.source_offset
     }
 
-    /// Secondi dall'inizio del media a `timeline_frame`, senza passare dai
-    /// frame sorgente: l'audio segue il taglio al campione.
+    /// Seconds from the start of the media at `timeline_frame`, without going through the
+    /// source frames: the audio follows the cut to the sample.
     pub fn media_secs_at(&self, timeline_frame: FrameIdx, timeline_fps: f64) -> f64 {
         (timeline_frame - self.timeline_start + self.source_offset) as f64 / timeline_fps
     }
 
-    /// Porta la clip da una timeline a `from` fps a una a `to` fps,
-    /// conservando i secondi; `rate` è quello della clip sulla nuova
+    /// Moves the clip from a timeline at `from` fps to one at `to` fps,
+    /// preserving the seconds; `rate` is the clip's one on the new
     /// timeline.
     pub fn retime(&mut self, from: Rational, to: Rational, rate: Rational) {
         let end = convert_frames(self.timeline_end(), from, to);
@@ -1239,10 +1240,10 @@ impl Clip {
         self.rate = rate;
     }
 
-    /// Moltiplicatore di opacità/volume a `timeline_frame` per le
-    /// dissolvenze: rampa lineare 0→1 su `fade_in` frame dall'inizio,
-    /// rampa 1→0 su `fade_out` frame dalla fine, prodotto delle due (se si
-    /// sovrappongono si sottraggono a vicenda, come in qualsiasi NLE).
+    /// Opacity/volume multiplier at `timeline_frame` for the
+    /// fades: linear ramp 0→1 over `fade_in` frames from the start,
+    /// ramp 1→0 over `fade_out` frames from the end, product of the two (if they
+    /// overlap they subtract from each other, as in any NLE).
     pub fn fade_multiplier_at(&self, timeline_frame: FrameIdx) -> f32 {
         let len = self.timeline_len.max(1);
         let fade_in = self.fade_in.clamp(0, len);
@@ -1261,21 +1262,21 @@ impl Clip {
         in_ramp * out_ramp
     }
 
-    /// Offset di posizione (stesse unità pixel di `Transform.position`,
-    /// `frame_size` = risoluzione della timeline) dovuto alle transizioni
-    /// push in entrata/uscita a `timeline_frame`. Sommato al `position` già
-    /// campionato dai keyframe del transform, non lo sostituisce: così una
-    /// transizione push convive con un pan manuale sulla stessa clip. Fuori
-    /// dalla finestra della transizione l'offset è zero; alle sue estremità
-    /// coincide sempre con "fuori schermo" o "a posto", indipendentemente
-    /// da `direction`/`ease`, perché il rilascio dà alpha 0 fuori dai bordi
-    /// del source_uv (vedi `transform.wgsl`): usarlo anche per rivelare
-    /// quel che sta sotto (lower third, overlay) è lo stesso meccanismo.
-    /// `zoom` è quello già campionato di `effects.transform` allo stesso
-    /// frame (vedi `push_clearance`): senza, una clip zoomata si vedrebbe
-    /// comparire di scatto a metà transizione invece di scorrere da fuori
-    /// schermo, perché il suo bordo vero resta oltre lo spostamento
-    /// calcolato per zoom 1.
+    /// Position offset (same pixel units as `Transform.position`,
+    /// `frame_size` = resolution of the timeline) due to the
+    /// push transitions in/out at `timeline_frame`. Added to the `position` already
+    /// sampled from the transform keyframes, it does not replace it: this way a
+    /// push transition coexists with a manual pan on the same clip. Outside
+    /// the transition window the offset is zero; at its extremes it
+    /// always coincides with "off screen" or "in place", independently
+    /// of `direction`/`ease`, because the release gives alpha 0 outside the edges
+    /// of the source_uv (see `transform.wgsl`): using it also to reveal
+    /// what is below (lower third, overlay) is the same mechanism.
+    /// `zoom` is the already sampled one of `effects.transform` at the same
+    /// frame (see `push_clearance`): without it, a zoomed clip would be seen
+    /// popping in halfway through the transition instead of sliding in from off
+    /// screen, because its real edge stays past the displacement
+    /// computed for zoom 1.
     pub fn transition_offset_at(&self, timeline_frame: FrameIdx, frame_size: (f32, f32), zoom: [f32; 2]) -> [f32; 2] {
         let len = self.timeline_len.max(1);
         let pos = timeline_frame - self.timeline_start;
@@ -1305,7 +1306,7 @@ impl Clip {
     }
 }
 
-/// `frames` a `from` fps espressi a `to` fps, arrotondati.
+/// `frames` at `from` fps expressed at `to` fps, rounded.
 pub fn convert_frames(frames: FrameIdx, from: Rational, to: Rational) -> FrameIdx {
     if from == to || from.num <= 0 || to.den <= 0 {
         return frames;
@@ -1324,29 +1325,29 @@ pub enum TrackKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub kind: TrackKind,
-    /// Sempre ordinate per `timeline_start`, mai sovrapposte.
+    /// Always sorted by `timeline_start`, never overlapping.
     pub clips: Vec<Clip>,
-    /// Su una track video: esclusa dal compositing.
+    /// On a video track: excluded from compositing.
     pub muted: bool,
-    /// Solo audio: se almeno una track è in solo, suonano solo quelle.
+    /// Audio only: if at least one track is soloed, only those play.
     #[serde(default)]
     pub solo: bool,
-    /// Le sue clip non si possono selezionare né modificare, e nulla ci
-    /// può atterrare sopra.
+    /// Its clips cannot be selected or edited, and nothing can
+    /// land on it.
     #[serde(default)]
     pub locked: bool,
-    /// Transizioni a cavallo tra due clip adiacenti. Non tocca mai
-    /// `timeline_start`/`timeline_len` delle clip coinvolte (restano non
-    /// sovrapposte, invariante intatto): è il rendering a "prestare" per
-    /// la sua finestra la coda di una e la testa dell'altra, vedi
-    /// `Track::crossing_at`. Chi divide una clip, la elimina o la sposta su
-    /// un'altra track deve chiamare `take_crossings_for` sul suo id,
-    /// altrimenti la voce resta nei dati come riferimento pendente (vedi
-    /// `crossing_from`/`crossing_into`, che a differenza di `crossing_at`
-    /// non verificano che le clip esistano ancora); spostarla sulla stessa
-    /// track invece no, resta semplicemente inerte finché non torna
-    /// adiacente (`SplitClip`, `LiftDelete`, `MoveClips` in `command.rs`
-    /// sono i punti da imitare per un nuovo comando che tocca le clip).
+    /// Transitions straddling two adjacent clips. It never touches
+    /// `timeline_start`/`timeline_len` of the clips involved (they stay non-
+    /// overlapping, invariant intact): it is the rendering that "lends" for
+    /// its window the tail of one and the head of the other, see
+    /// `Track::crossing_at`. Whoever splits a clip, deletes it or moves it to
+    /// another track must call `take_crossings_for` on its id,
+    /// otherwise the entry stays in the data as a dangling reference (see
+    /// `crossing_from`/`crossing_into`, which unlike `crossing_at`
+    /// do not check that the clips still exist); moving it on the same
+    /// track does not, it simply stays inert until it becomes
+    /// adjacent again (`SplitClip`, `LiftDelete`, `MoveClips` in `command.rs`
+    /// are the places to imitate for a new command touching the clips).
     #[serde(default)]
     pub crossings: Vec<CrossTransition>,
 }
@@ -1376,7 +1377,7 @@ impl Track {
         Some(self.clips.remove(pos))
     }
 
-    /// Inserisce mantenendo l'ordine per `timeline_start`.
+    /// Inserts preserving the order by `timeline_start`.
     pub fn insert_sorted(&mut self, clip: Clip) {
         let pos = self
             .clips
@@ -1384,9 +1385,9 @@ impl Track {
         self.clips.insert(pos, clip);
     }
 
-    /// La crossing transition la cui coppia è ancora valida (entrambe le
-    /// clip esistono e sono ancora adiacenti) e la cui finestra copre
-    /// `frame`, con le due clip coinvolte.
+    /// The crossing transition whose pair is still valid (both
+    /// clips exist and are still adjacent) and whose window covers
+    /// `frame`, with the two clips involved.
     pub fn crossing_at(&self, frame: FrameIdx) -> Option<(&Clip, &Clip, &CrossTransition)> {
         self.crossings.iter().find_map(|c| {
             let left = self.clip(c.left_clip)?;
@@ -1398,21 +1399,21 @@ impl Track {
         })
     }
 
-    /// La crossing transition (valida o no) il cui `left_clip` è `id`.
+    /// The crossing transition (valid or not) whose `left_clip` is `id`.
     pub fn crossing_from(&self, left_clip: ClipId) -> Option<&CrossTransition> {
         self.crossings.iter().find(|c| c.left_clip == left_clip)
     }
 
-    /// La crossing transition (valida o no) il cui `right_clip` è `id`.
+    /// The crossing transition (valid or not) whose `right_clip` is `id`.
     pub fn crossing_into(&self, right_clip: ClipId) -> Option<&CrossTransition> {
         self.crossings.iter().find(|c| c.right_clip == right_clip)
     }
 
-    /// Rimuove e restituisce tutte le crossing transition (di qualunque
-    /// tipo, presente o futuro: non filtra su `transition.kind`) che
-    /// coinvolgono `id` come `left_clip` o `right_clip`. Da chiamare da
-    /// ogni comando che divide o elimina una clip, per non lasciare
-    /// riferimenti pendenti in `crossings`.
+    /// Removes and returns all the crossing transitions (of any
+    /// kind, present or future: it does not filter on `transition.kind`)
+    /// involving `id` as `left_clip` or `right_clip`. To be called from
+    /// every command that splits or deletes a clip, so as not to leave
+    /// dangling references in `crossings`.
     pub fn take_crossings_for(&mut self, id: ClipId) -> Vec<CrossTransition> {
         let mut removed = Vec::new();
         self.crossings.retain(|c| {
@@ -1427,13 +1428,13 @@ impl Track {
     }
 }
 
-/// Una transizione a cavallo tra due clip adiacenti sulla stessa track:
-/// "mangia" gli ultimi `duration/2` frame di `left_clip` e i primi
-/// `duration/2` di `right_clip`, mostrandoli sovrapposti invece che in
-/// sequenza. A differenza di `EffectStack::transition_in`/`transition_out`
-/// (un bordo solo, contro il trasparente) qui i lati sono sempre due e
-/// reali: nessuna delle due clip cambia `timeline_start`/`timeline_len`,
-/// la finestra si calcola sempre dalla loro posizione attuale.
+/// A transition straddling two adjacent clips on the same track:
+/// it "eats" the last `duration/2` frames of `left_clip` and the first
+/// `duration/2` of `right_clip`, showing them overlapped instead of in
+/// sequence. Unlike `EffectStack::transition_in`/`transition_out`
+/// (one edge only, against transparency) here the sides are always two and
+/// real: neither clip changes `timeline_start`/`timeline_len`,
+/// the window is always computed from their current position.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrossTransition {
     pub left_clip: ClipId,
@@ -1442,34 +1443,34 @@ pub struct CrossTransition {
 }
 
 impl CrossTransition {
-    /// Quanti frame della finestra cadono prima del taglio (dentro
-    /// `left_clip`) e quanti dopo (dentro `right_clip`): sempre a metà,
-    /// l'eventuale frame dispari va al lato sinistro. Il drag della durata
-    /// è simmetrico (vedi timeline_ui), quindi la scelta di arrotondamento
-    /// conta solo per durate dispari.
+    /// How many frames of the window fall before the cut (inside
+    /// `left_clip`) and how many after (inside `right_clip`): always halved,
+    /// the odd frame, if any, goes to the left side. Dragging the duration
+    /// is symmetric (see timeline_ui), so the rounding choice
+    /// matters only for odd durations.
     pub fn split(&self) -> (FrameIdx, FrameIdx) {
         Self::split_duration(self.transition.duration)
     }
 
-    /// Come `split`, ma per una durata data invece di `self.transition.duration`
-    /// — serve all'anteprima dal vivo di un drag di ridimensionamento, dove
-    /// la durata mostrata non è ancora quella salvata.
+    /// Like `split`, but for a given duration instead of `self.transition.duration`
+    /// — needed by the live preview of a resize drag, where
+    /// the shown duration is not the saved one yet.
     pub fn split_duration(duration: FrameIdx) -> (FrameIdx, FrameIdx) {
         let left = duration - duration / 2;
         (left, duration - left)
     }
 
-    /// La finestra (in frame di timeline) della transizione, dati i bordi
-    /// attuali di `left`/`right` — mai memorizzata, sempre ricalcolata: se
-    /// una clip si sposta la finestra la segue.
+    /// The window (in timeline frames) of the transition, given the current
+    /// edges of `left`/`right` — never stored, always recomputed: if
+    /// a clip moves the window follows it.
     pub fn window(&self, left: &Clip, right: &Clip) -> std::ops::Range<FrameIdx> {
         let (split_left, split_right) = self.split();
         (left.timeline_end() - split_left)..(right.timeline_start + split_right)
     }
 
-    /// Progresso 0..1 di `frame` nella finestra: 0 all'inizio (sinistra
-    /// ancora del tutto a posto, destra del tutto fuori), 1 alla fine
-    /// (opposto). Applica già `ease`/`curve`.
+    /// Progress 0..1 of `frame` in the window: 0 at the start (left
+    /// still entirely in place, right entirely out), 1 at the end
+    /// (the opposite). It already applies `ease`/`curve`.
     pub fn eased_progress_at(&self, frame: FrameIdx, left: &Clip, right: &Clip) -> f32 {
         let window = self.window(left, right);
         let len = (window.end - window.start).max(1);
@@ -1477,17 +1478,17 @@ impl CrossTransition {
         eased(raw.clamp(0.0, 1.0), self.transition.ease, self.transition.curve)
     }
 
-    /// Offset di posizione (stesse unità pixel di `Transform.position`) dei
-    /// lati sinistro e destro al progresso già "easato" `progress`: il
-    /// sinistro esce, il destro entra, nello stesso verso — stessa
-    /// matematica di `Clip::transition_offset_at`, qui applicata a un
-    /// progresso condiviso dall'intera finestra invece che locale al bordo
-    /// di una singola clip.
-    /// `left_zoom`/`right_zoom` sono quelli già campionati del transform di
-    /// ciascuna clip allo stesso frame (vedi `push_clearance` e il doc di
-    /// `Clip::transition_offset_at`): ognuna può avere il suo, la spinta
-    /// di chi è più zoomato deve arrivare più lontano per liberare
-    /// davvero lo schermo.
+    /// Position offset (same pixel units as `Transform.position`) of the
+    /// left and right sides at the already "eased" progress `progress`: the
+    /// left one exits, the right one enters, in the same direction — same
+    /// mathematics as `Clip::transition_offset_at`, applied here to a
+    /// progress shared by the whole window instead of local to the edge
+    /// of a single clip.
+    /// `left_zoom`/`right_zoom` are the already sampled ones of the transform of
+    /// each clip at the same frame (see `push_clearance` and the docs of
+    /// `Clip::transition_offset_at`): each can have its own, the push
+    /// of the more zoomed one must reach farther to really
+    /// clear the screen.
     pub fn offsets(&self, progress: f32, frame_size: (f32, f32), left_zoom: [f32; 2], right_zoom: [f32; 2]) -> ([f32; 2], [f32; 2]) {
         let vec = self.transition.direction.vector();
         let left_amount = progress * push_clearance(vec, left_zoom);
@@ -1503,7 +1504,7 @@ pub struct Timeline {
     pub name: String,
     pub fps: Rational,
     pub resolution: (u32, u32),
-    /// Ordine di compositing: bottom -> top.
+    /// Compositing order: bottom -> top.
     pub tracks: Vec<Track>,
 }
 
@@ -1516,8 +1517,8 @@ impl Timeline {
         self.tracks.get_mut(track_index)?.clip_mut(id)
     }
 
-    /// Ultimo frame (esclusivo) coperto da una qualunque clip della
-    /// timeline, su qualunque track.
+    /// Last frame (exclusive) covered by any clip of the
+    /// timeline, on any track.
     pub fn total_frames(&self) -> FrameIdx {
         self.tracks
             .iter()
@@ -1527,7 +1528,7 @@ impl Timeline {
             .unwrap_or(0)
     }
 
-    /// Nome della track come in un NLE: V1, V2… A1, A2…, per tipo.
+    /// Track name as in an NLE: V1, V2… A1, A2…, per kind.
     pub fn track_label(&self, track_index: usize) -> String {
         let number = self.track_number(track_index);
         match self.tracks[track_index].kind {
@@ -1536,19 +1537,19 @@ impl Timeline {
         }
     }
 
-    /// Posizione della track fra quelle del suo tipo, da 1 (la V/A di
+    /// Position of the track among those of its kind, from 1 (the V/A of
     /// `track_label`).
     pub fn track_number(&self, track_index: usize) -> usize {
         let kind = self.tracks[track_index].kind;
         self.tracks[..=track_index].iter().filter(|t| t.kind == kind).count()
     }
 
-    /// Indice assoluto della `number`-esima track (da 1) di tipo `kind`.
+    /// Absolute index of the `number`-th track (from 1) of kind `kind`.
     pub fn track_of_kind_numbered(&self, kind: TrackKind, number: usize) -> Option<usize> {
         self.tracks_of_kind(kind).map(|(i, _)| i).nth(number.checked_sub(1)?)
     }
 
-    /// Le track di tipo `kind`, con il loro indice assoluto in `tracks`.
+    /// The tracks of kind `kind`, with their absolute index in `tracks`.
     pub fn tracks_of_kind(
         &self,
         kind: TrackKind,
@@ -1559,13 +1560,13 @@ impl Timeline {
             .filter(move |(_, t)| t.kind == kind)
     }
 
-    /// Prima track di tipo `kind`.
+    /// First track of kind `kind`.
     pub fn first_track_index(&self, kind: TrackKind) -> Option<usize> {
         self.tracks_of_kind(kind).map(|(i, _)| i).next()
     }
 
-    /// Le clip video che coprono `frame`, una per track, dal basso verso
-    /// l'alto (ordine di compositing). Esclude clip e track disattivate.
+    /// The video clips covering `frame`, one per track, from bottom to
+    /// top (compositing order). Excludes disabled clips and tracks.
     pub fn active_video_clips_at(&self, frame: FrameIdx) -> Vec<(usize, &Clip)> {
         self.tracks_of_kind(TrackKind::Video)
             .filter(|(_, t)| !t.muted)
@@ -1579,8 +1580,8 @@ impl Timeline {
             .collect()
     }
 
-    /// Le track audio che finiscono nel mix: non mute e, se qualcuna è in
-    /// solo, solo quelle.
+    /// The audio tracks ending up in the mix: not muted and, if any is
+    /// soloed, only those.
     pub fn audible_tracks(&self) -> impl Iterator<Item = (usize, &Track)> {
         let any_solo = self.tracks_of_kind(TrackKind::Audio).any(|(_, t)| t.solo);
         self.tracks_of_kind(TrackKind::Audio)
@@ -1591,7 +1592,7 @@ impl Timeline {
         self.tracks.get(track_index).is_some_and(|t| t.locked)
     }
 
-    /// La prima track di tipo `kind` non bloccata.
+    /// The first unlocked track of kind `kind`.
     pub fn first_unlocked_track_index(&self, kind: TrackKind) -> Option<usize> {
         self.tracks_of_kind(kind).find(|(_, t)| !t.locked).map(|(i, _)| i)
     }
@@ -1607,8 +1608,8 @@ impl Timeline {
             })
     }
 
-    /// Le clip di `group` su tutte le track. Uno scan: si chiama solo su
-    /// interazioni utente.
+    /// The clips of `group` on all the tracks. One scan: it is called only on
+    /// user interactions.
     pub fn clips_in_group(&self, group: LinkGroupId) -> Vec<(usize, ClipId)> {
         self.tracks
             .iter()
@@ -1622,7 +1623,7 @@ impl Timeline {
             .collect()
     }
 
-    /// Gli altri membri del gruppo collegato di una clip, lei esclusa.
+    /// The other members of the linked group of a clip, excluding it.
     pub fn linked_members(&self, track_index: usize, clip_id: ClipId) -> Vec<(usize, ClipId)> {
         let Some(group) = self.clip(track_index, clip_id).and_then(|c| c.linked_group) else {
             return Vec::new();
@@ -1641,12 +1642,12 @@ pub struct Project {
     next_clip_id: u64,
     #[serde(default)]
     next_link_group_id: u64,
-    /// Numero più alto mai assegnato a una compound clip: tenuto solo per
-    /// compatibilità con i progetti salvati, il nome nuovo lo sceglie
+    /// Highest number ever assigned to a compound clip: kept only for
+    /// compatibility with saved projects, the new name is chosen by
     /// `alloc_compound_name`.
     #[serde(default)]
     next_compound_id: u64,
-    /// Contatore per `MediaItem::content_hash` delle compound clip: vedi
+    /// Counter for `MediaItem::content_hash` of the compound clips: see
     /// `Project::touch_compound`.
     #[serde(default)]
     next_compound_generation: u64,
@@ -1665,8 +1666,8 @@ impl Project {
         id
     }
 
-    /// Nome per una nuova compound clip nel media pool: il numero libero
-    /// più basso, così cancellarne una ne libera il nome.
+    /// Name for a new compound clip in the media pool: the lowest free
+    /// number, so deleting one frees its name.
     pub fn alloc_compound_name(&mut self) -> String {
         let used: std::collections::HashSet<u64> = self
             .media_pool
@@ -1681,21 +1682,33 @@ impl Project {
         format!("{COMPOUND_NAME_PREFIX}{number}")
     }
 
-    /// Nuovo valore per `MediaItem::content_hash` di una compound clip: da
-    /// assegnare alla creazione e ogni volta che la sua timeline annidata
-    /// cambia, per invalidare la cache dei frame compositati che dipendono
-    /// dal suo contenuto.
+    /// Name for a new timeline: the lowest free "Timeline N", so deleting
+    /// one frees its name.
+    pub fn alloc_timeline_name(&self) -> String {
+        let used: std::collections::HashSet<u64> = self
+            .timelines
+            .values()
+            .filter_map(|tl| tl.name.strip_prefix(TIMELINE_NAME_PREFIX)?.parse().ok())
+            .collect();
+        let number = (1..).find(|n| !used.contains(n)).unwrap_or(1);
+        format!("{TIMELINE_NAME_PREFIX}{number}")
+    }
+
+    /// New value for `MediaItem::content_hash` of a compound clip: to be
+    /// assigned on creation and every time its nested timeline
+    /// changes, to invalidate the cache of composited frames depending
+    /// on its content.
     pub fn alloc_compound_generation(&mut self) -> u64 {
         self.next_compound_generation += 1;
         self.next_compound_generation
     }
 
-    /// Ricalcola `meta`/`content_hash` di una compound clip dalla sua
-    /// timeline annidata attuale. Da chiamare dopo ogni comando che tocca
-    /// quella timeline, non solo alla creazione: `meta.duration_frames`
-    /// (quindi `Clip::timeline_len` disponibile in un drag dal media pool)
-    /// deve riflettere il contenuto vero, non quello al momento della
-    /// creazione.
+    /// Recomputes `meta`/`content_hash` of a compound clip from its
+    /// current nested timeline. To be called after every command touching
+    /// that timeline, not only on creation: `meta.duration_frames`
+    /// (hence the `Clip::timeline_len` available in a drag from the media pool)
+    /// must reflect the real content, not the one at the time of
+    /// creation.
     pub fn sync_compound_meta(&mut self, media_id: MediaId) {
         let Some(item) = self.media_pool.get(media_id) else { return };
         let Some(timeline_id) = item.compound else { return };
@@ -1723,16 +1736,16 @@ impl Project {
         item.content_hash = generation;
     }
 
-    /// `true` se una clip che referenzia `media_id` (una compound clip, o la
-    /// timeline del progetto stessa: vedi `MediaItem::compound`) non può
-    /// atterrare su `destination` senza chiudere un ciclo — cioè se
-    /// `destination` è raggiungibile dalla timeline annidata di
-    /// `media_id`, seguendo a sua volta le compound clip che contiene, a
-    /// qualunque profondità (import diretto di una timeline dentro se
-    /// stessa, o indiretto attraverso una sua compound clip). Il rendering
-    /// ha comunque un limite di profondità come rete di sicurezza (vedi
-    /// `MAX_COMPOUND_DEPTH` in `vv_app::render_ahead`), ma un ciclo non
-    /// deve poter essere creato in primo luogo.
+    /// `true` if a clip referencing `media_id` (a compound clip, or the
+    /// project timeline itself: see `MediaItem::compound`) cannot
+    /// land on `destination` without closing a cycle — that is, if
+    /// `destination` is reachable from the nested timeline of
+    /// `media_id`, following in turn the compound clips it contains, at
+    /// any depth (direct import of a timeline inside itself,
+    /// or indirect through one of its compound clips). The rendering
+    /// has a depth limit anyway as a safety net (see
+    /// `MAX_COMPOUND_DEPTH` in `vv_app::render_ahead`), but a cycle must
+    /// not be creatable in the first place.
     pub fn would_create_a_cycle(&self, media_id: MediaId, destination: TimelineId) -> bool {
         let Some(start) = self.media_pool.get(media_id).and_then(|m| m.compound) else {
             return false;
@@ -1765,8 +1778,8 @@ impl Project {
         false
     }
 
-    /// Ricalcola `Clip::rate` dagli fps. `source_offset`/`timeline_len` sono
-    /// in frame di timeline e non cambiano.
+    /// Recomputes `Clip::rate` from the fps. `source_offset`/`timeline_len` are
+    /// in timeline frames and do not change.
     pub fn refresh_clip_rates(&mut self) {
         let media_pool = &self.media_pool;
         for timeline in self.timelines.values_mut() {
@@ -1810,8 +1823,8 @@ mod keyframe_tests {
     #[test]
     fn a_bezier_keyframe_interpolates_along_its_curve() {
         let mut k: Keyframed<f32> = Keyframed::constant(0.0);
-        // Controlli schiacciati in basso: a metà segmento il valore è
-        // ancora sotto la metà.
+        // Controls squashed low: at half the segment the value is
+        // still below half.
         k.upsert(0, 0.0, Interpolation::Bezier { c1: [0.5, 0.0], c2: [1.0, 0.0] });
         k.upsert(10, 100.0, Interpolation::Linear);
         assert!(k.value_at(5) < 50.0);
@@ -1881,7 +1894,7 @@ mod keyframe_tests {
         assert_eq!(k.value_at(10), 100.0);
         let mid = k.value_at(5);
         assert!((0.0..=100.0).contains(&mid));
-        // Monotonicità: valori crescenti col tempo.
+        // Monotonicity: values increasing with time.
         let mut last = k.value_at(0);
         for f in 1..=10 {
             let v = k.value_at(f);
@@ -2022,9 +2035,9 @@ mod timeline_tests {
 
     #[test]
     fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
-        // Due track video: la prima (indice 0, "bottom") copre [0, 30), la
-        // seconda (indice 1, "top") solo [10, 20) — un layer più corto
-        // sovrapposto a uno più lungo, il caso base del blend-over
+        // Two video tracks: the first (index 0, "bottom") covers [0, 30), the
+        // second (index 1, "top") only [10, 20) — a shorter layer
+        // overlapping a longer one, the base case of blend-over
         // (REFACTOR_PIPELINE.md B4).
         let tl = Timeline {
             name: "T".into(),
@@ -2189,7 +2202,7 @@ mod timeline_tests {
                 },
                 Track {
                     kind: TrackKind::Audio,
-                    clips: vec![clip_at(15, 10, 2)], // finisce a 25, più avanti della video
+                    clips: vec![clip_at(15, 10, 2)], // ends at 25, later than the video one
                     muted: false,
                     solo: false,
                     locked: false,
@@ -2216,14 +2229,14 @@ mod timeline_tests {
         )
     }
 
-    /// 59,94 fps su una timeline a 60: la clip dura in timeline quanto
-    /// dura davvero (0,1% in più di frame), non 1:1 come i frame sorgente.
+    /// 59.94 fps on a 60 fps timeline: the clip lasts on the timeline as long as
+    /// it really lasts (0.1% more frames), not 1:1 like the source frames.
     #[test]
     fn a_clip_slower_than_the_timeline_lasts_longer_in_timeline_frames() {
         let rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
         assert_eq!(rate, Rational::new(1001, 1000));
 
-        // 15 minuti di sorgente a 59,94 fps.
+        // 15 minutes of source at 59.94 fps.
         let source_len = 53_946;
         let clip = media_clip_at(rate, 0, source_len, 0);
         assert_eq!(clip.source_len(), source_len);
@@ -2242,9 +2255,9 @@ mod timeline_tests {
             "ultimo frame sorgente sull'ultimo frame di timeline"
         );
 
-        // Nessuna deriva accumulata: a ogni istante il frame sorgente
-        // mostrato resta quello che compete al tempo reale trascorso
-        // (tolleranza di mezzo frame, l'arrotondamento inevitabile).
+        // No accumulated drift: at every instant the source frame
+        // shown stays the one belonging to the real elapsed time
+        // (half a frame of tolerance, the unavoidable rounding).
         for t in (0..clip.timeline_len).step_by(137) {
             let secs = t as f64 / 60.0;
             let expected = secs * (60000.0 / 1001.0);
@@ -2258,7 +2271,7 @@ mod timeline_tests {
 
     #[test]
     fn source_frame_at_maps_a_faster_media_by_skipping_frames() {
-        // 50 fps su timeline a 25: due frame sorgente per frame timeline.
+        // 50 fps on a 25 fps timeline: two source frames per timeline frame.
         let rate = Rational::conform_rate(Rational::new(25, 1), Rational::new(50, 1));
         assert_eq!(rate, Rational::new(1, 2));
         let clip = media_clip_at(rate, 0, 100, 0);
@@ -2270,7 +2283,7 @@ mod timeline_tests {
 
     #[test]
     fn source_frame_at_maps_a_slower_media_by_repeating_frames() {
-        // 25 fps su timeline a 30: 6 frame di timeline ogni 5 sorgente.
+        // 25 fps on a 30 fps timeline: 6 timeline frames every 5 source ones.
         let rate = Rational::conform_rate(Rational::new(30, 1), Rational::new(25, 1));
         assert_eq!(rate, Rational::new(6, 5));
         let clip = media_clip_at(rate, 0, 25, 0);
@@ -2374,9 +2387,9 @@ mod timeline_tests {
         assert_eq!(tl.total_frames(), 0);
     }
 
-    /// Un progetto salvato prima di un parametro nuovo ha meno tracce: il
-    /// parametro mancante deve tornare al suo default, non far fallire il
-    /// caricamento.
+    /// A project saved before a new parameter has fewer tracks: the
+    /// missing parameter must go back to its default, not make the
+    /// loading fail.
     #[test]
     fn transform_tracks_saved_without_a_newer_param_load_with_its_default() {
         let older = "(params: [], flip: (false, false))";

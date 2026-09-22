@@ -1,8 +1,8 @@
-//! Pannelli del media pool e degli effetti.
+//! Media pool and effects panels.
 
 use super::*;
 
-/// Anello di avanzamento; `None` = in coda (solo l'anello di sfondo).
+/// Progress ring; `None` = queued (background ring only).
 pub(crate) fn proxy_progress_ring(ui: &mut egui::Ui, fraction: Option<f32>) -> egui::Response {
     const SIZE: f32 = 34.0;
     const STROKE: f32 = 3.0;
@@ -30,7 +30,7 @@ pub(crate) fn proxy_progress_ring(ui: &mut egui::Ui, fraction: Option<f32>) -> e
     response
 }
 
-/// Etichetta che segue il cursore mentre si trascina un media.
+/// Label following the cursor while dragging a media.
 pub(crate) fn show_drag_ghost(ui: &egui::Ui, id: egui::Id, label: &str) {
     let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
         return;
@@ -59,8 +59,8 @@ pub(crate) fn effects_section_header(ui: &mut egui::Ui, title: &str) {
     );
 }
 
-/// Voce del pannello Effects: miniatura a sinistra e nome, trascinabile
-/// sulla timeline.
+/// Effects panel entry: thumbnail on the left and name, draggable onto
+/// the timeline.
 pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
     let id = ui.id().with(("effect_item", generator.label()));
@@ -105,10 +105,10 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
     }
 }
 
-/// Voce di un filtro nel pannello Effects: si trascina su una clip video
-/// esistente (mai su uno spazio vuoto). Il tipo (`vv_core::FilterKind`) è lo
-/// stesso salvato in `EffectStack::filters`: nessuna doppia rappresentazione
-/// fra editor e modello.
+/// Filter entry in the Effects panel: dragged onto an existing video clip
+/// (never onto empty space). The kind (`vv_core::FilterKind`) is the same one
+/// saved in `EffectStack::filters`: no double representation between editor
+/// and model.
 pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
     let label = timeline_ui::filter_label(filter);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
@@ -141,10 +141,10 @@ pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
     }
 }
 
-/// Voce di una transizione nel pannello Effects: si trascina vicino a un
-/// bordo (sinistro o destro) di una clip video esistente, mai al centro né
-/// su uno spazio vuoto. Il tipo (`vv_core::TransitionKind`) è lo stesso
-/// salvato in `EffectStack::transition_in`/`transition_out`.
+/// Transition entry in the Effects panel: dragged near an edge (left or
+/// right) of an existing video clip, never at its center nor onto empty
+/// space. The kind (`vv_core::TransitionKind`) is the same one saved in
+/// `EffectStack::transition_in`/`transition_out`.
 pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) {
     let label = timeline_ui::transition_kind_label(kind);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
@@ -177,15 +177,20 @@ pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) 
     }
 }
 
-/// Larghezza della colonna "Durata": la stessa nell'intestazione e nelle
-/// righe, così restano allineate.
+/// Width of the "Duration" column: the same in the header and in the rows,
+/// so they stay aligned.
 pub(crate) const DURATION_COL_W: f32 = 64.0;
 
-/// Altezza della barra di intestazione del media pool.
+/// Free background on the sides and below the items: always somewhere to
+/// right click, even with the pool full.
+pub(crate) const SIDE_PAD: i8 = 6;
+pub(crate) const BOTTOM_PAD: f32 = 28.0;
+
+/// Height of the media pool header bar.
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 
-/// Intestazione a colonne del media pool: ogni cella è cliccabile per
-/// intero (non solo la scritta), come nella lista di un file manager.
+/// Column header of the media pool: every cell is clickable in full
+/// (not just the text), as in a file manager list.
 pub(crate) fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::MediaPoolState) {
     use media_pool::SortKey;
     let width = ui.available_width();
@@ -226,8 +231,8 @@ pub(crate) fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::Media
             text_color,
         );
         if active {
-            // Triangolino disegnato a mano invece di un carattere: quelli
-            // dei font di sistema sono alti e appuntiti, questo è schiacciato.
+            // Small triangle drawn by hand instead of a character: the ones
+            // in system fonts are tall and pointy, this one is squashed.
             let c = egui::pos2(cell.right() - 10.0, cell.center().y);
             let (w, h) = (4.5, 2.5);
             let points = if sort.ascending {
@@ -263,7 +268,7 @@ pub(crate) fn file_label(path: &std::path::Path) -> String {
 }
 
 impl VenturiApp {
-    /// Contenuto della sezione Media pool nella colonna di sinistra.
+    /// Contents of the Media pool section in the left column.
     pub(crate) fn show_media_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
         if let Some(worker) = &self.proxy_worker {
             let progress = worker.progress();
@@ -289,8 +294,8 @@ impl VenturiApp {
             }
         }
         media_pool_header(ui, &mut self.media_pool_state);
-        // `auto_shrink` spento: il pannello deve riempire la larghezza assegnata,
-        // altrimenti il suo resize torna indietro.
+        // `auto_shrink` off: the panel must fill the assigned width,
+        // otherwise its resize springs back.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -316,14 +321,32 @@ impl VenturiApp {
                     .iter()
                     .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
                     .collect();
-                // Interagito prima degli elementi: in egui vince l'ultimo, così un click
-                // su un elemento non fa partire il rettangolo di selezione.
+                // Interacted with before the items: in egui the last one wins, so a click
+                // on an item does not start the selection rectangle.
                 let bg = ui.interact(
                     ui.available_rect_before_wrap(),
                     ui.id().with("media_pool_bg"),
                     egui::Sense::click_and_drag(),
                 );
+                bg.context_menu(|ui| {
+                    ui.menu_button(t!("pool.timelines"), |ui| {
+                        if ui.button(t!("menu.import_otio")).clicked() {
+                            self.request_project_switch(ProjectSwitch::ImportOtio);
+                            ui.close();
+                        }
+                        if ui.button(t!("pool.new_timeline")).clicked() {
+                            self.open_new_timeline_dialog();
+                            ui.close();
+                        }
+                    });
+                });
                 let mut item_rects: Vec<(MediaId, egui::Rect)> = Vec::new();
+                // The items leave a strip of background on the sides (and
+                // `BOTTOM_PAD` below): with a full pool there would be no
+                // free spot left to right click on.
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(SIDE_PAD, 0))
+                    .show(ui, |ui| {
                 for (id, label, meta, content_hash) in items {
                     let proxy_state = self
                         .proxy_worker
@@ -400,7 +423,7 @@ impl VenturiApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        // Un'immagine non ha durata reale.
+                                        // An image has no real duration.
                                         let duration_label = if meta.is_image() {
                                             "—".to_string()
                                         } else {
@@ -440,7 +463,7 @@ impl VenturiApp {
                             timeline_ui::PROXY_COLOR,
                         );
                     }
-                    // Doppio click: anteprima. Trascinamento: sulla timeline aggiunge il media.
+                    // Double click: preview. Drag: adds the media onto the timeline.
                     let interact_id = ui.id().with("media_pool_item").with(id);
                     let resp = ui
                         .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
@@ -465,7 +488,7 @@ impl VenturiApp {
                         let modifiers = ui.input(|i| i.modifiers);
                         self.media_pool_state.click(id, modifiers, &order);
                     }
-                    // Tasto destro fuori dalla selezione la sostituisce, come il drag.
+                    // Right click outside the selection replaces it, like a drag.
                     if resp.secondary_clicked() && !self.media_pool_state.selected.contains(&id) {
                         self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
                     }
@@ -481,15 +504,15 @@ impl VenturiApp {
                             ui.close();
                         }
                     });
-                    // Trascinare un elemento fuori dalla selezione la
-                    // sostituisce con lui (come in timeline, vedi
+                    // Dragging an item outside the selection replaces it
+                    // with that item (as on the timeline, see
                     // `timeline_ui::drag_group_for`).
                     if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
                         self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
                     }
-                    // Trascinare un elemento della selezione trascina
-                    // l'intera selezione, nell'ordine del pannello: la
-                    // timeline le accoda una dopo l'altra.
+                    // Dragging an item of the selection drags the whole
+                    // selection, in panel order: the timeline appends them
+                    // one after the other.
                     let payload = if self.media_pool_state.selected.len() > 1
                         && self.media_pool_state.selected.contains(&id)
                     {
@@ -510,11 +533,11 @@ impl VenturiApp {
                     let dragged_count = payload.items.len();
                     resp.dnd_set_drag_payload(payload);
                     if resp.double_clicked() {
-                        // Una compound clip (o la timeline del progetto,
-                        // vedi `MediaItem::compound`) si apre come una sua
-                        // propria timeline, esattamente come un doppio
-                        // click sulla sua istanza in timeline — non ha
-                        // senso "anteprima" per lei.
+                        // A compound clip (or the project timeline, see
+                        // `MediaItem::compound`) opens as a timeline of its
+                        // own, exactly like a double click on its instance
+                        // on the timeline — "preview" makes no sense for
+                        // it.
                         match self.project.media_pool.get(id).and_then(|m| m.compound) {
                             Some(nested_id) => self.enter_compound_timeline(nested_id),
                             None => *preview_action = Some(id),
@@ -529,6 +552,8 @@ impl VenturiApp {
                         show_drag_ghost(ui, interact_id, &ghost);
                     }
                 }
+                    });
+                ui.add_space(BOTTOM_PAD);
 
                 if bg.drag_started() {
                     if let Some(pos) = bg.interact_pointer_pos() {
@@ -569,7 +594,7 @@ impl VenturiApp {
             });
     }
 
-    /// Sezione Effects: generatori ed effetti da trascinare sulla timeline.
+    /// Effects section: generators and effects to drag onto the timeline.
     pub(crate) fn show_effects_list(ui: &mut egui::Ui) {
         effects_section_header(ui, &t!("effects.generators"));
         egui::ScrollArea::vertical()
