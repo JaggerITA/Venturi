@@ -22,14 +22,127 @@ pub const AUDIO_ONLY_FPS: Rational = Rational::new(30, 1);
 /// is needed.
 pub const IMAGE_FPS: Rational = Rational::new(25, 1);
 
+/// Above this the declared fps is not a frame rate but the container's
+/// tick rate: VFR recordings (Android screen capture, some phone cameras)
+/// carry `r_frame_rate = 90000`, and trusting it would inflate
+/// `duration_frames` by five orders of magnitude.
+const MAX_PLAUSIBLE_FPS: f64 = 1000.0;
+
+/// Fallback when neither declared rate is usable.
+const UNKNOWN_FPS: Rational = Rational::new(30, 1);
+
+/// Ceiling for the rate measured on a VFR stream: beyond this the cost of
+/// conforming it to CFR outweighs the smoothness gained.
+const MAX_MEASURED_FPS: i32 = 120;
+
+/// The rate at which the media is decoded and indexed. `r_frame_rate` is
+/// the finest tick the stream can express, not its real rate: phone screen
+/// captures declare 90000 there, so it is only believed when plausible.
+pub(crate) fn media_fps(path: &Path, video: &ffmpeg::format::stream::Stream) -> Rational {
+    let rate = video.rate();
+    if let Some(fps) = plausible_fps(rate.numerator(), rate.denominator()) {
+        return fps;
+    }
+    // A VFR stream gets conformed to CFR, and the average rate would drop
+    // the bursts: a clip averaging 4 fps because the screen is still can
+    // still hold 60 fps of real motion. The peak is what makes those
+    // stretches play smoothly.
+    measured_peak_fps(path)
+        .or_else(|| {
+            let avg = video.avg_frame_rate();
+            plausible_fps(avg.numerator(), avg.denominator())
+        })
+        .unwrap_or(UNKNOWN_FPS)
+}
+
+fn plausible_fps(num: i32, den: i32) -> Option<Rational> {
+    (num > 0 && den > 0 && f64::from(num) / f64::from(den) <= MAX_PLAUSIBLE_FPS)
+        .then(|| Rational::new(num, den))
+}
+
+/// Frames in the densest one-second window, demuxing the whole file without
+/// decoding. Memoized: `Decoder::open` needs the same value as `probe` and
+/// is called again on every seek far from the playhead.
+fn measured_peak_fps(path: &Path) -> Option<Rational> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<(std::path::PathBuf, u64, i64), Option<Rational>>>> =
+        OnceLock::new();
+    let meta = std::fs::metadata(path).ok()?;
+    let key = (
+        path.to_path_buf(),
+        meta.len(),
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64),
+    );
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return *hit;
+    }
+    let measured = peak_fps_of_window(&packet_times(path)?);
+    cache.lock().unwrap().insert(key, measured);
+    measured
+}
+
+fn packet_times(path: &Path) -> Option<Vec<f64>> {
+    let mut input = ffmpeg::format::input(&path).ok()?;
+    let stream = input.streams().best(ffmpeg::media::Type::Video)?;
+    let stream_index = stream.index();
+    let time_base = seconds_per_tick(stream.time_base());
+    let mut times: Vec<f64> = input
+        .packets()
+        .filter(|(stream, _)| stream.index() == stream_index)
+        .filter_map(|(_, packet)| packet.pts().map(|pts| pts as f64 * time_base))
+        .collect();
+    times.sort_by(f64::total_cmp);
+    Some(times)
+}
+
+fn peak_fps_of_window(times: &[f64]) -> Option<Rational> {
+    if times.len() < 2 {
+        return None;
+    }
+    let mut start = 0usize;
+    let mut peak = 0usize;
+    for end in 0..times.len() {
+        while times[end] - times[start] >= 1.0 {
+            start += 1;
+        }
+        peak = peak.max(end - start + 1);
+    }
+    if peak < 2 {
+        return None;
+    }
+    Some(Rational::new(
+        snapped_to_a_common_rate(peak as i32).min(MAX_MEASURED_FPS),
+        1,
+    ))
+}
+
+/// The count in the densest window is off by a frame or two — pts jitter at
+/// one end of the window, a dropped frame at the other. A capture device
+/// targets a standard rate, so the nearby one is the real answer.
+fn snapped_to_a_common_rate(measured: i32) -> i32 {
+    const COMMON: [i32; 8] = [24, 25, 30, 48, 50, 60, 90, 120];
+    COMMON
+        .into_iter()
+        .filter(|&rate| (measured - rate).abs() * 10 <= rate)
+        // On a tie the higher rate wins: conforming too low drops real
+        // frames, too high only repeats them.
+        .min_by_key(|&rate| ((measured - rate).abs(), -rate))
+        .unwrap_or(measured)
+}
+
 pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     ensure_init();
     let input = ffmpeg::format::input(&path)?;
 
     let video = match input.streams().best(ffmpeg::media::Type::Video) {
         Some(video) => {
-            let rate = video.rate();
-            let fps = Rational::new(rate.numerator(), rate.denominator());
+            let fps = media_fps(path, &video);
             let decoder = ffmpeg::codec::context::Context::from_parameters(video.parameters())?
                 .decoder()
                 .video()?;
@@ -277,6 +390,51 @@ pub fn content_fingerprint(path: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Android screen capture declares `r_frame_rate = 90000`, the
+    /// container tick rate: believing it inflated `duration_frames` by five
+    /// orders of magnitude and froze the preview.
+    #[test]
+    fn a_tick_rate_masquerading_as_r_frame_rate_is_not_plausible() {
+        assert_eq!(plausible_fps(90000, 1), None);
+        assert_eq!(plausible_fps(0, 0), None);
+        assert_eq!(plausible_fps(60, 1), Some(Rational::new(60, 1)));
+        assert_eq!(plausible_fps(30000, 1001), Some(Rational::new(30000, 1001)));
+    }
+
+    /// A clip that is still for most of its length but holds real motion in
+    /// bursts: the average (~4 fps here) would make those stretches play in
+    /// slideshow, the peak keeps them smooth.
+    #[test]
+    fn the_measured_rate_is_the_peak_not_the_average() {
+        let mut times: Vec<f64> = (0..60).map(|i| f64::from(i) / 60.0).collect();
+        times.extend((1..10).map(f64::from));
+        assert_eq!(peak_fps_of_window(&times), Some(Rational::new(60, 1)));
+    }
+
+    #[test]
+    fn a_rate_measured_off_by_jitter_snaps_to_the_standard_one() {
+        assert_eq!(snapped_to_a_common_rate(61), 60);
+        assert_eq!(snapped_to_a_common_rate(55), 60);
+        assert_eq!(snapped_to_a_common_rate(31), 30);
+        // Too far from any standard rate: it is taken as it is.
+        assert_eq!(snapped_to_a_common_rate(40), 40);
+    }
+
+    #[test]
+    fn the_measured_rate_is_capped() {
+        let times: Vec<f64> = (0..500).map(|i| f64::from(i) / 500.0).collect();
+        assert_eq!(
+            peak_fps_of_window(&times),
+            Some(Rational::new(MAX_MEASURED_FPS, 1))
+        );
+    }
+
+    #[test]
+    fn too_few_packets_to_measure_a_rate() {
+        assert_eq!(peak_fps_of_window(&[]), None);
+        assert_eq!(peak_fps_of_window(&[0.0]), None);
+    }
 
     /// Reproduces the bug scenario: a container declaring more frames than
     /// the decoder actually produces (simulated here by passing

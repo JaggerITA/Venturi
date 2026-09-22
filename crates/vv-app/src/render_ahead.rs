@@ -982,7 +982,7 @@ fn fill_segments(
                         transit_bytes += frame_bytes;
                         transit_frames += 1;
                     }
-                    ctx.caches.insert(segment.media_id, idx, Arc::new(frame));
+                    ctx.caches.insert(segment.media_id, idx, frame);
                     od.next_frame = idx + 1;
                     resumed = true;
                 }
@@ -2157,7 +2157,7 @@ mod tests {
             let od = open.get_mut(&media_a).unwrap();
             match od.decoder.next_frame() {
                 Ok(Some((idx, frame))) => {
-                    caches.insert(media_a, idx, Arc::new(frame));
+                    caches.insert(media_a, idx, frame);
                     od.next_frame = idx + 1;
                 }
                 _ => break,
@@ -2230,7 +2230,7 @@ mod tests {
             let od = open.get_mut(&media_a).unwrap();
             match od.decoder.next_frame() {
                 Ok(Some((idx, frame))) => {
-                    caches.insert(media_a, idx, Arc::new(frame));
+                    caches.insert(media_a, idx, frame);
                     od.next_frame = idx + 1;
                 }
                 _ => break,

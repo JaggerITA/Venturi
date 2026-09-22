@@ -11,6 +11,7 @@ use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::util::color;
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
+use std::sync::Arc;
 use vv_core::FrameIdx;
 
 pub use vv_core::ColorMatrix;
@@ -86,12 +87,21 @@ pub struct Decoder {
     eof_sent: bool,
     /// Frame decoded by `seek_to_time` to check where it landed:
     /// `next_frame` returns it first.
-    pending: Option<(FrameIdx, FrameYuv420)>,
+    pending: Option<(FrameIdx, Arc<FrameYuv420>)>,
     /// The single frame of an image: seek and `next_frame` always return it,
     /// the rest of the decode would treat EOF after one frame as an error.
-    still_image: Option<FrameYuv420>,
+    still_image: Option<Arc<FrameYuv420>>,
     /// Index growing on every `next_frame` on an image, as in a video.
     synthetic_idx: FrameIdx,
+    /// Next index to hand out. The decoder emits a contiguous CFR sequence:
+    /// a VFR source (phone screen capture) leaves holes between one pts and
+    /// the next, and whoever caches by index would wait forever for frames
+    /// the stream never produces.
+    emit_idx: Option<FrameIdx>,
+    /// Last emitted frame, repeated to fill those holes. Shared, not
+    /// copied: a still stretch of a screen capture costs one frame however
+    /// many CFR slots it spans.
+    held: Option<Arc<FrameYuv420>>,
 }
 
 impl Decoder {
@@ -105,8 +115,7 @@ impl Decoder {
             .ok_or_else(|| crate::MediaError::NoStream(path.display().to_string()))?;
         let video_stream_index = video_stream.index();
         let time_base = video_stream.time_base();
-        let rate = video_stream.rate();
-        let fps = vv_core::Rational::new(rate.numerator(), rate.denominator());
+        let fps = crate::probe::media_fps(path, &video_stream);
 
         let mut decoder_ctx =
             ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?.decoder();
@@ -141,6 +150,8 @@ impl Decoder {
             pending: None,
             still_image: None,
             synthetic_idx: 0,
+            emit_idx: None,
+            held: None,
         })
     }
 
@@ -193,6 +204,8 @@ impl Decoder {
             self.decoder.flush();
             self.eof_sent = false;
             self.pending = None;
+            self.emit_idx = None;
+            self.held = None;
             match self.decode_next_frame()? {
                 Some((idx, frame)) if idx > target_idx && ts > 0 => {
                     ts = ts.saturating_sub(step).max(0);
@@ -210,23 +223,59 @@ impl Decoder {
 
     /// Decodes the next available video frame in presentation order.
     /// `Ok(None)` at the end of the stream.
-    pub fn next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
-        if let Some(landed) = self.pending.take() {
-            return Ok(Some(landed));
-        }
-        if let Some(frame) = &self.still_image {
+    pub fn next_frame(
+        &mut self,
+    ) -> Result<Option<(FrameIdx, Arc<FrameYuv420>)>, crate::MediaError> {
+        if let Some(frame) = self.still_image.clone() {
+            if let Some(landed) = self.pending.take() {
+                return Ok(Some(landed));
+            }
             // Called without a preceding seek (`pending` empty): "advances" by
             // a synthetic frame, always the same image — see the docs of
             // `still_image`/`synthetic_idx`.
             let idx = self.synthetic_idx;
             self.synthetic_idx += 1;
-            return Ok(Some((idx, frame.clone())));
+            return Ok(Some((idx, frame)));
         }
-        self.decode_next_frame()
+        loop {
+            if self.pending.is_none() {
+                self.pending = self.decode_next_frame()?;
+            }
+            let Some((decoded_idx, _)) = self.pending.as_ref().map(|(i, f)| (*i, f)) else {
+                return Ok(None);
+            };
+            let emit = *self.emit_idx.get_or_insert(decoded_idx);
+            if decoded_idx == emit {
+                let (_, frame) = self.pending.take().unwrap();
+                self.emit_idx = Some(emit + 1);
+                self.held = Some(frame.clone());
+                return Ok(Some((emit, frame)));
+            }
+            if decoded_idx < emit {
+                // Burst denser than the declared fps: its slot is already
+                // gone. Dropping it keeps the index tied to the pts —
+                // letting it through instead would drift the sequence past
+                // the real duration and break sync with the audio.
+                self.pending = None;
+                continue;
+            }
+            match &self.held {
+                Some(held) => {
+                    let frame = held.clone();
+                    self.emit_idx = Some(emit + 1);
+                    return Ok(Some((emit, frame)));
+                }
+                // Nothing to repeat yet (first frame after a seek): start the
+                // sequence where the stream actually is.
+                None => self.emit_idx = Some(decoded_idx),
+            }
+        }
     }
 
     /// `next_frame` without `pending`.
-    fn decode_next_frame(&mut self) -> Result<Option<(FrameIdx, FrameYuv420)>, crate::MediaError> {
+    fn decode_next_frame(
+        &mut self,
+    ) -> Result<Option<(FrameIdx, Arc<FrameYuv420>)>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Video::empty();
 
         // EOF already sent: only the remaining frames are drained.
@@ -267,7 +316,7 @@ impl Decoder {
     fn finish_frame(
         &mut self,
         decoded: &mut ffmpeg::frame::Video,
-    ) -> Result<(FrameIdx, FrameYuv420), crate::MediaError> {
+    ) -> Result<(FrameIdx, Arc<FrameYuv420>), crate::MediaError> {
         let pts = decoded.pts().unwrap_or(0);
         let secs =
             pts as f64 * self.time_base.numerator() as f64 / self.time_base.denominator() as f64;
@@ -283,7 +332,7 @@ impl Decoder {
                 || without_deprecated_range(format) != format);
         decoded.set_format(without_deprecated_range(format));
         let frame = yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range)?;
-        Ok((idx, frame))
+        Ok((idx, Arc::new(frame)))
     }
 }
 
@@ -383,7 +432,7 @@ fn yuv420_from_decoded(
 mod tests {
     use super::*;
 
-    fn decode_first_frame(path: &Path) -> Result<FrameYuv420, crate::MediaError> {
+    fn decode_first_frame(path: &Path) -> Result<Arc<FrameYuv420>, crate::MediaError> {
         let mut decoder = Decoder::open(path)?;
         decoder
             .next_frame()?
@@ -451,6 +500,90 @@ mod tests {
             &path,
         );
         path
+    }
+
+    /// Phone screen capture: frames only when the picture changes, so the
+    /// pts leave long holes. 30 fps declared, 6 frames in 3.1 s.
+    fn make_vfr_test_clip(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("vv-media-decode-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        crate::test_support::ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x64:rate=30:duration=4",
+                "-vf",
+                "select='eq(n,0)+eq(n,10)+eq(n,50)+eq(n,90)+eq(n,91)+eq(n,92)'",
+                "-fps_mode",
+                "passthrough",
+                "-c:v",
+                "libx264",
+                "-g",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            &path,
+        );
+        path
+    }
+
+    /// The cache demands every index of a range: on a VFR source the holes
+    /// between one pts and the next were never filled and the preview
+    /// waited forever for frames the stream does not contain.
+    #[test]
+    fn a_vfr_stream_is_decoded_as_a_contiguous_cfr_sequence() {
+        let path = make_vfr_test_clip("vfr.mp4");
+        let mut decoder = Decoder::open(&path).unwrap();
+        let mut indices = Vec::new();
+        while let Some((idx, _)) = decoder.next_frame().unwrap() {
+            indices.push(idx);
+        }
+        assert_eq!(
+            indices,
+            (0..=92).collect::<Vec<_>>(),
+            "attesa la sequenza CFR completa dai 6 frame reali"
+        );
+    }
+
+    /// The holes are filled by sharing the held frame: a long still
+    /// stretch must not cost one full copy per CFR slot.
+    #[test]
+    fn the_frames_filling_a_hole_share_one_allocation() {
+        let path = make_vfr_test_clip("vfr_shared.mp4");
+        let mut decoder = Decoder::open(&path).unwrap();
+        let mut frames = Vec::new();
+        while let Some((_, frame)) = decoder.next_frame().unwrap() {
+            frames.push(frame);
+        }
+        let distinct = frames
+            .iter()
+            .map(|f| Arc::as_ptr(f))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(distinct.len(), 6, "attese le 6 allocazioni dei frame reali");
+    }
+
+    #[test]
+    fn a_vfr_stream_stays_contiguous_after_a_seek() {
+        let path = make_vfr_test_clip("vfr_seek.mp4");
+        let mut decoder = Decoder::open(&path).unwrap();
+        decoder.seek_to_time(2.0).unwrap();
+        let mut indices = Vec::new();
+        while let Some((idx, _)) = decoder.next_frame().unwrap() {
+            indices.push(idx);
+        }
+        assert!(
+            indices.first().is_some_and(|&first| first <= 60),
+            "il seek deve atterrare a 2 s o prima: {:?}",
+            indices.first()
+        );
+        assert!(
+            indices.windows(2).all(|w| w[1] == w[0] + 1),
+            "indici non contigui dopo il seek: {indices:?}"
+        );
+        assert_eq!(indices.last(), Some(&92));
     }
 
     fn make_test_clip_with_gop_and_bframes(
@@ -601,7 +734,10 @@ mod tests {
         let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
         let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
 
-        let alpha = frame.alpha.expect("una PNG con trasparenza deve portare il piano alpha");
+        let alpha = frame
+            .alpha
+            .as_ref()
+            .expect("una PNG con trasparenza deve portare il piano alpha");
         assert_eq!(alpha.len(), (frame.width * frame.height) as usize, "alpha non sottocampionata");
         let at = |x: u32, y: u32| alpha[(y * frame.width + x) as usize];
         assert_eq!(at(2, 4), 255, "sinistra: opaca");

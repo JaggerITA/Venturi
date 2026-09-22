@@ -127,7 +127,6 @@ impl ActiveClipDecoder {
         loop {
             match self.decoder.next_frame().map_err(|e| e.to_string())? {
                 Some((idx, frame)) if idx >= target => {
-                    let frame = Arc::new(frame);
                     self.last = Some((idx, frame.clone()));
                     return Ok(Some(frame));
                 }
