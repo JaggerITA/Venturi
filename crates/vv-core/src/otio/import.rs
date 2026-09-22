@@ -552,6 +552,17 @@ fn resolve_parameter(
         ("Cropping", "cropBottom") => track(CropBottom, context.media.1),
         ("Cropping", "cropSoftness") => track(CropSoftness, 1.0),
         ("Composite", "opacity") => track(Opacity, 1.0),
+        ("Composite", "composite mode") => match parameter["Parameter Value"]
+            .as_u64()
+            .and_then(super::resolve::blend_mode)
+        {
+            Some(blend) => {
+                effects.blend_mode = blend;
+                true
+            }
+            // Resolve has modes we do not: let the warning through.
+            None => false,
+        },
         ("Video Faders", "videoFaderIn")
         | ("Fairlight Clip Volume and Fades", "faderIn") => {
             fades.0 = resolve_frames(parameter);
@@ -778,7 +789,7 @@ fn url_to_path(url: &str, base_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ClipId;
+    use crate::model::{BlendMode, ClipId};
     use crate::otio::timeline_to_otio;
     use serde_json::json;
 
@@ -974,7 +985,15 @@ mod tests {
                             }),
                         ])),
                         effect("Cropping", json!([parameter("cropTop", json!(0.25))])),
-                        effect("Composite", json!([parameter("opacity", json!(80.0))])),
+                        effect("Composite", json!([
+                            parameter("opacity", json!(80.0)),
+                            json!({
+                                "Parameter ID": "composite mode",
+                                "Parameter Value": 5,
+                                "Default Parameter Value": 0,
+                                "Variant Type": "UInt",
+                            }),
+                        ])),
                         effect("Video Faders", json!([parameter("videoFaderIn", json!(12.0))])),
                     ],
                 }],
@@ -999,6 +1018,7 @@ mod tests {
         assert_eq!(t.anchor[0], 128.0);
         assert_eq!(t.crop[1], 180.0, "il crop è in pixel del media");
         assert_eq!(t.opacity, 80.0);
+        assert_eq!(clip.effects.blend_mode, BlendMode::Screen);
         assert_eq!(clip.fade_in, 12);
         assert_eq!(
             clip.effects.transform.value_at(10).anchor[0],

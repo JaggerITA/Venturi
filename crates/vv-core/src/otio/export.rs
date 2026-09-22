@@ -348,6 +348,7 @@ mod tests {
         t.track_mut(TransformParam::Opacity).default = 80.0;
         t.flip = [true, false];
         clip.effects.speed = Keyframed::constant(1.705_748_4);
+        clip.effects.blend_mode = BlendMode::Screen;
         clip.fade_in = 12;
         project.timelines[timeline_id].tracks[0].clips.push(clip);
 
@@ -403,6 +404,7 @@ mod tests {
         );
         assert_eq!(value(&named("Cropping"), "cropTop"), 0.1);
         assert_eq!(value(&named("Composite"), "opacity"), 80.0);
+        assert_eq!(raw(&named("Composite"), "composite mode"), 5, "Screen");
         assert_eq!(value(&named("Video Faders"), "videoFaderIn"), 12.0);
 
         // The speed is the one thing Resolve reads from the standard schema.

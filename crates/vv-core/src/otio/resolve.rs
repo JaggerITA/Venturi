@@ -10,8 +10,8 @@
 use super::export::rational_time;
 use crate::FadeEdge;
 use crate::model::{
-    Clip, Ease, FrameIdx, Keyframed, Rational, TrackKind, TransformParam, TransformTracks,
-    Transition,
+    BlendMode, Clip, Ease, FrameIdx, Keyframed, Rational, TrackKind, TransformParam,
+    TransformTracks, Transition,
 };
 use serde_json::{Map, Value, json};
 
@@ -106,12 +106,48 @@ fn cropping(clip: &Clip, scale: &Scale) -> Option<Value> {
     effect("Cropping", "Cropping", 3, 1, parameters)
 }
 
-/// The blend mode stays out of it: `composite mode` is an opaque enum of
-/// Resolve's and we have no mapping for it.
 fn composite(clip: &Clip) -> Option<Value> {
     let t = &clip.effects.transform;
     let opacity = scalar(clip, t, TransformParam::Opacity, "opacity", 1.0, 100.0, [0.0, 100.0]);
-    effect("Composite", "Composite", 1, 1, [opacity, None, None, None, None, None])
+    let mode = composite_mode(clip.effects.blend_mode);
+    let mode = (mode != 0).then(|| {
+        json!({
+            "Parameter ID": "composite mode",
+            "Parameter Value": mode,
+            "Default Parameter Value": 0,
+            "Variant Type": "UInt",
+        })
+    });
+    effect("Composite", "Composite", 1, 1, [mode, opacity, None, None, None, None])
+}
+
+/// Values of Resolve's `composite mode`, read off a file with one clip per
+/// entry of its Composite Mode menu. It has more of them than we do; those
+/// stay out and the import warns about them.
+const COMPOSITE_MODES: [(BlendMode, u64); 15] = [
+    (BlendMode::Normal, 0),
+    (BlendMode::Add, 1),
+    (BlendMode::Subtract, 2),
+    (BlendMode::Difference, 3),
+    (BlendMode::Multiply, 4),
+    (BlendMode::Screen, 5),
+    (BlendMode::Overlay, 6),
+    (BlendMode::HardLight, 7),
+    (BlendMode::SoftLight, 8),
+    (BlendMode::Darken, 9),
+    (BlendMode::Lighten, 10),
+    (BlendMode::ColorDodge, 11),
+    (BlendMode::ColorBurn, 12),
+    (BlendMode::Exclusion, 13),
+    (BlendMode::Divide, 18),
+];
+
+pub(super) fn composite_mode(blend: BlendMode) -> u64 {
+    COMPOSITE_MODES.iter().find(|(b, _)| *b == blend).map_or(0, |(_, mode)| *mode)
+}
+
+pub(super) fn blend_mode(mode: u64) -> Option<BlendMode> {
+    COMPOSITE_MODES.iter().find(|(_, m)| *m == mode).map(|(blend, _)| *blend)
 }
 
 fn video_faders(clip: &Clip) -> Option<Value> {
@@ -375,5 +411,23 @@ fn edge_name(edge: FadeEdge) -> &'static str {
     match edge {
         FadeEdge::In => "in",
         FadeEdge::Out => "out",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every mode of ours exists in Resolve, and the values are the ones a
+    /// file with one clip per entry of its menu carries.
+    #[test]
+    fn the_composite_modes_map_both_ways() {
+        for blend in BlendMode::ALL {
+            let mode = composite_mode(blend);
+            assert_eq!(blend_mode(mode), Some(blend), "{blend:?}");
+        }
+        assert_eq!(composite_mode(BlendMode::Divide), 18);
+        assert_eq!(blend_mode(2), Some(BlendMode::Subtract));
+        assert_eq!(blend_mode(14), None, "Hue non ce l'abbiamo");
     }
 }
