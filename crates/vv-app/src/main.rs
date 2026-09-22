@@ -50,6 +50,9 @@ use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 /// ~6 s of margin at 1080p, ~1.5 s at 4K.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 
+/// Floor of the shrunk lookahead: below this playback stutters anyway.
+const MIN_LOOKAHEAD_SECS: f64 = 0.5;
+
 /// Color of a freshly created Solid Color clip.
 const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba { r: 1.0, g: 1.0, b: 0.0, a: 1.0 };
 
@@ -1293,14 +1296,12 @@ impl VenturiApp {
             render_ahead.update_project(&self.project, timeline_id);
             self.render_ahead_generation = generation;
         }
-        // At speeds >1x the playhead advances faster in real time:
-        // more buffered margin ahead is needed so as not to overtake the
-        // prefetch (see the docs of `effective_lookahead_secs`).
-        if self.playback_speed != 1.0 {
-            render_ahead.set_lookahead_secs(self.effective_lookahead_secs(timeline_id));
-        } else {
-            render_ahead.set_lookahead_secs(self.lookahead_secs);
-        }
+        // At speeds >1x the playhead advances faster in real time: more margin
+        // ahead is needed, and it must still fit the budget (see the docs of
+        // `effective_window_secs`).
+        let (ahead_secs, behind_secs) = self.effective_window_secs(timeline_id);
+        render_ahead.set_lookahead_secs(ahead_secs);
+        render_ahead.set_behind_secs(behind_secs);
         render_ahead.set_target(self.timeline_state.playhead);
     }
 
@@ -1329,17 +1330,62 @@ impl VenturiApp {
         self.project.sync_compound_meta(media_id);
     }
 
-    /// `lookahead_secs` scaled by the playback speed, within what
-    /// fits in the cache budget (minus `behind_secs`), never below the base.
-    fn effective_lookahead_secs(&self, timeline_id: TimelineId) -> f64 {
-        let scaled = self.lookahead_secs * self.playback_speed;
+    /// Prefetch window that actually fits the cache budget: `lookahead_secs`
+    /// scaled by the playback speed and `behind_secs`, shrunk proportionally
+    /// when the media playing together would not fit. Asking for more than the
+    /// budget does not buy a longer buffer: the worker saturates in the middle
+    /// of the window and leaves holes on one of the tracks, i.e. black flashes
+    /// during playback.
+    fn effective_window_secs(&self, timeline_id: TimelineId) -> (f64, f64) {
         let timeline = &self.project.timelines[timeline_id];
         let fps = timeline.fps.as_f64().max(1e-9);
-        let (w, h) = timeline.resolution;
-        let frame_bytes = vv_media::yuv420_frame_bytes(w, h).max(1);
-        let max_frames = self.cache_budget_bytes / frame_bytes;
-        let max_secs = (max_frames as f64 / fps - self.behind_secs).max(self.lookahead_secs);
-        scaled.min(max_secs)
+        let wanted_ahead = self.lookahead_secs * self.playback_speed;
+        let playhead = self.timeline_state.playhead;
+        let from = (playhead - (self.behind_secs * fps).ceil() as FrameIdx).max(0);
+        let to = playhead + (wanted_ahead * fps).ceil() as FrameIdx;
+        let frame_bytes = self.window_frame_bytes(timeline_id, from, to).max(1);
+        // Headroom: the transit frames decoded before a segment sit in the
+        // cache until the next reconcile.
+        let affordable =
+            self.cache_budget_bytes as f64 * 0.85 / (frame_bytes as f64 * fps);
+        let wanted_total = wanted_ahead + self.behind_secs;
+        if wanted_total <= affordable {
+            return (wanted_ahead, self.behind_secs);
+        }
+        let scale = affordable / wanted_total;
+        (
+            (wanted_ahead * scale).max(MIN_LOOKAHEAD_SECS),
+            self.behind_secs * scale,
+        )
+    }
+
+    /// Bytes one frame of each distinct media playing in `[from, to)` takes in
+    /// the cache. Source resolution, not the timeline one: the cache holds
+    /// decoded frames, before any scaling.
+    fn window_frame_bytes(&self, timeline_id: TimelineId, from: FrameIdx, to: FrameIdx) -> usize {
+        let timeline = &self.project.timelines[timeline_id];
+        let mut seen = std::collections::HashSet::new();
+        let mut bytes = 0;
+        for (_, track) in timeline.tracks_of_kind(TrackKind::Video) {
+            if track.muted {
+                continue;
+            }
+            for clip in track.clips.iter().filter(|c| !c.disabled) {
+                let vv_core::ClipSource::Media(media_id) = clip.source else {
+                    continue;
+                };
+                if clip.timeline_end() <= from || clip.timeline_start >= to {
+                    continue;
+                }
+                if !seen.insert(media_id) {
+                    continue;
+                }
+                if let Some(item) = self.project.media_pool.get(media_id) {
+                    bytes += vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
+                }
+            }
+        }
+        bytes
     }
 
     /// Drop of an effect from the Effects panel: the generator clip goes on the
@@ -1466,18 +1512,20 @@ impl VenturiApp {
         self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
     }
 
-    /// The layers to compose at the playhead, from bottom to top. `None` if the
-    /// media frame on top is not ready: the one already shown is kept; a layer
-    /// below that is not ready is skipped. During a crossing transition "on top"
-    /// counts if even one of the two halves is missing.
+    /// The layers to compose at the playhead, from bottom to top. `None` if a
+    /// media frame is not ready: the frame already shown is kept, composing
+    /// without that layer would flash black where the clip should be. Once the
+    /// buffer says it is caught up the missing frame will never arrive (media
+    /// that does not decode): the layer is dropped instead of freezing the
+    /// preview. During a crossing transition both halves must be ready.
     fn timeline_video_layers(&mut self) -> Option<Vec<frame_provider::OwnedLayer>> {
         let timeline = &self.project.timelines[self.timeline_id?];
+        let still_filling = self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up());
         let render_ahead = self.render_ahead.as_mut()?;
         let playhead = self.timeline_state.playhead;
         let clips = timeline.active_video_clips_at(playhead);
-        let topmost = clips.len().saturating_sub(1);
         let mut layers = Vec::with_capacity(clips.len());
-        for (i, &(track_index, clip)) in clips.iter().enumerate() {
+        for &(track_index, clip) in &clips {
             let frame = playhead.max(clip.timeline_start);
             let involved = match timeline.tracks[track_index].crossing_at(frame) {
                 Some((left, right, _)) if left.id == clip.id || right.id == clip.id => 2,
@@ -1494,8 +1542,20 @@ impl VenturiApp {
                 &mut provider,
             )
             .ok()?;
-            if i == topmost && track_layers.len() < involved {
-                return None;
+            if track_layers.len() < involved {
+                if std::env::var("VV_DEBUG_RENDER_AHEAD").is_ok()
+                    && let Some((media_id, source_frame)) =
+                        frame_provider::media_source_frame(clip, frame)
+                {
+                    eprintln!(
+                        "[viewer] LAYER-MANCANTE playhead={playhead} traccia={track_index} media={media_id:?} source_frame={source_frame} caught_up={} cached_ranges={:?}",
+                        !still_filling,
+                        render_ahead.cached_ranges_for(media_id),
+                    );
+                }
+                if still_filling {
+                    return None;
+                }
             }
             layers.extend(track_layers);
         }
@@ -3790,6 +3850,90 @@ mod tests {
         });
         app.timeline_id = Some(timeline_id);
         (app, media_id)
+    }
+
+    fn hd_media(app: &mut VenturiApp, hash: u64, (w, h): (u32, u32)) -> MediaId {
+        app.project.media_pool.insert(vv_core::MediaItem {
+            path: format!("/tmp/vv-{hash}.mp4").into(),
+            meta: vv_core::MediaMeta {
+                duration_frames: 100_000,
+                fps: vv_core::Rational::new(60, 1),
+                width: w,
+                height: h,
+                has_video: true,
+                has_audio: false,
+                sample_rate: 0,
+                channels: 0,
+                audio_streams: 0,
+            },
+            content_hash: hash,
+            compound: None,
+        })
+    }
+
+    fn full_track_clip(id: u64, media_id: MediaId) -> vv_core::Clip {
+        vv_core::Clip::from_source_range(
+            ClipId(id),
+            vv_core::ClipSource::Media(media_id),
+            0,
+            100_000,
+            0,
+            vv_core::Rational::one(),
+        )
+    }
+
+    /// Two media playing together at 60 fps need more than the cache budget for
+    /// the full 3 s + 2 s window: the window must shrink to what fits, or the
+    /// worker saturates mid-window and one of the two tracks stays black.
+    #[test]
+    fn the_prefetch_window_shrinks_to_what_the_cache_budget_holds() {
+        let mut app = VenturiApp::default();
+        let a = hd_media(&mut app, 1, (1920, 1080));
+        let b = hd_media(&mut app, 2, (1080, 2400));
+        let mut track_a = Track::new(TrackKind::Video);
+        track_a.clips.push(full_track_clip(1, a));
+        let mut track_b = Track::new(TrackKind::Video);
+        track_b.clips.push(full_track_clip(2, b));
+        let timeline_id = app.project.timelines.insert(vv_core::Timeline {
+            name: "T".into(),
+            fps: vv_core::Rational::new(60, 1),
+            resolution: (1920, 1080),
+            tracks: vec![track_a, track_b],
+        });
+        app.timeline_id = Some(timeline_id);
+        app.timeline_state.playhead = 6_000;
+
+        let (ahead, behind) = app.effective_window_secs(timeline_id);
+
+        let frame_bytes = vv_media::yuv420_frame_bytes(1920, 1080)
+            + vv_media::yuv420_frame_bytes(1080, 2400);
+        let needed = (ahead + behind) * 60.0 * frame_bytes as f64;
+        assert!(
+            needed <= app.cache_budget_bytes as f64,
+            "finestra {ahead}s+{behind}s = {needed} byte, oltre il budget {}",
+            app.cache_budget_bytes
+        );
+        assert!(ahead >= MIN_LOOKAHEAD_SECS);
+        assert!(behind > 0.0);
+    }
+
+    /// A single small media fits easily: the configured window is untouched.
+    #[test]
+    fn the_prefetch_window_is_not_shrunk_when_the_media_fits_the_budget() {
+        let (mut app, media_id) = app_with_media_at(
+            vv_core::Rational::new(25, 1),
+            vv_core::Rational::new(25, 1),
+            10_000,
+        );
+        let timeline_id = app.timeline_id.unwrap();
+        app.project.timelines[timeline_id].tracks[0]
+            .clips
+            .push(full_track_clip(1, media_id));
+
+        let (ahead, behind) = app.effective_window_secs(timeline_id);
+
+        assert_eq!(ahead, app.lookahead_secs);
+        assert_eq!(behind, app.behind_secs);
     }
 
     #[test]
