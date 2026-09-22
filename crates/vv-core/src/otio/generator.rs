@@ -60,7 +60,7 @@ fn drop_shadow(shadow: &TitleShadow, frame: (f32, f32)) -> Value {
 fn stroke() -> Value {
     block("Stroke", "Stroke", 28, 1, true, json!([
         parameter("strokeColor", json!("#ffffff"), json!("#ffffff"), "Color"),
-        parameter("strokeSize", json!(0), json!(1), "Int"),
+        animatable_no_keyframes("strokeSize", json!(0), json!(1), [0.0, 16.0]),
         parameter("strokeOutsideOnly", json!(false), json!(false), "Bool"),
     ]))
 }
@@ -133,6 +133,14 @@ fn animatable(id: &str, value: Value, default: Value, range: [f64; 2]) -> Value 
     parameter["minValue"] = json!(range[0]);
     parameter["maxValue"] = json!(range[1]);
     parameter["Key Frames"] = json!({});
+    parameter
+}
+
+/// Like `animatable`, for the parameters Resolve bounds but does not
+/// keyframe.
+fn animatable_no_keyframes(id: &str, value: Value, default: Value, range: [f64; 2]) -> Value {
+    let mut parameter = animatable(id, value, default, range);
+    parameter.as_object_mut().expect("oggetto").remove("Key Frames");
     parameter
 }
 
