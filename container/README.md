@@ -23,17 +23,16 @@ container/run.sh bash   # shell interattiva
 
 ## Build dell'AppImage
 
-`scripts/build-appimage.sh` gira dentro questo container (compila FFmpeg
-da sorgente, linka vv-app contro quel prefix, impacchetta con
-appimagetool):
+Usa un'immagine separata (`Containerfile.appimage`, Debian 13) perché la
+release deve linkare contro una glibc vecchia, non quella di Fedora 44:
 
 ```sh
-container/run.sh scripts/build-appimage.sh   # -> target/appimage/VibeVideo-<arch>.AppImage
+scripts/build-appimage.sh   # -> target/appimage/VibeVideo-<arch>.AppImage
 ```
 
-Si appoggia al toolchain dell'immagine (`patchelf`, `git`, `nasm`,
-`file`): se modifichi il `Containerfile`, ricostruisci l'immagine (vedi
-Setup) prima di rilanciare.
+Lo script rientra da solo nel container (via `container/build-appimage.sh`,
+che costruisce l'immagine al primo uso). Vedi ../README.md per i volumi di
+cache.
 
 ## Uso per testare la UI (sessione persistente)
 

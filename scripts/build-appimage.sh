@@ -6,6 +6,13 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# La build va fatta su Debian 13: un binario glibc richiede a runtime una
+# glibc >= a quella di build, e la distro di sviluppo (Fedora) ne ha una
+# troppo recente per l'AppImage. Se non siamo già dentro, ci rientriamo.
+if [ -z "${VV_APPIMAGE_CONTAINER:-}" ]; then
+    exec container/build-appimage.sh "$@"
+fi
+
 ARCH="$(uname -m)"
 TARGET_DIR="$(realpath -m "${CARGO_TARGET_DIR:-target}")"
 FFMPEG_PREFIX="$TARGET_DIR/ffmpeg-shared"
@@ -84,4 +91,10 @@ if [ ! -x "$TOOL" ]; then
 fi
 # Niente FUSE nei container: appimagetool si estrae da solo.
 APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$ARCH" "$TOOL" "$APPDIR" "$OUT"
+
+# Nel container il target dir è un volume: l'AppImage va portata fuori.
+if [ -n "${VV_APPIMAGE_OUT:-}" ]; then
+    cp "$OUT" "$VV_APPIMAGE_OUT/"
+    OUT="$VV_APPIMAGE_OUT/$(basename "$OUT")"
+fi
 echo "AppImage: $OUT"

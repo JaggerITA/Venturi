@@ -87,23 +87,15 @@ libx264: sulla macchina di destinazione non servono né FFmpeg né RPM Fusion.
 glibc, ALSA, Vulkan e l'eventuale driver NVIDIA (NVENC richiede >= 550)
 restano quelli di sistema.
 
-Servono `git`, `nasm`, `make`, un compilatore C, `curl` e zlib (header),
-oltre alle dipendenze non FFmpeg elencate sopra. FFmpeg viene compilato una
-volta sola in `target/ffmpeg-shared`.
+Lo script si esegue da solo dentro un container Debian 13
+(`container/Containerfile.appimage`, costruito al primo uso): un binario
+glibc gira solo su glibc >= a quella della macchina di build, quindi la
+release non va compilata su Fedora. Sull'host serve solo `podman`.
 
-L'AppImage richiede una glibc almeno pari a quella della macchina di build:
-per la massima compatibilità conviene compilarla in un container con una
-distro vecchia, es. Debian bookworm (glibc 2.36):
-
-```sh
-podman run --rm -it -v "$PWD:/workspace:Z" -w /workspace docker.io/library/debian:bookworm bash
-# dentro il container:
-apt-get update && apt-get install -y curl ca-certificates git nasm make gcc g++ \
-  pkg-config clang libclang-dev zlib1g-dev libwayland-dev libxkbcommon-dev \
-  libx11-dev libvulkan-dev libasound2-dev file
-curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . ~/.cargo/env
-scripts/build-appimage.sh
-```
+FFmpeg viene compilato una volta sola dentro il volume di build
+(`vibevideo-appimage-target`); per ripartire da zero:
+`podman volume rm vibevideo-appimage-cargo vibevideo-appimage-target`,
+e `podman rmi vibevideo-appimage` se cambi il `Containerfile.appimage`.
 
 L'AppImage è GPL (include libx264) e non include FDK-AAC: l'export usa
 l'encoder AAC nativo di FFmpeg.

@@ -1,0 +1,23 @@
+# Ambiente di build dell'AppImage. Debian 13 (glibc 2.41) e non l'immagine
+# di test Fedora: un binario glibc gira solo su glibc >= a quella di build,
+# quindi la release va compilata sulla distro più vecchia che supportiamo.
+# Il repo non è dentro l'immagine, va montato a runtime.
+FROM docker.io/library/debian:13
+
+# rust di trixie è troppo vecchio per la edition 2024 di alcune dipendenze:
+# toolchain da rustup.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git make nasm pkg-config \
+        gcc g++ clang libclang-dev \
+        zlib1g-dev libwayland-dev libxkbcommon-dev libx11-dev \
+        libvulkan-dev libasound2-dev \
+        patchelf file desktop-file-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+WORKDIR /workspace
+CMD ["scripts/build-appimage.sh"]
