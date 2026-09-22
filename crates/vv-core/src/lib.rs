@@ -15,7 +15,9 @@ pub use command::{
     set_clip_transform_param, set_clip_transition,
 };
 pub use model::*;
-pub use otio::{MeasureTitle, OtioError, OtioImport, OtioWarning, export_otio, import_otio};
+pub use otio::{
+    MeasureTitle, OtioError, OtioImport, OtioWarning, TitleMetrics, export_otio, import_otio,
+};
 pub use persistence::{PersistenceError, load_project, save_project};
 
 #[cfg(test)]

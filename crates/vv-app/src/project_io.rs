@@ -392,7 +392,7 @@ impl VenturiApp {
     }
 
     pub(crate) fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
-        let measure = |title: &vv_core::TitleParams| vv_render::text::background_box(title);
+        let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
         self.project_error =
             vv_core::export_otio(&self.project, timeline_id, path, Some(&measure))
             .err()
@@ -522,7 +522,7 @@ impl VenturiApp {
     /// save instead of overwriting the imported file. What was not
     /// imported ends up in `import_warnings`.
     pub(crate) fn import_otio_from(&mut self, path: &Path) {
-        let measure = |title: &vv_core::TitleParams| vv_render::text::background_box(title);
+        let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
         let imported = vv_core::import_otio(
             path,
             |media_path| {

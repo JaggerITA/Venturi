@@ -147,6 +147,9 @@ pub fn render_title(
     mask
 }
 
+/// Space the background leaves around the text, in font sizes.
+const BACKGROUND_PADDING: f32 = 0.2;
+
 fn text_attrs(params: &TitleParams) -> (Attrs<'_>, Align) {
     let family = if params.font_family.is_empty() {
         Family::SansSerif
@@ -195,19 +198,19 @@ fn shape_block(
     (block_w, block_h)
 }
 
-/// Size in timeline pixels of the rectangle the background covers on the
-/// axes left at 0, which mean "around the text" (see `TitleBackground`).
-/// The OTIO export needs it: Resolve has no such shorthand.
-pub fn background_box(params: &TitleParams) -> (f32, f32) {
+/// Text block and background padding of a title, in timeline pixels: what
+/// the background covers on the axes left at 0, which mean "around the
+/// text" (see `TitleBackground`). The OTIO export needs them separately,
+/// because Resolve has no such shorthand and shapes the text its own way.
+pub fn title_metrics(params: &TitleParams) -> vv_core::TitleMetrics {
     let mut state = lock();
     let TextState { font_system, .. } = &mut *state;
     let font_size = params.size.max(1.0);
     let line_height = (font_size * 1.2 + params.line_spacing).max(1.0);
     let (attrs, align) = text_attrs(params);
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
-    let (block_w, block_h) = shape_block(font_system, &mut buffer, params, &attrs, align);
-    let padding = font_size * 0.2 * 2.0;
-    (block_w + padding, block_h + padding)
+    let block = shape_block(font_system, &mut buffer, params, &attrs, align);
+    vv_core::TitleMetrics { block, padding: font_size * BACKGROUND_PADDING }
 }
 
 fn with_opacity(color: Rgba, opacity: f32) -> Rgba {
@@ -281,7 +284,7 @@ fn rasterize(
 
     let bg = &params.background;
     if bg.enabled {
-        let padding = font_size * 0.2;
+        let padding = font_size * BACKGROUND_PADDING;
         let box_w = if bg.width > 0.0 {
             bg.width * width as f32
         } else {

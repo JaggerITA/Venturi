@@ -445,7 +445,8 @@ mod tests {
         clip.effects.title = Some(title);
         project.timelines[timeline_id].tracks[0].clips.push(clip);
 
-        let measure = |_: &TitleParams| (480.0, 216.0);
+        let measure =
+            |_: &TitleParams| crate::TitleMetrics { block: (440.0, 176.0), padding: 20.0 };
         let otio = timeline_to_otio(&project, timeline_id, Some(&measure));
         let blocks = &otio["tracks"]["children"][0]["children"][0]["media_references"]
             ["DEFAULT_MEDIA"]["parameters"]["Resolve_OTIO"];
@@ -465,10 +466,8 @@ mod tests {
                 .as_f64()
                 .unwrap()
         };
-        assert!(
-            (value("backgroundWidth") - 0.3).abs() < 1e-6,
-            "480 px più il margine, su 1920"
-        );
+        // 440 px di testo più il 10% di margine, più 20 px di padding per lato.
+        assert!((value("backgroundWidth") - 524.0 / 1920.0).abs() < 1e-6, "524 px su 1920");
         assert!((value("backgroundHeight") - 0.2).abs() < 1e-6, "216 px su 1080");
         // 0.1 del lato corto del rettangolo (216 px) sono 21.6 px, che per
         // Resolve è una frazione dell'altezza del frame.

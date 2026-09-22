@@ -70,13 +70,9 @@ fn stroke() -> Value {
 /// nothing for Resolve, so the measured box takes its place.
 fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> Value {
     let background = &title.background;
-    let measured = measure.map(|measure| measure(title)).unwrap_or(frame);
     // The rectangle Resolve will draw, in timeline pixels: what the radius
     // and the two fractions both have to agree on.
-    let box_size = (
-        resolved(background.width, measured.0 * TEXT_WIDTH_ALLOWANCE, frame.0),
-        resolved(background.height, measured.1, frame.1),
-    );
+    let box_size = rectangle(title, frame, measure);
     block("Background", "Background", 27, 1, background.enabled, json!([
         parameter("backgroundColor", hex(background.color), json!("#000000"), "Color"),
         parameter("backgroundOutlineColor", hex(background.outline_color), json!("#000000"), "Color"),
@@ -99,18 +95,29 @@ fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTit
     ]))
 }
 
-/// Resolve shapes the same line wider than we do, and on the horizontal
-/// axis our padding is too thin to absorb it: a background left to wrap the
-/// text ends up touching it. Empirical, and only for the automatic width.
-const TEXT_WIDTH_ALLOWANCE: f32 = 1.2;
+/// Resolve shapes the same line wider than we do, so a background left to
+/// wrap the text ends up touching it. The allowance goes on the text, not
+/// on the padding, which is already right. Empirical.
+const TEXT_WIDTH_ALLOWANCE: f32 = 1.1;
 
-/// A side of the rectangle in timeline pixels: a fraction of the frame,
-/// or the measured text box when left at 0.
-fn resolved(fraction: f32, measured: f32, frame: f32) -> f32 {
-    match fraction > 0.0 {
+/// The rectangle of the background in timeline pixels: a fraction of the
+/// frame per axis, or the text plus its padding on the axes left at 0.
+fn rectangle(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> (f32, f32) {
+    let wrapped = measure.map_or(frame, |measure| {
+        let metrics = measure(title);
+        (
+            metrics.block.0 * TEXT_WIDTH_ALLOWANCE + metrics.padding * 2.0,
+            metrics.block.1 + metrics.padding * 2.0,
+        )
+    });
+    let side = |fraction: f32, wrapped: f32, frame: f32| match fraction > 0.0 {
         true => (fraction * frame).min(frame * 2.0),
-        false => measured,
-    }
+        false => wrapped,
+    };
+    (
+        side(title.background.width, wrapped.0, frame.0),
+        side(title.background.height, wrapped.1, frame.1),
+    )
 }
 
 /// Ours is a fraction of the shorter side of the rectangle, Resolve's one
@@ -325,11 +332,7 @@ pub(super) fn read_text(
     }
     // The radius refers to the rectangle, which is only known once the rest
     // of the title is.
-    let measured = measure.map(|measure| measure(&title)).unwrap_or(frame);
-    let box_size = (
-        resolved(title.background.width, measured.0, frame.0),
-        resolved(title.background.height, measured.1, frame.1),
-    );
+    let box_size = rectangle(&title, frame, measure);
     title.background.corner_radius =
         corner_radius_from_resolve(title.background.corner_radius, box_size, frame.1);
     title

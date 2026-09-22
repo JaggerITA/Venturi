@@ -915,7 +915,9 @@ mod tests {
     /// Qt rich text and the colour from the hex.
     #[test]
     fn reads_back_the_generators_without_our_metadata() {
-        let measure = |_: &crate::model::TitleParams| (480.0, 216.0);
+        let measure = |_: &crate::model::TitleParams| {
+            crate::TitleMetrics { block: (440.0, 176.0), padding: 20.0 }
+        };
         let mut project = Project::default();
         let timeline_id = project.timelines.insert(Timeline {
             name: "Generatori".into(),

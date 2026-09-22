@@ -8,9 +8,16 @@ mod resolve;
 
 pub use export::{export_otio, timeline_to_otio};
 
-/// Size in timeline pixels of the box a title draws around its text. Only
-/// whoever can shape the text knows it, so the export asks for it.
-pub type MeasureTitle<'a> = &'a dyn Fn(&crate::model::TitleParams) -> (f32, f32);
+/// Size of the text block of a title and the padding its background adds
+/// around it, in timeline pixels. Only whoever can shape the text knows
+/// them, so the export asks for them.
+#[derive(Debug, Clone, Copy)]
+pub struct TitleMetrics {
+    pub block: (f32, f32),
+    pub padding: f32,
+}
+
+pub type MeasureTitle<'a> = &'a dyn Fn(&crate::model::TitleParams) -> TitleMetrics;
 pub use import::{OtioImport, OtioWarning, import_otio, project_from_otio};
 
 #[derive(Debug, thiserror::Error)]
