@@ -419,6 +419,19 @@ mod tests {
         assert_eq!(keys["10"]["Value"], 2.0, "frame 40 della sorgente, decimo della clip");
     }
 
+    /// Resolve reads the parameters of a generator only from a file that
+    /// declares itself one of its own: without these two fields the colour
+    /// and the title arrive at their defaults.
+    #[test]
+    fn marks_the_file_as_written_by_resolve() {
+        let (project, timeline_id, _) = project();
+        let otio = timeline_to_otio(&project, timeline_id);
+        assert_eq!(otio["metadata"]["Resolve_OTIO"]["Resolve OTIO Meta Version"], "1.0");
+        for track in otio["tracks"]["children"].as_array().unwrap() {
+            assert_eq!(track["metadata"]["Resolve_OTIO"]["Locked"], false);
+        }
+    }
+
     /// A vertical clip in a horizontal timeline: Resolve measures the pan
     /// on the clip as it is fitted into the frame, so a shift of 700 px on
     /// a 1080x2400 source that lands 486 px wide is far more than 700/1920.
