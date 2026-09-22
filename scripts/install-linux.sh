@@ -53,7 +53,7 @@ install -Dm644 packaging/appimage/venturi.desktop "$DESKTOP"
 # Il nome del file icona deve combaciare con la chiave Icon= del .desktop.
 for dir in media/icons/linux/hicolor/*/apps; do
     size="$(basename "$(dirname "$dir")")"
-    for f in "$dir"/venturi.*; do
+    for f in "$dir"/venturi-video.*; do
         install -Dm644 "$f" "$ICONS/$size/apps/venturi.${f##*.}"
     done
 done

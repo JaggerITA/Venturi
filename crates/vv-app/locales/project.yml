@@ -5,8 +5,8 @@ file_filter.images:
   it: "immagini"
 
 file_filter.project:
-  en: "Venturi project"
-  it: "progetto Venturi"
+  en: "Venturi video editor"
+  it: "Venturi video editor"
 
 project.default_file_name:
   en: "project"

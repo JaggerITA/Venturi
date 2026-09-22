@@ -53,7 +53,7 @@ for dir in media/icons/linux/hicolor/*/apps; do
     size="$(basename "$(dirname "$dir")")"
     dest="$APPDIR/usr/share/icons/hicolor/$size/apps"
     mkdir -p "$dest"
-    for f in "$dir"/venturi.*; do
+    for f in "$dir"/venturi-video.*; do
         cp "$f" "$dest/venturi.${f##*.}"
     done
 done
