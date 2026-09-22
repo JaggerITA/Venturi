@@ -14,6 +14,10 @@ use vv_core::{
 };
 
 const ROW_HEIGHT: f32 = 40.0;
+/// Massimo dello zoom verticale (Shift+rotella); il minimo è `ROW_HEIGHT`.
+const MAX_ROW_HEIGHT: f32 = ROW_HEIGHT * 4.0;
+/// Guadagno dello zoom verticale per pixel di rotella.
+const ROW_ZOOM_SPEED: f32 = 1.0 / 200.0;
 const RULER_HEIGHT: f32 = 20.0;
 const MIN_TIMELINE_SECS: f64 = 20.0;
 const TRAILING_MARGIN_SECS: f64 = 5.0;
@@ -52,6 +56,8 @@ pub struct TimelineState {
     selection_anchor: Option<ClipKey>,
     pub playhead: FrameIdx,
     pixels_per_sec: f32,
+    /// Altezza delle tracce (zoom verticale): `ROW_HEIGHT` è il minimo.
+    row_height: f32,
     /// `pixels_per_sec` of the last drawing: if it changed there was a zoom
     /// in this frame, and the scroll must be corrected to anchor it to the playhead.
     last_rendered_pps: f32,
@@ -302,6 +308,7 @@ impl Default for TimelineState {
             selection_anchor: None,
             playhead: 0,
             pixels_per_sec: 60.0,
+            row_height: ROW_HEIGHT,
             // Same initial value as `pixels_per_sec`: on the first frame there
             // is no zoom to compensate yet.
             last_rendered_pps: 60.0,
@@ -387,6 +394,10 @@ impl TimelineState {
 
     fn set_pixels_per_sec(&mut self, value: f32) {
         self.pixels_per_sec = value.clamp(MIN_PIXELS_PER_SEC, MAX_PIXELS_PER_SEC);
+    }
+
+    fn set_row_height(&mut self, value: f32) {
+        self.row_height = value.clamp(ROW_HEIGHT, MAX_ROW_HEIGHT);
     }
 }
 
@@ -525,6 +536,7 @@ struct PaneLayout {
     audio_max_scroll: f32,
     /// Limits of the Video box height when dragging the separator.
     video_height_range: egui::Rangef,
+    row_height: f32,
 }
 
 impl PaneLayout {
@@ -541,8 +553,9 @@ impl PaneLayout {
             0.0
         };
         let rows_avail = (avail_below_ruler - divider_height).max(0.0);
-        let video_rows = video_count as f32 * ROW_HEIGHT;
-        let audio_rows = audio_count as f32 * ROW_HEIGHT;
+        let row_height = state.row_height;
+        let video_rows = video_count as f32 * row_height;
+        let audio_rows = audio_count as f32 * row_height;
         let default_video_height = if video_rows + audio_rows <= rows_avail {
             (rows_avail - video_rows - audio_rows) / 2.0 + video_rows
         } else {
@@ -591,6 +604,7 @@ impl PaneLayout {
             video_max_scroll,
             audio_max_scroll,
             video_height_range,
+            row_height,
         }
     }
 
@@ -599,11 +613,11 @@ impl PaneLayout {
     }
 
     fn video_rows_bottom(&self) -> f32 {
-        self.video_rows_top + self.video_count as f32 * ROW_HEIGHT
+        self.video_rows_top + self.video_count as f32 * self.row_height
     }
 
     fn audio_rows_bottom(&self) -> f32 {
-        self.audio_rows_top + self.audio_count as f32 * ROW_HEIGHT
+        self.audio_rows_top + self.audio_count as f32 * self.row_height
     }
 
     fn pane(&self, kind: TrackKind) -> egui::Rangef {
@@ -616,9 +630,9 @@ impl PaneLayout {
     /// `y` of a row of `track_row_order`.
     fn row_y(&self, row: usize) -> f32 {
         if row < self.video_count {
-            self.video_rows_top + row as f32 * ROW_HEIGHT
+            self.video_rows_top + row as f32 * self.row_height
         } else {
-            self.audio_rows_top + (row - self.video_count) as f32 * ROW_HEIGHT
+            self.audio_rows_top + (row - self.video_count) as f32 * self.row_height
         }
     }
 
@@ -627,10 +641,10 @@ impl PaneLayout {
     fn row_at_y(&self, y: f32) -> usize {
         let in_video = self.video_count > 0 && (self.audio_count == 0 || y < self.audio_pane.min);
         if in_video {
-            let row = ((y - self.video_rows_top) / ROW_HEIGHT).floor().max(0.0) as usize;
+            let row = ((y - self.video_rows_top) / self.row_height).floor().max(0.0) as usize;
             row.min(self.video_count - 1)
         } else {
-            let row = ((y - self.audio_rows_top) / ROW_HEIGHT).floor().max(0.0) as usize;
+            let row = ((y - self.audio_rows_top) / self.row_height).floor().max(0.0) as usize;
             self.video_count + row.min(self.audio_count.saturating_sub(1))
         }
     }
@@ -810,7 +824,7 @@ fn draw_track_headers(
         )));
         let row_rect = egui::Rect::from_min_size(
             egui::pos2(origin.x, origin.y + row_y[track_index]),
-            egui::vec2(TRACK_HEADER_WIDTH, ROW_HEIGHT),
+            egui::vec2(TRACK_HEADER_WIDTH, layout.row_height),
         );
         ui.painter().text(
             row_rect.left_center() + egui::vec2(6.0, 0.0),
@@ -1629,14 +1643,19 @@ pub fn show_timeline(
         ui.ctx().request_repaint();
     }
 
-    // Wheel: vertical scroll of the box under the pointer (the
-    // horizontal one stays on Shift+wheel, as the ScrollArea already did).
+    // Wheel: vertical scroll of the box under the pointer; with Shift it
+    // is the vertical zoom of the tracks (the horizontal scroll is on
+    // Ctrl+wheel, see `horizontal_scroll_modifier`).
     if let Some(pos) = ui.input(|i| i.pointer.hover_pos())
         && pointer_over(ui.ctx(), panel_rect)
     {
         let local_y = pos.y - panel_rect.top();
-        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-        if wheel != 0.0 {
+        let (wheel, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.shift));
+        if wheel != 0.0 && shift {
+            state.set_row_height(state.row_height * (wheel * ROW_ZOOM_SPEED).exp());
+            ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+            layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
+        } else if wheel != 0.0 {
             let scrolled = if layout.video_pane.contains(local_y) && layout.video_max_scroll > 0.0 {
                 state.video_scroll += wheel;
                 state.video_scroll_vel =
@@ -1656,6 +1675,7 @@ pub fn show_timeline(
             }
         }
     }
+    let row_height = layout.row_height;
     let divider_height = layout.divider_height;
     let visual_height = layout.audio_pane.max;
     let pane_of = |track_index: usize| layout.pane(track_kinds[track_index]);
@@ -1740,7 +1760,7 @@ pub fn show_timeline(
                 };
                 // Only the part of the clip visible in its box.
                 let visible_clip_rect = |v: &ClipVisual| {
-                    clip_local_rect(v, px_per_frame, &row_y).intersect(local_pane_rect(v.track_index))
+                    clip_local_rect(v, px_per_frame, &row_y, row_height).intersect(local_pane_rect(v.track_index))
                 };
                 let press_over_a_clip = |pos: egui::Pos2| {
                     let local = to_local(pos);
@@ -1767,7 +1787,7 @@ pub fn show_timeline(
                     let y = origin.y + row_y[track_index];
                     let track_rect = egui::Rect::from_min_size(
                         egui::pos2(origin.x, y),
-                        egui::vec2(content_width, ROW_HEIGHT),
+                        egui::vec2(content_width, row_height),
                     );
                     let bg = match (track_locked(track_index), row % 2 == 0) {
                         (true, _) => egui::Color32::from_gray(42),
@@ -1875,7 +1895,7 @@ pub fn show_timeline(
                                 .with_clip_rect(ghost_painter.clip_rect().intersect(pane_rect(pane)));
                             let rect = egui::Rect::from_min_size(
                                 egui::pos2(x, y),
-                                egui::vec2(seg.len as f32 * px_per_frame, ROW_HEIGHT),
+                                egui::vec2(seg.len as f32 * px_per_frame, row_height),
                             )
                             // A sliver of margin between one segment and the
                             // next: without it the edges meet and the appended
@@ -2054,7 +2074,7 @@ pub fn show_timeline(
                         egui::pos2(origin.x + gap_start as f32 * px_per_frame, y + 2.0),
                         egui::vec2(
                             (gap_end - gap_start) as f32 * px_per_frame,
-                            ROW_HEIGHT - 4.0,
+                            row_height - 4.0,
                         ),
                     );
                     let painter = track_painter(track_index);
@@ -2230,7 +2250,7 @@ pub fn show_timeline(
                             ),
                             egui::vec2(
                                 (visual.clip.timeline_len as f32 * px_per_frame).max(2.0),
-                                ROW_HEIGHT - 4.0,
+                                row_height - 4.0,
                             ),
                         )
                         .round_to_pixels(ui.pixels_per_point());
@@ -2281,10 +2301,10 @@ pub fn show_timeline(
                         // current edge (see `EffectiveTrack::New`).
                         Some((_, EffectiveTrack::New(depth))) => match track_kinds[visual.track_index] {
                             TrackKind::Video => {
-                                origin.y + layout.video_rows_top - *depth as f32 * ROW_HEIGHT
+                                origin.y + layout.video_rows_top - *depth as f32 * row_height
                             }
                             TrackKind::Audio => {
-                                origin.y + layout.audio_rows_bottom() + (*depth - 1) as f32 * ROW_HEIGHT
+                                origin.y + layout.audio_rows_bottom() + (*depth - 1) as f32 * row_height
                             }
                         },
                         None => origin.y + row_y[visual.track_index],
@@ -2295,7 +2315,7 @@ pub fn show_timeline(
                     // spessore irregolare (effetto seghettato).
                     let clip_rect = egui::Rect::from_min_size(
                         egui::pos2(x, y + 2.0),
-                        egui::vec2(w, ROW_HEIGHT - 4.0),
+                        egui::vec2(w, row_height - 4.0),
                     )
                     .round_to_pixels(ui.pixels_per_point());
 
@@ -2798,6 +2818,7 @@ pub fn show_timeline(
                                 &visuals,
                                 px_per_frame,
                                 &row_y,
+                                row_height,
                             );
                             state.selected = expand_to_linked_groups(&visuals, selected);
                             state.selection_anchor = anchor;
@@ -2872,6 +2893,7 @@ pub fn show_timeline(
                         &visuals,
                         origin,
                         &row_y,
+                        row_height,
                         px_per_frame,
                         track_index,
                         clip_id,
@@ -3639,6 +3661,7 @@ fn paint_mirrored_marker_on_neighbor(
     visuals: &[ClipVisual],
     origin: egui::Pos2,
     row_y: &[f32],
+    row_height: f32,
     px_per_frame: f32,
     track_index: usize,
     clip_id: ClipId,
@@ -3650,7 +3673,8 @@ fn paint_mirrored_marker_on_neighbor(
     let x = origin.x + neighbor.clip.timeline_start as f32 * px_per_frame;
     let y = origin.y + row_y[track_index];
     let w = (neighbor.clip.timeline_len as f32 * px_per_frame).max(2.0);
-    let neighbor_rect = egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0));
+    let neighbor_rect =
+        egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, row_height - 4.0));
     let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(neighbor_rect.width() / 2.0);
     let opposite = match edge {
         FadeEdge::In => FadeEdge::Out,
@@ -4606,11 +4630,16 @@ fn paint_disabled_badge(painter: &egui::Painter, top_left: egui::Pos2) {
 
 /// Rectangle of a clip in content-local coordinates: same
 /// geometry for drawing, selection rectangle and shift+click.
-fn clip_local_rect(visual: &ClipVisual, px_per_frame: f32, row_y: &[f32]) -> egui::Rect {
+fn clip_local_rect(
+    visual: &ClipVisual,
+    px_per_frame: f32,
+    row_y: &[f32],
+    row_height: f32,
+) -> egui::Rect {
     let x = visual.clip.timeline_start as f32 * px_per_frame;
     let y = row_y[visual.track_index];
     let w = (visual.clip.timeline_len as f32 * px_per_frame).max(2.0);
-    egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, ROW_HEIGHT - 4.0))
+    egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, row_height - 4.0))
 }
 
 /// Waveform of an audio clip, one line per visible column. The bin of
@@ -4690,11 +4719,12 @@ fn clips_intersecting_rect(
     visuals: &[ClipVisual],
     px_per_frame: f32,
     row_y: &[f32],
+    row_height: f32,
     rect: egui::Rect,
 ) -> Vec<ClipKey> {
     visuals
         .iter()
-        .filter(|v| !v.locked && clip_local_rect(v, px_per_frame, row_y).intersects(rect))
+        .filter(|v| !v.locked && clip_local_rect(v, px_per_frame, row_y, row_height).intersects(rect))
         .map(|v| (v.track_index, v.clip.id))
         .collect()
 }
@@ -4758,6 +4788,7 @@ fn apply_click_selection(
     visuals: &[ClipVisual],
     px_per_frame: f32,
     row_y: &[f32],
+    row_height: f32,
 ) -> (BTreeSet<ClipKey>, Option<ClipKey>) {
     match modifiers {
         ClickModifiers::Plain => (BTreeSet::from([clicked]), Some(clicked)),
@@ -4773,14 +4804,14 @@ fn apply_click_selection(
             let anchor_rect = visuals
                 .iter()
                 .find(|v| (v.track_index, v.clip.id) == effective_anchor)
-                .map(|v| clip_local_rect(v, px_per_frame, row_y));
+                .map(|v| clip_local_rect(v, px_per_frame, row_y, row_height));
             let clicked_rect = visuals
                 .iter()
                 .find(|v| (v.track_index, v.clip.id) == clicked)
-                .map(|v| clip_local_rect(v, px_per_frame, row_y));
+                .map(|v| clip_local_rect(v, px_per_frame, row_y, row_height));
             let set = match (anchor_rect, clicked_rect) {
                 (Some(a), Some(c)) => {
-                    clips_intersecting_rect(visuals, px_per_frame, row_y, a.union(c))
+                    clips_intersecting_rect(visuals, px_per_frame, row_y, row_height, a.union(c))
                         .into_iter()
                         .collect()
                 }
@@ -5656,6 +5687,7 @@ mod tests {
             &visuals,
             10.0,
             &test_row_y(2),
+            ROW_HEIGHT,
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(2))]));
         assert_eq!(anchor, Some((0, ClipId(2))));
@@ -5673,6 +5705,7 @@ mod tests {
             &visuals,
             10.0,
             &test_row_y(2),
+            ROW_HEIGHT,
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(1)), (0, ClipId(2))]));
 
@@ -5685,6 +5718,7 @@ mod tests {
             &visuals,
             10.0,
             &test_row_y(2),
+            ROW_HEIGHT,
         );
         assert_eq!(selected2, BTreeSet::from([(0, ClipId(2))]));
     }
@@ -5707,6 +5741,7 @@ mod tests {
             &visuals,
             1.0,
             &test_row_y(1),
+            ROW_HEIGHT,
         );
         assert_eq!(
             selected,
@@ -5732,6 +5767,7 @@ mod tests {
             &visuals,
             1.0,
             &test_row_y(2),
+            ROW_HEIGHT,
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]));
     }
@@ -5748,6 +5784,7 @@ mod tests {
             &visuals,
             1.0,
             &test_row_y(1),
+            ROW_HEIGHT,
         );
         assert_eq!(selected, BTreeSet::from([(0, ClipId(1))]));
         assert_eq!(anchor, Some((0, ClipId(1))));
@@ -5764,8 +5801,9 @@ mod tests {
         // column, both tracks), not 2.
         let row_y = test_row_y(2);
         let rect =
-            clip_local_rect(&visuals[0], 1.0, &row_y).union(clip_local_rect(&visuals[2], 1.0, &row_y));
-        let hits: BTreeSet<_> = clips_intersecting_rect(&visuals, 1.0, &row_y, rect)
+            clip_local_rect(&visuals[0], 1.0, &row_y, ROW_HEIGHT)
+                .union(clip_local_rect(&visuals[2], 1.0, &row_y, ROW_HEIGHT));
+        let hits: BTreeSet<_> = clips_intersecting_rect(&visuals, 1.0, &row_y, ROW_HEIGHT, rect)
             .into_iter()
             .collect();
         assert_eq!(hits, BTreeSet::from([(0, ClipId(1)), (1, ClipId(3))]));

@@ -3429,8 +3429,12 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             // Timeline zoom with Alt+scroll instead of the default Ctrl.
-            cc.egui_ctx
-                .options_mut(|o| o.input_options.zoom_modifier = egui::Modifiers::ALT);
+            // Shift+scroll is left free for the vertical zoom of the tracks,
+            // so the horizontal scroll moves to Ctrl+scroll.
+            cc.egui_ctx.options_mut(|o| {
+                o.input_options.zoom_modifier = egui::Modifiers::ALT;
+                o.input_options.horizontal_scroll_modifier = egui::Modifiers::CTRL;
+            });
             let mut app = VenturiApp::default();
             app.settings_path = settings::Settings::default_path();
             if let Some(path) = &app.settings_path {
