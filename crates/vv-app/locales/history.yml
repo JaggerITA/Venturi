@@ -36,6 +36,10 @@ history.paste_clips:
   en: "Paste clips"
   it: "Incolla clip"
 
+history.paste_attributes:
+  en: "Paste attributes"
+  it: "Incolla attributi"
+
 history.duplicate_clips:
   en: "Duplicate clips"
   it: "Duplica clip"

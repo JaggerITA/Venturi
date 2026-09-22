@@ -23,6 +23,7 @@ pub enum Action {
     Copy,
     Cut,
     Paste,
+    PasteAttributes,
     Delete,
     RippleDelete,
     Split,
@@ -39,7 +40,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -52,6 +53,7 @@ impl Action {
         Action::Copy,
         Action::Cut,
         Action::Paste,
+        Action::PasteAttributes,
         Action::Delete,
         Action::RippleDelete,
         Action::Split,
@@ -82,6 +84,7 @@ impl Action {
             Action::Copy => "copy",
             Action::Cut => "cut",
             Action::Paste => "paste",
+            Action::PasteAttributes => "paste_attributes",
             Action::Delete => "delete",
             Action::RippleDelete => "ripple_delete",
             Action::Split => "split",
@@ -116,6 +119,7 @@ impl Action {
             | Action::Copy
             | Action::Cut
             | Action::Paste
+            | Action::PasteAttributes
             | Action::Delete
             | Action::RippleDelete
             | Action::Split
@@ -149,6 +153,7 @@ impl Action {
             Action::Copy => vec![ctrl(Key::C)],
             Action::Cut => vec![ctrl(Key::X)],
             Action::Paste => vec![ctrl(Key::V)],
+            Action::PasteAttributes => vec![Shortcut { alt: true, ..plain(Key::V) }],
             Action::Delete => vec![plain(Key::Delete), plain(Key::Backspace)],
             // ISO key between left Shift and Z ("<" on Italian layouts).
             Action::RippleDelete => vec![plain(Key::IntlBackslash)],

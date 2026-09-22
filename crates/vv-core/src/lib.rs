@@ -7,7 +7,7 @@ pub use command::{
     AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge, GroupMark, History, InsertClip,
     KeyframePick, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClips, MoveKeyframes, RemoveKeyframe,
     RemoveMedia, RemoveTrack,
-    ResetTransformParams, RippleDeleteGap, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
+    ResetTransformParams, RippleDeleteGap, SetClipAttributes, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
     SetKeyframeInterpolation,
     SetCrossTransition, SetMediaPath, SetTrackFlag, SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip,
     UpsertKeyframe, compound_clip_commands, cut_overlaps, insert_overwriting, make_room_for_ranges,

@@ -107,6 +107,9 @@ impl VenturiApp {
                     clipboard_events.push(event);
                 }
             }
+            if pressed(Action::PasteAttributes) {
+                self.open_paste_attributes_dialog();
+            }
             if pressed(Action::ZoomIn) {
                 self.timeline_state.zoom_in();
             }
@@ -233,6 +236,20 @@ impl VenturiApp {
                         .clicked()
                     {
                         self.paste_clipboard_at_playhead();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.timeline_state.clipboard.is_empty()
+                                && !self.timeline_state.selected.is_empty(),
+                            egui::Button::new(
+                                keymap.menu_label(&t!("menu.paste_attributes"), Action::PasteAttributes),
+                            ),
+                        )
+                        .on_hover_text(t!("menu.paste_attributes_hint"))
+                        .clicked()
+                    {
+                        self.open_paste_attributes_dialog();
                         ui.close();
                     }
                     ui.separator();
@@ -506,5 +523,6 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::MakeCompoundClip => t!("history.make_compound_clip"),
         L::MoveKeyframes => t!("history.move_keyframes"),
         L::SetInterpolation => t!("history.set_interpolation"),
+        L::PasteAttributes => t!("history.paste_attributes"),
     }
 }

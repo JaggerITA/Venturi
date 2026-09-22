@@ -48,6 +48,10 @@ timeline.make_compound_clip:
   en: "Compound Clip"
   it: "Compound Clip"
 
+timeline.paste_attributes:
+  en: "Paste attributes..."
+  it: "Incolla attributi..."
+
 timeline.media_offline:
   en: "⚠ Media offline"
   it: "⚠ Media offline"

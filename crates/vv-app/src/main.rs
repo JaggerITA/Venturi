@@ -16,6 +16,7 @@ mod media_pool;
 mod media_pool_ui;
 mod mix_buffers;
 mod new_timeline_dialog;
+mod paste_attributes;
 mod project_io;
 mod properties_panel;
 mod proxy_worker;
@@ -36,6 +37,7 @@ mod worker;
 use eframe::wgpu;
 use media_pool_ui::*;
 use new_timeline_dialog::NewTimelineDialog;
+use paste_attributes::PasteAttributesDialog;
 use project_io::*;
 use properties_panel::*;
 use settings::Action;
@@ -337,6 +339,11 @@ struct VenturiApp {
     export: Option<ExportUiState>,
     export_dialog: Option<export_dialog::ExportDialog>,
     new_timeline_dialog: Option<NewTimelineDialog>,
+    paste_attributes: Option<PasteAttributesDialog>,
+    /// Attributes ticked in the last "paste attributes": proposed again the
+    /// next time, as in the other NLEs.
+    paste_attributes_selection: std::collections::HashSet<paste_attributes::Attribute>,
+    paste_attributes_keyframe_mode: paste_attributes::KeyframeMode,
     /// Proposed again at the next export of the session.
     last_export_settings: Option<export::ExportSettings>,
 
@@ -441,6 +448,9 @@ impl Default for VenturiApp {
             export: None,
             export_dialog: None,
             new_timeline_dialog: None,
+            paste_attributes: None,
+            paste_attributes_selection: Default::default(),
+            paste_attributes_keyframe_mode: paste_attributes::KeyframeMode::MaintainTiming,
             last_export_settings: None,
             current_project_path: None,
             window_title: String::new(),
@@ -2878,6 +2888,10 @@ impl eframe::App for VenturiApp {
         self.show_relink_message(ui);
         self.show_unsaved_changes_dialog(ui);
         self.show_new_timeline_dialog(ui.ctx());
+        if std::mem::take(&mut self.timeline_state.paste_attributes_requested) {
+            self.open_paste_attributes_dialog();
+        }
+        self.show_paste_attributes_dialog(ui.ctx());
 
         // Targets of the panel: the selected clips by track kind, in order
         // (track, start). The frame of each is the playhead in its own source

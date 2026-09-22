@@ -84,6 +84,14 @@ menu.paste_hint:
   en: "Pastes at the playhead position"
   it: "Incolla alla posizione del playhead"
 
+menu.paste_attributes:
+  en: "Paste attributes..."
+  it: "Incolla attributi..."
+
+menu.paste_attributes_hint:
+  en: "Pastes only the chosen attributes of the copied clip onto the selected clips"
+  it: "Incolla sulle clip selezionate solo gli attributi scelti della clip copiata"
+
 menu.delete:
   en: "Delete"
   it: "Elimina"

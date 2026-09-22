@@ -96,6 +96,9 @@ action.cut:
 action.paste:
   en: Paste
   it: Incolla
+action.paste_attributes:
+  en: Paste attributes
+  it: Incolla attributi
 action.delete:
   en: Delete
   it: Elimina

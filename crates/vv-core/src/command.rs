@@ -2,7 +2,7 @@
 //! needed to invert itself at the moment it is applied.
 
 use crate::model::{
-    Clip, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
+    Clip, ClipAttributes, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
     LinkGroupId, MediaId, MediaItem, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track,
     TrackKind, Transform, TransformParam, Transition,
 };
@@ -53,6 +53,7 @@ pub enum CommandLabel {
     MakeCompoundClip,
     MoveKeyframes,
     SetInterpolation,
+    PasteAttributes,
 }
 
 /// Several commands in a single history step.
@@ -1035,6 +1036,46 @@ impl<T: Clone> Command for SetClipValue<T> {
             project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id),
         ) {
             *(self.access)(clip) = old.clone();
+        }
+    }
+}
+
+/// Replaces the whole attribute block of a clip (effects and fades):
+/// the "paste attributes" of the NLEs, whose per-attribute merge the
+/// caller has already done.
+#[derive(Debug)]
+pub struct SetClipAttributes {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    value: ClipAttributes,
+    old: Option<ClipAttributes>,
+}
+
+impl SetClipAttributes {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, value: ClipAttributes) -> Self {
+        Self { timeline, track_index, clip_id, value, old: None }
+    }
+}
+
+impl Command for SetClipAttributes {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::PasteAttributes
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) {
+            self.old = Some(ClipAttributes::of(clip));
+            self.value.clone().apply_to(clip);
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if let (Some(old), Some(clip)) = (
+            self.old.clone(),
+            project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id),
+        ) {
+            old.apply_to(clip);
         }
     }
 }

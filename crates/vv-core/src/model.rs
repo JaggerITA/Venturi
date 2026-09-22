@@ -1306,6 +1306,31 @@ impl Clip {
     }
 }
 
+/// The attribute part of a clip: everything the "paste attributes" of
+/// the NLEs copies, i.e. all but source, position and links.
+#[derive(Debug, Clone)]
+pub struct ClipAttributes {
+    pub effects: EffectStack,
+    pub fade_in: FrameIdx,
+    pub fade_out: FrameIdx,
+}
+
+impl ClipAttributes {
+    pub fn of(clip: &Clip) -> Self {
+        Self {
+            effects: clip.effects.clone(),
+            fade_in: clip.fade_in,
+            fade_out: clip.fade_out,
+        }
+    }
+
+    pub fn apply_to(self, clip: &mut Clip) {
+        clip.effects = self.effects;
+        clip.fade_in = self.fade_in;
+        clip.fade_out = self.fade_out;
+    }
+}
+
 /// `frames` at `from` fps expressed at `to` fps, rounded.
 pub fn convert_frames(frames: FrameIdx, from: Rational, to: Rational) -> FrameIdx {
     if from == to || from.num <= 0 || to.den <= 0 {

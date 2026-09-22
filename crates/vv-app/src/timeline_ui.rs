@@ -97,6 +97,9 @@ pub struct TimelineState {
     audio_scroll_vel: f32,
     /// In/out of the timeline: the exported portion.
     pub export_marks: crate::transport::MarkRange,
+    /// "Paste attributes" asked from the context menu: the dialog lives in
+    /// the app, which opens it and clears the flag.
+    pub paste_attributes_requested: bool,
 }
 
 /// A copied clip. Id and group are reassigned on paste; the position
@@ -318,6 +321,7 @@ impl Default for TimelineState {
             video_scroll_vel: 0.0,
             audio_scroll_vel: 0.0,
             export_marks: crate::transport::MarkRange::default(),
+            paste_attributes_requested: false,
         }
     }
 }
@@ -2804,6 +2808,16 @@ pub fn show_timeline(
                             ui.label(t!("timeline.link_hint"));
                         }
                         ui.separator();
+                        if ui
+                            .add_enabled(
+                                !state.clipboard.is_empty() && !state.selected.is_empty(),
+                                egui::Button::new(t!("timeline.paste_attributes")),
+                            )
+                            .clicked()
+                        {
+                            state.paste_attributes_requested = true;
+                            ui.close();
+                        }
                         if ui.button(t!("timeline.make_compound_clip")).clicked() {
                             // A right-click on an unselected clip acts only
                             // on it, not on the stale previous selection.
