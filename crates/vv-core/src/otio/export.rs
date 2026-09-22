@@ -37,7 +37,10 @@ pub fn timeline_to_otio(project: &Project, timeline_id: TimelineId) -> Value {
         "OTIO_SCHEMA": "Timeline.1",
         "name": timeline.name,
         "global_start_time": rational_time(0, fps),
+        // Resolve stamps its own version on a file it wrote; without it it
+        // does not trust the `Resolve_OTIO` namespace of the generators.
         "metadata": {
+            "Resolve_OTIO": { "Resolve OTIO Meta Version": "1.0" },
             "venturi": {
                 "fps": timeline.fps,
                 "resolution": timeline.resolution,
@@ -90,7 +93,7 @@ fn track_to_otio(
         "effects": [],
         "markers": [],
         "enabled": !track.muted,
-        "metadata": {},
+        "metadata": { "Resolve_OTIO": { "Locked": false } },
         "children": children,
     })
 }
