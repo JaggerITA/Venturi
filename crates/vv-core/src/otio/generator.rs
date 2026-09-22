@@ -74,7 +74,7 @@ fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTit
     // The rectangle Resolve will draw, in timeline pixels: what the radius
     // and the two fractions both have to agree on.
     let box_size = (
-        resolved(background.width, measured.0, frame.0),
+        resolved(background.width, measured.0 * TEXT_WIDTH_ALLOWANCE, frame.0),
         resolved(background.height, measured.1, frame.1),
     );
     block("Background", "Background", 27, 1, background.enabled, json!([
@@ -98,6 +98,11 @@ fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTit
         animatable("backgroundOpacity", json!(background.opacity.round() as i64), json!(50), [0.0, 100.0]),
     ]))
 }
+
+/// Resolve shapes the same line wider than we do, and on the horizontal
+/// axis our padding is too thin to absorb it: a background left to wrap the
+/// text ends up touching it. Empirical, and only for the automatic width.
+const TEXT_WIDTH_ALLOWANCE: f32 = 1.2;
 
 /// A side of the rectangle in timeline pixels: a fraction of the frame,
 /// or the measured text box when left at 0.

@@ -465,7 +465,10 @@ mod tests {
                 .as_f64()
                 .unwrap()
         };
-        assert_eq!(value("backgroundWidth"), 0.25, "480 px su 1920");
+        assert!(
+            (value("backgroundWidth") - 0.3).abs() < 1e-6,
+            "480 px più il margine, su 1920"
+        );
         assert!((value("backgroundHeight") - 0.2).abs() < 1e-6, "216 px su 1080");
         // 0.1 del lato corto del rettangolo (216 px) sono 21.6 px, che per
         // Resolve è una frazione dell'altezza del frame.
