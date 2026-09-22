@@ -2,6 +2,7 @@
 //! file into a new project.
 
 mod export;
+mod generator;
 mod import;
 mod resolve;
 

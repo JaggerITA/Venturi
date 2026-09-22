@@ -5,6 +5,7 @@
 //! to `metadata.venturi`.
 
 use super::OtioError;
+use super::generator;
 use crate::model::{
     Clip, ClipSource, Ease, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
     MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline, Track, TrackKind,
@@ -297,25 +298,17 @@ impl Importer<'_> {
                 };
                 (ClipSource::Media(media_id), rate, offset.max(0), Some((secs, media_fps)))
             }
-            "GeneratorReference" if reference["generator_kind"] == "SolidColor" => {
+            "GeneratorReference" if reference["generator_kind"] == "Solid Color" => {
                 if effects.color.is_none() {
-                    let color = serde_json::from_value::<[f32; 4]>(
-                        reference["parameters"]["color"].clone(),
-                    )
-                    .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-                    effects.color = Some(Keyframed::constant(Rgba::from(color)));
+                    let color = generator::read_solid_color(reference).unwrap_or(Rgba::BLACK);
+                    effects.color = Some(Keyframed::constant(color));
                 }
                 (ClipSource::SolidColor, Rational::one(), 0, None)
             }
-            "GeneratorReference" if reference["generator_kind"] == "Text" => {
+            "GeneratorReference" if reference["generator_kind"] == "Rich" => {
                 if effects.title.is_none() {
-                    effects.title = Some(crate::model::TitleParams {
-                        content: reference["parameters"]["text"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
-                        ..Default::default()
-                    });
+                    let frame = self.timeline_resolution(venturi, &ClipSource::Text);
+                    effects.title = Some(generator::read_text(reference, frame));
                 }
                 (ClipSource::Text, Rational::one(), 0, None)
             }
@@ -912,6 +905,64 @@ mod tests {
             Some((PushDirection::Up, 9, Ease::In)),
             "la transizione torna intera da metadata.venturi"
         );
+    }
+
+    /// Generators go back and forth through Resolve's own blocks: the same
+    /// file, with our metadata stripped, has to rebuild the title from the
+    /// Qt rich text and the colour from the hex.
+    #[test]
+    fn reads_back_the_generators_without_our_metadata() {
+        let mut project = Project::default();
+        let timeline_id = project.timelines.insert(Timeline {
+            name: "Generatori".into(),
+            fps: Rational::new(30, 1),
+            resolution: (1920, 1080),
+            tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
+        });
+        let mut color =
+            Clip::from_source_range(ClipId(1), ClipSource::SolidColor, 0, 60, 0, Rational::one());
+        color.effects.color =
+            Some(Keyframed::constant(Rgba { r: 0.231_372_55, g: 0.709_803_94, b: 0.207_843_14, a: 1.0 }));
+        let mut text =
+            Clip::from_source_range(ClipId(2), ClipSource::Text, 0, 60, 0, Rational::one());
+        let title = crate::model::TitleParams {
+            content: "Due\nrighe & <>".into(),
+            font_family: "Open Sans".into(),
+            font_weight: 700,
+            italic: true,
+            underline: true,
+            size: 72.0,
+            align: crate::model::TextAlign::Left,
+            anchor: (crate::model::HAnchor::Right, crate::model::VAnchor::Bottom),
+            position: [192.0, -108.0],
+            ..Default::default()
+        };
+        text.effects.title = Some(title.clone());
+        project.timelines[timeline_id].tracks[0].clips.push(color);
+        project.timelines[timeline_id].tracks[1].clips.push(text);
+
+        let mut otio = timeline_to_otio(&project, timeline_id);
+        for track in otio["tracks"]["children"].as_array_mut().unwrap() {
+            for clip in track["children"].as_array_mut().unwrap() {
+                clip["metadata"]["venturi"] = json!(null);
+            }
+        }
+        let mut probe = probe_from(vec![]);
+        let imported = project_from_otio(&otio, Path::new("/"), &mut probe).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+
+        let (_, tl) = imported.project.timelines.iter().next().unwrap();
+        let color = tl.tracks[0].clips[0].effects.color.as_ref().unwrap().default;
+        assert_eq!(((color.r * 255.0).round(), (color.g * 255.0).round()), (59.0, 181.0));
+
+        let back = tl.tracks[1].clips[0].effects.title.as_ref().unwrap();
+        assert_eq!(back.content, title.content, "testo e righe dal blob HTML");
+        assert_eq!(back.font_family, "Open Sans");
+        assert_eq!((back.font_weight, back.size), (700, 72.0));
+        assert!(back.italic && back.underline && !back.strikethrough);
+        assert_eq!(back.align, crate::model::TextAlign::Left);
+        assert_eq!(back.anchor, title.anchor, "indice 8 della griglia 3x3");
+        assert!((back.position[0] - 192.0).abs() < 0.01 && (back.position[1] + 108.0).abs() < 0.01);
     }
 
     /// A clip exported by Resolve: the transform lives in `Effect.1` items

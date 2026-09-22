@@ -6,9 +6,12 @@
 //! the transitions also travel in Resolve's own namespace (see `resolve`).
 
 use super::OtioError;
+use super::generator;
 use super::resolve::{self, Scale};
 use crate::FadeEdge;
-use crate::model::{Clip, ClipSource, FrameIdx, Project, Rational, TimelineId, Track, TrackKind};
+use crate::model::{
+    Clip, ClipSource, FrameIdx, Project, Rational, Rgba, TimelineId, Track, TrackKind,
+};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -99,6 +102,7 @@ fn clip_to_otio(
     fps: Rational,
     resolution: (u32, u32),
 ) -> Value {
+    let frame = (resolution.0 as f32, resolution.1 as f32);
     let (name, media_reference) = match &clip.source {
         ClipSource::Media(media_id) => match project.media_pool.get(*media_id) {
             Some(item) => (
@@ -126,38 +130,15 @@ fn clip_to_otio(
             ),
         },
         ClipSource::SolidColor => {
-            let color = clip.effects.color.as_ref().map(|c| c.default);
-            (
-                "Colore".to_owned(),
-                json!({
-                    "OTIO_SCHEMA": "GeneratorReference.1",
-                    "name": "",
-                    "generator_kind": "SolidColor",
-                    "parameters": { "color": color.map(|c| [c.r, c.g, c.b, c.a]) },
-                    "available_range": null,
-                    "available_image_bounds": null,
-                    "metadata": {},
-                }),
-            )
+            let color = clip.effects.color.as_ref().map_or(Rgba::BLACK, |c| c.default);
+            ("Colore".to_owned(), generator::solid_color(color))
         }
         ClipSource::Text => {
-            let content = clip.effects.title.as_ref().map(|t| t.content.clone());
-            (
-                content.clone().unwrap_or_default(),
-                json!({
-                    "OTIO_SCHEMA": "GeneratorReference.1",
-                    "name": "",
-                    "generator_kind": "Text",
-                    "parameters": { "text": content },
-                    "available_range": null,
-                    "available_image_bounds": null,
-                    "metadata": {},
-                }),
-            )
+            let title = clip.effects.title.clone().unwrap_or_default();
+            (title.content.clone(), generator::text(&title, frame))
         }
     };
 
-    let frame = (resolution.0 as f32, resolution.1 as f32);
     let media = match &clip.source {
         ClipSource::Media(id) => project
             .media_pool
@@ -301,8 +282,10 @@ mod tests {
         assert_eq!(reference["available_range"]["duration"]["value"], 1000.0);
 
         let generator = &tracks[1]["children"][0]["media_references"]["DEFAULT_MEDIA"];
-        assert_eq!(generator["generator_kind"], "SolidColor");
-        assert_eq!(generator["parameters"]["color"], json!([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(generator["generator_kind"], "Solid Color");
+        let block = &generator["parameters"]["Resolve_OTIO"][0];
+        assert_eq!(block["Effect Name"], "Solid Color");
+        assert_eq!(block["Parameters"][1]["Parameter Value"], "#ff0000");
     }
 
     /// After a split mid source frame the right half starts where the left
