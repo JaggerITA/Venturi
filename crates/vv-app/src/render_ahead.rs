@@ -35,6 +35,10 @@ pub const DEFAULT_BEHIND_SECS: f64 = 2.0;
 /// cushion the playback stutters from the normal timing variability.
 const MIN_MARGIN_FRAMES: FrameIdx = 4;
 
+/// Chunks the forward window is split into, per media: see
+/// `chunk_forward_segments_near_to_far`.
+const FORWARD_CHUNK_FRAMES: FrameIdx = 15;
+
 /// Chunks the window behind the playhead is split into. Decoding it in
 /// a single seek would produce last the frames near the playhead, and a
 /// continuous backwards scrub would never reach them: from the nearest
@@ -593,6 +597,37 @@ fn push_borrowed_segment(
     }
 }
 
+/// Splits the forward segments into chunks of `FORWARD_CHUNK_FRAMES` and orders
+/// them by timeline position, so clips playing together (two video tracks) are
+/// filled interleaved. Whole segment at a time, the playhead interrupts the
+/// cycle before the lower track is ever reached and the compositing shows it
+/// black.
+fn chunk_forward_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
+    let mut chunks: Vec<MediaSegment> = Vec::new();
+    for segment in segments {
+        let mut chunk_start = segment.source_start;
+        loop {
+            let chunk_end = (chunk_start + FORWARD_CHUNK_FRAMES - 1).min(segment.source_end);
+            let offset = segment.rate.scale_round(chunk_start)
+                - segment.rate.scale_round(segment.source_start);
+            chunks.push(MediaSegment {
+                media_id: segment.media_id,
+                source_start: chunk_start,
+                source_end: chunk_end,
+                timeline_start: segment.timeline_start + offset,
+                rate: segment.rate,
+            });
+            if chunk_end == segment.source_end {
+                break;
+            }
+            chunk_start = chunk_end + 1;
+        }
+    }
+    // Stable: at equal position the order of the segments (topmost track first) holds.
+    chunks.sort_by_key(|c| c.timeline_start);
+    chunks
+}
+
 /// Splits the segments behind the playhead into chunks of `BEHIND_CHUNK_FRAMES`,
 /// from the edge near the playhead (`source_end`) towards the far one.
 fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
@@ -797,7 +832,8 @@ fn walk_and_fill(
         target,
     };
     // The forward window first: behind gets only the budget left over.
-    if let ControlFlow::Break(outcome) = fill_segments(&forward_segments, &ctx, open) {
+    let forward_chunks = chunk_forward_segments_near_to_far(&forward_segments);
+    if let ControlFlow::Break(outcome) = fill_segments(&forward_chunks, &ctx, open) {
         return outcome;
     }
     // Decoders separate from the forward ones: a single decoder would stay
@@ -1572,6 +1608,47 @@ mod tests {
         let real = collect_media_segments(&project, &project.timelines[timeline_id], 0, 100);
 
         assert!(real.is_empty(), "nessun media vero da decodificare in un ciclo puro");
+    }
+
+    /// Two clips playing together on two video tracks must be filled
+    /// interleaved chunk by chunk, not one whole clip then the other.
+    #[test]
+    fn chunk_forward_segments_near_to_far_interleaves_two_overlapping_tracks() {
+        let (media_a, media_b) = two_media_ids();
+        let segments = vec![
+            MediaSegment {
+                media_id: media_a,
+                source_start: 0,
+                source_end: 44,
+                timeline_start: 100,
+                rate: Rational::new(1, 1),
+            },
+            MediaSegment {
+                media_id: media_b,
+                source_start: 0,
+                source_end: 44,
+                timeline_start: 100,
+                rate: Rational::new(1, 1),
+            },
+        ];
+
+        let chunks = chunk_forward_segments_near_to_far(&segments);
+
+        let order: Vec<(MediaId, FrameIdx, FrameIdx)> = chunks
+            .iter()
+            .map(|c| (c.media_id, c.source_start, c.source_end))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (media_a, 0, 14),
+                (media_b, 0, 14),
+                (media_a, 15, 29),
+                (media_b, 15, 29),
+                (media_a, 30, 44),
+                (media_b, 30, 44),
+            ]
+        );
     }
 
     /// A segment behind the playhead longer than `BEHIND_CHUNK_FRAMES`
