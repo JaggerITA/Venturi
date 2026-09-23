@@ -1,0 +1,54 @@
+name: AppImage build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The compiled FFmpeg only changes with its build script or the image.
+      - uses: actions/cache@v4
+        with:
+          path: target/ffmpeg-shared
+          key: ffmpeg-appimage-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'container/Containerfile.appimage') }}
+
+      - uses: actions/cache@v4
+        with:
+          path: target/cargo-registry
+          key: cargo-registry-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.arch }}-
+
+      - name: Build image
+        run: docker build -t venturi-appimage -f container/Containerfile.appimage container/
+
+      # Same environment as container/build-appimage.sh, with the target dir
+      # in the workspace so the caches above can save it. The container runs
+      # as root on a checkout owned by the runner user: without safe.directory
+      # git refuses the repo and build.rs embeds "unknown" as the hash.
+      - name: Build AppImage
+        run: |
+          mkdir -p target/cargo-registry
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v "$PWD/target/cargo-registry:/usr/local/cargo/registry" \
+            -e CARGO_TARGET_DIR=/workspace/target \
+            -e VV_APPIMAGE_CONTAINER=1 \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/workspace \
+            venturi-appimage scripts/build-appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Venturi-appimage-${{ runner.arch }}
+          path: target/appimage/Venturi-*.AppImage
+          if-no-files-found: error

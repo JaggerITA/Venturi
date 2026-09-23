@@ -180,10 +180,10 @@ scripts/build-appimage.sh
 ```
 
 Produces `target/appimage/Venturi-<arch>.AppImage` with FFmpeg compiled from
-source inside it (shared libraries, with libx264, zlib and NVENC) plus
-libx264: the target machine needs neither FFmpeg nor RPM Fusion. glibc, ALSA,
-Vulkan and the NVIDIA driver, if any (NVENC requires >= 550), stay the system
-ones.
+source inside it (shared libraries, with libx264, librubberband, zlib and
+NVENC) plus libx264: the target machine needs neither FFmpeg nor RPM Fusion.
+glibc, ALSA, Vulkan and the NVIDIA driver, if any (NVENC requires >= 550),
+stay the system ones.
 
 The script re-runs itself inside a Debian 13 container
 (`container/Containerfile.appimage`, built on first use): a glibc binary only
@@ -194,6 +194,10 @@ FFmpeg is compiled once inside the build volume
 (`venturi-appimage-target`); to start over from scratch:
 `podman volume rm venturi-appimage-cargo venturi-appimage-target`,
 and `podman rmi venturi-appimage` if you change `Containerfile.appimage`.
+
+The `AppImage build` GitHub Actions workflow (`.github/workflows/appimage.yml`)
+builds the same image and runs the same script on x86_64 and aarch64 runners,
+manually or on `v*` tags, and uploads the AppImages as artifacts.
 
 The AppImage is GPL (it includes libx264) and does not include FDK-AAC:
 export uses FFmpeg's native AAC encoder.
