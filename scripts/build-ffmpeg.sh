@@ -1,7 +1,7 @@
 #!/bin/bash
-# Builds FFmpeg from source (shared libraries) with libx264, zlib and the
-# platform hardware encoder (NVENC on Linux, VideoToolbox on macOS) into a
-# local prefix. Used by build-appimage.sh and build-macos.sh.
+# Builds FFmpeg from source (shared libraries) with libx264, librubberband,
+# zlib and the platform hardware encoder (NVENC on Linux, VideoToolbox on
+# macOS) into a local prefix. Used by build-appimage.sh and build-macos.sh.
 #
 # Usage: scripts/build-ffmpeg.sh <prefix>
 set -euo pipefail
@@ -14,14 +14,15 @@ FFMPEG_TAG="n9.0.1"
 # NVENC SDK 12.2: an NVIDIA driver >= 550 is enough.
 NV_HEADERS_TAG="n12.2.72.0"
 X264_BRANCH="stable"
+RUBBERBAND_TAG="v4.0.0"
 
 OS="$(uname -s)"
 if [ "$OS" = Darwin ]; then
-    WANT="$FFMPEG_TAG videotoolbox $X264_BRANCH ${MACOSX_DEPLOYMENT_TARGET:-}"
+    WANT="$FFMPEG_TAG videotoolbox $X264_BRANCH $RUBBERBAND_TAG ${MACOSX_DEPLOYMENT_TARGET:-}"
     JOBS="$(sysctl -n hw.ncpu)"
     HW_FLAGS=(--enable-videotoolbox)
 else
-    WANT="$FFMPEG_TAG $NV_HEADERS_TAG $X264_BRANCH"
+    WANT="$FFMPEG_TAG $NV_HEADERS_TAG $X264_BRANCH $RUBBERBAND_TAG"
     JOBS="$(nproc)"
     HW_FLAGS=(--enable-ffnvcodec --enable-nvenc)
 fi
@@ -51,15 +52,32 @@ git clone --depth 1 --branch "$X264_BRANCH" \
     make install
 )
 
+# Needed by the `rubberband` filter of the fast playback audio.
+# --libdir=lib: Debian's meson would pick lib/<triplet>.
+git clone --depth 1 --branch "$RUBBERBAND_TAG" \
+    https://github.com/breakfastquay/rubberband.git "$SRC/rubberband"
+(
+    cd "$SRC/rubberband"
+    meson setup build --prefix="$PREFIX" --libdir=lib --buildtype=release \
+        -Ddefault_library=shared -Dresampler=builtin \
+        -Djni=disabled -Dladspa=disabled -Dvamp=disabled \
+        -Dcmdline=disabled -Dtests=disabled
+    meson install -C build
+)
+
 git clone --depth 1 --branch "$FFMPEG_TAG" \
     https://github.com/FFmpeg/FFmpeg.git "$SRC/ffmpeg"
 (
     cd "$SRC/ffmpeg"
+    if [ "$OS" = Darwin ]; then
+        # configure links rubberband with -lstdc++, absent from the macOS SDK.
+        sed -i '' 's/-lstdc++/-lc++/g' configure
+    fi
     # --disable-autodetect: no dependencies picked up at random from the build
     # machine; the ones we need are enabled explicitly.
     ./configure --prefix="$PREFIX" --enable-shared --disable-static \
         --enable-gpl --disable-autodetect --disable-programs --disable-doc \
-        --enable-libx264 --enable-zlib "${HW_FLAGS[@]}"
+        --enable-libx264 --enable-librubberband --enable-zlib "${HW_FLAGS[@]}"
     make -j"$JOBS"
     make install
 )
