@@ -13,18 +13,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ## Features
 
-| Category | Features |
-|---|---|
-| **Project** | Human-readable RON project files, OpenTimelineIO import/export compatible with DaVinci Resolve |
-| **Media** | Multi-stream audio, audio-only files, still images with transparency, relink of offline media |
-| **Timeline** | Ripple delete across all tracks keeping A/V sync, track lock/mute/solo, compound clips, paste attributes, magnet snapping, mixed frame rates conformed to the timeline, unlimited undo with jumpable history |
-| **Video effects** | Transform (zoom, position, rotation, anchor, flip), crop with softness, opacity, 15 composite modes, fades, Black & White filter, Push transition, on-viewer transform handles |
-| **Titles** | Text clips with font, style, tracking, line spacing, case, alignment, drop shadow and background box |
-| **Keyframes** | Keyframes on every parameter, keyframe editor with curves and Hold/Linear/Ease/custom interpolation |
-| **Audio** | Live mix of all tracks, volume keyframes, waveforms, audiometer, audio scrubbing |
-| **Playback** | Fast play up to 8x with pitch-preserved audio, timeline-wide frame cache, optional background proxies, player zoom and pan |
-| **Export** | H.264 + AAC MP4 with x264 or NVENC, in/out range, reduced resolution |
-| **Interface** | Rebindable keyboard shortcuts, English and Italian UI |
+- DaVinci Resolve timeline interoperability via **OpenTimelineIO**.
+- **Professional timeline workflow**: track scrubbing with audio, ripple delete, compound clips, copy/paste for attributes, magnet snapping, unlimited undo with jumpable history
+- **Keyframes done right**: every parameter is keyframable. There's also a nice **keyframe editor** to make with custom curves.
+- **Crazy fast playback**: timeline-wide **frame cache**, optional background **proxies**, fast playback up to 8x with pitch-preserved audio.
 
 ## Why another editor
 
