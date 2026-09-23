@@ -389,6 +389,8 @@ struct VenturiApp {
     about_open: bool,
     #[cfg(target_os = "linux")]
     wayland_dnd: Option<wayland_dnd::WaylandDnd>,
+    #[cfg(target_os = "macos")]
+    iso_key_down: bool,
 }
 
 impl Default for VenturiApp {
@@ -471,6 +473,8 @@ impl Default for VenturiApp {
             about_open: false,
             #[cfg(target_os = "linux")]
             wayland_dnd: None,
+            #[cfg(target_os = "macos")]
+            iso_key_down: false,
         }
     }
 }
@@ -2821,9 +2825,38 @@ fn unstick_wheel_modifiers(raw_input: &mut egui::RawInput) {
     }
 }
 
+/// winit on macOS maps the ISO "<" key to `Backquote` and never emits
+/// `IntlBackslash`; egui has no key for "<", so it falls back to that physical
+/// code. The typed text tells the two apart; the release carries no text, so
+/// `iso_key_down` rewrites it too, otherwise egui would see the key held.
+#[cfg(target_os = "macos")]
+fn fix_iso_key(raw_input: &mut egui::RawInput, iso_key_down: &mut bool) {
+    for i in 0..raw_input.events.len() {
+        let typed_angle = matches!(
+            raw_input.events.get(i + 1),
+            Some(egui::Event::Text(t)) if t.starts_with(['<', '>'])
+        );
+        if let egui::Event::Key { key, pressed, .. } = &mut raw_input.events[i]
+            && *key == egui::Key::Backtick
+        {
+            if *pressed && typed_angle {
+                *iso_key_down = true;
+            }
+            if *iso_key_down {
+                *key = egui::Key::IntlBackslash;
+                if !*pressed {
+                    *iso_key_down = false;
+                }
+            }
+        }
+    }
+}
+
 impl eframe::App for VenturiApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         unstick_wheel_modifiers(raw_input);
+        #[cfg(target_os = "macos")]
+        fix_iso_key(raw_input, &mut self.iso_key_down);
         #[cfg(target_os = "linux")]
         if let Some(dnd) = &self.wayland_dnd {
             dnd.feed(raw_input);
