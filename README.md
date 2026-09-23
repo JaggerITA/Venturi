@@ -1,13 +1,13 @@
 # Venturi
 
-A fast, focused video editor for Linux, written in Rust.
+A Linux-first, performance-oriented video editor written in Rust.
 
-Venturi is an "edit page only" NLE: multi-track cutting, the transforms you
-actually reach for while editing (crop, zoom, rotation, position, speed,
-opacity, audio gain, titles, solid colours), keyframes on every parameter,
-transitions, compound clips, ripple/normal delete. No node editor, no colour
-grading page, no fusion-style compositor. The scope is deliberate: the edit
-page is where the time goes, so that is the part that gets to be excellent.
+Venturi does little, and does it well. It is an "edit page only" NLE:
+multi-track cutting, the transforms and tools you actually reach for while
+editing (crop, zoom, rotation, position, speed, opacity, audio gain, titles,
+solid colours), keyframes on every parameter, transitions, compound clips,
+ripple delete. No node editor, no colour page, no Fusion-style compositor. The
+edit page is where the time goes, so that is the part that has to be perfect.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
@@ -20,97 +20,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ## Why another editor
 
-Venturi started from a simple frustration: on a modern laptop, cutting 1080p
-H.264 footage should feel instant, and usually it does not. Most editors treat
-the timeline as a collection of clips, each with its own decoder, its own
-cache, its own idea of what to keep in memory. Scrub across a cut and
-everything starts over. Group a few clips and playback falls off a cliff.
+Minimal in scope, professional in workflow.
 
-Venturi is built the other way around.
-
-### The timeline is the unit, not the clip
-
-There is one frame cache for the whole project, with a single global byte
-budget (1.2 GB by default, configurable). A single worker thread walks the
-timeline forward from the playhead — through cuts, gaps, and every video
-track at once — and fills it. Crossing a cut is not a special case; it is just
-the next frame.
-
-Eviction is not LRU. During a forward fill the frame *at the playhead* is the
-oldest one inserted, so any recency-based policy would throw away exactly the
-frame you are about to need. Instead a single reconcile pass drops whatever
-falls outside the current window, then evicts by **distance from the playhead
-in timeline frames**. The frame you need next is the last one to go.
-
-### Nothing is baked
-
-Transforms are evaluated at runtime from their keyframes and handed to the
-shader as uniforms — never baked into cached frames. Dragging a crop slider
-does not invalidate a single buffered frame. The same applies to the
-audio gain curve, which is sampled per block inside the mixer.
-
-### No readback in the preview path
-
-The compositor is wgpu on Vulkan, sharing its device with the egui UI. The
-preview composes straight into a texture that stays on the GPU and is handed
-to `egui-wgpu` as-is — no `copy_texture_to_buffer`, no `map_read`, no
-pipeline stall per frame. Compound clips compose into a pooled intermediate
-texture that is sampled directly by the outer pass, instead of making a round
-trip through RGB↔YUV on the CPU.
-
-Export uses the same code path with a different tail: decode, GPU compositing
-and encode run as three pipelined threads, and the RGBA→I420 conversion is a
-compute shader, so the readback is half the size and happens once per frame
-instead of twice.
-
-### The audio clock is the playback clock
-
-The mixer's position, in timeline samples, *is* the playhead; the video
-chases it. A gap is silence and the clock keeps running. The `cpal` callback
-mixes from an immutable snapshot published by the UI thread with a
-non-blocking `try_lock` — no allocation, no blocking lock, and old snapshots
-are dropped on the UI thread so a deallocation can never land in the audio
-callback. Fast-forward (2×/4×/8×) renders 8-second windows of the mix,
-pitch-preserved through `rubberband`, in the background and queues them
-without ever reopening the stream.
-
-### Scrubbing gets its own format
-
-Long-GOP H.264 cannot be scrubbed: every frame needs a decode from the
-previous keyframe. So, with proxies turned on (Playback menu, quality in
-Settings > Playback), every imported file gets a low-resolution all-intra
-proxy generated in the background, keyed by a content fingerprint in a global
-cache — it is reused by every project that touches the same file, even before
-you save. Preview uses it; **export always reads the originals**.
-
-### Correctness the same way
-
-Fast is only worth something if the frames are right. A clip whose media runs
-at a different rate than the timeline is *conformed*: `Clip::rate` is the one
-place where the two frame spaces meet, so a 59.94 clip on a 60 fps timeline
-occupies its real duration and duplicates a frame roughly every 17 seconds
-instead of drifting out of sync with its own audio. Splits and trims land
-exactly where you put them, even mid source frame. Preview and export share
-one `mix_range` for audio and one layer-building path for video, so what you
-hear and see while editing is what gets written out.
-
-### The rest of the shape
-
-- **Data-oriented model, no node graph.** A single `Project` owned by the UI
-  thread; media and timelines in `slotmap` arenas, clips in time-sorted
-  `Vec`s. Workers get snapshots or copies.
-- **Undo/redo by command pattern.** Every command captures what it needs to
-  invert itself. The history is light and unbounded.
-- **Projects are RON.** Readable, diffable, greppable, reviewable in git.
-- **Rust, no GC.** No pause is ever someone else's decision.
-- **Immediate-mode UI (egui).** The timeline is painted, not built from
-  nested widgets — cheaper for a dense grid of rectangles, and it shares the
-  wgpu device with the compositor.
-- **OpenTimelineIO in and out**, so a project can leave.
-
-Primary development and testing happens on Fedora Asahi Remix (Apple
-Silicon), but nothing here depends on Asahi: building on other Linux distros
-should work the same way, given the system libraries below.
+- **Keep it simple.** A small set of features, done well.
+- **As fast as possible.** Scrubbing, cutting and playback should feel
+  instant, and not only on a professional workstation.
+- **Familiar to DaVinci Resolve users.** The edit workflow is modelled on
+  Resolve's edit page, so the habits carry over, and timelines can move
+  between the two through OpenTimelineIO.
+- **Linux first.** Developed and tested on Linux, not ported to it.
 
 ## Dependencies
 
