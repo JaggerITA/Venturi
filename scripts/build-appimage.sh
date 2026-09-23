@@ -32,7 +32,10 @@ export PKG_CONFIG_PATH="$FFMPEG_PREFIX/lib/pkgconfig"
 # resolves -lavcodec & co. against the system libav, producing a binary with
 # sonames different from the bundled ones. The -L from RUSTFLAGS are placed by
 # rustc before those of the build scripts, so our prefix wins.
-export RUSTFLAGS="-L native=$FFMPEG_PREFIX/lib${RUSTFLAGS:+ $RUSTFLAGS}"
+# -rpath-link: GNU ld (the aarch64 default; x86_64 uses rust-lld) looks for
+# the libraries needed by libavcodec/libavfilter (libx264, librubberband)
+# there and not in the -L paths. It embeds nothing in the binary.
+export RUSTFLAGS="-L native=$FFMPEG_PREFIX/lib -C link-arg=-Wl,-rpath-link,$FFMPEG_PREFIX/lib${RUSTFLAGS:+ $RUSTFLAGS}"
 
 # Changing RUSTFLAGS/FFMPEG_DIR is not enough to make vv-app relink if a release
 # artifact is already cached: we force it by cleaning the ffmpeg chain.
