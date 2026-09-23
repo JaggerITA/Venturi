@@ -116,6 +116,14 @@ impl VenturiApp {
             if pressed(Action::ZoomOut) {
                 self.timeline_state.zoom_out();
             }
+            if pressed(Action::ViewerZoomFit) {
+                self.viewer_zoom.fit();
+            }
+            if pressed(Action::ViewerZoomActual)
+                && let Some((area, frame_px)) = self.viewer_geometry
+            {
+                self.viewer_zoom.set_scale(1.0, area, frame_px, i.pixels_per_point);
+            }
             if pressed(Action::FullscreenViewer) {
                 set_fullscreen = Some(!self.viewer_fullscreen);
             }

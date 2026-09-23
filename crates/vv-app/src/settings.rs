@@ -20,6 +20,8 @@ pub enum Action {
     MarkIn,
     MarkOut,
     FullscreenViewer,
+    ViewerZoomFit,
+    ViewerZoomActual,
     Undo,
     Redo,
     Copy,
@@ -42,7 +44,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 28] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -50,6 +52,8 @@ impl Action {
         Action::MarkIn,
         Action::MarkOut,
         Action::FullscreenViewer,
+        Action::ViewerZoomFit,
+        Action::ViewerZoomActual,
         Action::Undo,
         Action::Redo,
         Action::Copy,
@@ -81,6 +85,8 @@ impl Action {
             Action::MarkIn => "mark_in",
             Action::MarkOut => "mark_out",
             Action::FullscreenViewer => "fullscreen_viewer",
+            Action::ViewerZoomFit => "viewer_zoom_fit",
+            Action::ViewerZoomActual => "viewer_zoom_actual",
             Action::Undo => "undo",
             Action::Redo => "redo",
             Action::Copy => "copy",
@@ -115,7 +121,9 @@ impl Action {
             | Action::StepForward
             | Action::MarkIn
             | Action::MarkOut
-            | Action::FullscreenViewer => t!("action_category.playback"),
+            | Action::FullscreenViewer
+            | Action::ViewerZoomFit
+            | Action::ViewerZoomActual => t!("action_category.playback"),
             Action::Undo
             | Action::Redo
             | Action::Copy
@@ -150,6 +158,8 @@ impl Action {
             Action::MarkIn => vec![plain(Key::I)],
             Action::MarkOut => vec![plain(Key::O)],
             Action::FullscreenViewer => vec![ctrl(Key::F)],
+            Action::ViewerZoomFit => vec![plain(Key::Z)],
+            Action::ViewerZoomActual => vec![Shortcut { alt: true, shift: true, ..plain(Key::Z) }],
             Action::Undo => vec![ctrl(Key::Z)],
             Action::Redo => vec![ctrl_shift(Key::Z)],
             Action::Copy => vec![ctrl(Key::C)],

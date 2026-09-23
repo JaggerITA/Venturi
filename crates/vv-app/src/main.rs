@@ -29,6 +29,7 @@ mod timeline_audio;
 mod timeline_ui;
 mod transport;
 mod viewer_overlay;
+mod viewer_zoom;
 mod waveform_worker;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
@@ -236,7 +237,12 @@ struct VenturiApp {
     /// updated: registering a new one on every frame would lose the previous one.
     /// `None` without a shared device (tests).
     video_texture_id: Option<egui::TextureId>,
+    /// Frame size in pixels at 100% zoom (the timeline resolution), not
+    /// the texture's: that can be smaller, see `fit_output_size`.
     video_display_size: Option<egui::Vec2>,
+    viewer_zoom: viewer_zoom::ViewerZoom,
+    /// Player box and frame size of the last draw, for the zoom shortcuts.
+    viewer_geometry: Option<(egui::Rect, egui::Vec2)>,
     /// What the viewer shows: the last composition, even if in this
     /// frame no new one was made (no empty flash).
     last_viewer_frame_kind: Option<ViewerFrameKind>,
@@ -403,6 +409,8 @@ impl Default for VenturiApp {
             preview_error: None,
             video_texture_id: None,
             video_display_size: None,
+            viewer_zoom: viewer_zoom::ViewerZoom::default(),
+            viewer_geometry: None,
             last_viewer_frame_kind: None,
             egui_render_state: None,
             browsing_render_ahead: None,
@@ -1511,8 +1519,8 @@ impl VenturiApp {
             }
         }
         drop(renderer);
-        self.video_display_size =
-            Some(egui::vec2(output.width as f32, output.height as f32));
+        let (width, height) = output.timeline_size;
+        self.video_display_size = Some(egui::vec2(width as f32, height as f32));
         self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
     }
 
@@ -1931,6 +1939,53 @@ impl VenturiApp {
                 }
             });
         action
+    }
+
+    fn show_viewer_zoom_bar(&mut self, ui: &mut egui::Ui) {
+        let ppp = ui.ctx().pixels_per_point();
+        let geometry = self
+            .viewer_geometry
+            .filter(|_| self.last_viewer_frame_kind == Some(ViewerFrameKind::Video));
+        let label = match geometry {
+            Some((area, frame_px)) => {
+                viewer_zoom::percent_label(self.viewer_zoom.scale(area, frame_px, ppp))
+            }
+            None => "–".to_owned(),
+        };
+        let keymap = &self.settings.keymap;
+        let shortcut_text =
+            |action| keymap.shortcuts(action).first().map(ToString::to_string).unwrap_or_default();
+        ui.add_enabled_ui(geometry.is_some(), |ui| {
+            ui.menu_button(format!("{label} ⏷"), |ui| {
+                let Some((area, frame_px)) = geometry else {
+                    return;
+                };
+                let fit = egui::Button::selectable(self.viewer_zoom.is_fit(), t!("viewer.zoom_fit"))
+                    .shortcut_text(shortcut_text(Action::ViewerZoomFit));
+                if ui.add(fit).clicked() {
+                    self.viewer_zoom.fit();
+                    ui.close();
+                }
+                ui.separator();
+                let current = self.viewer_zoom.scale(area, frame_px, ppp);
+                for preset in viewer_zoom::PRESETS {
+                    let percent = viewer_zoom::percent_label(preset);
+                    let button = if preset == 1.0 {
+                        egui::Button::selectable(false, t!("viewer.zoom_actual", percent = percent))
+                            .shortcut_text(shortcut_text(Action::ViewerZoomActual))
+                    } else {
+                        egui::Button::selectable(false, percent)
+                    };
+                    let selected = !self.viewer_zoom.is_fit() && (current - preset).abs() < 1e-4;
+                    if ui.add(button.selected(selected)).clicked() {
+                        self.viewer_zoom.set_scale(preset, area, frame_px, ppp);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text(t!("viewer.zoom_hint"));
+        });
     }
 
     fn show_viewer_overlay(
@@ -3210,6 +3265,9 @@ impl eframe::App for VenturiApp {
                 .show(ui, |ui| {
                     transport_action = transport::show_transport(ui, total, playhead, marks, playing);
                 });
+            egui::Panel::top("viewer_zoom_bar")
+                .resizable(false)
+                .show(ui, |ui| self.show_viewer_zoom_bar(ui));
             let media_offline = self.active_clip_media_offline();
             // Browsing a "raw" media from the media pool there is no
             // timeline to compose: a single layer, its frame as it is.
@@ -3290,21 +3348,20 @@ impl eframe::App for VenturiApp {
                     if let (Some(id), Some(tex_size)) =
                         (self.video_texture_id, self.video_display_size)
                     {
-                        let available = ui.available_size();
-                        let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
-                        let display_size = tex_size * scale.max(0.0);
-                        let area = ui
-                            .centered_and_justified(|ui| {
-                                ui.add(
-                                    egui::Image::new(egui::load::SizedTexture::new(id, tex_size))
-                                        .fit_to_exact_size(display_size),
-                                )
-                            })
-                            .inner
-                            .rect;
+                        let (area, _) =
+                            ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+                        self.viewer_zoom.handle_input(ui, area, tex_size);
+                        let ppp = ui.ctx().pixels_per_point();
+                        let rect = self.viewer_zoom.frame_rect(area, tex_size, ppp);
+                        ui.painter().with_clip_rect(area).image(
+                            id,
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                        self.viewer_geometry = Some((area, tex_size));
                         viewer_area = Some(area);
-                        viewer_rect =
-                            Some(egui::Rect::from_center_size(area.center(), display_size));
+                        viewer_rect = Some(rect);
                     }
                 }
                 Some(ViewerFrameKind::Offline) => {
@@ -3343,6 +3400,7 @@ impl eframe::App for VenturiApp {
             }
 
             if let (Some(media_id), Some(rect)) = (self.browsing_media, viewer_rect) {
+                let rect = viewer_area.map_or(rect, |area| rect.intersect(area));
                 let (source_in, source_out) =
                     self.browse_marks.resolve(self.browse_total_frames());
                 let drag_id = ui.id().with("viewer_media_drag");

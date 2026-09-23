@@ -67,3 +67,15 @@ transport.play_hint:
 toolbar.keyframe_editor:
   en: "Keyframes"
   it: "Keyframe"
+
+viewer.zoom_hint:
+  en: "Player zoom · mouse wheel on the player zooms, middle button drags"
+  it: "Zoom del player · la rotella sul player fa zoom, il tasto centrale trascina"
+
+viewer.zoom_fit:
+  en: Fit
+  it: Adatta
+
+viewer.zoom_actual:
+  en: "%{percent} (Actual Size)"
+  it: "%{percent} (dimensione reale)"

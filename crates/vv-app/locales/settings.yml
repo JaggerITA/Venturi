@@ -132,6 +132,12 @@ action.mark_out:
 action.fullscreen_viewer:
   en: Fullscreen player
   it: Player a schermo intero
+action.viewer_zoom_fit:
+  en: Fit player zoom
+  it: Adatta zoom del player
+action.viewer_zoom_actual:
+  en: Player zoom 100% (actual size)
+  it: Zoom del player 100% (dimensione reale)
 action.undo:
   en: Undo
   it: Annulla
