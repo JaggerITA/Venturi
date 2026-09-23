@@ -139,11 +139,12 @@ impl VenturiApp {
         let mut set_fullscreen = None;
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                let mut bar_menus = Vec::new();
                 let export_disabled = self.timeline_id.is_none()
                     || self.export.is_some()
                     || self.export_dialog.is_some();
 
-                ui.menu_button(t!("menu.file"), |ui| {
+                bar_menus.push(ui.menu_button(t!("menu.file"), |ui| {
                     if ui.button(keymap.menu_label(&t!("menu.open_project"), Action::OpenProject)).clicked() {
                         self.request_project_switch(ProjectSwitch::Open);
                         ui.close();
@@ -192,9 +193,9 @@ impl VenturiApp {
                         self.open_settings(settings_dialog::Section::General);
                         ui.close();
                     }
-                });
+                }).response);
 
-                ui.menu_button(t!("menu.edit"), |ui| {
+                bar_menus.push(ui.menu_button(t!("menu.edit"), |ui| {
                     if ui.button(keymap.menu_label(&t!("menu.undo"), Action::Undo)).clicked() {
                         self.history.undo(&mut self.project);
                         ui.close();
@@ -275,9 +276,9 @@ impl VenturiApp {
                         self.split_at_playhead();
                         ui.close();
                     }
-                });
+                }).response);
 
-                ui.menu_button(t!("menu.timeline"), |ui| {
+                bar_menus.push(ui.menu_button(t!("menu.timeline"), |ui| {
                     // Checkboxes: they stay open on click, unlike the
                     // action buttons elsewhere in the menus.
                     ui.checkbox(
@@ -299,9 +300,9 @@ impl VenturiApp {
                         ui.close();
                     }
                     ui.label(t!("menu.zoom_hint"));
-                });
+                }).response);
 
-                ui.menu_button(t!("menu.playback"), |ui| {
+                bar_menus.push(ui.menu_button(t!("menu.playback"), |ui| {
                     if ui
                         .checkbox(&mut self.settings.proxy_enabled, t!("menu.use_proxy"))
                         .on_hover_text(t!("menu.use_proxy_hint"))
@@ -314,9 +315,9 @@ impl VenturiApp {
                         self.open_settings(settings_dialog::Section::Playback);
                         ui.close();
                     }
-                });
+                }).response);
 
-                ui.menu_button(t!("menu.view"), |ui| {
+                bar_menus.push(ui.menu_button(t!("menu.view"), |ui| {
                     ui.checkbox(&mut self.settings.panels.inspector_open, t!("menu.inspector"));
                     ui.checkbox(&mut self.audiometer_enabled, t!("menu.audiometer"))
                         .on_hover_text(
@@ -327,14 +328,15 @@ impl VenturiApp {
                         set_fullscreen = Some(true);
                         ui.close();
                     }
-                });
+                }).response);
 
-                ui.menu_button(t!("menu.help"), |ui| {
+                bar_menus.push(ui.menu_button(t!("menu.help"), |ui| {
                     if ui.button(t!("menu.about")).clicked() {
                         self.about_open = true;
                         ui.close();
                     }
-                });
+                }).response);
+                switch_bar_menu_on_hover(ui.ctx(), &bar_menus);
             });
         });
 
@@ -466,5 +468,21 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::MoveKeyframes => t!("history.move_keyframes"),
         L::SetInterpolation => t!("history.set_interpolation"),
         L::PasteAttributes => t!("history.paste_attributes"),
+    }
+}
+
+/// egui's `MenuBar` only opens menus on click; once one is open, hovering
+/// another bar entry should switch to it like in native menu bars.
+fn switch_bar_menu_on_hover(ctx: &egui::Context, bar_menus: &[egui::Response]) {
+    let popup_id = egui::Popup::default_response_id;
+    if !bar_menus.iter().any(|r| egui::Popup::is_id_open(ctx, popup_id(r))) {
+        return;
+    }
+    if let Some(hovered) = bar_menus
+        .iter()
+        .find(|r| r.hovered() && !egui::Popup::is_id_open(ctx, popup_id(r)))
+    {
+        egui::Popup::open_id(ctx, popup_id(hovered));
+        ctx.request_repaint();
     }
 }
