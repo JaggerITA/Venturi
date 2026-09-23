@@ -42,6 +42,21 @@ impl ViewerZoom {
         self.scale.unwrap_or_else(|| fit_scale(area, frame_px, ppp))
     }
 
+    /// Ui for the tools over the frame (transform handles, drag to the
+    /// timeline): while the player pans they stay drawn but get no pointer,
+    /// so the middle button is the player's only.
+    pub fn tools_ui(&self, ui: &mut egui::Ui, area: Rect) -> egui::Ui {
+        let mut builder = egui::UiBuilder::new().max_rect(area);
+        if self.panning {
+            builder = builder.disabled();
+        }
+        let opacity = ui.opacity();
+        let mut tools = ui.new_child(builder);
+        // `disabled` also fades the painting.
+        tools.set_opacity(opacity);
+        tools
+    }
+
     pub fn frame_rect(&self, area: Rect, frame_px: Vec2, ppp: f32) -> Rect {
         let size = frame_px * self.scale(area, frame_px, ppp) / ppp;
         Rect::from_center_size(area.center() + self.pan, size)

@@ -3395,12 +3395,17 @@ impl eframe::App for VenturiApp {
                 }
             }
 
-            if let (Some(rect), Some(area)) = (viewer_rect, viewer_area) {
+            let Some(rect) = viewer_rect else {
+                return;
+            };
+            let area = viewer_area.unwrap_or(rect);
+            let ui = &mut self.viewer_zoom.tools_ui(ui, area);
+            if viewer_area.is_some() {
                 self.show_viewer_overlay(ui, rect, area, &video_targets, &mut overlay_effects);
             }
 
-            if let (Some(media_id), Some(rect)) = (self.browsing_media, viewer_rect) {
-                let rect = viewer_area.map_or(rect, |area| rect.intersect(area));
+            if let Some(media_id) = self.browsing_media {
+                let rect = rect.intersect(area);
                 let (source_in, source_out) =
                     self.browse_marks.resolve(self.browse_total_frames());
                 let drag_id = ui.id().with("viewer_media_drag");
@@ -3412,9 +3417,6 @@ impl eframe::App for VenturiApp {
                     drags.extend(show_stream_drag_handles(ui, rect));
                 }
                 for (resp, streams) in drags {
-                    if resp.dragged_by(egui::PointerButton::Middle) {
-                        continue;
-                    }
                     resp.dnd_set_drag_payload(timeline_ui::MediaDragSet::one(
                         timeline_ui::MediaDrag {
                             media_id,
