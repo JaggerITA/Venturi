@@ -1,12 +1,14 @@
-name: AppImage build
+name: Release
 
+# On a v* tag it builds everything and publishes the release; run manually
+# it only builds, leaving the files as artifacts.
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
 
 jobs:
-  build:
+  appimage:
     strategy:
       fail-fast: false
       matrix:
@@ -52,3 +54,48 @@ jobs:
           name: Venturi-appimage-${{ runner.arch }}
           path: target/appimage/Venturi-*.AppImage
           if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build tools
+        run: brew install pkgconf meson ninja
+
+      # The compiled FFmpeg only changes with its build script.
+      - uses: actions/cache@v4
+        with:
+          path: target/ffmpeg-shared
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: scripts/build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Venturi-macos-arm64
+          path: target/macos/Venturi-*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [appimage, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

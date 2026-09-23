@@ -195,9 +195,9 @@ FFmpeg is compiled once inside the build volume
 `podman volume rm venturi-appimage-cargo venturi-appimage-target`,
 and `podman rmi venturi-appimage` if you change `Containerfile.appimage`.
 
-The `AppImage build` GitHub Actions workflow (`.github/workflows/appimage.yml`)
-builds the same image and runs the same script on x86_64 and aarch64 runners,
-manually or on `v*` tags, and uploads the AppImages as artifacts.
+The `Release` GitHub Actions workflow (`.github/workflows/release.yml`) builds
+the same image and runs the same script on x86_64 and aarch64 runners, see
+[Releases](#releases).
 
 The AppImage is GPL (it includes libx264) and does not include FDK-AAC:
 export uses FFmpeg's native AAC encoder.
@@ -213,9 +213,8 @@ Must run on a Mac with the Xcode command line tools and `pkgconf`. Produces
 (libx264, librubberband, zlib, VideoToolbox) bundled in
 `Contents/Frameworks`.
 
-The `macOS build` GitHub Actions workflow (`.github/workflows/macos.yml`) runs
-the same script on a `macos-14` runner, manually or on `v*` tags, and uploads
-the dmg as an artifact.
+The `Release` GitHub Actions workflow runs the same script on a `macos-14`
+runner, see [Releases](#releases).
 
 #### Opening the app on another Mac
 
@@ -246,6 +245,20 @@ codesign -vvv --deep /Applications/Venturi.app          # signature intact?
 ```
 A missing `x` is fixed with `chmod +x` on that file, a broken signature with
 `codesign --force --deep --sign - /Applications/Venturi.app`.
+
+### Releases
+
+`.github/workflows/release.yml` builds the AppImages (x86_64, aarch64) and the
+macOS dmg. Pushing a `v*` tag also publishes a GitHub release with the three
+files attached and notes generated from the commits:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Run manually from the Actions tab, it only builds and leaves the files as
+workflow artifacts.
 
 ## Run
 
