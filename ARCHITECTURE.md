@@ -121,17 +121,19 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   pass (`reconcile`): fuori finestra via, poi i frame più lontani dalla
   testina. La soglia oltre cui conviene un seek reale invece di decodificare
   in avanti si adatta al GOP osservato. Lookahead e behind sono
-  configurabili dal menu Playback > Proxy; a velocità > 1x il lookahead scala.
+  configurabili in Impostazioni > Playback; a velocità > 1x il lookahead scala.
 - **Anteprima dal media pool** (`browsing_media`): un secondo `RenderAhead`
   su una timeline sintetica con il solo media, seek dalla barra sotto al
   viewer. L'audio passa dallo stesso `TimelineAudio` della timeline
   (`sync_media`: uno snapshot con tutti gli stream del media), il cui clock
   fa da testina.
 - **Proxy** (`vv-media/src/proxy.rs`, thread `vv-app::proxy_worker`): per
-  ogni media importato, H.264 tutto-intra a 960px di larghezza in
+  ogni media importato, H.264 tutto-intra in
   `$XDG_CACHE_HOME/venturi/proxies/`, chiave `content_hash` (fingerprint
-  veloce: path canonico + dimensione + mtime). Toggle nel menu Playback > Proxy,
-  attivo di default; l'export usa sempre i sorgenti originali.
+  veloce: path canonico + dimensione + mtime) + qualità (bassa 640px, media
+  960px, alta 1920px; un file per qualità). Toggle nel menu Playback e in
+  Impostazioni > Playback (qualità), spento di default; l'export usa sempre
+  i sorgenti originali.
 - **Waveform** (`vv-media/src/waveform.rs`, thread
   `vv-app::waveform_worker`): picchi per `(content_hash, stream)` calcolati
   in streaming e salvati su disco; la timeline li carica in memoria e li

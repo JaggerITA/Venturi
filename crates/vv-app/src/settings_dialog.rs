@@ -2,22 +2,26 @@
 
 use std::borrow::Cow;
 
+use vv_media::proxy::ProxyQuality;
+
 use crate::i18n::Language;
 use crate::properties_panel::preview_combo;
 use crate::settings::{Action, Keymap, Settings, Shortcut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Section {
+pub enum Section {
     General,
+    Playback,
     Shortcuts,
 }
 
 impl Section {
-    const ALL: [Section; 2] = [Section::General, Section::Shortcuts];
+    const ALL: [Section; 3] = [Section::General, Section::Playback, Section::Shortcuts];
 
     fn title(self) -> Cow<'static, str> {
         match self {
             Section::General => t!("settings.section_general"),
+            Section::Playback => t!("settings.section_playback"),
             Section::Shortcuts => t!("settings.section_shortcuts"),
         }
     }
@@ -43,8 +47,8 @@ pub struct SettingsDialogResponse {
 }
 
 impl SettingsDialog {
-    pub fn new() -> Self {
-        Self { section: Section::General, capture: None, notice: None }
+    pub fn new(section: Section) -> Self {
+        Self { section, capture: None, notice: None }
     }
 
     /// While waiting for a key, global shortcuts must be suspended.
@@ -72,6 +76,9 @@ impl SettingsDialog {
                     ui.vertical(|ui| match self.section {
                         Section::General => {
                             response.changed |= general_section(ui, settings);
+                        }
+                        Section::Playback => {
+                            response.changed |= playback_section(ui, settings);
                         }
                         Section::Shortcuts => {
                             response.changed |= self.shortcuts_section(ui, &mut settings.keymap);
@@ -198,5 +205,63 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
         settings.language.apply();
     }
     changed |= ui.checkbox(&mut settings.kinetic_scroll, t!("settings.kinetic_scroll")).changed();
+    changed
+}
+
+fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
+    let mut changed = false;
+    ui.strong(t!("settings.read_ahead"));
+    egui::Grid::new("settings_read_ahead").num_columns(2).show(ui, |ui| {
+        ui.label(t!("settings.read_ahead_forward")).on_hover_text(t!("settings.read_ahead_forward_hint"));
+        changed |= ui
+            .add(egui::DragValue::new(&mut settings.lookahead_secs).range(0.0..=30.0).speed(0.1).suffix(" s"))
+            .on_hover_text(t!("settings.read_ahead_forward_hint"))
+            .changed();
+        ui.end_row();
+
+        ui.label(t!("settings.read_ahead_behind")).on_hover_text(t!("settings.read_ahead_behind_hint"));
+        changed |= ui
+            .add(egui::DragValue::new(&mut settings.behind_secs).range(0.0..=30.0).speed(0.1).suffix(" s"))
+            .on_hover_text(t!("settings.read_ahead_behind_hint"))
+            .changed();
+        ui.end_row();
+
+        ui.label(t!("settings.video_cache")).on_hover_text(t!("settings.video_cache_hint"));
+        let mut budget_mb = (settings.cache_budget_bytes / 1_000_000) as u32;
+        if ui
+            .add(egui::DragValue::new(&mut budget_mb).range(100..=8000).suffix(" MB"))
+            .on_hover_text(t!("settings.video_cache_hint"))
+            .changed()
+        {
+            settings.cache_budget_bytes = budget_mb as usize * 1_000_000;
+            changed = true;
+        }
+        ui.end_row();
+    });
+
+    ui.add_space(12.0);
+    ui.strong(t!("settings.proxy"));
+    changed |= ui
+        .checkbox(&mut settings.proxy_enabled, t!("menu.use_proxy"))
+        .on_hover_text(t!("menu.use_proxy_hint"))
+        .changed();
+    ui.add_enabled_ui(settings.proxy_enabled, |ui| {
+        ui.label(t!("settings.proxy_quality"));
+        for quality in ProxyQuality::ALL {
+            let (label, hint) = match quality {
+                ProxyQuality::Low => (t!("settings.proxy_quality_low"), t!("settings.proxy_quality_low_hint")),
+                ProxyQuality::Medium => {
+                    (t!("settings.proxy_quality_medium"), t!("settings.proxy_quality_medium_hint"))
+                }
+                ProxyQuality::High => (t!("settings.proxy_quality_high"), t!("settings.proxy_quality_high_hint")),
+            };
+            let text = format!("{label} ({} px)", quality.max_width());
+            changed |= ui
+                .radio_value(&mut settings.proxy_quality, quality, text)
+                .on_hover_text(hint)
+                .changed();
+        }
+        ui.label(egui::RichText::new(t!("settings.proxy_quality_note")).weak());
+    });
     changed
 }

@@ -156,29 +156,9 @@ menu.use_proxy_hint:
   en: "Preview/edit from a low-resolution copy generated in the background instead of the source: much smoother scrubbing on long sources. Export is never affected, it always uses the original sources. Turn off for work that needs full quality."
   it: "Anteprima/editing da una copia a bassa risoluzione generata in background invece che dal sorgente: scrub molto più fluido su sorgenti lunghi. L'export non è mai influenzato, usa sempre i sorgenti originali. Disattiva per lavori che richiedono la qualità piena."
 
-menu.read_ahead:
-  en: "Read-ahead forward:"
-  it: "Read-ahead avanti:"
-
-menu.read_ahead_hint:
-  en: "How many seconds of timeline to buffer ahead of the playhead. More = smoother scrub/playback but more RAM and CPU spent on frames that may never be needed; less = lighter but a short wait during fast scrubbing is more likely. A minimum margin remains even at 0."
-  it: "Quanti secondi di timeline bufferizzare in anticipo avanti dalla testina. Di più = scrub/playback più fluidi ma più RAM e CPU spesi su frame che potrebbero non servire mai; di meno = più leggero ma più probabile una breve attesa durante uno scrub veloce. Resta comunque un margine minimo anche a 0."
-
-menu.read_behind:
-  en: "Read-ahead behind:"
-  it: "Read-ahead dietro:"
-
-menu.read_behind_hint:
-  en: "How many seconds of timeline to keep buffered behind the playhead too, besides the forward window: makes short back-and-forth scrubbing cheap without decoding again every time. A minimum margin remains even at 0."
-  it: "Quanti secondi di timeline tenere bufferizzati anche dietro la testina, oltre alla finestra in avanti: rende economico uno scrub avanti-indietro ravvicinato senza dover ridecodificare ogni volta. Resta comunque un margine minimo anche a 0."
-
-menu.video_cache:
-  en: "Video cache:"
-  it: "Cache video:"
-
-menu.video_cache_hint:
-  en: "How much RAM to use for pre-decoded frames: more = smoother scrub/playback, less = lower risk of running out of memory (especially with 4K+ sources)."
-  it: "Quanta RAM usare per i frame pre-decodificati: di più = scrub/playback più fluidi, di meno = meno rischio di esaurire la memoria (soprattutto con sorgenti 4K+)."
+menu.playback_settings:
+  en: "Playback settings..."
+  it: "Impostazioni di playback..."
 
 menu.view:
   en: "View"

@@ -70,7 +70,8 @@ without ever reopening the stream.
 ### Scrubbing gets its own format
 
 Long-GOP H.264 cannot be scrubbed: every frame needs a decode from the
-previous keyframe. So every imported file gets a low-resolution all-intra
+previous keyframe. So, with proxies turned on (Playback menu, quality in
+Settings > Playback), every imported file gets a low-resolution all-intra
 proxy generated in the background, keyed by a content fingerprint in a global
 cache — it is reused by every project that touches the same file, even before
 you save. Preview uses it; **export always reads the originals**.

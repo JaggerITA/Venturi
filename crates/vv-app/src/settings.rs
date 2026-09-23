@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use vv_media::proxy::ProxyQuality;
+
 use crate::i18n::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -425,6 +427,12 @@ pub struct Settings {
     /// Preview from the all-intra proxy once ready: smooth scrubbing on
     /// long-GOP sources. Export always uses the originals.
     pub proxy_enabled: bool,
+    pub proxy_quality: ProxyQuality,
+    /// Seconds buffered ahead of/behind the playhead.
+    pub lookahead_secs: f64,
+    pub behind_secs: f64,
+    /// Memory budget for the decoded frame cache of every `RenderAhead`.
+    pub cache_budget_bytes: usize,
     /// Recently opened projects, most recent first.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
@@ -436,7 +444,11 @@ impl Default for Settings {
             keymap: Keymap::default(),
             language: Language::default(),
             kinetic_scroll: true,
-            proxy_enabled: true,
+            proxy_enabled: false,
+            proxy_quality: ProxyQuality::default(),
+            lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
+            behind_secs: crate::render_ahead::DEFAULT_BEHIND_SECS,
+            cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
         }
@@ -444,6 +456,11 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Quality of the proxies to use, `None` if they are off.
+    pub fn proxy(&self) -> Option<ProxyQuality> {
+        self.proxy_enabled.then_some(self.proxy_quality)
+    }
+
     pub fn add_recent_project(&mut self, path: PathBuf) {
         self.recent_projects.retain(|p| p != &path);
         self.recent_projects.insert(0, path);
@@ -459,8 +476,18 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     kinetic_scroll: Option<bool>,
+    /// Not `proxy_enabled`: that key was always saved as `true` when
+    /// proxies were on by default, it does not reflect a user choice.
     #[serde(default)]
-    proxy_enabled: Option<bool>,
+    use_proxies: Option<bool>,
+    #[serde(default)]
+    proxy_quality: Option<String>,
+    #[serde(default)]
+    lookahead_secs: Option<f64>,
+    #[serde(default)]
+    behind_secs: Option<f64>,
+    #[serde(default)]
+    cache_budget_mb: Option<u32>,
     #[serde(default)]
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
@@ -510,7 +537,14 @@ impl Settings {
         let mut settings = Self::default();
         settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
-        settings.proxy_enabled = file.proxy_enabled.unwrap_or(true);
+        settings.proxy_enabled = file.use_proxies.unwrap_or(settings.proxy_enabled);
+        settings.proxy_quality =
+            file.proxy_quality.as_deref().and_then(ProxyQuality::from_id).unwrap_or_default();
+        settings.lookahead_secs = file.lookahead_secs.unwrap_or(settings.lookahead_secs);
+        settings.behind_secs = file.behind_secs.unwrap_or(settings.behind_secs);
+        settings.cache_budget_bytes = file
+            .cache_budget_mb
+            .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
         settings.recent_projects = file.recent_projects;
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
@@ -547,7 +581,11 @@ impl Settings {
                 .collect(),
             language: Some(self.language.id().to_owned()),
             kinetic_scroll: Some(self.kinetic_scroll),
-            proxy_enabled: Some(self.proxy_enabled),
+            use_proxies: Some(self.proxy_enabled),
+            proxy_quality: Some(self.proxy_quality.id().to_owned()),
+            lookahead_secs: Some(self.lookahead_secs),
+            behind_secs: Some(self.behind_secs),
+            cache_budget_mb: Some((self.cache_budget_bytes / 1_000_000) as u32),
             recent_projects: self.recent_projects.clone(),
             panels: PanelLayoutFile {
                 media_pool_open: Some(self.panels.media_pool_open),
@@ -621,17 +659,23 @@ mod tests {
         settings.keymap.assign(Action::Split, Some(0), Shortcut::ctrl(egui::Key::K));
         settings.keymap.remove(Action::ZoomIn, 1);
         settings.language = Language::Italian;
-        settings.proxy_enabled = false;
+        settings.proxy_enabled = true;
+        settings.proxy_quality = ProxyQuality::High;
+        settings.lookahead_secs = 7.5;
+        settings.behind_secs = 0.5;
+        settings.cache_budget_bytes = 3_000_000_000;
         settings.save(&path).unwrap();
 
         let loaded = Settings::load(&path);
         assert_eq!(loaded, settings);
 
-        std::fs::write(&path, r#"{"shortcuts": {"split": ["Alt+K"]}}"#).unwrap();
+        std::fs::write(&path, r#"{"shortcuts": {"split": ["Alt+K"]}, "proxy_enabled": true}"#).unwrap();
         let loaded = Settings::load(&path);
         assert_eq!(loaded.keymap.shortcuts(Action::Split), &[Shortcut { alt: true, ..Shortcut::plain(egui::Key::K) }]);
         assert_eq!(loaded.keymap.shortcuts(Action::Undo), Keymap::default().shortcuts(Action::Undo));
-        assert!(loaded.proxy_enabled);
+        assert!(!loaded.proxy_enabled);
+        assert_eq!(loaded.proxy_quality, ProxyQuality::default());
+        assert_eq!(loaded.cache_budget_bytes, Settings::default().cache_budget_bytes);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

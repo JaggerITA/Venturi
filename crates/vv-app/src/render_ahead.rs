@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
 use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
+use vv_media::proxy::ProxyQuality;
 
 
 /// Seconds buffered ahead of the playhead, by default.
@@ -77,7 +78,7 @@ enum Command {
     UpdateProject(Box<Project>, TimelineId),
     /// Goes through the commands and not through an atomic: the worker must react to the change
     /// by emptying caches and decoders (the frames have the wrong resolution).
-    SetProxyEnabled(bool),
+    SetProxy(Option<ProxyQuality>),
     /// Wakes the worker immediately instead of waiting for `POLL_INTERVAL`.
     Wake,
     Stop,
@@ -116,7 +117,7 @@ impl RenderAhead {
         project: Project,
         timeline_id: TimelineId,
         cache_budget_bytes: usize,
-        proxy_enabled: bool,
+        proxy: Option<ProxyQuality>,
         lookahead_secs: f64,
         behind_secs: f64,
     ) -> Self {
@@ -131,7 +132,7 @@ impl RenderAhead {
         let (tx, rx) = mpsc::channel();
         let thread_shared = shared.clone();
         let handle = std::thread::spawn(move || {
-            worker_loop(rx, &thread_shared, project, timeline_id, proxy_enabled);
+            worker_loop(rx, &thread_shared, project, timeline_id, proxy);
         });
         Self {
             shared,
@@ -155,7 +156,7 @@ impl RenderAhead {
         self.shared.cache_budget_bytes.store(bytes, Ordering::Relaxed);
     }
 
-    /// Seconds buffered ahead (menu Playback > Proxy), never below
+    /// Seconds buffered ahead (Settings > Playback), never below
     /// `MIN_MARGIN_FRAMES`.
     pub fn set_lookahead_secs(&self, secs: f64) {
         store_secs(&self.shared.lookahead_secs, secs);
@@ -163,7 +164,7 @@ impl RenderAhead {
     }
 
     /// How many seconds of timeline to buffer *behind* the playhead too
-    /// (menu Playback > Proxy) — see the docs of `DEFAULT_BEHIND_SECS`.
+    /// (Settings > Playback) — see the docs of `DEFAULT_BEHIND_SECS`.
     pub fn set_behind_secs(&self, secs: f64) {
         store_secs(&self.shared.behind_secs, secs);
         self.shared.caught_up.store(false, Ordering::Relaxed);
@@ -181,10 +182,10 @@ impl RenderAhead {
 
     /// "Use proxy" toggle (plans/REFACTOR_PIPELINE.md proxy): the worker
     /// empties the shared cache and reopens from scratch every decoder on the
-    /// right path for the new state — see the docs of `Command::SetProxyEnabled`.
-    pub fn set_proxy_enabled(&self, enabled: bool) {
+    /// right path for the new state — see the docs of `Command::SetProxy`.
+    pub fn set_proxy(&self, proxy: Option<ProxyQuality>) {
         self.shared.caught_up.store(false, Ordering::Relaxed);
-        let _ = self.tx.send(Command::SetProxyEnabled(enabled));
+        let _ = self.tx.send(Command::SetProxy(proxy));
     }
 
     /// The decoded frame for `(media_id, source_frame)`, if already
@@ -301,7 +302,7 @@ fn worker_loop(
     shared: &SharedState,
     mut project: Project,
     mut timeline_id: TimelineId,
-    mut proxy_enabled: bool,
+    mut proxy: Option<ProxyQuality>,
 ) {
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     // Separate decoders for the window behind the playhead: see `walk_and_fill`.
@@ -336,8 +337,8 @@ fn worker_loop(
                     open.clear();
                     open_behind.clear();
                 }
-                Command::SetProxyEnabled(v) => {
-                    proxy_enabled = v;
+                Command::SetProxy(v) => {
+                    proxy = v;
                     shared.caches.clear();
                     open.clear();
                     open_behind.clear();
@@ -358,7 +359,7 @@ fn worker_loop(
             from,
             shared.cache_budget_bytes.load(Ordering::Relaxed),
             went_backward,
-            proxy_enabled,
+            proxy,
             load_secs(&shared.lookahead_secs),
             load_secs(&shared.behind_secs),
             &shared.target,
@@ -769,7 +770,7 @@ fn walk_and_fill(
     from_frame: FrameIdx,
     cache_budget_bytes: usize,
     went_backward: bool,
-    proxy_enabled: bool,
+    proxy: Option<ProxyQuality>,
     lookahead_secs: f64,
     behind_secs: f64,
     target: &AtomicI64,
@@ -828,7 +829,7 @@ fn walk_and_fill(
         went_backward,
         cache_budget_bytes,
         from_frame,
-        proxy_enabled,
+        proxy,
         target,
     };
     // The forward window first: behind gets only the budget left over.
@@ -885,10 +886,10 @@ struct FillContext<'a> {
     went_backward: bool,
     cache_budget_bytes: usize,
     from_frame: FrameIdx,
-    /// "Use proxy" toggle (plans/REFACTOR_PIPELINE.md proxy) as read
-    /// from the last `Command::SetProxyEnabled` — see `fill_segments`
+    /// Proxy quality in use, `None` if off (plans/REFACTOR_PIPELINE.md proxy), as read
+    /// from the last `Command::SetProxy` — see `fill_segments`
     /// where it decides whether to resolve the source path or the proxy one.
-    proxy_enabled: bool,
+    proxy: Option<ProxyQuality>,
     target: &'a AtomicI64,
 }
 
@@ -928,12 +929,12 @@ fn fill_segments(
         }
         // Proxy only if enabled and already generated; otherwise the source, until the
         // proxy shows up on disk.
-        let is_proxy = ctx.proxy_enabled && vv_media::proxy::proxy_exists(item.content_hash);
-        let path = if is_proxy {
-            vv_media::proxy::proxy_path_for(item.content_hash)
-        } else {
-            item.path.clone()
-        };
+        let proxy_path = ctx
+            .proxy
+            .filter(|&q| vv_media::proxy::proxy_exists(item.content_hash, q))
+            .map(|q| vv_media::proxy::proxy_path_for(item.content_hash, q));
+        let is_proxy = proxy_path.is_some();
+        let path = proxy_path.unwrap_or_else(|| item.path.clone());
         if position_decoder(
             ctx.caches,
             open,
@@ -1183,7 +1184,7 @@ mod tests {
             0,
             generous_budget,
             false,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -1816,7 +1817,7 @@ mod tests {
             project,
             timeline_id,
             100_000_000,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
@@ -1904,7 +1905,7 @@ mod tests {
             project.clone(),
             timeline_id,
             100_000_000,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
@@ -2003,7 +2004,7 @@ mod tests {
             project,
             timeline_id,
             100_000_000,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
@@ -2377,7 +2378,7 @@ mod tests {
             0,
             generous_budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -2443,7 +2444,7 @@ mod tests {
             60,
             generous_budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(60),
@@ -2530,7 +2531,7 @@ mod tests {
             95,
             tight_budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(95),
@@ -2612,7 +2613,7 @@ mod tests {
             95,
             generous_budget,
             false,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(95),
@@ -2643,7 +2644,7 @@ mod tests {
                 95,
                 generous_budget,
                 false,
-                false,
+                None,
                 DEFAULT_LOOKAHEAD_SECS,
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(95),
@@ -2707,7 +2708,7 @@ mod tests {
             60,
             generous_budget,
             false,
-            false, // proxy_enabled: irrelevant for this test
+            None, // proxy: irrelevant for this test
             0.0,   // lookahead_secs: the one under test
             0.0,   // behind_secs: the one under test
             &AtomicI64::new(60),
@@ -2791,7 +2792,7 @@ mod tests {
             0,
             tiny_budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -2867,7 +2868,7 @@ mod tests {
             0,
             100_000_000,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &drifted_target,
@@ -2954,7 +2955,7 @@ mod tests {
             40,
             budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
@@ -3042,7 +3043,7 @@ mod tests {
             40,
             budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(40),
@@ -3201,7 +3202,7 @@ mod tests {
             0,
             total_budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(0),
@@ -3221,7 +3222,7 @@ mod tests {
             200,
             total_budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(200),
@@ -3279,7 +3280,7 @@ mod tests {
             project,
             timeline_id,
             100_000_000,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
@@ -3366,7 +3367,7 @@ mod tests {
             project,
             timeline_id,
             100_000_000,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
         );
@@ -3461,7 +3462,7 @@ mod tests {
             crossings: Vec::new(),
         }]));
 
-        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, false, 0.0, 0.0);
+        let render_ahead = RenderAhead::spawn(project, timeline_id, 100_000_000, None, 0.0, 0.0);
 
         let wait_for = |frame: FrameIdx| {
             let start = std::time::Instant::now();
@@ -3561,7 +3562,7 @@ mod tests {
                 from,
                 budget,
                 went_backward,
-                false,                  // proxy_enabled: irrelevant for this test
+                None,                   // proxy: irrelevant for this test
                 DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(from),
@@ -3588,7 +3589,7 @@ mod tests {
             80,
             budget,
             true,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(80),
@@ -3674,7 +3675,7 @@ mod tests {
             300,
             budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(300),
@@ -3697,7 +3698,7 @@ mod tests {
             270,
             budget,
             true,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(270),
@@ -3785,7 +3786,7 @@ mod tests {
             300,
             budget,
             false,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(300),
@@ -3799,7 +3800,7 @@ mod tests {
             290,
             budget,
             true,
-            false,
+            None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(290),
@@ -3821,7 +3822,7 @@ mod tests {
                 290,
                 budget,
                 false,
-                false,
+                None,
                 DEFAULT_LOOKAHEAD_SECS,
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(290),
@@ -3898,7 +3899,7 @@ mod tests {
             went_backward: false,
             cache_budget_bytes: usize::MAX,
             from_frame: 5,
-            proxy_enabled: false,
+            proxy: None,
             target: &AtomicI64::new(5),
         };
         let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -3967,7 +3968,7 @@ mod tests {
             went_backward: false,
             cache_budget_bytes: tight_budget,
             from_frame: 80,
-            proxy_enabled: false,
+            proxy: None,
             target: &AtomicI64::new(80),
         };
         let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -4059,7 +4060,7 @@ mod tests {
             went_backward: true,
             cache_budget_bytes: budget_enough_for_the_wanted_range_but_not_the_full_transit,
             from_frame: 24,
-            proxy_enabled: false,
+            proxy: None,
             target: &AtomicI64::new(24),
         };
         let outcome = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -4143,7 +4144,7 @@ mod tests {
             10,
             budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(10),
@@ -4159,7 +4160,7 @@ mod tests {
             target,
             budget,
             false,
-            false,                  // proxy_enabled: irrelevant for this test
+            None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
             &AtomicI64::new(target),
@@ -4175,7 +4176,7 @@ mod tests {
                 target,
                 budget,
                 false,
-                false,                  // proxy_enabled: irrelevant for this test
+                None,                   // proxy: irrelevant for this test
                 DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
                 DEFAULT_BEHIND_SECS,
                 &AtomicI64::new(target),

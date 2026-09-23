@@ -250,8 +250,9 @@ impl VenturiApp {
         // the `IMAGE_DURATION_FRAMES` sentinel.
         if self.settings.proxy_enabled && item.meta.has_video && !item.meta.is_image() {
             let frames = item.meta.duration_frames.max(0) as u64;
+            let quality = self.settings.proxy_quality;
             self.proxy_worker
-                .get_or_insert_with(proxy_worker::ProxyWorker::spawn)
+                .get_or_insert_with(|| proxy_worker::ProxyWorker::spawn(quality))
                 .enqueue(item.path.clone(), item.content_hash, frames);
         }
         if item.meta.has_video && !self.thumbnails.contains_key(&item.content_hash) {
@@ -839,19 +840,22 @@ impl VenturiApp {
         }
     }
 
-    /// Applies the "use proxy" toggle: off also stops the generation in
-    /// progress (the worker is thrown away, the partial encode discarded), on
-    /// restarts it for the media that do not have a proxy yet.
-    pub(crate) fn apply_proxy_enabled(&mut self) {
-        let enabled = self.settings.proxy_enabled;
+    /// Applies the "use proxy" toggle and the quality: off (or a different
+    /// quality) also stops the generation in progress (the worker is thrown
+    /// away, the partial encode discarded), on restarts it for the media that
+    /// do not have a proxy yet.
+    pub(crate) fn apply_proxy_settings(&mut self) {
+        let proxy = self.settings.proxy();
         for render_ahead in self.render_aheads() {
-            render_ahead.set_proxy_enabled(enabled);
+            render_ahead.set_proxy(proxy);
         }
-        if !enabled {
+        if self.proxy_worker.as_ref().map(|w| w.quality()) != proxy {
             self.proxy_worker = None;
             self.proxy_paused_for_export = false;
-            return;
         }
+        let Some(quality) = proxy else {
+            return;
+        };
         let media: Vec<(PathBuf, u64, u64)> = self
             .project
             .media_pool
@@ -866,7 +870,7 @@ impl VenturiApp {
         if media.is_empty() {
             return;
         }
-        let worker = self.proxy_worker.get_or_insert_with(proxy_worker::ProxyWorker::spawn);
+        let worker = self.proxy_worker.get_or_insert_with(|| proxy_worker::ProxyWorker::spawn(quality));
         for (path, content_hash, frames) in media {
             worker.enqueue(path, content_hash, frames);
         }

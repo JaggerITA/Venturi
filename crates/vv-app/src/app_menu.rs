@@ -189,7 +189,7 @@ impl VenturiApp {
                     }
                     ui.separator();
                     if ui.button(t!("menu.settings")).clicked() {
-                        self.settings_dialog = Some(settings_dialog::SettingsDialog::new());
+                        self.open_settings(settings_dialog::Section::General);
                         ui.close();
                     }
                 });
@@ -302,77 +302,18 @@ impl VenturiApp {
                 });
 
                 ui.menu_button(t!("menu.playback"), |ui| {
-                    ui.menu_button("Proxy", |ui| {
-                        if ui
-                            .checkbox(&mut self.settings.proxy_enabled, t!("menu.use_proxy"))
-                            .on_hover_text(
-                                t!("menu.use_proxy_hint"),
-                            )
-                            .changed()
-                        {
-                            self.apply_proxy_enabled();
-                            self.persist_settings();
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label(t!("menu.read_ahead"));
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut self.lookahead_secs)
-                                        .range(0.0..=30.0)
-                                        .speed(0.1)
-                                        .suffix(" s"),
-                                )
-                                .on_hover_text(
-                                    t!("menu.read_ahead_hint"),
-                                )
-                                .changed()
-                            {
-                                for render_ahead in self.render_aheads() {
-                                    render_ahead.set_lookahead_secs(self.lookahead_secs);
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(t!("menu.read_behind"));
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut self.behind_secs)
-                                        .range(0.0..=30.0)
-                                        .speed(0.1)
-                                        .suffix(" s"),
-                                )
-                                .on_hover_text(
-                                    t!("menu.read_behind_hint"),
-                                )
-                                .changed()
-                            {
-                                for render_ahead in self.render_aheads() {
-                                    render_ahead.set_behind_secs(self.behind_secs);
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(t!("menu.video_cache"));
-                            // Expressed in MB in the UI, `cache_budget_bytes` in bytes.
-                            let mut budget_mb = (self.cache_budget_bytes / 1_000_000) as u32;
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut budget_mb)
-                                        .range(100..=8000)
-                                        .suffix(" MB"),
-                                )
-                                .on_hover_text(
-                                    t!("menu.video_cache_hint"),
-                                )
-                                .changed()
-                            {
-                                self.cache_budget_bytes = budget_mb as usize * 1_000_000;
-                                for render_ahead in self.render_aheads() {
-                                    render_ahead.set_cache_budget_bytes(self.cache_budget_bytes);
-                                }
-                            }
-                        });
-                    });
+                    if ui
+                        .checkbox(&mut self.settings.proxy_enabled, t!("menu.use_proxy"))
+                        .on_hover_text(t!("menu.use_proxy_hint"))
+                        .changed()
+                    {
+                        self.apply_proxy_settings();
+                        self.persist_settings();
+                    }
+                    if ui.button(t!("menu.playback_settings")).clicked() {
+                        self.open_settings(settings_dialog::Section::Playback);
+                        ui.close();
+                    }
                 });
 
                 ui.menu_button(t!("menu.view"), |ui| {

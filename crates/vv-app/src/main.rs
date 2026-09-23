@@ -247,10 +247,6 @@ struct VenturiApp {
     /// timeline with only the clip of the media, and the id of the media in there.
     browsing_render_ahead: Option<(render_ahead::RenderAhead, MediaId)>,
 
-    /// Memory budget (bytes) for the decoded frame cache of every
-    /// `RenderAhead`, configurable from the menu.
-    cache_budget_bytes: usize,
-
     /// Created on the first import; thrown away when the user turns the proxies off.
     proxy_worker: Option<proxy_worker::ProxyWorker>,
     /// The export paused the proxies and must resume them; `false` if the
@@ -272,9 +268,6 @@ struct VenturiApp {
     /// Compound clips whose waveform was composed with sources
     /// not ready yet: to be redone when they arrive.
     waveform_partial: std::collections::HashSet<(u64, usize)>,
-    /// Seconds buffered ahead of/behind the playhead (menu Playback > Proxy).
-    lookahead_secs: f64,
-    behind_secs: f64,
 
     /// Video clip shown in the viewer (the one under the playhead), from which
     /// frames and transform are read. `None` on a gap or during the preview
@@ -413,7 +406,6 @@ impl Default for VenturiApp {
             last_viewer_frame_kind: None,
             egui_render_state: None,
             browsing_render_ahead: None,
-            cache_budget_bytes: DEFAULT_CACHE_BUDGET_BYTES,
             proxy_worker: None,
             proxy_paused_for_export: false,
             waveform_worker: None,
@@ -422,8 +414,6 @@ impl Default for VenturiApp {
             waveform_cache: HashMap::new(),
             waveform_missing: Default::default(),
             waveform_partial: Default::default(),
-            lookahead_secs: render_ahead::DEFAULT_LOOKAHEAD_SECS,
-            behind_secs: render_ahead::DEFAULT_BEHIND_SECS,
             active_clip: None,
             compositor: vv_render::Compositor::new_headless(),
             edit_drag_group: None,
@@ -594,10 +584,10 @@ impl VenturiApp {
         let render_ahead = render_ahead::RenderAhead::spawn(
             project,
             timeline_id,
-            self.cache_budget_bytes,
-            self.settings.proxy_enabled,
-            self.lookahead_secs,
-            self.behind_secs,
+            self.settings.cache_budget_bytes,
+            self.settings.proxy(),
+            self.settings.lookahead_secs,
+            self.settings.behind_secs,
         );
         (render_ahead, preview_media)
     }
@@ -1226,10 +1216,10 @@ impl VenturiApp {
             self.render_ahead = Some(render_ahead::RenderAhead::spawn(
                 self.project.clone(),
                 timeline_id,
-                self.cache_budget_bytes,
-                self.settings.proxy_enabled,
-                self.lookahead_secs,
-                self.behind_secs,
+                self.settings.cache_budget_bytes,
+                self.settings.proxy(),
+                self.settings.lookahead_secs,
+                self.settings.behind_secs,
             ));
             self.render_ahead_generation = self.history.generation();
         }
@@ -1353,23 +1343,23 @@ impl VenturiApp {
     fn effective_window_secs(&self, timeline_id: TimelineId) -> (f64, f64) {
         let timeline = &self.project.timelines[timeline_id];
         let fps = timeline.fps.as_f64().max(1e-9);
-        let wanted_ahead = self.lookahead_secs * self.playback_speed;
+        let wanted_ahead = self.settings.lookahead_secs * self.playback_speed;
         let playhead = self.timeline_state.playhead;
-        let from = (playhead - (self.behind_secs * fps).ceil() as FrameIdx).max(0);
+        let from = (playhead - (self.settings.behind_secs * fps).ceil() as FrameIdx).max(0);
         let to = playhead + (wanted_ahead * fps).ceil() as FrameIdx;
         let frame_bytes = self.window_frame_bytes(timeline_id, from, to).max(1);
         // Headroom: the transit frames decoded before a segment sit in the
         // cache until the next reconcile.
         let affordable =
-            self.cache_budget_bytes as f64 * 0.85 / (frame_bytes as f64 * fps);
-        let wanted_total = wanted_ahead + self.behind_secs;
+            self.settings.cache_budget_bytes as f64 * 0.85 / (frame_bytes as f64 * fps);
+        let wanted_total = wanted_ahead + self.settings.behind_secs;
         if wanted_total <= affordable {
-            return (wanted_ahead, self.behind_secs);
+            return (wanted_ahead, self.settings.behind_secs);
         }
         let scale = affordable / wanted_total;
         (
             (wanted_ahead * scale).max(MIN_LOOKAHEAD_SECS),
-            self.behind_secs * scale,
+            self.settings.behind_secs * scale,
         )
     }
 
@@ -1826,17 +1816,32 @@ impl VenturiApp {
 
     /// Transform handles of the first selected video clip, if it is under
     /// the playhead and the viewer shows the timeline stopped.
+    fn open_settings(&mut self, section: settings_dialog::Section) {
+        self.settings_dialog = Some(settings_dialog::SettingsDialog::new(section));
+    }
+
     fn show_settings_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = &mut self.settings_dialog else {
             return;
         };
+        let before = self.settings.clone();
         let response = dialog.show(ctx, &mut self.settings);
         if !response.open {
             self.settings_dialog = None;
         }
-        if response.changed {
-            self.persist_settings();
+        if !response.changed {
+            return;
         }
+        if self.settings.proxy() != before.proxy() {
+            self.apply_proxy_settings();
+        }
+        // The timeline one is then scaled on every sync (`effective_window_secs`).
+        for render_ahead in self.render_aheads() {
+            render_ahead.set_lookahead_secs(self.settings.lookahead_secs);
+            render_ahead.set_behind_secs(self.settings.behind_secs);
+            render_ahead.set_cache_budget_bytes(self.settings.cache_budget_bytes);
+        }
+        self.persist_settings();
     }
 
     /// User settings on disk, including the panel layout: called
@@ -3960,9 +3965,9 @@ mod tests {
             + vv_media::yuv420_frame_bytes(1080, 2400);
         let needed = (ahead + behind) * 60.0 * frame_bytes as f64;
         assert!(
-            needed <= app.cache_budget_bytes as f64,
+            needed <= app.settings.cache_budget_bytes as f64,
             "finestra {ahead}s+{behind}s = {needed} byte, oltre il budget {}",
-            app.cache_budget_bytes
+            app.settings.cache_budget_bytes
         );
         assert!(ahead >= MIN_LOOKAHEAD_SECS);
         assert!(behind > 0.0);
@@ -3983,8 +3988,8 @@ mod tests {
 
         let (ahead, behind) = app.effective_window_secs(timeline_id);
 
-        assert_eq!(ahead, app.lookahead_secs);
-        assert_eq!(behind, app.behind_secs);
+        assert_eq!(ahead, app.settings.lookahead_secs);
+        assert_eq!(behind, app.settings.behind_secs);
     }
 
     #[test]
@@ -6557,9 +6562,11 @@ mod tests {
         // the import" below would be fragile, not because of a real race but because of
         // residual state on disk.
         let content_hash = vv_media::content_fingerprint(&path).unwrap();
-        let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash));
+        let quality = vv_media::proxy::ProxyQuality::default();
+        let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash, quality));
 
         let mut app = VenturiApp::default();
+        app.settings.proxy_enabled = true;
         app.import_media(path); // it also queues the proxy generation
         let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
         app.add_media_to_timeline(media_id);
@@ -6573,7 +6580,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         loop {
-            if vv_media::proxy::proxy_exists(content_hash) {
+            if vv_media::proxy::proxy_exists(content_hash, quality) {
                 break;
             }
             assert!(
@@ -6622,6 +6629,7 @@ mod tests {
             .collect();
 
         let mut app = VenturiApp::default();
+        app.settings.proxy_enabled = true;
         let mut with_bad = paths.clone();
         with_bad.push(dir.join("inesistente.mp4"));
         app.import_media_files(with_bad);
@@ -6745,8 +6753,8 @@ mod tests {
         assert_eq!(item.path, path);
     }
 
-    /// With the "use proxy" toggle off nothing is generated; turning it back on the
-    /// media already in the pool go back into the queue.
+    /// With the "use proxy" toggle off nothing is generated; turning it back on
+    /// (or changing quality) the media already in the pool go back into the queue.
     #[test]
     fn disabling_proxies_stops_generation_and_enabling_requeues_the_pool() {
         let dir = std::env::temp_dir().join("vv-app-proxy-toggle-test");
@@ -6773,12 +6781,18 @@ mod tests {
         assert!(app.proxy_worker.is_none(), "col toggle spento non parte nessun proxy");
 
         app.settings.proxy_enabled = true;
-        app.apply_proxy_enabled();
+        app.apply_proxy_settings();
         let worker = app.proxy_worker.as_ref().unwrap();
         assert_eq!(worker.progress().total, 1);
 
+        app.settings.proxy_quality = vv_media::proxy::ProxyQuality::Low;
+        app.apply_proxy_settings();
+        let worker = app.proxy_worker.as_ref().unwrap();
+        assert_eq!(worker.quality(), vv_media::proxy::ProxyQuality::Low, "cambiando qualità la coda riparte");
+        assert_eq!(worker.progress().total, 1);
+
         app.settings.proxy_enabled = false;
-        app.apply_proxy_enabled();
+        app.apply_proxy_settings();
         assert!(app.proxy_worker.is_none(), "spegnendo il toggle la coda va buttata via");
     }
 
@@ -6788,7 +6802,7 @@ mod tests {
     #[test]
     fn export_pauses_the_proxy_queue_and_resumes_it_afterwards() {
         let mut app = VenturiApp::default();
-        app.proxy_worker = Some(proxy_worker::ProxyWorker::spawn());
+        app.proxy_worker = Some(proxy_worker::ProxyWorker::spawn(Default::default()));
 
         app.pause_proxies_for_export();
         assert!(app.proxy_worker.as_ref().unwrap().is_paused());

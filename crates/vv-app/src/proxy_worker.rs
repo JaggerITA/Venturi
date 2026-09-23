@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
+use vv_media::proxy::ProxyQuality;
+
 use crate::worker::Worker;
 
 struct Job {
@@ -55,13 +57,15 @@ pub struct ProxyProgress {
     pub fraction: f32,
 }
 
+/// Bound to one quality: changing it means spawning a new worker.
 pub struct ProxyWorker {
     shared: Arc<Shared>,
     worker: Worker<Job>,
+    quality: ProxyQuality,
 }
 
 impl ProxyWorker {
-    pub fn spawn() -> Self {
+    pub fn spawn(quality: ProxyQuality) -> Self {
         let shared = Arc::new(Shared::default());
         let worker_shared = Arc::clone(&shared);
         let worker = Worker::spawn(move |rx: mpsc::Receiver<Job>| {
@@ -70,7 +74,7 @@ impl ProxyWorker {
                 if !shared.wait_while_paused() {
                     return;
                 }
-                if vv_media::proxy::proxy_exists(job.content_hash) {
+                if vv_media::proxy::proxy_exists(job.content_hash, quality) {
                     shared.set_state(job.content_hash, ProxyState::Ready);
                     continue;
                 }
@@ -80,6 +84,7 @@ impl ProxyWorker {
                 let result = vv_media::proxy::generate_proxy(
                     &job.path,
                     job.content_hash,
+                    quality,
                     |frames| {
                         let fraction = (frames as f32 / total).min(1.0);
                         // Updating the lock on every frame is pointless: the UI reads at ~60Hz.
@@ -103,7 +108,7 @@ impl ProxyWorker {
                 }
             }
         });
-        Self { shared, worker }
+        Self { shared, worker, quality }
     }
 
     /// Queues `path` (keyed by `content_hash`) for proxy generation —
@@ -118,7 +123,7 @@ impl ProxyWorker {
             ) {
                 return;
             }
-            let state = if vv_media::proxy::proxy_exists(content_hash) {
+            let state = if vv_media::proxy::proxy_exists(content_hash, self.quality) {
                 ProxyState::Ready
             } else {
                 ProxyState::Queued
@@ -133,6 +138,10 @@ impl ProxyWorker {
             content_hash,
             duration_frames,
         });
+    }
+
+    pub fn quality(&self) -> ProxyQuality {
+        self.quality
     }
 
     pub fn state(&self, content_hash: u64) -> Option<ProxyState> {
@@ -214,9 +223,9 @@ mod tests {
             &path,
         );
         let content_hash = 0x5EED_0001;
-        let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash));
+        let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash, ProxyQuality::Low));
 
-        let worker = ProxyWorker::spawn();
+        let worker = ProxyWorker::spawn(ProxyQuality::Low);
         worker.set_paused(true);
         worker.enqueue(path.clone(), content_hash, 25);
         worker.enqueue(path, content_hash, 25);

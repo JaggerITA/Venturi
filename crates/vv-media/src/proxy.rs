@@ -15,9 +15,60 @@ use ffmpeg::util::color;
 use ffmpeg_next as ffmpeg;
 use std::path::{Path, PathBuf};
 
-/// Maximum width of a proxy; height in proportion, even for 4:2:0. A
-/// narrower source is not enlarged.
-pub const PROXY_MAX_WIDTH: u32 = 960;
+/// Trade-off between decoding speed and sharpness of the preview. Each
+/// quality has its own file, so switching back does not regenerate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProxyQuality {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl ProxyQuality {
+    pub const ALL: [ProxyQuality; 3] = [ProxyQuality::Low, ProxyQuality::Medium, ProxyQuality::High];
+
+    /// Key in the settings file: must never be changed.
+    pub fn id(self) -> &'static str {
+        match self {
+            ProxyQuality::Low => "low",
+            ProxyQuality::Medium => "medium",
+            ProxyQuality::High => "high",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.id() == id)
+    }
+
+    /// Height in proportion, even for 4:2:0. A narrower source is not
+    /// enlarged.
+    pub fn max_width(self) -> u32 {
+        match self {
+            ProxyQuality::Low => 640,
+            ProxyQuality::Medium => 960,
+            ProxyQuality::High => 1920,
+        }
+    }
+
+    fn crf(self) -> &'static str {
+        match self {
+            ProxyQuality::Low => "30",
+            ProxyQuality::Medium => "26",
+            ProxyQuality::High => "21",
+        }
+    }
+
+    /// Medium keeps the unsuffixed name of the proxies generated before
+    /// qualities existed.
+    fn file_suffix(self) -> &'static str {
+        match self {
+            ProxyQuality::Low => "-low",
+            ProxyQuality::Medium => "",
+            ProxyQuality::High => "-high",
+        }
+    }
+}
 
 pub fn proxies_dir() -> PathBuf {
     crate::cache_dir("proxies")
@@ -25,14 +76,14 @@ pub fn proxies_dir() -> PathBuf {
 
 /// Path of the proxy file for this `content_hash`, whether the file exists
 /// yet or not — see `proxy_exists`.
-pub fn proxy_path_for(content_hash: u64) -> PathBuf {
-    proxies_dir().join(format!("{content_hash:016x}.mp4"))
+pub fn proxy_path_for(content_hash: u64, quality: ProxyQuality) -> PathBuf {
+    proxies_dir().join(format!("{content_hash:016x}{}.mp4", quality.file_suffix()))
 }
 
 /// One `stat` per call instead of in-memory state: the file is written by
 /// another thread, so no synchronization is needed this way.
-pub fn proxy_exists(content_hash: u64) -> bool {
-    proxy_path_for(content_hash).is_file()
+pub fn proxy_exists(content_hash: u64, quality: ProxyQuality) -> bool {
+    proxy_path_for(content_hash, quality).is_file()
 }
 
 /// Generates the proxy and writes it atomically (temporary file + `rename`).
@@ -41,6 +92,7 @@ pub fn proxy_exists(content_hash: u64) -> bool {
 pub fn generate_proxy(
     source_path: &Path,
     content_hash: u64,
+    quality: ProxyQuality,
     mut on_frame: impl FnMut(u64) -> bool,
 ) -> Result<PathBuf, crate::MediaError> {
     crate::probe::ensure_init();
@@ -55,13 +107,14 @@ pub fn generate_proxy(
         )));
     };
     let (src_w, src_h) = (first_frame.width, first_frame.height);
-    let (dst_w, dst_h) = scaled_dimensions(src_w, src_h, PROXY_MAX_WIDTH);
+    let (dst_w, dst_h) = scaled_dimensions(src_w, src_h, quality.max_width());
 
     let dir = proxies_dir();
     std::fs::create_dir_all(&dir)?;
-    let final_path = proxy_path_for(content_hash);
+    let final_path = proxy_path_for(content_hash, quality);
     let tmp_path = dir.join(format!(
-        "{content_hash:016x}.tmp-{}.mp4",
+        "{content_hash:016x}{}.tmp-{}.mp4",
+        quality.file_suffix(),
         std::process::id()
     ));
 
@@ -72,6 +125,7 @@ pub fn generate_proxy(
             dst_h,
             src_w,
             src_h,
+            quality,
             decoder.fps(),
             first_frame.matrix,
             first_frame.full_range,
@@ -152,6 +206,7 @@ impl ProxyEncoder {
         dst_h: u32,
         src_w: u32,
         src_h: u32,
+        quality: ProxyQuality,
         fps: vv_core::Rational,
         matrix: ColorMatrix,
         full_range: bool,
@@ -182,7 +237,7 @@ impl ProxyEncoder {
         let mut opts = Dictionary::new();
         // Fast to encode and decode; the quality is enough for scrubbing.
         opts.set("preset", "veryfast");
-        opts.set("crf", "26");
+        opts.set("crf", quality.crf());
         // All-intra: the whole point of the proxy.
         opts.set("g", "1");
         opts.set("keyint_min", "1");
@@ -286,11 +341,13 @@ mod tests {
     }
 
     #[test]
-    fn proxy_path_for_is_deterministic_and_keyed_by_content_hash() {
-        assert_eq!(proxy_path_for(42), proxy_path_for(42));
-        assert_ne!(proxy_path_for(42), proxy_path_for(43));
+    fn proxy_path_for_is_deterministic_and_keyed_by_content_hash_and_quality() {
+        let medium = ProxyQuality::Medium;
+        assert_eq!(proxy_path_for(42, medium), proxy_path_for(42, medium));
+        assert_ne!(proxy_path_for(42, medium), proxy_path_for(43, medium));
+        assert_ne!(proxy_path_for(42, medium), proxy_path_for(42, ProxyQuality::High));
         assert!(
-            proxy_path_for(42)
+            proxy_path_for(42, medium)
                 .to_string_lossy()
                 .ends_with("venturi/proxies/000000000000002a.mp4")
         );
@@ -305,12 +362,12 @@ mod tests {
         // already present from a previous test that failed halfway could
         // confuse the assertion on `proxy_exists` before the
         // generation.
-        let _ = std::fs::remove_file(proxy_path_for(content_hash));
+        let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
-        assert!(!proxy_exists(content_hash));
-        let proxy_path = generate_proxy(&path, content_hash, |_| true).expect("generazione proxy fallita");
-        assert_eq!(proxy_path, proxy_path_for(content_hash));
-        assert!(proxy_exists(content_hash));
+        assert!(!proxy_exists(content_hash, ProxyQuality::Medium));
+        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("generazione proxy fallita");
+        assert_eq!(proxy_path, proxy_path_for(content_hash, ProxyQuality::Medium));
+        assert!(proxy_exists(content_hash, ProxyQuality::Medium));
 
         // The proxy must be a valid H.264 file, re-decodable with the same
         // `Decoder` used for normal sources, with the same duration (in
@@ -349,11 +406,16 @@ mod tests {
     fn generate_proxy_downscales_a_wider_source() {
         let path = make_test_clip("wide_source.mp4", "1920x1080", 1);
         let content_hash = 0x123456;
-        let _ = std::fs::remove_file(proxy_path_for(content_hash));
+        let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
-        let proxy_path = generate_proxy(&path, content_hash, |_| true).expect("generazione proxy fallita");
+        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("generazione proxy fallita");
         let proxy_decoder = Decoder::open(&proxy_path).unwrap();
         assert_eq!(proxy_decoder.width(), 960);
         assert_eq!(proxy_decoder.height(), 540);
+
+        let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Low));
+        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Low, |_| true)
+            .expect("generazione proxy fallita");
+        assert_eq!(Decoder::open(&proxy_path).unwrap().width(), 640);
     }
 }

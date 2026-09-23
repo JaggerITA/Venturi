@@ -6,6 +6,57 @@ settings.title:
 settings.section_general:
   en: General
   it: Generali
+settings.section_playback:
+  en: Playback
+  it: Playback
+settings.read_ahead:
+  en: Read-ahead
+  it: Read-ahead
+settings.read_ahead_forward:
+  en: "Forward:"
+  it: "Avanti:"
+settings.read_ahead_forward_hint:
+  en: "How many seconds of timeline to buffer ahead of the playhead. More = smoother scrub/playback but more RAM and CPU spent on frames that may never be needed; less = lighter but a short wait during fast scrubbing is more likely. A minimum margin remains even at 0."
+  it: "Quanti secondi di timeline bufferizzare in anticipo avanti dalla testina. Di più = scrub/playback più fluidi ma più RAM e CPU spesi su frame che potrebbero non servire mai; di meno = più leggero ma più probabile una breve attesa durante uno scrub veloce. Resta comunque un margine minimo anche a 0."
+settings.read_ahead_behind:
+  en: "Behind:"
+  it: "Indietro:"
+settings.read_ahead_behind_hint:
+  en: "How many seconds of timeline to keep buffered behind the playhead too, besides the forward window: makes short back-and-forth scrubbing cheap without decoding again every time. A minimum margin remains even at 0."
+  it: "Quanti secondi di timeline tenere bufferizzati anche dietro la testina, oltre alla finestra in avanti: rende economico uno scrub avanti-indietro ravvicinato senza dover ridecodificare ogni volta. Resta comunque un margine minimo anche a 0."
+settings.video_cache:
+  en: "Video cache:"
+  it: "Cache video:"
+settings.video_cache_hint:
+  en: "How much RAM to use for pre-decoded frames: more = smoother scrub/playback, less = lower risk of running out of memory (especially with 4K+ sources)."
+  it: "Quanta RAM usare per i frame pre-decodificati: di più = scrub/playback più fluidi, di meno = meno rischio di esaurire la memoria (soprattutto con sorgenti 4K+)."
+settings.proxy:
+  en: Proxy
+  it: Proxy
+settings.proxy_quality:
+  en: "Proxy quality:"
+  it: "Qualità dei proxy:"
+settings.proxy_quality_low:
+  en: Low
+  it: Bassa
+settings.proxy_quality_low_hint:
+  en: "Smallest and fastest to generate and decode: the smoothest scrubbing even on slow machines, but a visibly soft preview."
+  it: "La più leggera da generare e decodificare: scrub più fluido anche su macchine lente, ma anteprima visibilmente sfocata."
+settings.proxy_quality_medium:
+  en: Medium
+  it: Media
+settings.proxy_quality_medium_hint:
+  en: "Balance between smoothness and sharpness of the preview."
+  it: "Equilibrio tra fluidità e nitidezza dell'anteprima."
+settings.proxy_quality_high:
+  en: High
+  it: Alta
+settings.proxy_quality_high_hint:
+  en: "Up to Full HD with less compression: a sharp preview, but proxies take longer to generate, use more disk and are heavier to decode."
+  it: "Fino al Full HD con meno compressione: anteprima nitida, ma i proxy richiedono più tempo per essere generati, occupano più disco e sono più pesanti da decodificare."
+settings.proxy_quality_note:
+  en: "Changing quality generates new proxies in the background; the ones already generated for other qualities stay on disk."
+  it: "Cambiando qualità vengono generati nuovi proxy in background; quelli già generati per altre qualità restano su disco."
 settings.section_shortcuts:
   en: Keyboard shortcuts
   it: Scorciatoie da tastiera
