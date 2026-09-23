@@ -3412,6 +3412,9 @@ impl eframe::App for VenturiApp {
                     drags.extend(show_stream_drag_handles(ui, rect));
                 }
                 for (resp, streams) in drags {
+                    if resp.dragged_by(egui::PointerButton::Middle) {
+                        continue;
+                    }
                     resp.dnd_set_drag_payload(timeline_ui::MediaDragSet::one(
                         timeline_ui::MediaDrag {
                             media_id,

@@ -1,4 +1,5 @@
-//! Viewer zoom and pan: wheel zooms around the pointer, middle button pans.
+//! Viewer zoom and pan: wheel zooms around the pointer; middle button,
+//! Ctrl+wheel (vertical) and Ctrl+Shift+wheel (horizontal) pan.
 
 use egui::{Pos2, Rect, Vec2};
 
@@ -49,10 +50,18 @@ impl ViewerZoom {
     pub fn handle_input(&mut self, ui: &egui::Ui, area: Rect, frame_px: Vec2) {
         let ppp = ui.ctx().pixels_per_point();
         let hovered = ui.rect_contains_pointer(area);
-        let (scroll, pinch, pointer, middle_pressed, middle_down, delta) = ui.input(|i| {
+        let line_speed = ui.ctx().options(|o| o.input_options.line_scroll_speed);
+        let (factor, wheel_pan, pointer, middle_pressed, middle_down, delta) = ui.input(|i| {
+            // egui turns Ctrl+wheel into `zoom_delta`: here it pans instead,
+            // so only the pinch gestures zoom.
+            let (factor, wheel_pan) = if i.modifiers.command {
+                (pinch_factor(i), ctrl_wheel_pan(i, line_speed))
+            } else {
+                ((i.smooth_scroll_delta.y / 200.0).exp() * i.zoom_delta(), Vec2::ZERO)
+            };
             (
-                i.smooth_scroll_delta.y,
-                i.zoom_delta(),
+                factor,
+                wheel_pan,
                 i.pointer.hover_pos(),
                 i.pointer.button_pressed(egui::PointerButton::Middle),
                 i.pointer.button_down(egui::PointerButton::Middle),
@@ -70,7 +79,10 @@ impl ViewerZoom {
             self.pan += delta;
             self.clamp_pan(area, frame_px, ppp);
         }
-        let factor = (scroll / 200.0).exp() * pinch;
+        if hovered && !self.is_fit() && wheel_pan != Vec2::ZERO {
+            self.pan += wheel_pan;
+            self.clamp_pan(area, frame_px, ppp);
+        }
         if hovered
             && factor != 1.0
             && let Some(pointer) = pointer
@@ -96,6 +108,42 @@ impl ViewerZoom {
         let size = frame_px * self.scale(area, frame_px, ppp) / ppp;
         let limit = ((size + area.size()) / 2.0 - Vec2::splat(MIN_VISIBLE)).max(Vec2::ZERO);
         self.pan = self.pan.clamp(-limit, limit);
+    }
+}
+
+fn pinch_factor(input: &egui::InputState) -> f32 {
+    if let Some(touch) = input.multi_touch() {
+        return touch.zoom_delta;
+    }
+    input
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            egui::Event::Zoom(factor) => Some(*factor),
+            _ => None,
+        })
+        .product()
+}
+
+/// Pan in points from the wheel events of this frame: vertical, or
+/// horizontal with Shift.
+fn ctrl_wheel_pan(input: &egui::InputState, line_speed: f32) -> Vec2 {
+    let mut pan = Vec2::ZERO;
+    for event in &input.events {
+        if let egui::Event::MouseWheel { unit, delta, .. } = event {
+            let points = match unit {
+                egui::MouseWheelUnit::Point => *delta,
+                egui::MouseWheelUnit::Line => *delta * line_speed,
+                egui::MouseWheelUnit::Page => *delta * input.viewport_rect().height(),
+            };
+            pan += points;
+        }
+    }
+    if input.modifiers.shift {
+        // Some platforms already report Shift+wheel as horizontal.
+        egui::vec2(pan.x + pan.y, 0.0)
+    } else {
+        pan
     }
 }
 

@@ -200,7 +200,8 @@ pub fn show(
 
     let resp = ui.interact(area, ui.id().with("viewer_transform_overlay"), egui::Sense::drag());
     let mut changed = None;
-    if resp.drag_started()
+    // Middle button pans the viewer.
+    if resp.drag_started_by(egui::PointerButton::Primary)
         && let Some(press) = ui.input(|i| i.pointer.press_origin())
     {
         *drag = handle_at(press).map(|handle| OverlayDrag {
@@ -212,7 +213,7 @@ pub fn show(
         });
     }
     if let Some(d) = drag.as_mut()
-        && resp.dragged()
+        && resp.dragged_by(egui::PointerButton::Primary)
         && let Some(pos) = resp.interact_pointer_pos()
     {
         let shift = ui.input(|i| i.modifiers.shift);
