@@ -198,6 +198,22 @@ and `podman rmi venturi-appimage` if you change `Containerfile.appimage`.
 The AppImage is GPL (it includes libx264) and does not include FDK-AAC:
 export uses FFmpeg's native AAC encoder.
 
+### macOS (Apple Silicon)
+
+```sh
+scripts/build-macos.sh
+```
+
+Must run on a Mac with the Xcode command line tools and `pkgconf`. Produces
+`target/macos/Venturi.app` and `target/macos/Venturi-arm64.dmg`, with FFmpeg
+(libx264, zlib, VideoToolbox) bundled in `Contents/Frameworks`. The app is
+signed ad-hoc only, not notarized: on first launch use right click → Open, or
+`xattr -dr com.apple.quarantine Venturi.app`.
+
+The `macOS build` GitHub Actions workflow (`.github/workflows/macos.yml`) runs
+the same script on a `macos-14` runner, manually or on `v*` tags, and uploads
+the dmg as an artifact.
+
 ## Run
 
 ```sh
