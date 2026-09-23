@@ -1,0 +1,604 @@
+use super::*;
+use crate::model::{BlendMode, ClipId};
+use crate::otio::timeline_to_otio;
+use serde_json::json;
+
+fn meta(fps: Rational, duration_frames: FrameIdx) -> MediaMeta {
+    MediaMeta {
+        duration_frames,
+        fps,
+        width: 1280,
+        height: 720,
+        has_video: true,
+        has_audio: true,
+        sample_rate: 48_000,
+        channels: 2,
+        audio_streams: 1,
+    }
+}
+
+fn probe_from(
+    media: Vec<(&'static str, MediaMeta)>,
+) -> impl FnMut(&Path) -> ProbeResult {
+    move |path| {
+        media
+            .iter()
+            .find(|(p, _)| Path::new(p) == path)
+            .map(|(_, m)| (m.clone(), 42))
+            .ok_or_else(|| "file not found".to_owned())
+    }
+}
+
+fn span(clip: &Clip) -> (FrameIdx, FrameIdx, FrameIdx, Rational) {
+    (clip.timeline_start, clip.source_offset, clip.timeline_len, clip.rate)
+}
+
+/// Exporting and importing a Venturi project returns the same clips,
+/// even split mid source frame.
+#[test]
+fn a_venturi_export_imports_back_unchanged() {
+    let media_meta = meta(Rational::new(30_000, 1001), 1000);
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path: "/tmp/a.mp4".into(),
+        meta: media_meta.clone(),
+        content_hash: 42,
+        compound: None,
+    });
+    let timeline_id = project.timelines.insert(Timeline {
+        name: "Montaggio".into(),
+        fps: Rational::new(30, 1),
+        resolution: (1920, 1080),
+        tracks: vec![
+            Track::new(TrackKind::Video),
+            Track::new(TrackKind::Video),
+            Track::new(TrackKind::Audio),
+        ],
+    });
+    let rate = Rational::conform_rate(Rational::new(30, 1), media_meta.fps);
+    let group = project.alloc_link_group_id();
+    let mut video = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        100,
+        900,
+        20,
+        rate,
+    );
+    video.linked_group = Some(group);
+    let mut audio = video.clone();
+    audio.id = ClipId(2);
+    audio.audio_stream_index = 1;
+    audio.effects.gain_db.upsert(10, -6.0, Interpolation::Linear);
+    let mut color =
+        Clip::from_source_range(ClipId(3), ClipSource::SolidColor, 0, 45, 300, Rational::one());
+    color.effects.color = Some(Keyframed::constant(Rgba { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }));
+    color.fade_in = 5;
+    color.fade_out = 7;
+    color.effects.transition_in = Some(Transition {
+        kind: TransitionKind::Push,
+        duration: 9,
+        direction: PushDirection::Up,
+        ease: Ease::In,
+        curve: 0.25,
+    });
+    let tl = &mut project.timelines[timeline_id];
+    tl.tracks[0].clips.push(video);
+    tl.tracks[1].clips.push(color);
+    tl.tracks[2].clips.push(audio);
+    tl.tracks[2].muted = true;
+    let mut split = crate::SplitClip::new(timeline_id, 0, ClipId(1), 500);
+    crate::Command::apply(&mut split, &mut project);
+
+    let otio = timeline_to_otio(&project, timeline_id, None);
+    let mut probe = probe_from(vec![("/tmp/a.mp4", media_meta.clone())]);
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+
+    let original = &project.timelines[timeline_id];
+    let (_, back) = imported.project.timelines.iter().next().unwrap();
+    assert_eq!(back.name, "Montaggio");
+    assert_eq!(back.fps, original.fps);
+    assert_eq!(back.resolution, original.resolution);
+    assert_eq!(back.tracks.len(), 3);
+    for (a, b) in original.tracks.iter().zip(&back.tracks) {
+        assert_eq!((a.kind, a.muted), (b.kind, b.muted));
+        let spans_a: Vec<_> = a.clips.iter().map(span).collect();
+        let spans_b: Vec<_> = b.clips.iter().map(span).collect();
+        assert_eq!(spans_a, spans_b);
+    }
+    let audio = &back.tracks[2].clips[0];
+    assert_eq!(audio.audio_stream_index, 1);
+    assert_eq!(audio.effects.gain_db.value_at(10), -6.0);
+    assert!(audio.linked_group.is_some());
+    assert_eq!(back.tracks[0].clips[0].linked_group, audio.linked_group);
+    assert_eq!(back.tracks[0].clips[1].linked_group, None, "right half unlinked");
+    let generated = &back.tracks[1].clips[0];
+    let color = generated.effects.color.as_ref().unwrap().default;
+    assert_eq!((color.r, color.g, color.b), (0.2, 0.4, 0.6));
+    assert_eq!((generated.fade_in, generated.fade_out), (5, 7));
+    assert_eq!(
+        generated.effects.transition_in.as_ref().map(|t| (t.direction, t.duration, t.ease)),
+        Some((PushDirection::Up, 9, Ease::In)),
+        "the transition comes back whole from metadata.venturi"
+    );
+}
+
+/// Generators go back and forth through Resolve's own blocks: the same
+/// file, with our metadata stripped, has to rebuild the title from the
+/// Qt rich text and the colour from the hex.
+#[test]
+fn reads_back_the_generators_without_our_metadata() {
+    let measure = |_: &crate::model::TitleParams| {
+        crate::TitleMetrics { block: (440.0, 176.0), padding: 20.0 }
+    };
+    let mut project = Project::default();
+    let timeline_id = project.timelines.insert(Timeline {
+        name: "Generatori".into(),
+        fps: Rational::new(30, 1),
+        resolution: (1920, 1080),
+        tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
+    });
+    let mut color =
+        Clip::from_source_range(ClipId(1), ClipSource::SolidColor, 0, 60, 0, Rational::one());
+    color.effects.color =
+        Some(Keyframed::constant(Rgba { r: 0.231_372_55, g: 0.709_803_94, b: 0.207_843_14, a: 1.0 }));
+    let mut text =
+        Clip::from_source_range(ClipId(2), ClipSource::Text, 0, 60, 0, Rational::one());
+    let title = crate::model::TitleParams {
+        content: "Two\nlines & <>".into(),
+        font_family: "Open Sans".into(),
+        font_weight: 700,
+        italic: true,
+        underline: true,
+        size: 72.0,
+        align: crate::model::TextAlign::Left,
+        anchor: (crate::model::HAnchor::Right, crate::model::VAnchor::Bottom),
+        position: [192.0, -108.0],
+        background: crate::model::TitleBackground {
+            enabled: true,
+            width: 0.25,
+            height: 0.2,
+            corner_radius: 0.1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    text.effects.title = Some(title.clone());
+    project.timelines[timeline_id].tracks[0].clips.push(color);
+    project.timelines[timeline_id].tracks[1].clips.push(text);
+
+    let mut otio = timeline_to_otio(&project, timeline_id, Some(&measure));
+    for track in otio["tracks"]["children"].as_array_mut().unwrap() {
+        for clip in track["children"].as_array_mut().unwrap() {
+            clip["metadata"]["venturi"] = json!(null);
+        }
+    }
+    let mut probe = probe_from(vec![]);
+    let imported =
+        project_from_otio(&otio, Path::new("/"), &mut probe, Some(&measure)).unwrap();
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    let color = tl.tracks[0].clips[0].effects.color.as_ref().unwrap().default;
+    assert_eq!(((color.r * 255.0).round(), (color.g * 255.0).round()), (59.0, 181.0));
+
+    let back = tl.tracks[1].clips[0].effects.title.as_ref().unwrap();
+    assert_eq!(back.content, title.content, "text and lines from the HTML blob");
+    assert_eq!(back.font_family, "Open Sans");
+    assert_eq!((back.font_weight, back.size), (700, 72.0));
+    assert!(back.italic && back.underline && !back.strikethrough);
+    assert_eq!(back.align, crate::model::TextAlign::Left);
+    assert_eq!(back.anchor, title.anchor, "index 8 of the 3x3 grid");
+    assert!((back.position[0] - 192.0).abs() < 0.01 && (back.position[1] + 108.0).abs() < 0.01);
+    assert!(
+        (back.background.corner_radius - title.background.corner_radius).abs() < 1e-4,
+        "the radius comes back in our units: {}",
+        back.background.corner_radius
+    );
+}
+
+/// A clip exported by Resolve: the transform lives in `Effect.1` items
+/// with normalized values and keyframes on the frames of the clip.
+#[test]
+fn reads_the_transform_of_a_resolve_clip() {
+    let parameter = |id: &str, value: Value| {
+        json!({
+            "Parameter ID": id,
+            "Parameter Value": value,
+            "Default Parameter Value": 0.0,
+            "Variant Type": "Double",
+            "Key Frames": {},
+        })
+    };
+    let effect = |name: &str, parameters: Value| {
+        json!({
+            "OTIO_SCHEMA": "Effect.1",
+            "name": "",
+            "effect_name": "Resolve Effect",
+            "metadata": { "Resolve_OTIO": {
+                "Effect Name": name,
+                "Name": name,
+                "Enabled": true,
+                "Parameters": parameters,
+            }},
+        })
+    };
+    let otio = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "From Resolve",
+        "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [{
+            "OTIO_SCHEMA": "Track.1",
+            "kind": "Video",
+            "children": [{
+                "OTIO_SCHEMA": "Clip.2",
+                "name": "one",
+                "source_range": range(0.0, 100.0, 24.0),
+                "media_references": { "DEFAULT_MEDIA": {
+                    "OTIO_SCHEMA": "ExternalReference.1",
+                    "target_url": B_ROLL,
+                    "available_range": range(0.0, 2400.0, 24.0),
+                }},
+                "effects": [
+                    json!({
+                        "OTIO_SCHEMA": "LinearTimeWarp.1",
+                        "name": "",
+                        "effect_name": "",
+                        "time_scalar": 2.0,
+                    }),
+                    effect("Transform", json!([
+                        parameter("transformationZoomX", json!(1.07)),
+                        parameter("transformationPan", json!(0.05)),
+                        parameter("transformationTilt", json!(-0.05)),
+                        parameter("transformationRotationAngle", json!(7.8)),
+                        json!({
+                            "Parameter ID": "transformationAnchorPoint",
+                            "Parameter Value": [0.1, 0.0],
+                            "Default Parameter Value": [0.0, 0.0],
+                            "Variant Type": "POINTF",
+                            "Key Frames": {
+                                "0": { "Value": [0.1, 0.0], "Variant Type": "POINTF" },
+                                "10": { "Value": [0.5, 0.0], "Variant Type": "POINTF" },
+                            },
+                        }),
+                        json!({
+                            "Parameter ID": "transformationFlipY",
+                            "Parameter Value": true,
+                            "Default Parameter Value": false,
+                            "Variant Type": "Bool",
+                        }),
+                    ])),
+                    effect("Cropping", json!([parameter("cropTop", json!(0.25))])),
+                    effect("Composite", json!([
+                        parameter("opacity", json!(80.0)),
+                        json!({
+                            "Parameter ID": "composite mode",
+                            "Parameter Value": 5,
+                            "Default Parameter Value": 0,
+                            "Variant Type": "UInt",
+                        }),
+                    ])),
+                    effect("Video Faders", json!([parameter("videoFaderIn", json!(12.0))])),
+                ],
+            }],
+        }]},
+    });
+    let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+    let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
+    assert_eq!(
+        imported.warnings,
+        vec![OtioWarning::SpeedNotApplied { clip: "one".into(), percent: 200 }],
+        "speed is kept but not played back"
+    );
+
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    let clip = &tl.tracks[0].clips[0];
+    assert_eq!(clip.effects.speed.default, 2.0);
+    assert_eq!(clip.effects.transform.flip, [false, true]);
+    let t = clip.effects.transform.value_at(0);
+    assert_eq!(t.zoom[0], 1.07);
+    assert_eq!(t.position, [64.0, -36.0], "denormalized on 1280x720");
+    assert_eq!(t.rotation, -7.8, "opposite direction to Resolve's");
+    assert_eq!(t.anchor[0], 128.0);
+    assert_eq!(t.crop[1], 180.0, "crop is in media pixels");
+    assert_eq!(t.opacity, 80.0);
+    assert_eq!(clip.effects.blend_mode, BlendMode::Screen);
+    assert_eq!(clip.fade_in, 12);
+    assert_eq!(
+        clip.effects.transform.value_at(10).anchor[0],
+        640.0,
+        "keyframe on the matching source frame"
+    );
+}
+
+fn rt(value: f64, rate: f64) -> Value {
+    json!({ "OTIO_SCHEMA": "RationalTime.1", "value": value, "rate": rate })
+}
+
+fn range(start: f64, duration: f64, rate: f64) -> Value {
+    json!({
+        "OTIO_SCHEMA": "TimeRange.1",
+        "start_time": rt(start, rate),
+        "duration": rt(duration, rate),
+    })
+}
+
+const B_ROLL: &str = "file:///media/b%20roll.mov";
+
+/// Source at 24 fps from frame `start` for `duration`.
+fn clip_1(name: &str, url: &str, start: f64, duration: f64, enabled: bool) -> Value {
+    json!({
+        "OTIO_SCHEMA": "Clip.1",
+        "name": name,
+        "source_range": range(start, duration, 24.0),
+        "enabled": enabled,
+        "effects": [],
+        "media_reference": {
+            "OTIO_SCHEMA": "ExternalReference.1",
+            "target_url": url,
+            // Media with a start timecode of 01:00:00:00 at 24 fps.
+            "available_range": range(86_400.0, 2400.0, 24.0),
+        },
+    })
+}
+
+/// File from another editor: `Clip.1`, times in the media rate with a
+/// start timecode, transitions, disabled clips and missing media;
+/// video and audio of the same stretch must be relinked.
+#[test]
+fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
+    let fps = 24_000.0 / 1001.0;
+    let otio = json!({
+        "OTIO_SCHEMA": "SerializableCollection.1",
+        "children": [{
+            "OTIO_SCHEMA": "Timeline.1",
+            "name": "From Resolve",
+            "global_start_time": rt(86_400.0, fps),
+            "tracks": {
+                "OTIO_SCHEMA": "Stack.1",
+                "children": [
+                    {
+                        "OTIO_SCHEMA": "Track.1",
+                        "kind": "Video",
+                        "children": [
+                            { "OTIO_SCHEMA": "Gap.1", "source_range": range(0.0, 24.0, fps) },
+                            clip_1("one", B_ROLL, 86_448.0, 48.0, true),
+                            { "OTIO_SCHEMA": "Transition.1", "in_offset": rt(6.0, fps) },
+                            clip_1("disabled", B_ROLL, 86_400.0, 24.0, false),
+                            clip_1("lost", "file:///media/missing.mov", 86_400.0, 24.0, true),
+                            clip_1("two", "b roll.mov", 86_400.0, 12.0, true),
+                        ],
+                    },
+                    {
+                        "OTIO_SCHEMA": "Track.1",
+                        "kind": "Audio",
+                        "enabled": false,
+                        "children": [
+                            { "OTIO_SCHEMA": "Gap.1", "source_range": range(0.0, 24.0, fps) },
+                            clip_1("one", B_ROLL, 86_448.0, 48.0, true),
+                        ],
+                    },
+                ],
+            },
+        }],
+    });
+    let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+    let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
+
+    assert_eq!(imported.warnings.len(), 2, "{:?}", imported.warnings);
+    assert_eq!(imported.warnings[0], OtioWarning::ClipDisabled { clip: "disabled".into() });
+    assert!(matches!(&imported.warnings[1], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("missing.mov")));
+    assert_eq!(imported.project.media_pool.len(), 1, "same file probed once");
+
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    assert_eq!(tl.fps, Rational::new(24_000, 1001));
+    assert_eq!(tl.resolution, (1280, 720), "from the first video media");
+    let video = &tl.tracks[0].clips;
+    assert_eq!(video.len(), 2);
+    assert_eq!((video[0].timeline_start, video[0].timeline_len), (24, 48));
+    assert_eq!(video[0].source_in(), 48, "from the media start timecode");
+    assert_eq!(video[1].timeline_start, 24 + 48 + 24 + 24, "after disabled and lost");
+    assert_eq!(video[1].source_in(), 0, "relative path");
+    let transition = video[0].effects.transition_out.as_ref().expect("outgoing transition");
+    assert_eq!(transition.duration, 6, "in_offset reaches into the previous clip");
+
+    let audio = &tl.tracks[1];
+    assert!(audio.muted);
+    assert!(video[0].linked_group.is_some());
+    assert_eq!(audio.clips[0].linked_group, video[0].linked_group);
+    assert_eq!(video[1].linked_group, None);
+}
+
+fn resolve_effect(name: &str, enabled: bool, parameters: Value) -> Value {
+    json!({
+        "OTIO_SCHEMA": "Effect.1",
+        "effect_name": "Resolve Effect",
+        "metadata": { "Resolve_OTIO": {
+            "Effect Name": name,
+            "Enabled": enabled,
+            "Parameters": parameters,
+        }},
+    })
+}
+
+fn volume(value: f64, keyframes: Value) -> Value {
+    json!([{
+        "Parameter ID": "volume",
+        "Default Parameter Value": 0.0,
+        "Parameter Value": value,
+        "Key Frames": keyframes,
+    }])
+}
+
+/// Resolve exports the whole effect stack of every clip: volume
+/// becomes gain, disabled and default ones disappear, the rest is
+/// summarized in one warning per effect. Groups and audio streams come
+/// from its metadata.
+#[test]
+fn resolve_effects_links_and_channels_are_translated() {
+    let resolve_clip = |start: f64, effects: Value, link: u64, source_track: u64| {
+        let mut clip = clip_1("c", B_ROLL, 86_400.0 + start, 24.0, true);
+        clip["effects"] = effects;
+        clip["metadata"] = json!({ "Resolve_OTIO": {
+            "Link Group ID": link,
+            "Channels": [
+                { "Source Channel ID": 0, "Source Track ID": source_track },
+                { "Source Channel ID": 1, "Source Track ID": source_track },
+            ],
+        }});
+        clip
+    };
+    let zoom = json!([{
+        "Parameter ID": "zoom",
+        "Default Parameter Value": 1.0,
+        "Parameter Value": 1.5,
+    }]);
+    let track = |kind: &str, children: Vec<Value>| {
+        json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": children })
+    };
+    let otio = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "global_start_time": rt(0.0, 24.0),
+        "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+            track("Video", vec![
+                resolve_clip(0.0, json!([
+                    resolve_effect("Transform", true, json!([])),
+                    resolve_effect("Dynamic Zoom", false, zoom.clone()),
+                    resolve_effect("Zoom", true, zoom.clone()),
+                ]), 5, 0),
+                resolve_clip(24.0, json!([resolve_effect("Zoom", true, zoom)]), 6, 0),
+            ]),
+            track("Audio", vec![
+                resolve_clip(0.0, json!([
+                    resolve_effect(
+                        "Fairlight Clip Volume and Fades",
+                        true,
+                        volume(3.5, json!({})),
+                    ),
+                ]), 5, 1),
+                resolve_clip(24.0, json!([resolve_effect(
+                    "Fairlight Clip Volume and Fades",
+                    true,
+                    volume(0.0, json!({ "0": { "Value": -6.0 }, "12": { "Value": 0.0 } })),
+                )]), 6, 1),
+            ]),
+        ]},
+    });
+    let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
+
+    assert_eq!(imported.warnings, [OtioWarning::EffectIgnored { effect: "Zoom".into(), clips: 2 }]);
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    let (video, audio) = (&tl.tracks[0].clips, &tl.tracks[1].clips);
+    assert_eq!(audio[0].effects.gain_db.value_at(0), 3.5);
+    let gain = &audio[1].effects.gain_db;
+    assert_eq!(gain.value_at(24), -6.0, "keyframe on the first source frame of the clip");
+    assert_eq!(gain.value_at(36), 0.0);
+    assert_eq!(gain.value_at(30), -3.0);
+    assert_eq!(audio[0].audio_stream_index, 1);
+    assert_eq!(video[0].linked_group, audio[0].linked_group);
+    assert_eq!(video[1].linked_group, audio[1].linked_group);
+    assert_ne!(video[0].linked_group, video[1].linked_group);
+}
+
+fn audio_only_meta() -> MediaMeta {
+    MediaMeta {
+        duration_frames: 300,
+        fps: Rational::new(30, 1),
+        width: 0,
+        height: 0,
+        has_video: false,
+        has_audio: true,
+        sample_rate: 48_000,
+        channels: 2,
+        audio_streams: 1,
+    }
+}
+
+/// An audio-only media comes back identical from an export of ours, reads
+/// at any rate from another editor, and on a video track is discarded
+/// with a warning.
+#[test]
+fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path: "/tmp/voice.wav".into(),
+        meta: audio_only_meta(),
+        content_hash: 42,
+        compound: None,
+    });
+    let fps = Rational::new(25, 1);
+    let timeline_id = project.timelines.insert(Timeline {
+        name: "Voice".into(),
+        fps,
+        resolution: (1920, 1080),
+        tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+    });
+    let rate = Rational::conform_rate(fps, Rational::new(30, 1));
+    project.timelines[timeline_id].tracks[1].clips.push(Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        30,
+        270,
+        10,
+        rate,
+    ));
+    let mut split = crate::SplitClip::new(timeline_id, 1, ClipId(1), 77);
+    crate::Command::apply(&mut split, &mut project);
+
+    let otio = timeline_to_otio(&project, timeline_id, None);
+    let mut probe = probe_from(vec![("/tmp/voice.wav", audio_only_meta())]);
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    let (_, back) = imported.project.timelines.iter().next().unwrap();
+    let spans = |t: &Timeline| t.tracks[1].clips.iter().map(span).collect::<Vec<_>>();
+    assert_eq!(spans(back), spans(&project.timelines[timeline_id]));
+
+    let wav_clip = |start_samples: f64| {
+        json!({
+            "OTIO_SCHEMA": "Clip.2",
+            "name": "voice",
+            "source_range": range(start_samples, 48_000.0, 48_000.0),
+            "media_references": { "DEFAULT_MEDIA": {
+                "OTIO_SCHEMA": "ExternalReference.1",
+                "target_url": "file:///tmp/voice.wav",
+            }},
+            "active_media_reference_key": "DEFAULT_MEDIA",
+        })
+    };
+    let track = |kind: &str| {
+        json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": [wav_clip(24_000.0)] })
+    };
+    let foreign = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "global_start_time": rt(0.0, 25.0),
+        "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [track("Video"), track("Audio")] },
+    });
+    let imported = project_from_otio(&foreign, Path::new("/"), &mut probe, None).unwrap();
+    assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    assert!(matches!(imported.warnings[0], OtioWarning::AudioOnlyOnVideoTrack { .. }));
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    assert!(tl.tracks[0].clips.is_empty());
+    let clip = &tl.tracks[1].clips[0];
+    assert_eq!((clip.timeline_len, clip.source_offset), (25, 13), "1 s from 0.5 s, at 25 fps");
+    assert_eq!(clip.rate, rate);
+    assert_eq!(tl.resolution, (1920, 1080));
+}
+
+#[test]
+fn a_file_without_timelines_is_an_error() {
+    let mut probe = probe_from(vec![]);
+    let not_a_timeline = json!({ "OTIO_SCHEMA": "Clip.2" });
+    let result = project_from_otio(&not_a_timeline, Path::new("/"), &mut probe, None);
+    assert!(matches!(result, Err(OtioError::Format(_))));
+}
+
+#[test]
+fn fps_from_float_recognises_ntsc_rates() {
+    assert_eq!(Rational::from_fps(25.0), Rational::new(25, 1));
+    assert_eq!(Rational::from_fps(29.97), Rational::new(30_000, 1001));
+    assert_eq!(Rational::from_fps(30_000.0 / 1001.0), Rational::new(30_000, 1001));
+    assert_eq!(Rational::from_fps(23.976), Rational::new(24_000, 1001));
+    assert_eq!(Rational::from_fps(59.94), Rational::new(60_000, 1001));
+    assert_eq!(Rational::from_fps(12.5), Rational::new(25, 2));
+}

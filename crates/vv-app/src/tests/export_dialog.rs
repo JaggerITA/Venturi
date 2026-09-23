@@ -1,0 +1,58 @@
+use super::*;
+
+#[test]
+fn validate_path_appends_mp4_and_rejects_missing_dirs() {
+    let dir = std::env::temp_dir();
+    let expected = dir.join("video.mp4");
+    assert_eq!(validate_path(dir.join("video").to_str().unwrap()), Ok(expected.clone()));
+    assert_eq!(validate_path(expected.to_str().unwrap()), Ok(expected));
+    assert!(validate_path("").is_err());
+    assert!(validate_path("/does/not/really/exist/video.mp4").is_err());
+}
+
+#[test]
+fn export_uses_in_out_marks_unless_whole_timeline_is_chosen() {
+    let info = TimelineInfo {
+        resolution: (1920, 1080),
+        fps: Rational::new(25, 1),
+        total_frames: 100,
+        marks: Some((20, 60)),
+        has_audio: true,
+    };
+    let path = std::env::temp_dir().join("out.mp4");
+    let mut dialog = ExportDialog::new(ExportSettings::new(path));
+    assert_eq!(dialog.export_range(&info), 20..60);
+    dialog.whole_timeline = true;
+    assert_eq!(dialog.export_range(&info), 0..100);
+}
+
+#[test]
+fn output_size_is_even_and_exact_at_full_scale() {
+    let mut settings = ExportSettings::new(PathBuf::new());
+    assert_eq!(settings.output_size((1920, 1080)), (1920, 1080));
+    settings.scale_percent = 75;
+    assert_eq!(settings.output_size((1920, 1080)), (1440, 810));
+    settings.scale_percent = 25;
+    assert_eq!(settings.output_size((1366, 768)), (340, 192));
+}
+
+#[test]
+fn dialog_renders_without_starting_an_export_on_its_own() {
+    let info = TimelineInfo {
+        resolution: (1920, 1080),
+        fps: Rational::new(60, 1),
+        total_frames: 28_800,
+        marks: Some((600, 1200)),
+        has_audio: true,
+    };
+    let mut dialog = ExportDialog::new(ExportSettings::new(std::env::temp_dir().join("x.mp4")));
+    let ctx = egui::Context::default();
+    for _ in 0..3 {
+        let mut action = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            action = Some(dialog.show(ui.ctx(), &info));
+        });
+        output.textures_delta.clear();
+        assert!(matches!(action, Some(ExportDialogAction::None)));
+    }
+}

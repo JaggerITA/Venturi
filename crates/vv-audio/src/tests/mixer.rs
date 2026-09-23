@@ -1,0 +1,617 @@
+use super::*;
+use std::path::PathBuf;
+use vv_core::{
+    Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track, TrackKind,
+};
+
+const RATE: u32 = 100;
+
+fn clip_at(media: vv_core::MediaId, start: FrameIdx, source_in: FrameIdx, len: FrameIdx) -> Clip {
+    Clip::from_source_range(
+        ClipId(0),
+        ClipSource::Media(media),
+        source_in,
+        source_in + len,
+        start,
+        Rational::one(),
+    )
+}
+
+/// Project at 10 fps with two media (`a.wav`, `b.wav`): at `RATE` = 100
+/// every timeline frame is 10 audio frames.
+fn project() -> (Project, vv_core::MediaId, vv_core::MediaId) {
+    let mut project = Project::default();
+    let meta = MediaMeta {
+        duration_frames: 100,
+        fps: Rational::new(10, 1),
+        width: 0,
+        height: 0,
+        has_video: true,
+        has_audio: true,
+        sample_rate: RATE,
+        channels: 1,
+        audio_streams: 1,
+    };
+    let a = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("a.wav"),
+        meta: meta.clone(),
+        content_hash: 1,
+        compound: None,
+    });
+    let b = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("b.wav"),
+        meta,
+        content_hash: 2,
+        compound: None,
+    });
+    (project, a, b)
+}
+
+fn timeline(tracks: Vec<Track>) -> Timeline {
+    Timeline {
+        name: "t".into(),
+        fps: Rational::new(10, 1),
+        resolution: (4, 2),
+        tracks,
+    }
+}
+
+fn audio_track(clips: Vec<Clip>) -> Track {
+    Track {
+        kind: TrackKind::Audio,
+        clips,
+        muted: false,
+        solo: false,
+        locked: false,
+        crossings: Vec::new(),
+    }
+}
+
+/// Mono: `a` is always 0.5, `b` is a ramp (sample i = i/1000);
+/// stream 1 of `a` is 0.25.
+fn buffers(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
+    match (path.to_str()?, stream) {
+        ("a.wav", 0) => Some(Arc::new(vec![0.5; 1000])),
+        ("a.wav", 1) => Some(Arc::new(vec![0.25; 1000])),
+        ("b.wav", 0) => Some(Arc::new((0..1000).map(|i| i as f32 / 1000.0).collect())),
+        _ => None,
+    }
+}
+
+fn render(project: &Project, tl: &Timeline, start: u64, frames: usize) -> Vec<f32> {
+    let snap = MixSnapshot::from_timeline(project, tl, RATE, 1, buffers, |_, _| None);
+    let mut out = vec![9.0; frames];
+    mix_range(&snap, start, &mut out);
+    out
+}
+
+#[test]
+fn gap_is_silence() {
+    let (project, a, _) = project();
+    let tl = timeline(vec![audio_track(vec![clip_at(a, 5, 0, 2)])]);
+    let out = render(&project, &tl, 0, 50);
+    assert!(out.iter().all(|&s| s == 0.0));
+    let empty = timeline(vec![]);
+    assert!(render(&project, &empty, 0, 10).iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn offset_clip_plays_its_source_range_at_its_timeline_position() {
+    let (project, _, b) = project();
+    // Timeline frame 2 (= audio 20) plays the source from frame 3 (= audio 30).
+    let tl = timeline(vec![audio_track(vec![clip_at(b, 2, 3, 1)])]);
+    let out = render(&project, &tl, 15, 20);
+    assert!(out[..5].iter().all(|&s| s == 0.0));
+    for i in 0..10 {
+        assert_eq!(out[5 + i], (30 + i) as f32 / 1000.0);
+    }
+    assert!(out[15..].iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn overlapping_clips_on_different_tracks_are_summed() {
+    let (project, a, b) = project();
+    let tl = timeline(vec![
+        audio_track(vec![clip_at(a, 0, 0, 5)]),
+        audio_track(vec![clip_at(b, 0, 0, 5)]),
+    ]);
+    let out = render(&project, &tl, 10, 5);
+    for (i, s) in out.iter().enumerate() {
+        assert_eq!(*s, 0.5 + (10 + i) as f32 / 1000.0);
+    }
+}
+
+#[test]
+fn muted_track_is_excluded() {
+    let (project, a, b) = project();
+    let mut muted = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    muted.muted = true;
+    let tl = timeline(vec![muted, audio_track(vec![clip_at(b, 0, 0, 5)])]);
+    let out = render(&project, &tl, 0, 5);
+    for (i, s) in out.iter().enumerate() {
+        assert_eq!(*s, i as f32 / 1000.0);
+    }
+}
+
+#[test]
+fn only_solo_tracks_play_when_any_is_solo() {
+    let (project, a, b) = project();
+    let mut solo = audio_track(vec![clip_at(b, 0, 0, 5)]);
+    solo.solo = true;
+    let tl = timeline(vec![audio_track(vec![clip_at(a, 0, 0, 5)]), solo]);
+    let out = render(&project, &tl, 0, 5);
+    for (i, s) in out.iter().enumerate() {
+        assert_eq!(*s, i as f32 / 1000.0);
+    }
+}
+
+#[test]
+fn disabled_clip_is_excluded() {
+    let (project, a, b) = project();
+    let mut disabled = clip_at(a, 0, 0, 5);
+    disabled.disabled = true;
+    let tl = timeline(vec![
+        audio_track(vec![disabled]),
+        audio_track(vec![clip_at(b, 0, 0, 5)]),
+    ]);
+    let out = render(&project, &tl, 0, 5);
+    for (i, s) in out.iter().enumerate() {
+        assert_eq!(*s, i as f32 / 1000.0);
+    }
+}
+
+#[test]
+fn video_tracks_are_ignored() {
+    let (project, a, _) = project();
+    let mut video = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    video.kind = TrackKind::Video;
+    let tl = timeline(vec![video]);
+    assert!(render(&project, &tl, 0, 20).iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn a_compound_clip_is_routed_to_compound_buffer_for_never_to_buffer_for() {
+    let mut project = Project::default();
+    let nested = project.timelines.insert(Timeline {
+        name: "n".into(),
+        fps: Rational::new(10, 1),
+        resolution: (1, 1),
+        tracks: vec![],
+    });
+    let compound_media = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("Compound Clip 1"),
+        meta: MediaMeta {
+            duration_frames: 100,
+            fps: Rational::new(10, 1),
+            width: 0,
+            height: 0,
+            has_video: false,
+            has_audio: true,
+            sample_rate: RATE,
+            channels: 1,
+            audio_streams: 1,
+        },
+        content_hash: 1,
+        compound: Some(nested),
+    });
+    let tl = timeline(vec![audio_track(vec![clip_at(compound_media, 0, 0, 5)])]);
+
+    let mut buffer_for_called = false;
+    let snap = MixSnapshot::from_timeline(
+        &project,
+        &tl,
+        RATE,
+        1,
+        |_, _| {
+            buffer_for_called = true;
+            None
+        },
+        |_, id| (id == compound_media).then(|| Arc::new(vec![0.5; 50])),
+    );
+    assert!(!buffer_for_called, "a compound clip must never go through buffer_for");
+    assert_eq!(snap.clips.len(), 1, "compound_buffer_for answered: the clip enters the mix");
+}
+
+/// The bug case: media at 9.99 fps (10000/1001, the small-scale analogue
+/// of 59.94 on 60) on a 10 fps timeline. Conformed, the clip
+/// lasts on the timeline as long as its audio does, and the mix at the end of the clip is
+/// still aligned to the right sample instead of being cut off.
+#[test]
+fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
+    const SOURCE_FRAMES: FrameIdx = 1000;
+    const AUDIO_SAMPLES: usize = 10_010; // 1000 frames / 9.99 fps = 100.1 s
+
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("slow.wav"),
+        meta: MediaMeta {
+            duration_frames: SOURCE_FRAMES,
+            fps: Rational::new(10_000, 1001),
+            width: 0,
+            height: 0,
+            has_video: true,
+            has_audio: true,
+            sample_rate: RATE,
+            channels: 1,
+            audio_streams: 1,
+        },
+        content_hash: 7,
+        compound: None,
+    });
+    let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
+    let clip =
+        Clip::from_source_range(ClipId(0), ClipSource::Media(media), 0, SOURCE_FRAMES, 0, rate);
+    assert_eq!(clip.timeline_len, 1001, "100,1 s a 10 fps");
+    let tl = timeline(vec![audio_track(vec![clip])]);
+
+    let buffer: Arc<Vec<f32>> =
+        Arc::new((0..AUDIO_SAMPLES).map(|i| i as f32 / 100_000.0).collect());
+    let buffer_for = |path: &Path, _stream: usize| {
+        (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
+    };
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, buffer_for, |_, _| None);
+    assert_eq!(snap.clips.len(), 1);
+    assert_eq!(
+        snap.clips[0].len, AUDIO_SAMPLES as u64,
+        "all of the media audio fits in the clip, nothing cut"
+    );
+
+    // Last 10 samples of the clip: still the ones at the end of the buffer,
+    // no drift accumulated over the preceding 100 s.
+    let mut out = vec![9.0; 10];
+    mix_range(&snap, AUDIO_SAMPLES as u64 - 10, &mut out);
+    for (i, s) in out.iter().enumerate() {
+        let expected = (AUDIO_SAMPLES - 10 + i) as f32 / 100_000.0;
+        assert!((s - expected).abs() < 1e-6, "campione {i}: {s} != {expected}");
+    }
+}
+
+/// A split in the middle of a source frame does not move the audio: the right
+/// half restarts from the sample the original was playing at that point.
+#[test]
+fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path: PathBuf::from("slow.wav"),
+        meta: MediaMeta {
+            duration_frames: 1000,
+            fps: Rational::new(10_000, 1001),
+            width: 0,
+            height: 0,
+            has_video: true,
+            has_audio: true,
+            sample_rate: RATE,
+            channels: 1,
+            audio_streams: 1,
+        },
+        content_hash: 7,
+        compound: None,
+    });
+    let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
+    let clip = Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 1000, 0, rate);
+    assert_eq!(clip.source_frame_at(500), clip.source_frame_at(499), "500 is mid-frame");
+    let timeline_id = project.timelines.insert(timeline(vec![audio_track(vec![clip])]));
+
+    let buffer: Arc<Vec<f32>> = Arc::new((0..10_010).map(|i| i as f32 / 100_000.0).collect());
+    let buffer_for = |path: &Path, _stream: usize| {
+        (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
+    };
+    let mix_all = |project: &Project| {
+        let timeline = &project.timelines[timeline_id];
+        let snap = MixSnapshot::from_timeline(project, timeline, RATE, 1, buffer_for, |_, _| None);
+        let mut out = vec![0.0; 10_010];
+        mix_range(&snap, 0, &mut out);
+        out
+    };
+    let before = mix_all(&project);
+
+    let mut split = vv_core::SplitClip::new(timeline_id, 0, ClipId(1), 500);
+    vv_core::Command::apply(&mut split, &mut project);
+    assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2);
+
+    assert_eq!(mix_all(&project), before);
+}
+
+#[test]
+fn constant_gain_scales_the_clip() {
+    let (project, a, _) = project();
+    let mut clip = clip_at(a, 0, 0, 5);
+    clip.effects.gain_db = Keyframed::constant(-6.0206);
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    for s in render(&project, &tl, 0, 10) {
+        assert!((s - 0.25).abs() < 1e-3, "s={s}");
+    }
+}
+
+#[test]
+fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
+    let (project, a, _) = project();
+    // Long enough to cover several gain blocks.
+    let blocks = 3;
+    let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
+    let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
+    let mut gain = Keyframed::constant(0.0f32);
+    gain.upsert(0, 0.0, Interpolation::Hold);
+    // From the second block (audio 800 = source frame 80) on: practically -inf.
+    gain.upsert(80, -200.0, Interpolation::Hold);
+    clip.effects.gain_db = gain;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    let snap = MixSnapshot::from_timeline(
+        &project,
+        &tl,
+        RATE,
+        1,
+        |_, _| Some(Arc::new(vec![0.5; len_frames])),
+        |_, _| None,
+    );
+    let mut out = vec![0.0; len_frames];
+    mix_range(&snap, 0, &mut out);
+    let block = GAIN_BLOCK_FRAMES as usize;
+    assert!(out[..block].iter().all(|&s| s == 0.5));
+    assert!(out[block..].iter().all(|&s| s.abs() < 1e-6));
+}
+
+#[test]
+fn audio_stream_index_selects_the_buffer() {
+    let (project, a, _) = project();
+    let mut clip = clip_at(a, 0, 0, 5);
+    clip.audio_stream_index = 1;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    assert!(render(&project, &tl, 0, 10).iter().all(|&s| s == 0.25));
+}
+
+#[test]
+fn clip_whose_buffer_is_not_ready_is_silent() {
+    let (project, a, b) = project();
+    let tl = timeline(vec![
+        audio_track(vec![clip_at(a, 0, 0, 5)]),
+        audio_track(vec![clip_at(b, 0, 0, 5)]),
+    ]);
+    let snap = MixSnapshot::from_timeline(
+        &project,
+        &tl,
+        RATE,
+        1,
+        |p, s| (p != Path::new("b.wav")).then(|| buffers(p, s)).flatten(),
+        |_, _| None,
+    );
+    let mut out = vec![0.0; 10];
+    mix_range(&snap, 0, &mut out);
+    assert!(out.iter().all(|&s| s == 0.5));
+}
+
+#[test]
+fn clip_longer_than_its_buffer_is_clamped() {
+    let (project, a, _) = project();
+    let tl = timeline(vec![audio_track(vec![clip_at(a, 0, 95, 20)])]);
+    let out = render(&project, &tl, 0, 100);
+    assert!(out[..50].iter().all(|&s| s == 0.5));
+    assert!(out[50..].iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn mix_is_independent_of_how_the_range_is_split() {
+    let (project, a, b) = project();
+    let mut ca = clip_at(a, 1, 0, 30);
+    let mut kf = Keyframed::constant(0.0f32);
+    kf.upsert(0, 0.0, Interpolation::Linear);
+    kf.upsert(30, -12.0, Interpolation::Linear);
+    ca.effects.gain_db = kf;
+    let tl = timeline(vec![
+        audio_track(vec![ca]),
+        audio_track(vec![clip_at(b, 7, 2, 20)]),
+    ]);
+    let whole = render(&project, &tl, 0, 400);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, buffers, |_, _| None);
+    let mut chunked = vec![0.0; 400];
+    for (i, chunk) in chunked.chunks_mut(37).enumerate() {
+        mix_range(&snap, (i * 37) as u64, chunk);
+    }
+    assert_eq!(whole, chunked);
+}
+
+#[test]
+fn stereo_mix_keeps_channels_interleaved() {
+    let (project, a, _) = project();
+    let tl = timeline(vec![audio_track(vec![clip_at(a, 1, 0, 1)])]);
+    let snap = MixSnapshot::from_timeline(
+        &project,
+        &tl,
+        RATE,
+        2,
+        |_, _| Some(Arc::new([0.1, 0.9].repeat(100))),
+        |_, _| None,
+    );
+    let mut out = vec![0.0; 40];
+    mix_range(&snap, 5, &mut out);
+    assert!(out[..10].iter().all(|&s| s == 0.0));
+    for f in out[10..30].chunks(2) {
+        assert_eq!(f, [0.1, 0.9]);
+    }
+    assert!(out[30..].iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn mixer_seek_and_snapshot_swaps_do_not_reopen_or_leak() {
+    let mut mixer = Mixer::new().unwrap();
+    mixer.seek(12_345);
+    assert_eq!(mixer.position(), 12_345, "paused, the position does not advance");
+    for _ in 0..50 {
+        let mix = Arc::new(MixSnapshot::empty(mixer.sample_rate(), mixer.channels()));
+        mixer.set_state(Arc::new(MixerState {
+            mix,
+            stretched: None,
+        }));
+    }
+    assert!(mixer.retained.len() <= 3, "retained={}", mixer.retained.len());
+}
+
+fn window(tempo: u64, origin: u64, chunks: &[&[f32]]) -> StretchedWindow {
+    StretchedWindow {
+        tempo,
+        origin,
+        chunks: chunks.iter().map(|c| Arc::new(c.to_vec())).collect(),
+    }
+}
+
+#[test]
+fn stretched_window_maps_timeline_position_to_stretched_frames() {
+    let w = window(4, 100, &[&[1.0, 2.0, 3.0], &[4.0, 5.0]]);
+    assert_eq!(w.covered_until(1), 120);
+
+    let mut out = [9.0; 3];
+    render_stretched(&w, 1, 100, &mut out);
+    assert_eq!(out, [1.0, 2.0, 3.0]);
+
+    // Position 110 = stretched frame 2, across the chunk boundary.
+    render_stretched(&w, 1, 110, &mut out);
+    assert_eq!(out, [3.0, 4.0, 5.0]);
+
+    render_stretched(&w, 1, 116, &mut out);
+    assert_eq!(out, [5.0, 0.0, 0.0], "past the end: silence");
+    render_stretched(&w, 1, 50, &mut out);
+    assert_eq!(out, [0.0; 3], "before the origin: silence");
+}
+
+#[test]
+fn stretched_window_keeps_stereo_frames_aligned() {
+    let w = window(2, 0, &[&[0.1, 0.2, 0.3, 0.4], &[0.5, 0.6]]);
+    assert_eq!(w.covered_until(2), 6);
+    let mut out = [0.0; 4];
+    render_stretched(&w, 2, 2, &mut out);
+    assert_eq!(out, [0.3, 0.4, 0.5, 0.6]);
+}
+
+#[test]
+fn sample_and_frame_conversions_round_trip() {
+    let fps = 25.0;
+    for frame in [0, 1, 24, 25, 1234] {
+        let s = timeline_frame_to_sample(frame, fps, PROJECT_SAMPLE_RATE);
+        assert_eq!(sample_to_timeline_frame(s, fps, PROJECT_SAMPLE_RATE), frame);
+    }
+}
+
+fn downmix_interleaved(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
+    let mut out = Vec::new();
+    remix_channels_into(samples, from, to, &mut out);
+    out
+}
+
+#[test]
+fn downmix_interleaved_is_a_noop_when_channel_counts_match() {
+    let samples = vec![0.1, 0.2, 0.3, 0.4];
+    assert_eq!(downmix_interleaved(&samples, 2, 2), samples);
+}
+
+#[test]
+fn downmix_interleaved_averages_all_channels_to_mono() {
+    // A stereo frame [1.0, 0.0] -> mono must give the average, 0.5.
+    let samples = vec![1.0, 0.0, 0.5, 0.5];
+    let mono = downmix_interleaved(&samples, 2, 1);
+    assert_eq!(mono, vec![0.5, 0.5]);
+}
+
+#[test]
+fn downmix_interleaved_six_to_two_groups_even_and_odd_channels() {
+    // Typical ffmpeg order for 5.1(side): L,R,C,LFE,Ls,Rs. With
+    // an even index -> channel 0 (L,C,Ls) and odd -> channel 1
+    // (R,LFE,Rs): a frame with L=1.0 and all the others at 0 must end up
+    // almost entirely on channel 0 (average of 1.0,0.0,0.0 = 1/3), nothing
+    // on channel 1.
+    let l_only = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let stereo = downmix_interleaved(&l_only, 6, 2);
+    assert_eq!(stereo.len(), 2);
+    assert!((stereo[0] - (1.0 / 3.0)).abs() < 1e-6, "left={}", stereo[0]);
+    assert_eq!(stereo[1], 0.0);
+}
+
+#[test]
+fn downmix_interleaved_upmixes_mono_by_duplicating_to_every_channel() {
+    let mono = vec![0.7, -0.3];
+    let stereo = downmix_interleaved(&mono, 1, 2);
+    assert_eq!(stereo, vec![0.7, 0.7, -0.3, -0.3]);
+}
+
+#[test]
+fn downmix_interleaved_preserves_frame_count() {
+    let samples = vec![0.0f32; 6 * 100]; // 100 frames at 6 channels
+    let stereo = downmix_interleaved(&samples, 6, 2);
+    assert_eq!(stereo.len(), 2 * 100);
+}
+
+#[test]
+fn db_to_linear_matches_known_reference_points() {
+    assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
+    // -6dB ~= halves the amplitude; +6dB ~= doubles it.
+    assert!((db_to_linear(-6.0) - 0.5012).abs() < 1e-3);
+    assert!((db_to_linear(6.0) - 1.9953).abs() < 1e-3);
+    // -20dB = exactly a factor of 0.1.
+    assert!((db_to_linear(-20.0) - 0.1).abs() < 1e-6);
+}
+
+fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
+    MixClip {
+        start: 0,
+        len: 1000,
+        source_offset: 0,
+        buffer: Arc::new(Vec::new()),
+        gain_db: Keyframed::constant(0.0),
+        clip_fps: 10.0,
+        fade_in,
+        fade_out,
+    }
+}
+
+#[test]
+fn fade_multiplier_ramps_linearly_in_and_out() {
+    let clip = fade_test_clip(100, 200);
+    assert_eq!(fade_multiplier(&clip, 0), 0.0);
+    assert!((fade_multiplier(&clip, 50) - 0.5).abs() < 1e-6);
+    assert_eq!(fade_multiplier(&clip, 100), 1.0);
+    assert_eq!(fade_multiplier(&clip, 500), 1.0, "on the plateau it stays at full volume");
+    assert!((fade_multiplier(&clip, 900) - 0.5).abs() < 1e-6, "200 samples from the end");
+    assert_eq!(fade_multiplier(&clip, 1000), 0.0);
+}
+
+#[test]
+fn no_fade_stays_at_full_volume() {
+    let clip = fade_test_clip(0, 0);
+    assert_eq!(fade_multiplier(&clip, 0), 1.0);
+    assert_eq!(fade_multiplier(&clip, 500), 1.0);
+    assert_eq!(fade_multiplier(&clip, 1000), 1.0);
+}
+
+#[test]
+fn overlapping_fades_multiply_instead_of_dipping_below_either_ramp_alone() {
+    // Fade in and out cover the whole clip: at the center each ramp is
+    // 0.5, the product (not the minimum) is what one sees.
+    let clip = fade_test_clip(1000, 1000);
+    assert!((fade_multiplier(&clip, 500) - 0.25).abs() < 1e-6);
+}
+
+#[test]
+fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
+    let (project, a, _) = project();
+    // 3 blocks of GAIN_BLOCK_FRAMES: the fade covers exactly the first one.
+    let blocks = 3;
+    let len_frames = (GAIN_BLOCK_FRAMES * blocks) as usize;
+    let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
+    clip.fade_in = (GAIN_BLOCK_FRAMES / 10) as FrameIdx;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+    let snap = MixSnapshot::from_timeline(
+        &project,
+        &tl,
+        RATE,
+        1,
+        |_, _| Some(Arc::new(vec![0.5; len_frames])),
+        |_, _| None,
+    );
+    let mut out = vec![9.0; len_frames];
+    mix_range(&snap, 0, &mut out);
+    let block = GAIN_BLOCK_FRAMES as usize;
+    assert!(out[..block].iter().all(|&s| s == 0.0), "first block silenced by the fade-in");
+    assert!(
+        out[block..].iter().all(|&s| s == 0.5),
+        "past the fade-in the gain is unchanged"
+    );
+}

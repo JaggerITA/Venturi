@@ -290,6 +290,32 @@ threaded they are stable. Some tests invoke `ffmpeg` from the command line to
 generate synthetic clips in `/tmp`, so the `ffmpeg` binary (not just the
 development libraries) also needs to be in `PATH`.
 
+### Where unit tests live
+
+Unlike the usual Rust convention (an inline `mod tests { … }` at the bottom
+of each file), unit tests are kept out of the source files, in
+`crates/<crate>/src/tests/`, mirroring the source path
+(`src/otio/import.rs` → `src/tests/otio/import.rs`). Each source file pulls
+its tests in as a child module, so they still see private items:
+
+```rust
+#[cfg(test)]
+#[path = "tests/export.rs"]
+mod tests;
+```
+
+Why: production code and tests can be measured separately with plain
+line counters, e.g.
+`cloc crates --include-lang=Rust --exclude-dir=tests`.
+
+Consequences to keep in mind:
+- a file getting its first tests needs the `#[path]` declaration above
+  (from a nested module the path climbs up, e.g. `"../tests/otio/import.rs"`);
+- renaming or moving a source file means updating its `#[path]` too;
+- `src/tests/` holds unit tests, not integration tests (those would go in
+  `crates/<crate>/tests/`, next to `src/`);
+- tools that walk `src/` must expect the `tests/` subdirectory.
+
 ## Lint
 
 ```sh
