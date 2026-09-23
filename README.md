@@ -206,13 +206,42 @@ scripts/build-macos.sh
 
 Must run on a Mac with the Xcode command line tools and `pkgconf`. Produces
 `target/macos/Venturi.app` and `target/macos/Venturi-arm64.dmg`, with FFmpeg
-(libx264, zlib, VideoToolbox) bundled in `Contents/Frameworks`. The app is
-signed ad-hoc only, not notarized: on first launch use right click → Open, or
-`xattr -dr com.apple.quarantine Venturi.app`.
+(libx264, librubberband, zlib, VideoToolbox) bundled in
+`Contents/Frameworks`.
 
 The `macOS build` GitHub Actions workflow (`.github/workflows/macos.yml`) runs
 the same script on a `macos-14` runner, manually or on `v*` tags, and uploads
 the dmg as an artifact.
+
+#### Opening the app on another Mac
+
+The app is signed ad-hoc only, not notarized: once downloaded (browser,
+AirDrop, Nextcloud…) macOS quarantines it and refuses to launch it, with
+"The application Venturi can't be opened" or, from the terminal,
+`zsh: operation not permitted`. Distribute the `.dmg`, not the bare `.app`
+folder: zips and FAT/exFAT drives can drop the executable bit.
+
+1. Remove the quarantine and launch:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Venturi.app
+   open /Applications/Venturi.app
+   ```
+2. If `xattr` also answers `operation not permitted`: System Settings →
+   Privacy & Security → App Management, enable Terminal and repeat step 1.
+   Alternatively, copy the app to the Desktop, remove the quarantine there and
+   move it to `/Applications` afterwards.
+3. Without a terminal: try to open the app once, then System Settings →
+   Privacy & Security → "Open Anyway" at the bottom. Right click → Open no
+   longer bypasses Gatekeeper since macOS Sequoia.
+
+If it still does not start:
+```sh
+ls -l /Applications/Venturi.app/Contents/MacOS/vv-app   # needs the x bit
+codesign -vvv --deep /Applications/Venturi.app          # signature intact?
+/Applications/Venturi.app/Contents/MacOS/vv-app         # real startup error
+```
+A missing `x` is fixed with `chmod +x` on that file, a broken signature with
+`codesign --force --deep --sign - /Applications/Venturi.app`.
 
 ## Run
 
