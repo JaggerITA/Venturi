@@ -4,7 +4,7 @@ Il refactor della pipeline è quasi concluso: resta solo il pool di worker
 (§3.4). Questo documento tiene gli invarianti e i vincoli che il codice deve
 continuare a rispettare, più gli identificativi (A1…B5, §x) citati nei
 commenti del codice. La descrizione dell'architettura attuale è in
-[ARCHITECTURE.md](ARCHITECTURE.md); il vecchio codice e la diagnosi
+[ARCHITECTURE.md](../ARCHITECTURE.md); il vecchio codice e la diagnosi
 originale sono nella git history.
 
 ---

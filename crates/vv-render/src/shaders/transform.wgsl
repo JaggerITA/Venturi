@@ -62,7 +62,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Kr/Kb coefficients for the requested matrix (REFACTOR_PIPELINE.md B3,
+// Kr/Kb coefficients for the requested matrix (plans/REFACTOR_PIPELINE.md B3,
 // see the docs of vv_media::ColorMatrix for the choice of which matrix to use
 // case by case — here only the application).
 fn kr_kb(matrix_id: i32) -> vec2<f32> {

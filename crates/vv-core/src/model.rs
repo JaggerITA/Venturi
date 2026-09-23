@@ -2130,7 +2130,7 @@ mod timeline_tests {
         // Two video tracks: the first (index 0, "bottom") covers [0, 30), the
         // second (index 1, "top") only [10, 20) — a shorter layer
         // overlapping a longer one, the base case of blend-over
-        // (REFACTOR_PIPELINE.md B4).
+        // (plans/REFACTOR_PIPELINE.md B4).
         let tl = Timeline {
             name: "T".into(),
             fps: Rational::new(25, 1),

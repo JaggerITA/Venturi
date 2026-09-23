@@ -6,7 +6,7 @@ insieme di clip che a velocità normale renderizza in tempo reale (e regge
 compound clip.
 
 Complemento di [REFACTOR_PIPELINE.md](REFACTOR_PIPELINE.md) (§2 cache, B2/B3
-compositing); l'architettura corrente è in [ARCHITECTURE.md](ARCHITECTURE.md).
+compositing); l'architettura corrente è in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ---
 

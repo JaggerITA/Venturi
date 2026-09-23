@@ -398,7 +398,7 @@ impl Compositor {
 
         // Three input textures (Y/U/V, bindings 0-2) instead of a single
         // RGBA one: the YUV→RGB conversion happens in the shader
-        // (REFACTOR_PIPELINE.md B3), only the raw planes arrive here.
+        // (plans/REFACTOR_PIPELINE.md B3), only the raw planes arrive here.
         let plane_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1349,7 +1349,7 @@ mod tests {
     /// used in the shader (`transform.wgsl`, `yuv_to_rgb`): it serves to
     /// check that the computation on the GPU (f32) is effectively
     /// that formula, not a silently different approximation
-    /// (REFACTOR_PIPELINE.md §5, frame accuracy is non-negotiable).
+    /// (plans/REFACTOR_PIPELINE.md §5, frame accuracy is non-negotiable).
     fn yuv_to_rgb_reference(y: u8, u: u8, v: u8, matrix: ColorMatrix, full_range: bool) -> [u8; 3] {
         let (y_n, u_n, v_n) = if full_range {
             (
@@ -2260,7 +2260,7 @@ mod tests {
     /// to check in the test that the zero-copy path produces exactly
     /// the same bytes as the readback path: a performance-only
     /// change must not alter a single pixel of what is
-    /// shown (REFACTOR_PIPELINE.md §5, frame accuracy is
+    /// shown (plans/REFACTOR_PIPELINE.md §5, frame accuracy is
     /// non-negotiable).
     fn read_back(compositor: &Compositor, texture: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
         let unpadded_bytes_per_row = w * 4;

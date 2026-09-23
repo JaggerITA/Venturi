@@ -1,6 +1,6 @@
 //! egui window: media pool, viewer, properties panel, timeline. The
 //! viewer composes on the GPU the active clips of all the video tracks and passes
-//! the texture to egui-wgpu without readback (REFACTOR_PIPELINE.md B2).
+//! the texture to egui-wgpu without readback (plans/REFACTOR_PIPELINE.md B2).
 
 #[macro_use]
 extern crate rust_i18n;
@@ -3866,7 +3866,7 @@ mod tests {
         );
     }
 
-    /// Two overlapping video tracks (REFACTOR_PIPELINE.md B4): the second
+    /// Two overlapping video tracks (plans/REFACTOR_PIPELINE.md B4): the second
     /// (added with `AddTrack`, hence at the end of `tracks` — higher
     /// than the default one) has a shorter clip at the center of the one
     /// of the first. `active_video_clip_at` must see the top one where

@@ -9,7 +9,7 @@ principalmente H.264 (x264) 1080p, in RAM/VRAM contenute.
 
 Questo documento descrive lo stato attuale. La storia delle scelte è nella
 git history; le regole del refactor della pipeline (invarianti, vincoli)
-sono in [REFACTOR_PIPELINE.md](REFACTOR_PIPELINE.md).
+sono in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 
 ## Decisioni chiave (e perché)
 

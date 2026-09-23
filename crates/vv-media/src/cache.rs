@@ -1,5 +1,5 @@
 //! `SharedFrameCache`: cache of the decoded frames of every media in the
-//! window, on a global budget, see REFACTOR_PIPELINE.md §2.
+//! window, on a global budget, see plans/REFACTOR_PIPELINE.md §2.
 
 use crate::decode::FrameYuv420;
 use std::collections::HashMap;
@@ -289,7 +289,7 @@ mod tests {
         assert!(!cache.contains(media_b, 10));
     }
 
-    /// The heart of the subtlety in REFACTOR_PIPELINE.md §2: during a
+    /// The heart of the subtlety in plans/REFACTOR_PIPELINE.md §2: during a
     /// forward fill the frame *at the playhead* is the first inserted — the
     /// "least recent" for any classic LRU. An LRU by recency would evict it
     /// first when the budget runs short; Tier B must instead evict the frame

@@ -1,7 +1,7 @@
 //! Video buffer at timeline level: a thread walks forward from the playhead
 //! (and a little backwards) crossing cuts, gaps and tracks without special
 //! cases, and fills a single `SharedFrameCache` on a global budget (see
-//! REFACTOR_PIPELINE.md §2). Decode only: the compositing stays on the UI thread,
+//! plans/REFACTOR_PIPELINE.md §2). Decode only: the compositing stays on the UI thread,
 //! the audio is played by the mixer.
 //!
 //! A compound clip is not decoded and not cached: its
@@ -179,7 +179,7 @@ impl RenderAhead {
         ));
     }
 
-    /// "Use proxy" toggle (REFACTOR_PIPELINE.md proxy): the worker
+    /// "Use proxy" toggle (plans/REFACTOR_PIPELINE.md proxy): the worker
     /// empties the shared cache and reopens from scratch every decoder on the
     /// right path for the new state — see the docs of `Command::SetProxyEnabled`.
     pub fn set_proxy_enabled(&self, enabled: bool) {
@@ -240,7 +240,7 @@ struct OpenDecoder {
     /// Open path: if the proxy becomes available or the toggle changes, the
     /// decoder must be reopened on the new one.
     resolved_path: std::path::PathBuf,
-    /// `true` when `resolved_path` is a proxy (REFACTOR_PIPELINE.md
+    /// `true` when `resolved_path` is a proxy (plans/REFACTOR_PIPELINE.md
     /// proxy) — see `PROXY_SEEK_THRESHOLD_FRAMES` on why it bypasses the
     /// adaptive GOP estimate instead of merely initializing it.
     is_all_intra: bool,
@@ -471,7 +471,7 @@ fn clipped_media_segments(
             }
             // clip→source-frame mapping shared with the export
             // (`vv_core::Clip::source_frame_at`, see the docs there for the
-            // reason — REFACTOR_PIPELINE.md B1).
+            // reason — plans/REFACTOR_PIPELINE.md B1).
             let source_start = clip.source_frame_at(segment_start);
             let source_end = clip.source_frame_at(segment_end - 1);
             let segment = MediaSegment {
@@ -885,7 +885,7 @@ struct FillContext<'a> {
     went_backward: bool,
     cache_budget_bytes: usize,
     from_frame: FrameIdx,
-    /// "Use proxy" toggle (REFACTOR_PIPELINE.md proxy) as read
+    /// "Use proxy" toggle (plans/REFACTOR_PIPELINE.md proxy) as read
     /// from the last `Command::SetProxyEnabled` — see `fill_segments`
     /// where it decides whether to resolve the source path or the proxy one.
     proxy_enabled: bool,
@@ -2041,7 +2041,7 @@ mod tests {
         }
     }
 
-    /// REFACTOR_PIPELINE.md §3.3: a freshly opened `OpenDecoder` has no
+    /// plans/REFACTOR_PIPELINE.md §3.3: a freshly opened `OpenDecoder` has no
     /// observations yet, so it uses the default fallback.
     #[test]
     fn open_decoder_seek_threshold_uses_the_default_fallback_before_any_observation() {
@@ -2173,7 +2173,7 @@ mod tests {
         );
     }
 
-    /// REFACTOR_PIPELINE.md proxy: a proxy becoming available in the
+    /// plans/REFACTOR_PIPELINE.md proxy: a proxy becoming available in the
     /// background (or the "use proxy" toggle changing) makes a
     /// different path resolve for the same media_id — the decoder open on the
     /// old path makes no sense to reuse/seek (it points at a
@@ -2809,7 +2809,7 @@ mod tests {
         );
     }
 
-    /// REFACTOR_PIPELINE.md §3.1 (responsiveness): if the *live* target has
+    /// plans/REFACTOR_PIPELINE.md §3.1 (responsiveness): if the *live* target has
     /// already moved past the fallback threshold (no GOP observation
     /// made for this media yet) relative to `from_frame`
     /// before even starting, the fill must notice at the first
@@ -3117,7 +3117,7 @@ mod tests {
         );
     }
 
-    /// Regression (ex-A2, REFACTOR_PIPELINE.md): with the old
+    /// Regression (ex-A2, plans/REFACTOR_PIPELINE.md): with the old
     /// architecture (one `FrameCache` per media, capacity fixed at
     /// creation time) this test checked that the capacity
     /// of `media_b` widened when `media_a` left the window
@@ -3616,7 +3616,7 @@ mod tests {
     /// next_frame` must stay exactly where it was before this
     /// call, direct proof that no seek/decode happened.
     ///
-    /// Note (REFACTOR_PIPELINE.md §2, Tier A): with the globally budgeted
+    /// Note (plans/REFACTOR_PIPELINE.md §2, Tier A): with the globally budgeted
     /// `SharedFrameCache`, `reconcile` also discards what is *past*
     /// the horizon of the new window (here: past 344, given that the
     /// new playhead is 270) — unlike the old `evict_before`,

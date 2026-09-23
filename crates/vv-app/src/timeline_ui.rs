@@ -6768,7 +6768,7 @@ mod tests {
         assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2);
     }
 
-    /// Runs `show_timeline` with more than one video track (REFACTOR_PIPELINE.md
+    /// Runs `show_timeline` with more than one video track (plans/REFACTOR_PIPELINE.md
     /// B4): the header column (labels + add/remove track buttons,
     /// `draw_track_headers`) must hold any N tracks, not
     /// only the fixed video/audio pair of before.
