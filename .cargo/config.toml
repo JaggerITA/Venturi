@@ -1,4 +1,4 @@
 [env]
-# I test grafici (compositor/render) condividono risorse GPU headless
-# (lavapipe): in parallelo vanno in SIGSEGV in modo intermittente.
+# The graphics tests (compositor/render) share headless GPU resources
+# (lavapipe): run in parallel they SIGSEGV intermittently.
 RUST_TEST_THREADS = "1"

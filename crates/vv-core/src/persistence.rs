@@ -79,8 +79,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("project.vvproj");
 
-        save_project(&project, &path).expect("save fallito");
-        let loaded = load_project(&path).expect("load fallito");
+        save_project(&project, &path).expect("save failed");
+        let loaded = load_project(&path).expect("load failed");
 
         assert_eq!(loaded.timelines.len(), 1);
         let loaded_timeline = &loaded.timelines[timeline_id];
@@ -109,7 +109,7 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-core-persistence-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("broken.vvproj");
-        std::fs::write(&path, "questo non è RON valido {{{").unwrap();
+        std::fs::write(&path, "this is not valid RON {{{").unwrap();
 
         assert!(load_project(&path).is_err());
     }

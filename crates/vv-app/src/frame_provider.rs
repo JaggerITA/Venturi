@@ -543,13 +543,13 @@ mod tests {
                 track_layers_at(&project, &outer, track_index, clip, 0, outer.resolution, &mut provider).unwrap(),
             );
         }
-        assert_eq!(layers.len(), 2, "il blu e la compound clip");
+        assert_eq!(layers.len(), 2, "the blue and the compound clip");
 
         let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
         let out = compositor.render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(4, 4));
         let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
-        assert_eq!(px(0, 1), &[255, 0, 0, 255], "sinistra: il rosso della timeline annidata");
-        assert_eq!(px(3, 1), &[0, 0, 255, 255], "destra: vuota nella annidata, si vede il blu sotto");
+        assert_eq!(px(0, 1), &[255, 0, 0, 255], "left: the red of the nested timeline");
+        assert_eq!(px(3, 1), &[0, 0, 255, 255], "right: empty in the nested one, the blue below shows");
     }
 
     /// Until a media inside the nested timeline is ready, the compound clip
@@ -601,7 +601,7 @@ mod tests {
         let mut provider = GpuCompounds::new(&mut inner, &compositor);
         let layers = track_layers_at(&project, &outer, 0, &clip, 0, outer.resolution, &mut provider).unwrap();
 
-        assert!(layers.is_empty(), "il media annidato non è in cache: niente layer");
+        assert!(layers.is_empty(), "the nested media is not cached: no layer");
     }
 
     fn video_track(clips: Vec<Clip>) -> Track {

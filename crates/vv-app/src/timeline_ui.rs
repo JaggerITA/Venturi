@@ -14,9 +14,9 @@ use vv_core::{
 };
 
 const ROW_HEIGHT: f32 = 40.0;
-/// Massimo dello zoom verticale (Shift+rotella); il minimo è `ROW_HEIGHT`.
+/// Maximum vertical zoom (Shift+wheel); the minimum is `ROW_HEIGHT`.
 const MAX_ROW_HEIGHT: f32 = ROW_HEIGHT * 4.0;
-/// Guadagno dello zoom verticale per pixel di rotella.
+/// Vertical zoom gain per pixel of wheel.
 const ROW_ZOOM_SPEED: f32 = 1.0 / 200.0;
 const RULER_HEIGHT: f32 = 20.0;
 const MIN_TIMELINE_SECS: f64 = 20.0;
@@ -56,7 +56,7 @@ pub struct TimelineState {
     selection_anchor: Option<ClipKey>,
     pub playhead: FrameIdx,
     pixels_per_sec: f32,
-    /// Altezza delle tracce (zoom verticale): `ROW_HEIGHT` è il minimo.
+    /// Track height (vertical zoom): `ROW_HEIGHT` is the minimum.
     row_height: f32,
     /// `pixels_per_sec` of the last drawing: if it changed there was a zoom
     /// in this frame, and the scroll must be corrected to anchor it to the playhead.
@@ -2310,9 +2310,9 @@ pub fn show_timeline(
                         None => origin.y + row_y[visual.track_index],
                     };
                     let w = (display_len as f32 * px_per_frame).max(2.0);
-                    // Snap ai pixel: senza, i bordi delle clip fitte cadono a
-                    // cavallo di due pixel e l'antialiasing li rende di
-                    // spessore irregolare (effetto seghettato).
+                    // Pixel snap: without it, the edges of dense clips straddle
+                    // two pixels and antialiasing makes them unevenly thick
+                    // (jagged look).
                     let clip_rect = egui::Rect::from_min_size(
                         egui::pos2(x, y + 2.0),
                         egui::vec2(w, row_height - 4.0),
@@ -3038,9 +3038,8 @@ fn paint_clip_box(painter: &egui::Painter, clip_rect: egui::Rect, visual: &ClipV
     };
     let corner = clip_corner_radius(clip_rect);
     painter.rect_filled(clip_rect, corner, fill);
-    // Su clip strettissime (zoom out molto indietro) il bordo mangerebbe
-    // tutto il colore: si tiene solo quello, più informativo, della
-    // selezione.
+    // On very narrow clips (zoomed far out) the stroke would eat all the
+    // colour: only the more informative selection stroke is kept.
     if is_selected || clip_rect.width() >= MIN_WIDTH_FOR_STROKE {
         painter.rect_stroke(clip_rect, corner, stroke, egui::StrokeKind::Inside);
     } else {
@@ -3048,8 +3047,8 @@ fn paint_clip_box(painter: &egui::Painter, clip_rect: egui::Rect, visual: &ClipV
     }
 }
 
-/// Riga scura di un pixel esatto sul bordo destro: su clip più strette
-/// del bordo completo serve solo a far vedere dove finisce la clip.
+/// Dark line exactly one pixel wide on the right edge: on clips narrower
+/// than the full stroke it only shows where the clip ends.
 fn paint_clip_separator(painter: &egui::Painter, clip_rect: egui::Rect) {
     let px = 1.0 / painter.pixels_per_point();
     painter.rect_filled(
@@ -3062,8 +3061,8 @@ fn paint_clip_separator(painter: &egui::Painter, clip_rect: egui::Rect) {
     );
 }
 
-/// Angoli arrotondati solo finché la clip è abbastanza larga: sotto,
-/// il raggio deformerebbe l'intero rettangolo.
+/// Rounded corners only while the clip is wide enough: below that, the
+/// radius would deform the whole rectangle.
 fn clip_corner_radius(clip_rect: egui::Rect) -> f32 {
     (clip_rect.width() / 2.0).min(4.0)
 }
@@ -3071,12 +3070,12 @@ fn clip_corner_radius(clip_rect: egui::Rect) -> f32 {
 const MIN_WIDTH_FOR_STROKE: f32 = 4.0;
 const LABEL_FONT_SIZE: f32 = 12.0;
 const LINK_ICON_WIDTH: f32 = 16.0;
-/// Sotto questa soglia di caratteri visibili il nome non aiuta a
-/// riconoscere la clip: meglio non disegnarlo affatto.
+/// Below this many visible characters the name does not help recognise
+/// the clip: better not to draw it at all.
 const LABEL_MIN_CHARS: usize = 4;
 
-/// Nome troncato entro `max_width`, omesso se non ci stanno almeno
-/// `LABEL_MIN_CHARS` caratteri.
+/// Name truncated to `max_width`, omitted if fewer than
+/// `LABEL_MIN_CHARS` characters fit.
 fn paint_clip_label(
     painter: &egui::Painter,
     label: &str,
@@ -5374,7 +5373,7 @@ mod tests {
 
             assert_eq!(
                 bin_whole, bin_half,
-                "a t={probe_secs}s la clip intera sceglie il bin {bin_whole} ma la metà dopo lo split sceglie {bin_half}: la forma d'onda si sposterebbe al taglio"
+                "at t={probe_secs}s the whole clip picks bin {bin_whole} but the half after the split picks {bin_half}: the waveform would shift at the cut"
             );
         }
     }
@@ -5587,12 +5586,12 @@ mod tests {
         assert_eq!(
             expand_to_linked_groups(&visuals, [(0, ClipId(1))]),
             BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]),
-            "selezionando il video deve espandere anche all'audio collegato"
+            "selecting the video must extend to the linked audio too"
         );
         assert_eq!(
             expand_to_linked_groups(&visuals, [(1, ClipId(2))]),
             BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]),
-            "e viceversa, partendo dall'audio"
+            "and vice versa, starting from the audio"
         );
     }
 
@@ -5912,7 +5911,7 @@ mod tests {
         assert_eq!(
             followers,
             vec![(ClipId(2), 1, 0), (ClipId(3), 2, 0)],
-            "entrambe le altre clip del gruppo, con offset 0 (stesso start)"
+            "both other clips of the group, with offset 0 (same start)"
         );
     }
 
@@ -6305,7 +6304,7 @@ mod tests {
             media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
         ];
         let (min_value, _) = single_trim_range(&project, &visuals[1].clip, TrimEdge::Start);
-        assert_eq!(min_value, 2, "10 - source_in 8, non il bordo del vicino");
+        assert_eq!(min_value, 2, "10 - source_in 8, not the neighbour's edge");
     }
 
     #[test]
@@ -6377,14 +6376,14 @@ mod tests {
             single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
         assert_eq!(
             min_value, 998,
-            "2000 frame sorgente prima = 2002 di timeline prima di 3000"
+            "2000 source frames before = 2002 timeline frames before 3000"
         );
 
         let (_, max_value) =
             single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
         assert_eq!(
             max_value, 5002,
-            "2000 frame sorgente residui = 2002 frame di timeline dopo 3000"
+            "2000 remaining source frames = 2002 timeline frames after 3000"
         );
     }
 
@@ -6419,7 +6418,7 @@ mod tests {
         );
         assert_eq!(
             max_value, 35,
-            "vincolo della gemella si applica anche al video"
+            "the twin's constraint applies to the video too"
         );
         assert_eq!(followers, vec![(ClipId(2), 1, 0, TrimEdge::End)]);
     }
@@ -6618,7 +6617,7 @@ mod tests {
         let spans = |track: usize| -> Vec<(FrameIdx, FrameIdx)> {
             tl.tracks[track].clips.iter().map(|c| (c.timeline_start, c.timeline_end())).collect()
         };
-        assert_eq!(spans(0), vec![(0, 20), (25, 45), (45, 60)], "l'altra clip viene tagliata");
+        assert_eq!(spans(0), vec![(0, 20), (25, 45), (45, 60)], "the other clip is cut");
         assert_eq!(spans(1), vec![(0, 20), (25, 45)]);
         let copy_v = &tl.tracks[0].clips[1];
         let copy_a = &tl.tracks[1].clips[1];
@@ -6631,7 +6630,7 @@ mod tests {
         );
 
         history.undo(&mut project);
-        assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2, "un solo passo di undo");
+        assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2, "a single undo step");
     }
 
     #[test]
@@ -6658,9 +6657,9 @@ mod tests {
         make_compound_clip(&mut project, &mut history, timeline_id, vec![(0, v), (1, a)]);
 
         let video_track = &project.timelines[timeline_id].tracks[0];
-        assert_eq!(video_track.clips.len(), 1, "le due originali diventano una sola clip video");
+        assert_eq!(video_track.clips.len(), 1, "the two originals become a single video clip");
         let vv_core::ClipSource::Media(media_id) = video_track.clips[0].source else {
-            panic!("la compound clip risultante deve puntare al media pool");
+            panic!("the resulting compound clip must point to the media pool");
         };
         assert_eq!(video_track.clips[0].timeline_start, 10);
         assert_eq!(video_track.clips[0].timeline_len, 40);
@@ -6668,12 +6667,12 @@ mod tests {
         assert_eq!(audio_track.clips.len(), 1);
         assert_eq!(video_track.clips[0].linked_group, audio_track.clips[0].linked_group);
 
-        let item = project.media_pool.get(media_id).expect("inserita nel pool");
+        let item = project.media_pool.get(media_id).expect("added to the pool");
         assert_eq!(item.path.to_str(), Some("Compound Clip 1"));
         assert!(item.meta.has_video && item.meta.has_audio);
-        let nested_id = item.compound.expect("è una compound clip");
+        let nested_id = item.compound.expect("it is a compound clip");
         let nested = &project.timelines[nested_id];
-        assert_eq!(nested.tracks[0].clips[0].timeline_start, 0, "riofsettata sull'inizio della selezione");
+        assert_eq!(nested.tracks[0].clips[0].timeline_start, 0, "re-offset to the start of the selection");
         assert_eq!(nested.tracks[1].clips[0].timeline_start, 10);
 
         // An undo gives back the original clips, but the pool (like an
@@ -6907,13 +6906,13 @@ mod tests {
                 });
             });
             output.textures_delta.clear();
-            captured.expect("id della ScrollArea")
+            captured.expect("ScrollArea id")
         };
 
         // Simulates the user having already scrolled: offset 30px.
         {
             let mut st = egui::containers::scroll_area::State::load(&ctx, scroll_id)
-                .expect("stato ScrollArea dopo frame 1");
+                .expect("ScrollArea state after frame 1");
             assert_eq!(st.offset.x, 0.0);
             st.offset.x = 30.0;
             st.store(&ctx, scroll_id);
@@ -7006,7 +7005,7 @@ mod tests {
         }
         assert!(
             last_height > 200.0,
-            "il pannello si è ristretto al contenuto ({last_height}px) invece di restare vicino ai 240px richiesti"
+            "the panel shrank to its content ({last_height}px) instead of staying near the requested 240px"
         );
     }
 }

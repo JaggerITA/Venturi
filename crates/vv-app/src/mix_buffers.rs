@@ -274,7 +274,7 @@ fn decode_progressively(
         return false;
     }
     let formats = result.unwrap_or_else(|e| {
-        eprintln!("[mix_buffers] decodifica fallita per {}: {e}", path.display());
+        eprintln!("[mix_buffers] decode failed for {}: {e}", path.display());
         vec![None; streams.len()]
     });
     for (slot, buffer) in buffers.into_iter().enumerate() {
@@ -298,7 +298,7 @@ mod tests {
     fn wait_done(cache: &mut MixBufferCache) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while cache.has_pending() {
-            assert!(std::time::Instant::now() < deadline, "decodifica mai finita");
+            assert!(std::time::Instant::now() < deadline, "decode never finished");
             std::thread::yield_now();
         }
     }
@@ -371,19 +371,19 @@ mod tests {
         let mut cache = MixBufferCache::spawn(48_000, 1);
         assert!(
             cache.get_or_compute_compound(&project, compound_media).is_none(),
-            "il media vero non è ancora decodificato: la compound clip non è pronta"
+            "the real media is not decoded yet: the compound clip is not ready"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let buffer = loop {
-            assert!(std::time::Instant::now() < deadline, "il mixdown non è mai diventato pronto");
+            assert!(std::time::Instant::now() < deadline, "the mixdown never became ready");
             cache.poll();
             if let Some(buffer) = cache.get_or_compute_compound(&project, compound_media) {
                 break buffer;
             }
             std::thread::yield_now();
         };
-        assert!(buffer.iter().any(|&s| s.abs() > 0.01), "il sine wave deve arrivare nel mixdown");
+        assert!(buffer.iter().any(|&s| s.abs() > 0.01), "the sine wave must reach the mixdown");
 
         // Same content_hash: the second call returns the cached buffer,
         // it does not recompute a new one.
@@ -429,7 +429,7 @@ mod tests {
         let frames = |b: &Vec<f32>| b.len() / 2;
         assert!((frames(&s0) as i64 - 48_000).abs() < 100, "s0={}", frames(&s0));
         assert!((frames(&s1) as i64 - 24_000).abs() < 100, "s1={}", frames(&s1));
-        assert!(cache.get_or_request(&path, 5).is_none(), "stream inesistente");
+        assert!(cache.get_or_request(&path, 5).is_none(), "nonexistent stream");
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         let mut lengths = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while cache.has_pending() {
-            assert!(std::time::Instant::now() < deadline, "decodifica mai finita");
+            assert!(std::time::Instant::now() < deadline, "decode never finished");
             if let Some(buffer) = cache.get_or_request(&path, 0)
                 && lengths.last() != Some(&buffer.len())
             {
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(full, 20 * 48_000 * 2);
         assert!(
             lengths.first().is_some_and(|&first| first < full),
-            "attesa almeno una pubblicazione parziale: {lengths:?}"
+            "expected at least one partial publication: {lengths:?}"
         );
     }
 
@@ -495,7 +495,7 @@ mod tests {
         cache.get_or_request_first(&paths[2], 0);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            assert!(std::time::Instant::now() < deadline, "decodifica mai arrivata");
+            assert!(std::time::Instant::now() < deadline, "decode never arrived");
             cache.poll();
             if cache.get_or_request(&paths[2], 0).is_some() {
                 break;
@@ -504,7 +504,7 @@ mod tests {
         }
         assert!(
             cache.get_or_request(&paths[1], 0).is_none(),
-            "la richiesta prioritaria doveva passare davanti a quella in coda"
+            "the priority request should have jumped ahead of the queued one"
         );
     }
 
@@ -545,14 +545,14 @@ mod tests {
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            assert!(std::time::Instant::now() < deadline, "decodifica mai arrivata");
+            assert!(std::time::Instant::now() < deadline, "decode never arrived");
             cache.poll();
             if (0..3).all(|stream| cache.get_or_request(&path, stream).is_some()) {
                 break;
             }
             std::thread::yield_now();
         }
-        assert_eq!(cache.in_progress.len(), 3, "nessuno stream doveva essere già finito");
+        assert_eq!(cache.in_progress.len(), 3, "no stream should have finished yet");
         let full = 120 * 48_000 * 2;
         assert!((0..3).all(|stream| cache.get_or_request(&path, stream).unwrap().len() < full));
     }

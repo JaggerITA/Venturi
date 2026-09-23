@@ -373,9 +373,9 @@ fn join_audio_mix(
     handle: Option<std::thread::ScopedJoinHandle<'_, Result<Vec<f32>, String>>>,
 ) -> Result<Vec<f32>, String> {
     handle
-        .expect("mix audio già consumato")
+        .expect("audio mix already consumed")
         .join()
-        .expect("thread di mix audio andato in panic")
+        .expect("audio mix thread panicked")
 }
 
 /// Writes the audio mix to the encoder in pieces, aligned to the video frames.
@@ -682,10 +682,10 @@ mod tests {
         let mut provider = StreamingFrameProvider::default();
 
         let before = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2)).unwrap();
-        assert_eq!(before, solid_i420(2, 2, BLACK_I420), "prima della compound clip: vuoto");
+        assert_eq!(before, solid_i420(2, 2, BLACK_I420), "before the compound clip: empty");
 
         let during = render_video_frame(&project, &tl, &compositor, &mut provider, 7, (2, 2)).unwrap();
-        assert_eq!(during, solid_i420(2, 2, RED_I420), "dentro: il contenuto della timeline annidata");
+        assert_eq!(during, solid_i420(2, 2, RED_I420), "inside: the content of the nested timeline");
     }
 
     /// Bug reported by the user: a compound clip is a timeline like any
@@ -756,8 +756,8 @@ mod tests {
         let frame = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (4, 2)).unwrap();
         // Y plane, one byte per pixel: left covered by the red of the
         // compound clip, right uncovered (the blue below must show).
-        assert_eq!(frame[0], RED_I420[0], "sinistra: il rosso della compound clip");
-        assert_eq!(frame[3], BLUE_I420[0], "destra: il blu della track sotto, non nero");
+        assert_eq!(frame[0], RED_I420[0], "left: the red of the compound clip");
+        assert_eq!(frame[3], BLUE_I420[0], "right: the blue of the track below, not black");
     }
 
     /// A PNG with transparency imported into the pool must let the track
@@ -786,7 +786,7 @@ mod tests {
         );
 
         let mut project = Project::default();
-        let meta = vv_media::probe::probe_image(&path).expect("probe della PNG fallito");
+        let meta = vv_media::probe::probe_image(&path).expect("PNG probe failed");
         let png_media = project.media_pool.insert(vv_core::MediaItem {
             path: path.clone(),
             meta,
@@ -819,12 +819,12 @@ mod tests {
         let frame = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (4, 2)).unwrap();
         assert!(
             (frame[0] as i16 - RED_I420[0] as i16).abs() <= 4,
-            "sinistra: il rosso opaco della PNG, non il blu ({})",
+            "left: the opaque red of the PNG, not the blue ({})",
             frame[0]
         );
         assert!(
             (frame[3] as i16 - BLUE_I420[0] as i16).abs() <= 4,
-            "destra: trasparente, si deve vedere il blu sotto ({})",
+            "right: transparent, the blue below must show ({})",
             frame[3]
         );
     }
@@ -896,7 +896,7 @@ mod tests {
         let compositor = vv_render::Compositor::new_headless();
         let mut provider = StreamingFrameProvider::default();
         let err = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2))
-            .expect_err("un media assente dal pool deve fallire, non produrre un frame nero");
+            .expect_err("a media missing from the pool must fail, not produce a black frame");
         assert!(err.contains("media not found"), "err={err}");
     }
 
@@ -927,11 +927,11 @@ mod tests {
 
         let below =
             render_video_frame(&project, &tl, &compositor, &mut provider, 5, (2, 2)).unwrap();
-        assert_eq!(below, solid_i420(2, 2, RED_I420), "sotto la track top: si vede quella bottom");
+        assert_eq!(below, solid_i420(2, 2, RED_I420), "below the top track: the bottom one shows");
 
         let above =
             render_video_frame(&project, &tl, &compositor, &mut provider, 15, (2, 2)).unwrap();
-        assert_eq!(above, solid_i420(2, 2, BLUE_I420), "la track top ha una clip qui: vince lei");
+        assert_eq!(above, solid_i420(2, 2, BLUE_I420), "the top track has a clip here: it wins");
     }
 
     #[test]
@@ -1039,10 +1039,10 @@ mod tests {
 
         let mixed = mix_audio_track(&project, &tl, 0..50).unwrap();
         let per_second = PROJECT_SAMPLE_RATE as usize * PROJECT_CHANNELS as usize;
-        assert!(mixed[..per_second].iter().all(|&s| s == 0.0), "silenzio prima della compound clip");
+        assert!(mixed[..per_second].iter().all(|&s| s == 0.0), "silence before the compound clip");
         assert!(
             mixed[per_second..].iter().any(|&s| s.abs() > 0.01),
-            "il contenuto della timeline annidata arriva nel mix alla posizione della compound clip"
+            "the nested timeline content reaches the mix at the compound clip position"
         );
     }
 
@@ -1078,14 +1078,14 @@ mod tests {
 
         let mut app = crate::VenturiApp::default();
         app.import_media(source_path);
-        let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
+        let timeline_id = app.timeline_id.expect("import should have created the timeline");
         let media_id = app
             .project
             .media_pool
             .iter()
             .next()
             .map(|(id, _)| id)
-            .expect("media importato atteso nel pool");
+            .expect("imported media expected in the pool");
         app.add_media_to_timeline(media_id);
 
         let output_path = dir.join("out.mp4");
@@ -1094,7 +1094,7 @@ mod tests {
         let total = app.project.timelines[timeline_id].total_frames();
         let settings = ExportSettings::new(output_path.clone());
         export_timeline(&app.project, timeline_id, &settings, 0..total, &progress, &cancel)
-            .expect("export fallito");
+            .expect("export failed");
 
         assert!(progress.lock().unwrap().done);
 
@@ -1114,9 +1114,9 @@ mod tests {
 
         let audio = vv_media::decode_audio_track(&output_path, 0)
             .unwrap()
-            .expect("audio atteso nell'export");
+            .expect("audio expected in the export");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
-        assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+        assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
     }
 
     /// Regression for a user report of audio running ahead of the
@@ -1202,7 +1202,7 @@ mod tests {
         let total = project.timelines[timeline_id].total_frames();
         let settings = ExportSettings::new(output_path.clone());
         export_timeline(&project, timeline_id, &settings, 0..total, &progress, &cancel)
-            .expect("export fallito");
+            .expect("export failed");
 
         let fps = 30000.0_f64 / 1001.0;
 
@@ -1216,9 +1216,9 @@ mod tests {
             }
             idx += 1;
         }
-        let white_frame_idx = white_frame_idx.expect("nessun frame bianco trovato nell'export");
+        let white_frame_idx = white_frame_idx.expect("no white frame found in the export");
 
-        let audio = vv_media::decode_audio_track(&output_path, 0).unwrap().expect("audio atteso");
+        let audio = vv_media::decode_audio_track(&output_path, 0).unwrap().expect("audio expected");
         let mut onset_sample = None;
         for (i, &s) in audio.samples.iter().enumerate() {
             if s.abs() > 0.05 {
@@ -1226,14 +1226,14 @@ mod tests {
                 break;
             }
         }
-        let onset_sample = onset_sample.expect("nessun onset audio trovato nell'export");
+        let onset_sample = onset_sample.expect("no audio onset found in the export");
         let onset_secs = onset_sample as f64 / audio.sample_rate as f64;
         let onset_frame = (onset_secs * fps).floor() as i64;
 
-        assert_eq!(white_frame_idx, FLASH_FRAME, "il flash video non è al frame atteso");
+        assert_eq!(white_frame_idx, FLASH_FRAME, "the video flash is not at the expected frame");
         assert_eq!(
             onset_frame, FLASH_FRAME,
-            "l'attacco audio ({onset_secs:.6}s) cade nel frame {onset_frame} invece del frame {FLASH_FRAME} del flash video: sfasamento di {} frame",
+            "the audio onset ({onset_secs:.6}s) falls in frame {onset_frame} instead of the video flash frame {FLASH_FRAME}: {} frame offset",
             FLASH_FRAME - onset_frame
         );
     }
@@ -1273,14 +1273,14 @@ mod tests {
 
         let mut app = crate::VenturiApp::default();
         app.import_media(source_path);
-        let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
+        let timeline_id = app.timeline_id.expect("import should have created the timeline");
         let media_id = app
             .project
             .media_pool
             .iter()
             .find(|(_, item)| item.compound.is_none())
             .map(|(id, _)| id)
-            .expect("media importato atteso nel pool");
+            .expect("imported media expected in the pool");
         assert!(app.project.media_pool[media_id].meta.is_image());
         app.add_media_to_timeline(media_id);
 
@@ -1288,10 +1288,10 @@ mod tests {
         let progress = Mutex::new(ExportProgress::default());
         let cancel = AtomicBool::new(false);
         let total = app.project.timelines[timeline_id].total_frames();
-        assert_eq!(total, 5 * 25, "5 s di default a 25 fps");
+        assert_eq!(total, 5 * 25, "5 s by default at 25 fps");
         let settings = ExportSettings::new(output_path.clone());
         export_timeline(&app.project, timeline_id, &settings, 0..total, &progress, &cancel)
-            .expect("export fallito");
+            .expect("export failed");
 
         assert!(progress.lock().unwrap().done);
 
@@ -1301,7 +1301,7 @@ mod tests {
             // Yellow over the whole frame, for the whole export: if
             // the image "ended" halfway, black would appear here (or an
             // error would already have interrupted the export above).
-            assert!(frame.y[0] > 150, "atteso ancora il frame dell'immagine, non nero");
+            assert!(frame.y[0] > 150, "expected the image frame still, not black");
             count += 1;
         }
         assert!((total - 1..=total).contains(&count), "count={count}");
@@ -1364,7 +1364,7 @@ mod tests {
 
         let mut app = crate::VenturiApp::default();
         app.import_media(mute_25);
-        let timeline_id = app.timeline_id.expect("import doveva creare la timeline");
+        let timeline_id = app.timeline_id.expect("import should have created the timeline");
         assert_eq!(
             app.project.timelines[timeline_id].fps,
             vv_core::Rational::new(25, 1)
@@ -1380,7 +1380,7 @@ mod tests {
             .filter(|(_, item)| item.compound.is_none())
             .map(|(id, _)| id)
             .find(|id| *id != first)
-            .expect("secondo media atteso nel pool");
+            .expect("second media expected in the pool");
         let second_start = app.project.timelines[timeline_id].total_frames();
         app.add_media_to_timeline(second);
 
@@ -1389,7 +1389,7 @@ mod tests {
             .iter()
             .flat_map(|t| t.clips.iter())
             .find(|c| c.timeline_start == second_start)
-            .expect("clip conformata attesa");
+            .expect("conformed clip expected");
         assert_ne!(conformed.rate, vv_core::Rational::one());
         let total = app.project.timelines[timeline_id].total_frames();
         // 1 s at 25 fps + 2 s conformed to 25 fps, within one frame of
@@ -1406,7 +1406,7 @@ mod tests {
             &progress,
             &AtomicBool::new(false),
         )
-        .expect("export fallito");
+        .expect("export failed");
 
         let mut decoder = vv_media::Decoder::open(&output_path).unwrap();
         let mut count = 0;
@@ -1417,13 +1417,13 @@ mod tests {
 
         let audio = vv_media::decode_audio_track(&output_path, 0)
             .unwrap()
-            .expect("audio atteso nell'export");
+            .expect("audio expected in the export");
         let frames = audio.samples.len() / audio.channels as usize;
         let secs = frames as f64 / audio.sample_rate as f64;
         let expected_secs = total as f64 / 25.0;
         assert!(
             (secs - expected_secs).abs() < 0.1,
-            "audio {secs}s contro {expected_secs}s di video"
+            "audio {secs}s versus {expected_secs}s of video"
         );
 
         // The audio of the second clip covers its stretch to the end:
@@ -1437,11 +1437,11 @@ mod tests {
                 .iter()
                 .fold(0.0_f32, |m, s| m.max(s.abs()))
         };
-        assert!(peak_in(0.1, 0.9) < 0.05, "la prima clip è muta");
-        assert!(peak_in(1.1, 1.9) > 0.1, "la seconda clip suona");
+        assert!(peak_in(0.1, 0.9) < 0.05, "the first clip is muted");
+        assert!(peak_in(1.1, 1.9) > 0.1, "the second clip plays");
         assert!(
             peak_in(expected_secs - 0.2, expected_secs) > 0.1,
-            "il sine deve arrivare fino alla fine della timeline"
+            "the sine must reach the end of the timeline"
         );
     }
 
@@ -1452,7 +1452,7 @@ mod tests {
         assert_eq!(settings.video.codec == vv_media::VideoCodec::Nvenc, nvenc);
         assert_eq!(settings.video.preset, settings.video.codec.default_preset());
         let fdk = vv_media::AudioCodec::FdkAac.is_available();
-        let audio = settings.audio.expect("audio incluso di default");
+        let audio = settings.audio.expect("audio included by default");
         assert_eq!(audio.codec == vv_media::AudioCodec::FdkAac, fdk);
     }
 
@@ -1499,7 +1499,7 @@ mod tests {
             &Mutex::new(ExportProgress::default()),
             &AtomicBool::new(false),
         )
-        .expect("export fallito");
+        .expect("export failed");
 
         let meta = vv_media::probe(&settings.output_path).unwrap();
         assert_eq!((meta.width, meta.height), (32, 24));
@@ -1541,7 +1541,7 @@ mod tests {
             &progress,
             &AtomicBool::new(false),
         )
-        .expect("export fallito");
+        .expect("export failed");
         assert_eq!(progress.lock().unwrap().total_frames, 10);
 
         let mut decoder = vv_media::Decoder::open(&output_path).unwrap();

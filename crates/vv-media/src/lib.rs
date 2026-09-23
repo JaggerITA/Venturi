@@ -57,7 +57,7 @@ pub mod test_support {
             .args(args)
             .arg(output)
             .status()
-            .expect("ffmpeg CLI non trovato");
-        assert!(status.success(), "ffmpeg {args:?} fallito");
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg {args:?} failed");
     }
 }

@@ -229,7 +229,7 @@ mod tests {
         worker.set_paused(true);
         worker.enqueue(path.clone(), content_hash, 25);
         worker.enqueue(path, content_hash, 25);
-        assert_eq!(worker.progress().total, 1, "un media riaccodato non conta due volte");
+        assert_eq!(worker.progress().total, 1, "a requeued media does not count twice");
 
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(worker.state(content_hash), Some(ProxyState::Queued));
@@ -238,7 +238,7 @@ mod tests {
         worker.set_paused(false);
         wait_until(
             || worker.state(content_hash) == Some(ProxyState::Ready),
-            "proxy mai pronto dopo la ripresa",
+            "proxy never ready after resuming",
         );
         let progress = worker.progress();
         assert_eq!((progress.finished, progress.total), (1, 1));

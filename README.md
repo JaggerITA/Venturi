@@ -11,6 +11,58 @@ page is where the time goes, so that is the part that gets to be excellent.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
+## Features
+
+Shortcuts are the defaults; every one of them can be rebound in
+Settings > Keyboard shortcuts. Ctrl is Cmd on macOS.
+
+| Category | Feature | Details |
+|---|---|---|
+| **Project** | Project files | Plain-text RON `.vvproj`: open (Ctrl+O), save (Ctrl+S), save as (Ctrl+Shift+S) |
+| | Recent projects | File → Recent projects |
+| | Unsaved changes guard | Asks to save before quitting or opening another project |
+| | Multiple timelines | Each with its own name, frame rate and resolution (presets or custom), listed in the media pool |
+| | OpenTimelineIO | Import as a new project and export, readable by DaVinci Resolve (transforms, transitions, composite modes, generators); what cannot be represented is reported as a warning |
+| **Media pool** | Import | Dialog (Ctrl+I), drag & drop from the file manager, multi-file import in the background; media already in the pool are skipped |
+| | Supported media | Video (mp4, mov, mkv, avi, multi-stream audio included), audio only (wav, mp3, flac, m4a, aac, ogg, opus), still images (jpg, png with transparency, bmp, webp, tiff) |
+| | Browsing | Thumbnails, duration, proxy status; click/Ctrl/Shift/rectangle multi-selection; Del removes media (their clips stay on the timeline as "Media offline") |
+| | Source preview | Double click plays the media in the viewer, with in/out marks; drag from the viewer inserts only the in–out part, or only its video / only its audio |
+| | Relink media | Finds moved files in a chosen folder for the selected offline clips |
+| | Generators | Solid Color and Text clips, dragged from the Effects panel |
+| **Timeline** | Tracks | Any number of video and audio tracks; add/remove, lock, mute, solo, disable video track |
+| | Editing | Drag, trim, split at the playhead (T), delete (Del/Backspace), ripple delete across all tracks keeping A/V sync (`<`), copy/cut/paste at the playhead (Ctrl+C/X/V), overwrite on drop |
+| | Selection | Click, Ctrl, Shift, rectangle; select all (Ctrl+A), select forward from the playhead (Alt+Y), "selection follows playhead" |
+| | Linking | Video and audio of the same import are linked; link/unlink by hand |
+| | Clip state | Enable/disable clip (D), 16 clip colours from the context menu |
+| | Compound clips | Group clips into a nested timeline; double click to enter, breadcrumb to go back |
+| | Paste attributes | Alt+V: paste only the chosen attributes (transform, crop, opacity, composite mode, fades, filters, transitions, volume, keyframes with kept or stretched timing) onto the selected clips |
+| | Navigation | Zoom (Ctrl+/Ctrl-, Alt+wheel or pinch), vertical track zoom (Shift+wheel), kinetic scrolling, magnet snapping to nearby edges, timecode ruler |
+| | Mixed frame rates | Clips at a different fps are conformed to the timeline in preview and export, staying in sync with their audio; variable frame rate sources handled as constant |
+| | Undo/redo | Unlimited (Ctrl+Z, Ctrl+Shift+Z) with an Undo History menu to jump to any step |
+| **Video effects** | Transform | Zoom X/Y (linkable), position, rotation, anchor point, horizontal/vertical flip, all in pixels |
+| | Cropping | Four sides with softness, inwards or outwards |
+| | Compositing | Opacity and 15 composite modes (Normal, Add, Multiply, Screen, Overlay, Darken, Lighten, Color Dodge, Color Burn, Hard Light, Soft Light, Difference, Exclusion, Subtract, Divide) |
+| | Fades | Fade-in/fade-out handles on the clip |
+| | Filters | Black & White, stackable, reorderable and individually disableable |
+| | Transitions | Push (left, right, up, down) on the clip in, out or both, with duration and easing curve |
+| | Viewer handles | Position, scale and anchor point handles drawn on the viewer |
+| **Titles** | Text | Font, style, colour, size, tracking, line spacing, underline, strikethrough, case (as typed, UPPERCASE, lowercase, Title Case) |
+| | Layout | Alignment (left, centre, right, justified), anchor, position |
+| | Decorations | Drop shadow (colour, offset, blur, opacity), background box (colour, size, corner radius, outline) |
+| **Keyframes** | Animation | Keyframes on every transform, crop, gain and colour parameter, from the inspector; per-row navigation to previous/next keyframe and reset per parameter or section |
+| | Keyframe editor | Curves and keyframe rows, box selection, drag in time, delete; Hold, Linear, Ease In, Ease Out, Ease In and Out or custom curve interpolation |
+| **Audio** | Mixing | All audio tracks mixed live, per-clip volume with keyframes, volume line draggable on the clip |
+| | Waveforms | Generated in the background and drawn on the audio clips |
+| | Monitoring | Audiometer, audio while scrubbing |
+| **Playback** | Transport | Play/pause (Space), frame step (arrows, auto-repeat at 0.5x when held), in/out marks (I/O) |
+| | Fast play | 1x → 2x → 4x → 8x (A), pitch-preserved audio |
+| | Buffering | Timeline-wide frame cache with configurable read-ahead, read-behind and RAM budget |
+| | Proxies | Optional all-intra proxies at low/medium/high quality, generated in the background and shared between projects; export always uses the originals |
+| | Player | Wheel zoom, middle-button or Ctrl(+Shift)+wheel pan, zoom bar, fit (Z), 100% (Alt+Shift+Z), fullscreen (Ctrl+F) |
+| **Export** | MP4 export | H.264 + AAC (Ctrl+Shift+E): in/out range or whole timeline, x264 or NVENC with preset and quality, reduced resolution, native AAC or FDK AAC with bitrate, optional audio |
+| **Interface** | Inspector | Video, audio and selection tabs; edits apply to every selected clip as a single undo step |
+| | Settings | Playback buffering and proxy quality, rebindable keyboard shortcuts, language (English, Italian), kinetic scrolling |
+
 ## Why another editor
 
 Venturi started from a simple frustration: on a modern laptop, cutting 1080p

@@ -699,7 +699,7 @@ impl Command for TrimClip {
                 clip.timeline_len = self.new_value - clip.timeline_start;
             }
         }
-        debug_assert!(clip.timeline_len >= 1 && clip.source_offset >= 0, "trim fuori dai limiti");
+        debug_assert!(clip.timeline_len >= 1 && clip.source_offset >= 0, "trim out of bounds");
         resort(track);
     }
 

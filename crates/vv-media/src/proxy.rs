@@ -102,7 +102,7 @@ pub fn generate_proxy(
     // in the preview path.
     let Some((_, first_frame)) = decoder.next_frame()? else {
         return Err(crate::MediaError::NoStream(format!(
-            "nessun frame decodificabile in {}",
+            "no decodable frame in {}",
             source_path.display()
         )));
     };
@@ -215,7 +215,7 @@ impl ProxyEncoder {
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
         let codec = encoder::find(codec::Id::H264)
-            .ok_or_else(|| crate::MediaError::NoStream("encoder H264 non disponibile".into()))?;
+            .ok_or_else(|| crate::MediaError::NoStream("H264 encoder not available".into()))?;
         let ost = octx.add_stream(codec)?;
         let stream_index = ost.index();
 
@@ -365,7 +365,7 @@ mod tests {
         let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
         assert!(!proxy_exists(content_hash, ProxyQuality::Medium));
-        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("generazione proxy fallita");
+        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("proxy generation failed");
         assert_eq!(proxy_path, proxy_path_for(content_hash, ProxyQuality::Medium));
         assert!(proxy_exists(content_hash, ProxyQuality::Medium));
 
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(
             proxy_decoder.width(),
             640,
-            "sorgente già più stretto di 960: non ingrandito"
+            "source already narrower than 960: not upscaled"
         );
         let mut proxy_frames = 0;
         while proxy_decoder.next_frame().unwrap().is_some() {
@@ -398,7 +398,7 @@ mod tests {
         // a proxy.
         assert!(
             (source_frames - proxy_frames).abs() <= 1,
-            "il proxy deve avere lo stesso numero di frame del sorgente (tolleranza 1 in coda): sorgente={source_frames} proxy={proxy_frames}"
+            "the proxy must have the same frame count as the source (tolerance 1 at the end): source={source_frames} proxy={proxy_frames}"
         );
     }
 
@@ -408,14 +408,14 @@ mod tests {
         let content_hash = 0x123456;
         let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
-        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("generazione proxy fallita");
+        let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("proxy generation failed");
         let proxy_decoder = Decoder::open(&proxy_path).unwrap();
         assert_eq!(proxy_decoder.width(), 960);
         assert_eq!(proxy_decoder.height(), 540);
 
         let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Low));
         let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Low, |_| true)
-            .expect("generazione proxy fallita");
+            .expect("proxy generation failed");
         assert_eq!(Decoder::open(&proxy_path).unwrap().width(), 640);
     }
 }

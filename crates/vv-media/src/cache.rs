@@ -318,7 +318,7 @@ mod tests {
 
         assert!(
             cache.contains(media_a, 0),
-            "il frame alla testina non deve mai essere sfrattato per fare spazio a uno più lontano"
+            "the frame at the playhead must never be evicted to make room for a farther one"
         );
         assert!(!cache.contains(media_a, 90));
     }
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(
             cache.bytes_used(),
             40,
-            "sovrascrivere lo stesso (media, idx) non deve sommare le due dimensioni"
+            "overwriting the same (media, idx) must not add the two sizes"
         );
     }
 
@@ -375,7 +375,7 @@ mod tests {
             cache.insert(media_a, idx, frame_of_size(4));
         }
         assert!(cache.covers(media_a, 5, 7));
-        assert!(!cache.covers(media_a, 5, 9), "buco a 8");
+        assert!(!cache.covers(media_a, 5, 9), "hole at 8");
         assert!(!cache.covers(media_b, 5, 5));
     }
 

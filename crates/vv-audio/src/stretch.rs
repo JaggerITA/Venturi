@@ -12,7 +12,7 @@ static INIT: Once = Once::new();
 
 fn ensure_init() {
     INIT.call_once(|| {
-        ffmpeg::init().expect("impossibile inizializzare ffmpeg");
+        ffmpeg::init().expect("cannot initialize ffmpeg");
     });
 }
 
@@ -42,14 +42,14 @@ pub fn stretch_samples(
     );
     graph
         .add(
-            &ffmpeg::filter::find("abuffer").ok_or("filtro abuffer non trovato")?,
+            &ffmpeg::filter::find("abuffer").ok_or("abuffer filter not found")?,
             "in",
             &args,
         )
         .map_err(|e| e.to_string())?;
     graph
         .add(
-            &ffmpeg::filter::find("abuffersink").ok_or("filtro abuffersink non trovato")?,
+            &ffmpeg::filter::find("abuffersink").ok_or("abuffersink filter not found")?,
             "out",
             "",
         )
@@ -85,7 +85,7 @@ pub fn stretch_samples(
 
         graph
             .get("in")
-            .ok_or("pad 'in' mancante")?
+            .ok_or("pad 'in' missing")?
             .source()
             .add(&frame)
             .map_err(|e| e.to_string())?;
@@ -94,7 +94,7 @@ pub fn stretch_samples(
     }
     graph
         .get("in")
-        .ok_or("pad 'in' mancante")?
+        .ok_or("pad 'in' missing")?
         .source()
         .flush()
         .map_err(|e| e.to_string())?;
@@ -111,7 +111,7 @@ fn drain_filtered(
     let mut filtered = ffmpeg::frame::Audio::empty();
     while graph
         .get("out")
-        .ok_or("pad 'out' mancante")?
+        .ok_or("pad 'out' missing")?
         .sink()
         .frame(&mut filtered)
         .is_ok()
@@ -148,7 +148,7 @@ mod tests {
         );
 
         let peak = stretched.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
-        assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+        assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
     }
 
     #[test]
@@ -180,13 +180,13 @@ mod tests {
         assert_eq!(
             stretched.len() % channels as usize,
             0,
-            "il buffer interleaved deve restare un multiplo esatto di channels"
+            "the interleaved buffer must stay an exact multiple of channels"
         );
         let ratio = samples.len() as f64 / stretched.len() as f64;
         assert!((ratio - 2.0).abs() < 0.05, "ratio={ratio}");
 
         let peak = stretched.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
-        assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+        assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
     }
 }
 
@@ -222,7 +222,7 @@ mod bench_window {
             let elapsed = start.elapsed();
             assert!(
                 elapsed < threshold,
-                "tempo={tempo} elapsed={elapsed:?} threshold={threshold:?}, troppo lento per l'estensione in background a questa velocità"
+                "tempo={tempo} elapsed={elapsed:?} threshold={threshold:?}, too slow for background extension at this speed"
             );
         }
     }

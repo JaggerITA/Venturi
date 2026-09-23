@@ -645,7 +645,7 @@ mod tests {
         let mut seen = Vec::new();
         for action in Action::ALL {
             for shortcut in keymap.shortcuts(action) {
-                assert!(!seen.contains(shortcut), "{shortcut} usata due volte");
+                assert!(!seen.contains(shortcut), "{shortcut} used twice");
                 seen.push(*shortcut);
             }
         }

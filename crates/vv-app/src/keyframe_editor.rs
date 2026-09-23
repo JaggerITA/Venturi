@@ -994,13 +994,13 @@ mod tests {
         let picks = vec![zoom(TransformParam::ZoomX, 5), (KeyframeTarget::Gain, 5)];
         let linked = with_zoom_link(picks.clone(), true);
         assert!(linked.contains(&zoom(TransformParam::ZoomY, 5)));
-        assert_eq!(linked.len(), 3, "il gain non ha gemelli");
+        assert_eq!(linked.len(), 3, "gain has no twins");
 
         let both = with_zoom_link(
             vec![zoom(TransformParam::ZoomX, 5), zoom(TransformParam::ZoomY, 5)],
             true,
         );
-        assert_eq!(both.len(), 2, "nessun doppione se sono già selezionati entrambi");
+        assert_eq!(both.len(), 2, "no duplicates if both are already selected");
 
         assert_eq!(with_zoom_link(picks.clone(), false), picks);
     }
@@ -1009,11 +1009,11 @@ mod tests {
     fn the_delete_key_is_the_editors_only_with_a_selection_and_the_last_click() {
         let mut state = KeyframeEditorState::default();
         state.selection.insert((KeyframeTarget::Gain, 3));
-        assert!(!state.owns_delete(), "senza l'ultimo click il Canc è della timeline");
+        assert!(!state.owns_delete(), "without the last click Delete belongs to the timeline");
         state.focused = true;
         assert!(state.owns_delete());
         state.selection.clear();
-        assert!(!state.owns_delete(), "niente da cancellare: il Canc torna alla clip");
+        assert!(!state.owns_delete(), "nothing to delete: Delete goes back to the clip");
     }
 
     #[test]
@@ -1021,12 +1021,12 @@ mod tests {
         let mut state = KeyframeEditorState::default();
         state.clip = Some((TimelineId::default(), 0, ClipId(1)));
         state.selection.insert(zoom(TransformParam::ZoomX, 7));
-        assert_eq!(state.remove_selected(true).len(), 2, "anche il gemello Y");
+        assert_eq!(state.remove_selected(true).len(), 2, "the Y twin too");
         assert!(state.selection.is_empty());
 
         let mut state = KeyframeEditorState::default();
         state.selection.insert((KeyframeTarget::Gain, 1));
-        assert!(state.remove_selected(false).is_empty(), "senza clip non c'è niente da togliere");
+        assert!(state.remove_selected(false).is_empty(), "without a clip there is nothing to remove");
     }
 
     #[test]
@@ -1036,8 +1036,8 @@ mod tests {
             (10, 100.0, Interpolation::Linear),
         ];
         assert_eq!(sample(&keyframes, 2.5), Some(25.0));
-        assert_eq!(sample(&keyframes, -3.0), Some(0.0), "prima del primo");
-        assert_eq!(sample(&keyframes, 40.0), Some(100.0), "dopo l'ultimo");
+        assert_eq!(sample(&keyframes, -3.0), Some(0.0), "before the first");
+        assert_eq!(sample(&keyframes, 40.0), Some(100.0), "after the last");
         assert_eq!(sample(&[], 1.0), None);
     }
 

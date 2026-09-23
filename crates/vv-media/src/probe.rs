@@ -9,7 +9,7 @@ static INIT: Once = Once::new();
 
 pub(crate) fn ensure_init() {
     INIT.call_once(|| {
-        ffmpeg::init().expect("impossibile inizializzare ffmpeg");
+        ffmpeg::init().expect("cannot initialize ffmpeg");
     });
 }
 
@@ -455,8 +455,8 @@ mod tests {
         let real = verify_last_decodable_frame(&path, fps, 10);
         let corrected = verify_last_decodable_frame(&path, fps, 10_000);
 
-        assert_eq!(corrected, real, "un nominal gonfiato deve convergere al vero ultimo frame decodificabile");
-        assert!(corrected <= 15, "10 frame veri a 10fps: il conteggio corretto non deve restare vicino al nominal gonfiato ({corrected})");
+        assert_eq!(corrected, real, "an inflated nominal count must converge to the real last decodable frame");
+        assert!(corrected <= 15, "10 real frames at 10fps: the corrected count must not stay near the inflated nominal ({corrected})");
     }
 
     /// Real case of the overestimate: the audio lasts longer than the video, so
@@ -476,10 +476,10 @@ mod tests {
             &path,
         );
 
-        let meta = probe(&path).expect("probe fallito");
+        let meta = probe(&path).expect("probe failed");
         assert!(
             (meta.duration_frames - 25).abs() <= 2,
-            "1 s di video a 25 fps, non i frame promessi dai 4 s di audio: {}",
+            "1 s of video at 25 fps, not the frames promised by 4 s of audio: {}",
             meta.duration_frames
         );
     }
@@ -513,7 +513,7 @@ mod tests {
             &path,
         );
 
-        let meta = probe(&path).expect("probe fallito");
+        let meta = probe(&path).expect("probe failed");
         assert_eq!(meta.width, 640);
         assert_eq!(meta.height, 360);
         assert_eq!(meta.fps, Rational::new(25, 1));
@@ -528,7 +528,7 @@ mod tests {
     fn probe_accepts_an_audio_only_file() {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tono.wav");
+        let path = dir.join("tone.wav");
         crate::test_support::ffmpeg(
             &[
                 "-f",
@@ -539,13 +539,13 @@ mod tests {
             &path,
         );
 
-        let meta = probe(&path).expect("probe fallito");
+        let meta = probe(&path).expect("probe failed");
         assert!(!meta.has_video);
         assert!(meta.has_audio);
         assert_eq!((meta.width, meta.height), (0, 0));
         assert_eq!(meta.fps, AUDIO_ONLY_FPS);
         assert_eq!(meta.sample_rate, 44_100);
-        assert_eq!(meta.duration_frames, 60, "2 s a fps nominale");
+        assert_eq!(meta.duration_frames, 60, "2 s at nominal fps");
     }
 
     #[test]
@@ -567,7 +567,7 @@ mod tests {
             &path,
         );
 
-        let meta = probe_image(&path).expect("probe_image fallito");
+        let meta = probe_image(&path).expect("probe_image failed");
         assert_eq!((meta.width, meta.height), (640, 360));
         assert_eq!(meta.fps, IMAGE_FPS);
         assert!(meta.has_video);
@@ -580,8 +580,8 @@ mod tests {
     fn probe_rejects_a_file_without_audio_or_video() {
         let dir = std::env::temp_dir().join("vv-media-probe-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sottotitoli.srt");
-        std::fs::write(&path, "1\n00:00:00,000 --> 00:00:01,000\nciao\n").unwrap();
+        let path = dir.join("subtitles.srt");
+        std::fs::write(&path, "1\n00:00:00,000 --> 00:00:01,000\nhello\n").unwrap();
         assert!(probe(&path).is_err());
     }
 
@@ -590,7 +590,7 @@ mod tests {
         let dir = std::env::temp_dir().join("vv-media-fingerprint-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("stable.bin");
-        std::fs::write(&path, "contenuto di prova").unwrap();
+        std::fs::write(&path, "test content").unwrap();
 
         let a = content_fingerprint(&path).unwrap();
         let b = content_fingerprint(&path).unwrap();
@@ -603,8 +603,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path_a = dir.join("a.bin");
         let path_b = dir.join("b.bin");
-        std::fs::write(&path_a, "contenuto corto").unwrap();
-        std::fs::write(&path_b, "contenuto molto più lungo di quello corto").unwrap();
+        std::fs::write(&path_a, "short content").unwrap();
+        std::fs::write(&path_b, "content much longer than the short one").unwrap();
 
         assert_ne!(
             content_fingerprint(&path_a).unwrap(),
@@ -618,14 +618,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rewritten.bin");
 
-        std::fs::write(&path, "prima versione").unwrap();
+        std::fs::write(&path, "first version").unwrap();
         let before = content_fingerprint(&path).unwrap();
 
         // A different size guarantees the fingerprint changes even
         // if the filesystem has an mtime resolution too coarse
         // to record the write as "later" than the previous one
         // within the duration of the test.
-        std::fs::write(&path, "seconda versione, più lunga della prima").unwrap();
+        std::fs::write(&path, "second version, longer than the first").unwrap();
         let after = content_fingerprint(&path).unwrap();
 
         assert_ne!(before, after);

@@ -303,7 +303,7 @@ mod tests {
             }
             b
         };
-        let loaded = read_peaks_file(&bytes).expect("read fallito");
+        let loaded = read_peaks_file(&bytes).expect("read failed");
         assert_eq!(loaded.peaks, peaks);
         assert!((loaded.audio_duration_secs - 5.5).abs() < 1e-9);
     }
@@ -335,22 +335,22 @@ mod tests {
 
         assert!(!waveform_exists(content_hash, 0));
         let wf = generate_waveform(&path, content_hash, 0, 500)
-            .expect("generazione waveform fallita")
-            .expect("audio atteso");
+            .expect("waveform generation failed")
+            .expect("audio expected");
         assert_eq!(wf.peaks.len(), 500);
         assert!(waveform_exists(content_hash, 0));
 
         // A 440Hz sine is not silent: the global (normalized) peak must
         // reach 1.0 and the values must stay in [0,1].
         let peak = wf.peaks.iter().cloned().fold(0.0_f32, f32::max);
-        assert!((peak - 1.0).abs() < 1e-6, "peak={peak}, atteso 1.0 dopo normalizzazione");
+        assert!((peak - 1.0).abs() < 1e-6, "peak={peak}, expected 1.0 after normalization");
         assert!(wf.peaks.iter().all(|p| (0.0..=1.0).contains(p)));
 
         // The audio duration must be ~2s (the file is 2s long).
         assert!((wf.audio_duration_secs - 2.0).abs() < 0.2, "dur={:?}", wf.audio_duration_secs);
 
         // The cache file, read back, returns the same peaks.
-        let reloaded = load_waveform(content_hash, 0).expect("reload fallito");
+        let reloaded = load_waveform(content_hash, 0).expect("reload failed");
         assert_eq!(reloaded.peaks, wf.peaks);
         assert!((reloaded.audio_duration_secs - wf.audio_duration_secs).abs() < 1e-9);
     }
@@ -382,8 +382,8 @@ mod tests {
         let content_hash = 0x51DE7357;
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
         let wf = generate_waveform(&path, content_hash, 0, 400)
-            .expect("generazione waveform fallita")
-            .expect("audio atteso");
+            .expect("waveform generation failed")
+            .expect("audio expected");
 
         // The tone starts exactly at the middle of the duration (2s of 4s): with
         // 400 bins, the bin where it comes out of the silence must be near bin
@@ -396,10 +396,10 @@ mod tests {
             .peaks
             .iter()
             .position(|&p| p > 0.3)
-            .expect("il tono dovrebbe superare la soglia da qualche parte");
+            .expect("the tone should exceed the threshold somewhere");
         assert!(
             (170..230).contains(&first_loud_bin),
-            "il tono inizia al bin {first_loud_bin} (atteso vicino al bin 200, metà dei 400 bin totali per una transizione a metà dei 4s)"
+            "the tone starts at bin {first_loud_bin} (expected near bin 200, half of the 400 total bins for a transition halfway through the 4s)"
         );
     }
 
@@ -415,7 +415,7 @@ mod tests {
     fn peaks_stay_aligned_when_samples_per_bin_is_fractional() {
         let dir = std::env::temp_dir().join("vv-media-waveform-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tono_a_8s.wav");
+        let path = dir.join("tone_at_8s.wav");
         crate::test_support::ffmpeg(
             &[
                 "-f",
@@ -431,14 +431,14 @@ mod tests {
         // 480000 samples / 250000 bins = 1.92 samples per bin.
         let num_peaks = 250_000;
         let wf = generate_waveform(&path, content_hash, 0, num_peaks)
-            .expect("generazione waveform fallita")
-            .expect("audio atteso");
-        let first_loud_bin = wf.peaks.iter().position(|&p| p > 0.3).expect("tono atteso");
+            .expect("waveform generation failed")
+            .expect("audio expected");
+        let first_loud_bin = wf.peaks.iter().position(|&p| p > 0.3).expect("tone expected");
         let expected = num_peaks * 8 / 10;
         assert!(
             // The sine starts at 0: it crosses the threshold a few samples later.
             first_loud_bin.abs_diff(expected) <= 5,
-            "tono al bin {first_loud_bin}, atteso {expected} (8 s su 10)"
+            "tone at bin {first_loud_bin}, expected {expected} (8 s out of 10)"
         );
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
     }
@@ -464,17 +464,17 @@ mod tests {
         let content_hash = 0x51DE7357_6C6C6C6C;
         let _ = std::fs::remove_file(waveform_path_for(content_hash, 0));
         let wf = generate_waveform(&path, content_hash, 0, 400)
-            .expect("generazione waveform fallita")
-            .expect("audio atteso");
+            .expect("waveform generation failed")
+            .expect("audio expected");
 
         let first_loud_bin = wf
             .peaks
             .iter()
             .position(|&p| p > 0.3)
-            .expect("il tono dovrebbe superare la soglia da qualche parte");
+            .expect("the tone should exceed the threshold somewhere");
         assert!(
             (170..230).contains(&first_loud_bin),
-            "il tono inizia al bin {first_loud_bin} (atteso vicino al bin 200, metà dei 400 bin totali per una transizione a metà dei 4s)"
+            "the tone starts at bin {first_loud_bin} (expected near bin 200, half of the 400 total bins for a transition halfway through the 4s)"
         );
     }
 
@@ -497,8 +497,8 @@ mod tests {
             &path,
         );
 
-        let result = generate_waveform(&path, 0xDEADBEEF, 0, 200).expect("generazione fallita");
-        assert!(result.is_none(), "nessuna traccia audio: nessun picco");
+        let result = generate_waveform(&path, 0xDEADBEEF, 0, 200).expect("generation failed");
+        assert!(result.is_none(), "no audio track: no peaks");
     }
 
     /// A file with two audio streams (see `audio::decode_audio_track_selects_the_requested_stream_index_not_just_the_best`
@@ -535,17 +535,17 @@ mod tests {
 
         let first = generate_waveform(&path, content_hash, 0, 200)
             .unwrap()
-            .expect("stream 0 atteso");
+            .expect("stream 0 expected");
         assert!((first.audio_duration_secs - 1.0).abs() < 0.2);
 
         let second = generate_waveform(&path, content_hash, 1, 200)
             .unwrap()
-            .expect("stream 1 atteso");
+            .expect("stream 1 expected");
         assert!((second.audio_duration_secs - 1.0).abs() < 0.2);
 
         assert!(
             generate_waveform(&path, content_hash, 2, 200).unwrap().is_none(),
-            "nessuno stream audio all'indice 2"
+            "no audio stream at index 2"
         );
     }
 }

@@ -193,7 +193,7 @@ fn animatable(id: &str, value: Value, default: Value, range: [f64; 2]) -> Value 
 /// keyframe.
 fn animatable_no_keyframes(id: &str, value: Value, default: Value, range: [f64; 2]) -> Value {
     let mut parameter = animatable(id, value, default, range);
-    parameter.as_object_mut().expect("oggetto").remove("Key Frames");
+    parameter.as_object_mut().expect("object").remove("Key Frames");
     parameter
 }
 

@@ -1,38 +1,45 @@
-# Istruzioni per Claude Code
+# Instructions for Claude Code
 
-## Stile dei commenti
+## Language
 
-Regola ferrea: i commenti nel codice devono essere **brevi** e scritti
-**solo quando necessari** — mai per spiegare cose ovvie o che si leggono
-già dal codice stesso (nomi di variabili/funzioni ben scelti bastano).
+Everything in the repository (code, comments, test messages, docs, commit
+messages) is written in English. The only exception is the `it:` entries of
+the locale files in `crates/vv-app/locales/`, which are the Italian UI
+translation.
 
-Un commento è giustificato solo quando spiega un *perché* non ovvio: un
-vincolo nascosto, il motivo di una scelta non scontata, un bug aggirato,
-un comportamento che sorprenderebbe chi legge. Se togliendolo il codice
-resta comunque chiaro, il commento non va scritto.
+## Comment style
 
-Evitare in particolare:
-- Commenti-saggio di più paragrafi su una singola riga o funzione.
-- Ripetere nel commento quello che il codice già dice (il *cosa* invece
-  del *perché*).
-- Premesse/contesto storico lunghi quando basterebbe una riga secca.
+Hard rule: comments in the code must be **short** and written **only when
+necessary** — never to explain obvious things or things that can already be
+read from the code itself (well-chosen variable/function names are enough).
 
-## Gestione dei task (Vikunja)
+A comment is justified only when it explains a non-obvious *why*: a hidden
+constraint, the reason for a non-obvious choice, a worked-around bug, a
+behaviour that would surprise the reader. If the code stays clear without
+it, the comment must not be written.
 
-La lista dei task di questo progetto è tenuta su Vikunja. Quando si
-completa una feature:
+Avoid in particular:
+- Multi-paragraph essay comments on a single line or function.
+- Repeating in the comment what the code already says (the *what* instead
+  of the *why*).
+- Long preambles/historical context when a single terse line would do.
 
-1. Creare il commit relativo alla feature.
-2. Segnare il task corrispondente come completato su Vikunja.
-3. Lasciare un commento sul task completato con l'hash breve del commit
-   git relativo (es. `849a7f8`).
+## Task management (Vikunja)
+
+This project's task list is kept on Vikunja. When a feature is completed:
+
+1. Create the commit for the feature.
+2. Mark the corresponding task as done on Vikunja.
+3. Leave a comment on the completed task with the short hash of the related
+   git commit (e.g. `849a7f8`).
 
 ## Build
 
-Quando viene chiesta una build, copiare in `~/Nextcloud/Share/Venturi-builds` 
-la versione appena compilata con architettura e timestamp nel suffisso del nome.
+When a build is requested, copy the freshly compiled version to
+`~/Nextcloud/Share/Venturi-builds` with architecture and timestamp as the
+name suffix.
 
-ES:
+E.g.:
 ```
 export TIMESTAMP=$(date +%s)
 cp target/appimage/Venturi-x86_64.AppImage ~/Nextcloud/Share/Venturi-builds/vv-app-$(uname -m)-${TIMESTAMP}.AppImage

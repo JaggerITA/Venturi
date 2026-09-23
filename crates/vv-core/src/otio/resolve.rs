@@ -428,6 +428,6 @@ mod tests {
         }
         assert_eq!(composite_mode(BlendMode::Divide), 18);
         assert_eq!(blend_mode(2), Some(BlendMode::Subtract));
-        assert_eq!(blend_mode(14), None, "Hue non ce l'abbiamo");
+        assert_eq!(blend_mode(14), None, "we don't have Hue");
     }
 }

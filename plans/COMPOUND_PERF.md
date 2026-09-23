@@ -1,299 +1,295 @@
-# COMPOUND_PERF — piano per il rendering delle compound clip
+# COMPOUND_PERF — plan for rendering compound clips
 
-Diagnosi e piano nati dal problema riportato: su una timeline 1080@60, un
-insieme di clip che a velocità normale renderizza in tempo reale (e regge
->1x) non sta più dietro al playback a 1x appena viene raggruppato in una
-compound clip.
+Diagnosis and plan born from a reported problem: on a 1080@60 timeline, a
+set of clips that renders in real time at normal speed (and holds >1x) can
+no longer keep up with 1x playback as soon as it is grouped into a compound
+clip.
 
-Complemento di [REFACTOR_PIPELINE.md](REFACTOR_PIPELINE.md) (§2 cache, B2/B3
-compositing); l'architettura corrente è in [ARCHITECTURE.md](../ARCHITECTURE.md).
+Complements [REFACTOR_PIPELINE.md](REFACTOR_PIPELINE.md) (§2 cache, B2/B3
+compositing); the current architecture is in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ---
 
-## 1. Dov'è il costo, oggi
+## 1. Where the cost is, today
 
-Per **ogni** frame di compound clip, `render_ahead::compose_frame_at`:
+For **every** compound clip frame, `render_ahead::compose_frame_at`:
 
-1. upload dei piani YUV dei layer annidati sul device **headless** del
-   worker — un secondo device wgpu, separato da quello di egui che usa la UI
-   (`main.rs`, `Compositor::new_headless` nel worker vs `Compositor::new`
-   con `wgpu_render_state`);
-2. render pass → texture RGBA;
-3. `Compositor::read_rgba_texture`: `copy_texture_to_buffer` di 8.3 MB +
-   `map_read` con `poll(wait_indefinitely)` → **stallo sincrono della GPU a
-   ogni frame**, nessun pipelining. Alloca anche un buffer di readback nuovo
-   a ogni chiamata (il path i420 invece lo poola);
-4. de-padding delle righe: altri 8.3 MB di memcpy;
-5. `frame_provider::rgba_to_yuv420_with_alpha`: **loop scalare su CPU** su
-   2.07M px (luma) + 518k blocchi 2x2 con divisioni (croma) + piano alpha.
-   Single-thread. Da solo sfora il budget di 16.6 ms a 60 fps;
-6. cache: 3.1 MB YUV + 2.07 MB di alpha → un frame compound pesa ~1.6x un
-   frame normale, quindi **riduce il lookahead di tutti gli altri media** a
-   parità di budget;
-7. thread UI: ri-upload di 4 piani sul device di egui + `yuv_to_rgb` nello
+1. uploads the YUV planes of the nested layers to the worker's **headless**
+   device — a second wgpu device, separate from the egui one used by the UI
+   (`main.rs`, `Compositor::new_headless` in the worker vs `Compositor::new`
+   with `wgpu_render_state`);
+2. render pass → RGBA texture;
+3. `Compositor::read_rgba_texture`: `copy_texture_to_buffer` of 8.3 MB +
+   `map_read` with `poll(wait_indefinitely)` → **a synchronous GPU stall on
+   every frame**, no pipelining. It also allocates a new readback buffer on
+   every call (the i420 path pools it instead);
+4. row de-padding: another 8.3 MB of memcpy;
+5. `frame_provider::rgba_to_yuv420_with_alpha`: **a scalar CPU loop** over
+   2.07M px (luma) + 518k 2x2 blocks with divisions (chroma) + alpha plane.
+   Single-threaded. On its own it blows the 16.6 ms budget at 60 fps;
+6. cache: 3.1 MB YUV + 2.07 MB of alpha → a compound frame weighs ~1.6x a
+   normal frame, so it **shrinks the lookahead of every other media** for
+   the same budget;
+7. UI thread: re-upload of 4 planes to the egui device + `yuv_to_rgb` in the
    shader.
 
-In sintesi: **due round-trip completi RGB↔YUV e un readback bloccante** che
-le clip non raggruppate non pagano, il tutto serializzato col decode nello
-stesso thread del worker.
+In short: **two full RGB↔YUV round trips and a blocking readback** that
+ungrouped clips do not pay, all serialised with decoding in the same worker
+thread.
 
 ---
 
-## 2. Perché non basta il flattening
+## 2. Why flattening is not enough
 
-Idea scartata (ma non del tutto): espandere la compound nei suoi layer
-annidati con i transform composti e renderizzare tutto in un solo pass, così
-che raggruppare non costi nulla.
+Idea discarded (but not entirely): expand the compound into its nested
+layers with composed transforms and render everything in a single pass, so
+that grouping costs nothing.
 
-Non è sempre valido:
+It is not always valid:
 
-- **Filtri.** Sono per-layer, dentro il fragment shader di ogni layer: non
-  esiste uno stadio "dopo l'ultimo layer" su cui applicare i filtri del
-  gruppo senza un intermedio rasterizzato (che è la compound clip stessa).
-  Applicarli a ciascun layer annidato è corretto solo se il filtro
-  *distribuisce* su `over`: vale per le funzioni lineari e pointwise
-  (`Grayscale`, l'unico esistente oggi, è una matrice colore), non vale per
-  nessun filtro spaziale (`blur(A over B) != blur(A) over blur(B)`) né per
-  nessuna non-linearità (gamma, contrasto, saturazione con clamp, curve,
-  chroma key). Funzionerebbe per accidente finché c'è un filtro solo.
-- **Opacità di gruppo.** Con `opacity < 1` e ≥2 layer annidati sovrapposti:
-  rasterizzato sfuma il gruppo (il layer sotto resta coperto), flattened
-  sfuma ogni layer per conto suo e **il layer sotto traspare attraverso
-  quello sopra**. Immagini diverse, la seconda è quella sbagliata.
-- **`Transform` non è chiuso per composizione.** `T_gruppo ∘ T_annidato`
-  deve entrare nei campi di `vv_core::Transform` (crop, zoom[2], position,
-  rotation, anchor, flip): rotazione esterna ∘ zoom anisotropo interno ∘
-  rotazione interna dà una matrice 2x2 generale, non rappresentabile.
-  Servirebbe generalizzare transform e shader a una `mat3x3`. In più `crop`
-  è in pixel nativi del media del singolo layer, il crop esterno è in pixel
-  della timeline annidata: spazi diversi da riconciliare.
-- **Clipping al canvas annidato.** Ciò che esce dai bordi della timeline
-  annidata oggi sparisce; flattened non c'è più nulla che tagli, e un layer
-  spostato oltre il margine diventa visibile nella timeline esterna.
-  Servirebbe un rect-clip per layer, derivato dal transform del gruppo.
-  Stesso discorso per `fit_factors`.
+- **Filters.** They are per layer, inside each layer's fragment shader:
+  there is no "after the last layer" stage on which to apply the group's
+  filters without a rasterised intermediate (which is the compound clip
+  itself). Applying them to each nested layer is correct only if the filter
+  *distributes* over `over`: true for linear, pointwise functions
+  (`Grayscale`, the only one today, is a colour matrix), false for any
+  spatial filter (`blur(A over B) != blur(A) over blur(B)`) and any
+  non-linearity (gamma, contrast, clamped saturation, curves, chroma key).
+  It would work by accident as long as there is only one filter.
+- **Group opacity.** With `opacity < 1` and ≥2 overlapping nested layers:
+  rasterised fades the group (the lower layer stays covered), flattened
+  fades each layer on its own and **the lower layer shows through the upper
+  one**. Different images, the second is the wrong one.
+- **`Transform` is not closed under composition.** `T_group ∘ T_nested`
+  must fit in the fields of `vv_core::Transform` (crop, zoom[2], position,
+  rotation, anchor, flip): outer rotation ∘ inner anisotropic zoom ∘ inner
+  rotation gives a general 2x2 matrix, not representable. Transform and
+  shader would need generalising to a `mat3x3`. On top of that `crop` is in
+  native pixels of the single layer's media, while the outer crop is in
+  pixels of the nested timeline: different spaces to reconcile.
+- **Clipping to the nested canvas.** Whatever leaves the nested timeline's
+  edges disappears today; flattened there is nothing left to clip, and a
+  layer moved past the margin becomes visible in the outer timeline. It
+  would need a per-layer rect clip derived from the group transform. Same
+  story for `fit_factors`.
 
-Resta utilizzabile come ottimizzazione opzionale quando il gruppo
-"distribuisce" davvero, ma il guadagno è **un solo render pass**: non vale
-i casi limite. Il costo vero è altrove (§1).
+It remains usable as an optional optimisation when the group really
+"distributes", but the gain is **a single render pass**: not worth the edge
+cases. The real cost is elsewhere (§1).
 
 ---
 
-## 3. Il piano: device condiviso, compound come sotto-pass
+## 3. The plan: shared device, compound as a sub-pass
 
-### 3.1 `Layer::Texture` nel compositor
+### 3.1 `Layer::Texture` in the compositor
 
-Variante di `vv_render::Layer` che prende una `wgpu::Texture` già pronta
-invece dei piani YUV. Il bind group layout attuale dichiara
-`TextureSampleType::Float { filterable: true }`, D2: una view `Rgba8Unorm`
-**lo soddisfa già**. Quindi bind della texture RGBA allo slot 0, placeholder
-su 1/2/5, nuovo `Fill::Rgba`, e in `transform.wgsl` un ramo che campiona
-come `vec4` e salta `yuv_to_rgb`. Niente seconda pipeline, niente secondo
-bind group layout.
+A variant of `vv_render::Layer` that takes a ready `wgpu::Texture` instead
+of the YUV planes. The current bind group layout declares
+`TextureSampleType::Float { filterable: true }`, D2: an `Rgba8Unorm` view
+**already satisfies it**. So: bind the RGBA texture to slot 0, placeholders
+on 1/2/5, a new `Fill::Rgba`, and in `transform.wgsl` a branch that samples
+as `vec4` and skips `yuv_to_rgb`. No second pipeline, no second bind group
+layout.
 
-`OUTPUT_FORMAT` è `Rgba8Unorm` (non sRGB): nessuna conversione di gamma
-implicita nel sample.
+`OUTPUT_FORMAT` is `Rgba8Unorm` (not sRGB): no implicit gamma conversion on
+sampling.
 
-### 3.2 Premoltiplicazione — c'è un bug latente da sistemare qui
+### 3.2 Premultiplication — there is a latent bug to fix here
 
-La pipeline usa `BlendState::ALPHA_BLENDING`: su clear trasparente il
-risultato è **premoltiplicato** (`rgb = a·C`, `alpha = a`).
-`rgba_to_yuv420_with_alpha` però tratta quel `rgb` come straight, e lo
-shader lo rimoltiplica per l'alpha → **α² sui bordi semitrasparenti di una
-compound clip**, già oggi. Da confermare con un test.
+The pipeline uses `BlendState::ALPHA_BLENDING`: on a transparent clear the
+result is **premultiplied** (`rgb = a·C`, `alpha = a`).
+`rgba_to_yuv420_with_alpha` however treats that `rgb` as straight, and the
+shader multiplies it by alpha again → **α² on the semi-transparent edges of
+a compound clip**, already today. To be confirmed with a test.
 
-Nel nuovo path: un-premultiply nello shader (`rgb / max(a, eps)`), che
-mantiene una pipeline sola, oppure un secondo blend state
-`PREMULTIPLIED_ALPHA_BLENDING` per i soli layer texture.
+In the new path: un-premultiply in the shader (`rgb / max(a, eps)`), which
+keeps a single pipeline, or a second blend state
+`PREMULTIPLIED_ALPHA_BLENDING` for texture layers only.
 
-### 3.3 Il pool di texture ricicla l'output
+### 3.3 The texture pool recycles the output
 
-`render_layers_to_texture_with_clear` fa
-`give_back(&mut pool.outputs, [output_texture.clone()])` e restituisce la
-stessa texture: **è riciclata**, il render successivo della stessa
-dimensione ci disegna sopra. Se qualcuno la conserva → corruzione
-silenziosa, non un crash. Serve una variante che non rimetta l'output nel
-pool, o una restituzione al pool via `Drop` dell'handle.
+`render_layers_to_texture_with_clear` does
+`give_back(&mut pool.outputs, [output_texture.clone()])` and returns the
+same texture: **it is recycled**, the next render of the same size draws
+over it. If someone keeps it → silent corruption, not a crash. It needs a
+variant that does not put the output back in the pool, or a return to the
+pool through the handle's `Drop`.
 
-### 3.4 Device condiviso col worker
+### 3.4 Device shared with the worker
 
-`RenderAhead::spawn` riceve `cc.wgpu_render_state` e costruisce
-`Compositor::new(device, queue)` invece di `new_headless()`.
-`wgpu::Device`/`Queue` sono `Send + Sync` e già dietro `Arc`. Due
-`Compositor` sullo stesso device vanno bene (il `pool` è un `Mutex` per
-istanza). Fallback a `new_headless` quando non c'è render state (test,
+`RenderAhead::spawn` receives `cc.wgpu_render_state` and builds
+`Compositor::new(device, queue)` instead of `new_headless()`.
+`wgpu::Device`/`Queue` are `Send + Sync` and already behind `Arc`. Two
+`Compositor`s on the same device are fine (the `pool` is one `Mutex` per
+instance). Fall back to `new_headless` when there is no render state (tests,
 export).
 
-### 3.5 La compound smette di essere un media cachato
+### 3.5 The compound stops being a cached media
 
-Questa è la parte che semplifica il codice. Una volta che il compositing è
-sullo stesso device e costa un pass, non c'è motivo di *materializzare e
-cachare* il frame composto:
+This is the part that simplifies the code. Once compositing is on the same
+device and costs one pass, there is no reason to *materialise and cache* the
+composed frame:
 
-- il worker torna a fare **solo decode**, anche dentro le timeline annidate
-  (la parte di `clipped_media_segments` che cammina nel nesting per tenere
-  caldi i media veri resta identica);
-- al momento di comporre il frame esterno, una clip compound produce un
-  `Layer::Texture` renderizzata al volo in una texture **transitoria dal
-  pool**, rilasciata subito dopo. Ricorsivo per il nesting.
+- the worker goes back to **decoding only**, including inside nested
+  timelines (the part of `clipped_media_segments` that walks the nesting to
+  keep the real media warm stays identical);
+- when composing the outer frame, a compound clip produces a
+  `Layer::Texture` rendered on the fly into a **transient texture from the
+  pool**, released right after. Recursive for nesting.
 
-Spariscono da `render_ahead.rs`: `compose_compound_segments`,
-`MAX_COMPOUND_PASSES`, `CacheOnlyProvider`, `compose_frame_at`, e tutto il
-secondo canale `(real, compound)` che oggi attraversa
+Gone from `render_ahead.rs`: `compose_compound_segments`,
+`MAX_COMPOUND_PASSES`, `CacheOnlyProvider`, `compose_frame_at`, and the
+whole second `(real, compound)` channel that today runs through
 `collect_media_segments` / `crossing_borrowed_segments` / `walk_and_fill`.
-Sparisce la logica "layer non ancora pronto → ritento al giro successivo", e
-sparisce l'invalidazione via `content_hash` / `Project::touch_compound` per
-i frame composti: non c'è più nulla di stantio da invalidare.
+The "layer not ready yet → retry next round" logic goes, and so does the
+invalidation through `content_hash` / `Project::touch_compound` for composed
+frames: there is nothing stale left to invalidate.
 
-Costo per frame esterno: 1 render pass + 1 texture transitoria per istanza
-di compound. A 1080p60 è rumore. **Zero VRAM persistente, zero readback,
-zero conversione.**
+Cost per outer frame: 1 render pass + 1 transient texture per compound
+instance. At 1080p60 it is noise. **Zero persistent VRAM, zero readback,
+zero conversion.**
 
-Perché non cachare le texture composte: 1080p RGBA8 = 8.3 MB/frame, un
-lookahead di 3 s a 60 fps sarebbe 1.5 GB di VRAM. (Nota: anche oggi in RAM
-sono 5.2 MB/frame → 930 MB, tenuti a bada solo dallo sfratto.)
+Why not cache the composed textures: 1080p RGBA8 = 8.3 MB/frame, a 3 s
+lookahead at 60 fps would be 1.5 GB of VRAM. (Note: even today in RAM it is
+5.2 MB/frame → 930 MB, kept in check only by eviction.)
 
-Contropartita: si ricompone a ogni repaint anche a playhead fermo, e non c'è
-riuso quando lo stesso frame compound serve due volte (i due lati di una
-crossing transition che ne prende il bordo in prestito). Si mitiga con una
-LRU minuscola — una decina di texture, chiave `(media_id, frame locale,
-risoluzione)` — non con una cache a orizzonte di lookahead.
+Downside: it recomposes on every repaint even with a still playhead, and
+there is no reuse when the same compound frame is needed twice (both sides
+of a crossing transition that borrows its edge). Mitigated with a tiny LRU —
+about ten textures, keyed by `(media_id, local frame, resolution)` — not with
+a lookahead-horizon cache.
 
 ### 3.6 Export
 
-`export.rs` compone la compound in sincrono e vuole un `FrameYuv420` perché
-`FrameProvider::frame_for` restituisce quello. Generalizzare il tipo di
-ritorno (es. `enum ProvidedFrame { Yuv, Texture }`) porterebbe lo stesso
-guadagno all'export, che paga identici readback + conversione per frame
-compound. È offline: non urgente, va in coda.
+`export.rs` composes the compound synchronously and wants a `FrameYuv420`
+because `FrameProvider::frame_for` returns that. Generalising the return
+type (e.g. `enum ProvidedFrame { Yuv, Texture }`) would bring the same gain
+to export, which pays the same readback + conversion per compound frame. It
+is offline: not urgent, goes to the back of the queue.
 
 ---
 
-## 4. Ordine di lavoro e stato
+## 4. Work order and status
 
-1. ~~`Layer::Texture` + `Fill::Rgba` + un-premultiply nello shader (§3.1,
-   §3.2)~~ — fatto.
-2. ~~Variante di `render_layers_to_texture` che non ricicla l'output
-   (§3.3)~~ — fatto, ed è diventata `PooledTexture`: l'intermedio torna nel
-   suo pool quando il layer che lo usa viene lasciato andare.
-3. ~~Device condiviso al worker (§3.4)~~ — **non serve più**: col §3.5 il
-   worker non compone niente, quindi non gli serve nessun compositor.
-4. ~~Compound come sotto-pass (§3.5)~~ — fatto: `frame_provider::GpuCompounds`
-   compone la timeline annidata al volo; da `render_ahead.rs` sono spariti
-   il canale compound, `compose_compound_segments`, `CacheOnlyProvider` e
-   `compose_frame_at`.
-5. ~~Export sullo stesso path (§3.6)~~ — fatto: stesso `GpuCompounds`, con
-   i due stadi GPU su un compositor condiviso (la texture nasce nel decode
-   e si campiona nella composizione). `rgba_to_yuv420_with_alpha` è sparita
-   con l'ultimo chiamante.
+1. ~~`Layer::Texture` + `Fill::Rgba` + un-premultiply in the shader (§3.1,
+   §3.2)~~ — done.
+2. ~~Variant of `render_layers_to_texture` that does not recycle the output
+   (§3.3)~~ — done, and it became `PooledTexture`: the intermediate goes back
+   to its pool when the layer using it is dropped.
+3. ~~Device shared with the worker (§3.4)~~ — **no longer needed**: with
+   §3.5 the worker composes nothing, so it needs no compositor.
+4. ~~Compound as a sub-pass (§3.5)~~ — done: `frame_provider::GpuCompounds`
+   composes the nested timeline on the fly; the compound channel,
+   `compose_compound_segments`, `CacheOnlyProvider` and `compose_frame_at`
+   are gone from `render_ahead.rs`.
+5. ~~Export on the same path (§3.6)~~ — done: same `GpuCompounds`, with the
+   two GPU stages on a shared compositor (the texture is born in decode and
+   sampled in composition). `rgba_to_yuv420_with_alpha` went away with its
+   last caller.
 
-Resta da misurare sul materiale reale se 1080@60 ora regge il playback, e
-se la varianza sul thread UI giustifica il ring corto di §5.
+Still to measure on real footage: whether 1080@60 now holds playback, and
+whether the variance on the UI thread justifies the short ring of §5.
 
-**`FrameYuv420::alpha` non si tocca.** Era rimasta senza produttori quando
-le compound clip hanno smesso di passare dalla CPU, e sembrava morta — ma
-serviva a un caso che *non funzionava affatto*: lo scaler convertiva tutto
-a YUV420P, quindi una PNG importata con trasparenza arrivava opaca. Ora la
-riempie il decoder (YUVA420P quando il formato sorgente ha un'alpha vera),
-e tutto il trasporto fino allo shader era già al suo posto.
+**Do not touch `FrameYuv420::alpha`.** It had been left without producers
+when compound clips stopped going through the CPU, and looked dead — but it
+served a case that *did not work at all*: the scaler converted everything to
+YUV420P, so an imported PNG with transparency arrived opaque. Now the
+decoder fills it (YUVA420P when the source format has real alpha), and all
+the plumbing up to the shader was already in place.
 
-**Buco noto:** un *video* con alpha (WebM VP9, ProRes 4444) a cui venga
-generato un proxy lo perde, perché il proxy è H.264. Le immagini non
-ricevono proxy (`project_io.rs`), quindi le PNG sono salve; per i video con
-alpha servirebbe saltare la generazione del proxy, il che vuol dire un
-`has_alpha` in `MediaMeta`.
-
----
-
-## 5. Perché non cachare il composito invece dei media
-
-Domanda ricorrente: la cache per media (`SharedFrameCache`, chiave
-`(MediaId, frame sorgente)`) fu decisa quando non c'era compositing; le
-compound clip cambiano la valutazione? Sarebbe più veloce, o più pulito,
-cachare l'ultimo passaggio della pipeline — il frame compositato della
-timeline?
-
-**No.** La premessa non regge: le compound non sono lente perché il
-compositing sia caro, ma perché *quel* path fa readback bloccante +
-conversione su CPU + secondo device (§1). Tolto quello, comporre una
-timeline annidata è un render pass.
-
-Motivi per cui la cache per media resta la scelta giusta:
-
-- **Stabilità dell'identità.** Un frame media è invalidato solo dal file che
-  cambia o dal toggle proxy. Un frame compositato dipende da tutto lo stato
-  del progetto a quel frame (transform, keyframe, opacità, filtri,
-  transizioni, ordine/mute/solo delle track), ricorsivamente dalle timeline
-  annidate, e dalla risoluzione del viewer (`OutputFrame::scaled` compone
-  alla risoluzione del frame decodificato, non della timeline). Un **ripple
-  edit** sposta di N l'indice di ogni frame a valle: l'intera cache del
-  composito muore, quella dei media non se ne accorge. Sapere *quali* frame
-  invalidare è vero dependency tracking; la risposta conservativa è "tutti".
-- **Si cachea ciò che è caro ricalcolare e ad accesso non casuale.** Il
-  decode è entrambe le cose — seek, GOP, transito: tutta la macchina di
-  `render_ahead.rs` (`BEHIND_CHUNK_FRAMES`, soglia di seek adattiva,
-  `TRANSIT_SAFETY_CAP_FRAMES`) esiste solo per quello. Il compositing è
-  stateless e ad accesso casuale.
-- **Deduplicazione.** Un frame media serve più frame di timeline
-  (`rate < 1`) e più clip (clip duplicata, stesso media in due punti,
-  compound riusata). Il composito non deduplica nulla.
-- **Densità.** Composito 1080p = 3.1 MB I420 / 8.3 MB RGBA, frame media =
-  3.1 MB: il composito vince solo con molti layer attivi. Su una timeline a
-  una track è pari o peggio.
-- **L'interazione dominante è l'editing, non il playback.** Una cache il cui
-  hit rate collassa a ogni modifica dà il comportamento peggiore quando fa
-  più male: sposti un keyframe e ri-decodifichi, invece di ri-comporre da
-  cache.
-
-Cosa c'è di vero nell'intuizione:
-
-- Il doppio canale `(real, compound)` in `render_ahead.rs` esiste
-  **precisamente perché** la cache è indicizzata per media e una compound
-  non è un media. Una cache per frame di timeline farebbe sparire il caso
-  speciale — ma §3.5 ottiene la stessa pulizia senza prendersi in carico
-  l'invalidazione, perché la compound smette di essere un'entità cachata.
-- Argomento diverso e valido: **la varianza sul thread UI**. Oggi tutto il
-  compositing avviene dentro il repaint di egui, e il clock del playback non
-  può assorbirne i picchi. Un **ring corto** di texture pre-compositate
-  (0.25–0.5 s, 15–30 frame, 125–250 MB a 1080p), riempito da un worker e
-  buttato per intero a ogni modifica del progetto, ridurrebbe il thread UI a
-  un blit. Invalidazione banale: l'orizzonte è così corto che rifarlo costa
-  poco. È un **tier 2 sopra** la cache dei media, non al posto suo, ed è
-  indipendente dalle compound: da valutare **dopo** §3, misurando se la
-  varianza è un problema reale.
-
-Cosa cambierebbe davvero la valutazione: compositing caro per davvero —
-stack a molti layer, filtri spaziali pesanti (blur), 4K multi-stream,
-effetti con dipendenza temporale. Anche allora la risposta non è
-"sostituire" ma un **tier 3**: render cache su disco, opt-in, per sezione,
-con chiave un content hash dello stato effettivo delle clip — di cui
-`content_hash` / `Project::touch_compound` sono già il germe.
+**Known gap:** a *video* with alpha (WebM VP9, ProRes 4444) that gets a
+proxy loses it, because the proxy is H.264. Images get no proxy
+(`project_io.rs`), so PNGs are safe; videos with alpha would need to skip
+proxy generation, which means a `has_alpha` in `MediaMeta`.
 
 ---
 
-## 6. Quick win, se serve un risultato prima del piano
+## 5. Why not cache the composite instead of the media
 
-Indipendenti e compatibili col piano:
+Recurring question: the per-media cache (`SharedFrameCache`, keyed by
+`(MediaId, source frame)`) was decided when there was no compositing; do
+compound clips change the assessment? Would it be faster, or cleaner, to
+cache the last stage of the pipeline — the composited timeline frame?
 
-- conversione RGBA→YUV+alpha **su GPU**, estendendo `rgba_to_i420.wgsl` per
-  scrivere anche il piano alpha: toglie il costo dominante (§1.5) e riduce
-  il readback da 8.3 a 5.2 MB;
-- poolare il buffer di readback del path RGBA come fa già quello i420;
-- readback asincrono (submit di N frame, map dopo) invece di bloccare per
+**No.** The premise does not hold: compounds are not slow because
+compositing is expensive, but because *that* path does a blocking readback +
+CPU conversion + a second device (§1). Remove that, and composing a nested
+timeline is one render pass.
+
+Reasons the per-media cache stays the right choice:
+
+- **Identity stability.** A media frame is invalidated only by the file
+  changing or by the proxy toggle. A composited frame depends on the whole
+  project state at that frame (transform, keyframes, opacity, filters,
+  transitions, track order/mute/solo), recursively on the nested timelines,
+  and on the viewer resolution (`OutputFrame::scaled` composes at the
+  resolution of the decoded frame, not the timeline's). A **ripple edit**
+  shifts the index of every downstream frame by N: the whole composite
+  cache dies, the media cache does not notice. Knowing *which* frames to
+  invalidate is real dependency tracking; the conservative answer is "all".
+- **You cache what is expensive to recompute and not randomly accessed.**
+  Decoding is both — seek, GOP, transit: the whole `render_ahead.rs`
+  machinery (`BEHIND_CHUNK_FRAMES`, adaptive seek threshold,
+  `TRANSIT_SAFETY_CAP_FRAMES`) exists only for that. Compositing is
+  stateless and random access.
+- **Deduplication.** A media frame serves several timeline frames
+  (`rate < 1`) and several clips (duplicated clip, same media in two places,
+  reused compound). The composite deduplicates nothing.
+- **Density.** 1080p composite = 3.1 MB I420 / 8.3 MB RGBA, media frame =
+  3.1 MB: the composite wins only with many active layers. On a single-track
+  timeline it is equal or worse.
+- **The dominant interaction is editing, not playback.** A cache whose hit
+  rate collapses on every edit behaves worst exactly when it hurts most: you
+  move a keyframe and re-decode, instead of recomposing from cache.
+
+What is true in the intuition:
+
+- The double `(real, compound)` channel in `render_ahead.rs` exists
+  **precisely because** the cache is indexed by media and a compound is not
+  a media. A per-timeline-frame cache would remove the special case — but
+  §3.5 gets the same cleanup without taking on invalidation, because the
+  compound stops being a cached entity.
+- A different, valid argument: **variance on the UI thread**. Today all
+  compositing happens inside the egui repaint, and the playback clock cannot
+  absorb its spikes. A **short ring** of pre-composited textures (0.25–0.5 s,
+  15–30 frames, 125–250 MB at 1080p), filled by a worker and thrown away
+  entirely on every project change, would reduce the UI thread to a blit.
+  Trivial invalidation: the horizon is so short that redoing it is cheap. It
+  is a **tier 2 on top of** the media cache, not instead of it, and it is
+  independent of compounds: to be evaluated **after** §3, measuring whether
+  the variance is a real problem.
+
+What would really change the assessment: truly expensive compositing —
+many-layer stacks, heavy spatial filters (blur), 4K multi-stream, effects
+with temporal dependency. Even then the answer is not "replace" but a
+**tier 3**: an on-disk render cache, opt-in, per section, keyed by a content
+hash of the clips' effective state — of which `content_hash` /
+`Project::touch_compound` are already the seed.
+
+---
+
+## 6. Quick wins, if a result is needed before the plan
+
+Independent and compatible with the plan:
+
+- RGBA→YUV+alpha conversion **on the GPU**, extending `rgba_to_i420.wgsl` to
+  write the alpha plane too: removes the dominant cost (§1.5) and cuts the
+  readback from 8.3 to 5.2 MB;
+- pool the readback buffer of the RGBA path as the i420 one already does;
+- asynchronous readback (submit N frames, map later) instead of blocking per
   frame;
-- `rayon` sul loop di conversione, se resta su CPU;
-- compositing delle compound su un thread proprio, per non fermare il
-  decode.
+- `rayon` on the conversion loop, if it stays on the CPU;
+- compound compositing on a thread of its own, so decoding does not stall.
 
 ---
 
-## 7. Vincoli da non perdere di vista
+## 7. Constraints not to lose sight of
 
-- **Un pass per layer** (`LoadOp::Load` in un pass separato per ciascuno):
-  col nesting i pass si moltiplicano. Indipendente da questo lavoro, ma è il
-  prossimo tetto.
-- `OutputFrame::scaled`: l'anteprima compone alla risoluzione del frame
-  decodificato, non della timeline. La texture della compound va
-  renderizzata a quella stessa risoluzione, o si aggiunge uno scaling.
-- Submit concorrente sulla stessa queue da UI e worker: wgpu serializza
-  internamente, e con §3.5 il worker quasi non tocca più la GPU.
+- **One pass per layer** (`LoadOp::Load` in a separate pass for each): with
+  nesting the passes multiply. Independent of this work, but it is the next
+  ceiling.
+- `OutputFrame::scaled`: the preview composes at the resolution of the
+  decoded frame, not the timeline's. The compound texture must be rendered
+  at that same resolution, or scaling must be added.
+- Concurrent submits on the same queue from UI and worker: wgpu serialises
+  internally, and with §3.5 the worker barely touches the GPU any more.

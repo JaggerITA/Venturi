@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(
             guess_matrix(color::Space::SMPTE170M, 1080),
             ColorMatrix::Bt601,
-            "una matrice SD segnalata esplicitamente vince sull'euristica per risoluzione"
+            "an explicitly signalled SD matrix wins over the resolution heuristic"
         );
     }
 
@@ -459,12 +459,12 @@ mod tests {
         assert_eq!(
             guess_matrix(color::Space::Unspecified, 240),
             ColorMatrix::Bt601,
-            "SD non segnalato: BT.601"
+            "SD unsignalled: BT.601"
         );
         assert_eq!(
             guess_matrix(color::Space::Unspecified, 1080),
             ColorMatrix::Bt709,
-            "HD non segnalato: BT.709"
+            "HD unsignalled: BT.709"
         );
     }
 
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(
             indices,
             (0..=92).collect::<Vec<_>>(),
-            "attesa la sequenza CFR completa dai 6 frame reali"
+            "expected the full CFR sequence from the 6 real frames"
         );
     }
 
@@ -562,7 +562,7 @@ mod tests {
             .iter()
             .map(|f| Arc::as_ptr(f))
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(distinct.len(), 6, "attese le 6 allocazioni dei frame reali");
+        assert_eq!(distinct.len(), 6, "expected the 6 allocations of the real frames");
     }
 
     #[test]
@@ -576,12 +576,12 @@ mod tests {
         }
         assert!(
             indices.first().is_some_and(|&first| first <= 60),
-            "il seek deve atterrare a 2 s o prima: {:?}",
+            "the seek must land at 2 s or earlier: {:?}",
             indices.first()
         );
         assert!(
             indices.windows(2).all(|w| w[1] == w[0] + 1),
-            "indici non contigui dopo il seek: {indices:?}"
+            "non-contiguous indices after the seek: {indices:?}"
         );
         assert_eq!(indices.last(), Some(&92));
     }
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "misurazione manuale, non una asserzione di correttezza"]
+    #[ignore = "manual measurement, not a correctness assertion"]
     fn bench_decode_forward_through_a_large_gop() {
         let dir = std::env::temp_dir().join("vv-media-decode-bench");
         std::fs::create_dir_all(&dir).unwrap();
@@ -644,18 +644,18 @@ mod tests {
             &path,
         );
 
-        let mut decoder = Decoder::open(&path).expect("apertura fallita");
-        decoder.seek_to_time(0.0).expect("seek fallito");
+        let mut decoder = Decoder::open(&path).expect("open failed");
+        decoder.seek_to_time(0.0).expect("seek failed");
         let start = std::time::Instant::now();
         let mut count = 0;
         while count < 249 {
-            match decoder.next_frame().expect("decode fallito") {
+            match decoder.next_frame().expect("decode failed") {
                 Some(_) => count += 1,
                 None => break,
             }
         }
         eprintln!(
-            "decodificati {count} frame (1920x1080) in {:?} ({:.1} fps)",
+            "decoded {count} frames (1920x1080) in {:?} ({:.1} fps)",
             start.elapsed(),
             count as f64 / start.elapsed().as_secs_f64()
         );
@@ -665,10 +665,10 @@ mod tests {
     fn decode_first_frame_of_x264_reads_correct_dimensions_and_pixels() {
         let path = make_test_clip("sample.mp4", 1);
 
-        let frame = decode_first_frame(&path).expect("decode fallito");
+        let frame = decode_first_frame(&path).expect("decode failed");
         assert_eq!(frame.width, 320);
         assert_eq!(frame.height, 240);
-        assert_eq!(frame.y.len(), 320 * 240, "piano Y denso, 1 byte/pixel");
+        assert_eq!(frame.y.len(), 320 * 240, "dense Y plane, 1 byte/pixel");
         // 4:2:0: chroma planes at half resolution (rounded up,
         // exact here because 320x240 is already even).
         assert_eq!(frame.u_width, 160);
@@ -681,7 +681,7 @@ mod tests {
         let distinct: std::collections::HashSet<u8> = frame.y.iter().step_by(37).copied().collect();
         assert!(
             distinct.len() > 5,
-            "i pixel decodificati sembrano degeneri: {distinct:?}"
+            "the decoded pixels look degenerate: {distinct:?}"
         );
     }
 
@@ -731,17 +731,17 @@ mod tests {
             &path,
         );
 
-        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
-        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+        let mut decoder = Decoder::open_image(&path).expect("image open failed");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame expected");
 
         let alpha = frame
             .alpha
             .as_ref()
-            .expect("una PNG con trasparenza deve portare il piano alpha");
-        assert_eq!(alpha.len(), (frame.width * frame.height) as usize, "alpha non sottocampionata");
+            .expect("a PNG with transparency must carry the alpha plane");
+        assert_eq!(alpha.len(), (frame.width * frame.height) as usize, "alpha not subsampled");
         let at = |x: u32, y: u32| alpha[(y * frame.width + x) as usize];
-        assert_eq!(at(2, 4), 255, "sinistra: opaca");
-        assert_eq!(at(13, 4), 0, "destra: trasparente, non opaca");
+        assert_eq!(at(2, 4), 255, "left: opaque");
+        assert_eq!(at(13, 4), 0, "right: transparent, not opaque");
     }
 
     /// An RGB frame (a PNG) always declares `color_range = JPEG`, but that
@@ -750,13 +750,13 @@ mod tests {
     #[test]
     fn a_png_is_reported_as_limited_range_because_that_is_what_the_scaler_produces() {
         let path = make_test_image("range.png");
-        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
-        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+        let mut decoder = Decoder::open_image(&path).expect("image open failed");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame expected");
 
         assert!(!frame.full_range);
         assert!(
             frame.y.iter().all(|&y| (16..=235).contains(&y)),
-            "valori fuori dall'intervallo limited: non è il range dichiarato"
+            "values outside the limited range: not the declared range"
         );
     }
 
@@ -766,8 +766,8 @@ mod tests {
     #[test]
     fn a_video_without_alpha_carries_no_alpha_plane() {
         let path = make_test_clip("no-alpha.mp4", 1);
-        let mut decoder = Decoder::open(&path).expect("apertura fallita");
-        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+        let mut decoder = Decoder::open(&path).expect("open failed");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame expected");
 
         assert!(frame.alpha.is_none());
     }
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     fn open_image_decodes_correct_dimensions_and_pixels() {
         let path = make_test_image("still.png");
-        let decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+        let decoder = Decoder::open_image(&path).expect("image open failed");
         assert_eq!(decoder.width(), 320);
         assert_eq!(decoder.height(), 240);
     }
@@ -787,20 +787,20 @@ mod tests {
     #[test]
     fn open_image_returns_the_same_frame_for_any_requested_position() {
         let path = make_test_image("still_repeat.png");
-        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
+        let mut decoder = Decoder::open_image(&path).expect("image open failed");
 
         decoder.seek_to_time(0.0).unwrap();
-        let (idx0, frame0) = decoder.next_frame().unwrap().expect("frame atteso");
+        let (idx0, frame0) = decoder.next_frame().unwrap().expect("frame expected");
         assert_eq!(idx0, 0);
 
         decoder.seek_to_time(120.0).unwrap();
-        let (idx_far, frame_far) = decoder.next_frame().unwrap().expect("frame atteso anche lontano nel tempo");
+        let (idx_far, frame_far) = decoder.next_frame().unwrap().expect("frame expected even far ahead in time");
         assert_eq!(idx_far, (120.0 * crate::probe::IMAGE_FPS.as_f64()).round() as FrameIdx);
-        assert_eq!(frame_far.y, frame0.y, "stesso identico frame, qualunque posizione");
+        assert_eq!(frame_far.y, frame0.y, "the very same frame, whatever the position");
 
         // Without a seek in between, next_frame keeps returning
         // something (never None) instead of behaving like a real EOF.
-        let (idx_next, frame_next) = decoder.next_frame().unwrap().expect("mai EOF per un'immagine");
+        let (idx_next, frame_next) = decoder.next_frame().unwrap().expect("never EOF for an image");
         assert!(idx_next > idx_far);
         assert_eq!(frame_next.y, frame0.y);
     }
@@ -816,10 +816,10 @@ mod tests {
             &["-f", "lavfi", "-i", "color=white:size=64x64", "-frames:v", "1", "-update", "1"],
             &path,
         );
-        let mut decoder = Decoder::open_image(&path).expect("apertura immagine fallita");
-        let (_, frame) = decoder.next_frame().unwrap().expect("frame atteso");
+        let mut decoder = Decoder::open_image(&path).expect("image open failed");
+        let (_, frame) = decoder.next_frame().unwrap().expect("frame expected");
         assert!(frame.full_range);
-        assert!(frame.y.iter().all(|&y| y >= 250), "luma compressa: {}", frame.y[0]);
+        assert!(frame.y.iter().all(|&y| y >= 250), "compressed luma: {}", frame.y[0]);
     }
 
     #[test]
@@ -828,11 +828,11 @@ mod tests {
         // for generated/consumer content): 320x240 is below the 720p
         // threshold, it must fall back on BT.601 + limited range.
         let path = make_test_clip("colorspace.mp4", 1);
-        let frame = decode_first_frame(&path).expect("decode fallito");
+        let frame = decode_first_frame(&path).expect("decode failed");
         assert_eq!(frame.matrix, ColorMatrix::Bt601);
         assert!(
             !frame.full_range,
-            "il range di default per video deve essere limited (MPEG), non full"
+            "the default range for video must be limited (MPEG), not full"
         );
     }
 
@@ -844,7 +844,7 @@ mod tests {
         let mut last_idx = -1;
         let mut count = 0;
         while let Some((idx, _)) = decoder.next_frame().unwrap() {
-            assert!(idx > last_idx, "gli indici di frame devono crescere");
+            assert!(idx > last_idx, "frame indices must increase");
             last_idx = idx;
             count += 1;
         }
@@ -861,12 +861,12 @@ mod tests {
         let (idx, _) = decoder
             .next_frame()
             .unwrap()
-            .expect("doveva esserci un frame dopo il seek");
+            .expect("there should have been a frame after the seek");
 
         // The seek lands on the keyframe <= target: with GOP=10 at 25fps the
         // distance from frame 1.5s*25=37 does not exceed one GOP.
-        assert!(idx <= 37, "idx={idx} dovrebbe essere <= al target");
-        assert!(idx >= 37 - 10, "idx={idx} troppo lontano dal target");
+        assert!(idx <= 37, "idx={idx} should be <= the target");
+        assert!(idx >= 37 - 10, "idx={idx} too far from the target");
     }
 
     /// Regression for a real bug, confirmed by the user on a
@@ -894,11 +894,11 @@ mod tests {
                 let target = keyframe - offset;
                 let mut decoder = Decoder::open(&path).unwrap();
                 decoder.seek_to_time(target as f64 / 25.0).unwrap();
-                let (idx, _) = decoder.next_frame().unwrap().expect("frame atteso");
+                let (idx, _) = decoder.next_frame().unwrap().expect("frame expected");
                 assert!(
                     idx <= target,
                     "keyframe={keyframe} offset={offset} target={target}: \
-                     atterrato su idx={idx}, oltre il target"
+                     landed on idx={idx}, past the target"
                 );
             }
         }

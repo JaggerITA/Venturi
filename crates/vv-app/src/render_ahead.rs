@@ -289,7 +289,7 @@ impl OpenDecoder {
         }
         if debug_enabled() {
             eprintln!(
-                "[render_ahead] ATTERRAGGIO idx={idx} last_keyframe_landed_prima={:?} estimated_gop_dopo={:?}",
+                "[render_ahead] LANDING idx={idx} last_keyframe_landed_before={:?} estimated_gop_after={:?}",
                 self.last_keyframe_landed, self.estimated_gop
             );
         }
@@ -705,7 +705,7 @@ fn position_decoder(
         let _ = o.decoder.seek_to_time(secs);
         if let Some(t) = debug_start {
             eprintln!(
-                "[render_ahead] seek (decoder riusato) media={media_id:?} target={segment_start} elapsed={:?}",
+                "[render_ahead] seek (decoder reused) media={media_id:?} target={segment_start} elapsed={:?}",
                 t.elapsed()
             );
         }
@@ -727,7 +727,7 @@ fn position_decoder(
     let _ = decoder.seek_to_time(secs);
     if let Some(t) = debug_start {
         eprintln!(
-            "[render_ahead] OPEN (nuovo decoder) media={media_id:?} path={} target={segment_start} elapsed={:?}",
+            "[render_ahead] OPEN (new decoder) media={media_id:?} path={} target={segment_start} elapsed={:?}",
             path.display(),
             t.elapsed()
         );
@@ -817,7 +817,7 @@ fn walk_and_fill(
             .collect::<HashSet<_>>()
         {
             eprintln!(
-                "[render_ahead] DOPO-RECONCILE media={id:?} cached_ranges={:?}",
+                "[render_ahead] AFTER-RECONCILE media={id:?} cached_ranges={:?}",
                 caches.cached_ranges(*id)
             );
         }
@@ -844,7 +844,7 @@ fn walk_and_fill(
     let behind_chunks = without_already_cached_chunks(caches, all_behind_chunks.clone());
     if debug_enabled() {
         eprintln!(
-            "[render_ahead] DIETRO from_frame={from_frame} behind_secs={behind_secs} behind_frames={behind_frames} blocchi_totali={} blocchi_da_processare={} bytes_used={} budget={cache_budget_bytes}",
+            "[render_ahead] BEHIND from_frame={from_frame} behind_secs={behind_secs} behind_frames={behind_frames} total_chunks={} chunks_to_process={} bytes_used={} budget={cache_budget_bytes}",
             all_behind_chunks.len(),
             behind_chunks.len(),
             caches.bytes_used(),
@@ -854,14 +854,14 @@ fn walk_and_fill(
                 .iter()
                 .any(|b| b.source_start == c.source_start && b.source_end == c.source_end);
             eprintln!(
-                "[render_ahead]   blocco media={:?} [{},{}] {}",
+                "[render_ahead]   chunk media={:?} [{},{}] {}",
                 c.media_id,
                 c.source_start,
                 c.source_end,
                 if processed {
-                    "DA PROCESSARE"
+                    "TO PROCESS"
                 } else {
-                    "già in cache, saltato"
+                    "already cached, skipped"
                 }
             );
         }
@@ -917,7 +917,7 @@ fn fill_segments(
         if ctx.caches.bytes_used() + estimated_frame_bytes > ctx.cache_budget_bytes {
             if debug_enabled() {
                 eprintln!(
-                    "[render_ahead] BUDGET-GIA-SATURO media={:?} segment=[{},{}] bytes_used={} budget={}",
+                    "[render_ahead] BUDGET-ALREADY-FULL media={:?} segment=[{},{}] bytes_used={} budget={}",
                     segment.media_id,
                     segment.source_start,
                     segment.source_end,
@@ -1007,7 +1007,7 @@ fn fill_segments(
                         if transit_frames >= TRANSIT_SAFETY_CAP_FRAMES {
                             if debug_enabled() {
                                 eprintln!(
-                                    "[render_ahead] TRANSITO-ECCESSIVO media={:?} segment=[{},{}] next_frame={} transit_frames={transit_frames}",
+                                    "[render_ahead] EXCESSIVE-TRANSIT media={:?} segment=[{},{}] next_frame={} transit_frames={transit_frames}",
                                     segment.media_id,
                                     segment.source_start,
                                     segment.source_end,
@@ -1038,7 +1038,7 @@ fn fill_segments(
                 Err(e) => {
                     if debug_enabled() {
                         eprintln!(
-                            "[render_ahead] DECODE-FINE(ERR) media={:?} segment=[{},{}] next_frame={} errore={e}",
+                            "[render_ahead] DECODE-FINE(ERR) media={:?} segment=[{},{}] next_frame={} error={e}",
                             segment.media_id,
                             segment.source_start,
                             segment.source_end,
@@ -1194,7 +1194,7 @@ mod tests {
         for frame in [0, 1, 30, 59] {
             assert!(
                 caches.get(media_a, frame).is_some(),
-                "frame sorgente {frame} dell'immagine non è stato decodificato"
+                "source frame {frame} of the image was not decoded"
             );
         }
     }
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(
             segments.len(),
             2,
-            "deve attraversare il taglio in un colpo solo"
+            "must cross the cut in one go"
         );
         assert_eq!(segments[0].source_start, 40);
         assert_eq!(segments[0].source_end, 49);
@@ -1378,7 +1378,7 @@ mod tests {
         assert_eq!(
             segments.len(),
             2,
-            "solo le due clip Media generano segmenti"
+            "only the two Media clips produce segments"
         );
         assert_eq!((segments[0].source_start, segments[0].source_end), (0, 9));
         assert_eq!((segments[1].source_start, segments[1].source_end), (0, 9));
@@ -1414,7 +1414,7 @@ mod tests {
         assert_eq!(
             (segments[0].media_id, segments[1].media_id),
             (media_b, media_a),
-            "a pari posizione la track in cima ha la priorità"
+            "at equal position the topmost track takes priority"
         );
     }
 
@@ -1445,7 +1445,7 @@ mod tests {
         assert_eq!(
             segments.len(),
             2,
-            "deve attraversare il taglio all'indietro in un colpo solo"
+            "must cross the cut backwards in one go"
         );
         // Discovery order: from the nearest to the playhead (60) to the
         // farthest — first the piece of media_b [50,60), then the one of
@@ -1477,7 +1477,7 @@ mod tests {
         assert_eq!(
             segments.len(),
             2,
-            "solo le due clip Media generano segmenti, il vuoto e la SolidColor vengono saltati"
+            "only the two Media clips produce segments, the gap and the SolidColor are skipped"
         );
         assert_eq!((segments[0].source_start, segments[0].source_end), (0, 9));
         assert_eq!((segments[1].source_start, segments[1].source_end), (0, 9));
@@ -1565,9 +1565,9 @@ mod tests {
 
         let real = collect_media_segments(&project, &root, 10, 30);
 
-        assert_eq!(real.len(), 1, "solo il media vero dentro la compound clip, che è l'unico da decodificare");
+        assert_eq!(real.len(), 1, "only the real media inside the compound clip, the only one to decode");
         assert_eq!(real[0].media_id, real_media);
-        assert_eq!(real[0].source_start, 10, "stesso range, in frame della timeline annidata");
+        assert_eq!(real[0].source_start, 10, "same range, in frames of the nested timeline");
         assert_eq!(real[0].source_end, 29);
     }
 
@@ -1608,7 +1608,7 @@ mod tests {
 
         let real = collect_media_segments(&project, &project.timelines[timeline_id], 0, 100);
 
-        assert!(real.is_empty(), "nessun media vero da decodificare in un ciclo puro");
+        assert!(real.is_empty(), "no real media to decode in a pure cycle");
     }
 
     /// Two clips playing together on two video tracks must be filled
@@ -1676,7 +1676,7 @@ mod tests {
                 .map(|c| (c.source_start, c.source_end))
                 .collect::<Vec<_>>(),
             vec![(118, 132), (103, 117), (100, 102)],
-            "dal bordo vicino (132) al lontano (100), ognuno da al più BEHIND_CHUNK_FRAMES"
+            "from the near edge (132) to the far one (100), each at most BEHIND_CHUNK_FRAMES"
         );
         // `timeline_start` follows the same offset as `source_start`
         // relative to the original segment (affine mapping, see the docs).
@@ -1948,7 +1948,7 @@ mod tests {
                 missing.push((frame, ok, expected));
             }
         }
-        assert!(missing.is_empty(), "frame con layer mancanti (frame, ok, expected): {missing:?}");
+        assert!(missing.is_empty(), "frames with missing layers (frame, ok, expected): {missing:?}");
     }
 
     /// End-to-end reproduction (real worker thread, not a direct
@@ -2019,7 +2019,7 @@ mod tests {
             }
             assert!(
                 start.elapsed() < Duration::from_secs(5),
-                "timeout: il buffer non ha mai raggiunto il taglio: ranges={ranges:?}"
+                "timeout: the buffer never reached the cut: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -2037,7 +2037,7 @@ mod tests {
         for (i, ranges) in samples.iter().enumerate() {
             assert!(
                 ranges.iter().any(|&(s, e)| s <= 40 && e >= 50),
-                "campione {i}: il buffer attorno alla testina è sparito con la testina ferma: {ranges:?}"
+                "sample {i}: the buffer around the playhead vanished with the playhead still: {ranges:?}"
             );
         }
     }
@@ -2084,7 +2084,7 @@ mod tests {
         assert_eq!(
             od.seek_threshold_frames(),
             25,
-            "un salto più largo di uno già osservato non deve far crescere la stima"
+            "a jump wider than one already observed must not grow the estimate"
         );
 
         od.record_keyframe_landing(235); // distance 10: must narrow
@@ -2134,7 +2134,7 @@ mod tests {
         assert_eq!(
             od.seek_threshold_frames(),
             PROXY_SEEK_THRESHOLD_FRAMES,
-            "un proxy all-intra non deve mai usare la soglia imparata, qualunque atterraggio osservi"
+            "an all-intra proxy must never use the learned threshold, whatever landing it observes"
         );
     }
 
@@ -2170,7 +2170,7 @@ mod tests {
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 1000, false, false, false),
             Positioned::Seeked,
-            "un seek reale su un media già aperto deve riusare il decoder, non riaprirlo"
+            "a real seek on an already open media must reuse the decoder, not reopen it"
         );
     }
 
@@ -2202,7 +2202,7 @@ mod tests {
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path_b, 0, false, false, false),
             Positioned::Opened,
-            "il path è cambiato: deve riaprire sul nuovo, non riusare il decoder del vecchio"
+            "the path changed: it must reopen on the new one, not reuse the old decoder"
         );
     }
 
@@ -2244,7 +2244,7 @@ mod tests {
         let advanced_next_frame = open.get(&media_a).unwrap().next_frame;
         assert!(
             advanced_next_frame > 5,
-            "il decoder deve aver avanzato di parecchio"
+            "the decoder must have advanced a lot"
         );
 
         // Simulates a real eviction: `reconcile` with a window that
@@ -2274,8 +2274,8 @@ mod tests {
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
             Positioned::Seeked,
-            "un buco lasciato da uno sfratto dietro a next_frame deve forzare un seek reale, \
-             non un Reused che lo lascia scoperto per sempre"
+            "a hole left by an eviction behind next_frame must force a real seek, \
+             not a Reused that leaves it uncovered forever"
         );
     }
 
@@ -2315,7 +2315,7 @@ mod tests {
             }
         }
         let advanced_next_frame = open.get(&media_a).unwrap().next_frame;
-        assert!(advanced_next_frame > 0, "il decoder deve aver avanzato");
+        assert!(advanced_next_frame > 0, "the decoder must have advanced");
 
         // A later cycle with the target still behind the decoder's
         // position — the normal state during forward playback —
@@ -2327,7 +2327,7 @@ mod tests {
         assert_eq!(
             open.get(&media_a).unwrap().next_frame,
             advanced_next_frame,
-            "non deve aver riaperto il decoder mentre è ancora utilmente avanti"
+            "it must not have reopened the decoder while still usefully ahead"
         );
     }
 
@@ -2386,7 +2386,7 @@ mod tests {
 
         assert!(
             outcome.caught_up,
-            "budget e finestra coprono tutta la clip: non dovrebbe restare altro da fare"
+            "budget and window cover the whole clip: nothing else should be left to do"
         );
         assert!(!outcome.interrupted);
     }
@@ -2453,11 +2453,11 @@ mod tests {
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
-            "il tratto dietro la testina [40,59] (dentro behind_secs) deve essere stato decodificato, non solo trattenuto se già presente: {ranges:?}"
+            "the span behind the playhead [40,59] (within behind_secs) must have been decoded, not just kept if already there: {ranges:?}"
         );
         assert!(
             ranges.iter().any(|&(s, e)| s <= 60 && e >= 99),
-            "la finestra in avanti deve comunque essere coperta normalmente: {ranges:?}"
+            "the forward window must still be covered normally: {ranges:?}"
         );
     }
 
@@ -2539,13 +2539,13 @@ mod tests {
 
         assert!(
             caches.contains(media_a, 94),
-            "il frame adiacente alla testina (bordo vicino della finestra dietro) deve essere \
-             tra i primi decodificati, quindi in cache anche con un budget stretto"
+            "the frame next to the playhead (near edge of the behind window) must be \
+             among the first decoded, so cached even with a tight budget"
         );
         assert!(
             !caches.contains(media_a, 45),
-            "il frame sul bordo lontano della finestra dietro non deve essere raggiunto prima \
-             di quelli vicini alla testina, con un budget che copre solo il primo blocco"
+            "the frame on the far edge of the behind window must not be reached before \
+             those near the playhead, with a budget covering only the first chunk"
         );
     }
 
@@ -2620,7 +2620,7 @@ mod tests {
         );
         assert!(
             first.caught_up,
-            "il primo giro deve completare la finestra: {first:?}"
+            "the first round must complete the window: {first:?}"
         );
 
         // 20 later rounds, same playhead, nothing changes: they must
@@ -2655,8 +2655,8 @@ mod tests {
 
         assert!(
             elapsed < Duration::from_millis(20),
-            "20 giri a testina ferma non devono toccare il decoder (nessun seek reale): \
-             impiegati {elapsed:?} in totale, attesi <20ms"
+            "20 rounds with the playhead still must not touch the decoder (no real seek): \
+             took {elapsed:?} in total, expected <20ms"
         );
     }
 
@@ -2734,11 +2734,11 @@ mod tests {
         assert_eq!(
             caches.cached_ranges(media_a),
             vec![(60 - MIN_MARGIN_FRAMES, 60 + MIN_MARGIN_FRAMES - 1)],
-            "configurato a zero secondi la finestra non deve estendersi oltre il margine minimo"
+            "set to zero seconds the window must not extend past the minimum margin"
         );
         assert!(
             outcome.caught_up,
-            "una finestra minima, già coperta, deve risultare caught_up"
+            "a minimal window, already covered, must report caught_up"
         );
     }
 
@@ -2802,11 +2802,11 @@ mod tests {
         assert!(!ranges.is_empty());
         assert_eq!(
             ranges[0].0, 0,
-            "il buffer deve partire dalla testina, non da una coda arbitraria: {ranges:?}"
+            "the buffer must start from the playhead, not from an arbitrary tail: {ranges:?}"
         );
         assert!(
             ranges[0].1 < 74,
-            "con un budget così piccolo non deve riuscire a coprire tutta la finestra: {ranges:?}"
+            "with such a small budget it must not manage to cover the whole window: {ranges:?}"
         );
     }
 
@@ -2875,18 +2875,18 @@ mod tests {
         );
         assert!(
             outcome.interrupted,
-            "deve segnalare l'interruzione al chiamante (worker_loop) per farlo ripartire subito"
+            "it must report the interruption to the caller (worker_loop) so it restarts right away"
         );
         assert!(
             !outcome.caught_up,
-            "interrotto: non ha potuto verificare se la finestra fosse coperta"
+            "interrupted: it could not check whether the window was covered"
         );
 
         let ranges = caches.cached_ranges(media_a);
         let decoded_frames: FrameIdx = ranges.iter().map(|&(s, e)| e - s + 1).sum();
         assert!(
             decoded_frames < 10,
-            "deve fermarsi dopo pochissimi frame, non decodificare l'intera finestra ormai obsoleta: ranges={ranges:?}"
+            "it must stop after very few frames, not decode the whole now-stale window: ranges={ranges:?}"
         );
     }
 
@@ -2964,11 +2964,11 @@ mod tests {
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
-            "il tratto della prima clip [40,59] non deve essere sfrattato dall'elaborazione della seconda: ranges={ranges:?}"
+            "the span of the first clip [40,59] must not be evicted by processing the second: ranges={ranges:?}"
         );
         assert!(
             ranges.iter().any(|&(s, e)| s <= 200 && e >= 200),
-            "la seconda clip deve comunque essere bufferizzata, non solo attraversata: ranges={ranges:?}"
+            "the second clip must still be buffered, not just crossed: ranges={ranges:?}"
         );
     }
 
@@ -3052,15 +3052,15 @@ mod tests {
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 40 && e >= 59),
-            "il tratto della prima clip [40,59] non deve sparire per colpa del secondo segmento nello stesso ciclo: ranges={ranges:?}"
+            "the span of the first clip [40,59] must not vanish because of the second segment in the same cycle: ranges={ranges:?}"
         );
         assert!(
             ranges.iter().any(|&(s, _)| s <= 200),
-            "la seconda clip deve comunque ricevere una fetta della capacità condivisa: ranges={ranges:?}"
+            "the second clip must still get a slice of the shared capacity: ranges={ranges:?}"
         );
         assert!(
             !outcome.caught_up,
-            "budget saturo prima di finire la finestra: non è \"caught up\", c'è ancora lavoro per il prossimo ciclo"
+            "budget full before finishing the window: not \"caught up\", there is still work for the next cycle"
         );
     }
 
@@ -3100,7 +3100,7 @@ mod tests {
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 25, false, false, false),
             Positioned::Reused,
-            "nello stesso ciclo il secondo segmento non deve mai richiedere un seek: il decoder è già lì"
+            "in the same cycle the second segment must never need a seek: the decoder is already there"
         );
 
         // Cycle 2, playhead still (`went_backward=false` for both):
@@ -3110,7 +3110,7 @@ mod tests {
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
             Positioned::Reused,
-            "testina ferma: rielaborare il primo segmento non deve scatenare un seek reale"
+            "playhead still: reprocessing the first segment must not trigger a real seek"
         );
         assert_eq!(
             position_decoder(&caches, &mut open, media_a, &path, 25, false, false, false),
@@ -3231,14 +3231,14 @@ mod tests {
         let frames_b_alone = frames_cached(&ranges);
         assert!(
             frames_b_alone > frames_b_shared,
-            "con un solo media nella finestra deve arrivare a bufferizzarne di più, non restare fermo alla quota di quando la condivideva: {frames_b_shared} -> {frames_b_alone}"
+            "with a single media in the window it must buffer more of it, not stay at the share it had when sharing: {frames_b_shared} -> {frames_b_alone}"
         );
 
         // source_start for the second cycle: clip b has source_in=0,
         // timeline_start=40, hence 200-40=160.
         assert!(
             ranges.iter().any(|&(s, _)| s <= 160),
-            "con più budget disponibile il buffer deve poter partire dalla nuova testina, non da una coda arbitraria più avanti: {ranges:?}"
+            "with more budget available the buffer must be able to start from the new playhead, not from an arbitrary tail further ahead: {ranges:?}"
         );
     }
 
@@ -3310,7 +3310,7 @@ mod tests {
             }
             assert!(
                 start.elapsed() < Duration::from_secs(5),
-                "timeout indietro: ranges={ranges:?}"
+                "timeout backwards: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -3412,7 +3412,7 @@ mod tests {
             }
             assert!(
                 start.elapsed() < Duration::from_secs(5),
-                "timeout su scrub indietro: ranges={ranges:?}"
+                "timeout on backward scrub: ranges={ranges:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -3472,7 +3472,7 @@ mod tests {
                 }
                 assert!(
                     start.elapsed() < Duration::from_millis(40),
-                    "frame {frame} non pronto entro una scadenza compatibile con la sveglia immediata"
+                    "frame {frame} not ready within a deadline compatible with the immediate wakeup"
                 );
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -3575,7 +3575,7 @@ mod tests {
         let ranges_before = caches.cached_ranges(media_a);
         assert!(
             !ranges_before.iter().any(|&(s, e)| s <= 80 && e >= 80),
-            "80 non deve essere già in cache per coincidenza, altrimenti il test non prova nulla: {ranges_before:?}"
+            "80 must not already be cached by coincidence, otherwise the test proves nothing: {ranges_before:?}"
         );
 
         // Scrub back to 80: further back than the current playhead (200),
@@ -3598,7 +3598,7 @@ mod tests {
         let ranges_after = caches.cached_ranges(media_a);
         assert!(
             ranges_after.iter().any(|&(s, e)| s <= 80 && e >= 80),
-            "lo scrub indietro a 80 deve far ricalcolare il buffer per la nuova posizione: {ranges_after:?}"
+            "scrubbing back to 80 must recompute the buffer for the new position: {ranges_after:?}"
         );
     }
 
@@ -3683,7 +3683,7 @@ mod tests {
         let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
         assert!(
             filled_up_to > 350,
-            "il primo riempimento deve aver bufferizzato ben oltre 300 (fino all'orizzonte di lookahead): {filled_up_to}"
+            "the first fill must have buffered well past 300 (up to the lookahead horizon): {filled_up_to}"
         );
 
         // Scrub back by only 30 frames: below the old threshold of
@@ -3708,8 +3708,8 @@ mod tests {
         assert_eq!(
             next_frame_after,
             filled_up_to + 1,
-            "il segmento richiesto era già interamente in cache: il decoder non doveva essere \
-             toccato affatto, next_frame deve restare dov'era: next_frame={next_frame_after}"
+            "the requested segment was already fully cached: the decoder should not have been \
+             touched at all, next_frame must stay where it was: next_frame={next_frame_after}"
         );
 
         // The intersection between the old tail and the new window
@@ -3723,7 +3723,7 @@ mod tests {
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 250 && e >= 344),
-            "l'intersezione [250,344] tra vecchia coda e nuova finestra deve restare un range contiguo: ranges={ranges:?} filled_up_to={filled_up_to}"
+            "the intersection [250,344] between old tail and new window must stay one contiguous range: ranges={ranges:?} filled_up_to={filled_up_to}"
         );
     }
 
@@ -3832,8 +3832,8 @@ mod tests {
 
         assert!(
             elapsed < Duration::from_millis(20),
-            "20 cicli a testina ferma dopo un riaggancio anticipato non devono riseekare/\
-             ridecodificare a ripetizione: impiegati {elapsed:?} in totale, attesi <20ms"
+            "20 cycles with the playhead still after an early reattach must not re-seek/\
+             re-decode repeatedly: took {elapsed:?} in total, expected <20ms"
         );
     }
 
@@ -3907,8 +3907,8 @@ mod tests {
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 5 && e >= 50),
-            "il buco [16,39] tra le due isole deve essere colmato, non lasciato scoperto per \
-             sempre da un riaggancio prematuro: ranges={ranges:?}"
+            "the hole [16,39] between the two islands must be filled, not left uncovered \
+             forever by a premature reattach: ranges={ranges:?}"
         );
     }
 
@@ -3976,8 +3976,8 @@ mod tests {
         let ranges = caches.cached_ranges(media_a);
         assert!(
             ranges.iter().any(|&(s, e)| s <= 80 && e >= 90),
-            "il segmento richiesto [80,90] deve essere raggiunto, non lasciato scoperto perché \
-             il budget si è esaurito sul transito prima di arrivarci: ranges={ranges:?}"
+            "the requested segment [80,90] must be reached, not left uncovered because \
+             the budget ran out on the transit before getting there: ranges={ranges:?}"
         );
     }
 
@@ -4068,15 +4068,15 @@ mod tests {
         assert_eq!(
             outcome,
             ControlFlow::Continue(()),
-            "il tratto voluto ha budget a sufficienza: non deve essere saltato solo perché il \
-             transito per arrivarci è stimato grande"
+            "the wanted span has enough budget: it must not be skipped just because the \
+             transit to reach it is estimated large"
         );
         assert!(
             caches
                 .cached_ranges(media_a)
                 .iter()
                 .any(|&(s, e)| s <= 24 && e >= 34),
-            "il segmento [24,34] deve essere in cache"
+            "segment [24,34] must be cached"
         );
     }
 
@@ -4184,7 +4184,7 @@ mod tests {
             let ranges = caches.cached_ranges(media_a);
             assert!(
                 ranges.iter().any(|&(s, e)| s <= target && target <= e),
-                "il buffer deve coprire la testina (target={target}): {ranges:?}"
+                "the buffer must cover the playhead (target={target}): {ranges:?}"
             );
         }
     }

@@ -196,7 +196,7 @@ impl Encoder {
 
         let video_codec = encoder::find_by_name(video.codec.ffmpeg_name()).ok_or_else(|| {
             crate::MediaError::NoStream(format!(
-                "encoder {} non disponibile",
+                "encoder {} not available",
                 video.codec.ffmpeg_name()
             ))
         })?;
@@ -246,7 +246,7 @@ impl Encoder {
                 let audio_codec =
                     encoder::find_by_name(settings.codec.ffmpeg_name()).ok_or_else(|| {
                         crate::MediaError::NoStream(format!(
-                            "encoder {} non disponibile",
+                            "encoder {} not available",
                             settings.codec.ffmpeg_name()
                         ))
                     })?;
@@ -272,7 +272,7 @@ impl Encoder {
                         .and_then(|mut formats| formats.next())
                         .ok_or_else(|| {
                             crate::MediaError::NoStream(
-                                "nessun formato campione supportato dall'encoder AAC".into(),
+                                "no sample format supported by the AAC encoder".into(),
                             )
                         })?,
                 );
@@ -525,7 +525,7 @@ mod tests {
         let meta = crate::probe::probe(&path).unwrap();
         assert_eq!(meta.width, 16);
         assert_eq!(meta.height, 16);
-        assert!(!meta.has_audio, "solo video, niente audio");
+        assert!(!meta.has_audio, "video only, no audio");
 
         let mut decoder = crate::decode::Decoder::open(&path).unwrap();
         let mut count = 0;
@@ -575,9 +575,9 @@ mod tests {
 
         let audio = crate::audio::decode_audio_track(&path, 0)
             .unwrap()
-            .expect("audio atteso");
+            .expect("audio expected");
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
-        assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+        assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
     }
 
     /// Every encoder combination available on this machine must produce a

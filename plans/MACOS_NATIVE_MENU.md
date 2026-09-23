@@ -1,55 +1,56 @@
-# MACOS_NATIVE_MENU — menu nella barra di sistema su macOS
+# MACOS_NATIVE_MENU — menu in the system menu bar on macOS
 
-Stato: non iniziato. Su macOS i menu stanno oggi nella barra egui dentro la
-finestra (`app_menu.rs`, `show_menu_bar`), come su Linux. Obiettivo: menu
-nativo nella barra di sistema su macOS, menu egui invariato su Linux.
+Status: not started. On macOS the menus currently live in the egui bar inside
+the window (`app_menu.rs`, `show_menu_bar`), as on Linux. Goal: a native menu
+in the system menu bar on macOS, egui menu unchanged on Linux.
 
-## Approccio
+## Approach
 
-eframe/egui non ha menu nativi: si usa il crate **`muda`** (quello di Tauri),
-compatibile con winit su macOS, come dipendenza solo
-`cfg(target_os = "macos")`.
+eframe/egui has no native menus: use the **`muda`** crate (the one from
+Tauri), compatible with winit on macOS, as a
+`cfg(target_os = "macos")`-only dependency.
 
-1. **`MenuCommand`**: enum unico dei comandi (Open, Save, SaveAs, Import,
+1. **`MenuCommand`**: a single enum of commands (Open, Save, SaveAs, Import,
    ImportOtio, Export, ExportOtio, Settings, Undo, Redo, Copy, Cut, Paste,
    PasteAttributes, Delete, RippleDelete, Split, ZoomIn, ZoomOut, Fullscreen,
-   About, OpenRecent(path), JumpHistory(pos), toggle delle checkbox…) con un
-   solo `dispatch`. Il menu egui e quello nativo producono comandi, la logica
-   non si duplica. Refactor utile anche a sé.
-2. **Menu nativo** (`macos_menu.rs`): costruito una volta dopo l'avvio di
-   eframe (nella closure di creazione dell'app, quando NSApp esiste). Eventi
-   letti ogni frame da `MenuEvent::receiver()`; `MenuEvent::set_event_handler`
-   chiama `ctx.request_repaint()`, altrimenti a UI ferma il click resta in coda.
-3. **Stato sincronizzato ogni frame** (costa poco): `set_enabled` sulle voci
-   condizionali (Export, Copy/Cut con selezione, Paste con clipboard…),
-   `set_checked` sulle `CheckMenuItem` (Inspector, Audiometer, Scrub audio,
+   About, OpenRecent(path), JumpHistory(pos), checkbox toggles…) with a
+   single `dispatch`. Both the egui menu and the native one produce commands,
+   the logic is not duplicated. A useful refactor on its own.
+2. **Native menu** (`macos_menu.rs`): built once after eframe starts (in the
+   app creation closure, when NSApp exists). Events read every frame from
+   `MenuEvent::receiver()`; `MenuEvent::set_event_handler` calls
+   `ctx.request_repaint()`, otherwise with an idle UI the click stays queued.
+3. **State synced every frame** (cheap): `set_enabled` on conditional items
+   (Export, Copy/Cut with a selection, Paste with a clipboard…),
+   `set_checked` on the `CheckMenuItem`s (Inspector, Audiometer, Scrub audio,
    Selection follows playhead, Use proxy).
-4. **Sottomenu dinamici** (progetti recenti, cronologia undo): ricostruiti
-   quando cambiano. Tutto il menu ricostruito al cambio lingua.
-5. **Menu applicazione standard**: "Venturi" con About, Impostazioni (⌘,),
-   Nascondi/Nascondi altre, Esci (`PredefinedMenuItem`).
+4. **Dynamic submenus** (recent projects, undo history): rebuilt when they
+   change. The whole menu is rebuilt on a language change.
+5. **Standard application menu**: "Venturi" with About, Settings (⌘,),
+   Hide/Hide Others, Quit (`PredefinedMenuItem`).
 
-## Ostacoli
+## Obstacles
 
-- **Widget non nativi in Playback → Proxy**: i `DragValue` di read-ahead,
-  read-behind e cache video non possono stare in un menu nativo. Passo
-  preliminare separato: spostarli nella finestra Impostazioni (sensato anche
-  su Linux). Idem la label "zoom hint" del menu Timeline.
-- **Acceleratori**: con un acceleratore sulla voce, macOS intercetta il tasto
-  prima di winit, che non lo vede più. Quindi:
-  - la scorciatoia va gestita una volta sola (evento di menu, non
-    `handle_shortcuts`), oppure le voci restano senza acceleratore e mostrano
-    la scorciatoia solo nel testo;
-  - le scorciatoie sono configurabili: acceleratori da aggiornare al cambio
-    di keymap, con mappatura `egui::Key` → `muda` (`<`/`IntlBackslash` a mano,
-    vedi il fix ISO in `fix_iso_key`);
-  - ⌘C/⌘V/⌘X nel menu Modifica rischiano di rompere copia/incolla nei campi
-    di testo egui: senza acceleratore, oppure inoltrati a egui come
+- **Non-native widgets in Playback → Proxy**: the read-ahead, read-behind
+  and video cache `DragValue`s cannot live in a native menu. Separate
+  preliminary step: move them to the Settings window (sensible on Linux
+  too). Same for the "zoom hint" label of the Timeline menu.
+- **Accelerators**: with an accelerator on the item, macOS intercepts the
+  key before winit, which no longer sees it. Therefore:
+  - the shortcut must be handled only once (menu event, not
+    `handle_shortcuts`), or the items stay without an accelerator and show
+    the shortcut in the text only;
+  - shortcuts are configurable: accelerators must be updated on a keymap
+    change, with an `egui::Key` → `muda` mapping (`<`/`IntlBackslash` by
+    hand, see the ISO fix in `fix_iso_key`);
+  - ⌘C/⌘V/⌘X in the Edit menu risk breaking copy/paste in egui text
+    fields: no accelerator, or forwarded to egui as
     `Event::Copy`/`Event::Paste`.
-- **Test**: niente Mac in sviluppo, ogni iterazione passa da CI + Mac reale.
+- **Testing**: no Mac in development, every iteration goes through CI + a
+  real Mac.
 
-## Stima
+## Estimate
 
-400-600 righe, in gran parte riorganizzazione di `app_menu.rs`. Ordine:
-impostazioni proxy nella finestra Impostazioni → `MenuCommand` (solo Linux,
-testabile) → menu nativo macOS.
+400-600 lines, mostly a reorganisation of `app_menu.rs`. Order: proxy
+settings in the Settings window → `MenuCommand` (Linux only, testable) →
+native macOS menu.

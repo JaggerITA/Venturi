@@ -20,8 +20,8 @@ vv-render = { version = "0.1.0", path = "../vv-render" }
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Dipendenza diretta solo per la feature: senza, le decorazioni client-side
-# di winit disegnano i pulsanti ma non il titolo della finestra.
+# Direct dependency only for the feature: without it, winit's client-side
+# decorations draw the buttons but not the window title.
 winit = { version = "0.30.13", features = ["wayland-csd-adwaita"] }
 raw-window-handle = "0.6.2"
 sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false }

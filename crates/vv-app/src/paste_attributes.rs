@@ -502,9 +502,9 @@ mod tests {
         assert_eq!(
             pasted.effects.transform.track(TransformParam::Opacity).default,
             target.effects.transform.track(TransformParam::Opacity).default,
-            "l'opacità non selezionata resta quella della clip di destinazione"
+            "unselected opacity stays that of the destination clip"
         );
-        assert_eq!(pasted.fade_in, 0, "le dissolvenze non selezionate non si toccano");
+        assert_eq!(pasted.fade_in, 0, "unselected fades are left alone");
     }
 
     /// The keyframes are in source frames: a target clip starting from
@@ -600,7 +600,7 @@ mod tests {
             .tracks_of_kind(TrackKind::Video)
             .next()
             .map(|(i, _)| i)
-            .expect("la timeline nasce con una track video");
+            .expect("the timeline is created with a video track");
 
         let mut source = clip(0, 0, 20);
         source.id = app.project.alloc_clip_id();
@@ -620,7 +620,7 @@ mod tests {
             .set_selection(std::collections::BTreeSet::from([(track_index, target_id)]), None);
         app.paste_attributes_selection = HashSet::from([Attribute::Zoom]);
         app.open_paste_attributes_dialog();
-        let dialog = app.paste_attributes.take().expect("la finestra si apre");
+        let dialog = app.paste_attributes.take().expect("the dialog opens");
         app.apply_paste_attributes(&dialog);
 
         let zoom_of = |app: &VenturiApp, id| {
@@ -634,6 +634,6 @@ mod tests {
         };
         assert_eq!(zoom_of(&app, target_id), 2.0);
         app.history.undo(&mut app.project);
-        assert_eq!(zoom_of(&app, target_id), 1.0, "un solo passo di undo");
+        assert_eq!(zoom_of(&app, target_id), 1.0, "a single undo step");
     }
 }

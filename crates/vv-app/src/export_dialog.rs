@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(validate_path(dir.join("video").to_str().unwrap()), Ok(expected.clone()));
         assert_eq!(validate_path(expected.to_str().unwrap()), Ok(expected));
         assert!(validate_path("").is_err());
-        assert!(validate_path("/non/esiste/davvero/video.mp4").is_err());
+        assert!(validate_path("/does/not/really/exist/video.mp4").is_err());
     }
 
     #[test]

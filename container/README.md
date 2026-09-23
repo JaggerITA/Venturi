@@ -1,88 +1,87 @@
-# Container di test (headless)
+# Test container (headless)
 
-Ambiente Podman per compilare/eseguire/screenshottare vv-app senza una
-sessione grafica reale — Xvfb come X server virtuale, Vulkan software
-(lavapipe, già in `mesa-vulkan-drivers`) per `wgpu` invece di richiedere
-una GPU reale passata al container. Il repo non è dentro l'immagine: va
-montato a runtime, così riflette sempre lo stato locale corrente senza
-dover ricostruire l'immagine a ogni modifica.
+Podman environment to build/run/screenshot vv-app without a real graphical
+session — Xvfb as a virtual X server, software Vulkan (lavapipe, already in
+`mesa-vulkan-drivers`) for `wgpu` instead of requiring a real GPU passed to
+the container. The repo is not inside the image: it is mounted at runtime,
+so it always reflects the current local state without rebuilding the image
+on every change.
 
-## Setup (una volta)
+## Setup (once)
 
 ```sh
 podman build -t venturi-test -f container/Containerfile container/
 ```
 
-## Uso rapido (comando singolo, container usa-e-getta)
+## Quick use (single command, throwaway container)
 
 ```sh
 container/run.sh cargo build -p vv-app
 container/run.sh cargo test -p vv-app -- --test-threads=1
-container/run.sh bash   # shell interattiva
+container/run.sh bash   # interactive shell
 ```
 
-## Build dell'AppImage
+## AppImage build
 
-Usa un'immagine separata (`Containerfile.appimage`, Debian 13) perché la
-release deve linkare contro una glibc vecchia, non quella di Fedora 44:
+Uses a separate image (`Containerfile.appimage`, Debian 13) because the
+release must link against an old glibc, not Fedora 44's:
 
 ```sh
 scripts/build-appimage.sh   # -> target/appimage/Venturi-<arch>.AppImage
 ```
 
-Lo script rientra da solo nel container (via `container/build-appimage.sh`,
-che costruisce l'immagine al primo uso). Vedi ../README.md per i volumi di
-cache.
+The script re-enters the container by itself (through
+`container/build-appimage.sh`, which builds the image on first use). See
+../README.md for the cache volumes.
 
-## Uso per testare la UI (sessione persistente)
+## Testing the UI (persistent session)
 
-Un comando singolo (`run.sh`) non basta per "avvia l'app, interagisci,
-screenshot, interagisci di nuovo" — serve un container che resti vivo
-tra un comando e l'altro:
+A single command (`run.sh`) is not enough for "start the app, interact,
+screenshot, interact again" — that needs a container that stays alive
+between one command and the next:
 
 ```sh
-container/session.sh start                      # avvia Xvfb + il container
+container/session.sh start                      # starts Xvfb + the container
 container/session.sh exec cargo build -p vv-app
 
-# Avvia l'app in background dentro la sessione (il binario sta in
-# /cargo-target/debug/, non nel $PATH — vedi CARGO_TARGET_DIR nel
+# Start the app in the background inside the session (the binary is in
+# /cargo-target/debug/, not in $PATH — see CARGO_TARGET_DIR in the
 # Containerfile):
 container/session.sh exec bash -c \
     'nohup /cargo-target/debug/vv-app >/tmp/vv-app.log 2>&1 & disown'
 
-container/session.sh shot avvio                  # -> container/shots/avvio.png
-container/session.sh exec xdotool mousemove 162 11 click 1   # apre un menu
-container/session.sh shot menu-aperto
+container/session.sh shot startup                # -> container/shots/startup.png
+container/session.sh exec xdotool mousemove 162 11 click 1   # opens a menu
+container/session.sh shot menu-open
 
 container/session.sh exec pkill -f vv-app
-container/session.sh stop                        # ferma e rimuove il container
+container/session.sh stop                        # stops and removes the container
 ```
 
-`xdotool` prende coordinate assolute sullo schermo virtuale
-(1280x800 di default, `XVFB_RESOLUTION` nel Containerfile) — usa uno
-screenshot precedente per leggere a occhio le coordinate del prossimo
-click. Comandi utili: `mousemove X Y`, `click 1`/`click 3` (tasto
-sinistro/destro), `key <nome>` (es. `key space`), `keydown`/`keyup`
-per un drag (`mousedown 1` ... `mousemove` ... `mouseup 1`).
+`xdotool` takes absolute coordinates on the virtual screen (1280x800 by
+default, `XVFB_RESOLUTION` in the Containerfile) — use a previous screenshot
+to eyeball the coordinates of the next click. Useful commands:
+`mousemove X Y`, `click 1`/`click 3` (left/right button), `key <name>`
+(e.g. `key space`), `keydown`/`keyup`, and for a drag
+(`mousedown 1` ... `mousemove` ... `mouseup 1`).
 
-## Cache tra le run
+## Cache between runs
 
-`run.sh`/`session.sh` montano due volumi Podman nominati
-(`venturi-cargo-registry`, `venturi-target`) così le dipendenze
-scaricate e gli artefatti di build restano tra un container e l'altro
-— solo il primo build è lento (bindgen di `ffmpeg-next` + `wgpu`,
-~2 minuti), i successivi sono incrementali. Per ripartire da zero:
+`run.sh`/`session.sh` mount two named Podman volumes
+(`venturi-cargo-registry`, `venturi-target`) so downloaded dependencies and
+build artifacts persist from one container to the next — only the first
+build is slow (`ffmpeg-next` bindgen + `wgpu`, ~2 minutes), later ones are
+incremental. To start over from scratch:
 `podman volume rm venturi-cargo-registry venturi-target`.
 
-## Limiti noti
+## Known limitations
 
-- Nessun audio reale (`/etc/asound.conf` punta a un device ALSA nullo):
-  basta perché `cpal` non fallisca l'apertura dello stream, non per
-  sentire nulla — irrilevante per test visivi sulla timeline/UI.
-- Rendering software (lavapipe): funzionalmente corretto ma più lento
-  di una GPU reale — va bene per uno screenshot o un giro di
-  interazione, non per misurare framerate/performance percepite.
-- Nessun window manager: le finestre non hanno decorazioni e non c'è
-  focus-follow-mouse — `xdotool` interagisce comunque via coordinate
-  assolute, ma azioni che assumono un WM (es. alt-tab) non si
-  applicano.
+- No real audio (`/etc/asound.conf` points to a null ALSA device): enough
+  for `cpal` not to fail opening the stream, not to hear anything —
+  irrelevant for visual tests of the timeline/UI.
+- Software rendering (lavapipe): functionally correct but slower than a
+  real GPU — fine for a screenshot or an interaction round, not for
+  measuring framerate/perceived performance.
+- No window manager: windows have no decorations and there is no
+  focus-follows-mouse — `xdotool` interacts through absolute coordinates
+  anyway, but actions that assume a WM (e.g. alt-tab) do not apply.

@@ -364,7 +364,7 @@ impl TimelineAudio {
             let samples = match result.samples {
                 Ok(samples) => Arc::new(samples),
                 Err(e) => {
-                    eprintln!("vv-app: stretch audio a {}x fallito: {e}", request.tempo);
+                    eprintln!("vv-app: audio stretch at {}x failed: {e}", request.tempo);
                     continue;
                 }
             };
@@ -491,7 +491,7 @@ mod tests {
         while audio.speed() != speed {
             assert!(
                 started.elapsed() < Duration::from_secs(5),
-                "lo stretch doveva completarsi"
+                "the stretch should have completed"
             );
             std::thread::sleep(Duration::from_millis(5));
             audio.tick();
@@ -548,7 +548,7 @@ mod tests {
         assert!(advanced > 0.45 && advanced < 0.9, "advanced={advanced}");
 
         audio.request_speed(1.0);
-        assert_eq!(audio.speed(), 1.0, "tornare a 1x è immediato");
+        assert_eq!(audio.speed(), 1.0, "going back to 1x is immediate");
         assert!(audio.stretched.is_none());
     }
 
@@ -564,7 +564,7 @@ mod tests {
         while Instant::now() < deadline && max <= window_secs + 1.0 {
             audio.tick();
             let pos = secs(&audio);
-            assert!(pos >= max - 1e-6, "mai indietro: pos={pos} max={max}");
+            assert!(pos >= max - 1e-6, "never backwards: pos={pos} max={max}");
             max = pos;
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -573,7 +573,7 @@ mod tests {
         let covered = window.covered_until(audio.channels()) as f64 / RATE;
         assert!(
             covered > max,
-            "l'audio deve precedere la testina: covered={covered} max={max}"
+            "audio must lead the playhead: covered={covered} max={max}"
         );
     }
 
@@ -605,7 +605,7 @@ mod tests {
         while audio.stretched.as_ref().unwrap().chunks.is_empty() {
             assert!(
                 started.elapsed() < Duration::from_secs(5),
-                "finestra mai arrivata"
+                "window never arrived"
             );
             std::thread::sleep(Duration::from_millis(5));
             audio.tick();

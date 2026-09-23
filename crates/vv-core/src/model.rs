@@ -1897,7 +1897,7 @@ mod keyframe_tests {
         assert!(Interpolation::EaseIn.ease(0.5) < 0.5);
         assert!(Interpolation::EaseOut.ease(0.5) > 0.5);
         for interp in Interpolation::PRESETS {
-            assert_eq!(interp.ease(1.0), 1.0, "{interp:?} deve arrivare a destinazione");
+            assert_eq!(interp.ease(1.0), 1.0, "{interp:?} must reach the destination");
         }
     }
 
@@ -1946,8 +1946,8 @@ mod keyframe_tests {
         k.upsert(10, 100.0, Interpolation::Linear);
         k.upsert(20, 200.0, Interpolation::Linear);
 
-        assert_eq!(k.value_at(0), 100.0, "prima del primo: valore del primo");
-        assert_eq!(k.value_at(30), 200.0, "dopo l'ultimo: valore dell'ultimo");
+        assert_eq!(k.value_at(0), 100.0, "before the first: value of the first");
+        assert_eq!(k.value_at(30), 200.0, "after the last: value of the last");
     }
 
     #[test]
@@ -1967,12 +1967,12 @@ mod keyframe_tests {
         k.upsert(0, 0.0, Interpolation::Hold);
         k.upsert(10, 100.0, Interpolation::Hold);
 
-        assert_eq!(k.value_at(5), 0.0, "Hold mantiene il valore di partenza");
+        assert_eq!(k.value_at(5), 0.0, "Hold keeps the starting value");
         assert_eq!(k.value_at(9), 0.0);
         assert_eq!(
             k.value_at(10),
             100.0,
-            "sul keyframe stesso vale il suo valore"
+            "on the keyframe itself it has its value"
         );
     }
 
@@ -1990,7 +1990,7 @@ mod keyframe_tests {
         let mut last = k.value_at(0);
         for f in 1..=10 {
             let v = k.value_at(f);
-            assert!(v >= last, "value_at deve crescere monotonamente");
+            assert!(v >= last, "value_at must increase monotonically");
             last = v;
         }
     }
@@ -2016,7 +2016,7 @@ mod keyframe_tests {
         assert_eq!(
             k.remove_at(5),
             None,
-            "rimuovere due volte non deve fare nulla"
+            "removing twice must do nothing"
         );
     }
 
@@ -2041,7 +2041,7 @@ mod keyframe_tests {
         assert_eq!(
             tracks.value_at(5).zoom,
             [1.0, 1.0],
-            "gli altri parametri restano al loro default"
+            "the other parameters stay at their default"
         );
         assert!(!tracks.is_constant());
     }
@@ -2059,11 +2059,11 @@ mod keyframe_tests {
         let both = [TransformParam::Rotation, TransformParam::ZoomX];
         assert_eq!(tracks.previous_keyframe(&both, 20), Some(10));
         assert_eq!(tracks.next_keyframe(&both, 20), Some(30));
-        assert_eq!(tracks.previous_keyframe(&both, 10), None, "non se stesso");
+        assert_eq!(tracks.previous_keyframe(&both, 10), None, "not itself");
         assert_eq!(
             tracks.next_keyframe(&[TransformParam::Rotation], 20),
             None,
-            "solo i keyframe dei parametri chiesti"
+            "only the keyframes of the requested parameters"
         );
     }
 
@@ -2088,7 +2088,7 @@ mod keyframe_tests {
         assert_eq!(mid.rotation, 45.0);
         assert_eq!(mid.anchor, [0.1, 0.2]);
         assert_eq!(mid.opacity, 50.0);
-        assert_eq!(mid.flip, [true, true], "il flip scatta a metà, non sfuma");
+        assert_eq!(mid.flip, [true, true], "flip snaps halfway, it does not blend");
     }
 
     #[test]
@@ -2157,17 +2157,17 @@ mod timeline_tests {
         assert_eq!(
             tl.active_video_clip_at(5).map(|(t, c)| (t, c.id)),
             Some((0, ClipId(1))),
-            "solo la track bottom ha qualcosa qui"
+            "only the bottom track has something here"
         );
         assert_eq!(
             tl.active_video_clip_at(15).map(|(t, c)| (t, c.id)),
             Some((1, ClipId(2))),
-            "la track top copre questo punto: vince lei"
+            "the top track covers this point: it wins"
         );
         assert_eq!(
             tl.active_video_clip_at(25).map(|(t, c)| (t, c.id)),
             Some((0, ClipId(1))),
-            "tornata scoperta la track top, si rivede la bottom sotto"
+            "with the top track uncovered again, the bottom one shows"
         );
         assert!(tl.active_video_clip_at(35).is_none());
     }
@@ -2203,7 +2203,7 @@ mod timeline_tests {
                 .map(|(t, c)| (*t, c.id))
                 .collect::<Vec<_>>(),
             vec![(0, ClipId(1)), (1, ClipId(2))],
-            "bottom prima, top per ultima: è l'ordine di compositing"
+            "bottom first, top last: it is the compositing order"
         );
         assert_eq!(
             tl.active_video_clips_at(5)
@@ -2211,7 +2211,7 @@ mod timeline_tests {
                 .map(|(_, c)| c.id)
                 .collect::<Vec<_>>(),
             vec![ClipId(1)],
-            "qui solo la track bottom ha una clip"
+            "here only the bottom track has a clip"
         );
         assert!(tl.active_video_clips_at(35).is_empty());
     }
@@ -2273,7 +2273,7 @@ mod timeline_tests {
             60,
             Rational::one(),
         );
-        assert_eq!(clip.source_frame_at(60), 200, "primo frame della clip");
+        assert_eq!(clip.source_frame_at(60), 200, "first frame of the clip");
         assert_eq!(clip.source_frame_at(75), 215);
     }
 
@@ -2332,7 +2332,7 @@ mod timeline_tests {
         let source_len = 53_946;
         let clip = media_clip_at(rate, 0, source_len, 0);
         assert_eq!(clip.source_len(), source_len);
-        assert_eq!(clip.timeline_len, 54_000, "15 minuti esatti a 60 fps");
+        assert_eq!(clip.timeline_len, 54_000, "exactly 15 minutes at 60 fps");
     }
 
     #[test]
@@ -2340,11 +2340,11 @@ mod timeline_tests {
         let rate = Rational::conform_rate(Rational::new(60, 1), Rational::new(60000, 1001));
         let clip = media_clip_at(rate, 0, 53_946, 120);
 
-        assert_eq!(clip.source_frame_at(120), 0, "primo frame della clip");
+        assert_eq!(clip.source_frame_at(120), 0, "first frame of the clip");
         assert_eq!(
             clip.source_frame_at(clip.timeline_end() - 1),
             53_945,
-            "ultimo frame sorgente sull'ultimo frame di timeline"
+            "last source frame on the last timeline frame"
         );
 
         // No accumulated drift: at every instant the source frame
@@ -2356,7 +2356,7 @@ mod timeline_tests {
             let got = clip.source_frame_at(120 + t) as f64;
             assert!(
                 (got - expected).abs() <= 0.5,
-                "a {secs}s: atteso ~{expected}, ottenuto {got}"
+                "at {secs}s: expected ~{expected}, got {got}"
             );
         }
     }
@@ -2381,7 +2381,7 @@ mod timeline_tests {
         let clip = media_clip_at(rate, 0, 25, 0);
         assert_eq!(clip.timeline_len, 30, "1s a 25 fps dura 1s a 30 fps");
         let sources: Vec<FrameIdx> = (0..6).map(|t| clip.source_frame_at(t)).collect();
-        assert_eq!(sources, vec![0, 1, 2, 2, 3, 4], "un frame ripetuto su sei");
+        assert_eq!(sources, vec![0, 1, 2, 2, 3, 4], "one frame in six repeated");
     }
 
     #[test]
@@ -2446,9 +2446,9 @@ mod timeline_tests {
         assert_eq!(
             clips[1].rate,
             Rational::one(),
-            "una SolidColor non si conforma a nulla"
+            "a SolidColor does not conform to anything"
         );
-        assert_eq!(clips[0].timeline_len, 1000, "la durata di timeline non cambia");
+        assert_eq!(clips[0].timeline_len, 1000, "the timeline duration does not change");
     }
 
     #[test]
@@ -2460,8 +2460,8 @@ mod timeline_tests {
         let rate_25 = Rational::conform_rate(Rational::new(25, 1), Rational::new(30000, 1001));
         clip.retime(Rational::new(30, 1), Rational::new(25, 1), rate_25);
         assert_eq!(clip.timeline_start, 125, "5 secondi");
-        assert_eq!(clip.source_offset, 250, "10 secondi nel media");
-        assert_eq!(clip.timeline_end(), 626, "fine a 751 frame di 30 fps");
+        assert_eq!(clip.source_offset, 250, "10 seconds into the media");
+        assert_eq!(clip.timeline_end(), 626, "end at 751 frames of 30 fps");
         assert_eq!(clip.rate, rate_25);
 
         clip.retime(Rational::new(25, 1), Rational::new(30, 1), rate_30);
@@ -2485,7 +2485,7 @@ mod timeline_tests {
     #[test]
     fn transform_tracks_saved_without_a_newer_param_load_with_its_default() {
         let older = "(params: [], flip: (false, false))";
-        let tracks: TransformTracks = ron::from_str(older).expect("caricamento");
+        let tracks: TransformTracks = ron::from_str(older).expect("load");
         let t = tracks.value_at(0);
         assert_eq!(t.opacity, 100.0);
         assert_eq!(t.zoom, [1.0, 1.0]);

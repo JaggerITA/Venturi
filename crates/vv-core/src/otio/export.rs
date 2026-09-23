@@ -233,7 +233,7 @@ mod tests {
     fn project() -> (Project, TimelineId, MediaId) {
         let mut project = Project::default();
         let media = project.media_pool.insert(MediaItem {
-            path: "/tmp/un video.mp4".into(),
+            path: "/tmp/a video.mp4".into(),
             meta: MediaMeta {
                 duration_frames: 1000,
                 fps: Rational::new(30_000, 1001),
@@ -285,18 +285,18 @@ mod tests {
         let names: Vec<&str> = tracks.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["V1", "V2", "A1"]);
         assert_eq!(tracks[2]["kind"], "Audio");
-        assert_eq!(tracks[2]["enabled"], false, "track mutata");
+        assert_eq!(tracks[2]["enabled"], false, "muted track");
 
         let v1 = tracks[0]["children"].as_array().unwrap();
         assert_eq!(v1[0]["OTIO_SCHEMA"], "Gap.1");
         assert_eq!(v1[0]["source_range"]["duration"]["value"], 30.0);
         let clip = &v1[1];
-        assert_eq!(clip["name"], "un video.mp4");
+        assert_eq!(clip["name"], "a video.mp4");
         assert_eq!(clip["source_range"]["start_time"]["value"], 100.0);
         assert_eq!(clip["source_range"]["start_time"]["rate"], 30.0);
         assert_eq!(clip["source_range"]["duration"]["value"], 300.0);
         let reference = &clip["media_references"]["DEFAULT_MEDIA"];
-        assert_eq!(reference["target_url"], "file:///tmp/un%20video.mp4");
+        assert_eq!(reference["target_url"], "file:///tmp/a%20video.mp4");
         assert_eq!(reference["available_range"]["duration"]["value"], 1000.0);
 
         let generator = &tracks[1]["children"][0]["media_references"]["DEFAULT_MEDIA"];
@@ -325,7 +325,7 @@ mod tests {
 
         let otio = timeline_to_otio(&project, timeline_id, None);
         let v1 = otio["tracks"]["children"][0]["children"].as_array().unwrap();
-        assert_eq!(v1.len(), 2, "nessun gap tra le due metà");
+        assert_eq!(v1.len(), 2, "no gap between the two halves");
         let start = |i: usize| v1[i]["source_range"]["start_time"]["value"].as_f64().unwrap();
         let len = |i: usize| v1[i]["source_range"]["duration"]["value"].as_f64().unwrap();
         assert_eq!(start(0) + len(0), start(1));
@@ -359,7 +359,7 @@ mod tests {
             effects
                 .iter()
                 .find(|e| e["metadata"]["Resolve_OTIO"]["Effect Name"] == name)
-                .unwrap_or_else(|| panic!("nessun effetto {name}"))
+                .unwrap_or_else(|| panic!("no effect {name}"))
                 .clone()
         };
         let raw = |effect: &Value, id: &str| {
@@ -368,7 +368,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .find(|p| p["Parameter ID"] == id)
-                .unwrap_or_else(|| panic!("nessun parametro {id}"))["Parameter Value"]
+                .unwrap_or_else(|| panic!("no parameter {id}"))["Parameter Value"]
                 .clone()
         };
         // The values are f32 widened to f64: comparing them exactly would
@@ -380,9 +380,9 @@ mod tests {
         let transform = named("Transform");
         assert_eq!(transform["effect_name"], "Resolve Effect");
         assert_eq!(value(&transform, "transformationZoomX"), 1.07);
-        assert_eq!(value(&transform, "transformationPan"), 0.05, "96 px su 1920");
-        assert_eq!(value(&transform, "transformationTilt"), -0.05, "-54 px su 1080");
-        assert_eq!(value(&transform, "transformationRotationAngle"), -7.8, "verso opposto");
+        assert_eq!(value(&transform, "transformationPan"), 0.05, "96 px out of 1920");
+        assert_eq!(value(&transform, "transformationTilt"), -0.05, "-54 px out of 1080");
+        assert_eq!(value(&transform, "transformationRotationAngle"), -7.8, "opposite direction");
         let anchor = raw(&transform, "transformationAnchorPoint");
         assert!((anchor[0].as_f64().unwrap() - 0.1).abs() < 1e-6);
         assert_eq!(anchor[1].as_f64().unwrap(), 0.0);
@@ -392,7 +392,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|p| p["Parameter ID"] != "transformationZoomY"),
-            "i parametri al default sono omessi, come fa Resolve"
+            "parameters at default are omitted, as Resolve does"
         );
         assert_eq!(raw(&transform, "transformationFlipX"), true);
         assert!(
@@ -401,7 +401,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|p| p["Parameter ID"] != "transformationFlipY"),
-            "il flip non attivo è omesso"
+            "an inactive flip is omitted"
         );
         assert_eq!(value(&named("Cropping"), "cropTop"), 0.1);
         assert_eq!(value(&named("Composite"), "opacity"), 80.0);
@@ -428,7 +428,7 @@ mod tests {
         let otio = timeline_to_otio(&project, timeline_id, None);
         let keys = &otio["tracks"]["children"][0]["children"][0]["effects"][0]["metadata"]
             ["Resolve_OTIO"]["Parameters"][0]["Key Frames"];
-        assert_eq!(keys["10"]["Value"], 2.0, "frame 40 della sorgente, decimo della clip");
+        assert_eq!(keys["10"]["Value"], 2.0, "source frame 40, tenth of the clip");
     }
 
     /// "Around the text" is a shorthand we have and Resolve does not: the
@@ -467,12 +467,12 @@ mod tests {
                 .as_f64()
                 .unwrap()
         };
-        // 440 px di testo più il 10% di margine, più 20 px di padding per lato.
-        assert!((value("backgroundWidth") - 524.0 / 1920.0).abs() < 1e-6, "524 px su 1920");
-        assert!((value("backgroundHeight") - 0.2).abs() < 1e-6, "216 px su 1080");
-        // 0.1 del lato corto del rettangolo (216 px) sono 21.6 px, che per
-        // Resolve è una frazione dell'altezza del frame.
-        assert!((value("backgroundCornerRadius") - 0.02).abs() < 1e-6, "21.6 px su 1080");
+        // 440 px of text plus 10% margin, plus 20 px of padding per side.
+        assert!((value("backgroundWidth") - 524.0 / 1920.0).abs() < 1e-6, "524 px out of 1920");
+        assert!((value("backgroundHeight") - 0.2).abs() < 1e-6, "216 px out of 1080");
+        // 0.1 of the rectangle's short side (216 px) is 21.6 px, which for
+        // Resolve is a fraction of the frame height.
+        assert!((value("backgroundCornerRadius") - 0.02).abs() < 1e-6, "21.6 px out of 1080");
 
         // Without a measurement there is nothing better than the frame.
         let otio = timeline_to_otio(&project, timeline_id, None);
@@ -503,7 +503,7 @@ mod tests {
     fn normalizes_the_position_on_the_clip_not_on_the_frame() {
         let mut project = Project::default();
         let media = project.media_pool.insert(MediaItem {
-            path: "/tmp/verticale.mp4".into(),
+            path: "/tmp/vertical.mp4".into(),
             meta: MediaMeta {
                 duration_frames: 1000,
                 fps: Rational::new(30, 1),
@@ -519,7 +519,7 @@ mod tests {
             compound: None,
         });
         let timeline_id = project.timelines.insert(Timeline {
-            name: "Verticale".into(),
+            name: "Vertical".into(),
             fps: Rational::new(30, 1),
             resolution: (1920, 1080),
             tracks: vec![Track::new(TrackKind::Video)],
@@ -534,11 +534,11 @@ mod tests {
             ["Resolve_OTIO"]["Parameters"][0]["Parameter Value"]
             .as_f64()
             .unwrap();
-        assert_eq!((pan * 1e4).round() / 1e4, -1.4403, "-700 su 486 px di clip");
+        assert_eq!((pan * 1e4).round() / 1e4, -1.4403, "-700 out of 486 px of clip");
         assert_eq!(
             (pan * 1920.0).round(),
             -2765.0,
-            "il valore che l'inspector di Resolve mostra in pixel"
+            "the value Resolve's inspector shows in pixels"
         );
     }
 
@@ -562,7 +562,7 @@ mod tests {
         let transition = &children[0];
         assert_eq!(transition["OTIO_SCHEMA"], "Transition.1");
         assert_eq!(transition["in_offset"]["value"], 0.0);
-        assert_eq!(transition["out_offset"]["value"], 24.0, "entra nella clip che segue");
+        assert_eq!(transition["out_offset"]["value"], 24.0, "reaches into the following clip");
         assert_eq!(transition["metadata"]["Resolve_OTIO"]["Transition Type"], "Push");
         assert_eq!(transition["metadata"]["venturi"]["transition"]["direction"], "Left");
 

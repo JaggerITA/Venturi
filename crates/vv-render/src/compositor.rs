@@ -361,7 +361,7 @@ impl std::ops::Deref for PooledTexture {
     type Target = wgpu::Texture;
 
     fn deref(&self) -> &wgpu::Texture {
-        self.texture.as_ref().expect("la texture c'è fino al Drop")
+        self.texture.as_ref().expect("the texture exists until Drop")
     }
 }
 
@@ -524,14 +524,14 @@ impl Compositor {
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions::default())
                 .await
-                .expect("nessun adapter wgpu disponibile");
+                .expect("no wgpu adapter available");
             adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("vv-render headless device"),
                     ..Default::default()
                 })
                 .await
-                .expect("richiesta device wgpu fallita")
+                .expect("wgpu device request failed")
         });
         Self::new(Arc::new(device), Arc::new(queue))
     }
@@ -889,11 +889,11 @@ impl Compositor {
         });
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll del device wgpu fallito");
+            .expect("wgpu device poll failed");
         rx.recv()
-            .expect("il callback di map_async non ha risposto")
-            .expect("map_async fallita");
-        let out = read(&slice.get_mapped_range().expect("get_mapped_range fallita"));
+            .expect("the map_async callback did not answer")
+            .expect("map_async failed");
+        let out = read(&slice.get_mapped_range().expect("get_mapped_range failed"));
         buffer.unmap();
         out
     }
@@ -1445,9 +1445,9 @@ mod tests {
 
         // Neutral chroma: R matches the quadrant's Y exactly (40).
         assert_close_rgba(pixel(4, 4), [40, 40, 40, 255]);
-        assert_eq!(pixel(12, 4), [0, 0, 0, 255], "alto-destra: tagliato");
-        assert_eq!(pixel(4, 12), [0, 0, 0, 255], "basso-sinistra: tagliato");
-        assert_eq!(pixel(12, 12), [0, 0, 0, 255], "basso-destra: tagliato");
+        assert_eq!(pixel(12, 4), [0, 0, 0, 255], "top-right: cut");
+        assert_eq!(pixel(4, 12), [0, 0, 0, 255], "bottom-left: cut");
+        assert_eq!(pixel(12, 12), [0, 0, 0, 255], "bottom-right: cut");
     }
 
     #[test]
@@ -1468,7 +1468,7 @@ mod tests {
         };
 
         assert_close_rgba(pixel(12, 12), [220, 220, 220, 255]);
-        assert_eq!(pixel(4, 4), [0, 0, 0, 255], "alto-sinistra: tagliato");
+        assert_eq!(pixel(4, 4), [0, 0, 0, 255], "top-left: cut");
     }
 
     #[test]
@@ -1511,7 +1511,7 @@ mod tests {
         let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
 
         let bars = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(32, 16));
-        assert_eq!(&bars[0..4], &[0, 0, 0, 255], "a zoom 1 restano le bande");
+        assert_eq!(&bars[0..4], &[0, 0, 0, 255], "at zoom 1 the bars remain");
 
         let transform = Transform {
             crop: [0.0; 4],
@@ -1544,7 +1544,7 @@ mod tests {
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
 
-        assert_eq!(pixel(2, 8), [0, 0, 0, 255], "metà sinistra: clip uscita");
+        assert_eq!(pixel(2, 8), [0, 0, 0, 255], "left half: clip moved out");
         assert_close_rgba(pixel(14, 8), [255, 255, 255, 255]);
     }
 
@@ -1616,7 +1616,7 @@ mod tests {
             [out[i], out[i + 1], out[i + 2], out[i + 3]]
         };
 
-        assert_eq!(pixel(2, 4), [0, 0, 0, 255], "metà sinistra: vuota");
+        assert_eq!(pixel(2, 4), [0, 0, 0, 255], "left half: empty");
         assert_close_rgba(pixel(13, 4), [255, 255, 255, 255]);
     }
 
@@ -1706,15 +1706,15 @@ mod tests {
         let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
 
         // Black clear below: the closer to the crop edge, the darker.
-        assert!(luma(4, 8) > 200, "lontano dal bordo: pieno");
+        assert!(luma(4, 8) > 200, "far from the edge: full");
         assert!(
             luma(7, 8) < luma(6, 8) && luma(6, 8) < luma(4, 8),
-            "gradiente verso il bordo: {} {} {}",
+            "gradient towards the edge: {} {} {}",
             luma(4, 8),
             luma(6, 8),
             luma(7, 8)
         );
-        assert_eq!(luma(9, 8), 0, "oltre il crop non si sfuma, si taglia");
+        assert_eq!(luma(9, 8), 0, "past the crop it is cut, not feathered");
     }
 
     /// Positive softness: the ramp falls *past* the crop edge, so
@@ -1731,14 +1731,14 @@ mod tests {
         let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
         let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
 
-        assert!(luma(7, 8) > 200, "dentro il crop resta pieno fino al bordo");
+        assert!(luma(7, 8) > 200, "inside the crop it stays full up to the edge");
         assert!(
             luma(8, 8) > 0 && luma(8, 8) < luma(7, 8),
-            "appena oltre il bordo si sfuma invece di sparire: {} {}",
+            "just past the edge it fades instead of vanishing: {} {}",
             luma(7, 8),
             luma(8, 8)
         );
-        assert_eq!(luma(12, 8), 0, "oltre la rampa non resta nulla");
+        assert_eq!(luma(12, 8), 0, "past the ramp nothing is left");
     }
 
     /// The case reported by the user: a 9:16 clip on top of a 16:9 one in a
@@ -1826,7 +1826,7 @@ mod tests {
         let pixel = out.as_chunks::<4>().0[0];
         assert_eq!(pixel[0], pixel[1], "grigio: R=G=B");
         assert_eq!(pixel[1], pixel[2]);
-        assert!(pixel[0] > 0 && pixel[0] < 255, "luma del rosso, non nero né bianco");
+        assert!(pixel[0] > 0 && pixel[0] < 255, "luma of red, neither black nor white");
     }
 
     #[test]
@@ -1849,8 +1849,8 @@ mod tests {
             OutputFrame::exact(160, 90),
         );
         let pixels = out.as_chunks::<4>().0;
-        assert_eq!(pixels[0], [0, 0, 0, 255], "fuori dal testo resta il nero");
-        assert!(pixels.iter().any(|px| px == &[255, 0, 0, 255]), "nessun pixel del testo");
+        assert_eq!(pixels[0], [0, 0, 0, 255], "outside the text it stays black");
+        assert!(pixels.iter().any(|px| px == &[255, 0, 0, 255]), "no text pixel");
     }
 
     #[test]
@@ -1888,7 +1888,7 @@ mod tests {
             OutputFrame::exact(160, 90),
         );
         let pixels = out.as_chunks::<4>().0;
-        assert!(pixels.iter().any(|px| px == &[0, 0, 0, 255]), "nessun pixel d'ombra");
+        assert!(pixels.iter().any(|px| px == &[0, 0, 0, 255]), "no shadow pixel");
     }
 
     const BLUE: vv_core::Rgba = vv_core::Rgba {
@@ -1955,7 +1955,7 @@ mod tests {
         for (i, (a, b)) in via_texture.iter().zip(direct.iter()).enumerate() {
             assert!(
                 (*a as i16 - *b as i16).abs() <= 2,
-                "byte {i}: via texture {a}, diretto {b}"
+                "byte {i}: via texture {a}, direct {b}"
             );
         }
     }
@@ -2011,12 +2011,12 @@ mod tests {
         let output = OutputFrame::exact(8, 8);
 
         let texture = compositor.render_layers_to_owned_texture_transparent(&[], output);
-        assert!(compositor.scratch.lock().unwrap().is_empty(), "in uso, non nel pool");
+        assert!(compositor.scratch.lock().unwrap().is_empty(), "in use, not in the pool");
         drop(texture);
         assert_eq!(compositor.scratch.lock().unwrap().len(), 1);
 
         let _reused = compositor.render_layers_to_owned_texture_transparent(&[], output);
-        assert!(compositor.scratch.lock().unwrap().is_empty(), "ripresa dal pool, non allocata");
+        assert!(compositor.scratch.lock().unwrap().is_empty(), "taken from the pool, not allocated");
     }
 
     /// `render_layers_to_owned_texture_transparent` does not put the texture
@@ -2076,9 +2076,9 @@ mod tests {
             OutputFrame::scaled(8, 4, (16, 8)),
         );
         let px = |x: usize, y: usize| &out[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
-        assert_eq!(px(1, 2), &[0, 0, 0, 255], "a sinistra resta scoperto");
+        assert_eq!(px(1, 2), &[0, 0, 0, 255], "the left stays uncovered");
         assert_eq!(px(3, 2), &[255, 0, 0, 255]);
-        assert_eq!(px(6, 2), &[0, 0, 0, 255], "oltre il crop");
+        assert_eq!(px(6, 2), &[0, 0, 0, 255], "past the crop");
     }
 
     /// The layer opacity (clip fades) attenuates the alpha it composes with
@@ -2209,8 +2209,8 @@ mod tests {
             OutputFrame::exact(16, 8),
         );
         let px = |x: usize, y: usize| &out[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4];
-        assert_eq!(px(2, 4), &[255, 0, 0, 255], "coperto dal layer: rosso opaco");
-        assert_eq!(px(12, 4), &[0, 0, 0, 0], "scoperto: trasparente, non nero");
+        assert_eq!(px(2, 4), &[255, 0, 0, 255], "covered by the layer: opaque red");
+        assert_eq!(px(12, 4), &[0, 0, 0, 0], "uncovered: transparent, not black");
     }
 
     /// The mechanism by which an already composed compound clip comes back as a
@@ -2236,8 +2236,8 @@ mod tests {
             OutputFrame::exact(4, 4),
         );
         let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
-        assert_eq!(px(0, 0), &[255, 255, 255, 255], "sinistra: il video si vede, opaco");
-        assert_eq!(px(3, 0), &[0, 0, 0, 255], "destra: alpha 0 nel piano lascia vedere il nero sotto");
+        assert_eq!(px(0, 0), &[255, 255, 255, 255], "left: the video shows, opaque");
+        assert_eq!(px(3, 0), &[0, 0, 0, 255], "right: alpha 0 in the plane lets the black below show");
     }
 
     #[test]
@@ -2334,7 +2334,7 @@ mod tests {
 
         assert_eq!(
             via_readback, via_texture,
-            "il path zero-copy deve produrre esattamente gli stessi pixel del path con readback"
+            "the zero-copy path must produce exactly the same pixels as the readback path"
         );
     }
 

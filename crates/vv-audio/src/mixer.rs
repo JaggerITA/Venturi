@@ -315,7 +315,7 @@ impl Mixer {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
-            .ok_or("nessun device audio di output")?;
+            .ok_or("no audio output device")?;
         // Native channels of the device: asking for others makes PipeWire insert a
         // remix that adds output latency, visible as audio lagging
         // behind playhead and waveform.
@@ -672,8 +672,8 @@ mod tests {
             },
             |_, id| (id == compound_media).then(|| Arc::new(vec![0.5; 50])),
         );
-        assert!(!buffer_for_called, "una compound clip non deve mai passare da buffer_for");
-        assert_eq!(snap.clips.len(), 1, "compound_buffer_for ha risposto: la clip entra nel mix");
+        assert!(!buffer_for_called, "a compound clip must never go through buffer_for");
+        assert_eq!(snap.clips.len(), 1, "compound_buffer_for answered: the clip enters the mix");
     }
 
     /// The bug case: media at 9.99 fps (10000/1001, the small-scale analogue
@@ -717,7 +717,7 @@ mod tests {
         assert_eq!(snap.clips.len(), 1);
         assert_eq!(
             snap.clips[0].len, AUDIO_SAMPLES as u64,
-            "tutto l'audio del media entra nella clip, niente di tagliato"
+            "all of the media audio fits in the clip, nothing cut"
         );
 
         // Last 10 samples of the clip: still the ones at the end of the buffer,
@@ -753,7 +753,7 @@ mod tests {
         });
         let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
         let clip = Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 1000, 0, rate);
-        assert_eq!(clip.source_frame_at(500), clip.source_frame_at(499), "500 è a metà frame");
+        assert_eq!(clip.source_frame_at(500), clip.source_frame_at(499), "500 is mid-frame");
         let timeline_id = project.timelines.insert(timeline(vec![audio_track(vec![clip])]));
 
         let buffer: Arc<Vec<f32>> = Arc::new((0..10_010).map(|i| i as f32 / 100_000.0).collect());
@@ -899,7 +899,7 @@ mod tests {
     fn mixer_seek_and_snapshot_swaps_do_not_reopen_or_leak() {
         let mut mixer = Mixer::new().unwrap();
         mixer.seek(12_345);
-        assert_eq!(mixer.position(), 12_345, "in pausa la posizione non avanza");
+        assert_eq!(mixer.position(), 12_345, "paused, the position does not advance");
         for _ in 0..50 {
             let mix = Arc::new(MixSnapshot::empty(mixer.sample_rate(), mixer.channels()));
             mixer.set_state(Arc::new(MixerState {
@@ -932,9 +932,9 @@ mod tests {
         assert_eq!(out, [3.0, 4.0, 5.0]);
 
         render_stretched(&w, 1, 116, &mut out);
-        assert_eq!(out, [5.0, 0.0, 0.0], "oltre la fine: silenzio");
+        assert_eq!(out, [5.0, 0.0, 0.0], "past the end: silence");
         render_stretched(&w, 1, 50, &mut out);
-        assert_eq!(out, [0.0; 3], "prima dell'origine: silenzio");
+        assert_eq!(out, [0.0; 3], "before the origin: silence");
     }
 
     #[test]
@@ -1032,8 +1032,8 @@ mod tests {
         assert_eq!(fade_multiplier(&clip, 0), 0.0);
         assert!((fade_multiplier(&clip, 50) - 0.5).abs() < 1e-6);
         assert_eq!(fade_multiplier(&clip, 100), 1.0);
-        assert_eq!(fade_multiplier(&clip, 500), 1.0, "sul plateau resta a volume pieno");
-        assert!((fade_multiplier(&clip, 900) - 0.5).abs() < 1e-6, "200 sample dalla fine");
+        assert_eq!(fade_multiplier(&clip, 500), 1.0, "on the plateau it stays at full volume");
+        assert!((fade_multiplier(&clip, 900) - 0.5).abs() < 1e-6, "200 samples from the end");
         assert_eq!(fade_multiplier(&clip, 1000), 0.0);
     }
 
@@ -1073,10 +1073,10 @@ mod tests {
         let mut out = vec![9.0; len_frames];
         mix_range(&snap, 0, &mut out);
         let block = GAIN_BLOCK_FRAMES as usize;
-        assert!(out[..block].iter().all(|&s| s == 0.0), "primo blocco silenziato dal fade-in");
+        assert!(out[..block].iter().all(|&s| s == 0.0), "first block silenced by the fade-in");
         assert!(
             out[block..].iter().all(|&s| s == 0.5),
-            "oltre il fade-in il gain resta invariato"
+            "past the fade-in the gain is unchanged"
         );
     }
 }

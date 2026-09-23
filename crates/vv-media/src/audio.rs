@@ -269,7 +269,7 @@ mod tests {
             &path,
         );
 
-        let audio = decode_audio_track(&path, 0).unwrap().expect("audio atteso");
+        let audio = decode_audio_track(&path, 0).unwrap().expect("audio expected");
         assert_eq!(audio.channels, 2);
         assert_eq!(audio.samples.len(), 48_000 * 2);
     }
@@ -292,7 +292,7 @@ mod tests {
             &path,
         );
 
-        let audio = decode_audio_track(&path, 0).unwrap().expect("audio atteso");
+        let audio = decode_audio_track(&path, 0).unwrap().expect("audio expected");
         assert_eq!(audio.sample_rate, 48000);
         assert_eq!(audio.channels, 1);
 
@@ -305,7 +305,7 @@ mod tests {
 
         // A 440Hz sine is not silent: the peak must be well above 0.
         let peak = audio.samples.iter().cloned().fold(0.0_f32, f32::max);
-        assert!(peak > 0.1, "peak={peak}, atteso un segnale non silenzioso");
+        assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
     }
 
     #[test]
@@ -444,15 +444,15 @@ mod tests {
             &path,
         );
 
-        let first = decode_audio_track(&path, 0).unwrap().expect("stream 0 atteso");
+        let first = decode_audio_track(&path, 0).unwrap().expect("stream 0 expected");
         assert_eq!(first.sample_rate, 44100);
 
-        let second = decode_audio_track(&path, 1).unwrap().expect("stream 1 atteso");
+        let second = decode_audio_track(&path, 1).unwrap().expect("stream 1 expected");
         assert_eq!(second.sample_rate, 48000);
 
         assert!(
             decode_audio_track(&path, 2).unwrap().is_none(),
-            "nessuno stream audio all'indice 2"
+            "no audio stream at index 2"
         );
     }
 }

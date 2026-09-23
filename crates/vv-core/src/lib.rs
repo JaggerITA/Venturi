@@ -86,7 +86,7 @@ mod tests {
         assert!(project.media_pool.is_empty());
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         let ClipSource::Media(dangling) = clip.source else {
-            panic!("la clip deve restare in timeline, solo senza media");
+            panic!("the clip must stay in the timeline, just without media");
         };
         assert!(project.media_pool.get(dangling).is_none());
 
@@ -113,11 +113,11 @@ mod tests {
             &mut project,
             Box::new(command::SetMediaPath::new(
                 media,
-                "/altra/postazione/clip.mp4".into(),
+                "/other/workstation/clip.mp4".into(),
                 42,
             )),
         );
-        assert_eq!(project.media_pool[media].path, std::path::PathBuf::from("/altra/postazione/clip.mp4"));
+        assert_eq!(project.media_pool[media].path, std::path::PathBuf::from("/other/workstation/clip.mp4"));
         assert_eq!(project.media_pool[media].content_hash, 42);
 
         history.undo(&mut project);
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(project.timelines[timeline].tracks.len(), 3);
         assert!(!project.timelines[timeline].tracks[0].muted);
         assert_eq!(history.position(), 1);
-        assert_eq!(history.labels().count(), 4, "i passi annullati restano in elenco");
+        assert_eq!(history.labels().count(), 4, "undone steps stay in the list");
 
         history.go_to(&mut project, 4);
         assert_eq!(project.timelines[timeline].tracks.len(), 5);
@@ -283,11 +283,11 @@ mod tests {
 
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         assert_eq!(clip.source_in(), 5);
-        assert_eq!(clip.timeline_start, 15, "si sposta della stessa quantità");
+        assert_eq!(clip.timeline_start, 15, "moves by the same amount");
         assert_eq!(
             clip.timeline_end(),
             original_end,
-            "la fine sulla timeline resta ferma"
+            "the end on the timeline stays put"
         );
 
         history.undo(&mut project);
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(clip.source_out(), 15);
         assert_eq!(
             clip.timeline_start, 10,
-            "l'inizio sulla timeline resta fermo"
+            "the start on the timeline stays put"
         );
         assert_eq!(clip.timeline_end(), 25);
 
@@ -405,14 +405,14 @@ mod tests {
 
             assert!(
                 project.timelines[timeline].tracks[0].crossings.is_empty(),
-                "split_the_right_clip={split_the_right_clip}: la crossing tra le due clip originali doveva sparire, non restare orfana"
+                "split_the_right_clip={split_the_right_clip}: the crossing between the two original clips should have gone, not been left orphaned"
             );
 
             history.undo(&mut project);
             assert_eq!(
                 project.timelines[timeline].tracks[0].crossings,
                 vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition: make_transition() }],
-                "split_the_right_clip={split_the_right_clip}: l'undo dello split deve far tornare la crossing"
+                "split_the_right_clip={split_the_right_clip}: undoing the split must bring the crossing back"
             );
         }
     }
@@ -449,7 +449,7 @@ mod tests {
         history.do_command(&mut project, Box::new(command::LiftDelete::new(timeline, 0, a_id)));
         assert!(
             project.timelines[timeline].tracks[0].crossings.is_empty(),
-            "cancellare a_id deve togliere la crossing, non lasciarla puntare a un ClipId inesistente"
+            "deleting a_id must remove the crossing, not leave it pointing at a nonexistent ClipId"
         );
 
         history.undo(&mut project);
@@ -497,7 +497,7 @@ mod tests {
         history.do_command(&mut project, Box::new(command::MoveClips::new(timeline, vec![(a_id, 0, 1, 0)])));
         assert!(
             project.timelines[timeline].tracks[0].crossings.is_empty(),
-            "spostare a_id su un'altra track deve togliere la crossing dalla track di partenza"
+            "moving a_id to another track must remove the crossing from the source track"
         );
 
         history.undo(&mut project);
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(clips[0].effects.gain_db.keyframes().len(), 2);
         let right = &clips[1].effects.gain_db;
         assert!(right.is_constant());
-        assert_eq!(right.value_at(12), -6.0, "tiene il valore che aveva al taglio");
+        assert_eq!(right.value_at(12), -6.0, "keeps the value it had at the cut");
     }
 
     #[test]
@@ -715,7 +715,7 @@ mod tests {
         let clip = &project.timelines[timeline].tracks[0].clips[0];
         assert_eq!(clip.source_in(), 3000);
         assert_eq!(clip.timeline_end(), original_end);
-        assert_eq!(clip.timeline_len, 3003, "3000 frame a 59,94 su 60 fps");
+        assert_eq!(clip.timeline_len, 3003, "3000 frames at 59.94 on 60 fps");
 
         history.undo(&mut project);
         let clip = &project.timelines[timeline].tracks[0].clips[0];
@@ -852,7 +852,7 @@ mod tests {
         );
 
         let clip = &project.timelines[timeline].tracks[0].clips[0];
-        assert!(clip.effects.transform.is_constant(), "keyframe azzerati");
+        assert!(clip.effects.transform.is_constant(), "keyframes cleared");
         assert_eq!(clip.effects.transform.value_at(5).zoom, [1.0, 1.0]);
         assert_eq!(clip.effects.transform.flip, [false, false]);
 
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(
             clip.effects.gain_db.keyframe_at(5),
             Some((-6.0, Interpolation::Linear)),
-            "l'undo deve ripristinare il keyframe precedente, non rimuoverlo"
+            "undo must restore the previous keyframe, not remove it"
         );
     }
 
@@ -1022,7 +1022,7 @@ mod tests {
         );
 
         let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
-        assert_eq!(gain.keyframes().len(), 1, "quello di arrivo è stato sovrascritto");
+        assert_eq!(gain.keyframes().len(), 1, "the one at the destination was overwritten");
         assert_eq!(gain.keyframe_at(10), Some((-6.0, Interpolation::Linear)));
 
         history.undo(&mut project);
@@ -1423,7 +1423,7 @@ mod tests {
         let tl = &project.timelines[timeline];
         let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
         assert_eq!(find(a_id).linked_group, None);
-        assert_eq!(find(b_id).linked_group, None, "l'intero gruppo si scioglie, non solo a");
+        assert_eq!(find(b_id).linked_group, None, "the whole group is dissolved, not just a");
         assert_eq!(find(c_id).linked_group, None);
 
         history.undo(&mut project);
@@ -1467,7 +1467,7 @@ mod tests {
         );
         let tl = &project.timelines[timeline];
         let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
-        let group = find(video_id).linked_group.expect("collegata");
+        let group = find(video_id).linked_group.expect("linked");
         assert_eq!(find(audio_a_id).linked_group, Some(group));
         assert_eq!(find(audio_b_id).linked_group, Some(group));
 
@@ -1505,11 +1505,11 @@ mod tests {
         assert_eq!(
             tl.tracks[0].clips[0].linked_group,
             Some(group),
-            "la metà sinistra è la stessa clip di prima, accorciata: resta nel gruppo"
+            "the left half is the same clip as before, shortened: it stays in the group"
         );
         assert_eq!(
             tl.tracks[0].clips[1].linked_group, None,
-            "la metà destra è una clip nuova, parte scollegata"
+            "the right half is a new clip, starts unlinked"
         );
 
         history.undo(&mut project);
@@ -1582,7 +1582,7 @@ mod tests {
         history.do_command(&mut project, Box::new(command::RippleDeleteGap::new(timeline, 0, 20)));
         let tl = &project.timelines[timeline];
         assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
-        assert_eq!(tl.tracks[1].clips[0].timeline_start, 20, "track bloccata");
+        assert_eq!(tl.tracks[1].clips[0].timeline_start, 20, "locked track");
 
         history.undo(&mut project);
         history.undo(&mut project);
@@ -1615,7 +1615,7 @@ mod tests {
         );
         assert!(
             project.timelines[timeline].active_video_clips_at(5).is_empty(),
-            "track video disattivata"
+            "video track disabled"
         );
     }
 
@@ -1642,7 +1642,7 @@ mod tests {
             p.timelines[timeline].clip(0, id).unwrap()
         }
         assert_eq!(find(&project, timeline, id).fade_in, 4);
-        assert_eq!(find(&project, timeline, id).fade_out, 10, "oltre la durata della clip si clampa");
+        assert_eq!(find(&project, timeline, id).fade_out, 10, "clamped past the clip duration");
 
         history.undo(&mut project);
         assert_eq!(find(&project, timeline, id).fade_out, 0);
@@ -1849,9 +1849,9 @@ mod compound_clip_tests {
 
         assert!(plan.has_video);
         assert!(!plan.has_audio);
-        assert_eq!(plan.video_track, Some(0), "la track più in basso fra quelle coinvolte");
+        assert_eq!(plan.video_track, Some(0), "the lowest of the tracks involved");
         assert_eq!(plan.audio_track, None);
-        assert_eq!(plan.nested_timeline.tracks.len(), 2, "una track annidata per ogni track video coinvolta");
+        assert_eq!(plan.nested_timeline.tracks.len(), 2, "one nested track per video track involved");
     }
 
     #[test]
@@ -1864,7 +1864,7 @@ mod compound_clip_tests {
 
         let mut history = History::default();
         history.do_command(&mut project, Box::new(command::RemoveMedia::new(media)));
-        assert_eq!(project.timelines.len(), 1, "la timeline annidata sparisce col media");
+        assert_eq!(project.timelines.len(), 1, "the nested timeline goes away with the media");
 
         let again = insert_compound_media(&mut project, &plan);
         assert_eq!(project.media_pool[again].path.to_str(), Some("Compound Clip 1"));
@@ -1918,7 +1918,7 @@ mod compound_clip_tests {
         let audio_track = &project.timelines[timeline].tracks[1];
         assert_eq!(audio_track.clips.len(), 1);
         assert!(matches!(audio_track.clips[0].source, ClipSource::Media(id) if id == media_id));
-        let group = video_track.clips[0].linked_group.expect("video collegato all'audio");
+        let group = video_track.clips[0].linked_group.expect("video linked to the audio");
         assert_eq!(audio_track.clips[0].linked_group, Some(group));
 
         // The pool and the nested timeline stay out of the history.
@@ -1964,7 +1964,7 @@ mod compound_clip_tests {
         });
         let media = compound_media_for(&mut project, timeline);
 
-        assert!(project.would_create_a_cycle(media, timeline), "T dentro se stessa");
+        assert!(project.would_create_a_cycle(media, timeline), "T inside itself");
     }
 
     #[test]
@@ -1996,7 +1996,7 @@ mod compound_clip_tests {
         });
 
         assert!(project.would_create_a_cycle(media_b, a), "A -> B -> A");
-        assert!(!project.would_create_a_cycle(media_a, b), "B -> A non ancora un ciclo su B");
+        assert!(!project.would_create_a_cycle(media_a, b), "B -> A not yet a cycle on B");
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub struct TitleRender {
 
 impl TitleRender {
     pub fn text(&self) -> &TextMask {
-        &self.layers.last().expect("il testo c'è sempre").0
+        &self.layers.last().expect("the text is always there").0
     }
 }
 
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn default_title_is_drawn_around_the_center() {
         let render = render_title(&TitleParams::default(), (640, 360), (640, 360));
-        let (x0, y0, x1, y1) = covered_bounds(render.text()).expect("nessun pixel disegnato");
+        let (x0, y0, x1, y1) = covered_bounds(render.text()).expect("no pixel drawn");
         let (cx, cy) = ((x0 + x1) / 2, (y0 + y1) / 2);
         assert!((cx as i32 - 320).abs() < 20, "centro x {cx}");
         assert!((cy as i32 - 180).abs() < 30, "centro y {cy}");
@@ -485,7 +485,7 @@ mod tests {
         };
         let render = render_title(&params, (640, 360), (640, 360));
         let (x0, ..) = covered_bounds(render.text()).unwrap();
-        assert!((x0 as i32 - 320).abs() < 12, "inizio x {x0}");
+        assert!((x0 as i32 - 320).abs() < 12, "start x {x0}");
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
             ..Default::default()
         };
         let render = render_title(&params, (640, 360), (640, 360));
-        assert_eq!(render.layers.len(), 3, "sfondo, bordo, testo");
+        assert_eq!(render.layers.len(), 3, "background, outline, text");
         let (tx0, ty0, tx1, ty1) = covered_bounds(render.text()).unwrap();
         let (bx0, by0, bx1, by1) = covered_bounds(&render.layers[0].0).unwrap();
         assert!(bx0 < tx0 && by0 < ty0 && bx1 > tx1 && by1 > ty1);
@@ -560,7 +560,7 @@ mod tests {
 
         let soft = render_title(&shadow(12.0), (640, 360), (640, 360));
         let (bx0, ..) = covered_bounds(&soft.layers[0].0).unwrap();
-        assert!(bx0 < sx0, "la sfocatura allarga l'ombra");
+        assert!(bx0 < sx0, "blur widens the shadow");
     }
 
     #[test]
@@ -572,6 +572,6 @@ mod tests {
             (x1 - x0) as f32
         };
         let ratio = width(half.text()) / width(full.text());
-        assert!((ratio - 0.5).abs() < 0.08, "rapporto {ratio}");
+        assert!((ratio - 0.5).abs() < 0.08, "ratio {ratio}");
     }
 }

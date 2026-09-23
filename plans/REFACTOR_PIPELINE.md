@@ -1,105 +1,103 @@
-# REFACTOR_PIPELINE — regole e stato della pipeline di rendering
+# REFACTOR_PIPELINE — rules and status of the rendering pipeline
 
-Il refactor della pipeline è quasi concluso: resta solo il pool di worker
-(§3.4). Questo documento tiene gli invarianti e i vincoli che il codice deve
-continuare a rispettare, più gli identificativi (A1…B5, §x) citati nei
-commenti del codice. La descrizione dell'architettura attuale è in
-[ARCHITECTURE.md](../ARCHITECTURE.md); il vecchio codice e la diagnosi
-originale sono nella git history.
-
----
-
-## 1. Problemi di partenza e stato
-
-| # | Problema risolto | Soluzione attuale |
-|---|------------------|-------------------|
-| A1 | Due meccanismi di sfratto scollegati (posizionale + LRU per capacità) che si contraddicevano | Un solo pass `SharedFrameCache::reconcile` (§2) |
-| A2 | Budget diviso tra media e segmenti, non proporzionale al bisogno | Budget globale in byte, sfratto per distanza dalla testina (§2) |
-| A3 | Soglia di seek fissa, non adatta al GOP reale | Soglia adattiva sul GOP osservato (§3.3) |
-| A4 | Un solo worker seriale senza priorità tra "serve ora" e prefetch | Fill in ordine di distanza dalla testina; il pool multi-worker resta da fare (§3.4) |
-| B1 | Mappatura clip→frame sorgente duplicata tra anteprima ed export | `Clip::source_frame_at` + trait `FrameProvider` |
-| B2 | Round-trip CPU→GPU→CPU del compositor a ogni frame di anteprima | `Compositor::render_layers_to_texture` registrato in `egui-wgpu` |
-| B3 | Frame in cache in RGBA convertiti su CPU | Frame YUV420 in cache, conversione nello shader |
-| B4 | Rendering limitato a una track video e una audio fisse | N track video (compositate bottom->top in alpha-over) e N track audio (sommate) |
-| B5 | Audio per-clip invece di un mixer continuo | `vv_audio::Mixer`: somma tutte le track ed è il clock del playback |
+The pipeline refactor is almost done: only the worker pool (§3.4) is left.
+This document keeps the invariants and constraints the code must keep
+honouring, plus the identifiers (A1…B5, §x) cited in code comments. The
+current architecture is described in [ARCHITECTURE.md](../ARCHITECTURE.md);
+the old code and the original diagnosis are in the git history.
 
 ---
 
-## 2. Cache dei frame (Part A)
+## 1. Starting problems and status
 
-**Una sola cache a chiave composita `(MediaId, frame sorgente)`, un budget
-globale in byte, e un unico pass `reconcile()` che decide lo sfratto** con
-priorità per distanza dalla testina: per ogni frame si calcola la posizione
-in spazio timeline (tramite il segmento della finestra che lo contiene) e poi
-`|posizione − playhead|`; un frame fuori da ogni segmento ha distanza infinita.
-
-- **Tier A (finestra):** via ogni frame fuori dall'unione degli intervalli
-  sorgente dei segmenti correnti del suo media. Copre dietro la testina,
-  media usciti dalla finestra e oltre l'orizzonte di lookahead.
-- **Tier B (budget):** se sopra budget, via i frame in finestra **più
-  lontani** dalla testina.
-
-**⚠️ Il Tier B non può usare LRU per recency.** Durante il fill in avanti il
-frame alla testina è il primo inserito, quindi il meno recente: una LRU lo
-sfratterebbe per primo. La recency può fare solo da tiebreaker a parità di
-distanza.
-
-**Ordine di fill.** Il worker decodifica in ordine di distanza dalla testina
-attraverso tutti i media della finestra, fino al budget o alla copertura
-della finestra: il frame che serve ora arriva sempre prima di un prefetch
-lontano. Il fill si ferma quando si ricongiunge a frame già in cache, così
-uno scrub piccolo all'indietro non ridecodifica la coda.
-
-### Invarianti (coperti dai test in `render_ahead.rs` e `vv-media/src/cache.rs`)
-1. **Fronte alla testina:** a regime il buffer parte dalla testina corrente,
-   anche avanzando a piccoli passi senza seek reale.
-2. **Stabilità con testina ferma:** nessun ciclo invalida ciò che è già
-   corretto.
-3. **Nessun segmento invalida l'altro:** due segmenti dello stesso media nella
-   stessa finestra non si sfrattano a vicenda, nemmeno con budget stretto.
-4. **Copertura sotto budget piccolo:** il buffer parte comunque dalla testina.
-5. **Scrub all'indietro** (piccoli e grandi): il buffer raggiunge la nuova
-   posizione; uno scrub piccolo non ridecodifica la coda già in cache.
-6. **Seek riusato:** riposizionare un media già aperto usa `seek_to_time` sul
-   decoder esistente, mai una riapertura.
+| # | Problem solved | Current solution |
+|---|----------------|------------------|
+| A1 | Two disconnected eviction mechanisms (positional + capacity LRU) contradicting each other | A single `SharedFrameCache::reconcile` pass (§2) |
+| A2 | Budget split between media and segments, not proportional to need | Global byte budget, eviction by distance from the playhead (§2) |
+| A3 | Fixed seek threshold, not adapted to the real GOP | Adaptive threshold on the observed GOP (§3.3) |
+| A4 | A single serial worker with no priority between "needed now" and prefetch | Fill in order of distance from the playhead; the multi-worker pool is still to do (§3.4) |
+| B1 | Clip→source frame mapping duplicated between preview and export | `Clip::source_frame_at` + `FrameProvider` trait |
+| B2 | CPU→GPU→CPU compositor round trip on every preview frame | `Compositor::render_layers_to_texture` registered in `egui-wgpu` |
+| B3 | Cached frames in RGBA converted on the CPU | YUV420 frames in the cache, conversion in the shader |
+| B4 | Rendering limited to one fixed video track and one audio track | N video tracks (composited bottom->top with alpha-over) and N audio tracks (summed) |
+| B5 | Per-clip audio instead of a continuous mixer | `vv_audio::Mixer`: sums all tracks and is the playback clock |
 
 ---
 
-## 3. Passi della Part A
+## 2. Frame cache (Part A)
 
-1. ✅ **Reattività del fill:** il loop rilegge il target ogni N frame e
-   interrompe un prefetch diventato obsoleto.
-2. ✅ **Cache unificata + `reconcile()` + budget globale + fill per distanza** (§2).
-3. ✅ **Soglia di seek adattiva:** dopo ogni seek reale si stima il GOP dai
-   keyframe di atterraggio; la soglia è circa un GOP, con un fallback basso
-   finché non c'è un'osservazione (sbagliare per eccesso costa poco perché il
-   seek riusa il decoder aperto).
-4. ⏳ **Pool di worker con coda a priorità:** distribuire su N thread lo
-   stesso ordine di fill per distanza. Da fare solo se un thread non tiene il
-   passo; è il passo più rischioso (concorrenza sulla cache condivisa).
+**A single cache keyed by `(MediaId, source frame)`, a global byte budget,
+and one `reconcile()` pass that decides eviction** by priority of distance
+from the playhead: for each frame the timeline-space position is computed
+(through the window segment containing it), then `|position − playhead|`; a
+frame outside every segment has infinite distance.
+
+- **Tier A (window):** drop every frame outside the union of the source
+  ranges of its media's current segments. Covers behind the playhead, media
+  that left the window, and beyond the lookahead horizon.
+- **Tier B (budget):** if over budget, drop the in-window frames
+  **farthest** from the playhead.
+
+**⚠️ Tier B cannot use recency LRU.** During the forward fill the frame at
+the playhead is the first inserted, so the least recent: an LRU would evict
+it first. Recency can only act as a tiebreaker at equal distance.
+
+**Fill order.** The worker decodes in order of distance from the playhead
+across all media in the window, up to the budget or until the window is
+covered: the frame needed now always arrives before a distant prefetch. The
+fill stops when it joins frames already cached, so a small backward scrub
+does not re-decode the tail.
+
+### Invariants (covered by the tests in `render_ahead.rs` and `vv-media/src/cache.rs`)
+1. **Front at the playhead:** at steady state the buffer starts at the
+   current playhead, even when advancing in small steps without a real seek.
+2. **Stability with a still playhead:** no cycle invalidates what is already
+   correct.
+3. **No segment invalidates another:** two segments of the same media in the
+   same window do not evict each other, not even with a tight budget.
+4. **Coverage under a small budget:** the buffer still starts at the
+   playhead.
+5. **Backward scrub** (small and large): the buffer reaches the new
+   position; a small scrub does not re-decode the tail already cached.
+6. **Reused seek:** repositioning an already open media uses `seek_to_time`
+   on the existing decoder, never a reopen.
+
+---
+
+## 3. Part A steps
+
+1. ✅ **Fill responsiveness:** the loop rereads the target every N frames and
+   interrupts a prefetch that became stale.
+2. ✅ **Unified cache + `reconcile()` + global budget + fill by distance** (§2).
+3. ✅ **Adaptive seek threshold:** after every real seek the GOP is estimated
+   from the landing keyframes; the threshold is about one GOP, with a low
+   fallback until there is an observation (erring on the high side is cheap
+   because the seek reuses the open decoder).
+4. ⏳ **Worker pool with a priority queue:** spread the same fill-by-distance
+   order over N threads. Only if one thread cannot keep up; it is the
+   riskiest step (concurrency on the shared cache).
 
 ---
 
 ## Proxy
 
-Copia tutto-intra a bassa risoluzione di ogni media, generata in background:
-rende ogni frame raggiungibile con un decode singolo invece di attraversare il
-GOP del sorgente, quindi lo scrub veloce tiene il passo. Non è
-un'approssimazione: il frame mostrato resta quello esatto alla posizione
-richiesta. L'export usa sempre i sorgenti originali. Dettagli in ARCHITECTURE.md.
+Low-resolution all-intra copy of each media, generated in the background:
+makes every frame reachable with a single decode instead of crossing the
+source GOP, so fast scrubbing keeps up. It is not an approximation: the frame
+shown is still the exact one at the requested position. Export always uses
+the original sources. Details in ARCHITECTURE.md.
 
 ---
 
-## 5. Vincoli trasversali (non negoziabili)
+## 5. Cross-cutting constraints (non-negotiable)
 
-- **Accuratezza del frame.** Mai mostrare un frame approssimativo/stale per
-  guadagnare fluidità: *il frame mostrato è esattamente quello della timeline
-  al playhead*. Se una proposta di perf richiede questo trade-off, ci si ferma
-  e si chiede prima.
-- **Un cambio alla volta.** Dopo ogni passo: `cargo build -p vv-app` (non solo
-  check) + suite di test.
-- **I test di regressione sono la rete di sicurezza.** Si estendono, non si
-  tolgono. Un test che smette di passare dopo un refactoring segnala un
-  invariante perso: si indaga, non si "aggiusta" il test.
-- **Niente casi speciali per scenario.** `RenderAhead` cammina la timeline
-  senza ramificazioni per vuoto/taglio/stesso media: un solo cammino uniforme.
+- **Frame accuracy.** Never show an approximate/stale frame to gain
+  smoothness: *the frame shown is exactly the timeline frame at the
+  playhead*. If a perf proposal requires this trade-off, stop and ask first.
+- **One change at a time.** After each step: `cargo build -p vv-app` (not
+  just check) + the test suite.
+- **Regression tests are the safety net.** They get extended, never
+  removed. A test that stops passing after a refactor signals a lost
+  invariant: investigate, do not "fix" the test.
+- **No special cases per scenario.** `RenderAhead` walks the timeline
+  without branches for gap/cut/same media: a single uniform walk.
