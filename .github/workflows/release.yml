@@ -35,7 +35,7 @@ jobs:
       # Same environment as container/build-appimage.sh, with the target dir
       # in the workspace so the caches above can save it. The container runs
       # as root on a checkout owned by the runner user: without safe.directory
-      # git refuses the repo and build.rs embeds "unknown" as the hash.
+      # git refuses the repo and build.rs embeds "unknown" as the version.
       - name: Build AppImage
         run: |
           mkdir -p target/cargo-registry
