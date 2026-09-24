@@ -101,14 +101,7 @@ impl Harness {
     }
 
     fn no_gesture(&self) -> bool {
-        self.state.drag.is_none()
-            && self.state.marquee.is_none()
-            && self.state.trim.is_none()
-            && self.state.fade_drag.is_none()
-            && self.state.transition_drag.is_none()
-            && self.state.crossing_drag.is_none()
-            && self.state.transition_duplicate_drag.is_none()
-            && self.state.volume_drag.is_none()
+        self.state.gesture.is_none()
     }
 }
 

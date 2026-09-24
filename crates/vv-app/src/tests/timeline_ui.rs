@@ -112,29 +112,35 @@ fn fade_zone_at_only_matches_the_top_band_near_the_handle() {
 }
 
 #[test]
-fn fade_drag_value_moves_in_opposite_screen_directions_for_in_and_out() {
+fn edge_drag_value_moves_in_opposite_screen_directions_for_in_and_out() {
     let px_per_frame = 2.0;
-    let drag_right = |edge| FadeDragState {
+    let drag = |edge, accum_px| EdgeDragState {
         clip_id: ClipId(1),
         track_index: 0,
         edge,
         original_value: 10,
-        accum_px: 20.0, // 20px to the right = 10 frames
+        accum_px,
     };
-    // Fade-in: dragging to the right lengthens the fade.
-    assert_eq!(fade_drag_value(&drag_right(FadeEdge::In), 100, px_per_frame), 20);
-    // Fade-out: the same movement to the right shortens it (the handle
-    // approaches the corner).
-    assert_eq!(fade_drag_value(&drag_right(FadeEdge::Out), 100, px_per_frame), 0);
+    // 20px to the right = 10 frames: the fade-in grows, the fade-out (its
+    // handle approaching the corner) shrinks.
+    assert_eq!(edge_drag_value(&drag(FadeEdge::In, 20.0), 100, px_per_frame, 0), 20);
+    assert_eq!(edge_drag_value(&drag(FadeEdge::Out, 20.0), 100, px_per_frame, 0), 0);
     // Clamped to the duration of the clip.
-    let far = FadeDragState {
+    assert_eq!(edge_drag_value(&drag(FadeEdge::In, 1000.0), 30, px_per_frame, 0), 30);
+}
+
+/// A fade can be dragged away to nothing, a transition keeps a frame.
+#[test]
+fn edge_drag_value_never_goes_below_min() {
+    let drag = EdgeDragState {
         clip_id: ClipId(1),
         track_index: 0,
         edge: FadeEdge::In,
         original_value: 10,
-        accum_px: 1000.0,
+        accum_px: -1000.0,
     };
-    assert_eq!(fade_drag_value(&far, 30, px_per_frame), 30);
+    assert_eq!(edge_drag_value(&drag, 100, 2.0, 0), 0);
+    assert_eq!(edge_drag_value(&drag, 100, 2.0, 1), 1);
 }
 
 #[test]

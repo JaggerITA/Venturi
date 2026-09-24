@@ -61,10 +61,8 @@ pub struct TimelineState {
     /// `pixels_per_sec` of the last drawing: if it changed there was a zoom
     /// in this frame, and the scroll must be corrected to anchor it to the playhead.
     last_rendered_pps: f32,
-    drag: Option<DragState>,
-    /// Selection rectangle in progress, in content coordinates (it stays
-    /// valid if the scroll changes).
-    marquee: Option<MarqueeDrag>,
+    /// The pointer gesture in progress, if any.
+    gesture: Option<Gesture>,
     /// Selected gap (track, start, end), an alternative to `selected`:
     /// it is closed with a ripple delete. The space at the end is not a gap.
     pub selected_gap: Option<(usize, FrameIdx, FrameIdx)>,
@@ -77,19 +75,6 @@ pub struct TimelineState {
     /// (Ctrl+V) at the playhead position. Empty if nothing has ever
     /// been copied in this session yet.
     pub clipboard: Vec<ClipboardEntry>,
-    trim: Option<TrimState>,
-    fade_drag: Option<FadeDragState>,
-    transition_drag: Option<TransitionDragState>,
-    crossing_drag: Option<CrossingDragState>,
-    /// Alt+drag on the body (not on the handle) of a transition marker,
-    /// in progress: it duplicates instead of resizing. It mutates nothing by itself — the
-    /// DnD payload (`vv_core::Transition`) leaves already set by
-    /// `begin_transition_duplicate_drag` and from there `egui::DragAndDrop`
-    /// keeps it alive for the duration of the drag; this field only serves to
-    /// know when the gesture ends (see the `drag_stopped` branch), for the
-    /// origin clip.
-    transition_duplicate_drag: Option<ClipId>,
-    volume_drag: Option<VolumeDragState>,
     /// Height of the Video box if the user dragged the separator
     /// (see `GROUP_DIVIDER_HEIGHT`); `None` = groups centered by default.
     video_pane_height: Option<f32>,
@@ -135,6 +120,24 @@ pub struct ClipboardEntry {
     pub link_tag: Option<u64>,
 }
 
+/// A pointer gesture on the timeline: at most one at a time.
+enum Gesture {
+    Move(DragState),
+    /// Selection rectangle, in content coordinates (it stays valid if the
+    /// scroll changes).
+    Marquee(MarqueeDrag),
+    Trim(TrimState),
+    Fade(EdgeDragState),
+    TransitionLength(EdgeDragState),
+    CrossingLength(CrossingDragState),
+    /// Alt+drag on the body (not on the handle) of a transition marker of
+    /// this clip: it duplicates instead of resizing. The DnD payload set by
+    /// `begin_transition_duplicate_drag` does the work; this only marks when
+    /// the gesture ends.
+    DuplicateTransition(ClipId),
+    Volume(VolumeDragState),
+}
+
 struct MarqueeDrag {
     start: egui::Pos2,
     current: egui::Pos2,
@@ -157,30 +160,19 @@ struct DragState {
     duplicate: bool,
 }
 
-/// Dragging the fade handle (fade-in or fade-out) of a
-/// clip: no followers nor neighbors, it is always local to the single clip.
-struct FadeDragState {
+/// Dragging the handle of a fade or of a single-edge transition: always
+/// local to the single clip, no followers nor neighbors.
+struct EdgeDragState {
     clip_id: ClipId,
     track_index: usize,
     edge: FadeEdge,
-    /// Original value (frames) of `fade_in`/`fade_out` before the drag.
+    /// Length (frames) of the fade or transition before the drag.
     original_value: FrameIdx,
     accum_px: f32,
 }
 
-/// Dragging the end (duration) of a transition: same shape
-/// as `FadeDragState`, same single clip involved.
-struct TransitionDragState {
-    clip_id: ClipId,
-    track_index: usize,
-    edge: FadeEdge,
-    /// Duration (frames) before the drag.
-    original_value: FrameIdx,
-    accum_px: f32,
-}
-
-/// Dragging the end of a crossing transition: unlike
-/// `TransitionDragState`, it always touches both sides equally (see
+/// Dragging the end of a crossing transition: unlike a single-edge
+/// transition (`Gesture::TransitionLength`), it always touches both sides equally (see
 /// `CrossTransition::split`) — here a `FadeEdge` is not needed, only knowing whether
 /// the end being grabbed is the one inside the left clip or the one
 /// inside the right clip, for the sign of the displacement.
@@ -198,7 +190,7 @@ struct CrossingDragState {
 }
 
 /// Vertical dragging of the volume line on an audio clip: like
-/// `FadeDragState`, always local to the single clip, never a multiple
+/// a fade (`EdgeDragState`), always local to the single clip, never a multiple
 /// selection. Unlike fade/trim, the gain is really applied (via
 /// `PendingAction::SetGain`) on every drag frame instead of only on
 /// release — the same chain of events as the properties panel slider,
@@ -316,17 +308,10 @@ impl Default for TimelineState {
             // Same initial value as `pixels_per_sec`: on the first frame there
             // is no zoom to compensate yet.
             last_rendered_pps: 60.0,
-            drag: None,
-            marquee: None,
+            gesture: None,
             selected_gap: None,
             selected_transition: None,
             clipboard: Vec::new(),
-            trim: None,
-            fade_drag: None,
-            transition_drag: None,
-            crossing_drag: None,
-            transition_duplicate_drag: None,
-            volume_drag: None,
             video_pane_height: None,
             video_scroll: 0.0,
             audio_scroll: 0.0,
@@ -342,6 +327,41 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    fn moving(&self) -> Option<&DragState> {
+        match &self.gesture {
+            Some(Gesture::Move(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    fn trimming(&self) -> Option<&TrimState> {
+        match &self.gesture {
+            Some(Gesture::Trim(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    fn fading(&self) -> Option<&EdgeDragState> {
+        match &self.gesture {
+            Some(Gesture::Fade(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    fn sizing_transition(&self) -> Option<&EdgeDragState> {
+        match &self.gesture {
+            Some(Gesture::TransitionLength(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    fn sizing_crossing(&self) -> Option<&CrossingDragState> {
+        match &self.gesture {
+            Some(Gesture::CrossingLength(d)) => Some(d),
+            _ => None,
+        }
+    }
+
     /// Sets selection and anchor from outside (e.g. after a cut).
     pub fn set_selection(&mut self, selected: BTreeSet<ClipKey>, anchor: Option<ClipKey>) {
         self.selected = selected;
@@ -1694,7 +1714,7 @@ pub fn show_timeline(
     let track_at_y = |local_y: f32| -> usize { row_order[layout.row_at_y(local_y)] };
 
     let mut pending: Option<PendingAction> = None;
-    // Taken from `state.volume_drag` before the reset further below clears it, to
+    // Taken from the volume gesture before the reset further below clears it, to
     // close the undo group after `apply_pending_action` has applied
     // the last `SetGain` of the drag (see `VolumeDragState::group`).
     let mut volume_drag_group: Option<vv_core::GroupMark> = None;
@@ -2005,19 +2025,21 @@ pub fn show_timeline(
                         && !press_over_a_clip(pos)
                     {
                         let local = to_local(pos);
-                        state.marquee = Some(MarqueeDrag {
+                        state.gesture = Some(Gesture::Marquee(MarqueeDrag {
                             start: local,
                             current: local,
-                        });
+                        }));
                     }
                 } else if marquee_resp.dragged() {
-                    if let (Some(m), Some(pos)) =
-                        (&mut state.marquee, marquee_resp.interact_pointer_pos())
+                    if let (Some(Gesture::Marquee(m)), Some(pos)) =
+                        (&mut state.gesture, marquee_resp.interact_pointer_pos())
                     {
                         m.current = to_local(pos);
                     }
                 } else if marquee_resp.drag_stopped() {
-                    if let Some(m) = state.marquee.take() {
+                    if let Some(Gesture::Marquee(m)) =
+                        state.gesture.take_if(|g| matches!(g, Gesture::Marquee(_)))
+                    {
                         let rect = egui::Rect::from_two_pos(m.start, m.current);
                         let hits: Vec<ClipKey> = visuals
                             .iter()
@@ -2053,7 +2075,7 @@ pub fn show_timeline(
                         }
                     }
                 }
-                if let Some(m) = &state.marquee {
+                if let Some(Gesture::Marquee(m)) = &state.gesture {
                     let marquee_rect = egui::Rect::from_two_pos(
                         origin + m.start.to_vec2(),
                         origin + m.current.to_vec2(),
@@ -2098,7 +2120,7 @@ pub fn show_timeline(
                 }
 
                 // Candidate track of the drag, from the current pointer position.
-                let drag_effective_track = state.drag.as_ref().map(|d| {
+                let drag_effective_track = state.moving().map(|d| {
                     let kind = track_kinds[d.track_index];
                     let target = ui.input(|i| i.pointer.interact_pos()).and_then(|pos| {
                         track_drag_target(
@@ -2116,7 +2138,7 @@ pub fn show_timeline(
                         _ => EffectiveTrack::Existing(d.track_index),
                     }
                 });
-                if let (Some(d), Some(EffectiveTrack::New(_))) = (&state.drag, drag_effective_track) {
+                if let (Some(d), Some(EffectiveTrack::New(_))) = (state.moving(), drag_effective_track) {
                     let rect = match track_kinds[d.track_index] {
                         TrackKind::Video => above_video_rect,
                         TrackKind::Audio => below_audio_rect,
@@ -2128,7 +2150,7 @@ pub fn show_timeline(
                 // If any clip of the group would land on a locked
                 // track, the group stays on its own tracks.
                 let drag_group_targets: Option<Vec<(ClipId, EffectiveTrack)>> =
-                    state.drag.as_ref().map(|d| {
+                    state.moving().map(|d| {
                         let targets_for = |primary_target| {
                             drag_group_row_targets(
                                 d.clip_id,
@@ -2154,7 +2176,7 @@ pub fn show_timeline(
 
                 // Position of the dragged primary (clamped and snapped), once
                 // for the whole group and for the preview during the drag.
-                let dragged_primary_new_start = state.drag.as_ref().map(|d| {
+                let dragged_primary_new_start = state.moving().map(|d| {
                     let raw = d.original_start as f32 + d.accum_px / px_per_frame;
                     let raw_rounded = raw.round() as FrameIdx;
                     let len = visuals
@@ -2184,7 +2206,7 @@ pub fn show_timeline(
                 });
 
                 // As above for the edge of a trim, which changes the length too.
-                let trimmed_primary_new_value = state.trim.as_ref().map(|t| {
+                let trimmed_primary_new_value = state.trimming().map(|t| {
                     let raw = t.original_value as f32 + t.accum_px / px_per_frame;
                     let exclude: Vec<ClipId> = std::iter::once(t.clip_id)
                         .chain(t.followers.iter().map(|&(id, _, _, _)| id))
@@ -2201,28 +2223,22 @@ pub fn show_timeline(
                     snapped.clamp(t.min_value, t.max_value)
                 });
 
-                // `drag`/`trim` are cleared only after the loop: the clips of the group
+                // The gesture is cleared only after the loop: the clips of the group
                 // drawn after the primary would go back for one frame to the initial
                 // position.
-                let mut drag_finished = false;
-                let mut trim_finished = false;
-                let mut fade_drag_finished = false;
-                let mut transition_drag_finished = false;
-                let mut crossing_drag_finished = false;
-                let mut volume_drag_finished = false;
+                let mut gesture_finished = false;
                 let mut edge_cursor: Option<(egui::Pos2, EdgeCursor)> = None;
                 // The mirror marker on the neighbor must be drawn after the whole loop,
                 // not during the iteration of the clip under the pointer: if the
                 // neighbor comes later in `draw_order` (the common case, more recent
                 // clips have higher ids), its own `paint_clip_box` would
-                // cover it immediately — see the comment on `drag_finished` above
+                // cover it immediately — see the comment on `gesture_finished` above
                 // for the same structural reason.
                 let mut pending_crossing_previews: Vec<(usize, ClipId, FadeEdge)> = Vec::new();
 
                 // The moving clips are drawn last: they invade the others.
                 let trimmed_keys: Vec<ClipKey> = state
-                    .trim
-                    .as_ref()
+                    .trimming()
                     .map(|t| {
                         std::iter::once((t.track_index, t.clip_id))
                             .chain(t.followers.iter().map(|&(id, track, _, _)| (track, id)))
@@ -2230,7 +2246,7 @@ pub fn show_timeline(
                     })
                     .unwrap_or_default();
                 let mut moving_keys = trimmed_keys.clone();
-                if let Some(d) = &state.drag {
+                if let Some(d) = state.moving() {
                     moving_keys.push((d.track_index, d.clip_id));
                     moving_keys.extend(d.followers.iter().map(|&(id, track, _)| (track, id)));
                 }
@@ -2244,7 +2260,7 @@ pub fn show_timeline(
                     )
                     .collect();
                 // When duplicating, the originals stay visible in their place.
-                if state.drag.as_ref().is_some_and(|d| d.duplicate) {
+                if state.moving().is_some_and(|d| d.duplicate) {
                     for visual in visuals
                         .iter()
                         .filter(|v| moving_keys.contains(&(v.track_index, v.clip.id)))
@@ -2489,10 +2505,10 @@ pub fn show_timeline(
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && visual.clip.effects.gain_db.is_constant()
                     {
-                        let dragging = state
-                            .volume_drag
-                            .as_ref()
-                            .is_some_and(|d| d.clip_id == visual.clip.id);
+                        let dragging = matches!(
+                            &state.gesture,
+                            Some(Gesture::Volume(d)) if d.clip_id == visual.clip.id
+                        );
                         paint_gain_line(
                             &painter,
                             clip_rect,
@@ -2505,14 +2521,9 @@ pub fn show_timeline(
                     // fade is already set, otherwise only while the
                     // clip is under the mouse (to grab them from the corner).
                     let (fade_in_preview, fade_out_preview) = fade_preview(state, visual, px_per_frame);
-                    let fade_in_dragging = state
-                        .fade_drag
-                        .as_ref()
-                        .is_some_and(|d| d.clip_id == visual.clip.id && d.edge == FadeEdge::In);
-                    let fade_out_dragging = state
-                        .fade_drag
-                        .as_ref()
-                        .is_some_and(|d| d.clip_id == visual.clip.id && d.edge == FadeEdge::Out);
+                    let fading_edge = |edge| state.fading().is_some_and(|d| d.clip_id == visual.clip.id && d.edge == edge);
+                    let fade_in_dragging = fading_edge(FadeEdge::In);
+                    let fade_out_dragging = fading_edge(FadeEdge::Out);
                     let show_fades = !visual.locked && clip_rect.width() >= MIN_FADE_CLIP_WIDTH_PX;
                     let fade_in_x = clip_rect.left()
                         + (fade_in_preview as f32 * px_per_frame).min(clip_rect.width());
@@ -2556,10 +2567,10 @@ pub fn show_timeline(
                     // end: general behavior (see
                     // `paint_duration_overlay`), not only for the fade above.
                     if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
-                        if let Some(d) = state.transition_drag.as_ref().filter(|d| d.clip_id == visual.clip.id) {
-                            let frames = transition_drag_value(d, visual.clip.timeline_len, px_per_frame);
+                        if let Some(d) = state.sizing_transition().filter(|d| d.clip_id == visual.clip.id) {
+                            let frames = edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 1);
                             paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
-                        } else if let Some(d) = state.crossing_drag.as_ref().filter(|d| {
+                        } else if let Some(d) = state.sizing_crossing().filter(|d| {
                             [&left_marker, &right_marker].into_iter().flatten().any(|m| {
                                 m.selection == TransitionSelection::Crossing(d.track_index, d.left_clip)
                             })
@@ -2600,37 +2611,26 @@ pub fn show_timeline(
                                 gain_line_y(visual.clip.effects.gain_db.default, clip_rect),
                             )
                     };
-                    if resp.hovered()
-                        && state.drag.is_none()
-                        && state.trim.is_none()
-                        && state.transition_drag.is_none()
-                        && state.crossing_drag.is_none()
+                    let idle_hover = resp.hovered() && state.gesture.is_none();
+                    if idle_hover
                         && let Some(pos) = resp.hover_pos()
                         && transition_handle_at(pos, clip_rect, transition_in_x, transition_out_x).is_some()
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    } else if resp.hovered()
+                    } else if idle_hover
                         && show_fades
-                        && state.drag.is_none()
-                        && state.trim.is_none()
-                        && state.fade_drag.is_none()
                         && let Some(pos) = resp.hover_pos()
                         && fade_zone_at(pos, clip_rect, fade_in_x, fade_out_x).is_some()
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    } else if resp.hovered()
+                    } else if idle_hover
                         && !visual.locked
-                        && state.drag.is_none()
-                        && state.trim.is_none()
                         && let Some(pos) = resp.hover_pos()
                         && let Some(zone) = edge_at(pos)
                     {
                         edge_cursor = Some((pos, EdgeCursor::from_zone(zone)));
-                    } else if resp.hovered()
+                    } else if idle_hover
                         && !visual.locked
-                        && state.drag.is_none()
-                        && state.trim.is_none()
-                        && state.volume_drag.is_none()
                         && let Some(pos) = resp.hover_pos()
                         && volume_hit(pos)
                     {
@@ -2640,6 +2640,11 @@ pub fn show_timeline(
                     let marker_at = |edge: FadeEdge| match edge {
                         FadeEdge::In => left_marker.as_ref(),
                         FadeEdge::Out => right_marker.as_ref(),
+                    };
+                    let owns_crossing = |d: &CrossingDragState| {
+                        [&left_marker, &right_marker].into_iter().flatten().any(|m| {
+                            m.selection == TransitionSelection::Crossing(d.track_index, d.left_clip)
+                        })
                     };
                     if resp.drag_started() {
                         // `press_origin` and not the current position: egui declares the drag after a
@@ -2695,102 +2700,76 @@ pub fn show_timeline(
                             },
                         }
                     } else if resp.dragged() {
-                        if let Some(td) = &mut state.transition_drag
-                            && td.clip_id == visual.clip.id
-                        {
-                            td.accum_px += resp.drag_delta().x;
-                        } else if let Some(cd) = &mut state.crossing_drag
-                            && [&left_marker, &right_marker].into_iter().flatten().any(|m| {
-                                m.selection == TransitionSelection::Crossing(cd.track_index, cd.left_clip)
-                            })
-                        {
-                            cd.accum_px += resp.drag_delta().x;
-                        } else if let Some(fd) = &mut state.fade_drag
-                            && fd.clip_id == visual.clip.id
-                        {
-                            fd.accum_px += resp.drag_delta().x;
-                        } else if let Some(vd) = &mut state.volume_drag
-                            && vd.clip_id == visual.clip.id
-                        {
-                            vd.accum_px += resp.drag_delta().y;
-                            // Unlike fade/trim/move, it is applied right here,
-                            // on every drag frame (see `VolumeDragState`).
-                            pending = Some(PendingAction::SetGain {
-                                track_index: vd.track_index,
-                                clip_id: vd.clip_id,
-                                new_value: volume_drag_value(vd, clip_rect.height() / 2.0),
-                            });
-                        } else if let Some(t) = &mut state.trim
-                            && t.clip_id == visual.clip.id
-                        {
-                            t.accum_px += resp.drag_delta().x;
-                        } else if let Some(d) = &mut state.drag
-                            && d.clip_id == visual.clip.id
-                        {
-                            d.accum_px += resp.drag_delta().x;
+                        let delta = resp.drag_delta();
+                        match &mut state.gesture {
+                            Some(Gesture::TransitionLength(d)) if d.clip_id == visual.clip.id => {
+                                d.accum_px += delta.x;
+                            }
+                            Some(Gesture::CrossingLength(d)) if owns_crossing(d) => d.accum_px += delta.x,
+                            Some(Gesture::Fade(d)) if d.clip_id == visual.clip.id => d.accum_px += delta.x,
+                            Some(Gesture::Volume(d)) if d.clip_id == visual.clip.id => {
+                                d.accum_px += delta.y;
+                                // Unlike fade/trim/move, it is applied right here,
+                                // on every drag frame (see `VolumeDragState`).
+                                pending = Some(PendingAction::SetGain {
+                                    track_index: d.track_index,
+                                    clip_id: d.clip_id,
+                                    new_value: volume_drag_value(d, clip_rect.height() / 2.0),
+                                });
+                            }
+                            Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => t.accum_px += delta.x,
+                            Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => d.accum_px += delta.x,
+                            _ => {}
                         }
                     } else if resp.drag_stopped() {
-                        if let Some(td) = &state.transition_drag
-                            && td.clip_id == visual.clip.id
-                        {
-                            pending = Some(PendingAction::SetTransitionDuration {
-                                track_index: td.track_index,
-                                clip_id: td.clip_id,
-                                edge: td.edge,
-                                new_value: transition_drag_value(td, visual.clip.timeline_len, px_per_frame),
-                            });
-                            transition_drag_finished = true;
-                        } else if let Some(cd) = &state.crossing_drag
-                            && [&left_marker, &right_marker].into_iter().flatten().any(|m| {
-                                m.selection == TransitionSelection::Crossing(cd.track_index, cd.left_clip)
-                            })
-                        {
-                            pending = Some(PendingAction::SetCrossingDuration {
-                                track_index: cd.track_index,
-                                left_clip: cd.left_clip,
-                                new_value: crossing_drag_value(cd, px_per_frame),
-                            });
-                            crossing_drag_finished = true;
-                        } else if state.transition_duplicate_drag == Some(visual.clip.id) {
-                            // The real drop (if there was one, on another clip) is already
-                            // handled by `dnd_release_payload` in that clip;
-                            // here only closing the local state is left.
-                            state.transition_duplicate_drag = None;
-                        } else if let Some(fd) = &state.fade_drag
-                            && fd.clip_id == visual.clip.id
-                        {
-                            pending = Some(PendingAction::SetFade {
-                                track_index: fd.track_index,
-                                clip_id: fd.clip_id,
-                                edge: fd.edge,
-                                new_value: fade_drag_value(fd, visual.clip.timeline_len, px_per_frame),
-                            });
-                            fade_drag_finished = true;
-                        } else if let Some(vd) = &state.volume_drag
-                            && vd.clip_id == visual.clip.id
-                        {
-                            pending = Some(PendingAction::SetGain {
-                                track_index: vd.track_index,
-                                clip_id: vd.clip_id,
-                                new_value: volume_drag_value(vd, clip_rect.height() / 2.0),
-                            });
-                            volume_drag_group = Some(vd.group);
-                            volume_drag_finished = true;
-                        } else if let Some(t) = &state.trim
-                            && t.clip_id == visual.clip.id
-                        {
-                            pending = Some(finish_trim(t, visual, &visuals, trimmed_primary_new_value));
-                            trim_finished = true;
-                        } else if let Some(d) = &state.drag
-                            && d.clip_id == visual.clip.id
-                        {
-                            pending = Some(finish_drag(
-                                d,
-                                drag_group_targets.as_deref().unwrap(),
-                                &track_kinds,
-                                dragged_primary_new_start,
-                            ));
-                            drag_finished = true;
+                        gesture_finished = true;
+                        match &state.gesture {
+                            Some(Gesture::TransitionLength(d)) if d.clip_id == visual.clip.id => {
+                                pending = Some(PendingAction::SetTransitionDuration {
+                                    track_index: d.track_index,
+                                    clip_id: d.clip_id,
+                                    edge: d.edge,
+                                    new_value: edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 1),
+                                });
+                            }
+                            Some(Gesture::CrossingLength(d)) if owns_crossing(d) => {
+                                pending = Some(PendingAction::SetCrossingDuration {
+                                    track_index: d.track_index,
+                                    left_clip: d.left_clip,
+                                    new_value: crossing_drag_value(d, px_per_frame),
+                                });
+                            }
+                            // The real drop, if any, is handled by
+                            // `dnd_release_payload` in the clip it landed on.
+                            Some(Gesture::DuplicateTransition(clip_id)) if *clip_id == visual.clip.id => {}
+                            Some(Gesture::Fade(d)) if d.clip_id == visual.clip.id => {
+                                pending = Some(PendingAction::SetFade {
+                                    track_index: d.track_index,
+                                    clip_id: d.clip_id,
+                                    edge: d.edge,
+                                    new_value: edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 0),
+                                });
+                            }
+                            Some(Gesture::Volume(d)) if d.clip_id == visual.clip.id => {
+                                pending = Some(PendingAction::SetGain {
+                                    track_index: d.track_index,
+                                    clip_id: d.clip_id,
+                                    new_value: volume_drag_value(d, clip_rect.height() / 2.0),
+                                });
+                                volume_drag_group = Some(d.group);
+                            }
+                            Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => {
+                                pending = Some(finish_trim(t, visual, &visuals, trimmed_primary_new_value));
+                            }
+                            Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => {
+                                pending = Some(finish_drag(
+                                    d,
+                                    drag_group_targets.as_deref().unwrap(),
+                                    &track_kinds,
+                                    dragged_primary_new_start,
+                                ));
+                            }
+                            _ => gesture_finished = false,
                         }
                     } else if resp.double_clicked() {
                         if let ClipSource::Media(media_id) = visual.clip.source
@@ -2909,26 +2888,11 @@ pub fn show_timeline(
                     );
                 }
                 // Cleared only now, not with a `.take()` halfway through the loop
-                // above — see the comment on `drag_finished`/`trim_finished`.
-                if drag_finished {
-                    state.drag = None;
+                // above — see the comment on `gesture_finished`.
+                if gesture_finished {
+                    state.gesture = None;
                 }
-                if trim_finished {
-                    state.trim = None;
-                }
-                if fade_drag_finished {
-                    state.fade_drag = None;
-                }
-                if transition_drag_finished {
-                    state.transition_drag = None;
-                }
-                if crossing_drag_finished {
-                    state.crossing_drag = None;
-                }
-                if volume_drag_finished {
-                    state.volume_drag = None;
-                }
-                if let Some(t) = &state.trim
+                if let Some(t) = state.trimming()
                     && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
                 {
                     let cursor = match (t.roll, t.edge) {
@@ -3000,7 +2964,7 @@ fn display_range(
     dragged_primary_new_start: Option<FrameIdx>,
 ) -> (FrameIdx, FrameIdx) {
     if is_trimming_this
-        && let (Some(t), Some(primary_value)) = (&state.trim, trimmed_primary_new_value)
+        && let (Some(t), Some(primary_value)) = (state.trimming(), trimmed_primary_new_value)
     {
         let (offset, edge) = t
             .followers
@@ -3016,7 +2980,7 @@ fn display_range(
             ),
         }
     } else {
-        let start = match (&state.drag, dragged_primary_new_start) {
+        let start = match (state.moving(), dragged_primary_new_start) {
             (Some(d), Some(new_start)) if d.clip_id == visual.clip.id => new_start,
             (Some(d), Some(new_start)) => match d
                 .followers
@@ -3253,7 +3217,7 @@ fn begin_trim(
         TrimEdge::Start => visual.clip.timeline_start,
         TrimEdge::End => visual.clip.timeline_end(),
     };
-    state.trim = Some(TrimState {
+    state.gesture = Some(Gesture::Trim(TrimState {
         clip_id: visual.clip.id,
         track_index: visual.track_index,
         edge,
@@ -3263,7 +3227,7 @@ fn begin_trim(
         max_value: max_value.max(min_value),
         followers,
         roll: matches!(zone, EdgeZone::Roll { .. }),
-    });
+    }));
 }
 
 /// Starts dragging `visual` together with its selection group.
@@ -3276,14 +3240,14 @@ fn begin_drag(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVi
     let (_, _, followers) =
         combined_drag_range(visuals, visual.track_index, visual.clip.id, &others);
 
-    state.drag = Some(DragState {
+    state.gesture = Some(Gesture::Move(DragState {
         clip_id: visual.clip.id,
         track_index: visual.track_index,
         original_start: visual.clip.timeline_start,
         accum_px: 0.0,
         followers,
         duplicate,
-    });
+    }));
 }
 
 /// Starts dragging the fade-in/fade-out handle of `visual`: no
@@ -3293,27 +3257,28 @@ fn begin_fade_drag(state: &mut TimelineState, visual: &ClipVisual, edge: FadeEdg
         FadeEdge::In => visual.clip.fade_in,
         FadeEdge::Out => visual.clip.fade_out,
     };
-    state.fade_drag = Some(FadeDragState {
+    state.gesture = Some(Gesture::Fade(EdgeDragState {
         clip_id: visual.clip.id,
         track_index: visual.track_index,
         edge,
         original_value,
         accum_px: 0.0,
-    });
+    }));
 }
 
-/// Value (in frames, clamped to the clip duration) of the preview of a
-/// fade drag in progress: dragging the fade-in handle to the right lengthens
-/// `fade_in`, dragging the fade-out one to the left lengthens
-/// `fade_out` — opposite directions on the X axis for the same sign of `accum_px`.
-fn fade_drag_value(d: &FadeDragState, clip_len: FrameIdx, px_per_frame: f32) -> FrameIdx {
+/// Length (in frames, clamped to `min..=clip_len`) of the preview of a fade
+/// or transition drag in progress: dragging the handle towards the inside of
+/// the clip lengthens it — opposite directions on the X axis for `In` and
+/// `Out`. `min` is 0 for a fade, which can be dragged away, 1 for a
+/// transition, which cannot.
+fn edge_drag_value(d: &EdgeDragState, clip_len: FrameIdx, px_per_frame: f32, min: FrameIdx) -> FrameIdx {
     let signed_delta = match d.edge {
         FadeEdge::In => d.accum_px,
         FadeEdge::Out => -d.accum_px,
     };
     (d.original_value as f32 + signed_delta / px_per_frame)
         .round()
-        .clamp(0.0, clip_len as f32) as FrameIdx
+        .clamp(min as f32, clip_len.max(min) as f32) as FrameIdx
 }
 
 /// `(fade_in, fade_out)` to show for `visual`: the preview of the drag in
@@ -3321,10 +3286,10 @@ fn fade_drag_value(d: &FadeDragState, clip_len: FrameIdx, px_per_frame: f32) -> 
 fn fade_preview(state: &TimelineState, visual: &ClipVisual, px_per_frame: f32) -> (FrameIdx, FrameIdx) {
     let mut fade_in = visual.clip.fade_in;
     let mut fade_out = visual.clip.fade_out;
-    if let Some(d) = &state.fade_drag
+    if let Some(d) = state.fading()
         && d.clip_id == visual.clip.id
     {
-        let value = fade_drag_value(d, visual.clip.timeline_len, px_per_frame);
+        let value = edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 0);
         match d.edge {
             FadeEdge::In => fade_in = value,
             FadeEdge::Out => fade_out = value,
@@ -3356,13 +3321,13 @@ fn begin_transition_drag(state: &mut TimelineState, visual: &ClipVisual, edge: F
         FadeEdge::Out => visual.clip.effects.transition_out.as_ref(),
     }
     .map_or(0, |t| t.duration);
-    state.transition_drag = Some(TransitionDragState {
+    state.gesture = Some(Gesture::TransitionLength(EdgeDragState {
         clip_id: visual.clip.id,
         track_index: visual.track_index,
         edge,
         original_value,
         accum_px: 0.0,
-    });
+    }));
 }
 
 /// The clip adjacent to `clip_id` on the side `edge`, on the same track: `In`
@@ -3439,14 +3404,14 @@ fn begin_crossing_drag(
         return;
     };
     let max_duration = (2 * left.timeline_len.min(right.timeline_len)).max(1);
-    state.crossing_drag = Some(CrossingDragState {
+    state.gesture = Some(Gesture::CrossingLength(CrossingDragState {
         track_index,
         left_clip,
         grabbed_left_side: edge == FadeEdge::Out,
         original_duration: crossing.transition.duration,
         max_duration,
         accum_px: 0.0,
-    });
+    }));
 }
 
 /// Starts an Alt+drag duplication from the body of a transition
@@ -3476,21 +3441,7 @@ fn begin_transition_duplicate_drag(
     if let Some(transition) = transition {
         resp.dnd_set_drag_payload(transition);
     }
-    state.transition_duplicate_drag = Some(visual.clip.id);
-}
-
-/// Value (in frames, clamped to 1..=clip duration) of the preview of a
-/// transition drag in progress: same sign convention as
-/// `fade_drag_value` (dragging the end towards the inside of the clip
-/// lengthens the transition, on both edges).
-fn transition_drag_value(d: &TransitionDragState, clip_len: FrameIdx, px_per_frame: f32) -> FrameIdx {
-    let signed_delta = match d.edge {
-        FadeEdge::In => d.accum_px,
-        FadeEdge::Out => -d.accum_px,
-    };
-    (d.original_value as f32 + signed_delta / px_per_frame)
-        .round()
-        .clamp(1.0, clip_len.max(1) as f32) as FrameIdx
+    state.gesture = Some(Gesture::DuplicateTransition(visual.clip.id));
 }
 
 /// Total duration (in frames) of the preview of a crossing drag in progress:
@@ -3498,7 +3449,7 @@ fn transition_drag_value(d: &TransitionDragState, clip_len: FrameIdx, px_per_fra
 /// (and the right one to the right in the same way), always by twice
 /// the displacement in frames — it grows/shrinks on the two sides equally.
 fn crossing_drag_value(d: &CrossingDragState, px_per_frame: f32) -> FrameIdx {
-    // Like `transition_drag_value`: the left end is an "Out" edge
+    // Like `edge_drag_value`: the left end is an "Out" edge
     // (inside the left clip, it grows by dragging it to the left,
     // away from the cut), the right one an "In" edge (inside the right
     // clip, it grows by dragging it to the right) — here doubled in addition
@@ -3532,7 +3483,7 @@ fn edge_marker(
         FadeEdge::Out => track.crossing_from(visual.clip.id),
     };
     if let Some(crossing) = crossing {
-        let total = if let Some(d) = &state.crossing_drag
+        let total = if let Some(d) = state.sizing_crossing()
             && d.track_index == visual.track_index
             && d.left_clip == crossing.left_clip
         {
@@ -3556,11 +3507,11 @@ fn edge_marker(
         FadeEdge::Out => visual.clip.effects.transition_out.as_ref(),
     }?;
     let mut duration = transition.duration;
-    if let Some(d) = &state.transition_drag
+    if let Some(d) = state.sizing_transition()
         && d.clip_id == visual.clip.id
         && d.edge == edge
     {
-        duration = transition_drag_value(d, visual.clip.timeline_len, px_per_frame);
+        duration = edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 1);
     }
     Some(EdgeMarker {
         duration,
@@ -3846,13 +3797,13 @@ fn volume_line_hit(pos: egui::Pos2, clip_rect: egui::Rect, line_y: f32) -> bool 
 /// single clip. It opens the undo group that will collect the `SetGain`s of
 /// every drag frame (see `VolumeDragState::group`).
 fn begin_volume_drag(state: &mut TimelineState, history: &mut History, visual: &ClipVisual) {
-    state.volume_drag = Some(VolumeDragState {
+    state.gesture = Some(Gesture::Volume(VolumeDragState {
         clip_id: visual.clip.id,
         track_index: visual.track_index,
         original_db: visual.clip.effects.gain_db.default,
         accum_px: 0.0,
         group: history.begin_group(),
-    });
+    }));
 }
 
 /// Gain (dB) of the preview of a volume line drag in progress: the drag is

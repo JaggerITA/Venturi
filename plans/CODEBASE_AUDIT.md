@@ -127,8 +127,9 @@ filters (see §4).
 
 ### 2.5 Timeline UI: fade and transition gestures cloned
 `fade_drag_value` ≡ `transition_drag_value` (only the clamp differs, 0 vs 1);
-`begin_fade_drag` ≈ `begin_transition_drag`. The doc comment of
-`adjacent_clip` sits above `transition_drag_value`.
+`begin_fade_drag` ≈ `begin_transition_drag`. (The audit also claimed a
+misplaced `adjacent_clip` doc comment: wrong, a misread of two concatenated
+excerpts.)
 
 ### 2.6 Model
 - `Clip::transition_offset_at`: the `transition_in`/`transition_out` blocks
@@ -213,7 +214,7 @@ from there.
 | 4 | §4 Fix the inconsistencies | done (d2b3ea3) |
 | 5a | §3 Merge `MediaSegment` into `WantedRange` | done (34c3687) |
 | 5b | §3 `Layer`/`OwnedLayer` = shared fields + content enum | done (f37ee56) |
-| 5c | §3 `enum Gesture` for the 8 timeline drag states — **plan first** | todo |
+| 5c | §3 `enum Gesture` for the 8 timeline drag states (plan agreed 2026-09-24) | done — see below |
 | 5d | §5 Split `show_timeline` (after 5c) — **plan first** | todo |
 
 ### Step 1 notes
@@ -278,3 +279,18 @@ in either case on this machine: the 3 s lookahead absorbed it.
 - Compound waveforms follow `audible_tracks` (solo included), like the
   compound mixdown that actually plays.
 - Stale `extrapolated_frame_for` docs rewritten.
+
+### Step 5c notes
+Safety net first (424f0a5): `tests/timeline_ui_gestures.rs` drives
+`show_timeline` on a headless context with synthetic pointer events (move,
+trim, fade, transition/crossing length, volume in one undo step, marquee,
+and the release-frame flash of a linked clip). `TimelineState::clip_rects`
+(cfg(test)) lets them aim. Note: egui starts a drag only past ~6 px and the
+timeline does not accumulate the movement of that first frame — the harness
+adds a pickup step so the tests assert exact values.
+
+Then `TimelineState::gesture: Option<Gesture>` replaced the 8 `Option`s;
+`FadeDragState`/`TransitionDragState` became `EdgeDragState`,
+`fade_drag_value`/`transition_drag_value` became `edge_drag_value(.., min)`;
+one `gesture_finished` flag, still cleared after the draw loop. Agreed
+behavior change: hover cursors never switch while any gesture is active.
