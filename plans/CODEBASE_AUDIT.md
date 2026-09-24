@@ -207,7 +207,7 @@ from there.
 
 | Step | Item | Status |
 |---|---|---|
-| 1 | §1.1 Skip identical viewer recompositions | done — see below |
+| 1 | §1.1 Skip identical viewer recompositions | done (9c5521a) |
 | 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | todo |
 | 3 | §1.2 Keep decoders across `UpdateProject` — **discuss design first** | todo |
 | 4 | §4 Fix the inconsistencies | todo |
