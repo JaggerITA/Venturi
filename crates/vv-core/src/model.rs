@@ -198,6 +198,11 @@ pub struct MediaItem {
     pub compound: Option<TimelineId>,
 }
 
+/// Nesting limit for whoever walks into compound clips: a safety net
+/// against a cycle (`Project::would_create_a_cycle` prevents creating one),
+/// not a design limit.
+pub const MAX_COMPOUND_DEPTH: u32 = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Interpolation {
     Hold,

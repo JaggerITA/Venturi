@@ -45,61 +45,166 @@ impl MixSnapshot {
         }
     }
 
-    /// `buffer_for` gives the buffer already at the `sample_rate`/`channels` of a
-    /// real file; `compound_buffer_for` that of the mixdown of a compound clip
-    /// (see `vv_app::mix_buffers` for how it computes and caches it — it does not
-    /// matter here, only that it can be asked given a `MediaId`). `None` from
-    /// either one (not ready yet, or no audio) makes the clip silent.
+    /// Clips whose audio is `Pending` are silent.
     pub fn from_timeline(
         project: &Project,
         timeline: &Timeline,
         sample_rate: u32,
         channels: u16,
-        mut buffer_for: impl FnMut(&Path, usize) -> Option<Arc<Vec<f32>>>,
-        mut compound_buffer_for: impl FnMut(&Project, MediaId) -> Option<Arc<Vec<f32>>>,
+        source: &mut impl AudioSource,
     ) -> Self {
-        let fps = timeline.fps.as_f64().max(1e-9);
-        let ch = channels.max(1) as u64;
-        let mut clips = Vec::new();
-        for (_, track) in timeline.audible_tracks() {
-            for clip in track.clips.iter().filter(|c| !c.disabled) {
-                let ClipSource::Media(media_id) = &clip.source else {
-                    continue;
-                };
-                let Some(item) = project.media_pool.get(*media_id) else {
-                    continue;
-                };
-                let buffer = if item.compound.is_some() {
-                    compound_buffer_for(project, *media_id)
-                } else {
-                    buffer_for(&item.path, clip.audio_stream_index)
-                };
-                let Some(buffer) = buffer else {
-                    continue;
-                };
-                let clip_fps = item.meta.fps.as_f64().max(1e-9);
-                if let Some(mix_clip) = mix_clip_from(clip, fps, clip_fps, sample_rate, ch, buffer) {
-                    clips.push(mix_clip);
-                }
-            }
-        }
-        Self {
-            sample_rate,
-            channels,
-            clips,
-        }
+        collect_clips(project, timeline, sample_rate, channels, source, 0).0
     }
 }
 
-/// The `MixClip` of `clip`, given the buffer already decoded/composed at
-/// `sample_rate`: the part of `from_timeline` independent of how `buffer` was
-/// obtained (a real file or the mixdown of a compound clip), reused
-/// also by `vv_app::mix_buffers::MixBufferCache::get_or_compute_compound`
-/// to build the exact same mix of a nested timeline without
-/// going through `from_timeline` (which would require two closures both
-/// mutable on the same cache, in conflict — see there for the details).
+/// A clip's audio, as an `AudioSource` answers it.
+pub enum ClipAudio {
+    /// Already at the snapshot's `sample_rate`/`channels`.
+    Ready(Arc<Vec<f32>>),
+    /// Like `Ready`, but only the start of a buffer still decoding: it plays,
+    /// yet a compound containing it is not cached.
+    Partial(Arc<Vec<f32>>),
+    /// Still decoding, nothing yet: silent for now, and so is a compound
+    /// containing it.
+    Pending,
+    /// No audio there (e.g. a stream index past the file's streams).
+    Missing,
+}
+
+/// The decoded audio a mix is built from. Compound clips never reach `file`:
+/// their mixdown is built from the nested timeline (`compound_mixdown`).
+pub trait AudioSource {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio;
+
+    /// A mixdown kept by `store_compound`, if still valid for `content_hash`.
+    fn cached_compound(&mut self, _media_id: MediaId, _content_hash: u64) -> Option<Arc<Vec<f32>>> {
+        None
+    }
+
+    fn store_compound(&mut self, _media_id: MediaId, _content_hash: u64, _mixdown: Arc<Vec<f32>>) {}
+}
+
+/// `None` is `Missing`; no compound cache.
+impl<F: FnMut(&Path, usize) -> Option<Arc<Vec<f32>>>> AudioSource for F {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
+    }
+}
+
+/// How much of a timeline's audio was ready.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Readiness {
+    Complete,
+    Partial,
+    Pending,
+}
+
+/// The mix clips of `timeline`, and the least ready of them.
+fn collect_clips(
+    project: &Project,
+    timeline: &Timeline,
+    sample_rate: u32,
+    channels: u16,
+    source: &mut impl AudioSource,
+    depth: u32,
+) -> (MixSnapshot, Readiness) {
+    let fps = timeline.fps.as_f64().max(1e-9);
+    let ch = channels.max(1) as u64;
+    let mut clips = Vec::new();
+    let mut readiness = Readiness::Complete;
+    for (_, track) in timeline.audible_tracks() {
+        for clip in track.clips.iter().filter(|c| !c.disabled) {
+            let ClipSource::Media(media_id) = &clip.source else {
+                continue;
+            };
+            let Some(item) = project.media_pool.get(*media_id) else {
+                continue;
+            };
+            let audio = if item.compound.is_some() {
+                compound_audio(project, *media_id, sample_rate, channels, source, depth)
+            } else {
+                source.file(&item.path, clip.audio_stream_index)
+            };
+            let buffer = match audio {
+                ClipAudio::Ready(buffer) => buffer,
+                ClipAudio::Partial(buffer) => {
+                    readiness = readiness.max(Readiness::Partial);
+                    buffer
+                }
+                ClipAudio::Pending => {
+                    readiness = Readiness::Pending;
+                    continue;
+                }
+                ClipAudio::Missing => continue,
+            };
+            let clip_fps = item.meta.fps.as_f64().max(1e-9);
+            if let Some(mix_clip) = mix_clip_from(clip, fps, clip_fps, sample_rate, ch, buffer) {
+                clips.push(mix_clip);
+            }
+        }
+    }
+    let snapshot = MixSnapshot {
+        sample_rate,
+        channels,
+        clips,
+    };
+    (snapshot, readiness)
+}
+
+/// The mixdown of the nested timeline of compound clip `media_id`, at
+/// `sample_rate`/`channels`. `Pending` while a clip in it (at any depth) has
+/// nothing yet, `Partial` while one is still decoding: only a complete one is
+/// cached, or the missing piece would stay missing until `content_hash`
+/// changes again.
+pub fn compound_mixdown(
+    project: &Project,
+    media_id: MediaId,
+    sample_rate: u32,
+    channels: u16,
+    source: &mut impl AudioSource,
+) -> ClipAudio {
+    compound_audio(project, media_id, sample_rate, channels, source, 0)
+}
+
+fn compound_audio(
+    project: &Project,
+    media_id: MediaId,
+    sample_rate: u32,
+    channels: u16,
+    source: &mut impl AudioSource,
+    depth: u32,
+) -> ClipAudio {
+    // Past the limit (only a cycle gets here) it never becomes ready: the
+    // whole cycle stays silent instead of layering itself 16 times.
+    if depth >= vv_core::MAX_COMPOUND_DEPTH {
+        return ClipAudio::Pending;
+    }
+    let Some(item) = project.media_pool.get(media_id) else {
+        return ClipAudio::Missing;
+    };
+    let Some(nested) = item.compound.and_then(|id| project.timelines.get(id)) else {
+        return ClipAudio::Missing;
+    };
+    if let Some(mixdown) = source.cached_compound(media_id, item.content_hash) {
+        return ClipAudio::Ready(mixdown);
+    }
+    let (snapshot, readiness) = collect_clips(project, nested, sample_rate, channels, source, depth + 1);
+    if readiness == Readiness::Pending {
+        return ClipAudio::Pending;
+    }
+    let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+    let mut mixdown = vec![0.0f32; len as usize * channels.max(1) as usize];
+    mix_range(&snapshot, 0, &mut mixdown);
+    let mixdown = Arc::new(mixdown);
+    if readiness == Readiness::Partial {
+        return ClipAudio::Partial(mixdown);
+    }
+    source.store_compound(media_id, item.content_hash, mixdown.clone());
+    ClipAudio::Ready(mixdown)
+}
+
 /// `None` if the buffer does not cover even one sample of the clip.
-pub fn mix_clip_from(
+fn mix_clip_from(
     clip: &vv_core::Clip,
     timeline_fps: f64,
     clip_fps: f64,

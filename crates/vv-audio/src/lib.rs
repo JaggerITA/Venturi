@@ -5,5 +5,5 @@
 pub mod mixer;
 pub mod stretch;
 
-pub use mixer::{MixSnapshot, Mixer, MixerState, StretchedWindow};
+pub use mixer::{AudioSource, ClipAudio, MixSnapshot, Mixer, MixerState, StretchedWindow};
 pub use stretch::stretch_samples;

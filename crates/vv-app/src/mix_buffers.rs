@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use vv_core::{ClipSource, MediaId, Project};
+use vv_audio::{AudioSource, ClipAudio};
+use vv_core::MediaId;
 
 use crate::worker::Worker;
 
@@ -31,11 +32,8 @@ pub struct MixBufferCache {
     in_progress: HashSet<Key>,
     worker: Worker<(Key, bool)>,
     ready_rx: mpsc::Receiver<Ready>,
-    sample_rate: u32,
-    channels: u16,
-    /// Already computed mixdowns of a compound clip, keyed by `MediaId` +
-    /// the `content_hash` they were computed with: see
-    /// `get_or_compute_compound`.
+    /// Mixdowns of compound clips, with the `content_hash` they were
+    /// computed with (see `vv_audio::mixer::compound_mixdown`).
     compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
 }
 
@@ -83,8 +81,6 @@ impl MixBufferCache {
             in_progress: HashSet::new(),
             worker,
             ready_rx,
-            sample_rate,
-            channels,
             compound: HashMap::new(),
         }
     }
@@ -116,93 +112,6 @@ impl MixBufferCache {
         None
     }
 
-    /// The mixdown of the nested timeline of a compound clip, at this
-    /// cache's `sample_rate`/`channels` — treated from there on like an
-    /// already decoded file. Cached by `content_hash`: `None` until even
-    /// a single one of the audio clips involved (at any nesting depth) has
-    /// a ready buffer — a mixdown missing a piece, once cached, would stay
-    /// wrong until `content_hash` changes again. It does not go through
-    /// `MixSnapshot::from_timeline` (which would take two closures both
-    /// mutable on `self`, in conflict): it builds the `MixClip`s by hand
-    /// with `vv_audio::mixer::mix_clip_from`, the same function
-    /// `from_timeline` uses.
-    pub fn get_or_compute_compound(&mut self, project: &Project, media_id: MediaId) -> Option<Arc<Vec<f32>>> {
-        self.get_or_compute_compound_at_depth(project, media_id, 0)
-    }
-
-    /// Limit on the nesting depth: since the project timeline is in the
-    /// media pool too, dragging it inside itself (or inside one of its
-    /// compound clips) would create a cycle — without a limit, a stack
-    /// overflow instead of a plain "not ready".
-    const MAX_COMPOUND_DEPTH: u32 = 16;
-
-    fn get_or_compute_compound_at_depth(
-        &mut self,
-        project: &Project,
-        media_id: MediaId,
-        depth: u32,
-    ) -> Option<Arc<Vec<f32>>> {
-        if depth >= Self::MAX_COMPOUND_DEPTH {
-            return None;
-        }
-        let item = project.media_pool.get(media_id)?;
-        let nested_id = item.compound?;
-        let content_hash = item.content_hash;
-        if let Some((hash, buffer)) = self.compound.get(&media_id)
-            && *hash == content_hash
-        {
-            return Some(buffer.clone());
-        }
-        let nested = project.timelines.get(nested_id)?;
-        let timeline_fps = nested.fps.as_f64().max(1e-9);
-        let mut clips = Vec::new();
-        for (_, track) in nested.audible_tracks() {
-            for clip in track.clips.iter().filter(|c| !c.disabled) {
-                let ClipSource::Media(inner_id) = &clip.source else {
-                    continue;
-                };
-                let Some(inner_item) = project.media_pool.get(*inner_id) else {
-                    continue;
-                };
-                // `get_or_request` answers `None` both for "not decided yet"
-                // and "no audio on this stream" (same treatment for live
-                // listening, where it makes no difference): only here, where
-                // it has to decide whether to cache, do the two cases matter —
-                // `in_progress` tells them apart.
-                let buffer = if inner_item.compound.is_some() {
-                    let Some(buffer) = self.get_or_compute_compound_at_depth(project, *inner_id, depth + 1) else {
-                        return None;
-                    };
-                    buffer
-                } else {
-                    let key = (inner_item.path.clone(), clip.audio_stream_index);
-                    match self.get_or_request(&inner_item.path, clip.audio_stream_index) {
-                        Some(buffer) => buffer,
-                        None if self.in_progress.contains(&key) => return None,
-                        None => continue,
-                    }
-                };
-                let clip_fps = inner_item.meta.fps.as_f64().max(1e-9);
-                if let Some(mix_clip) =
-                    vv_audio::mixer::mix_clip_from(clip, timeline_fps, clip_fps, self.sample_rate, self.channels as u64, buffer)
-                {
-                    clips.push(mix_clip);
-                }
-            }
-        }
-        let snapshot = vv_audio::mixer::MixSnapshot {
-            sample_rate: self.sample_rate,
-            channels: self.channels,
-            clips,
-        };
-        let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
-        let mut buffer = vec![0.0f32; len as usize * self.channels.max(1) as usize];
-        vv_audio::mixer::mix_range(&snapshot, 0, &mut buffer);
-        let buffer = Arc::new(buffer);
-        self.compound.insert(media_id, (content_hash, buffer.clone()));
-        Some(buffer)
-    }
-
     /// Collects the ready buffers (partial ones too); `true` if at least one
     /// arrived (the mixer snapshot must be rebuilt).
     pub fn poll(&mut self) -> bool {
@@ -223,6 +132,31 @@ impl MixBufferCache {
     pub fn has_pending(&mut self) -> bool {
         self.poll();
         !self.in_progress.is_empty()
+    }
+}
+
+/// Every buffer is at the `sample_rate`/`channels` given to `spawn`.
+impl AudioSource for MixBufferCache {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        let buffer = self.get_or_request(path, stream);
+        let decoding = self.in_progress.contains(&(path.to_path_buf(), stream));
+        match (buffer, decoding) {
+            (Some(buffer), false) => ClipAudio::Ready(buffer),
+            (Some(buffer), true) => ClipAudio::Partial(buffer),
+            (None, true) => ClipAudio::Pending,
+            (None, false) => ClipAudio::Missing,
+        }
+    }
+
+    fn cached_compound(&mut self, media_id: MediaId, content_hash: u64) -> Option<Arc<Vec<f32>>> {
+        self.compound
+            .get(&media_id)
+            .filter(|(hash, _)| *hash == content_hash)
+            .map(|(_, mixdown)| mixdown.clone())
+    }
+
+    fn store_compound(&mut self, media_id: MediaId, content_hash: u64, mixdown: Arc<Vec<f32>>) {
+        self.compound.insert(media_id, (content_hash, mixdown));
     }
 }
 

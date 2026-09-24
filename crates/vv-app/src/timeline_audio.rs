@@ -3,7 +3,6 @@
 //! of the mix already stretched in the background. Without an audio device
 //! the clock is wall time and nothing plays.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -12,7 +11,7 @@ use vv_audio::mixer::{
     MixClip, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE, StretchedWindow, mix_range,
     sample_to_timeline_frame, timeline_frame_to_sample,
 };
-use vv_core::{ClipSource, FrameIdx, Keyframed, MediaId, Project, TimelineId};
+use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
 
 use crate::mix_buffers::MixBufferCache;
 
@@ -111,32 +110,12 @@ impl TimelineAudio {
             return;
         };
         let (rate, channels) = (self.mix.sample_rate, self.mix.channels);
-        // Computed beforehand, not from a closure: `get_or_compute_compound`
-        // wants `&mut self.buffers` just like `get_or_request` below, and the
-        // two cannot be two closures alive on the same cache at once
-        // (see the docs of `MixBufferCache::get_or_compute_compound`).
-        let mut compound_buffers: HashMap<MediaId, Arc<Vec<f32>>> = HashMap::new();
-        for (_, track) in timeline.audible_tracks() {
-            for clip in track.clips.iter().filter(|c| !c.disabled) {
-                let ClipSource::Media(media_id) = &clip.source else {
-                    continue;
-                };
-                if !project.media_pool.get(*media_id).is_some_and(|m| m.compound.is_some()) {
-                    continue;
-                }
-                if let Some(buffer) = self.buffers.get_or_compute_compound(project, *media_id) {
-                    compound_buffers.insert(*media_id, buffer);
-                }
-            }
-        }
-        let buffers = &mut self.buffers;
         self.mix = Arc::new(MixSnapshot::from_timeline(
             project,
             timeline,
             rate,
             channels,
-            |path, stream| buffers.get_or_request(path, stream),
-            |_, media_id| compound_buffers.get(&media_id).cloned(),
+            &mut self.buffers,
         ));
         self.publish();
     }

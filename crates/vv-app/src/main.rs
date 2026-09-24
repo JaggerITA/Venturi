@@ -1248,7 +1248,7 @@ impl VenturiApp {
         };
         if current == nested_id || self.timeline_stack.contains(&nested_id) {
             // Already on this level, or already an ancestor on the stack: a
-            // residual cycle (see `MAX_COMPOUND_DEPTH` in render_ahead.rs) must
+            // residual cycle (see `vv_core::MAX_COMPOUND_DEPTH`) must
             // not make the stack grow indefinitely.
             return;
         }
@@ -2651,8 +2651,8 @@ fn map_source_ranges_to_timeline(
 }
 
 /// How many levels of nested compound clips are walked (waveform,
-/// "buffered" strip): past that, it gives up — like the render's
-/// `MAX_COMPOUND_DEPTH`.
+/// "buffered" strip): past that, it gives up — like
+/// `vv_core::MAX_COMPOUND_DEPTH`.
 const MAX_COMPOUND_WALK_DEPTH: usize = 8;
 
 /// Peaks of a compound clip, composed from those of the audio clips of

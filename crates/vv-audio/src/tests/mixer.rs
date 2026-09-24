@@ -79,7 +79,7 @@ fn buffers(path: &Path, stream: usize) -> Option<Arc<Vec<f32>>> {
 }
 
 fn render(project: &Project, tl: &Timeline, start: u64, frames: usize) -> Vec<f32> {
-    let snap = MixSnapshot::from_timeline(project, tl, RATE, 1, buffers, |_, _| None);
+    let snap = MixSnapshot::from_timeline(project, tl, RATE, 1, &mut buffers);
     let mut out = vec![9.0; frames];
     mix_range(&snap, start, &mut out);
     out
@@ -169,47 +169,131 @@ fn video_tracks_are_ignored() {
     assert!(render(&project, &tl, 0, 20).iter().all(|&s| s == 0.0));
 }
 
-#[test]
-fn a_compound_clip_is_routed_to_compound_buffer_for_never_to_buffer_for() {
-    let mut project = Project::default();
-    let nested = project.timelines.insert(Timeline {
-        name: "n".into(),
-        fps: Rational::new(10, 1),
-        resolution: (1, 1),
-        tracks: vec![],
-    });
-    let compound_media = project.media_pool.insert(MediaItem {
+/// `project()` plus a compound clip whose nested timeline plays `a.wav`
+/// for 5 frames.
+fn project_with_compound() -> (Project, vv_core::MediaId) {
+    let (mut project, a, _) = project();
+    let nested = project
+        .timelines
+        .insert(timeline(vec![audio_track(vec![clip_at(a, 0, 0, 5)])]));
+    let compound = project.media_pool.insert(MediaItem {
         path: PathBuf::from("Compound Clip 1"),
-        meta: MediaMeta {
-            duration_frames: 100,
-            fps: Rational::new(10, 1),
-            width: 0,
-            height: 0,
-            has_video: false,
-            has_audio: true,
-            sample_rate: RATE,
-            channels: 1,
-            audio_streams: 1,
-        },
-        content_hash: 1,
+        meta: project.media_pool[a].meta.clone(),
+        content_hash: 10,
         compound: Some(nested),
     });
-    let tl = timeline(vec![audio_track(vec![clip_at(compound_media, 0, 0, 5)])]);
+    (project, compound)
+}
 
-    let mut buffer_for_called = false;
-    let snap = MixSnapshot::from_timeline(
-        &project,
-        &tl,
-        RATE,
-        1,
-        |_, _| {
-            buffer_for_called = true;
-            None
-        },
-        |_, id| (id == compound_media).then(|| Arc::new(vec![0.5; 50])),
-    );
-    assert!(!buffer_for_called, "a compound clip must never go through buffer_for");
-    assert_eq!(snap.clips.len(), 1, "compound_buffer_for answered: the clip enters the mix");
+/// Answers from `buffers`, counting the calls; `partial` answers `Partial`
+/// instead of `Ready`, as for a file still decoding.
+#[derive(Default)]
+struct CountingSource {
+    files_asked: Vec<PathBuf>,
+    partial: bool,
+    stored: Vec<MediaId>,
+    cache: Option<Arc<Vec<f32>>>,
+}
+
+impl AudioSource for CountingSource {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.files_asked.push(path.to_path_buf());
+        match buffers(path, stream) {
+            Some(b) if self.partial => ClipAudio::Partial(b),
+            Some(b) => ClipAudio::Ready(b),
+            None => ClipAudio::Missing,
+        }
+    }
+
+    fn cached_compound(&mut self, _: MediaId, _: u64) -> Option<Arc<Vec<f32>>> {
+        self.cache.clone()
+    }
+
+    fn store_compound(&mut self, media_id: MediaId, _: u64, mixdown: Arc<Vec<f32>>) {
+        self.stored.push(media_id);
+        self.cache = Some(mixdown);
+    }
+}
+
+#[test]
+fn a_compound_clip_plays_its_nested_timeline_and_never_asks_for_its_own_file() {
+    let (project, compound) = project_with_compound();
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 5)])]);
+    let mut source = CountingSource::default();
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(source.files_asked, [PathBuf::from("a.wav")]);
+    let mut out = vec![9.0; 60];
+    mix_range(&snap, 0, &mut out);
+    assert!(out[..50].iter().all(|&s| s == 0.5));
+    assert!(out[50..].iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn a_compound_used_twice_is_mixed_once() {
+    let (project, compound) = project_with_compound();
+    let tl = timeline(vec![audio_track(vec![
+        clip_at(compound, 0, 0, 5),
+        clip_at(compound, 10, 0, 5),
+    ])]);
+    let mut source = CountingSource::default();
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    assert_eq!(snap.clips.len(), 2);
+    assert_eq!(source.stored, [compound]);
+    assert_eq!(source.files_asked.len(), 1, "the second use comes from the cache");
+}
+
+/// A mixdown built on a file still decoding plays, but caching it would
+/// keep the missing tail missing until `content_hash` changes.
+#[test]
+fn a_compound_over_a_partial_file_plays_but_is_not_cached() {
+    let (project, compound) = project_with_compound();
+    let mut source = CountingSource {
+        partial: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        compound_mixdown(&project, compound, RATE, 1, &mut source),
+        ClipAudio::Partial(_)
+    ));
+    assert!(source.stored.is_empty());
+
+    source.partial = false;
+    assert!(matches!(
+        compound_mixdown(&project, compound, RATE, 1, &mut source),
+        ClipAudio::Ready(_)
+    ));
+    assert_eq!(source.stored, [compound]);
+}
+
+#[test]
+fn a_compound_over_a_pending_file_is_silent_and_not_cached() {
+    let (project, compound) = project_with_compound();
+    assert!(matches!(
+        compound_mixdown(&project, compound, RATE, 1, &mut AllPending),
+        ClipAudio::Pending
+    ));
+}
+
+struct AllPending;
+
+impl AudioSource for AllPending {
+    fn file(&mut self, _: &Path, _: usize) -> ClipAudio {
+        ClipAudio::Pending
+    }
+}
+
+/// Safety net: `would_create_a_cycle` prevents it, but a compound containing
+/// itself must end silent, not overflow the stack.
+#[test]
+fn a_compound_containing_itself_is_silent() {
+    let (mut project, compound) = project_with_compound();
+    let nested = project.media_pool[compound].compound.unwrap();
+    project.timelines[nested]
+        .tracks
+        .push(audio_track(vec![clip_at(compound, 0, 0, 5)]));
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 5)])]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    assert!(snap.clips.is_empty());
 }
 
 /// The bug case: media at 9.99 fps (10000/1001, the small-scale analogue
@@ -249,7 +333,7 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
     let buffer_for = |path: &Path, _stream: usize| {
         (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
     };
-    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, buffer_for, |_, _| None);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |p: &Path, s: usize| buffer_for(p, s));
     assert_eq!(snap.clips.len(), 1);
     assert_eq!(
         snap.clips[0].len, AUDIO_SAMPLES as u64,
@@ -298,7 +382,7 @@ fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
     };
     let mix_all = |project: &Project| {
         let timeline = &project.timelines[timeline_id];
-        let snap = MixSnapshot::from_timeline(project, timeline, RATE, 1, buffer_for, |_, _| None);
+        let snap = MixSnapshot::from_timeline(project, timeline, RATE, 1, &mut |p: &Path, s: usize| buffer_for(p, s));
         let mut out = vec![0.0; 10_010];
         mix_range(&snap, 0, &mut out);
         out
@@ -341,8 +425,7 @@ fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
         &tl,
         RATE,
         1,
-        |_, _| Some(Arc::new(vec![0.5; len_frames])),
-        |_, _| None,
+        &mut |_: &Path, _: usize| Some(Arc::new(vec![0.5; len_frames])),
     );
     let mut out = vec![0.0; len_frames];
     mix_range(&snap, 0, &mut out);
@@ -372,8 +455,7 @@ fn clip_whose_buffer_is_not_ready_is_silent() {
         &tl,
         RATE,
         1,
-        |p, s| (p != Path::new("b.wav")).then(|| buffers(p, s)).flatten(),
-        |_, _| None,
+        &mut |p: &Path, s: usize| (p != Path::new("b.wav")).then(|| buffers(p, s)).flatten(),
     );
     let mut out = vec![0.0; 10];
     mix_range(&snap, 0, &mut out);
@@ -402,7 +484,7 @@ fn mix_is_independent_of_how_the_range_is_split() {
         audio_track(vec![clip_at(b, 7, 2, 20)]),
     ]);
     let whole = render(&project, &tl, 0, 400);
-    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, buffers, |_, _| None);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
     let mut chunked = vec![0.0; 400];
     for (i, chunk) in chunked.chunks_mut(37).enumerate() {
         mix_range(&snap, (i * 37) as u64, chunk);
@@ -419,8 +501,7 @@ fn stereo_mix_keeps_channels_interleaved() {
         &tl,
         RATE,
         2,
-        |_, _| Some(Arc::new([0.1, 0.9].repeat(100))),
-        |_, _| None,
+        &mut |_: &Path, _: usize| Some(Arc::new([0.1, 0.9].repeat(100))),
     );
     let mut out = vec![0.0; 40];
     mix_range(&snap, 5, &mut out);
@@ -603,8 +684,7 @@ fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
         &tl,
         RATE,
         1,
-        |_, _| Some(Arc::new(vec![0.5; len_frames])),
-        |_, _| None,
+        &mut |_: &Path, _: usize| Some(Arc::new(vec![0.5; len_frames])),
     );
     let mut out = vec![9.0; len_frames];
     mix_range(&snap, 0, &mut out);

@@ -10,21 +10,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    Clip, ClipId, ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
+    Clip, ClipId, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
 };
 
 use vv_audio::mixer::{
-    MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into, timeline_frame_to_sample,
+    AudioSource, ClipAudio, MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into,
+    timeline_frame_to_sample,
 };
 
 use crate::frame_provider::{FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at};
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
-/// Same limit and same reason as `MAX_COMPOUND_DEPTH` in
-/// `render_ahead.rs`: since the project timeline is in the media pool
-/// too, a cycle of compound clips is possible.
-const MAX_COMPOUND_DEPTH: u32 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportSettings {
@@ -427,14 +424,12 @@ fn mix_audio_track(
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, String> {
+    let mut wanted = WantedStreams::default();
+    MixSnapshot::from_timeline(project, timeline, PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, &mut wanted);
     // The same decoding as the preview (`mix_buffers`): swresample to
     // `PROJECT_SAMPLE_RATE`, all the streams of a file in one pass.
-    // Recursive: the real media inside a compound clip end up in the
-    // same collection, as if they were clips of `timeline`.
-    let mut streams_by_path: HashMap<PathBuf, Vec<usize>> = HashMap::new();
-    collect_audio_streams(project, timeline, &mut streams_by_path, 0);
-    let mut buffers: HashMap<(PathBuf, usize), Arc<Vec<f32>>> = HashMap::new();
-    for (path, streams) in streams_by_path {
+    let mut audio = DecodedAudio::default();
+    for (path, streams) in wanted.0 {
         let mut decoded = vec![Vec::new(); streams.len()];
         let formats = vv_media::decode_audio_streams_streaming(
             &path,
@@ -448,19 +443,13 @@ fn mix_audio_track(
         .map_err(|e| e.to_string())?;
         for ((stream, samples), format) in streams.into_iter().zip(decoded).zip(formats) {
             if format.is_some() {
-                buffers.insert((path.clone(), stream), Arc::new(samples));
+                audio.files.insert((path.clone(), stream), Arc::new(samples));
             }
         }
     }
 
-    let snapshot = MixSnapshot::from_timeline(
-        project,
-        timeline,
-        PROJECT_SAMPLE_RATE,
-        PROJECT_CHANNELS,
-        |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
-        |_, media_id| compound_mix_buffer(project, media_id, &buffers, 0),
-    );
+    let snapshot =
+        MixSnapshot::from_timeline(project, timeline, PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, &mut audio);
     let fps = timeline.fps.as_f64();
     let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
     let end_sample = timeline_frame_to_sample(range.end, fps, PROJECT_SAMPLE_RATE);
@@ -470,73 +459,42 @@ fn mix_audio_track(
     Ok(mixed)
 }
 
-/// Every Media clip of `timeline` (at any nesting depth inside the
-/// compound clips) referencing a real file, collected into
-/// `streams_by_path`: a compound clip itself does not generate an entry (its
-/// "file" does not exist), only what its nested timeline references.
-fn collect_audio_streams(
-    project: &Project,
-    timeline: &Timeline,
-    streams_by_path: &mut HashMap<PathBuf, Vec<usize>>,
-    depth: u32,
-) {
-    if depth >= MAX_COMPOUND_DEPTH {
-        return;
-    }
-    for (_, track) in timeline.audible_tracks() {
-        for clip in track.clips.iter().filter(|c| !c.disabled) {
-            let ClipSource::Media(media_id) = &clip.source else {
-                continue;
-            };
-            let Some(item) = project.media_pool.get(*media_id) else {
-                continue;
-            };
-            match item.compound {
-                Some(nested_id) => {
-                    if let Some(nested) = project.timelines.get(nested_id) {
-                        collect_audio_streams(project, nested, streams_by_path, depth + 1);
-                    }
-                }
-                None => {
-                    let streams = streams_by_path.entry(item.path.clone()).or_default();
-                    if !streams.contains(&clip.audio_stream_index) {
-                        streams.push(clip.audio_stream_index);
-                    }
-                }
-            }
+/// Lists the streams of every real file the mix reaches, compound clips
+/// included, without providing any.
+#[derive(Default)]
+struct WantedStreams(HashMap<PathBuf, Vec<usize>>);
+
+impl AudioSource for WantedStreams {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        let streams = self.0.entry(path.to_path_buf()).or_default();
+        if !streams.contains(&stream) {
+            streams.push(stream);
         }
+        ClipAudio::Pending
     }
 }
 
-/// The mixdown of the nested timeline of a compound clip, at
-/// `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`: no caching is needed here (the export
-/// asks for it once for the whole export) nor checking that the real media
-/// are ready (`buffers` already has them all, decoded before getting
-/// here by `collect_audio_streams`). Recursive for a compound clip
-/// inside another.
-fn compound_mix_buffer(
-    project: &Project,
-    media_id: MediaId,
-    buffers: &HashMap<(PathBuf, usize), Arc<Vec<f32>>>,
-    depth: u32,
-) -> Option<Arc<Vec<f32>>> {
-    if depth >= MAX_COMPOUND_DEPTH {
-        return None;
+/// Everything decoded up front: a compound used several times is mixed once.
+#[derive(Default)]
+struct DecodedAudio {
+    files: HashMap<(PathBuf, usize), Arc<Vec<f32>>>,
+    compounds: HashMap<MediaId, Arc<Vec<f32>>>,
+}
+
+impl AudioSource for DecodedAudio {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.files
+            .get(&(path.to_path_buf(), stream))
+            .map_or(ClipAudio::Missing, |buffer| ClipAudio::Ready(buffer.clone()))
     }
-    let item = project.media_pool.get(media_id)?;
-    let nested = project.timelines.get(item.compound?)?;
-    let snapshot = MixSnapshot::from_timeline(
-        project,
-        nested,
-        PROJECT_SAMPLE_RATE,
-        PROJECT_CHANNELS,
-        |path, stream| buffers.get(&(path.to_path_buf(), stream)).cloned(),
-        |_, inner_media_id| compound_mix_buffer(project, inner_media_id, buffers, depth + 1),
-    );
-    let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
-    let mut buffer = vec![0.0_f32; len as usize * PROJECT_CHANNELS as usize];
-    mix_range(&snapshot, 0, &mut buffer);
-    Some(Arc::new(buffer))
+
+    fn cached_compound(&mut self, media_id: MediaId, _content_hash: u64) -> Option<Arc<Vec<f32>>> {
+        self.compounds.get(&media_id).cloned()
+    }
+
+    fn store_compound(&mut self, media_id: MediaId, _content_hash: u64, mixdown: Arc<Vec<f32>>) {
+        self.compounds.insert(media_id, mixdown);
+    }
 }
 
 #[cfg(test)]

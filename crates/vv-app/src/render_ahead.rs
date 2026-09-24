@@ -403,12 +403,6 @@ struct MediaSegment {
 /// from the nearest to the playhead and, at equal position, from the highest track.
 /// Real media only: a compound clip is not decoded, it is walked
 /// into (at any nesting depth).
-/// Limit on the nesting depth of compound clips this module
-/// follows: since the project timeline shows up in the media pool too
-/// (see `MediaItem::compound`), dragging it inside itself (or inside one of
-/// its compound clips) would create a cycle — without a limit, a stack
-/// overflow instead of a plain "not composed". Generous for real use.
-const MAX_COMPOUND_DEPTH: u32 = 16;
 
 fn collect_media_segments(
     project: &Project,
@@ -454,7 +448,7 @@ fn clipped_media_segments(
     depth: u32,
 ) -> Vec<(usize, MediaSegment)> {
     let mut real = Vec::new();
-    if depth >= MAX_COMPOUND_DEPTH {
+    if depth >= vv_core::MAX_COMPOUND_DEPTH {
         return real;
     }
     for (track_index, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {

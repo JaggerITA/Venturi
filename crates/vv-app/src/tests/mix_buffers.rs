@@ -1,4 +1,5 @@
 use super::*;
+use vv_core::Project;
 
 fn wait_done(cache: &mut MixBufferCache) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -9,7 +10,7 @@ fn wait_done(cache: &mut MixBufferCache) {
 }
 
 #[test]
-fn get_or_compute_compound_waits_for_its_real_media_then_caches_the_mixdown() {
+fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
     let dir = std::env::temp_dir().join("vv-app-mix-buffers-test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("compound_source.wav");
@@ -74,25 +75,24 @@ fn get_or_compute_compound_waits_for_its_real_media_then_caches_the_mixdown() {
     });
 
     let mut cache = MixBufferCache::spawn(48_000, 1);
+    let mut mixdown = |cache: &mut MixBufferCache| {
+        vv_audio::mixer::compound_mixdown(&project, compound_media, 48_000, 1, cache)
+    };
     assert!(
-        cache.get_or_compute_compound(&project, compound_media).is_none(),
+        matches!(mixdown(&mut cache), vv_audio::ClipAudio::Pending),
         "the real media is not decoded yet: the compound clip is not ready"
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let buffer = loop {
-        assert!(std::time::Instant::now() < deadline, "the mixdown never became ready");
-        cache.poll();
-        if let Some(buffer) = cache.get_or_compute_compound(&project, compound_media) {
-            break buffer;
-        }
-        std::thread::yield_now();
+    wait_done(&mut cache);
+    let vv_audio::ClipAudio::Ready(buffer) = mixdown(&mut cache) else {
+        panic!("the decode is over: the mixdown must be complete");
     };
     assert!(buffer.iter().any(|&s| s.abs() > 0.01), "the sine wave must reach the mixdown");
 
-    // Same content_hash: the second call returns the cached buffer,
-    // it does not recompute a new one.
-    let cached = cache.get_or_compute_compound(&project, compound_media).unwrap();
+    // Same content_hash: the cached buffer, not a new mix.
+    let vv_audio::ClipAudio::Ready(cached) = mixdown(&mut cache) else {
+        panic!("a complete mixdown stays ready");
+    };
     assert!(Arc::ptr_eq(&buffer, &cached));
 }
 

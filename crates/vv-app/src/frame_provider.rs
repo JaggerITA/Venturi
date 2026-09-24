@@ -236,12 +236,6 @@ pub fn renders_same(a: &[OwnedLayer], b: &[OwnedLayer]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.renders_same(b))
 }
 
-/// Limit on the nesting depth of compound clips: a compound clip
-/// containing itself (`Project::would_create_compound_cycle` prevents it
-/// on insertion) would send the composition into infinite recursion.
-/// A safety net, not a design limit.
-pub const MAX_COMPOUND_DEPTH: u32 = 16;
-
 /// Adds to any provider the GPU composition of compound clips: the nested
 /// timeline becomes a texture that stays on the card, instead of a composed
 /// frame brought back to the CPU and converted to YUV again.
@@ -279,7 +273,7 @@ impl FrameProvider for GpuCompounds<'_> {
         nested: &Timeline,
         local_frame: FrameIdx,
     ) -> Result<Option<vv_render::PooledTexture>, String> {
-        if self.depth >= MAX_COMPOUND_DEPTH {
+        if self.depth >= vv_core::MAX_COMPOUND_DEPTH {
             return Ok(None);
         }
         self.depth += 1;

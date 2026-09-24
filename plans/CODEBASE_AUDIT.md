@@ -208,7 +208,7 @@ from there.
 | Step | Item | Status |
 |---|---|---|
 | 1 | §1.1 Skip identical viewer recompositions | done (9c5521a) |
-| 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | todo |
+| 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done — see below |
 | 3 | §1.2 Keep decoders across `UpdateProject` — **discuss design first** | todo |
 | 4 | §4 Fix the inconsistencies | todo |
 | 5 | §3 Merge `MediaSegment`/`WantedRange`, `LayerCommon`; `enum Gesture` + split `show_timeline` | todo |
@@ -221,3 +221,24 @@ opacity, filters, blend, color, title, and same `OutputFrame`. Anything that
 cannot be compared — a compound clip's freshly composed GPU texture —
 always recomposes. Equality is on everything the compositor reads, so a
 skipped recomposition shows exactly the pixels a new one would.
+
+### Step 2 notes
+One walk builds every mix: `MixSnapshot::from_timeline` takes an
+`AudioSource` (`vv_audio::mixer`), which answers `Ready`/`Partial`/`Pending`/
+`Missing` per file and may cache compound mixdowns; the compound mixdown
+itself (`compound_mixdown`) and its depth limit live only in the mixer.
+`MixBufferCache` (preview) and the export's `DecodedAudio` implement it; the
+export's first pass (`WantedStreams`) only lists the streams to decode, so
+`collect_audio_streams`/`compound_mix_buffer`/`get_or_compute_compound` and
+`timeline_audio`'s pre-pass are gone. `vv_core::MAX_COMPOUND_DEPTH` replaces
+the per-module 16s (the UI's 8 is left for step 4).
+
+Bug fixed on the way: the preview cached a compound mixdown built on a
+*partially* decoded buffer (progressive publication), so its tail stayed
+silent until `content_hash` changed. `Partial` still plays but is never
+cached.
+
+Pre-existing failures, unrelated (also on HEAD before step 1):
+`export_timeline_produces_a_playable_file_matching_the_timeline` and
+`ease_in_and_ease_out_are_slow_then_fast_and_viceversa` (`Interpolation::PRESETS`
+contains `Hold`, which never reaches 1.0).
