@@ -156,7 +156,7 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    shader flips it, uvs point down) and parameters in pixels — of the
    timeline for position and anchor, of the media (native resolution, not
    the proxy's) for crop and softness, converted to fractions in the uniform
-   (`OutputFrame`, `Layer::Video::source_size`): `zoom` (per axis) and
+   (`OutputFrame`, `LayerContent::Video::source_size`): `zoom` (per axis) and
    `rotation` act around the `anchor`, `position` moves the clip in the
    frame, `flip` mirrors it, `crop` cuts each side by a fraction (0 =
    untouched) — with `crop_softness` feathering the edge through alpha,

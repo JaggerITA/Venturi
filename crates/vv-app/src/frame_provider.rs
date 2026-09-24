@@ -81,91 +81,52 @@ pub fn as_render_yuv_frame(frame: &FrameYuv420) -> vv_render::YuvFrame<'_> {
 }
 
 /// A compositing layer that owns what `vv_render::Layer` borrows.
-pub enum OwnedLayer {
+pub struct OwnedLayer {
+    pub content: OwnedContent,
+    pub transform: Transform,
+    pub opacity: f32,
+    /// Only the active filters of `EffectStack::filters`, in their order.
+    pub filters: Vec<vv_core::FilterKind>,
+    pub blend: vv_core::BlendMode,
+}
+
+pub enum OwnedContent {
     Video {
         frame: Arc<FrameYuv420>,
-        transform: Transform,
         /// Native resolution of the media (not of the proxy): the units of the crop.
         source_size: (u32, u32),
-        opacity: f32,
-        /// Only the active filters of `EffectStack::filters`, in their order.
-        filters: Vec<vv_core::FilterKind>,
-        blend: vv_core::BlendMode,
     },
     /// Compound clip composed on the GPU (see `FrameProvider::compound_texture`).
     Texture {
         texture: vv_render::PooledTexture,
-        transform: Transform,
         /// Resolution of the nested timeline: the units of the crop, like
         /// `Video`'s `source_size` (the texture can be smaller).
         source_size: (u32, u32),
-        opacity: f32,
-        filters: Vec<vv_core::FilterKind>,
-        blend: vv_core::BlendMode,
     },
-    Solid {
-        color: Rgba,
-        transform: Transform,
-        opacity: f32,
-        filters: Vec<vv_core::FilterKind>,
-        blend: vv_core::BlendMode,
-    },
-    Text {
-        title: TitleParams,
-        transform: Transform,
-        opacity: f32,
-        filters: Vec<vv_core::FilterKind>,
-        blend: vv_core::BlendMode,
-    },
+    Solid(Rgba),
+    Text(TitleParams),
 }
 
 impl OwnedLayer {
     pub fn as_render(&self) -> vv_render::Layer<'_> {
-        match self {
-            OwnedLayer::Video {
-                frame,
-                transform,
-                source_size,
-                opacity,
-                filters,
-                blend,
-            } => vv_render::Layer::Video {
+        let content = match &self.content {
+            OwnedContent::Video { frame, source_size } => vv_render::LayerContent::Video {
                 frame: as_render_yuv_frame(frame),
-                transform: *transform,
                 source_size: *source_size,
-                opacity: *opacity,
-                filters: filters.as_slice(),
-                blend: *blend,
             },
-            OwnedLayer::Texture {
+            OwnedContent::Texture { texture, source_size } => vv_render::LayerContent::Texture {
                 texture,
-                transform,
-                source_size,
-                opacity,
-                filters,
-                blend,
-            } => vv_render::Layer::Texture {
-                texture,
-                transform: *transform,
                 source_size: *source_size,
-                opacity: *opacity,
-                filters: filters.as_slice(),
-                blend: *blend,
             },
-            OwnedLayer::Solid { color, transform, opacity, filters, blend } => vv_render::Layer::Solid {
-                color: *color,
-                transform: *transform,
-                opacity: *opacity,
-                filters: filters.as_slice(),
-                blend: *blend,
-            },
-            OwnedLayer::Text { title, transform, opacity, filters, blend } => vv_render::Layer::Text {
-                title,
-                transform: *transform,
-                opacity: *opacity,
-                filters: filters.as_slice(),
-                blend: *blend,
-            },
+            OwnedContent::Solid(color) => vv_render::LayerContent::Solid(*color),
+            OwnedContent::Text(title) => vv_render::LayerContent::Text(title),
+        };
+        vv_render::Layer {
+            content,
+            transform: self.transform,
+            opacity: self.opacity,
+            filters: &self.filters,
+            blend: self.blend,
         }
     }
 
@@ -173,60 +134,20 @@ impl OwnedLayer {
     /// compared by identity: equal only while `other` holds its `Arc`. A
     /// compound clip's texture is composed anew every time, never equal.
     fn renders_same(&self, other: &OwnedLayer) -> bool {
-        use OwnedLayer::*;
-        match (self, other) {
+        let same_content = match (&self.content, &other.content) {
             (
-                Video { frame, transform, source_size, opacity, filters, blend },
-                Video {
-                    frame: frame2,
-                    transform: transform2,
-                    source_size: source_size2,
-                    opacity: opacity2,
-                    filters: filters2,
-                    blend: blend2,
-                },
-            ) => {
-                Arc::ptr_eq(frame, frame2)
-                    && transform == transform2
-                    && source_size == source_size2
-                    && opacity == opacity2
-                    && filters == filters2
-                    && blend == blend2
-            }
-            (
-                Solid { color, transform, opacity, filters, blend },
-                Solid {
-                    color: color2,
-                    transform: transform2,
-                    opacity: opacity2,
-                    filters: filters2,
-                    blend: blend2,
-                },
-            ) => {
-                color == color2
-                    && transform == transform2
-                    && opacity == opacity2
-                    && filters == filters2
-                    && blend == blend2
-            }
-            (
-                Text { title, transform, opacity, filters, blend },
-                Text {
-                    title: title2,
-                    transform: transform2,
-                    opacity: opacity2,
-                    filters: filters2,
-                    blend: blend2,
-                },
-            ) => {
-                title == title2
-                    && transform == transform2
-                    && opacity == opacity2
-                    && filters == filters2
-                    && blend == blend2
-            }
+                OwnedContent::Video { frame, source_size },
+                OwnedContent::Video { frame: frame2, source_size: source_size2 },
+            ) => Arc::ptr_eq(frame, frame2) && source_size == source_size2,
+            (OwnedContent::Solid(color), OwnedContent::Solid(color2)) => color == color2,
+            (OwnedContent::Text(title), OwnedContent::Text(title2)) => title == title2,
             _ => false,
-        }
+        };
+        same_content
+            && self.transform == other.transform
+            && self.opacity == other.opacity
+            && self.filters == other.filters
+            && self.blend == other.blend
     }
 }
 
@@ -395,43 +316,30 @@ fn build_layer(
     // The clip opacity is multiplied by the one already carried by the
     // fades.
     let opacity = opacity * (transform.opacity / 100.0).clamp(0.0, 1.0);
-    match &clip.source {
-        ClipSource::SolidColor => Some(OwnedLayer::Solid {
-            color: clip
-                .effects
+    let content = match &clip.source {
+        ClipSource::SolidColor => OwnedContent::Solid(
+            clip.effects
                 .color
                 .as_ref()
                 .map_or(Rgba::BLACK, |k| k.value_at(source_frame)),
-            transform,
-            opacity,
-            filters,
-            blend,
-        }),
-        ClipSource::Text => clip
-            .effects
-            .title
-            .clone()
-            .map(|title| OwnedLayer::Text { title, transform, opacity, filters, blend }),
-        ClipSource::Media(_) => match content {
-            ClipContent::None => None,
-            ClipContent::Yuv(frame) => Some(OwnedLayer::Video {
-                frame,
-                transform,
-                source_size: clip_source_size(project, clip, timeline_size),
-                opacity,
-                filters,
-                blend,
-            }),
-            ClipContent::Texture(texture) => Some(OwnedLayer::Texture {
-                texture,
-                transform,
-                source_size: clip_source_size(project, clip, timeline_size),
-                opacity,
-                filters,
-                blend,
-            }),
-        },
-    }
+        ),
+        ClipSource::Text => OwnedContent::Text(clip.effects.title.clone()?),
+        ClipSource::Media(_) => {
+            let source_size = clip_source_size(project, clip, timeline_size);
+            match content {
+                ClipContent::None => return None,
+                ClipContent::Yuv(frame) => OwnedContent::Video { frame, source_size },
+                ClipContent::Texture(texture) => OwnedContent::Texture { texture, source_size },
+            }
+        }
+    };
+    Some(OwnedLayer {
+        content,
+        transform,
+        opacity,
+        filters,
+        blend,
+    })
 }
 
 /// The timeline frame to take the content from: `timeline_frame`, or that of

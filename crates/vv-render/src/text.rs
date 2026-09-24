@@ -1,7 +1,7 @@
 //! Title rasterization (`ClipSource::Text`) via `cosmic-text`. Each element
 //! (background, outline, shadow, text) is a single color: an 8-bit coverage
 //! mask per element is enough, which the compositor colors and stacks
-//! (`Layer::Text`).
+//! (`LayerContent::Text`).
 
 use cosmic_text::{
     Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache,

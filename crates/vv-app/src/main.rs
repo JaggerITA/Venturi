@@ -1538,7 +1538,7 @@ impl VenturiApp {
         // would keep it out of the scratch pool.
         let reusable = !layers
             .iter()
-            .any(|l| matches!(l, frame_provider::OwnedLayer::Texture { .. }));
+            .any(|l| matches!(l.content, frame_provider::OwnedContent::Texture { .. }));
         self.viewer_content = reusable.then_some((layers, output));
     }
 
@@ -3284,9 +3284,11 @@ impl eframe::App for VenturiApp {
                     self.last_viewer_frame_kind = None;
                 } else if let Some(frame) = self.browsing_video_frame() {
                     let output = vv_render::OutputFrame::exact(frame.width, frame.height);
-                    let layer = frame_provider::OwnedLayer::Video {
-                        source_size: (frame.width, frame.height),
-                        frame,
+                    let layer = frame_provider::OwnedLayer {
+                        content: frame_provider::OwnedContent::Video {
+                            source_size: (frame.width, frame.height),
+                            frame,
+                        },
                         transform: vv_core::Transform::default(),
                         opacity: 1.0,
                         filters: Vec::new(),
@@ -3297,8 +3299,8 @@ impl eframe::App for VenturiApp {
             } else if let Some(layers) = layers {
                 let video_size = layers
                     .iter()
-                    .filter_map(|l| match l {
-                        frame_provider::OwnedLayer::Video { frame, .. } => {
+                    .filter_map(|l| match &l.content {
+                        frame_provider::OwnedContent::Video { frame, .. } => {
                             Some((frame.width, frame.height))
                         }
                         _ => None,

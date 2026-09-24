@@ -76,55 +76,56 @@ pub struct YuvFrame<'a> {
     pub alpha: &'a [u8],
 }
 
-/// A layer of the stack. `Solid` and `Text` are treated as sources as large
-/// as the timeline: same transform/crop.
-pub enum Layer<'a> {
+/// A layer of the stack: what it shows and how it composes.
+pub struct Layer<'a> {
+    pub content: LayerContent<'a>,
+    pub transform: Transform,
+    /// Alpha multiplier of the whole layer (clip fades): 1.0 = no attenuation.
+    pub opacity: f32,
+    /// Active filters of the clip (`EffectStack::filters`), in the order
+    /// they must be applied: vv-render does not know what each one means,
+    /// only the id of the shader corresponding to it (`filter_shader_id`).
+    pub filters: &'a [vv_core::FilterKind],
+    /// How the layer composes onto those below.
+    pub blend: BlendMode,
+}
+
+impl<'a> Layer<'a> {
+    /// Opaque, no filters, `Normal` blend.
+    pub fn new(content: LayerContent<'a>, transform: Transform) -> Self {
+        Self {
+            content,
+            transform,
+            opacity: 1.0,
+            filters: &[],
+            blend: BlendMode::Normal,
+        }
+    }
+}
+
+/// `Solid` and `Text` are treated as sources as large as the timeline: same
+/// transform/crop.
+pub enum LayerContent<'a> {
     Video {
         frame: YuvFrame<'a>,
-        transform: Transform,
         /// *Native* resolution of the media, in which the `Transform`'s crop
         /// in pixels is expressed: not that of `frame`, which can be a
         /// reduced-resolution proxy.
         source_size: (u32, u32),
-        /// Alpha multiplier of the whole layer (clip fades):
-        /// 1.0 = no attenuation.
-        opacity: f32,
-        /// Active filters of the clip (`EffectStack::filters`), in the order
-        /// they must be applied: vv-render does not know what each one means,
-        /// only the id of the shader corresponding to it (`filter_shader_id`).
-        filters: &'a [vv_core::FilterKind],
-        /// How the layer composes onto those below.
-        blend: BlendMode,
     },
     /// A frame already composed and resident on the GPU: the nested timeline of
     /// a compound clip, which becomes a layer again in the outer timeline without
     /// going through the CPU. Premultiplied RGBA — see `Fill::Rgba`.
     Texture {
         texture: &'a wgpu::Texture,
-        transform: Transform,
         /// As in `Video`: the units of the crop, which may not be the
         /// dimensions of `texture` (reduced-resolution preview).
         source_size: (u32, u32),
-        opacity: f32,
-        filters: &'a [vv_core::FilterKind],
-        blend: BlendMode,
     },
-    Solid {
-        color: vv_core::Rgba,
-        transform: Transform,
-        opacity: f32,
-        filters: &'a [vv_core::FilterKind],
-        blend: BlendMode,
-    },
+    Solid(vv_core::Rgba),
     /// Title: rasterized at the output resolution (see `text`), then
     /// treated like a `Solid` as large as the timeline.
-    Text {
-        title: &'a vv_core::TitleParams,
-        transform: Transform,
-        opacity: f32,
-        filters: &'a [vv_core::FilterKind],
-        blend: BlendMode,
-    },
+    Text(&'a vv_core::TitleParams),
 }
 
 /// How many filters per layer the uniform can carry (see `filters` in
@@ -696,7 +697,7 @@ impl Compositor {
 
     /// Like `render_layers_to_texture_transparent`, but the texture stays with
     /// whoever receives it until they let it go, so it can be used in the meantime
-    /// as a `Layer::Texture`: with immediate recycling the first render of the
+    /// as a `LayerContent::Texture`: with immediate recycling the first render of the
     /// same size would draw over it.
     pub fn render_layers_to_owned_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> PooledTexture {
         PooledTexture {
@@ -737,7 +738,8 @@ impl Compositor {
         }
         let mut first = true;
         for layer in layers {
-            let blend = layer_blend(layer);
+            let Layer { content, transform, opacity, filters, blend } = layer;
+            let blend = *blend;
             let backdrop_view = |backdrops: &mut Vec<Option<wgpu::Texture>>| {
                 let texture = (blend != BlendMode::Normal)
                     .then(|| self.scratch_texture(output.width, output.height));
@@ -749,15 +751,8 @@ impl Compositor {
                 view
             };
             let backdrop_start = backdrops.len();
-            let bind_groups = match layer {
-                Layer::Video {
-                    frame,
-                    transform,
-                    source_size,
-                    opacity,
-                    filters,
-                    ..
-                } => vec![self.layer_bind_group(
+            let bind_groups = match content {
+                LayerContent::Video { frame, source_size } => vec![self.layer_bind_group(
                     &mut planes,
                     frame,
                     transform,
@@ -770,14 +765,7 @@ impl Compositor {
                     blend,
                     &backdrop_view(&mut backdrops),
                 )],
-                Layer::Texture {
-                    texture,
-                    transform,
-                    source_size,
-                    opacity,
-                    filters,
-                    ..
-                } => vec![self.texture_bind_group(
+                LayerContent::Texture { texture, source_size } => vec![self.texture_bind_group(
                     &mut planes,
                     texture,
                     transform,
@@ -789,7 +777,7 @@ impl Compositor {
                     &backdrop_view(&mut backdrops),
                 )],
                 // The color comes from the uniform: the planes are only placeholders.
-                Layer::Solid { color, transform, opacity, filters, .. } => vec![self.layer_bind_group(
+                LayerContent::Solid(color) => vec![self.layer_bind_group(
                     &mut planes,
                     &SOLID_PLACEHOLDER,
                     transform,
@@ -802,7 +790,7 @@ impl Compositor {
                     blend,
                     &backdrop_view(&mut backdrops),
                 )],
-                Layer::Text { title, transform, opacity, filters, .. } => {
+                LayerContent::Text(title) => {
                     let render = crate::text::render_title(
                         title,
                         output.timeline_size,
@@ -949,7 +937,7 @@ impl Compositor {
     }
 
     /// Like `layer_bind_group`, but the source is an already composed RGBA
-    /// texture (`Layer::Texture`): it takes the Y plane slot — the layout
+    /// texture (`LayerContent::Texture`): it takes the Y plane slot — the layout
     /// only asks for a filterable float 2D texture, and `Rgba8Unorm` satisfies
     /// it as much as `R8Unorm` — and the other slots take the 1x1
     /// placeholders, which with `Fill::Rgba` the shader does not sample (except the alpha,
@@ -1143,16 +1131,6 @@ impl Compositor {
     }
 }
 
-/// The compositing method of a layer, whatever its source.
-fn layer_blend(layer: &Layer) -> BlendMode {
-    match layer {
-        Layer::Video { blend, .. }
-        | Layer::Texture { blend, .. }
-        | Layer::Solid { blend, .. }
-        | Layer::Text { blend, .. } => *blend,
-    }
-}
-
 /// Letterbox/pillarbox factors passed to the shader: >1 on the axis that
 /// stays uncovered (black bars), 1 on the other.
 fn fit_factors(source: (f32, f32), output: (f32, f32)) -> [f32; 2] {
@@ -1200,14 +1178,13 @@ impl Compositor {
         output: OutputFrame,
     ) -> Vec<u8> {
         self.render_layers(
-            &[Layer::Video {
-                frame: frame.borrowed(),
-                transform: *transform,
-                source_size: (frame.width, frame.height),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            }],
+            &[Layer::new(
+                LayerContent::Video {
+                    frame: frame.borrowed(),
+                    source_size: (frame.width, frame.height),
+                },
+                *transform,
+            )],
             output,
         )
     }
@@ -1220,14 +1197,13 @@ impl Compositor {
         output: OutputFrame,
     ) -> wgpu::Texture {
         self.render_layers_to_texture(
-            &[Layer::Video {
-                frame: frame.borrowed(),
-                transform: *transform,
-                source_size: (frame.width, frame.height),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            }],
+            &[Layer::new(
+                LayerContent::Video {
+                    frame: frame.borrowed(),
+                    source_size: (frame.width, frame.height),
+                },
+                *transform,
+            )],
             output,
         )
     }

@@ -395,14 +395,10 @@ fn crop_is_in_native_source_pixels_even_on_a_proxy_frame() {
         ..Transform::default()
     };
     let out = compositor.render_layers(
-        &[Layer::Video {
-            frame: input.as_yuv_frame(),
+        &[Layer::new(
+            LayerContent::Video { frame: input.as_yuv_frame(), source_size: (1920, 1080) },
             transform,
-            source_size: (1920, 1080),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+        )],
         OutputFrame::scaled(16, 16, (1920, 1080)),
     );
     let pixel = |x: usize, y: usize| {
@@ -515,22 +511,20 @@ fn side_bars_of_the_top_layer_show_the_layer_below() {
     let above = solid_frame(8, 16, 16, 128, 128, ColorMatrix::Bt709, false);
     let out = compositor.render_layers(
         &[
-            Layer::Video {
-                frame: below.as_yuv_frame(),
-                transform: Transform::default(),
-                source_size: (below.width, below.height),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
-            Layer::Video {
-                frame: above.as_yuv_frame(),
-                transform: Transform::default(),
-                source_size: (above.width, above.height),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
+            Layer::new(
+                LayerContent::Video {
+                    frame: below.as_yuv_frame(),
+                    source_size: (below.width, below.height),
+                },
+                Transform::default(),
+            ),
+            Layer::new(
+                LayerContent::Video {
+                    frame: above.as_yuv_frame(),
+                    source_size: (above.width, above.height),
+                },
+                Transform::default(),
+            ),
         ],
         OutputFrame::exact(32, 16),
     );
@@ -550,21 +544,14 @@ fn a_solid_layer_covers_everything_below_it() {
     let below = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
     let out = compositor.render_layers(
         &[
-            Layer::Video {
-                frame: below.as_yuv_frame(),
-                transform: Transform::default(),
-                source_size: (below.width, below.height),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
-            Layer::Solid {
-                color: RED,
-                transform: Transform::default(),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
+            Layer::new(
+                LayerContent::Video {
+                    frame: below.as_yuv_frame(),
+                    source_size: (below.width, below.height),
+                },
+                Transform::default(),
+            ),
+            Layer::new(LayerContent::Solid(RED), Transform::default()),
         ],
         OutputFrame::exact(16, 16),
     );
@@ -577,8 +564,8 @@ fn a_solid_layer_covers_everything_below_it() {
 fn grayscale_flattens_a_solid_layer_to_its_luma() {
     let compositor = Compositor::new_headless();
     let out = compositor.render_layers(
-        &[Layer::Solid {
-            color: RED,
+        &[Layer {
+            content: LayerContent::Solid(RED),
             transform: Transform::default(),
             opacity: 1.0,
             filters: &[vv_core::FilterKind::Grayscale],
@@ -602,13 +589,7 @@ fn a_text_layer_paints_its_color_only_where_the_glyphs_are() {
         ..Default::default()
     };
     let out = compositor.render_layers(
-        &[Layer::Text {
-            title: &title,
-            transform: Transform::default(),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+        &[Layer::new(LayerContent::Text(&title), Transform::default())],
         OutputFrame::exact(160, 90),
     );
     let pixels = out.as_chunks::<4>().0;
@@ -633,20 +614,8 @@ fn a_text_shadow_darkens_the_layer_below() {
     };
     let out = compositor.render_layers(
         &[
-            Layer::Solid {
-                color: RED,
-                transform: Transform::default(),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
-            Layer::Text {
-                title: &title,
-                transform: Transform::default(),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
+            Layer::new(LayerContent::Solid(RED), Transform::default()),
+            Layer::new(LayerContent::Text(&title), Transform::default()),
         ],
         OutputFrame::exact(160, 90),
     );
@@ -669,7 +638,7 @@ const WHITE: vv_core::Rgba = vv_core::Rgba {
 };
 
 /// Composing into an intermediate (the nested timeline of a compound
-/// clip) and reusing it as a `Layer::Texture` must give the same pixels
+/// clip) and reusing it as a `LayerContent::Texture` must give the same pixels
 /// as composing its layers directly: alpha-over is associative,
 /// and the round-trip through the texture must not introduce
 /// differences.
@@ -683,33 +652,17 @@ fn a_texture_layer_composites_like_the_layers_it_was_made_of() {
         zoom: [0.5, 0.5],
         ..Transform::default()
     };
-    let below = || Layer::Solid {
-        color: BLUE,
-        transform: Transform::default(),
-        opacity: 1.0,
-        filters: &[],
-        blend: BlendMode::Normal,
-    };
-    let above = || Layer::Solid {
-        color: RED,
-        transform: inner,
-        opacity: 1.0,
-        filters: &[],
-        blend: BlendMode::Normal,
-    };
+    let below = || Layer::new(LayerContent::Solid(BLUE), Transform::default());
+    let above = || Layer::new(LayerContent::Solid(RED), inner);
 
     let nested = compositor.render_layers_to_owned_texture_transparent(&[above()], output);
     let via_texture = compositor.render_layers(
         &[
             below(),
-            Layer::Texture {
-                texture: &nested,
-                transform: Transform::default(),
-                source_size: (16, 16),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
+            Layer::new(
+                LayerContent::Texture { texture: &nested, source_size: (16, 16) },
+                Transform::default(),
+            ),
         ],
         output,
     );
@@ -732,8 +685,8 @@ fn a_semitransparent_texture_layer_is_not_faded_twice() {
     let compositor = Compositor::new_headless();
     let output = OutputFrame::exact(8, 8);
     let nested = compositor.render_layers_to_owned_texture_transparent(
-        &[Layer::Solid {
-            color: RED,
+        &[Layer {
+            content: LayerContent::Solid(RED),
             transform: Transform::default(),
             opacity: 0.5,
             filters: &[],
@@ -743,21 +696,11 @@ fn a_semitransparent_texture_layer_is_not_faded_twice() {
     );
     let out = compositor.render_layers(
         &[
-            Layer::Solid {
-                color: WHITE,
-                transform: Transform::default(),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
-            Layer::Texture {
-                texture: &nested,
-                transform: Transform::default(),
-                source_size: (8, 8),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
+            Layer::new(LayerContent::Solid(WHITE), Transform::default()),
+            Layer::new(
+                LayerContent::Texture { texture: &nested, source_size: (8, 8) },
+                Transform::default(),
+            ),
         ],
         output,
     );
@@ -790,23 +733,11 @@ fn an_owned_texture_is_not_recycled_by_the_next_render() {
     let compositor = Compositor::new_headless();
     let output = OutputFrame::exact(8, 8);
     let nested = compositor.render_layers_to_owned_texture_transparent(
-        &[Layer::Solid {
-            color: RED,
-            transform: Transform::default(),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+        &[Layer::new(LayerContent::Solid(RED), Transform::default())],
         output,
     );
     compositor.render_layers(
-        &[Layer::Solid {
-            color: BLUE,
-            transform: Transform::default(),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+        &[Layer::new(LayerContent::Solid(BLUE), Transform::default())],
         output,
     );
     assert_eq!(read_back(&compositor, &nested, 8, 8).as_chunks::<4>().0[0], [255, 0, 0, 255]);
@@ -825,17 +756,11 @@ fn a_solid_layer_is_cropped_and_moved_like_a_video_layer() {
     // Crop in timeline pixels: right half cut, then moved
     // a quarter to the right.
     let out = compositor.render_layers(
-        &[Layer::Solid {
-            color: RED,
-            transform: Transform {
+        &[Layer::new(LayerContent::Solid(RED), Transform {
                 crop: [0.0, 0.0, 8.0, 0.0],
                 position: [4.0, 0.0],
                 ..Transform::default()
-            },
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+            })],
         OutputFrame::scaled(8, 4, (16, 8)),
     );
     let px = |x: usize, y: usize| &out[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
@@ -852,16 +777,15 @@ fn layer_opacity_blends_with_what_is_below() {
     let below = solid_frame(4, 4, 235, 128, 128, ColorMatrix::Bt709, false); // white
     let out = compositor.render_layers(
         &[
-            Layer::Video {
-                frame: below.as_yuv_frame(),
-                transform: Transform::default(),
-                source_size: (below.width, below.height),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
-            Layer::Solid {
-                color: RED,
+            Layer::new(
+                LayerContent::Video {
+                    frame: below.as_yuv_frame(),
+                    source_size: (below.width, below.height),
+                },
+                Transform::default(),
+            ),
+            Layer {
+                content: LayerContent::Solid(RED),
                 transform: Transform::default(),
                 opacity: 0.5,
                 filters: &[],
@@ -878,15 +802,20 @@ fn layer_opacity_blends_with_what_is_below() {
     // Opacity 0: the layer above is not visible at all.
     let out = compositor.render_layers(
         &[
-            Layer::Video {
-                frame: below.as_yuv_frame(),
+            Layer::new(
+                LayerContent::Video {
+                    frame: below.as_yuv_frame(),
+                    source_size: (below.width, below.height),
+                },
+                Transform::default(),
+            ),
+            Layer {
+                content: LayerContent::Solid(RED),
                 transform: Transform::default(),
-                source_size: (below.width, below.height),
-                opacity: 1.0,
+                opacity: 0.0,
                 filters: &[],
                 blend: BlendMode::Normal,
             },
-            Layer::Solid { color: RED, transform: Transform::default(), opacity: 0.0, filters: &[], blend: BlendMode::Normal },
         ],
         OutputFrame::exact(4, 4),
     );
@@ -897,13 +826,7 @@ fn layer_opacity_blends_with_what_is_below() {
 fn render_layers_i420_packs_dense_planes_for_odd_sizes() {
     let compositor = Compositor::new_headless();
     let out = compositor.render_layers_i420(
-        &[Layer::Solid {
-            color: RED,
-            transform: Transform::default(),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+        &[Layer::new(LayerContent::Solid(RED), Transform::default())],
         OutputFrame::exact(5, 3),
     );
     // Chroma 3x2; 15 + 6 + 6 = 27 bytes, not a multiple of 4.
@@ -917,13 +840,7 @@ fn render_layers_i420_packs_dense_planes_for_odd_sizes() {
 fn render_layers_i420_reuses_its_buffers_across_frames_and_sizes() {
     let compositor = Compositor::new_headless();
     let solid = |color| {
-        [Layer::Solid {
-            color,
-            transform: Transform::default(),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }]
+        [Layer::new(LayerContent::Solid(color), Transform::default())]
     };
     let fresh = |color, w, h| {
         Compositor::new_headless().render_layers_i420(&solid(color), OutputFrame::exact(w, h))
@@ -959,16 +876,10 @@ fn render_layers_rgba_transparent_leaves_uncovered_areas_transparent_not_black()
     let compositor = Compositor::new_headless();
     // Crop in timeline pixels: right half cut away.
     let out = compositor.render_layers_rgba_transparent(
-        &[Layer::Solid {
-            color: RED,
-            transform: Transform {
+        &[Layer::new(LayerContent::Solid(RED), Transform {
                 crop: [0.0, 0.0, 8.0, 0.0],
                 ..Transform::default()
-            },
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+            })],
         OutputFrame::exact(16, 8),
     );
     let px = |x: usize, y: usize| &out[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4];
@@ -988,14 +899,13 @@ fn a_videos_own_alpha_plane_lets_the_layer_below_show_through() {
     // Left opaque, right transparent.
     let alpha: Vec<u8> = (0..16u32).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
     let out = compositor.render_layers(
-        &[Layer::Video {
-            frame: YuvFrame { alpha: &alpha, ..frame.as_yuv_frame() },
-            transform: Transform::default(),
-            source_size: (4, 4),
-            opacity: 1.0,
-            filters: &[],
-            blend: BlendMode::Normal,
-        }],
+        &[Layer::new(
+            LayerContent::Video {
+                frame: YuvFrame { alpha: &alpha, ..frame.as_yuv_frame() },
+                source_size: (4, 4),
+            },
+            Transform::default(),
+        )],
         OutputFrame::exact(4, 4),
     );
     let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
@@ -1111,15 +1021,9 @@ fn a_blend_mode_combines_the_layer_with_what_is_below() {
     let blended = |mode| {
         let out = compositor.render_layers(
             &[
-                Layer::Solid {
-                    color: grey,
-                    transform: Transform::default(),
-                    opacity: 1.0,
-                    filters: &[],
-                    blend: BlendMode::Normal,
-                },
-                Layer::Solid {
-                    color: grey,
+                Layer::new(LayerContent::Solid(grey), Transform::default()),
+                Layer {
+                    content: LayerContent::Solid(grey),
                     transform: Transform::default(),
                     opacity: 1.0,
                     filters: &[],
@@ -1147,20 +1051,14 @@ fn a_blended_layer_leaves_the_backdrop_where_it_does_not_cover() {
     let output = OutputFrame::exact(16, 16);
     let out = compositor.render_layers(
         &[
-            Layer::Solid {
-                color: BLUE,
-                transform: Transform::default(),
-                opacity: 1.0,
-                filters: &[],
-                blend: BlendMode::Normal,
-            },
-            Layer::Solid {
-                color: WHITE,
+            Layer::new(LayerContent::Solid(BLUE), Transform::default()),
+            Layer {
+                content: LayerContent::Solid(WHITE),
                 // Away with the right half: the blue must remain there.
                 transform: Transform {
-                    crop: [0.0, 0.0, 8.0, 0.0],
-                    ..Transform::default()
-                },
+                        crop: [0.0, 0.0, 8.0, 0.0],
+                        ..Transform::default()
+                    },
                 opacity: 1.0,
                 filters: &[],
                 blend: BlendMode::Screen,
@@ -1180,8 +1078,8 @@ fn the_first_layer_can_be_blended_over_the_clear() {
     let compositor = Compositor::new_headless();
     let output = OutputFrame::exact(8, 8);
     let out = compositor.render_layers(
-        &[Layer::Solid {
-            color: RED,
+        &[Layer {
+            content: LayerContent::Solid(RED),
             transform: Transform::default(),
             opacity: 1.0,
             filters: &[],

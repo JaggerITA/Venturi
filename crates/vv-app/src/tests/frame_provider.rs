@@ -18,10 +18,8 @@ fn solid_clip(id: u64, start: FrameIdx, len: FrameIdx, zoom: [f32; 2]) -> Clip {
 }
 
 fn position_of(layer: &OwnedLayer) -> [f32; 2] {
-    match layer {
-        OwnedLayer::Solid { transform, .. } => transform.position,
-        _ => panic!("expected a Solid layer"),
-    }
+    assert!(matches!(layer.content, OwnedContent::Solid(_)), "expected a Solid layer");
+    layer.transform.position
 }
 
 /// Bug reported by the user: a compound clip is a timeline like any
@@ -232,10 +230,9 @@ fn gray_frame() -> Arc<FrameYuv420> {
 }
 
 fn video_layer(frame: Arc<FrameYuv420>, opacity: f32) -> OwnedLayer {
-    OwnedLayer::Video {
-        frame,
+    OwnedLayer {
+        content: OwnedContent::Video { frame, source_size: (2, 2) },
         transform: Transform::default(),
-        source_size: (2, 2),
         opacity,
         filters: Vec::new(),
         blend: vv_core::BlendMode::Normal,
