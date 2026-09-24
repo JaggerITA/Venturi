@@ -240,6 +240,9 @@ struct VenturiApp {
     /// Frame size in pixels at 100% zoom (the timeline resolution), not
     /// the texture's: that can be smaller, see `fit_output_size`.
     video_display_size: Option<egui::Vec2>,
+    /// Layers and output of the texture's last composition: an identical
+    /// one is skipped instead of re-uploading every plane on each repaint.
+    viewer_content: Option<(Vec<frame_provider::OwnedLayer>, vv_render::OutputFrame)>,
     viewer_zoom: viewer_zoom::ViewerZoom,
     /// Player box and frame size of the last draw, for the zoom shortcuts.
     viewer_geometry: Option<(egui::Rect, egui::Vec2)>,
@@ -409,6 +412,7 @@ impl Default for VenturiApp {
             preview_error: None,
             video_texture_id: None,
             video_display_size: None,
+            viewer_content: None,
             viewer_zoom: viewer_zoom::ViewerZoom::default(),
             viewer_geometry: None,
             last_viewer_frame_kind: None,
@@ -1496,11 +1500,25 @@ impl VenturiApp {
 
     /// Composes `layers` and shows the resulting texture in the viewer, without
     /// readback. It does nothing without a shared device (tests).
-    fn show_composited(&mut self, layers: &[vv_render::Layer], output: vv_render::OutputFrame) {
+    fn show_composited(&mut self, layers: Vec<frame_provider::OwnedLayer>, output: vv_render::OutputFrame) {
+        let unchanged = self.video_texture_id.is_some()
+            && self
+                .viewer_content
+                .as_ref()
+                .is_some_and(|(shown, shown_output)| {
+                    *shown_output == output && frame_provider::renders_same(shown, &layers)
+                });
+        if unchanged {
+            self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
+            return;
+        }
         let Some(render_state) = self.egui_render_state.clone() else {
             return;
         };
-        let texture = self.compositor.render_layers_to_texture(layers, output);
+        let render_layers: Vec<vv_render::Layer> =
+            layers.iter().map(frame_provider::OwnedLayer::as_render).collect();
+        let texture = self.compositor.render_layers_to_texture(&render_layers, output);
+        drop(render_layers);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut renderer = render_state.renderer.write();
         match self.video_texture_id {
@@ -1522,6 +1540,12 @@ impl VenturiApp {
         let (width, height) = output.timeline_size;
         self.video_display_size = Some(egui::vec2(width as f32, height as f32));
         self.last_viewer_frame_kind = Some(ViewerFrameKind::Video);
+        // Not kept with a compound texture: never reusable, and holding it
+        // would keep it out of the scratch pool.
+        let reusable = !layers
+            .iter()
+            .any(|l| matches!(l, frame_provider::OwnedLayer::Texture { .. }));
+        self.viewer_content = reusable.then_some((layers, output));
     }
 
     /// The layers to compose at the playhead, from bottom to top. `None` if a
@@ -3283,18 +3307,16 @@ impl eframe::App for VenturiApp {
                 if self.preview_meta.as_ref().is_some_and(|m| !m.has_video) {
                     self.last_viewer_frame_kind = None;
                 } else if let Some(frame) = self.browsing_video_frame() {
-                    let layer = vv_render::Layer::Video {
-                        frame: frame_provider::as_render_yuv_frame(&frame),
-                        transform: vv_core::Transform::default(),
+                    let output = vv_render::OutputFrame::exact(frame.width, frame.height);
+                    let layer = frame_provider::OwnedLayer::Video {
                         source_size: (frame.width, frame.height),
+                        frame,
+                        transform: vv_core::Transform::default(),
                         opacity: 1.0,
-                        filters: &[],
+                        filters: Vec::new(),
                         blend: vv_core::BlendMode::Normal,
                     };
-                    self.show_composited(
-                        &[layer],
-                        vv_render::OutputFrame::exact(frame.width, frame.height),
-                    );
+                    self.show_composited(vec![layer], output);
                 }
             } else if let Some(layers) = layers {
                 let video_size = layers
@@ -3319,10 +3341,8 @@ impl eframe::App for VenturiApp {
                         // timeline: the bars show without upscaling.
                         let timeline_size = timeline_size.unwrap_or(size);
                         let (out_w, out_h) = vv_render::fit_output_size(size, timeline_size);
-                        let render_layers: Vec<vv_render::Layer> =
-                            layers.iter().map(frame_provider::OwnedLayer::as_render).collect();
                         self.show_composited(
-                            &render_layers,
+                            layers,
                             vv_render::OutputFrame::scaled(out_w, out_h, timeline_size),
                         );
                     }
@@ -3332,7 +3352,7 @@ impl eframe::App for VenturiApp {
                         let (w, h) = timeline_size.unwrap_or((16, 9));
                         let step = (w.max(h) / 64).max(1);
                         self.show_composited(
-                            &[],
+                            Vec::new(),
                             vv_render::OutputFrame::scaled(
                                 (w / step).max(1),
                                 (h / step).max(1),

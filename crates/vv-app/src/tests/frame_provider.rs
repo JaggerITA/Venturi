@@ -215,3 +215,53 @@ fn crossing_offsets_clear_a_zoomed_clip_fully_off_screen() {
     assert_eq!(position_of(&layers[0]), [progress * frame_size.0, 0.0]);
     assert_eq!(position_of(&layers[1]), [-(1.0 - progress) * 1.5 * frame_size.0, 0.0]);
 }
+
+fn gray_frame() -> Arc<FrameYuv420> {
+    Arc::new(FrameYuv420 {
+        width: 2,
+        height: 2,
+        y: vec![128; 4],
+        u: vec![128],
+        v: vec![128],
+        u_width: 1,
+        u_height: 1,
+        matrix: vv_core::ColorMatrix::Bt709,
+        full_range: false,
+        alpha: None,
+    })
+}
+
+fn video_layer(frame: Arc<FrameYuv420>, opacity: f32) -> OwnedLayer {
+    OwnedLayer::Video {
+        frame,
+        transform: Transform::default(),
+        source_size: (2, 2),
+        opacity,
+        filters: Vec::new(),
+        blend: vv_core::BlendMode::Normal,
+    }
+}
+
+#[test]
+fn the_same_frame_with_the_same_parameters_renders_the_same() {
+    let frame = gray_frame();
+    assert!(renders_same(&[video_layer(frame.clone(), 1.0)], &[video_layer(frame, 1.0)]));
+    assert!(renders_same(&[], &[]));
+}
+
+/// Identity, not content: a new decode of identical pixels still recomposes.
+#[test]
+fn a_different_frame_or_parameter_renders_differently() {
+    let frame = gray_frame();
+    let shown = [video_layer(frame.clone(), 1.0)];
+    assert!(!renders_same(&shown, &[video_layer(gray_frame(), 1.0)]));
+    assert!(!renders_same(&shown, &[video_layer(frame.clone(), 0.5)]));
+    assert!(!renders_same(&shown, &[video_layer(frame.clone(), 1.0), video_layer(frame, 1.0)]));
+}
+
+#[test]
+fn a_nan_parameter_never_renders_the_same() {
+    let frame = gray_frame();
+    let layer = || video_layer(frame.clone(), f32::NAN);
+    assert!(!renders_same(&[layer()], &[layer()]));
+}

@@ -168,6 +168,72 @@ impl OwnedLayer {
             },
         }
     }
+
+    /// `true` if composing it gives the same pixels as `other`. Frames are
+    /// compared by identity: equal only while `other` holds its `Arc`. A
+    /// compound clip's texture is composed anew every time, never equal.
+    fn renders_same(&self, other: &OwnedLayer) -> bool {
+        use OwnedLayer::*;
+        match (self, other) {
+            (
+                Video { frame, transform, source_size, opacity, filters, blend },
+                Video {
+                    frame: frame2,
+                    transform: transform2,
+                    source_size: source_size2,
+                    opacity: opacity2,
+                    filters: filters2,
+                    blend: blend2,
+                },
+            ) => {
+                Arc::ptr_eq(frame, frame2)
+                    && transform == transform2
+                    && source_size == source_size2
+                    && opacity == opacity2
+                    && filters == filters2
+                    && blend == blend2
+            }
+            (
+                Solid { color, transform, opacity, filters, blend },
+                Solid {
+                    color: color2,
+                    transform: transform2,
+                    opacity: opacity2,
+                    filters: filters2,
+                    blend: blend2,
+                },
+            ) => {
+                color == color2
+                    && transform == transform2
+                    && opacity == opacity2
+                    && filters == filters2
+                    && blend == blend2
+            }
+            (
+                Text { title, transform, opacity, filters, blend },
+                Text {
+                    title: title2,
+                    transform: transform2,
+                    opacity: opacity2,
+                    filters: filters2,
+                    blend: blend2,
+                },
+            ) => {
+                title == title2
+                    && transform == transform2
+                    && opacity == opacity2
+                    && filters == filters2
+                    && blend == blend2
+            }
+            _ => false,
+        }
+    }
+}
+
+/// `true` if the two stacks compose to the same pixels (see
+/// `OwnedLayer::renders_same`).
+pub fn renders_same(a: &[OwnedLayer], b: &[OwnedLayer]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.renders_same(b))
 }
 
 /// Limit on the nesting depth of compound clips: a compound clip

@@ -178,7 +178,7 @@ enum Fill {
 /// Pixel resolution of the produced texture and the logical one of the
 /// timeline, in which position and anchor are expressed. They coincide
 /// on export; the preview composes at the resolution of the decoded frame.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputFrame {
     pub width: u32,
     pub height: u32,

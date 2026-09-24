@@ -453,7 +453,7 @@ impl<T: Lerp + Clone> Keyframed<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
     /// Pixels cut per side (left, top, right, bottom) at the native
     /// resolution of the media, not of the proxy. The rest is not recentered.
