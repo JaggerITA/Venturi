@@ -27,6 +27,16 @@ impl WantedRange {
     fn timeline_position_of(&self, idx: FrameIdx) -> FrameIdx {
         self.timeline_start + self.rate.scale_round(idx) - self.rate.scale_round(self.source_start)
     }
+
+    /// The part `source_start..=source_end` of this range.
+    pub fn sub_range(&self, source_start: FrameIdx, source_end: FrameIdx) -> Self {
+        Self {
+            source_start,
+            source_end,
+            timeline_start: self.timeline_position_of(source_start),
+            ..*self
+        }
+    }
 }
 
 struct SharedInner {

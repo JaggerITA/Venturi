@@ -406,20 +406,6 @@ enum Positioned {
     Failed,
 }
 
-/// Stretch of a Media clip in the window, in source frames, with its
-/// position on the timeline (used to measure the distance from the playhead).
-#[derive(Clone, Copy, Debug)]
-struct MediaSegment {
-    media_id: MediaId,
-    source_start: FrameIdx,
-    source_end: FrameIdx,
-    timeline_start: FrameIdx,
-    /// `Clip::rate` of the clip the segment comes from: needed by
-    /// `chunk_behind_segments_near_to_far` to translate an offset in
-    /// source frames into the corresponding timeline offset.
-    rate: vv_core::Rational,
-}
-
 /// Segments of `[from_frame, end_frame)`, one per Media clip of every video
 /// track (including those below: they show in the letterbox bars),
 /// from the nearest to the playhead and, at equal position, from the highest track.
@@ -431,7 +417,7 @@ fn collect_media_segments(
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
-) -> Vec<MediaSegment> {
+) -> Vec<WantedRange> {
     let mut real = clipped_media_segments(project, timeline, from_frame, end_frame, 0);
     real.sort_by_key(|(track, s)| (s.timeline_start, std::cmp::Reverse(*track)));
     strip_track(real)
@@ -444,13 +430,13 @@ fn collect_media_segments_behind(
     timeline: &Timeline,
     from_frame: FrameIdx,
     start_frame: FrameIdx,
-) -> Vec<MediaSegment> {
+) -> Vec<WantedRange> {
     let mut real = clipped_media_segments(project, timeline, start_frame, from_frame, 0);
     real.sort_by_key(|(track, s)| (std::cmp::Reverse(s.timeline_start), std::cmp::Reverse(*track)));
     strip_track(real)
 }
 
-fn strip_track(segments: Vec<(usize, MediaSegment)>) -> Vec<MediaSegment> {
+fn strip_track(segments: Vec<(usize, WantedRange)>) -> Vec<WantedRange> {
     segments.into_iter().map(|(_, s)| s).collect()
 }
 
@@ -468,7 +454,7 @@ fn clipped_media_segments(
     from_frame: FrameIdx,
     end_frame: FrameIdx,
     depth: u32,
-) -> Vec<(usize, MediaSegment)> {
+) -> Vec<(usize, WantedRange)> {
     let mut real = Vec::new();
     if depth >= vv_core::MAX_COMPOUND_DEPTH {
         return real;
@@ -487,7 +473,7 @@ fn clipped_media_segments(
         // reason — plans/REFACTOR_PIPELINE.md B1).
         let source_start = clip.source_frame_at(segment_start);
         let source_end = clip.source_frame_at(segment_end - 1);
-        let segment = MediaSegment {
+        let segment = WantedRange {
             media_id: *media_id,
             source_start,
             source_end,
@@ -506,9 +492,9 @@ fn clipped_media_segments(
 fn push_or_recurse(
     project: &Project,
     track_index: usize,
-    segment: MediaSegment,
+    segment: WantedRange,
     depth: u32,
-    real: &mut Vec<(usize, MediaSegment)>,
+    real: &mut Vec<(usize, WantedRange)>,
 ) {
     match project.media_pool.get(segment.media_id).and_then(|m| m.compound) {
         Some(nested_id) => {
@@ -531,7 +517,7 @@ fn crossing_borrowed_segments(
     timeline: &Timeline,
     from_frame: FrameIdx,
     end_frame: FrameIdx,
-) -> Vec<MediaSegment> {
+) -> Vec<WantedRange> {
     let mut real = Vec::new();
     for (_, track) in timeline.visible_video_tracks() {
         for crossing in &track.crossings {
@@ -566,7 +552,7 @@ fn push_borrowed_segment(
     clip: &vv_core::Clip,
     from_timeline: FrameIdx,
     to_timeline: FrameIdx,
-    real: &mut Vec<MediaSegment>,
+    real: &mut Vec<WantedRange>,
 ) {
     let ClipSource::Media(media_id) = &clip.source else {
         return;
@@ -577,7 +563,7 @@ fn push_borrowed_segment(
     let last = (item.meta.duration_frames - 1).max(0);
     let a = clip.source_frame_at(from_timeline).clamp(0, last);
     let b = clip.source_frame_at(to_timeline).clamp(0, last);
-    let segment = MediaSegment {
+    let segment = WantedRange {
         media_id: *media_id,
         source_start: a.min(b),
         source_end: a.max(b),
@@ -605,21 +591,13 @@ fn push_borrowed_segment(
 /// filled interleaved. Whole segment at a time, the playhead interrupts the
 /// cycle before the lower track is ever reached and the compositing shows it
 /// black.
-fn chunk_forward_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
-    let mut chunks: Vec<MediaSegment> = Vec::new();
+fn chunk_forward_segments_near_to_far(segments: &[WantedRange]) -> Vec<WantedRange> {
+    let mut chunks: Vec<WantedRange> = Vec::new();
     for segment in segments {
         let mut chunk_start = segment.source_start;
         loop {
             let chunk_end = (chunk_start + FORWARD_CHUNK_FRAMES - 1).min(segment.source_end);
-            let offset = segment.rate.scale_round(chunk_start)
-                - segment.rate.scale_round(segment.source_start);
-            chunks.push(MediaSegment {
-                media_id: segment.media_id,
-                source_start: chunk_start,
-                source_end: chunk_end,
-                timeline_start: segment.timeline_start + offset,
-                rate: segment.rate,
-            });
+            chunks.push(segment.sub_range(chunk_start, chunk_end));
             if chunk_end == segment.source_end {
                 break;
             }
@@ -633,21 +611,13 @@ fn chunk_forward_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSeg
 
 /// Splits the segments behind the playhead into chunks of `BEHIND_CHUNK_FRAMES`,
 /// from the edge near the playhead (`source_end`) towards the far one.
-fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegment> {
+fn chunk_behind_segments_near_to_far(segments: &[WantedRange]) -> Vec<WantedRange> {
     let mut chunks = Vec::new();
     for segment in segments {
         let mut chunk_end = segment.source_end;
         loop {
             let chunk_start = (chunk_end - BEHIND_CHUNK_FRAMES + 1).max(segment.source_start);
-            let offset = segment.rate.scale_round(chunk_start)
-                - segment.rate.scale_round(segment.source_start);
-            chunks.push(MediaSegment {
-                media_id: segment.media_id,
-                source_start: chunk_start,
-                source_end: chunk_end,
-                timeline_start: segment.timeline_start + offset,
-                rate: segment.rate,
-            });
+            chunks.push(segment.sub_range(chunk_start, chunk_end));
             if chunk_start == segment.source_start {
                 break;
             }
@@ -662,8 +632,8 @@ fn chunk_behind_segments_near_to_far(segments: &[MediaSegment]) -> Vec<MediaSegm
 /// would look like it needs reseeking on every cycle, even with the playhead still.
 fn without_already_cached_chunks(
     caches: &SharedFrameCache,
-    chunks: Vec<MediaSegment>,
-) -> Vec<MediaSegment> {
+    chunks: Vec<WantedRange>,
+) -> Vec<WantedRange> {
     chunks
         .into_iter()
         .filter(|chunk| {
@@ -798,17 +768,7 @@ fn walk_and_fill(
     open.retain(|id, _| forward_media.contains(id));
     open_behind.retain(|id, _| behind_media.contains(id));
 
-    let window: Vec<WantedRange> = forward_segments
-        .iter()
-        .chain(behind_segments.iter())
-        .map(|s| WantedRange {
-            media_id: s.media_id,
-            source_start: s.source_start,
-            source_end: s.source_end,
-            timeline_start: s.timeline_start,
-            rate: s.rate,
-        })
-        .collect();
+    let window: Vec<WantedRange> = forward_segments.iter().chain(&behind_segments).copied().collect();
     // Discards what is outside both windows and, past the budget, the
     // farthest from the playhead.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
@@ -899,7 +859,7 @@ struct FillContext<'a> {
 /// saturated or if the live playhead moved too far. `Break` carries the final
 /// outcome.
 fn fill_segments(
-    segments: &[MediaSegment],
+    segments: &[WantedRange],
     ctx: &FillContext,
     open: &mut HashMap<MediaId, OpenDecoder>,
 ) -> ControlFlow<WalkOutcome> {

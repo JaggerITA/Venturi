@@ -527,14 +527,14 @@ fn collect_media_segments_stops_at_a_cyclic_compound_clip_instead_of_overflowing
 fn chunk_forward_segments_near_to_far_interleaves_two_overlapping_tracks() {
     let (media_a, media_b) = two_media_ids();
     let segments = vec![
-        MediaSegment {
+        WantedRange {
             media_id: media_a,
             source_start: 0,
             source_end: 44,
             timeline_start: 100,
             rate: Rational::new(1, 1),
         },
-        MediaSegment {
+        WantedRange {
             media_id: media_b,
             source_start: 0,
             source_end: 44,
@@ -570,7 +570,7 @@ fn chunk_forward_segments_near_to_far_interleaves_two_overlapping_tracks() {
 #[test]
 fn chunk_behind_segments_near_to_far_splits_from_the_near_edge_without_gaps() {
     let (media_a, _) = two_media_ids();
-    let segment = MediaSegment {
+    let segment = WantedRange {
         media_id: media_a,
         source_start: 100,
         source_end: 132, // 33 frames: 2 chunks of 15 + 1 of 3
@@ -600,7 +600,7 @@ fn chunk_behind_segments_near_to_far_splits_from_the_near_edge_without_gaps() {
 #[test]
 fn chunk_behind_segments_near_to_far_keeps_a_short_segment_whole() {
     let (media_a, _) = two_media_ids();
-    let segment = MediaSegment {
+    let segment = WantedRange {
         media_id: media_a,
         source_start: 40,
         source_end: 44,
@@ -636,7 +636,7 @@ fn without_already_cached_chunks_drops_only_fully_covered_chunks() {
 
     let chunks = vec![
         // media_a: entirely covered, must be discarded.
-        MediaSegment {
+        WantedRange {
             media_id: media_a,
             source_start: 118,
             source_end: 132,
@@ -644,7 +644,7 @@ fn without_already_cached_chunks_drops_only_fully_covered_chunks() {
             rate: Rational::one(),
         },
         // media_b: only partially covered, stays.
-        MediaSegment {
+        WantedRange {
             media_id: media_b,
             source_start: 95,
             source_end: 110,
@@ -652,7 +652,7 @@ fn without_already_cached_chunks_drops_only_fully_covered_chunks() {
             rate: Rational::one(),
         },
         // media_a: outside the cached interval, stays.
-        MediaSegment {
+        WantedRange {
             media_id: media_a,
             source_start: 50,
             source_end: 64,
@@ -755,7 +755,7 @@ fn render_ahead_buffers_across_a_straight_cut_between_two_different_media() {
 /// crossing transition, `held_timeline_frame` (`frame_provider.rs`)
 /// asks, for the "lent" side, for a stretch of source frames that
 /// belongs to the NORMAL range of one clip but falls outside the range
-/// declared by the OTHER — no normal `MediaSegment` covers it, and
+/// declared by the OTHER — no normal `WantedRange` covers it, and
 /// without `crossing_borrowed_segments` `SharedFrameCache::reconcile`
 /// evicts it (or never fetches it) as soon as the playhead passes the cut,
 /// freezing the compositing for half of the crossing window.
@@ -1802,7 +1802,7 @@ fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_d
 
 /// Regression for the bug reported by the user: two clips on the
 /// timeline sharing the same media (a single file cut
-/// into several pieces, very common) generate two `MediaSegment`s for the
+/// into several pieces, very common) generate two `WantedRange`s for the
 /// same `media_id` in the same window, with different `source_start`s.
 /// Calling `evict_before` with the `source_start` of the
 /// *single* segment being processed (as was done before)
@@ -2796,7 +2796,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
     }
 
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
-    let segment = MediaSegment {
+    let segment = WantedRange {
         media_id: media_a,
         source_start: 5,
         source_end: 50,
@@ -2865,7 +2865,7 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
     // decode to reach it from the keyframe at 0.
     let frame_bytes = 320 * 240 * 3 / 2;
     let tight_budget = frame_bytes * 11;
-    let segment = MediaSegment {
+    let segment = WantedRange {
         media_id: media_a,
         source_start: 80,
         source_end: 90,
@@ -2951,7 +2951,7 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
     od.record_keyframe_landing(25);
     open.insert(media_a, od);
 
-    let segment = MediaSegment {
+    let segment = WantedRange {
         media_id: media_a,
         source_start: 24,
         source_end: 34,
