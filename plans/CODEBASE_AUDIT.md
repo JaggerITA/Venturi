@@ -209,7 +209,7 @@ from there.
 |---|---|---|
 | 1 | §1.1 Skip identical viewer recompositions | done (9c5521a) |
 | 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done (a7c3370) |
-| 3 | §1.2 Keep decoders across `UpdateProject` (design agreed 2026-09-24) | done — see below |
+| 3 | §1.2 Keep decoders across `UpdateProject` (design agreed 2026-09-24) | done (995c5e2) |
 | 4 | §4 Fix the inconsistencies | todo |
 | 5 | §3 Merge `MediaSegment`/`WantedRange`, `LayerCommon`; `enum Gesture` + split `show_timeline` | todo |
 
