@@ -108,6 +108,10 @@ pub struct TimelineState {
     /// "Paste attributes" asked from the context menu: the dialog lives in
     /// the app, which opens it and clears the flag.
     pub paste_attributes_requested: bool,
+    /// Where each clip was drawn in the last frame: the tests aim their
+    /// synthetic pointer events with it.
+    #[cfg(test)]
+    clip_rects: std::collections::HashMap<ClipId, egui::Rect>,
 }
 
 /// A copied clip. Id and group are reassigned on paste; the position
@@ -331,6 +335,8 @@ impl Default for TimelineState {
             audio_scroll_vel: 0.0,
             export_marks: crate::transport::MarkRange::default(),
             paste_attributes_requested: false,
+            #[cfg(test)]
+            clip_rects: std::collections::HashMap::new(),
         }
     }
 }
@@ -2318,6 +2324,8 @@ pub fn show_timeline(
                         egui::vec2(w, row_height - 4.0),
                     )
                     .round_to_pixels(ui.pixels_per_point());
+                    #[cfg(test)]
+                    state.clip_rects.insert(visual.clip.id, clip_rect);
 
                     let id = ui.id().with("clip").with(visual.clip.id.0);
                     let sense = if visual.locked {
@@ -5320,3 +5328,7 @@ fn paint_proxy_strip(painter: &egui::Painter, rect: egui::Rect) {
 #[cfg(test)]
 #[path = "tests/timeline_ui.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/timeline_ui_gestures.rs"]
+mod gesture_tests;
