@@ -208,7 +208,7 @@ from there.
 | Step | Item | Status |
 |---|---|---|
 | 1 | §1.1 Skip identical viewer recompositions | done (9c5521a) |
-| 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done — see below |
+| 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done (a7c3370) |
 | 3 | §1.2 Keep decoders across `UpdateProject` — **discuss design first** | todo |
 | 4 | §4 Fix the inconsistencies | todo |
 | 5 | §3 Merge `MediaSegment`/`WantedRange`, `LayerCommon`; `enum Gesture` + split `show_timeline` | todo |
