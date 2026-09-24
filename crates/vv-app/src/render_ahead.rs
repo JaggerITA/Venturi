@@ -332,10 +332,9 @@ fn worker_loop(
             match cmd {
                 Command::Stop => return,
                 Command::UpdateProject(p, id) => {
+                    forget_changed_media(&project, &p, &shared.caches, &mut open, &mut open_behind);
                     project = *p;
                     timeline_id = id;
-                    open.clear();
-                    open_behind.clear();
                 }
                 Command::SetProxy(v) => {
                     proxy = v;
@@ -366,6 +365,29 @@ fn worker_loop(
         );
         retry_immediately = outcome.interrupted;
         shared.caught_up.store(outcome.caught_up, Ordering::Relaxed);
+    }
+}
+
+/// Decoders survive an edit: reopening costs a seek back to a keyframe. A
+/// media gone from `new` or naming another file there loses its decoders and
+/// its frames — `MediaId`s are slotmap keys, reused by a replaced project.
+fn forget_changed_media(
+    old: &Project,
+    new: &Project,
+    caches: &SharedFrameCache,
+    open: &mut HashMap<MediaId, OpenDecoder>,
+    open_behind: &mut HashMap<MediaId, OpenDecoder>,
+) {
+    for (media_id, item) in &old.media_pool {
+        let same_file = new
+            .media_pool
+            .get(media_id)
+            .is_some_and(|n| n.path == item.path && n.content_hash == item.content_hash);
+        if !same_file {
+            caches.remove_media(media_id);
+            open.remove(&media_id);
+            open_behind.remove(&media_id);
+        }
     }
 }
 

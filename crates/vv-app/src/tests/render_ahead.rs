@@ -3098,3 +3098,137 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
         );
     }
 }
+
+fn make_color_clip(dir_name: &str, file_name: &str, color: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(dir_name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(file_name);
+    vv_media::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c={color}:size=320x240:rate=25:duration=2"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        &path,
+    );
+    path
+}
+
+fn single_media_project(path: std::path::PathBuf) -> (Project, MediaId, TimelineId) {
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        content_hash: vv_media::content_fingerprint(&path).unwrap(),
+        path,
+        meta: MediaMeta {
+            duration_frames: 50,
+            fps: Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+        },
+        compound: None,
+    });
+    let timeline_id = project.timelines.insert(timeline_with(vec![Track {
+        kind: TrackKind::Video,
+        clips: vec![media_clip(1, media, 0, 50)],
+        muted: false,
+        solo: false,
+        locked: false,
+        crossings: Vec::new(),
+    }]));
+    (project, media, timeline_id)
+}
+
+fn wait_caught_up(render_ahead: &RenderAhead) {
+    let start = std::time::Instant::now();
+    // Past `POLL_INTERVAL`: `caught_up` is set only by a whole cycle.
+    std::thread::sleep(POLL_INTERVAL * 3);
+    while !render_ahead.is_caught_up() {
+        assert!(start.elapsed() < Duration::from_secs(10), "never caught up");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `MediaId`s are slotmap keys: the first media of any project gets the
+/// same one. Opening another project must not show the old one's frames.
+#[test]
+fn a_replaced_project_never_shows_the_previous_projects_frames() {
+    let dir = "vv-app-render-ahead-replace-test";
+    let path_a = make_test_clip(dir, "a.mp4", 2);
+    let path_b = make_color_clip(dir, "b.mp4", "red");
+    let (project_a, media_a, timeline_a) = single_media_project(path_a);
+    let (project_b, media_b, timeline_b) = single_media_project(path_b.clone());
+    assert_eq!(media_a, media_b, "the premise: both projects reuse the same key");
+
+    let render_ahead = RenderAhead::spawn(project_a, timeline_a, 100_000_000, None, 1.0, 0.0);
+    render_ahead.set_target(0);
+    wait_caught_up(&render_ahead);
+    assert!(render_ahead.get_frame(media_a, 0).is_some());
+
+    render_ahead.update_project(&project_b, timeline_b);
+    wait_caught_up(&render_ahead);
+    let shown = render_ahead.get_frame(media_b, 0).expect("frame 0 of the new project");
+    let (_, expected) = vv_media::Decoder::open(&path_b).unwrap().next_frame().unwrap().unwrap();
+    assert!(shown.y == expected.y, "frame 0 still comes from the previous project's file");
+}
+
+/// An open decoder for `media` on `path`, and a cached frame of it.
+fn opened_media(
+    media: MediaId,
+    path: &std::path::Path,
+) -> (SharedFrameCache, HashMap<MediaId, OpenDecoder>) {
+    let caches = SharedFrameCache::new();
+    let mut open = HashMap::new();
+    assert_eq!(
+        position_decoder(&caches, &mut open, media, path, 0, false, false, false),
+        Positioned::Opened
+    );
+    caches.insert(media, 0, Arc::new(dummy_frame()));
+    (caches, open)
+}
+
+#[test]
+fn an_edit_that_keeps_the_media_keeps_its_decoder_and_frames() {
+    let path = make_test_clip("vv-app-render-ahead-forget-test", "keep.mp4", 1);
+    let (old, media, timeline_id) = single_media_project(path.clone());
+    let mut new = old.clone();
+    new.timelines[timeline_id].tracks[0].clips[0].effects.transform =
+        vv_core::TransformTracks::constant(vv_core::Transform {
+            zoom: [2.0, 2.0],
+            ..Default::default()
+        });
+    let (caches, mut open) = opened_media(media, &path);
+    let mut open_behind = HashMap::new();
+
+    forget_changed_media(&old, &new, &caches, &mut open, &mut open_behind);
+    assert!(open.contains_key(&media));
+    assert!(caches.contains(media, 0));
+}
+
+#[test]
+fn a_media_naming_another_file_loses_its_decoder_and_frames() {
+    let path = make_test_clip("vv-app-render-ahead-forget-test", "before.mp4", 1);
+    let (old, media, _) = single_media_project(path.clone());
+    let mut relinked = old.clone();
+    relinked.media_pool[media].path = "elsewhere.mp4".into();
+    let mut removed = old.clone();
+    removed.media_pool.remove(media);
+
+    for new in [relinked, removed] {
+        let (caches, mut open) = opened_media(media, &path);
+        let mut open_behind = HashMap::new();
+        forget_changed_media(&old, &new, &caches, &mut open, &mut open_behind);
+        assert!(!open.contains_key(&media));
+        assert!(!caches.contains(media, 0));
+        assert_eq!(caches.bytes_used(), 0);
+    }
+}

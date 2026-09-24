@@ -98,6 +98,21 @@ impl SharedFrameCache {
         inner.bytes_used = 0;
     }
 
+    /// Drops every frame of `media_id`: for when the id now names another
+    /// file, which `reconcile` cannot tell.
+    pub fn remove_media(&self, media_id: MediaId) {
+        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut *inner;
+        let bytes_used = &mut inner.bytes_used;
+        inner.entries.retain(|&(m, _), frame| {
+            let keep = m != media_id;
+            if !keep {
+                *bytes_used -= frame.byte_len();
+            }
+            keep
+        });
+    }
+
     /// The only eviction policy, run every cycle before the fill.
     /// Tier A: out goes whatever falls in no interval of `window`.
     /// Tier B: past `budget_bytes`, out go the frames farthest from the playhead

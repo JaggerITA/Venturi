@@ -209,7 +209,7 @@ from there.
 |---|---|---|
 | 1 | §1.1 Skip identical viewer recompositions | done (9c5521a) |
 | 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done (a7c3370) |
-| 3 | §1.2 Keep decoders across `UpdateProject` — **discuss design first** | todo |
+| 3 | §1.2 Keep decoders across `UpdateProject` (design agreed 2026-09-24) | done — see below |
 | 4 | §4 Fix the inconsistencies | todo |
 | 5 | §3 Merge `MediaSegment`/`WantedRange`, `LayerCommon`; `enum Gesture` + split `show_timeline` | todo |
 
@@ -242,3 +242,21 @@ Pre-existing failures, unrelated (also on HEAD before step 1):
 `export_timeline_produces_a_playable_file_matching_the_timeline` and
 `ease_in_and_ease_out_are_slow_then_fast_and_viceversa` (`Interpolation::PRESETS`
 contains `Hold`, which never reaches 1.0).
+
+### Step 3 notes
+`UpdateProject` no longer clears every decoder: `forget_changed_media`
+(`render_ahead.rs`) drops the decoders **and the cached frames**
+(`SharedFrameCache::remove_media`) only of media gone from the new project
+or whose `(path, content_hash)` changed. Eviction/budget policy untouched.
+The project clone per history change was left as is (the cost was the
+decoders, not the clone).
+
+Bug fixed on the way: the frame cache was never invalidated on project
+replace, and `MediaId`s are slotmap keys reused by a new project — opening
+another project could show the previous project's frames on the new media
+(test `a_replaced_project_never_shows_the_previous_projects_frames`).
+
+Measured on `bbb_sunflower_1080p_60fps_normal.mp4` (GOP 250), 6 s of 60 fps
+playback with a zoom edit every 100 ms: decoder opens 19 → 2, each reopen
+~75–80 ms of worker time (~1.3 s wasted per 6 s before). No missed frames
+in either case on this machine: the 3 s lookahead absorbed it.
