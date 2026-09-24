@@ -214,7 +214,7 @@ from there.
 | 4 | §4 Fix the inconsistencies | done (d2b3ea3) |
 | 5a | §3 Merge `MediaSegment` into `WantedRange` | done (34c3687) |
 | 5b | §3 `Layer`/`OwnedLayer` = shared fields + content enum | done (f37ee56) |
-| 5c | §3 `enum Gesture` for the 8 timeline drag states (plan agreed 2026-09-24) | done — see below |
+| 5c | §3 `enum Gesture` for the 8 timeline drag states (plan agreed 2026-09-24) | done (5072eed) |
 | 5d | §5 Split `show_timeline` (after 5c) — **plan first** | todo |
 
 ### Step 1 notes
