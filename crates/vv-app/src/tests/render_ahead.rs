@@ -752,7 +752,7 @@ fn render_ahead_buffers_across_a_straight_cut_between_two_different_media() {
 }
 
 /// End-to-end reproduction of the bug reported by the user: during a
-/// crossing transition, `extrapolated_frame_for` (`frame_provider.rs`)
+/// crossing transition, `held_timeline_frame` (`frame_provider.rs`)
 /// asks, for the "lent" side, for a stretch of source frames that
 /// belongs to the NORMAL range of one clip but falls outside the range
 /// declared by the OTHER — no normal `MediaSegment` covers it, and

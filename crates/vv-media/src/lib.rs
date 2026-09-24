@@ -17,8 +17,8 @@ pub use decode::{ColorMatrix, Decoder, FrameYuv420, yuv420_frame_bytes};
 pub use encode::{AudioCodec, AudioSettings, Encoder, VideoCodec, VideoSettings};
 pub use thumbnail::{Thumbnail, generate_thumbnail};
 pub use probe::{
-    AUDIO_ONLY_FPS, AudioStreamInfo, IMAGE_FPS, audio_streams, content_fingerprint, probe,
-    probe_image,
+    AUDIO_ONLY_FPS, AudioStreamInfo, IMAGE_EXTENSIONS, IMAGE_FPS, audio_streams, content_fingerprint,
+    is_image_path, probe, probe_image, probe_media,
 };
 pub use waveform::{
     generate_waveforms, load_waveform, recommended_num_peaks, waveform_exists, waveform_path_for,

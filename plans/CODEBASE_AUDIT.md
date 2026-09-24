@@ -210,7 +210,7 @@ from there.
 | 1 | §1.1 Skip identical viewer recompositions | done (9c5521a) |
 | 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done (a7c3370) |
 | 3 | §1.2 Keep decoders across `UpdateProject` (design agreed 2026-09-24) | done (995c5e2) |
-| 4 | §4 Fix the inconsistencies | todo |
+| 4 | §4 Fix the inconsistencies | done — see below |
 | 5 | §3 Merge `MediaSegment`/`WantedRange`, `LayerCommon`; `enum Gesture` + split `show_timeline` | todo |
 
 ### Step 1 notes
@@ -260,3 +260,18 @@ Measured on `bbb_sunflower_1080p_60fps_normal.mp4` (GOP 250), 6 s of 60 fps
 playback with a zoom edit every 100 ms: decoder opens 19 → 2, each reopen
 ~75–80 ms of worker time (~1.3 s wasted per 6 s before). No missed frames
 in either case on this machine: the 3 s lookahead absorbed it.
+
+### Step 4 notes
+- `Timeline::visible_video_tracks`/`visible_video_clips` (not muted, not
+  disabled) now back `active_video_clips_at`, `active_video_clip_at`,
+  `render_ahead` segments, `window_frame_bytes`, the "buffered" and proxy
+  strips (§2.3). `active_video_clip_at` no longer returns a disabled clip or
+  one on a muted track — e.g. a disabled offline clip on top no longer
+  turned the viewer "Offline".
+- `vv_media::probe_media` / `is_image_path` / `IMAGE_EXTENSIONS`: the three
+  import paths share them; OTIO import now recognizes images.
+- `vv_core::MAX_COMPOUND_DEPTH` everywhere (the UI's 8 is gone);
+  `push_borrowed_segment` recurses at depth 1, not 0.
+- Compound waveforms follow `audible_tracks` (solo included), like the
+  compound mixdown that actually plays.
+- Stale `extrapolated_frame_for` docs rewritten.

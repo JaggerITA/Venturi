@@ -185,6 +185,20 @@ fn probe_image_reads_dimensions_and_reports_the_image_sentinel() {
     assert!(meta.is_image());
 }
 
+/// Every import path (media pool, drop, OTIO) goes through it: an image
+/// probed as a one-frame video would last a single frame on the timeline.
+#[test]
+fn probe_media_recognizes_an_image_by_its_extension() {
+    let dir = std::env::temp_dir().join("vv-media-probe-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("STILL.PNG");
+    crate::test_support::ffmpeg(
+        &["-f", "lavfi", "-i", "color=c=blue:size=64x48:rate=1:duration=1", "-frames:v", "1", "-update", "1"],
+        &path,
+    );
+    assert!(probe_media(&path).expect("probe_media failed").is_image());
+}
+
 #[test]
 fn probe_rejects_a_file_without_audio_or_video() {
     let dir = std::env::temp_dir().join("vv-media-probe-test");

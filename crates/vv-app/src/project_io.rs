@@ -121,7 +121,7 @@ impl VenturiApp {
         }
         self.import_warnings.clear();
         self.pending_import = Some(PendingImport {
-            worker: import_worker::ImportWorker::spawn(paths, is_image_path),
+            worker: import_worker::ImportWorker::spawn(paths),
             errors: Vec::new(),
             imported: Vec::new(),
         });
@@ -203,12 +203,7 @@ impl VenturiApp {
     }
 
     pub(crate) fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
-        let probed = if is_image_path(&path) {
-            vv_media::probe_image(&path)
-        } else {
-            vv_media::probe(&path)
-        };
-        match probed {
+        match vv_media::probe_media(&path) {
             Ok(meta) => Ok(self.insert_media(path, meta)),
             Err(e) => Err(e.to_string()),
         }
@@ -389,7 +384,7 @@ impl VenturiApp {
             )
             .add_filter("video", &["mp4", "mov", "mkv", "avi"])
             .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
-            .add_filter(t!("file_filter.images"), IMAGE_EXTENSIONS)
+            .add_filter(t!("file_filter.images"), vv_media::IMAGE_EXTENSIONS)
             .pick_files(),
             )
         });
@@ -574,7 +569,7 @@ impl VenturiApp {
         let imported = vv_core::import_otio(
             path,
             |media_path| {
-                let meta = vv_media::probe(media_path).map_err(|e| e.to_string())?;
+                let meta = vv_media::probe_media(media_path).map_err(|e| e.to_string())?;
                 Ok((meta, vv_media::content_fingerprint(media_path).unwrap_or(0)))
             },
             Some(&measure),

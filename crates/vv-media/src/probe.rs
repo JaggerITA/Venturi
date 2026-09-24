@@ -176,7 +176,7 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
     // The container often declares more frames than the decoder actually
     // produces (drop frames, imprecise CFR index...): whoever asks for
     // frame `duration_frames - 1` as the "last frame" (e.g. the freeze in
-    // `extrapolated_frame_for`) would get `None` forever if we blindly
+    // `held_timeline_frame`) would get `None` forever if we blindly
     // trusted the arithmetic.
     let duration_frames = if video.is_some() {
         verify_last_decodable_frame(path, fps, nominal_duration_frames)
@@ -303,6 +303,21 @@ fn decode_from(path: &Path, from_secs: f64) -> Option<f64> {
 
 fn seconds_per_tick(time_base: ffmpeg::Rational) -> f64 {
     time_base.numerator() as f64 / time_base.denominator() as f64
+}
+
+/// Extensions treated as images: probing a container is not enough to
+/// tell them apart.
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
+
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTENSIONS.iter().any(|img| img.eq_ignore_ascii_case(ext)))
+}
+
+/// `probe_image` or `probe`, by extension.
+pub fn probe_media(path: &Path) -> Result<MediaMeta, crate::MediaError> {
+    if is_image_path(path) { probe_image(path) } else { probe(path) }
 }
 
 /// Like `probe` but for an image: `duration_frames` is the sentinel

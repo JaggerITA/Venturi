@@ -58,6 +58,32 @@ fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
     assert!(tl.active_video_clip_at(35).is_none());
 }
 
+/// It must be the clip the viewer shows: a disabled clip or a muted track on
+/// top lets the one below through, as in `active_video_clips_at`.
+#[test]
+fn active_video_clip_at_skips_what_is_not_composited() {
+    let track = |clip: Clip, muted: bool| Track {
+        kind: TrackKind::Video,
+        clips: vec![clip],
+        muted,
+        solo: false,
+        locked: false,
+        crossings: Vec::new(),
+    };
+    let mut disabled = clip_at(0, 10, 2);
+    disabled.disabled = true;
+    let mut tl = Timeline {
+        name: "T".into(),
+        fps: Rational::new(25, 1),
+        resolution: (1920, 1080),
+        tracks: vec![track(clip_at(0, 10, 1), false), track(disabled, false)],
+    };
+    assert_eq!(tl.active_video_clip_at(5).map(|(_, c)| c.id), Some(ClipId(1)));
+
+    tl.tracks[1] = track(clip_at(0, 10, 3), true);
+    assert_eq!(tl.active_video_clip_at(5).map(|(_, c)| c.id), Some(ClipId(1)));
+}
+
 #[test]
 fn active_video_clips_at_returns_every_covering_track_bottom_to_top() {
     let tl = Timeline {

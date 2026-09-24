@@ -26,7 +26,7 @@ pub struct ImportWorker {
 }
 
 impl ImportWorker {
-    pub fn spawn(paths: Vec<PathBuf>, is_image: fn(&std::path::Path) -> bool) -> Self {
+    pub fn spawn(paths: Vec<PathBuf>) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (result_tx, rx) = mpsc::channel();
         for (index, path) in paths.iter().enumerate() {
@@ -52,11 +52,7 @@ impl ImportWorker {
                 }) else {
                     return;
                 };
-                let probed = if is_image(&job.path) {
-                    vv_media::probe_image(&job.path)
-                } else {
-                    vv_media::probe(&job.path)
-                };
+                let probed = vv_media::probe_media(&job.path);
                 if result_tx
                     .send((job.index, probed.map_err(|e| e.to_string())))
                     .is_err()

@@ -1662,18 +1662,22 @@ impl Timeline {
         self.tracks_of_kind(kind).map(|(i, _)| i).next()
     }
 
+    /// The video tracks that get composited: not muted.
+    pub fn visible_video_tracks(&self) -> impl DoubleEndedIterator<Item = (usize, &Track)> {
+        self.tracks_of_kind(TrackKind::Video).filter(|(_, t)| !t.muted)
+    }
+
+    /// Every clip that gets composited somewhere, with its track.
+    pub fn visible_video_clips(&self) -> impl Iterator<Item = (usize, &Clip)> {
+        self.visible_video_tracks()
+            .flat_map(|(i, t)| t.clips.iter().filter(|c| !c.disabled).map(move |c| (i, c)))
+    }
+
     /// The video clips covering `frame`, one per track, from bottom to
     /// top (compositing order). Excludes disabled clips and tracks.
     pub fn active_video_clips_at(&self, frame: FrameIdx) -> Vec<(usize, &Clip)> {
-        self.tracks_of_kind(TrackKind::Video)
-            .filter(|(_, t)| !t.muted)
-            .filter_map(|(i, t)| {
-                t.clips
-                    .iter()
-                    .find(|c| c.contains(frame))
-                    .filter(|c| !c.disabled)
-                    .map(|c| (i, c))
-            })
+        self.visible_video_tracks()
+            .filter_map(|(i, t)| visible_clip_at(t, frame).map(|c| (i, c)))
             .collect()
     }
 
@@ -1694,15 +1698,11 @@ impl Timeline {
         self.tracks_of_kind(kind).find(|(_, t)| !t.locked).map(|(i, _)| i)
     }
 
+    /// The topmost of `active_video_clips_at`: the clip the viewer shows.
     pub fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, &Clip)> {
-        self.tracks_of_kind(TrackKind::Video)
+        self.visible_video_tracks()
             .rev()
-            .find_map(|(i, t)| {
-                t.clips
-                    .iter()
-                    .find(|c| c.contains(frame))
-                    .map(|c| (i, c))
-            })
+            .find_map(|(i, t)| visible_clip_at(t, frame).map(|c| (i, c)))
     }
 
     /// The clips of `group` on all the tracks. One scan: it is called only on
@@ -1730,6 +1730,11 @@ impl Timeline {
             .filter(|&(_, id)| id != clip_id)
             .collect()
     }
+}
+
+/// The clip of `track` covering `frame`, unless it is disabled.
+fn visible_clip_at(track: &Track, frame: FrameIdx) -> Option<&Clip> {
+    track.clips.iter().find(|c| c.contains(frame)).filter(|c| !c.disabled)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

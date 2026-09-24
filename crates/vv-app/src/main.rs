@@ -936,7 +936,7 @@ impl VenturiApp {
         &self,
         timeline_id: TimelineId,
         cached: &mut HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>>,
-        depth: usize,
+        depth: u32,
     ) -> Vec<(FrameIdx, FrameIdx)> {
         let (Some(render_ahead), Some(timeline)) =
             (&self.render_ahead, self.project.timelines.get(timeline_id))
@@ -944,9 +944,8 @@ impl VenturiApp {
             return Vec::new();
         };
         let clips: Vec<(MediaId, &vv_core::Clip)> = timeline
-            .tracks_of_kind(TrackKind::Video)
-            .flat_map(|(_, track)| track.clips.iter())
-            .filter_map(|clip| match clip.source {
+            .visible_video_clips()
+            .filter_map(|(_, clip)| match clip.source {
                 vv_core::ClipSource::Media(media_id) => Some((media_id, clip)),
                 _ => None,
             })
@@ -959,7 +958,7 @@ impl VenturiApp {
                     .media_pool
                     .get(media_id)
                     .and_then(|item| item.compound)
-                    .filter(|_| depth < MAX_COMPOUND_WALK_DEPTH);
+                    .filter(|_| depth < vv_core::MAX_COMPOUND_DEPTH);
                 let source_ranges = match nested {
                     Some(nested_id) => self.cached_ranges_of_timeline(nested_id, cached, depth + 1),
                     None => render_ahead.cached_ranges_for(media_id),
@@ -983,18 +982,18 @@ impl VenturiApp {
         let Some(proxy_worker) = &self.proxy_worker else {
             return Vec::new();
         };
-        let mut ranges = Vec::new();
-        for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Video) {
-            for clip in &track.clips {
-                if let vv_core::ClipSource::Media(media_id) = &clip.source
-                    && let Some(item) = self.project.media_pool.get(*media_id)
-                    && proxy_worker.state(item.content_hash) == Some(proxy_worker::ProxyState::Ready)
-                {
-                    ranges.push((clip.timeline_start, clip.timeline_end() - 1));
-                }
-            }
-        }
-        ranges
+        self.project.timelines[timeline_id]
+            .visible_video_clips()
+            .filter(|(_, clip)| {
+                let vv_core::ClipSource::Media(media_id) = &clip.source else {
+                    return false;
+                };
+                self.project.media_pool.get(*media_id).is_some_and(|item| {
+                    proxy_worker.state(item.content_hash) == Some(proxy_worker::ProxyState::Ready)
+                })
+            })
+            .map(|(_, clip)| (clip.timeline_start, clip.timeline_end() - 1))
+            .collect()
     }
 
     /// Loads into `waveform_cache` the waveforms of the audio clips on the timeline,
@@ -1054,8 +1053,8 @@ impl VenturiApp {
     /// Waveform of a compound clip: there is no file to decode, it is
     /// composed from those of the clips of its nested timeline (see
     /// `compose_compound_waveform`), loading them first if needed.
-    fn ensure_compound_waveform(&mut self, media_id: vv_core::MediaId, depth: usize) {
-        if depth > MAX_COMPOUND_WALK_DEPTH {
+    fn ensure_compound_waveform(&mut self, media_id: vv_core::MediaId, depth: u32) {
+        if depth >= vv_core::MAX_COMPOUND_DEPTH {
             return;
         }
         let Some(item) = self.project.media_pool.get(media_id) else {
@@ -1382,23 +1381,18 @@ impl VenturiApp {
         let timeline = &self.project.timelines[timeline_id];
         let mut seen = std::collections::HashSet::new();
         let mut bytes = 0;
-        for (_, track) in timeline.tracks_of_kind(TrackKind::Video) {
-            if track.muted {
+        for (_, clip) in timeline.visible_video_clips() {
+            let vv_core::ClipSource::Media(media_id) = clip.source else {
+                continue;
+            };
+            if clip.timeline_end() <= from || clip.timeline_start >= to {
                 continue;
             }
-            for clip in track.clips.iter().filter(|c| !c.disabled) {
-                let vv_core::ClipSource::Media(media_id) = clip.source else {
-                    continue;
-                };
-                if clip.timeline_end() <= from || clip.timeline_start >= to {
-                    continue;
-                }
-                if !seen.insert(media_id) {
-                    continue;
-                }
-                if let Some(item) = self.project.media_pool.get(media_id) {
-                    bytes += vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
-                }
+            if !seen.insert(media_id) {
+                continue;
+            }
+            if let Some(item) = self.project.media_pool.get(media_id) {
+                bytes += vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
             }
         }
         bytes
@@ -2650,11 +2644,6 @@ fn map_source_ranges_to_timeline(
         .collect()
 }
 
-/// How many levels of nested compound clips are walked (waveform,
-/// "buffered" strip): past that, it gives up — like
-/// `vv_core::MAX_COMPOUND_DEPTH`.
-const MAX_COMPOUND_WALK_DEPTH: usize = 8;
-
 /// Peaks of a compound clip, composed from those of the audio clips of
 /// its nested timeline: there is no file to decode, so the
 /// worker cannot generate them. The `bool` is `false` if some source was
@@ -2674,10 +2663,7 @@ fn compose_compound_waveform(
     let num_peaks = vv_media::recommended_num_peaks(duration_secs);
     let mut peaks = vec![0.0f32; num_peaks];
     let mut complete = true;
-    for (_, track) in timeline.tracks_of_kind(TrackKind::Audio) {
-        if track.muted {
-            continue;
-        }
+    for (_, track) in timeline.audible_tracks() {
         for clip in track.clips.iter().filter(|c| !c.disabled) {
             let vv_core::ClipSource::Media(source_id) = clip.source else {
                 continue;
@@ -2741,16 +2727,6 @@ pub(crate) fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> S
     } else {
         format!("{m}:{s:02}")
     }
-}
-
-/// Extensions treated as images: probing a container is not enough to
-/// tell them apart.
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff"];
-
-fn is_image_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| IMAGE_EXTENSIONS.iter().any(|img| img.eq_ignore_ascii_case(ext)))
 }
 
 /// Hand-drawn magnet: on some platforms (Asahi) egui's fonts

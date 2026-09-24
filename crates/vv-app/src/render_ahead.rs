@@ -473,33 +473,28 @@ fn clipped_media_segments(
     if depth >= vv_core::MAX_COMPOUND_DEPTH {
         return real;
     }
-    for (track_index, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
-        if track.muted {
+    for (track_index, clip) in timeline.visible_video_clips() {
+        let ClipSource::Media(media_id) = &clip.source else {
+            continue;
+        };
+        let segment_start = clip.timeline_start.max(from_frame);
+        let segment_end = clip.timeline_end().min(end_frame);
+        if segment_end <= segment_start {
             continue;
         }
-        for clip in track.clips.iter().filter(|c| !c.disabled) {
-            let ClipSource::Media(media_id) = &clip.source else {
-                continue;
-            };
-            let segment_start = clip.timeline_start.max(from_frame);
-            let segment_end = clip.timeline_end().min(end_frame);
-            if segment_end <= segment_start {
-                continue;
-            }
-            // clip→source-frame mapping shared with the export
-            // (`vv_core::Clip::source_frame_at`, see the docs there for the
-            // reason — plans/REFACTOR_PIPELINE.md B1).
-            let source_start = clip.source_frame_at(segment_start);
-            let source_end = clip.source_frame_at(segment_end - 1);
-            let segment = MediaSegment {
-                media_id: *media_id,
-                source_start,
-                source_end,
-                timeline_start: segment_start,
-                rate: clip.rate,
-            };
-            push_or_recurse(project, track_index, segment, depth, &mut real);
-        }
+        // clip→source-frame mapping shared with the export
+        // (`vv_core::Clip::source_frame_at`, see the docs there for the
+        // reason — plans/REFACTOR_PIPELINE.md B1).
+        let source_start = clip.source_frame_at(segment_start);
+        let source_end = clip.source_frame_at(segment_end - 1);
+        let segment = MediaSegment {
+            media_id: *media_id,
+            source_start,
+            source_end,
+            timeline_start: segment_start,
+            rate: clip.rate,
+        };
+        push_or_recurse(project, track_index, segment, depth, &mut real);
     }
     real
 }
@@ -525,18 +520,12 @@ fn push_or_recurse(
     }
 }
 
-/// Segments "lent" for the crossing transitions active in
-/// `[from_frame, end_frame)`: `extrapolated_frame_for` (`frame_provider.rs`)
-/// never freezes a clip on its last/first real frame, but keeps
-/// playing the footage the trim had discarded until it reaches the real
-/// end of the media — that is, past its own declared edge, it asks for a
-/// growing range of source frames, not a single fixed frame. No
-/// segment of `clipped_media_segments` ever covers it (it is clipped tightly
-/// to the declared range of each clip), so without this
-/// `SharedFrameCache::reconcile` evicts it (or never fetches it) as soon as
-/// the playhead passes the cut, freezing the compositing for that half
-/// of the crossing window. Like `clipped_media_segments`, real media
-/// only: a compound clip is walked into.
+/// Segments "lent" to the crossing transitions active in
+/// `[from_frame, end_frame)`: each side plays past its clip's declared edge
+/// (the footage the trim discarded, held on the media's real edges by
+/// `held_timeline_frame`), which no `clipped_media_segments` segment covers —
+/// without these, `reconcile` evicts it as soon as the playhead passes the
+/// cut. Real media only: a compound clip is walked into.
 fn crossing_borrowed_segments(
     project: &Project,
     timeline: &Timeline,
@@ -544,10 +533,7 @@ fn crossing_borrowed_segments(
     end_frame: FrameIdx,
 ) -> Vec<MediaSegment> {
     let mut real = Vec::new();
-    for (_, track) in timeline.tracks_of_kind(vv_core::TrackKind::Video) {
-        if track.muted {
-            continue;
-        }
+    for (_, track) in timeline.visible_video_tracks() {
         for crossing in &track.crossings {
             let (Some(left), Some(right)) = (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) else {
                 continue;
@@ -606,7 +592,7 @@ fn push_borrowed_segment(
                     nested,
                     segment.source_start,
                     segment.source_end + 1,
-                    0,
+                    1,
                 )));
             }
         }
