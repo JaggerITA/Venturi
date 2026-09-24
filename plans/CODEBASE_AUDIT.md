@@ -215,7 +215,7 @@ from there.
 | 5a | §3 Merge `MediaSegment` into `WantedRange` | done (34c3687) |
 | 5b | §3 `Layer`/`OwnedLayer` = shared fields + content enum | done (f37ee56) |
 | 5c | §3 `enum Gesture` for the 8 timeline drag states (plan agreed 2026-09-24) | done (5072eed) |
-| 5d | §5 Split `show_timeline` (after 5c) — **plan first** | todo |
+| 5d | §5 Split `show_timeline` (after 5c) — plan below, **awaiting approval** | todo |
 
 ### Step 1 notes
 The viewer keeps the layers it last composed (`VenturiApp::viewer_content`)
@@ -294,3 +294,51 @@ Then `TimelineState::gesture: Option<Gesture>` replaced the 8 `Option`s;
 `fade_drag_value`/`transition_drag_value` became `edge_drag_value(.., min)`;
 one `gesture_finished` flag, still cleared after the draw loop. Agreed
 behavior change: hover cursors never switch while any gesture is active.
+
+### Step 5d plan (proposed 2026-09-24, not yet approved)
+`show_timeline` is 1418 lines: ~160 of setup, then a `ScrollArea` closure of
+~1185, of which ~570 are the per-clip loop. Target: `show_timeline` as a
+~150-line orchestrator, no extracted function over ~200 lines. Code moves,
+no behavior change.
+
+Shape:
+- `TimelineFrame` (per-frame, read-only): fps, `px_per_frame`, track
+  kinds/flags/labels, `visuals`, row order/`row_y`, `PaneLayout`, sizes.
+  Built by a `collect_frame` from the current pass 1.
+- `Canvas` (inside the ScrollArea): `origin`, painter, and the rect helpers
+  that are closures today (`pane_rect`, `track_painter`, `to_local`,
+  `visible_clip_rect`, …) as methods.
+- `GesturePreview`: `drag_effective_track`, `drag_group_targets`,
+  `dragged_primary_new_start`, `trimmed_primary_new_value`, moving keys and
+  `draw_order`.
+- Per clip: `clip_rect_for` (layout), `paint_clip` (box, waveform, overlay,
+  volume line, fade handles, transition markers, duration overlays),
+  `interact_clip` (DnD drops of filter/transition, hover cursors,
+  drag start/drag/stop, clicks), `clip_context_menu`. Results go into a
+  `FrameOutcome` (pending action, `gesture_finished`, edge cursor, crossing
+  previews, compound to enter, volume undo group).
+
+Commits, each with every test green:
+1. zoom/touch handling + `collect_frame`/`TimelineFrame` + pane scroll;
+2. drops, drop ghosts and new-track zones (returns `media_drop`);
+3. marquee + selected gap;
+4. `GesturePreview` + duplicate-originals ghost;
+5. per-clip split (`clip_rect_for`, `paint_clip`, `interact_clip`,
+   `clip_context_menu`);
+6. after-loop finalization (crossing previews, deferred gesture clear,
+   cursors, playhead, scrollbars).
+
+Invariants to keep: the order of `ui.interact` calls (hit-test priority:
+track backgrounds, marquee area, divider, new-track zones, then clips);
+egui ids (same `ui`, same salts); the gesture cleared only after the loop.
+
+Safety net, before step 1:
+- new tests on what the gesture tests do not cover: click selection,
+  double click entering a compound, filter and transition drops (payload
+  set with `egui::DragAndDrop::set_payload`), a media drop returning
+  `media_drop`, the context menu opening;
+- a temporary "golden" check, not committed: hash of the painted shapes
+  (`FullOutput.shapes`) of a fixed rich scene (selection, fades,
+  transitions, crossing, waveform, gap, a drag in progress), recorded before
+  step 1 and compared after each step — a pure code move must paint the
+  exact same shapes.
