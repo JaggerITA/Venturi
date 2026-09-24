@@ -30,6 +30,10 @@ Minimal in scope, professional in workflow.
   between the two through OpenTimelineIO.
 - **Linux first.** Developed and tested on Linux, not ported to it.
 
+## The name
+
+Named after the Venturi effect: when a fluid passes through a constriction, it doesn't slow down, it speeds up. Venturi Video is built on the same principle: tight constraints make it faster, so your edits stay fluid even on modest hardware.
+
 ## Dependencies
 
 - **Rust** 1.85 or newer (edition 2024) — [rustup.rs](https://rustup.rs)
