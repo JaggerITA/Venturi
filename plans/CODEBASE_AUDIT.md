@@ -211,7 +211,10 @@ from there.
 | 2 | §2.1 Unify the audio mix (also fixes §1.6 compound caching) | done (a7c3370) |
 | 3 | §1.2 Keep decoders across `UpdateProject` (design agreed 2026-09-24) | done (995c5e2) |
 | 4 | §4 Fix the inconsistencies | done (d2b3ea3) |
-| 5 | §3 Merge `MediaSegment`/`WantedRange`, `LayerCommon`; `enum Gesture` + split `show_timeline` | todo |
+| 5a | §3 Merge `MediaSegment` into `WantedRange` | done (34c3687) |
+| 5b | §3 `Layer`/`OwnedLayer` = shared fields + content enum | done (f37ee56) |
+| 5c | §3 `enum Gesture` for the 8 timeline drag states — **plan first** | todo |
+| 5d | §5 Split `show_timeline` (after 5c) — **plan first** | todo |
 
 ### Step 1 notes
 The viewer keeps the layers it last composed (`VenturiApp::viewer_content`)
