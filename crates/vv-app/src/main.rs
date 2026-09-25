@@ -1973,7 +1973,7 @@ impl VenturiApp {
         let keymap = &self.settings.keymap;
         let shortcut_text =
             |action| keymap.shortcuts(action).first().map(ToString::to_string).unwrap_or_default();
-        ui.add_enabled_ui(geometry.is_some(), |ui| {
+        let zoom_rect = ui.add_enabled_ui(geometry.is_some(), |ui| {
             ui.menu_button(format!("{label} ⏷"), |ui| {
                 let Some((area, frame_px)) = geometry else {
                     return;
@@ -2003,7 +2003,25 @@ impl VenturiApp {
             })
             .response
             .on_hover_text(t!("viewer.zoom_hint"));
-        });
+        })
+        .response
+        .rect;
+        if let Some(timeline_id) = self.timeline_id {
+            // Symmetric around the center, so it never overlaps the zoom menu.
+            let full = ui.max_rect();
+            let half_width = (full.width() / 2.0 - (zoom_rect.right() - full.left()) - 8.0).max(0.0);
+            let rect = egui::Rect::from_x_y_ranges(
+                full.center().x - half_width..=full.center().x + half_width,
+                zoom_rect.y_range(),
+            );
+            let name = self.timeline_display_name(timeline_id);
+            ui.put(
+                rect,
+                egui::Label::new(egui::RichText::new(name).strong())
+                    .selectable(false)
+                    .truncate(),
+            );
+        }
     }
 
     fn show_viewer_overlay(
