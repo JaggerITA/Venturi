@@ -322,9 +322,11 @@ impl VenturiApp {
                     .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
                     .collect();
                 // Interacted with before the items: in egui the last one wins, so a click
-                // on an item does not start the selection rectangle.
+                // on an item does not start the selection rectangle. The clip rect
+                // is the viewport: `available_rect_before_wrap` is viewport-sized
+                // but scrolls away with the content.
                 let bg = ui.interact(
-                    ui.available_rect_before_wrap(),
+                    ui.clip_rect(),
                     ui.id().with("media_pool_bg"),
                     egui::Sense::click_and_drag(),
                 );
@@ -533,13 +535,12 @@ impl VenturiApp {
                     let dragged_count = payload.items.len();
                     resp.dnd_set_drag_payload(payload);
                     if resp.double_clicked() {
-                        // A compound clip (or the project timeline, see
-                        // `MediaItem::compound`) opens as a timeline of its
-                        // own, exactly like a double click on its instance
-                        // on the timeline — "preview" makes no sense for
-                        // it.
+                        // A compound clip (or a project timeline, see
+                        // `MediaItem::compound`) opens as a top level timeline:
+                        // from the pool there is no parent to stack in the
+                        // breadcrumb. "Preview" makes no sense for it.
                         match self.project.media_pool.get(id).and_then(|m| m.compound) {
-                            Some(nested_id) => self.enter_compound_timeline(nested_id),
+                            Some(timeline_id) => self.open_timeline(timeline_id),
                             None => *preview_action = Some(id),
                         }
                     }

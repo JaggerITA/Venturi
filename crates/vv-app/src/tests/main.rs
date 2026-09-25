@@ -25,6 +25,21 @@ fn a_new_timeline_becomes_current_and_shows_up_in_the_media_pool() {
     assert!(app.has_unsaved_changes());
 }
 
+#[test]
+fn switching_between_project_timelines_does_not_nest_them() {
+    let mut app = VenturiApp::default();
+    let first = app.ensure_timeline();
+    let second = app.create_timeline(
+        app.project.alloc_timeline_name(),
+        vv_core::Rational::new(30, 1),
+        (1280, 720),
+    );
+    app.open_timeline(second);
+    app.open_timeline(first);
+    assert_eq!(app.timeline_id, Some(first));
+    assert!(app.timeline_stack.is_empty());
+}
+
 fn make_timeline_with_clip(
     app: &mut VenturiApp,
     track_index: usize,
