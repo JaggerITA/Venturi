@@ -1796,6 +1796,56 @@ impl Project {
         format!("{TIMELINE_NAME_PREFIX}{number}")
     }
 
+    /// Copy of the timeline of `source` (a compound pool item) as a new
+    /// pool item called `name`. Clip and link group ids are reallocated:
+    /// they are unique project-wide.
+    pub fn duplicate_timeline(&mut self, source: MediaId, name: String) -> Option<MediaId> {
+        let timeline_id = self.media_pool.get(source)?.compound?;
+        let mut timeline = self.timelines.get(timeline_id)?.clone();
+        timeline.name = name.clone();
+        let mut groups = std::collections::HashMap::new();
+        for track in &mut timeline.tracks {
+            let mut clip_ids = std::collections::HashMap::new();
+            for clip in &mut track.clips {
+                let id = self.alloc_clip_id();
+                clip_ids.insert(clip.id, id);
+                clip.id = id;
+                if let Some(group) = clip.linked_group {
+                    let new_group =
+                        *groups.entry(group).or_insert_with(|| self.alloc_link_group_id());
+                    clip.linked_group = Some(new_group);
+                }
+            }
+            track.crossings.retain_mut(|crossing| {
+                match (clip_ids.get(&crossing.left_clip), clip_ids.get(&crossing.right_clip)) {
+                    (Some(&left), Some(&right)) => {
+                        crossing.left_clip = left;
+                        crossing.right_clip = right;
+                        true
+                    }
+                    _ => false,
+                }
+            });
+        }
+        let new_timeline = self.timelines.insert(timeline);
+        let mut item = self.media_pool[source].clone();
+        item.path = name.into();
+        item.compound = Some(new_timeline);
+        let media_id = self.media_pool.insert(item);
+        self.sync_compound_meta(media_id);
+        Some(media_id)
+    }
+
+    /// Renames a compound pool item together with its timeline.
+    pub fn rename_timeline(&mut self, media_id: MediaId, name: String) {
+        let Some(item) = self.media_pool.get_mut(media_id) else { return };
+        let Some(timeline_id) = item.compound else { return };
+        item.path = name.clone().into();
+        if let Some(timeline) = self.timelines.get_mut(timeline_id) {
+            timeline.name = name;
+        }
+    }
+
     /// New value for `MediaItem::content_hash` of a compound clip: to be
     /// assigned on creation and every time its nested timeline
     /// changes, to invalidate the cache of composited frames depending

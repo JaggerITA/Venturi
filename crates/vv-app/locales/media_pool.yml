@@ -159,3 +159,15 @@ pool.resolution_custom:
 pool.create_timeline:
   en: "Create"
   it: "Crea"
+
+pool.duplicate_timeline:
+  en: "Duplicate timeline"
+  it: "Duplica timeline"
+
+pool.rename:
+  en: "Rename"
+  it: "Rinomina"
+
+pool.copy_suffix:
+  en: "copy"
+  it: "copia"

@@ -37,6 +37,19 @@ pub struct MediaPoolState {
     /// media instead of the clips on the timeline.
     pub focused: bool,
     pub sort: Sort,
+    pub renaming: Option<Rename>,
+    /// A click on the name of the only selected item, with its time: it
+    /// becomes a rename unless a double click follows (the "slow double
+    /// click").
+    pub rename_pending: Option<(MediaId, f64)>,
+}
+
+pub struct Rename {
+    pub media_id: MediaId,
+    pub text: String,
+    /// Set until the text field has been shown once: it then takes focus
+    /// with the whole name selected.
+    pub just_started: bool,
 }
 
 impl MediaPoolState {

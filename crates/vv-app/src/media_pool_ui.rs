@@ -267,7 +267,117 @@ pub(crate) fn file_label(path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// Name text field of the item being renamed: `Some(Some(name))` to
+/// confirm, `Some(None)` to cancel, `None` while still editing.
+fn rename_field(ui: &mut egui::Ui, rename: &mut media_pool::Rename) -> Option<Option<String>> {
+    let edit_id = ui.id().with("media_pool_rename");
+    let mut output = egui::TextEdit::singleline(&mut rename.text)
+        .id(edit_id)
+        .desired_width(ui.available_width() - DURATION_COL_W)
+        .show(ui);
+    if rename.just_started {
+        rename.just_started = false;
+        output.response.request_focus();
+        let end = egui::text::CCursor::new(rename.text.chars().count());
+        output
+            .state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), end)));
+        output.state.store(ui.ctx(), edit_id);
+    }
+    if !output.response.lost_focus() {
+        return None;
+    }
+    let name = rename.text.trim();
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) || name.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(name.to_string()))
+    }
+}
+
+/// Thumbnail of a timeline in the pool: a film strip.
+fn paint_film_icon(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    color: egui::Color32,
+    hole_color: egui::Color32,
+) {
+    let film = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 28.0));
+    painter.rect_filled(film, 2.0, color);
+    const HOLES: usize = 6;
+    let step = film.width() / HOLES as f32;
+    for i in 0..HOLES {
+        let x = film.left() + step * (i as f32 + 0.5);
+        for y in [film.top() + 3.5, film.bottom() - 3.5] {
+            painter.rect_filled(
+                egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(4.0, 3.0)),
+                0.5,
+                hole_color,
+            );
+        }
+    }
+    let frames = film.shrink2(egui::vec2(3.0, 8.0));
+    let gap = 3.0;
+    let frame_w = (frames.width() - gap) / 2.0;
+    for i in 0..2 {
+        let left = frames.left() + i as f32 * (frame_w + gap);
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(left, frames.top()),
+                egui::vec2(frame_w, frames.height()),
+            ),
+            1.0,
+            hole_color,
+        );
+    }
+}
+
 impl VenturiApp {
+    fn start_rename(&mut self, media_id: MediaId) {
+        let Some(item) = self.project.media_pool.get(media_id) else { return };
+        self.media_pool_state.renaming = Some(media_pool::Rename {
+            media_id,
+            text: file_label(&item.path),
+            just_started: true,
+        });
+    }
+
+    /// Not in the history, like creating a timeline.
+    fn rename_timeline(&mut self, media_id: MediaId, name: String) {
+        let unchanged = self
+            .project
+            .media_pool
+            .get(media_id)
+            .is_some_and(|item| file_label(&item.path) == name);
+        if !unchanged {
+            self.project.rename_timeline(media_id, name);
+            self.unsaved_media = true;
+        }
+    }
+
+    /// The copy is called "<name> copy", "<name> copy 2", ... and ends up
+    /// selected.
+    pub(crate) fn duplicate_timeline(&mut self, media_id: MediaId) {
+        let Some(item) = self.project.media_pool.get(media_id) else { return };
+        let base = format!("{} {}", file_label(&item.path), t!("pool.copy_suffix"));
+        let taken: std::collections::HashSet<String> = self
+            .project
+            .media_pool
+            .values()
+            .filter(|m| m.compound.is_some())
+            .map(|m| file_label(&m.path))
+            .collect();
+        let name = std::iter::once(base.clone())
+            .chain((2..).map(|n| format!("{base} {n}")))
+            .find(|name| !taken.contains(name))
+            .expect("infinite candidates");
+        if let Some(copy) = self.project.duplicate_timeline(media_id, name) {
+            self.unsaved_media = true;
+            self.media_pool_state.select_only([copy]);
+        }
+    }
+
     /// Contents of the Media pool section in the left column.
     pub(crate) fn show_media_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
         if let Some(worker) = &self.proxy_worker {
@@ -299,12 +409,18 @@ impl VenturiApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let items: Vec<(MediaId, String, vv_core::MediaMeta, u64)> = self
+                let items: Vec<(MediaId, String, vv_core::MediaMeta, u64, bool)> = self
                     .project
                     .media_pool
                     .iter()
                     .map(|(id, item)| {
-                        (id, file_label(&item.path), item.meta.clone(), item.content_hash)
+                        (
+                            id,
+                            file_label(&item.path),
+                            item.meta.clone(),
+                            item.content_hash,
+                            item.compound.is_some(),
+                        )
                     })
                     .collect();
                 let mut items = items;
@@ -312,14 +428,14 @@ impl VenturiApp {
                     &mut items,
                     self.media_pool_state.sort,
                     |(_, label, ..)| label.as_str(),
-                    |(_, _, meta, _)| {
+                    |(_, _, meta, ..)| {
                         meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9)
                     },
                 );
                 let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
                 let drags: Vec<timeline_ui::MediaDrag> = items
                     .iter()
-                    .map(|(id, _, meta, _)| timeline_ui::MediaDrag::whole(*id, meta))
+                    .map(|(id, _, meta, ..)| timeline_ui::MediaDrag::whole(*id, meta))
                     .collect();
                 // Interacted with before the items: in egui the last one wins, so a click
                 // on an item does not start the selection rectangle. The clip rect
@@ -349,12 +465,24 @@ impl VenturiApp {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(SIDE_PAD, 0))
                     .show(ui, |ui| {
-                for (id, label, meta, content_hash) in items {
+                for (id, label, meta, content_hash, is_timeline) in items {
                     let proxy_state = self
                         .proxy_worker
                         .as_ref()
                         .and_then(|w| w.state(content_hash));
-                    let thumbnail = self.thumbnails.get(&content_hash).cloned().flatten();
+                    let thumbnail = if is_timeline {
+                        None
+                    } else {
+                        self.thumbnails.get(&content_hash).cloned().flatten()
+                    };
+                    let renaming = self
+                        .media_pool_state
+                        .renaming
+                        .as_mut()
+                        .filter(|r| r.media_id == id);
+                    let is_renaming = renaming.is_some();
+                    let mut rename_done = None;
+                    let mut label_rect = egui::Rect::NOTHING;
                     let group_resp = ui
                         .group(|ui| {
                             ui.set_min_width(ui.available_width());
@@ -390,7 +518,14 @@ impl VenturiApp {
                                             2.0,
                                             ui.visuals().extreme_bg_color,
                                         );
-                                        if !meta.has_video {
+                                        if is_timeline {
+                                            paint_film_icon(
+                                                ui.painter(),
+                                                rect,
+                                                ui.visuals().weak_text_color(),
+                                                ui.visuals().extreme_bg_color,
+                                            );
+                                        } else if !meta.has_video {
                                             ui.painter().text(
                                                 rect.center(),
                                                 egui::Align2::CENTER_CENTER,
@@ -402,7 +537,12 @@ impl VenturiApp {
                                     }
                                 }
                                 ui.vertical(|ui| {
-                                    ui.label(&label);
+                                    match renaming {
+                                        Some(rename) => {
+                                            rename_done = rename_field(ui, rename);
+                                        }
+                                        None => label_rect = ui.label(&label).rect,
+                                    }
                                     ui.small(if meta.is_image() {
                                         t!("pool.meta_image", width = meta.width, height = meta.height)
                                     } else if meta.has_video {
@@ -467,11 +607,24 @@ impl VenturiApp {
                     }
                     // Double click: preview. Drag: adds the media onto the timeline.
                     let interact_id = ui.id().with("media_pool_item").with(id);
+                    // While renaming, the item must not steal the clicks of
+                    // the text field.
+                    let sense = if is_renaming {
+                        egui::Sense::hover()
+                    } else {
+                        egui::Sense::click_and_drag()
+                    };
                     let resp = ui
-                        .interact(group_resp.rect, interact_id, egui::Sense::click_and_drag())
+                        .interact(group_resp.rect, interact_id, sense)
                         .on_hover_text(
                             t!("pool.item_hint"),
                         );
+                    if let Some(new_name) = rename_done {
+                        self.media_pool_state.renaming = None;
+                        if let Some(name) = new_name {
+                            self.rename_timeline(id, name);
+                        }
+                    }
                     item_rects.push((id, group_resp.rect));
                     if self.media_pool_state.selected.contains(&id) {
                         ui.painter().rect_stroke(
@@ -488,13 +641,33 @@ impl VenturiApp {
                     }
                     if resp.clicked() {
                         let modifiers = ui.input(|i| i.modifiers);
+                        let on_name = is_timeline
+                            && modifiers.is_none()
+                            && self.media_pool_state.selected.len() == 1
+                            && self.media_pool_state.selected.contains(&id)
+                            && resp
+                                .interact_pointer_pos()
+                                .is_some_and(|pos| label_rect.contains(pos));
                         self.media_pool_state.click(id, modifiers, &order);
+                        self.media_pool_state.rename_pending =
+                            on_name.then(|| (id, ui.input(|i| i.time)));
                     }
                     // Right click outside the selection replaces it, like a drag.
                     if resp.secondary_clicked() && !self.media_pool_state.selected.contains(&id) {
                         self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
                     }
                     resp.context_menu(|ui| {
+                        if is_timeline {
+                            if ui.button(t!("pool.duplicate_timeline")).clicked() {
+                                self.duplicate_timeline(id);
+                                ui.close();
+                            }
+                            if ui.button(t!("pool.rename")).clicked() {
+                                self.start_rename(id);
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
                         let count = self.media_pool_state.selected.len().max(1);
                         let label = if count > 1 {
                             t!("pool.relink_many", count = count)
@@ -509,6 +682,9 @@ impl VenturiApp {
                     // Dragging an item outside the selection replaces it
                     // with that item (as on the timeline, see
                     // `timeline_ui::drag_group_for`).
+                    if resp.drag_started() {
+                        self.media_pool_state.rename_pending = None;
+                    }
                     if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
                         self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
                     }
@@ -535,6 +711,7 @@ impl VenturiApp {
                     let dragged_count = payload.items.len();
                     resp.dnd_set_drag_payload(payload);
                     if resp.double_clicked() {
+                        self.media_pool_state.rename_pending = None;
                         // A compound clip (or a project timeline, see
                         // `MediaItem::compound`) opens as a top level timeline:
                         // from the pool there is no parent to stack in the
@@ -555,6 +732,18 @@ impl VenturiApp {
                 }
                     });
                 ui.add_space(BOTTOM_PAD);
+                if let Some((id, clicked_at)) = self.media_pool_state.rename_pending {
+                    let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+                    let elapsed = ui.input(|i| i.time) - clicked_at;
+                    if elapsed > wait {
+                        self.media_pool_state.rename_pending = None;
+                        self.start_rename(id);
+                    } else {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(
+                            wait - elapsed,
+                        ));
+                    }
+                }
 
                 if bg.drag_started() {
                     if let Some(pos) = bg.interact_pointer_pos() {
@@ -576,6 +765,7 @@ impl VenturiApp {
                         self.media_pool_state.select_only(hits);
                     }
                 } else if bg.clicked() {
+                    self.media_pool_state.rename_pending = None;
                     self.media_pool_state.clear();
                 }
                 if let Some((start, end)) = self.media_pool_state.marquee {
@@ -618,3 +808,7 @@ impl VenturiApp {
             });
     }
 }
+
+#[cfg(test)]
+#[path = "tests/media_pool_ui.rs"]
+mod tests;

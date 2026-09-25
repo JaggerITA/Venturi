@@ -402,3 +402,83 @@ fn transform_tracks_saved_without_a_newer_param_load_with_its_default() {
     assert_eq!(t.opacity, 100.0);
     assert_eq!(t.zoom, [1.0, 1.0]);
 }
+
+fn project_with_timeline_item() -> (Project, MediaId) {
+    let mut project = Project::default();
+    let a = project.alloc_clip_id();
+    let b = project.alloc_clip_id();
+    let group = project.alloc_link_group_id();
+    let mut clip_a = clip_at(0, 10, a.0);
+    clip_a.linked_group = Some(group);
+    let mut track = Track::new(TrackKind::Video);
+    track.clips = vec![clip_a, clip_at(10, 10, b.0)];
+    track.crossings = vec![CrossTransition {
+        left_clip: a,
+        right_clip: b,
+        transition: Transition {
+            kind: TransitionKind::Push,
+            duration: 4,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.0,
+        },
+    }];
+    let timeline = project.timelines.insert(Timeline {
+        name: "Timeline 1".into(),
+        fps: Rational::new(30, 1),
+        resolution: (64, 48),
+        tracks: vec![track],
+    });
+    let media_id = project.media_pool.insert(MediaItem {
+        path: "Timeline 1".into(),
+        meta: MediaMeta {
+            duration_frames: 0,
+            fps: Rational::new(30, 1),
+            width: 64,
+            height: 48,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 48_000,
+            channels: 2,
+            audio_streams: 1,
+        },
+        content_hash: 0,
+        compound: Some(timeline),
+    });
+    project.sync_compound_meta(media_id);
+    (project, media_id)
+}
+
+#[test]
+fn duplicate_timeline_copies_clips_with_fresh_ids() {
+    let (mut project, source) = project_with_timeline_item();
+    let copy = project
+        .duplicate_timeline(source, "Timeline 1 copy".into())
+        .expect("source is a timeline");
+
+    let source_tl = &project.timelines[project.media_pool[source].compound.unwrap()];
+    let copy_tl = &project.timelines[project.media_pool[copy].compound.unwrap()];
+    assert_eq!(copy_tl.name, "Timeline 1 copy");
+    assert_eq!(project.media_pool[copy].path, std::path::Path::new("Timeline 1 copy"));
+    assert_eq!(project.media_pool[copy].meta.duration_frames, 20);
+
+    let (src, dup) = (&source_tl.tracks[0], &copy_tl.tracks[0]);
+    assert_eq!(dup.clips.len(), 2);
+    for (s, d) in src.clips.iter().zip(&dup.clips) {
+        assert_ne!(s.id, d.id);
+        assert_eq!(s.timeline_start, d.timeline_start);
+    }
+    assert!(dup.clips[0].linked_group.is_some());
+    assert_ne!(dup.clips[0].linked_group, src.clips[0].linked_group);
+    assert_eq!(dup.crossings[0].left_clip, dup.clips[0].id);
+    assert_eq!(dup.crossings[0].right_clip, dup.clips[1].id);
+}
+
+#[test]
+fn rename_timeline_renames_pool_item_and_timeline() {
+    let (mut project, media_id) = project_with_timeline_item();
+    project.rename_timeline(media_id, "Edit".into());
+    assert_eq!(project.media_pool[media_id].path, std::path::Path::new("Edit"));
+    let timeline = project.media_pool[media_id].compound.unwrap();
+    assert_eq!(project.timelines[timeline].name, "Edit");
+}
