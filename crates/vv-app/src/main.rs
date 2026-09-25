@@ -2017,7 +2017,7 @@ impl VenturiApp {
             let name = self.timeline_display_name(timeline_id);
             ui.put(
                 rect,
-                egui::Label::new(egui::RichText::new(name).strong())
+                egui::Label::new(name)
                     .selectable(false)
                     .truncate(),
             );
