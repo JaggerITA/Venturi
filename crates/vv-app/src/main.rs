@@ -2557,6 +2557,7 @@ impl VenturiApp {
             .any(|t| t.clips.iter().any(|c| c.timeline_start == position));
         if landed {
             self.timeline_state.playhead = position;
+            self.timeline_state.reveal_playhead = true;
             self.ensure_active_clip_matches_playhead(true);
         }
     }
@@ -2949,6 +2950,11 @@ impl eframe::App for VenturiApp {
         self.poll_thumbnails(&ui.ctx().clone());
         if self.thumbnail_worker.as_ref().is_some_and(|w| w.has_pending()) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // The jump is applied by the timeline scroll sync of this frame; the
+        // command that set it may have run after the timeline was drawn.
+        if self.timeline_state.reveal_playhead {
+            ui.ctx().request_repaint();
         }
         if let Some(audio) = &mut self.timeline_audio {
             audio.tick();

@@ -93,6 +93,9 @@ pub struct TimelineState {
     /// "Paste attributes" asked from the context menu: the dialog lives in
     /// the app, which opens it and clears the flag.
     pub paste_attributes_requested: bool,
+    /// The playhead jumped programmatically (e.g. ripple delete): the next
+    /// frame brings it into view if it left, without waiting for playback.
+    pub reveal_playhead: bool,
     /// Where each clip was drawn in the last frame: the tests aim their
     /// synthetic pointer events with it.
     #[cfg(test)]
@@ -320,6 +323,7 @@ impl Default for TimelineState {
             audio_scroll_vel: 0.0,
             export_marks: crate::transport::MarkRange::default(),
             paste_attributes_requested: false,
+            reveal_playhead: false,
             #[cfg(test)]
             clip_rects: std::collections::HashMap::new(),
         }
@@ -3936,9 +3940,11 @@ fn sync_timeline_scroll(
     }
     state.last_rendered_pps = state.pixels_per_sec;
 
-    // During playback the playhead stays visible: if it leaves, the view "turns the page"
-    // bringing it to a third from the left. Clamp like egui's in `begin`.
-    if playback_active {
+    // During playback (or after a programmatic jump) the playhead stays visible:
+    // if it leaves, the view "turns the page" bringing it to a third from the
+    // left. Clamp like egui's in `begin`.
+    let reveal = std::mem::take(&mut state.reveal_playhead);
+    if playback_active || reveal {
         let playhead_x = state.playhead as f32 * px_per_frame;
         let visible_start =
             match egui::containers::scroll_area::State::load(ctx, scroll_id) {
