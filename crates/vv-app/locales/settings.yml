@@ -198,3 +198,6 @@ action.zoom_in:
 action.zoom_out:
   en: Zoom timeline out
   it: Zoom indietro timeline
+action.add_marker:
+  en: Add marker
+  it: Aggiungi marker

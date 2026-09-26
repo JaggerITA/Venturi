@@ -13,12 +13,19 @@ use vv_core::{
     TrackFlag, TrackKind, TrimEdge,
 };
 
+#[path = "timeline_markers.rs"]
+mod markers;
+pub(crate) use markers::add_marker_at_playhead;
+
 const ROW_HEIGHT: f32 = 40.0;
 /// Maximum vertical zoom (Shift+wheel); the minimum is `ROW_HEIGHT`.
 const MAX_ROW_HEIGHT: f32 = ROW_HEIGHT * 4.0;
 /// Vertical zoom gain per pixel of wheel.
 const ROW_ZOOM_SPEED: f32 = 1.0 / 200.0;
-const RULER_HEIGHT: f32 = 20.0;
+/// The ruler is the tick band plus the marker lane below it.
+const RULER_TICKS_HEIGHT: f32 = 20.0;
+const MARKER_LANE_HEIGHT: f32 = 14.0;
+const RULER_HEIGHT: f32 = RULER_TICKS_HEIGHT + MARKER_LANE_HEIGHT;
 const MIN_TIMELINE_SECS: f64 = 20.0;
 const TRAILING_MARGIN_SECS: f64 = 5.0;
 /// Height of the draggable separator between the Video group and the Audio group.
@@ -102,10 +109,14 @@ pub struct TimelineState {
     /// "Change Clip Speed…" asked for these clips: the dialog lives in the
     /// app, which opens it and clears this.
     pub speed_dialog_requested: Option<Vec<ClipKey>>,
+    marker_drag: Option<markers::MarkerDrag>,
+    marker_editor: Option<markers::MarkerEditor>,
     /// Where each clip was drawn in the last frame: the tests aim their
     /// synthetic pointer events with it.
     #[cfg(test)]
     clip_rects: std::collections::HashMap<ClipId, egui::Rect>,
+    #[cfg(test)]
+    marker_lane: egui::Rect,
 }
 
 /// A copied clip. Id and group are reassigned on paste; the position
@@ -374,8 +385,12 @@ impl Default for TimelineState {
             reveal_playhead: false,
             retime_controls: BTreeSet::new(),
             speed_dialog_requested: None,
+            marker_drag: None,
+            marker_editor: None,
             #[cfg(test)]
             clip_rects: std::collections::HashMap::new(),
+            #[cfg(test)]
+            marker_lane: egui::Rect::NOTHING,
         }
     }
 }
@@ -509,6 +524,7 @@ struct ClipVisual<'a> {
 /// Command collected during the drawing (which borrows `project`) and
 /// applied afterwards.
 enum PendingAction {
+    Marker(markers::MarkerChange),
     /// Moves a dragged group. The new tracks must be created before
     /// resolving the `EffectiveTrack::New` of `moves`.
     Move {
@@ -1313,7 +1329,7 @@ fn draw_ruler_ticks(
     // Heights of the three tick levels (from bottom to top).
     const FRAME_TICK_HEIGHT: f32 = 5.0;
     const MEDIUM_TICK_HEIGHT: f32 = 10.0;
-    const MAJOR_TICK_HEIGHT: f32 = RULER_HEIGHT;
+    const MAJOR_TICK_HEIGHT: f32 = RULER_TICKS_HEIGHT;
 
     // Range in seconds actually visible, not the whole duration of the
     // timeline (thousands of off-screen ticks otherwise).
@@ -1378,8 +1394,8 @@ fn draw_ruler_ticks(
             let x = origin.x + frame as f32 * px_per_frame;
             painter.line_segment(
                 [
-                    egui::pos2(x, origin.y + RULER_HEIGHT - MEDIUM_TICK_HEIGHT),
-                    egui::pos2(x, origin.y + RULER_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_TICKS_HEIGHT - MEDIUM_TICK_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_TICKS_HEIGHT),
                 ],
                 egui::Stroke::new(1.0, medium_color),
             );
@@ -1402,8 +1418,8 @@ fn draw_ruler_ticks(
             let x = origin.x + frame as f32 * px_per_frame;
             painter.line_segment(
                 [
-                    egui::pos2(x, origin.y + RULER_HEIGHT - FRAME_TICK_HEIGHT),
-                    egui::pos2(x, origin.y + RULER_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_TICKS_HEIGHT - FRAME_TICK_HEIGHT),
+                    egui::pos2(x, origin.y + RULER_TICKS_HEIGHT),
                 ],
                 egui::Stroke::new(1.0, minor_color),
             );
@@ -1962,6 +1978,20 @@ pub fn show_timeline(
                     snapping_enabled,
                     buffered_ranges,
                     max_end_frames,
+                    &mut pending,
+                );
+                markers::show_markers(
+                    ui,
+                    &painter,
+                    origin,
+                    content_width,
+                    timeline_id,
+                    &project.timelines[timeline_id].markers,
+                    state,
+                    &visuals,
+                    px_per_frame,
+                    snapping_enabled,
+                    &mut pending,
                 );
 
                 // Track backgrounds and, above them, an interactable area for clicks and
@@ -2200,6 +2230,12 @@ pub fn show_timeline(
                     media_drop = Some((drag, frame, MediaDropTarget::NewAudioTrack));
                 }
 
+                marquee_resp.context_menu(|ui| {
+                    if ui.button(t!("timeline.add_marker")).clicked() {
+                        pending = Some(PendingAction::Marker(markers::MarkerChange::AddAtPlayhead));
+                        ui.close();
+                    }
+                });
                 if marquee_resp.drag_started() {
                     if let Some(pos) = marquee_resp.interact_pointer_pos()
                         && !press_over_a_clip(pos)
@@ -4730,14 +4766,26 @@ fn show_ruler(
     snapping_enabled: bool,
     buffered_ranges: &[(FrameIdx, FrameIdx)],
     max_end_frames: FrameIdx,
+    pending: &mut Option<PendingAction>,
 ) {
     let ruler_rect = egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
     painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(45));
+    painter.rect_filled(
+        markers::lane_rect(origin, content_width),
+        0.0,
+        egui::Color32::from_gray(38),
+    );
     let ruler_resp = ui.interact(
         ruler_rect,
         ui.id().with("timeline_ruler"),
         egui::Sense::click_and_drag(),
     );
+    ruler_resp.context_menu(|ui| {
+        if ui.button(t!("timeline.add_marker")).clicked() {
+            *pending = Some(PendingAction::Marker(markers::MarkerChange::AddAtPlayhead));
+            ui.close();
+        }
+    });
     // On a click what counts is where it was released: if the frame
     // arrived late, `interact_pointer_pos` is already
     // the last mouse position after the release.
@@ -4782,8 +4830,8 @@ fn show_ruler(
         let x0 = origin.x + start as f32 * px_per_frame;
         let x1 = origin.x + (end + 1) as f32 * px_per_frame;
         let strip_rect = egui::Rect::from_min_max(
-            egui::pos2(x0, origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT),
-            egui::pos2(x1, origin.y + RULER_HEIGHT),
+            egui::pos2(x0, origin.y + RULER_TICKS_HEIGHT - BUFFERED_STRIP_HEIGHT),
+            egui::pos2(x1, origin.y + RULER_TICKS_HEIGHT),
         );
         painter.rect_filled(strip_rect, 0.0, buffered_color);
     }
@@ -4794,7 +4842,7 @@ fn show_ruler(
             egui::pos2(origin.x + mark_in as f32 * px_per_frame, origin.y),
             egui::pos2(
                 origin.x + mark_out as f32 * px_per_frame,
-                origin.y + RULER_HEIGHT - BUFFERED_STRIP_HEIGHT,
+                origin.y + RULER_TICKS_HEIGHT - BUFFERED_STRIP_HEIGHT,
             ),
         );
         painter.rect_filled(
@@ -4828,7 +4876,7 @@ fn paint_playhead(painter: &egui::Painter, origin: egui::Pos2, x_offset: f32, vi
         vec![
             egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
             egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-            egui::pos2(px, origin.y + RULER_HEIGHT),
+            egui::pos2(px, origin.y + RULER_TICKS_HEIGHT),
         ],
         playhead_color,
         egui::Stroke::NONE,
@@ -4843,6 +4891,9 @@ fn apply_pending_action(
     action: PendingAction,
 ) {
     match action {
+        PendingAction::Marker(change) => {
+            markers::apply_change(project, history, timeline_id, state.playhead, change);
+        }
         PendingAction::Move {
             new_video_tracks,
             new_audio_tracks,

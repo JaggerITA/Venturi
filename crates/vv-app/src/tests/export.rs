@@ -21,6 +21,7 @@ fn timeline_with(tracks: Vec<Track>) -> Timeline {
         fps: vv_core::Rational::new(25, 1),
         resolution: (4, 2),
         tracks,
+        markers: Vec::new(),
     }
 }
 
@@ -108,6 +109,7 @@ fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
             locked: false,
             crossings: Vec::new(),
         }],
+        markers: Vec::new(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
@@ -185,6 +187,7 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
             locked: false,
             crossings: Vec::new(),
         }],
+        markers: Vec::new(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
@@ -514,6 +517,7 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
             locked: false,
             crossings: Vec::new(),
         }],
+        markers: Vec::new(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
@@ -724,6 +728,7 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
                 crossings: Vec::new(),
             },
         ],
+        markers: Vec::new(),
     };
     let timeline_id = project.timelines.insert(tl);
 

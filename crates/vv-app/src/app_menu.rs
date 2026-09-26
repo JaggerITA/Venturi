@@ -127,6 +127,9 @@ impl VenturiApp {
             if pressed(Action::ZoomOut) {
                 self.timeline_state.zoom_out();
             }
+            if pressed(Action::AddMarker) {
+                self.add_marker_at_playhead();
+            }
             if pressed(Action::ViewerZoomFit) {
                 self.viewer_zoom.fit();
             }
@@ -381,6 +384,19 @@ impl VenturiApp {
                             self.toggle_retime_controls();
                             ui.close();
                         }
+                        if ui
+                            .add_enabled(
+                                self.timeline_id.is_some(),
+                                egui::Button::new(
+                                    keymap
+                                        .menu_label(&t!("timeline.add_marker"), Action::AddMarker),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.add_marker_at_playhead();
+                            ui.close();
+                        }
                     })
                     .response,
                 );
@@ -579,6 +595,10 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::SetInterpolation => t!("history.set_interpolation"),
         L::PasteAttributes => t!("history.paste_attributes"),
         L::ClipSpeed => t!("history.clip_speed"),
+        L::AddMarker => t!("history.add_marker"),
+        L::EditMarker => t!("history.edit_marker"),
+        L::MoveMarker => t!("history.move_marker"),
+        L::DeleteMarker => t!("history.delete_marker"),
     }
 }
 

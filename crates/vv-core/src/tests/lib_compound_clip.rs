@@ -7,6 +7,7 @@ fn project_with_tracks(kinds: &[TrackKind]) -> (Project, TimelineId) {
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: kinds.iter().map(|k| Track::new(*k)).collect(),
+        markers: Vec::new(),
     });
     (project, timeline)
 }
@@ -39,6 +40,7 @@ fn insert_compound_media(project: &mut Project, plan: &CompoundPlan) -> MediaId 
         fps: plan.nested_timeline.fps,
         resolution: plan.nested_timeline.resolution,
         tracks: plan.nested_timeline.tracks.clone(),
+        markers: Vec::new(),
     });
     let path = project.alloc_compound_name().into();
     let content_hash = project.alloc_compound_generation();
@@ -237,6 +239,7 @@ fn would_create_a_cycle_catches_importing_a_timeline_into_itself() {
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![],
+        markers: Vec::new(),
     });
     let media = compound_media_for(&mut project, timeline);
 
@@ -254,12 +257,14 @@ fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![],
+        markers: Vec::new(),
     });
     let b = project.timelines.insert(Timeline {
         name: "B".into(),
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![],
+        markers: Vec::new(),
     });
     let media_a = compound_media_for(&mut project, a);
     let media_b = compound_media_for(&mut project, b);
@@ -296,12 +301,14 @@ fn would_create_a_cycle_is_false_for_unrelated_timelines() {
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![],
+        markers: Vec::new(),
     });
     let b = project.timelines.insert(Timeline {
         name: "B".into(),
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![],
+        markers: Vec::new(),
     });
     let media_a = compound_media_for(&mut project, a);
 

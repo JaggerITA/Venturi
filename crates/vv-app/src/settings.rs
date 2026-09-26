@@ -42,10 +42,11 @@ pub enum Action {
     Export,
     ZoomIn,
     ZoomOut,
+    AddMarker,
 }
 
 impl Action {
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 30] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -75,6 +76,7 @@ impl Action {
         Action::Export,
         Action::ZoomIn,
         Action::ZoomOut,
+        Action::AddMarker,
     ];
 
     /// Key in the settings file: must never be changed.
@@ -109,6 +111,7 @@ impl Action {
             Action::Export => "export",
             Action::ZoomIn => "zoom_in",
             Action::ZoomOut => "zoom_out",
+            Action::AddMarker => "add_marker",
         }
     }
 
@@ -145,7 +148,9 @@ impl Action {
             | Action::SaveProjectAs
             | Action::ImportMedia
             | Action::Export => t!("action_category.file"),
-            Action::ZoomIn | Action::ZoomOut => t!("action_category.timeline"),
+            Action::ZoomIn | Action::ZoomOut | Action::AddMarker => {
+                t!("action_category.timeline")
+            }
         }
     }
 
@@ -199,6 +204,7 @@ impl Action {
             // "=" is the unshifted "+" of US layouts.
             Action::ZoomIn => vec![ctrl(Key::Plus), ctrl(Key::Equals)],
             Action::ZoomOut => vec![ctrl(Key::Minus)],
+            Action::AddMarker => vec![plain(Key::M)],
         }
     }
 
