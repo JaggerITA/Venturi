@@ -1039,6 +1039,7 @@ pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Res
         crate::keyframe_editor::paint_keyframe_diamond(
             ui.painter(),
             rect.center(),
+            5.0,
             on_keyframe,
             visuals.fg_stroke.color,
         );

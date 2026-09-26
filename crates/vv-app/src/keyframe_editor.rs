@@ -16,13 +16,14 @@ use vv_core::{
 use crate::properties_panel::BoxedCommand;
 
 const LABEL_WIDTH: f32 = 110.0;
-const ROW_HEIGHT: f32 = 18.0;
+const ROW_HEIGHT: f32 = 22.0;
 const RULER_HEIGHT: f32 = 18.0;
 const CURVE_HEIGHT: f32 = 170.0;
 /// Hit radius of a keyframe: wider than the drawn point, which would
 /// otherwise be nearly impossible to grab.
-const PICK_RADIUS: f32 = 7.0;
-const POINT_RADIUS: f32 = 4.0;
+const PICK_RADIUS: f32 = 11.0;
+/// Half diagonal of a keyframe diamond.
+const DIAMOND_HALF: f32 = 7.0;
 const HANDLE_RADIUS: f32 = 5.0;
 /// The handles sit on the curve, between the points: their hit area is more
 /// generous, or grabbing them with the mouse is a lottery.
@@ -731,7 +732,7 @@ fn draw_curve(
             continue;
         };
         let selected = state.selection.contains(&(row, frame));
-        paint_keyframe_diamond(&painter, pos, selected, CURVE_COLOR);
+        paint_keyframe_diamond(&painter, pos, DIAMOND_HALF, selected, CURVE_COLOR);
     }
 
     let interaction = ui.interact(
@@ -971,6 +972,7 @@ fn draw_rows(
             paint_keyframe_diamond(
                 &painter,
                 pos,
+                DIAMOND_HALF,
                 state.selection.contains(&(row, frame)),
                 visuals.text_color(),
             );
@@ -1106,10 +1108,10 @@ mod tests;
 pub(crate) fn paint_keyframe_diamond(
     painter: &egui::Painter,
     pos: egui::Pos2,
+    r: f32,
     selected: bool,
     outline: egui::Color32,
 ) {
-    let r = POINT_RADIUS + 1.0;
     let points = vec![
         pos + egui::vec2(0.0, -r),
         pos + egui::vec2(r, 0.0),
