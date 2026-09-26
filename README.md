@@ -36,7 +36,7 @@ Named after the Venturi effect: when a fluid passes through a constriction, it d
 
 ## Dependencies
 
-- **Rust** 1.85 or newer (edition 2024) — [rustup.rs](https://rustup.rs)
+- **Rust** 1.88 or newer (edition 2024, let chains) — [rustup.rs](https://rustup.rs)
 - **FFmpeg** (development headers/libs + `pkg-config`, for `ffmpeg-next`, the
   binding used for decode/encode)
 - **clang/libclang** (for `ffmpeg-next`'s bindgen)
@@ -241,7 +241,7 @@ Consequences to keep in mind:
 ## Lint
 
 ```sh
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
@@ -251,6 +251,26 @@ cargo fmt --check
 build/run/screenshot vv-app without a real graphical session (Xvfb + software
 Vulkan) — useful for checking the UI in isolation, or from a machine without a
 display.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a PR:
+
+- Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test --workspace`: the `CI` workflow runs the same three steps on
+  every pull request.
+- Keep unit tests in `crates/<crate>/src/tests/`, not inline (see
+  [Where unit tests live](#where-unit-tests-live)).
+- Write code, comments and commit messages in English; the only Italian in
+  the repository is the `it:` translation in `crates/vv-app/locales/`.
+- Comments explain a non-obvious *why*, not what the code already says.
+- Commit messages use a `type: summary` first line (`feat:`, `fix:`,
+  `refactor:`, `docs:`, `test:`, `style:`, `perf:`, `chore:`, `ci:`), as in
+  the existing history.
+
+The project conventions in full are in [CLAUDE.md](CLAUDE.md) (they apply to
+humans and coding agents alike, see [AGENTS.md](AGENTS.md)); the design is
+described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Licence
 
