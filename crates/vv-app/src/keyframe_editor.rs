@@ -731,7 +731,7 @@ fn draw_curve(
             continue;
         };
         let selected = state.selection.contains(&(row, frame));
-        paint_keyframe_dot(&painter, pos, selected, CURVE_COLOR);
+        paint_keyframe_diamond(&painter, pos, selected, CURVE_COLOR);
     }
 
     let interaction = ui.interact(
@@ -968,7 +968,7 @@ fn draw_rows(
         );
         for frame in frames_of(&clip.effects, row) {
             let pos = egui::pos2(axis.x(frame), strip.center().y);
-            paint_keyframe_dot(
+            paint_keyframe_diamond(
                 &painter,
                 pos,
                 state.selection.contains(&(row, frame)),
@@ -1101,17 +1101,31 @@ fn draw_rows(
 #[path = "tests/keyframe_editor.rs"]
 mod tests;
 
-/// Keyframe mark: an outline when unselected, filled with the accent when
-/// selected.
-pub(crate) fn paint_keyframe_dot(
+/// Keyframe mark: a diamond, outlined when unselected, filled with the
+/// accent when selected.
+pub(crate) fn paint_keyframe_diamond(
     painter: &egui::Painter,
     pos: egui::Pos2,
     selected: bool,
     outline: egui::Color32,
 ) {
+    let r = POINT_RADIUS + 1.0;
+    let points = vec![
+        pos + egui::vec2(0.0, -r),
+        pos + egui::vec2(r, 0.0),
+        pos + egui::vec2(0.0, r),
+        pos + egui::vec2(-r, 0.0),
+    ];
     if selected {
-        painter.circle_filled(pos, POINT_RADIUS + 0.5, SELECTED_COLOR);
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            SELECTED_COLOR,
+            egui::Stroke::NONE,
+        ));
     } else {
-        painter.circle_stroke(pos, POINT_RADIUS, egui::Stroke::new(1.5, outline));
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(1.5, outline),
+        ));
     }
 }

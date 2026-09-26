@@ -104,14 +104,18 @@ fn title_params_survive_save_and_load() {
 }
 
 #[test]
-fn clip_colors_of_the_previous_palette_still_load() {
-    for (old, new) in [
-        ("Chocolate", ClipColor::Slate),
-        ("Olive", ClipColor::Green),
-        ("Apricot", ClipColor::Rose),
-        ("Orange", ClipColor::Orange),
+fn unknown_clip_colors_load_as_no_color() {
+    #[derive(serde::Deserialize)]
+    struct Holder {
+        #[serde(deserialize_with = "crate::model::lenient_clip_color")]
+        color: Option<ClipColor>,
+    }
+    for (text, expected) in [
+        ("(color: Some(Chocolate))", None),
+        ("(color: Some(Slate))", Some(ClipColor::Slate)),
+        ("(color: None)", None),
     ] {
-        let color: Option<ClipColor> = ron::from_str(&format!("Some({old})")).unwrap();
-        assert_eq!(color, Some(new), "{old}");
+        let holder: Holder = ron::from_str(text).unwrap();
+        assert_eq!(holder.color, expected, "{text}");
     }
 }

@@ -664,10 +664,10 @@ pub(crate) struct RowResponse {
     pub(crate) goto: Option<FrameIdx>,
 }
 
-/// A row of the parameters panel: the keyframe toggle (an empty slot for
-/// non-animatable parameters), label, controls and, when the parameter is
-/// animated, the arrows to the neighbouring keyframes. Double click or the
-/// context menu on the label reset the row.
+/// A row of the parameters panel: the keyframe group (previous keyframe,
+/// toggle, next keyframe; an empty slot for non-animatable parameters),
+/// label and controls. Double click or the context menu on the label reset
+/// the row.
 pub(crate) fn param_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -678,10 +678,13 @@ pub(crate) fn param_row(
     ui.horizontal(|ui| {
         match keyframe {
             Some(keyframe) => {
+                let prev = keyframe_arrow(ui, true, keyframe.prev, &t!("props.prev_keyframe"));
                 response.toggled_keyframe = keyframe_button(ui, keyframe.on_keyframe).clicked();
+                let next = keyframe_arrow(ui, false, keyframe.next, &t!("props.next_keyframe"));
+                response.goto = prev.or(next);
             }
             None => {
-                ui.allocate_exact_size(KEYFRAME_TOGGLE_SIZE, egui::Sense::hover());
+                ui.allocate_exact_size(keyframe_group_size(ui), egui::Sense::hover());
             }
         }
         ui.allocate_ui_with_layout(
@@ -708,18 +711,21 @@ pub(crate) fn param_row(
                 });
             },
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(keyframe) = keyframe {
-                let next = keyframe_arrow(ui, false, keyframe.next, &t!("props.next_keyframe"));
-                let prev = keyframe_arrow(ui, true, keyframe.prev, &t!("props.prev_keyframe"));
-                response.goto = prev.or(next);
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                response.changed = contents(ui);
-            });
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            response.changed = contents(ui);
         });
     });
     response
+}
+
+/// Width of arrows plus toggle, so the labels of non-animatable rows line
+/// up with the others.
+fn keyframe_group_size(ui: &egui::Ui) -> egui::Vec2 {
+    let spacing = ui.spacing().item_spacing.x;
+    egui::vec2(
+        KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_TOGGLE_SIZE.x + spacing * 2.0,
+        KEYFRAME_TOGGLE_SIZE.y,
+    )
 }
 
 /// The effects of a clip targeted by the panel.
@@ -1016,8 +1022,8 @@ pub(crate) fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Respons
     response
 }
 
-/// Keyframe toggle: the same dot as the keyframe editor, filled when the
-/// playhead is on a keyframe.
+/// Keyframe toggle: the same diamond as the keyframe editor, filled when
+/// the playhead is on a keyframe.
 pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Response {
     let tooltip = if on_keyframe {
         t!("props.remove_keyframe")
@@ -1030,7 +1036,7 @@ pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Res
         if response.hovered() {
             ui.painter().rect_filled(rect, 3.0, visuals.weak_bg_fill);
         }
-        crate::keyframe_editor::paint_keyframe_dot(
+        crate::keyframe_editor::paint_keyframe_diamond(
             ui.painter(),
             rect.center(),
             on_keyframe,
@@ -1042,13 +1048,11 @@ pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Res
 
 pub(crate) const KEYFRAME_TOGGLE_SIZE: egui::Vec2 = egui::Vec2::new(18.0, 18.0);
 
-/// Space for a keyframe navigation arrow: reserved even
-/// when the arrow is absent, otherwise the controls would move on every
-/// playhead change.
+/// Size of a keyframe navigation arrow.
 const KEYFRAME_ARROW_SIZE: egui::Vec2 = egui::Vec2::new(14.0, 18.0);
 
-/// Chevron to the previous or next keyframe. Without keyframes on that
-/// side it takes the same space, invisible.
+/// Chevron to the previous or next keyframe, dimmed when there is none on
+/// that side.
 pub(crate) fn keyframe_arrow(
     ui: &mut egui::Ui,
     previous: bool,
@@ -1061,8 +1065,11 @@ pub(crate) fn keyframe_arrow(
         egui::Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(KEYFRAME_ARROW_SIZE, sense);
-    let frame = target?;
-    let color = ui.style().interact(&response).fg_stroke.color;
+    let color = if target.is_some() {
+        ui.style().interact(&response).fg_stroke.color
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
     let c = rect.center();
     let dx = if previous { 2.0 } else { -2.0 };
     ui.painter().add(egui::Shape::line(
@@ -1073,6 +1080,7 @@ pub(crate) fn keyframe_arrow(
         ],
         egui::Stroke::new(1.5, color),
     ));
+    let frame = target?;
     response.on_hover_text(tooltip).clicked().then_some(frame)
 }
 

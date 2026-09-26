@@ -12,12 +12,3 @@ fn the_composite_modes_map_both_ways() {
     assert_eq!(blend_mode(2), Some(BlendMode::Subtract));
     assert_eq!(blend_mode(14), None, "we don't have Hue");
 }
-
-#[test]
-fn the_clip_color_names_map_back_to_the_same_color() {
-    for color in ClipColor::ALL {
-        let name = clip_color_name(color);
-        let back: ClipColor = serde_json::from_value(json!(name)).unwrap();
-        assert_eq!(back, color, "{name}");
-    }
-}

@@ -1164,30 +1164,71 @@ impl EffectStack {
 }
 
 /// Hues picked in OKLCH at near-constant lightness and chroma, plus two
-/// neutrals. The aliases are the names of the previous 16-color palette,
-/// still found in older project and OTIO files.
+/// neutrals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipColor {
-    #[serde(alias = "Brown")]
     Red,
     Orange,
     Yellow,
-    #[serde(alias = "Lime", alias = "Olive")]
     Green,
-    #[serde(alias = "Teal")]
     Cyan,
     Blue,
-    #[serde(alias = "Navy")]
     Indigo,
     Purple,
-    #[serde(alias = "Violet")]
     Magenta,
-    #[serde(alias = "Pink", alias = "Apricot")]
     Rose,
-    #[serde(alias = "Chocolate")]
     Slate,
-    #[serde(alias = "Tan", alias = "Beige")]
     Gray,
+}
+
+/// A color name this version does not know (older palettes) loads as no
+/// color instead of failing the whole file.
+pub(crate) fn lenient_clip_color<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ClipColor>, D::Error> {
+    use serde::de::{EnumAccess, VariantAccess, Visitor};
+    struct Lenient;
+    impl<'de> Visitor<'de> for Lenient {
+        type Value = Option<ClipColor>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a clip color")
+        }
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_enum("ClipColor", &[], self)
+        }
+        fn visit_str<E>(self, name: &str) -> Result<Self::Value, E> {
+            Ok(ClipColor::from_name(name))
+        }
+        fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+            let (Name(name), variant) = data.variant()?;
+            variant.unit_variant()?;
+            Ok(ClipColor::from_name(&name))
+        }
+    }
+    /// RON hands variant names over only as identifiers, not as strings.
+    struct Name(String);
+    impl<'de> serde::Deserialize<'de> for Name {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct NameVisitor;
+            impl Visitor<'_> for NameVisitor {
+                type Value = Name;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a color name")
+                }
+                fn visit_str<E>(self, name: &str) -> Result<Name, E> {
+                    Ok(Name(name.to_owned()))
+                }
+            }
+            d.deserialize_identifier(NameVisitor)
+        }
+    }
+    deserializer.deserialize_option(Lenient)
 }
 
 impl ClipColor {
@@ -1205,6 +1246,10 @@ impl ClipColor {
         ClipColor::Slate,
         ClipColor::Gray,
     ];
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| format!("{c:?}") == name)
+    }
 
     pub fn rgb(self) -> (u8, u8, u8) {
         match self {
@@ -1267,7 +1312,7 @@ pub struct Clip {
     #[serde(default)]
     pub fade_out: FrameIdx,
     /// Hand-picked timeline color; `None` = the one derived from the source kind.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_clip_color")]
     pub display_color: Option<ClipColor>,
 }
 

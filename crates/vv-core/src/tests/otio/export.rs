@@ -457,5 +457,5 @@ fn keeps_what_otio_cannot_represent_in_metadata() {
     assert_eq!(meta["audio_stream_index"], 1);
     assert_eq!(meta["linked_group"], 7);
     assert_eq!(meta["effects"]["gain_db"]["default"], -6.0);
-    assert_eq!(meta["display_color"], "Navy");
+    assert_eq!(meta["display_color"], "Indigo");
 }

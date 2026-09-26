@@ -10,8 +10,8 @@
 use super::export::rational_time;
 use crate::FadeEdge;
 use crate::model::{
-    BlendMode, Clip, ClipColor, ClipSource, Ease, FrameIdx, Keyframed, Rational, TrackKind,
-    TransformParam, TransformTracks, Transition,
+    BlendMode, Clip, ClipSource, Ease, FrameIdx, Keyframed, Rational, TrackKind, TransformParam,
+    TransformTracks, Transition,
 };
 use serde_json::{Map, Value, json};
 
@@ -263,26 +263,6 @@ const COMPOSITE_MODES: [(BlendMode, u64); 15] = [
     (BlendMode::Exclusion, 13),
     (BlendMode::Divide, 18),
 ];
-
-/// Resolve's name for the color, so files stay readable by Venturi
-/// versions that used Resolve's palette. Every name maps back to the same
-/// color through the aliases of `ClipColor`.
-pub(super) fn clip_color_name(color: ClipColor) -> &'static str {
-    match color {
-        ClipColor::Red => "Brown",
-        ClipColor::Orange => "Orange",
-        ClipColor::Yellow => "Yellow",
-        ClipColor::Green => "Green",
-        ClipColor::Cyan => "Teal",
-        ClipColor::Blue => "Blue",
-        ClipColor::Indigo => "Navy",
-        ClipColor::Purple => "Purple",
-        ClipColor::Magenta => "Violet",
-        ClipColor::Rose => "Pink",
-        ClipColor::Slate => "Chocolate",
-        ClipColor::Gray => "Tan",
-    }
-}
 
 pub(super) fn composite_mode(blend: BlendMode) -> u64 {
     COMPOSITE_MODES

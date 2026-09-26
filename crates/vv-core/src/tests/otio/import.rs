@@ -855,3 +855,42 @@ fn a_clip_speed_round_trips_with_and_without_our_metadata() {
     assert_eq!(foreign.source_in(), original.source_in(), "media time");
     assert_eq!(span(&foreign), span(&original));
 }
+
+#[test]
+fn an_unknown_clip_color_imports_as_no_color() {
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path: "/media/a.mov".into(),
+        meta: meta(Rational::new(24, 1), 240),
+        content_hash: 42,
+        compound: None,
+    });
+    let timeline_id = project.timelines.insert(Timeline {
+        name: "Colors".into(),
+        fps: Rational::new(24, 1),
+        resolution: (1280, 720),
+        tracks: vec![Track::new(TrackKind::Video)],
+    });
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        48,
+        0,
+        Rational::one(),
+    );
+    clip.display_color = Some(crate::model::ClipColor::Slate);
+    project.timelines[timeline_id].tracks[0].clips.push(clip);
+
+    let import = |otio: &Value| {
+        let mut probe = probe_from(vec![("/media/a.mov", meta(Rational::new(24, 1), 240))]);
+        let imported = project_from_otio(otio, Path::new("/"), &mut probe, None).unwrap();
+        let (_, tl) = imported.project.timelines.iter().next().unwrap();
+        tl.tracks[0].clips[0].display_color
+    };
+    let mut otio = timeline_to_otio(&project, timeline_id, None);
+    assert_eq!(import(&otio), Some(crate::model::ClipColor::Slate));
+    otio["tracks"]["children"][0]["children"][0]["metadata"]["venturi"]["display_color"] =
+        json!("Chocolate");
+    assert_eq!(import(&otio), None);
+}

@@ -4812,14 +4812,27 @@ fn show_ruler(
     }
 }
 
+/// Playhead line plus a triangular head in the ruler.
 fn paint_playhead(painter: &egui::Painter, origin: egui::Pos2, x_offset: f32, visual_height: f32) {
-    crate::theme::paint_playhead(
-        painter,
-        origin.x + x_offset,
-        origin.y,
-        origin.y + RULER_HEIGHT,
-        origin.y + visual_height,
+    let px = origin.x + x_offset;
+    let playhead_color = crate::theme::PLAYHEAD;
+    painter.line_segment(
+        [
+            egui::pos2(px, origin.y),
+            egui::pos2(px, origin.y + visual_height),
+        ],
+        egui::Stroke::new(2.0, playhead_color),
     );
+    const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+            egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
+            egui::pos2(px, origin.y + RULER_HEIGHT),
+        ],
+        playhead_color,
+        egui::Stroke::NONE,
+    ));
 }
 
 fn apply_pending_action(
@@ -5378,9 +5391,9 @@ fn clip_label_and_color(
                 label = format!("{label} ({})", format_speed(clip.speed));
             }
             let color = if track.kind == TrackKind::Video {
-                palette_color(vv_core::ClipColor::Slate)
+                egui::Color32::from_rgb(90, 140, 200)
             } else {
-                palette_color(vv_core::ClipColor::Cyan)
+                egui::Color32::from_rgb(90, 190, 140)
             };
             (label, clip_box_color(color, clip))
         }
