@@ -1,11 +1,11 @@
-//! Properties panel (inspector): Video/Audio tabs, parameter rows
-//! with keyframes, title editor.
+//! Properties panel: Video/Audio tabs, parameter rows with keyframes,
+//! title editor.
 
 use std::borrow::Cow;
 
 use super::*;
 
-/// Panel tabs: labels, the active one underlined.
+/// Panel tabs: icon and label, the active one underlined.
 pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab) {
     let tabs = [
         (PropertiesTab::Video, t!("props.tab_video")),
@@ -23,7 +23,7 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
                 egui::Color32::PLACEHOLDER,
             );
             let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(galley.size().x + 24.0, TAB_HEIGHT),
+                egui::vec2(TAB_ICON_WIDTH + galley.size().x + 24.0, TAB_HEIGHT),
                 egui::Sense::click(),
             );
             if response.clicked() {
@@ -36,8 +36,15 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
             } else {
                 ui.visuals().weak_text_color()
             };
+            let content_left = rect.center().x - (TAB_ICON_WIDTH + galley.size().x) / 2.0;
+            paint_tab_icon(
+                ui.painter(),
+                tab,
+                egui::pos2(content_left + TAB_ICON_WIDTH / 2.0 - 2.0, rect.center().y),
+                color,
+            );
             let text_pos = egui::pos2(
-                rect.center().x - galley.size().x / 2.0,
+                content_left + TAB_ICON_WIDTH,
                 rect.center().y - galley.size().y / 2.0,
             );
             ui.painter().galley(text_pos, galley, color);
@@ -52,21 +59,109 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
     });
 }
 
-/// Title/Settings of the Video tab of a text clip: two full-width
-/// halves.
-pub(crate) fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
-    ui.columns(2, |cols| {
-        for (col, (tab, label)) in cols.iter_mut().zip([
-            (VideoSubTab::Title, t!("props.subtab_title")),
-            (VideoSubTab::Settings, t!("props.subtab_settings")),
-        ]) {
-            let button = egui::Button::selectable(*current == tab, label)
-                .min_size(egui::vec2(col.available_width(), 22.0));
-            if col.add(button).clicked() {
-                *current = tab;
+const TAB_ICON_WIDTH: f32 = 18.0;
+
+/// Film frame, waveform or list, drawn by hand like the other icons.
+fn paint_tab_icon(
+    painter: &egui::Painter,
+    tab: PropertiesTab,
+    center: egui::Pos2,
+    color: egui::Color32,
+) {
+    let stroke = egui::Stroke::new(1.3, color);
+    match tab {
+        PropertiesTab::Video => {
+            let frame = egui::Rect::from_center_size(center, egui::vec2(12.0, 9.0));
+            painter.rect_stroke(frame, 1.0, stroke, egui::StrokeKind::Inside);
+            for x in [frame.left() + 3.0, frame.right() - 3.0] {
+                painter.line_segment(
+                    [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())],
+                    stroke,
+                );
             }
         }
-    });
+        PropertiesTab::Audio => {
+            for (i, height) in [3.0, 7.0, 10.0, 5.0, 8.0, 3.0].into_iter().enumerate() {
+                let x = center.x - 5.0 + i as f32 * 2.0;
+                painter.line_segment(
+                    [
+                        egui::pos2(x, center.y - height / 2.0),
+                        egui::pos2(x, center.y + height / 2.0),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        PropertiesTab::Selection => {
+            for dy in [-3.5, 0.0, 3.5] {
+                let y = center.y + dy;
+                painter.circle_filled(egui::pos2(center.x - 5.0, y), 1.0, color);
+                painter.line_segment(
+                    [egui::pos2(center.x - 2.5, y), egui::pos2(center.x + 6.0, y)],
+                    stroke,
+                );
+            }
+        }
+    }
+}
+
+/// Section title with a chevron that folds it. With `resettable`, the
+/// context menu resets the whole section. Returns (open, reset).
+pub(crate) fn section_header(ui: &mut egui::Ui, title: &str, resettable: bool) -> (bool, bool) {
+    let id = egui::Id::new(("properties_section", title));
+    let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_persisted(id, open));
+    }
+    let color = if response.hovered() {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
+    paint_chevron(
+        ui.painter(),
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        open,
+        color,
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 16.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(13.0),
+        ui.visuals().strong_text_color(),
+    );
+    let mut reset = false;
+    if resettable {
+        response.context_menu(|ui| {
+            if ui.button(t!("props.reset_section")).clicked() {
+                reset = true;
+                ui.close();
+            }
+        });
+    }
+    (open, reset)
+}
+
+/// Pointing down when `open`, right otherwise.
+fn paint_chevron(painter: &egui::Painter, center: egui::Pos2, open: bool, color: egui::Color32) {
+    let points = if open {
+        vec![
+            center + egui::vec2(-3.5, -1.5),
+            center + egui::vec2(0.0, 2.0),
+            center + egui::vec2(3.5, -1.5),
+        ]
+    } else {
+        vec![
+            center + egui::vec2(-1.5, -3.5),
+            center + egui::vec2(2.0, 0.0),
+            center + egui::vec2(-1.5, 3.5),
+        ]
+    };
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
 }
 
 /// Text alignment button: lines drawn like the classic icon,
@@ -115,229 +210,237 @@ pub(crate) fn title_editor(
     let before = title.clone();
     let (frame_w, frame_h) = (timeline_size.0 as f32, timeline_size.1 as f32);
 
-    ui.label(egui::RichText::new(t!("props.text")).strong());
-    ui.add(
-        egui::TextEdit::multiline(&mut title.content)
-            .desired_rows(4)
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(4.0);
-
-    let row = param_row(ui, &t!("props.font"), None, |ui| {
-        let mut items = vec![(String::new(), "Sans-serif".to_string(), true)];
-        items.extend(
-            fonts
-                .families()
-                .iter()
-                .map(|f| (f.clone(), f.clone(), true)),
+    let (open, _) = section_header(ui, &t!("props.text"), false);
+    if open {
+        ui.add(
+            egui::TextEdit::multiline(&mut title.content)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
         );
-        preview_combo(
-            ui,
-            "title_font_family",
-            &mut title.font_family,
-            &items,
-            Some(ui.available_width()),
-            Some(320.0),
-            None,
-        )
-    });
-    if row.reset {
-        title.font_family = defaults.font_family.clone();
-    }
+        ui.add_space(4.0);
 
-    let row = param_row(ui, &t!("props.style"), None, |ui| {
-        let mut faces = fonts.faces(&title.font_family).to_vec();
-        if faces.is_empty() {
-            faces = [(400, false), (700, false), (400, true), (700, true)]
-                .into_iter()
-                .map(|(weight, italic)| vv_render::text::FontFace {
-                    weight,
-                    italic,
-                    name: vv_render::text::face_name(weight, italic),
-                })
-                .collect();
-        }
-        let items: Vec<_> = faces
-            .iter()
-            .map(|face| ((face.weight, face.italic), face.name.clone(), true))
-            .collect();
-        let mut face = (title.font_weight, title.italic);
-        let changed = preview_combo(
-            ui,
-            "title_font_face",
-            &mut face,
-            &items,
-            Some(ui.available_width()),
-            None,
-            None,
-        );
-        if changed {
-            (title.font_weight, title.italic) = face;
-        }
-        changed
-    });
-    if row.reset {
-        title.font_weight = defaults.font_weight;
-        title.italic = defaults.italic;
-    }
-
-    if color_row(ui, &t!("props.color"), &mut title.color).reset {
-        title.color = defaults.color;
-    }
-
-    for (label, value, default, range, speed) in [
-        (
-            t!("props.size"),
-            &mut title.size,
-            defaults.size,
-            1.0..=1000.0,
-            1.0,
-        ),
-        (
-            t!("props.tracking"),
-            &mut title.tracking,
-            defaults.tracking,
-            -300.0..=1000.0,
-            1.0,
-        ),
-        (
-            t!("props.line_spacing"),
-            &mut title.line_spacing,
-            defaults.line_spacing,
-            -200.0..=500.0,
-            1.0,
-        ),
-    ] {
-        let row = param_row(ui, &label, None, |ui| {
-            slider_field(ui, value, range, speed, 0)
+        let row = param_row(ui, &t!("props.font"), None, |ui| {
+            let mut items = vec![(String::new(), "Sans-serif".to_string(), true)];
+            items.extend(
+                fonts
+                    .families()
+                    .iter()
+                    .map(|f| (f.clone(), f.clone(), true)),
+            );
+            preview_combo(
+                ui,
+                "title_font_family",
+                &mut title.font_family,
+                &items,
+                Some(ui.available_width()),
+                Some(320.0),
+                None,
+            )
         });
         if row.reset {
-            *value = default;
+            title.font_family = defaults.font_family.clone();
+        }
+
+        let row = param_row(ui, &t!("props.style"), None, |ui| {
+            let mut faces = fonts.faces(&title.font_family).to_vec();
+            if faces.is_empty() {
+                faces = [(400, false), (700, false), (400, true), (700, true)]
+                    .into_iter()
+                    .map(|(weight, italic)| vv_render::text::FontFace {
+                        weight,
+                        italic,
+                        name: vv_render::text::face_name(weight, italic),
+                    })
+                    .collect();
+            }
+            let items: Vec<_> = faces
+                .iter()
+                .map(|face| ((face.weight, face.italic), face.name.clone(), true))
+                .collect();
+            let mut face = (title.font_weight, title.italic);
+            let changed = preview_combo(
+                ui,
+                "title_font_face",
+                &mut face,
+                &items,
+                Some(ui.available_width()),
+                None,
+                None,
+            );
+            if changed {
+                (title.font_weight, title.italic) = face;
+            }
+            changed
+        });
+        if row.reset {
+            title.font_weight = defaults.font_weight;
+            title.italic = defaults.italic;
         }
     }
 
-    let row = param_row(ui, &t!("props.decorations"), None, |ui| {
-        let u = ui
-            .selectable_label(title.underline, egui::RichText::new("U").underline())
-            .on_hover_text(t!("props.underline"))
-            .clicked();
-        let s = ui
-            .selectable_label(
-                title.strikethrough,
-                egui::RichText::new("S").strikethrough(),
+    let (open, _) = section_header(ui, &t!("props.appearance"), false);
+    if open {
+        if color_row(ui, &t!("props.color"), &mut title.color).reset {
+            title.color = defaults.color;
+        }
+
+        for (label, value, default, range, speed) in [
+            (
+                t!("props.size"),
+                &mut title.size,
+                defaults.size,
+                1.0..=1000.0,
+                1.0,
+            ),
+            (
+                t!("props.tracking"),
+                &mut title.tracking,
+                defaults.tracking,
+                -300.0..=1000.0,
+                1.0,
+            ),
+            (
+                t!("props.line_spacing"),
+                &mut title.line_spacing,
+                defaults.line_spacing,
+                -200.0..=500.0,
+                1.0,
+            ),
+        ] {
+            let row = param_row(ui, &label, None, |ui| {
+                slider_field(ui, value, range, speed, 0)
+            });
+            if row.reset {
+                *value = default;
+            }
+        }
+
+        let row = param_row(ui, &t!("props.decorations"), None, |ui| {
+            let u = ui
+                .selectable_label(title.underline, egui::RichText::new("U").underline())
+                .on_hover_text(t!("props.underline"))
+                .clicked();
+            let s = ui
+                .selectable_label(
+                    title.strikethrough,
+                    egui::RichText::new("S").strikethrough(),
+                )
+                .on_hover_text(t!("props.strikethrough"))
+                .clicked();
+            title.underline ^= u;
+            title.strikethrough ^= s;
+            u || s
+        });
+        if row.reset {
+            title.underline = defaults.underline;
+            title.strikethrough = defaults.strikethrough;
+        }
+
+        let row = param_row(ui, &t!("props.case"), None, |ui| {
+            let label = |case| match case {
+                FontCase::Mixed => t!("props.case_mixed"),
+                FontCase::Upper => t!("props.case_upper"),
+                FontCase::Lower => t!("props.case_lower"),
+                FontCase::Title => t!("props.case_title"),
+            };
+            let items: Vec<_> = [
+                FontCase::Mixed,
+                FontCase::Upper,
+                FontCase::Lower,
+                FontCase::Title,
+            ]
+            .into_iter()
+            .map(|case| (case, label(case).to_string(), true))
+            .collect();
+            preview_combo(
+                ui,
+                "title_font_case",
+                &mut title.case,
+                &items,
+                Some(ui.available_width()),
+                None,
+                None,
             )
-            .on_hover_text(t!("props.strikethrough"))
-            .clicked();
-        title.underline ^= u;
-        title.strikethrough ^= s;
-        u || s
-    });
-    if row.reset {
-        title.underline = defaults.underline;
-        title.strikethrough = defaults.strikethrough;
-    }
-
-    let row = param_row(ui, &t!("props.case"), None, |ui| {
-        let label = |case| match case {
-            FontCase::Mixed => t!("props.case_mixed"),
-            FontCase::Upper => t!("props.case_upper"),
-            FontCase::Lower => t!("props.case_lower"),
-            FontCase::Title => t!("props.case_title"),
-        };
-        let items: Vec<_> = [
-            FontCase::Mixed,
-            FontCase::Upper,
-            FontCase::Lower,
-            FontCase::Title,
-        ]
-        .into_iter()
-        .map(|case| (case, label(case).to_string(), true))
-        .collect();
-        preview_combo(
-            ui,
-            "title_font_case",
-            &mut title.case,
-            &items,
-            Some(ui.available_width()),
-            None,
-            None,
-        )
-    });
-    if row.reset {
-        title.case = defaults.case;
-    }
-
-    let row = param_row(ui, &t!("props.align"), None, |ui| {
-        let mut changed = false;
-        for (align, hint) in [
-            (TextAlign::Left, t!("props.align_left")),
-            (TextAlign::Center, t!("props.align_center")),
-            (TextAlign::Right, t!("props.align_right")),
-            (TextAlign::Justify, t!("props.align_justify")),
-        ] {
-            if text_align_button(ui, title.align == align, align)
-                .on_hover_text(hint)
-                .clicked()
-            {
-                title.align = align;
-                changed = true;
-            }
+        });
+        if row.reset {
+            title.case = defaults.case;
         }
-        changed
-    });
-    if row.reset {
-        title.align = defaults.align;
+
+        let row = param_row(ui, &t!("props.align"), None, |ui| {
+            let mut changed = false;
+            for (align, hint) in [
+                (TextAlign::Left, t!("props.align_left")),
+                (TextAlign::Center, t!("props.align_center")),
+                (TextAlign::Right, t!("props.align_right")),
+                (TextAlign::Justify, t!("props.align_justify")),
+            ] {
+                if text_align_button(ui, title.align == align, align)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    title.align = align;
+                    changed = true;
+                }
+            }
+            changed
+        });
+        if row.reset {
+            title.align = defaults.align;
+        }
     }
 
-    let row = param_row(ui, &t!("props.anchor"), None, |ui| {
-        let mut changed = false;
-        for (anchor, text, hint) in [
-            (HAnchor::Left, "⇤", t!("props.anchor_left")),
-            (HAnchor::Center, "↔", t!("props.anchor_center")),
-            (HAnchor::Right, "⇥", t!("props.anchor_right")),
-        ] {
-            if ui
-                .selectable_label(title.anchor.0 == anchor, text)
-                .on_hover_text(hint)
-                .clicked()
-            {
-                title.anchor.0 = anchor;
-                changed = true;
+    let (open, _) = section_header(ui, &t!("props.placement"), false);
+    if open {
+        let row = param_row(ui, &t!("props.anchor"), None, |ui| {
+            let mut changed = false;
+            for (anchor, text, hint) in [
+                (HAnchor::Left, "⇤", t!("props.anchor_left")),
+                (HAnchor::Center, "↔", t!("props.anchor_center")),
+                (HAnchor::Right, "⇥", t!("props.anchor_right")),
+            ] {
+                if ui
+                    .selectable_label(title.anchor.0 == anchor, text)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    title.anchor.0 = anchor;
+                    changed = true;
+                }
             }
-        }
-        ui.separator();
-        for (anchor, text, hint) in [
-            (VAnchor::Top, "⤒", t!("props.anchor_top")),
-            (VAnchor::Middle, "↕", t!("props.anchor_center")),
-            (VAnchor::Bottom, "⤓", t!("props.anchor_bottom")),
-        ] {
-            if ui
-                .selectable_label(title.anchor.1 == anchor, text)
-                .on_hover_text(hint)
-                .clicked()
-            {
-                title.anchor.1 = anchor;
-                changed = true;
+            ui.separator();
+            for (anchor, text, hint) in [
+                (VAnchor::Top, "⤒", t!("props.anchor_top")),
+                (VAnchor::Middle, "↕", t!("props.anchor_center")),
+                (VAnchor::Bottom, "⤓", t!("props.anchor_bottom")),
+            ] {
+                if ui
+                    .selectable_label(title.anchor.1 == anchor, text)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    title.anchor.1 = anchor;
+                    changed = true;
+                }
             }
+            changed
+        });
+        if row.reset {
+            title.anchor = defaults.anchor;
         }
-        changed
-    });
-    if row.reset {
-        title.anchor = defaults.anchor;
-    }
 
-    // Shown from the bottom-left corner, as in the reference
-    // (960x540 = center of a 1080p frame); saved from the center.
-    let row = param_row(ui, &t!("props.position"), None, |ui| {
-        let mut x = title.position[0] + frame_w / 2.0;
-        let mut y = title.position[1] + frame_h / 2.0;
-        let changed = axis_field(ui, "X", &mut x, 1.0, 1, -frame_w..=frame_w * 2.0)
-            | axis_field(ui, "Y", &mut y, 1.0, 1, -frame_h..=frame_h * 2.0);
-        title.position = [x - frame_w / 2.0, y - frame_h / 2.0];
-        changed
-    });
-    if row.reset {
-        title.position = defaults.position;
+        // Shown from the bottom-left corner, as in the reference
+        // (960x540 = center of a 1080p frame); saved from the center.
+        let row = param_row(ui, &t!("props.position"), None, |ui| {
+            let mut x = title.position[0] + frame_w / 2.0;
+            let mut y = title.position[1] + frame_h / 2.0;
+            let changed = axis_field(ui, "X", &mut x, 1.0, 1, -frame_w..=frame_w * 2.0)
+                | axis_field(ui, "Y", &mut y, 1.0, 1, -frame_h..=frame_h * 2.0);
+            title.position = [x - frame_w / 2.0, y - frame_h / 2.0];
+            changed
+        });
+        if row.reset {
+            title.position = defaults.position;
+        }
     }
 
     ui.add_space(8.0);
@@ -448,19 +551,19 @@ pub(crate) fn color_row(ui: &mut egui::Ui, label: &str, color: &mut vv_core::Rgb
     })
 }
 
-/// Header of a toggleable section: switch, title and reset of the
-/// whole section (`true` if clicked).
+/// Header of a toggleable section: switch and title, whose context menu
+/// resets the whole section (`true` if chosen).
 pub(crate) fn title_section_header(ui: &mut egui::Ui, title: &str, enabled: &mut bool) -> bool {
     let mut reset = false;
     ui.horizontal(|ui| {
         toggle_switch(ui, enabled);
-        ui.label(egui::RichText::new(title).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            reset = ui
-                .small_button("↺")
-                .on_hover_text(t!("props.reset_section"))
-                .clicked();
-        });
+        ui.add(egui::Label::new(egui::RichText::new(title).strong()).sense(egui::Sense::click()))
+            .context_menu(|ui| {
+                if ui.button(t!("props.reset_section")).clicked() {
+                    reset = true;
+                    ui.close();
+                }
+            });
     });
     reset
 }
@@ -538,8 +641,7 @@ pub(crate) fn apply_title_edit(
     out
 }
 
-/// Width of the label column in the parameters panel:
-/// all right-aligned, as in the inspector of an NLE.
+/// Width of the label column in the parameters panel.
 pub(crate) const PARAM_LABEL_WIDTH: f32 = 96.0;
 
 /// The keyframe state of a panel row, for its diamond.
@@ -562,9 +664,10 @@ pub(crate) struct RowResponse {
     pub(crate) goto: Option<FrameIdx>,
 }
 
-/// A row of the parameters panel: label, controls, the keyframe
-/// diamond with its navigation arrows (absent for non-animatable
-/// parameters) and the reset of that single row.
+/// A row of the parameters panel: the keyframe toggle (an empty slot for
+/// non-animatable parameters), label, controls and, when the parameter is
+/// animated, the arrows to the neighbouring keyframes. Double click or the
+/// context menu on the label reset the row.
 pub(crate) fn param_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -573,6 +676,14 @@ pub(crate) fn param_row(
 ) -> RowResponse {
     let mut response = RowResponse::default();
     ui.horizontal(|ui| {
+        match keyframe {
+            Some(keyframe) => {
+                response.toggled_keyframe = keyframe_button(ui, keyframe.on_keyframe).clicked();
+            }
+            None => {
+                ui.allocate_exact_size(KEYFRAME_TOGGLE_SIZE, egui::Sense::hover());
+            }
+        }
         ui.allocate_ui_with_layout(
             egui::vec2(PARAM_LABEL_WIDTH, 18.0),
             egui::Layout::right_to_left(egui::Align::Center),
@@ -581,36 +692,27 @@ pub(crate) fn param_row(
                 // minimum width the one it has (`set_min_width`), so
                 // a label wider than `PARAM_LABEL_WIDTH` widens it, and
                 // on the next frame it widens again, without ever stopping.
-                ui.add(egui::Label::new(label).truncate())
-                    .on_hover_text(label);
+                let label_response = ui
+                    .add(
+                        egui::Label::new(label)
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text(format!("{label}\n{}", t!("props.reset_hint")));
+                response.reset = label_response.double_clicked();
+                label_response.context_menu(|ui| {
+                    if ui.button(t!("props.reset_param")).clicked() {
+                        response.reset = true;
+                        ui.close();
+                    }
+                });
             },
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            response.reset = ui
-                .small_button("↺")
-                .on_hover_text(t!("props.reset_param"))
-                .clicked();
-            // Separates the keyframe controls from the reset, which sits right
-            // to the right (we are in a right->left layout).
-            ui.add_space(8.0);
             if let Some(keyframe) = keyframe {
-                // Arrows and diamond in a fixed area: the diamond must not move
-                // when an arrow disappears.
-                let spacing = ui.spacing().item_spacing.x;
-                let width = KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_DIAMOND_SIZE.x + spacing * 2.0;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(width, KEYFRAME_DIAMOND_SIZE.y),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let prev =
-                            keyframe_arrow(ui, "◀", keyframe.prev, &t!("props.prev_keyframe"));
-                        response.toggled_keyframe =
-                            keyframe_button(ui, keyframe.on_keyframe).clicked();
-                        let next =
-                            keyframe_arrow(ui, "▶", keyframe.next, &t!("props.next_keyframe"));
-                        response.goto = prev.or(next);
-                    },
-                );
+                let next = keyframe_arrow(ui, false, keyframe.next, &t!("props.next_keyframe"));
+                let prev = keyframe_arrow(ui, true, keyframe.prev, &t!("props.prev_keyframe"));
+                response.goto = prev.or(next);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 response.changed = contents(ui);
@@ -748,8 +850,7 @@ pub(crate) fn drag_field(
     changed
 }
 
-/// A single-value parameter: slider plus numeric field, as in the
-/// reference inspector.
+/// A single-value parameter: slider plus numeric field.
 pub(crate) fn slider_field(
     ui: &mut egui::Ui,
     value: &mut f32,
@@ -915,77 +1016,65 @@ pub(crate) fn link_button(ui: &mut egui::Ui, linked: &mut bool) -> egui::Respons
     response
 }
 
-/// Keyframe diamond, drawn by hand: on some platforms (Asahi)
-/// egui's fonts do not have ◇/◆.
+/// Keyframe toggle: the same dot as the keyframe editor, filled when the
+/// playhead is on a keyframe.
 pub(crate) fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool) -> egui::Response {
     let tooltip = if on_keyframe {
         t!("props.remove_keyframe")
     } else {
         t!("props.add_keyframe")
     };
-
-    let (rect, response) = ui.allocate_exact_size(KEYFRAME_DIAMOND_SIZE, egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(KEYFRAME_TOGGLE_SIZE, egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let visuals = ui.style().interact(&response);
-        let painter = ui.painter();
-        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
-        let c = rect.center();
-        let r = 5.0;
-        let diamond = vec![
-            c + egui::vec2(0.0, -r),
-            c + egui::vec2(r, 0.0),
-            c + egui::vec2(0.0, r),
-            c + egui::vec2(-r, 0.0),
-        ];
-        if on_keyframe {
-            // Filled and red when the playhead is *on* a keyframe, as
-            // in the reference inspector.
-            painter.add(egui::Shape::convex_polygon(
-                diamond,
-                KEYFRAME_HERE_COLOR,
-                egui::Stroke::NONE,
-            ));
-        } else {
-            painter.add(egui::Shape::closed_line(diamond, visuals.fg_stroke));
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 3.0, visuals.weak_bg_fill);
         }
+        crate::keyframe_editor::paint_keyframe_dot(
+            ui.painter(),
+            rect.center(),
+            on_keyframe,
+            visuals.fg_stroke.color,
+        );
     }
     response.on_hover_text(tooltip)
 }
 
-/// Space for a keyframe navigation arrow: reserved even
-/// when the arrow is absent, otherwise the diamond would move on every
-/// playhead change.
-pub(crate) const KEYFRAME_ARROW_SIZE: egui::Vec2 = egui::Vec2::new(16.0, 18.0);
+pub(crate) const KEYFRAME_TOGGLE_SIZE: egui::Vec2 = egui::Vec2::new(18.0, 18.0);
 
-/// Keyframe navigation arrow. Without keyframes on that side it
-/// takes the same space, invisible.
+/// Space for a keyframe navigation arrow: reserved even
+/// when the arrow is absent, otherwise the controls would move on every
+/// playhead change.
+const KEYFRAME_ARROW_SIZE: egui::Vec2 = egui::Vec2::new(14.0, 18.0);
+
+/// Chevron to the previous or next keyframe. Without keyframes on that
+/// side it takes the same space, invisible.
 pub(crate) fn keyframe_arrow(
     ui: &mut egui::Ui,
-    label: &str,
+    previous: bool,
     target: Option<FrameIdx>,
     tooltip: &str,
 ) -> Option<FrameIdx> {
-    let button = egui::Button::new(label)
-        .small()
-        .min_size(KEYFRAME_ARROW_SIZE);
-    match target {
-        Some(frame) => ui
-            .add(button)
-            .on_hover_text(tooltip)
-            .clicked()
-            .then_some(frame),
-        None => {
-            ui.add_visible(false, button);
-            None
-        }
-    }
+    let sense = if target.is_some() {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(KEYFRAME_ARROW_SIZE, sense);
+    let frame = target?;
+    let color = ui.style().interact(&response).fg_stroke.color;
+    let c = rect.center();
+    let dx = if previous { 2.0 } else { -2.0 };
+    ui.painter().add(egui::Shape::line(
+        vec![
+            c + egui::vec2(dx, -4.0),
+            c + egui::vec2(-dx, 0.0),
+            c + egui::vec2(dx, 4.0),
+        ],
+        egui::Stroke::new(1.5, color),
+    ));
+    response.on_hover_text(tooltip).clicked().then_some(frame)
 }
-
-/// Size of the keyframe diamond.
-pub(crate) const KEYFRAME_DIAMOND_SIZE: egui::Vec2 = egui::Vec2::new(20.0, 20.0);
-
-/// The color of the diamond when the playhead is on a keyframe.
-pub(crate) const KEYFRAME_HERE_COLOR: egui::Color32 = crate::theme::ACCENT;
 
 /// The clip a panel command acts on: timeline, track, id.
 pub(crate) type ClipRef = (TimelineId, usize, ClipId);
@@ -1527,16 +1616,6 @@ impl VenturiApp {
                                     let is_text = self.properties_tab == PropertiesTab::Video
                                         && info.title.is_some();
                                     if is_text {
-                                        video_subtab_bar(ui, &mut self.video_subtab);
-                                        ui.add_space(4.0);
-                                    }
-                                    match self.properties_tab {
-                                        // The Selection tab does not get here:
-                                        // it was served earlier, without a primary clip.
-                                        PropertiesTab::Selection => {}
-                                        PropertiesTab::Video
-                                            if is_text && self.video_subtab == VideoSubTab::Title =>
-                                        {
                                             let before = info.title.clone().unwrap_or_default();
                                             let mut title = before.clone();
                                             if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
@@ -1552,7 +1631,12 @@ impl VenturiApp {
                                                     pending_effects.push(set_title((t.timeline, t.track_index, t.clip_id), apply_title_edit(current, &before, &title)));
                                                 }
                                             }
-                                        }
+                                            ui.add_space(6.0);
+                                    }
+                                    match self.properties_tab {
+                                        // The Selection tab does not get here:
+                                        // it was served earlier, without a primary clip.
+                                        PropertiesTab::Selection => {}
                                         PropertiesTab::Video => {
                                             use vv_core::TransformParam as P;
                                             let (frame_w, frame_h) =
@@ -1573,25 +1657,6 @@ impl VenturiApp {
                                                     .iter()
                                                     .filter_map(|p| info.params[p.index()].next)
                                                     .min(),
-                                            };
-
-                                            let section_reset = |ui: &mut egui::Ui, title: &str| {
-                                                let mut clicked = false;
-                                                ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new(title).strong());
-                                                    ui.with_layout(
-                                                        egui::Layout::right_to_left(
-                                                            egui::Align::Center,
-                                                        ),
-                                                        |ui| {
-                                                            clicked = ui
-                                                                .small_button("↺")
-                                                                .on_hover_text(t!("props.reset_section"))
-                                                                .clicked();
-                                                        },
-                                                    );
-                                                });
-                                                clicked
                                             };
 
                                             const TRANSFORM_PARAMS: [P; 7] = [
@@ -1616,9 +1681,11 @@ impl VenturiApp {
                                             let mut rows: Vec<(Vec<P>, RowResponse)> = Vec::new();
                                             let mut reset_groups: Vec<(Vec<P>, bool)> = Vec::new();
 
-                                            if section_reset(ui, &t!("props.transform")) {
+                                            let (open, reset) = section_header(ui, &t!("props.transform"), true);
+                                            if reset {
                                                 reset_groups.push((TRANSFORM_PARAMS.to_vec(), true));
                                             }
+                                            if open {
 
                                             let zoom_params = vec![P::ZoomX, P::ZoomY];
                                             let row = param_row(
@@ -1768,11 +1835,14 @@ impl VenturiApp {
                                             if flip_row.reset {
                                                 reset_groups.push((Vec::new(), true));
                                             }
+                                            }
 
                                             ui.add_space(6.0);
-                                            if section_reset(ui, &t!("props.cropping")) {
+                                            let (open, reset) = section_header(ui, &t!("props.cropping"), true);
+                                            if reset {
                                                 reset_groups.push((CROP_PARAMS.to_vec(), false));
                                             }
+                                            if open {
 
                                             for (label, param, index, limit) in [
                                                 (t!("props.crop_left"), P::CropLeft, 0, source_w),
@@ -1822,15 +1892,18 @@ impl VenturiApp {
                                                 },
                                             );
                                             rows.push((softness_params, row));
+                                            }
 
                                             ui.add_space(6.0);
                                             let mut blend_mode = info.blend_mode;
                                             let mut blend_changed = false;
-                                            if section_reset(ui, &t!("props.composite")) {
+                                            let (open, reset) = section_header(ui, &t!("props.composite"), true);
+                                            if reset {
                                                 reset_groups.push((vec![P::Opacity], false));
                                                 blend_mode = vv_core::BlendMode::Normal;
                                                 blend_changed = true;
                                             }
+                                            if open {
 
                                             let row = param_row(ui, &t!("props.composite_mode"), None, |ui| {
                                                 let items: Vec<_> = vv_core::BlendMode::ALL
@@ -1874,6 +1947,7 @@ impl VenturiApp {
                                                 },
                                             );
                                             rows.push((opacity_params, row));
+                                            }
 
                                             let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
                                             for (params, row) in &rows {
@@ -1937,8 +2011,8 @@ impl VenturiApp {
                                             // panel; empty until there is one.
                                             if !info.filters.is_empty() {
                                                 ui.add_space(6.0);
-                                                ui.label(egui::RichText::new(t!("props.filters")).strong());
-                                                for filter in &info.filters {
+                                                let (open, _) = section_header(ui, &t!("props.filters"), false);
+                                                for filter in info.filters.iter().filter(|_| open) {
                                                     let mut enabled = filter.enabled;
                                                     let reset = title_section_header(
                                                         ui,

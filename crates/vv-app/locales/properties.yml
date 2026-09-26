@@ -12,13 +12,7 @@ props.tab_selection:
   en: "Selection"
   it: "Selezione"
 
-props.subtab_title:
-  en: "Title"
-  it: "Title"
 
-props.subtab_settings:
-  en: "Settings"
-  it: "Settings"
 
 props.text:
   en: "Text"
@@ -435,3 +429,15 @@ blend.subtract:
 blend.divide:
   en: "Divide"
   it: "Dividi"
+
+props.reset_hint:
+  en: "Double-click or right-click to reset"
+  it: "Doppio click o tasto destro per reimpostare"
+
+props.appearance:
+  en: "Appearance"
+  it: "Aspetto"
+
+props.placement:
+  en: "Placement"
+  it: "Posizionamento"

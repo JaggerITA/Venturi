@@ -1543,9 +1543,8 @@ fn self_test_set_gain(
     );
 }
 
-/// The keyframe diamond must always stay at the same distance from the
-/// edge of the row, whether the navigation arrows are there or not
-/// (otherwise it dances on every playhead move).
+/// The controls of a row must not move whether the navigation arrows are
+/// there or not (otherwise they dance on every playhead move).
 #[test]
 fn keyframe_arrow_reserves_the_same_width_when_there_is_nowhere_to_go() {
     let ctx = egui::Context::default();
@@ -1560,7 +1559,7 @@ fn arrow_row_width(ctx: &egui::Context, target: Option<FrameIdx>) -> f32 {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 let before = ui.cursor().min.x;
-                keyframe_arrow(ui, "◀", target, "test");
+                keyframe_arrow(ui, true, target, "test");
                 width = ui.cursor().min.x - before;
             });
         });

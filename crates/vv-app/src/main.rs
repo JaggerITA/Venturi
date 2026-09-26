@@ -149,13 +149,6 @@ enum PropertiesTab {
     Selection,
 }
 
-/// Sub-tab of the Video tab for text clips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VideoSubTab {
-    Title,
-    Settings,
-}
-
 /// System fonts for the Title panel, read the first time they are needed.
 #[derive(Default)]
 struct FontCatalog {
@@ -345,7 +338,6 @@ struct VenturiApp {
 
     /// Tab open in the properties panel.
     properties_tab: PropertiesTab,
-    video_subtab: VideoSubTab,
     fonts: FontCatalog,
 
     export: Option<ExportUiState>,
@@ -459,7 +451,6 @@ impl Default for VenturiApp {
             overlay_drag: None,
             zoom_link: true,
             properties_tab: PropertiesTab::Video,
-            video_subtab: VideoSubTab::Title,
             fonts: FontCatalog::default(),
             export: None,
             export_dialog: None,

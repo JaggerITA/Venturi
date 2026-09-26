@@ -165,8 +165,8 @@ menu.view:
   it: "Visualizza"
 
 menu.inspector:
-  en: "Inspector"
-  it: "Inspector"
+  en: "Properties"
+  it: "Proprietà"
 
 menu.audiometer:
   en: "Audiometer"
