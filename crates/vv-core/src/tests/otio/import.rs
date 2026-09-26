@@ -686,3 +686,20 @@ fn fps_from_float_recognises_ntsc_rates() {
     assert_eq!(Rational::from_fps(59.94), Rational::new(60_000, 1001));
     assert_eq!(Rational::from_fps(12.5), Rational::new(25, 2));
 }
+
+#[test]
+fn media_url_count_counts_each_file_once() {
+    let reference = |url: &str| json!({ "OTIO_SCHEMA": "ExternalReference.1", "target_url": url });
+    let otio = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [{
+            "OTIO_SCHEMA": "Track.1",
+            "children": [
+                { "OTIO_SCHEMA": "Clip.1", "media_reference": reference("a.mp4") },
+                { "OTIO_SCHEMA": "Clip.1", "media_reference": reference("a.mp4") },
+                { "OTIO_SCHEMA": "Clip.2", "media_references": { "DEFAULT_MEDIA": reference("b.mov") } },
+            ],
+        }]},
+    });
+    assert_eq!(media_url_count(&otio), 2);
+}

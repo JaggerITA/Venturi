@@ -235,6 +235,7 @@ struct VenturiApp {
     import_warnings: Vec<String>,
     /// Probing of the files of a multiple import, in progress in the background.
     pending_import: Option<project_io::PendingImport>,
+    pending_otio_import: Option<project_io::PendingOtioImport>,
     /// Files chosen while an import was already in progress: they start afterwards.
     import_queue: Vec<PathBuf>,
 
@@ -414,6 +415,7 @@ impl Default for VenturiApp {
             keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
             import_warnings: Vec::new(),
             pending_import: None,
+            pending_otio_import: None,
             import_queue: Vec::new(),
             preview_meta: None,
             preview_error: None,
@@ -3083,6 +3085,7 @@ impl eframe::App for VenturiApp {
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
         self.poll_pending_import(&ui.ctx().clone());
+        self.poll_pending_otio_import(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
         if self
             .thumbnail_worker
@@ -3152,6 +3155,7 @@ impl eframe::App for VenturiApp {
         self.show_about_dialog(ui.ctx());
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
+        self.show_otio_import_progress(ui);
         self.show_relink_message(ui);
         self.show_unsaved_changes_dialog(ui);
         self.show_new_timeline_dialog(ui.ctx());

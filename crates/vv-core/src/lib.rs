@@ -17,6 +17,7 @@ pub use command::{
 pub use model::*;
 pub use otio::{
     MeasureTitle, OtioError, OtioImport, OtioWarning, TitleMetrics, export_otio, import_otio,
+    media_url_count, project_from_otio,
 };
 pub use persistence::{PersistenceError, load_project, save_project};
 

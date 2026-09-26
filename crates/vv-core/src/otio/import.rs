@@ -52,6 +52,26 @@ pub fn import_otio(
     project_from_otio(&value, base_dir, &mut probe, measure)
 }
 
+/// Distinct `target_url`s in the file: an upper bound on the probes
+/// `project_from_otio` will make, for a progress bar.
+pub fn media_url_count(value: &Value) -> usize {
+    fn collect<'v>(value: &'v Value, urls: &mut std::collections::HashSet<&'v str>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(url) = map.get("target_url").and_then(Value::as_str) {
+                    urls.insert(url);
+                }
+                map.values().for_each(|v| collect(v, urls));
+            }
+            Value::Array(items) => items.iter().for_each(|v| collect(v, urls)),
+            _ => {}
+        }
+    }
+    let mut urls = std::collections::HashSet::new();
+    collect(value, &mut urls);
+    urls.len()
+}
+
 /// `base_dir` resolves relative `target_url`s.
 pub fn project_from_otio(
     value: &Value,

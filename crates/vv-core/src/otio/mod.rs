@@ -18,7 +18,7 @@ pub struct TitleMetrics {
 }
 
 pub type MeasureTitle<'a> = &'a dyn Fn(&crate::model::TitleParams) -> TitleMetrics;
-pub use import::{OtioImport, OtioWarning, import_otio, project_from_otio};
+pub use import::{OtioImport, OtioWarning, import_otio, media_url_count, project_from_otio};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OtioError {

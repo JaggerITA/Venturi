@@ -2,6 +2,8 @@
 //! export and relink.
 
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectSwitch {
@@ -39,6 +41,14 @@ pub(crate) struct PendingImport {
     pub(crate) worker: import_worker::ImportWorker,
     pub(crate) errors: Vec<String>,
     pub(crate) imported: Vec<MediaId>,
+}
+
+/// OTIO import running on a thread: probing every media of a large
+/// timeline takes long enough for the desktop to flag the window as hung.
+pub(crate) struct PendingOtioImport {
+    pub(crate) probed: Arc<AtomicUsize>,
+    pub(crate) total: Arc<AtomicUsize>,
+    pub(crate) handle: std::thread::JoinHandle<Result<vv_core::OtioImport, String>>,
 }
 
 pub(crate) struct PendingDialog {
@@ -574,24 +584,97 @@ impl VenturiApp {
     /// save instead of overwriting the imported file. What was not
     /// imported ends up in `import_warnings`.
     pub(crate) fn import_otio_from(&mut self, path: &Path) {
-        let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
-        let imported = vv_core::import_otio(
-            path,
-            |media_path| {
-                let meta = vv_media::probe_media(media_path).map_err(|e| e.to_string())?;
-                Ok((meta, vv_media::content_fingerprint(media_path).unwrap_or(0)))
-            },
-            Some(&measure),
-        );
-        match imported {
-            Ok(imported) => {
+        if self.pending_otio_import.is_some() {
+            return;
+        }
+        let probed = Arc::new(AtomicUsize::new(0));
+        let total = Arc::new(AtomicUsize::new(0));
+        let path = path.to_path_buf();
+        let handle = std::thread::spawn({
+            let (probed, total) = (probed.clone(), total.clone());
+            move || {
+                let value: serde_json::Value = std::fs::read_to_string(&path)
+                    .map_err(vv_core::OtioError::from)
+                    .and_then(|text| Ok(serde_json::from_str(&text)?))
+                    .map_err(|e| e.to_string())?;
+                total.store(vv_core::media_url_count(&value), Ordering::Relaxed);
+                let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
+                let mut probe = |media_path: &Path| {
+                    let result = vv_media::probe_media(media_path)
+                        .map_err(|e| e.to_string())
+                        .map(|meta| (meta, vv_media::content_fingerprint(media_path).unwrap_or(0)));
+                    probed.fetch_add(1, Ordering::Relaxed);
+                    result
+                };
+                let base_dir = path.parent().unwrap_or(Path::new("."));
+                vv_core::project_from_otio(&value, base_dir, &mut probe, Some(&measure))
+                    .map_err(|e| e.to_string())
+            }
+        });
+        self.pending_otio_import = Some(PendingOtioImport {
+            probed,
+            total,
+            handle,
+        });
+    }
+
+    pub(crate) fn poll_pending_otio_import(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.pending_otio_import else {
+            return;
+        };
+        if !pending.handle.is_finished() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        }
+        let Some(pending) = self.pending_otio_import.take() else {
+            return;
+        };
+        match pending.handle.join() {
+            Ok(Ok(imported)) => {
                 self.replace_project(imported.project, None);
                 self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 self.project_error = Some(t!("project.otio_import_failed", error = e).into_owned())
             }
+            Err(_) => {
+                self.project_error =
+                    Some(t!("project.otio_import_failed", error = "panic").into_owned())
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_otio_import(&mut self) {
+        let ctx = egui::Context::default();
+        while self.pending_otio_import.is_some() {
+            self.poll_pending_otio_import(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Modal: the old project is about to be replaced, editing it now
+    /// would be lost.
+    pub(crate) fn show_otio_import_progress(&mut self, ui: &mut egui::Ui) {
+        let Some(pending) = &self.pending_otio_import else {
+            return;
+        };
+        let total = pending.total.load(Ordering::Relaxed);
+        let done = pending.probed.load(Ordering::Relaxed).min(total);
+        egui::Modal::new(egui::Id::new("otio_import_progress")).show(ui.ctx(), |ui| {
+            ui.heading(t!("project.otio_importing"));
+            ui.add_space(8.0);
+            let bar = if total == 0 {
+                egui::ProgressBar::new(0.0).animate(true)
+            } else {
+                egui::ProgressBar::new(done as f32 / total as f32).text(t!(
+                    "project.otio_import_progress",
+                    done = done,
+                    total = total
+                ))
+            };
+            ui.add(bar.desired_width(320.0));
+        });
     }
 
     pub(crate) fn open_project_dialog(&mut self) {
@@ -776,7 +859,12 @@ impl VenturiApp {
                     }
                 });
             ui.separator();
-            close = ui.button(t!("common.close")).clicked();
+            ui.horizontal(|ui| {
+                if ui.button(t!("project.copy_all")).clicked() {
+                    ui.ctx().copy_text(self.import_warnings.join("\n"));
+                }
+                close = ui.button(t!("common.close")).clicked();
+            });
         });
         if close {
             self.import_warnings.clear();

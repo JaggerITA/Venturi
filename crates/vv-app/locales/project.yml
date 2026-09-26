@@ -52,6 +52,18 @@ project.open_failed:
   en: "Could not open the project: %{error}"
   it: "Apertura fallita: %{error}"
 
+project.otio_importing:
+  en: "Importing OTIO timeline…"
+  it: "Importazione timeline OTIO…"
+
+project.otio_import_progress:
+  en: "Media %{done}/%{total}"
+  it: "Media %{done}/%{total}"
+
+project.copy_all:
+  en: "Copy all"
+  it: "Copia tutto"
+
 project.import_warnings:
   en: "Import warnings (%{count})"
   it: "Avvisi di importazione (%{count})"

@@ -3906,6 +3906,7 @@ fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
     let mut app = VenturiApp::default();
     app.current_project_path = Some(dir.join("old.vvproj"));
     app.import_otio_from(&otio_path);
+    app.wait_for_otio_import();
 
     assert!(app.project_error.is_none(), "{:?}", app.project_error);
     assert_eq!(app.current_project_path, None);
