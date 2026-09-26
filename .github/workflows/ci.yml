@@ -22,10 +22,20 @@ jobs:
             clang clang-devel \
             wayland-devel libxkbcommon-devel libxkbcommon-x11 libX11-devel \
             vulkan-loader-devel mesa-vulkan-drivers \
-            alsa-lib-devel
-          # No sound card on the runner: a null device keeps cpal happy.
-          printf 'pcm.!default {\n  type null\n}\nctl.!default {\n  type null\n}\n' \
+            alsa-lib-devel \
+            pulseaudio alsa-plugins-pulseaudio
+          # No sound card on the runner. ALSA's null PCM never blocks, so the
+          # cpal callback spins and the audio clock runs thousands of times
+          # too fast, breaking the playback tests: a PulseAudio null sink
+          # consumes samples in real time instead.
+          printf 'pcm.!default {\n  type pulse\n}\nctl.!default {\n  type pulse\n}\n' \
             > /etc/asound.conf
+
+      - name: Start audio sink
+        run: |
+          mkdir -p /run/user/0
+          XDG_RUNTIME_DIR=/run/user/0 pulseaudio -D --exit-idle-time=-1 \
+            --load="module-null-sink sink_name=ci"
 
       - uses: actions/checkout@v4
 
@@ -41,3 +51,5 @@ jobs:
       # lavapipe (software Vulkan, part of mesa-vulkan-drivers).
       - name: Test
         run: cargo test --workspace
+        env:
+          XDG_RUNTIME_DIR: /run/user/0
