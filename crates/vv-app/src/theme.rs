@@ -25,7 +25,13 @@ pub(crate) fn apply(ctx: &egui::Context) {
 
 /// Playhead line with the "T" head of the logo's vertical bar: a bar in the
 /// accent across the top, a thicker accent stem down to `head_bottom`.
-pub(crate) fn paint_playhead(painter: &egui::Painter, x: f32, top: f32, head_bottom: f32, bottom: f32) {
+pub(crate) fn paint_playhead(
+    painter: &egui::Painter,
+    x: f32,
+    top: f32,
+    head_bottom: f32,
+    bottom: f32,
+) {
     const BAR_HALF_WIDTH: f32 = 6.0;
     const BAR_HEIGHT: f32 = 4.0;
     painter.line_segment(

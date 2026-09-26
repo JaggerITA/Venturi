@@ -69,72 +69,56 @@ timeline.clip_color:
   it: "Colore clip"
 
 timeline.clear_clip_color:
-  en: "Clear Color"
-  it: "Rimuovi colore"
+  en: "No color"
+  it: "Nessun colore"
+
+timeline.color_red:
+  en: "Red"
+  it: "Rosso"
 
 timeline.color_orange:
   en: "Orange"
-  it: "Arancione"
-
-timeline.color_apricot:
-  en: "Apricot"
-  it: "Albicocca"
+  it: "Arancio"
 
 timeline.color_yellow:
   en: "Yellow"
   it: "Giallo"
 
-timeline.color_lime:
-  en: "Lime"
-  it: "Lime"
-
-timeline.color_olive:
-  en: "Olive"
-  it: "Oliva"
-
 timeline.color_green:
   en: "Green"
   it: "Verde"
 
-timeline.color_teal:
-  en: "Teal"
-  it: "Foglia di tè"
-
-timeline.color_navy:
-  en: "Navy"
-  it: "Blu notte"
+timeline.color_cyan:
+  en: "Cyan"
+  it: "Ciano"
 
 timeline.color_blue:
   en: "Blue"
   it: "Blu"
 
+timeline.color_indigo:
+  en: "Indigo"
+  it: "Indaco"
+
 timeline.color_purple:
   en: "Purple"
-  it: "Porpora"
-
-timeline.color_violet:
-  en: "Violet"
   it: "Viola"
 
-timeline.color_pink:
-  en: "Pink"
+timeline.color_magenta:
+  en: "Magenta"
+  it: "Magenta"
+
+timeline.color_rose:
+  en: "Rose"
   it: "Rosa"
 
-timeline.color_tan:
-  en: "Tan"
-  it: "Cuoio"
+timeline.color_slate:
+  en: "Slate"
+  it: "Ardesia"
 
-timeline.color_beige:
-  en: "Beige"
-  it: "Beige"
-
-timeline.color_brown:
-  en: "Brown"
-  it: "Marrone"
-
-timeline.color_chocolate:
-  en: "Chocolate"
-  it: "Cioccolato"
+timeline.color_gray:
+  en: "Gray"
+  it: "Grigio"
 
 speed.title:
   en: "Change Clip Speed"

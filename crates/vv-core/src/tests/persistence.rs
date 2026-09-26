@@ -102,3 +102,16 @@ fn title_params_survive_save_and_load() {
     let back: TitleParams = ron::from_str(&text).unwrap();
     assert_eq!(back, title);
 }
+
+#[test]
+fn clip_colors_of_the_previous_palette_still_load() {
+    for (old, new) in [
+        ("Chocolate", ClipColor::Slate),
+        ("Olive", ClipColor::Green),
+        ("Apricot", ClipColor::Rose),
+        ("Orange", ClipColor::Orange),
+    ] {
+        let color: Option<ClipColor> = ron::from_str(&format!("Some({old})")).unwrap();
+        assert_eq!(color, Some(new), "{old}");
+    }
+}

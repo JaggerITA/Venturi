@@ -1314,7 +1314,7 @@ fn set_display_color_applies_to_every_clip_and_undo_restores_each_one() {
         Box::new(command::SetClipsDisplayColor::new(
             timeline,
             vec![(0, a_id)],
-            Some(ClipColor::Navy),
+            Some(ClipColor::Indigo),
         )),
     );
     history.do_command(
@@ -1322,7 +1322,7 @@ fn set_display_color_applies_to_every_clip_and_undo_restores_each_one() {
         Box::new(command::SetClipsDisplayColor::new(
             timeline,
             vec![(0, a_id), (0, b_id)],
-            Some(ClipColor::Pink),
+            Some(ClipColor::Rose),
         )),
     );
 
@@ -1332,11 +1332,11 @@ fn set_display_color_applies_to_every_clip_and_undo_restores_each_one() {
             .unwrap()
             .display_color
     };
-    assert_eq!(color(&project, a_id), Some(ClipColor::Pink));
-    assert_eq!(color(&project, b_id), Some(ClipColor::Pink));
+    assert_eq!(color(&project, a_id), Some(ClipColor::Rose));
+    assert_eq!(color(&project, b_id), Some(ClipColor::Rose));
 
     history.undo(&mut project);
-    assert_eq!(color(&project, a_id), Some(ClipColor::Navy));
+    assert_eq!(color(&project, a_id), Some(ClipColor::Indigo));
     assert_eq!(color(&project, b_id), None);
 
     history.undo(&mut project);

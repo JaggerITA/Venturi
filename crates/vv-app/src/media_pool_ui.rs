@@ -866,11 +866,8 @@ impl VenturiApp {
                 }
                 if let Some((start, end)) = self.media_pool_state.marquee {
                     let rect = egui::Rect::from_two_pos(start, end);
-                    ui.painter().rect_filled(
-                        rect,
-                        0.0,
-                        crate::theme::ACCENT_TRANSLUCENT,
-                    );
+                    ui.painter()
+                        .rect_filled(rect, 0.0, crate::theme::ACCENT_TRANSLUCENT);
                     ui.painter().rect_stroke(
                         rect,
                         0.0,

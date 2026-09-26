@@ -2257,11 +2257,7 @@ pub fn show_timeline(
                         origin + m.start.to_vec2(),
                         origin + m.current.to_vec2(),
                     );
-                    painter.rect_filled(
-                        marquee_rect,
-                        0.0,
-                        crate::theme::ACCENT_TRANSLUCENT,
-                    );
+                    painter.rect_filled(marquee_rect, 0.0, crate::theme::ACCENT_TRANSLUCENT);
                     painter.rect_stroke(
                         marquee_rect,
                         0.0,
@@ -3259,20 +3255,9 @@ pub fn show_timeline(
                             let targets = || {
                                 color_targets(&visuals, state, visual.track_index, visual.clip.id)
                             };
-                            if ui.button(t!("timeline.clear_clip_color")).clicked() {
-                                pending = Some(PendingAction::SetDisplayColor(targets(), None));
+                            if let Some(color) = clip_color_grid(ui, visual.clip.display_color) {
+                                pending = Some(PendingAction::SetDisplayColor(targets(), color));
                                 ui.close();
-                            }
-                            ui.separator();
-                            for color in vv_core::ClipColor::ALL {
-                                let checked = visual.clip.display_color == Some(color);
-                                if clip_color_item(ui, color, checked).clicked() {
-                                    pending = Some(PendingAction::SetDisplayColor(
-                                        targets(),
-                                        Some(color),
-                                    ));
-                                    ui.close();
-                                }
                             }
                         });
                         if matches!(visual.clip.source, ClipSource::Media(_)) {
@@ -5459,47 +5444,101 @@ fn color_targets(
     }
 }
 
-const COLOR_MENU_WIDTH: f32 = 150.0;
-const COLOR_MENU_DOT_RADIUS: f32 = 5.0;
+const COLOR_GRID_COLUMNS: usize = 6;
+const COLOR_SWATCH_CELL: f32 = 26.0;
+const COLOR_SWATCH_RADIUS: f32 = 6.0;
 
-/// Menu entry with the name of the color and its dot on the right, like Resolve.
-fn clip_color_item(ui: &mut egui::Ui, color: vv_core::ClipColor, checked: bool) -> egui::Response {
+/// Swatch grid of the clip color menu. `Some(None)` = "no color" chosen.
+fn clip_color_grid(
+    ui: &mut egui::Ui,
+    current: Option<vv_core::ClipColor>,
+) -> Option<Option<vv_core::ClipColor>> {
+    let mut chosen = None;
+    egui::Grid::new("clip_color_grid")
+        .spacing(egui::vec2(2.0, 2.0))
+        .show(ui, |ui| {
+            for (i, color) in vv_core::ClipColor::ALL.into_iter().enumerate() {
+                if clip_color_swatch(ui, color, current == Some(color)).clicked() {
+                    chosen = Some(Some(color));
+                }
+                if (i + 1) % COLOR_GRID_COLUMNS == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    ui.separator();
+    if ui
+        .add_enabled(
+            current.is_some(),
+            egui::Button::new(t!("timeline.clear_clip_color")),
+        )
+        .clicked()
+    {
+        chosen = Some(None);
+    }
+    chosen
+}
+
+fn clip_color_swatch(
+    ui: &mut egui::Ui,
+    color: vv_core::ClipColor,
+    checked: bool,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::Vec2::splat(COLOR_SWATCH_CELL), egui::Sense::click());
+    let resp = resp.on_hover_text(clip_color_label(color));
+    let painter = ui.painter();
+    if resp.hovered() {
+        painter.rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
     let (r, g, b) = color.rgb();
-    let label = clip_color_label(color);
-    let text = if checked {
-        format!("✔ {label}")
+    let stroke = if checked {
+        egui::Stroke::new(2.0, ui.visuals().strong_text_color())
     } else {
-        label.into_owned()
+        egui::Stroke::NONE
     };
-    let resp = ui.add(egui::Button::new(text).min_size(egui::vec2(COLOR_MENU_WIDTH, 0.0)));
-    let center = egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y);
-    ui.painter().circle_filled(
-        center,
-        COLOR_MENU_DOT_RADIUS,
+    painter.add(egui::Shape::convex_polygon(
+        drop_outline(rect.center(), COLOR_SWATCH_RADIUS),
         egui::Color32::from_rgb(r, g, b),
-    );
+        stroke,
+    ));
     resp
+}
+
+/// A drop: circle of `radius` whose top tapers to a tip. `center` is the
+/// center of the bounding box.
+fn drop_outline(center: egui::Pos2, radius: f32) -> Vec<egui::Pos2> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    const TIP_DISTANCE: f32 = 1.8;
+    let tip_distance = radius * TIP_DISTANCE;
+    let circle_center = center + egui::vec2(0.0, (tip_distance - radius) / 2.0);
+    let tangent = (radius / tip_distance).acos();
+    let start = -FRAC_PI_2 + tangent;
+    let sweep = 2.0 * PI - 2.0 * tangent;
+    const STEPS: usize = 20;
+    let mut points = vec![circle_center - egui::vec2(0.0, tip_distance)];
+    points.extend((0..=STEPS).map(|i| {
+        let angle = start + sweep * i as f32 / STEPS as f32;
+        circle_center + radius * egui::vec2(angle.cos(), angle.sin())
+    }));
+    points
 }
 
 fn clip_color_label(color: vv_core::ClipColor) -> Cow<'static, str> {
     use vv_core::ClipColor as C;
     match color {
+        C::Red => t!("timeline.color_red"),
         C::Orange => t!("timeline.color_orange"),
-        C::Apricot => t!("timeline.color_apricot"),
         C::Yellow => t!("timeline.color_yellow"),
-        C::Lime => t!("timeline.color_lime"),
-        C::Olive => t!("timeline.color_olive"),
         C::Green => t!("timeline.color_green"),
-        C::Teal => t!("timeline.color_teal"),
-        C::Navy => t!("timeline.color_navy"),
+        C::Cyan => t!("timeline.color_cyan"),
         C::Blue => t!("timeline.color_blue"),
+        C::Indigo => t!("timeline.color_indigo"),
         C::Purple => t!("timeline.color_purple"),
-        C::Violet => t!("timeline.color_violet"),
-        C::Pink => t!("timeline.color_pink"),
-        C::Tan => t!("timeline.color_tan"),
-        C::Beige => t!("timeline.color_beige"),
-        C::Brown => t!("timeline.color_brown"),
-        C::Chocolate => t!("timeline.color_chocolate"),
+        C::Magenta => t!("timeline.color_magenta"),
+        C::Rose => t!("timeline.color_rose"),
+        C::Slate => t!("timeline.color_slate"),
+        C::Gray => t!("timeline.color_gray"),
     }
 }
 

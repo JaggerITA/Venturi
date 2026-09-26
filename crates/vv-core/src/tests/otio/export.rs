@@ -449,7 +449,7 @@ fn keeps_what_otio_cannot_represent_in_metadata() {
     clip.audio_stream_index = 1;
     clip.linked_group = Some(LinkGroupId(7));
     clip.effects.gain_db = Keyframed::constant(-6.0);
-    clip.display_color = Some(crate::model::ClipColor::Navy);
+    clip.display_color = Some(crate::model::ClipColor::Indigo);
     project.timelines[timeline_id].tracks[2].clips.push(clip);
 
     let otio = timeline_to_otio(&project, timeline_id, None);

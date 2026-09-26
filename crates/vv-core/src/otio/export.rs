@@ -193,7 +193,7 @@ fn clip_to_otio(
                 "audio_stream_index": clip.audio_stream_index,
                 "fade_in": clip.fade_in,
                 "fade_out": clip.fade_out,
-                "display_color": clip.display_color,
+                "display_color": clip.display_color.map(resolve::clip_color_name),
                 "speed": clip.speed,
                 "pitch_correction": clip.pitch_correction,
             }

@@ -1163,65 +1163,63 @@ impl EffectStack {
     }
 }
 
-/// Names and shades follow Resolve's clip colors.
+/// Hues picked in OKLCH at near-constant lightness and chroma, plus two
+/// neutrals. The aliases are the names of the previous 16-color palette,
+/// still found in older project and OTIO files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipColor {
+    #[serde(alias = "Brown")]
+    Red,
     Orange,
-    Apricot,
     Yellow,
-    Lime,
-    Olive,
+    #[serde(alias = "Lime", alias = "Olive")]
     Green,
-    Teal,
-    Navy,
+    #[serde(alias = "Teal")]
+    Cyan,
     Blue,
+    #[serde(alias = "Navy")]
+    Indigo,
     Purple,
-    Violet,
-    Pink,
-    Tan,
-    Beige,
-    Brown,
-    Chocolate,
+    #[serde(alias = "Violet")]
+    Magenta,
+    #[serde(alias = "Pink", alias = "Apricot")]
+    Rose,
+    #[serde(alias = "Chocolate")]
+    Slate,
+    #[serde(alias = "Tan", alias = "Beige")]
+    Gray,
 }
 
 impl ClipColor {
-    pub const ALL: [ClipColor; 16] = [
+    pub const ALL: [ClipColor; 12] = [
+        ClipColor::Red,
         ClipColor::Orange,
-        ClipColor::Apricot,
         ClipColor::Yellow,
-        ClipColor::Lime,
-        ClipColor::Olive,
         ClipColor::Green,
-        ClipColor::Teal,
-        ClipColor::Navy,
+        ClipColor::Cyan,
         ClipColor::Blue,
+        ClipColor::Indigo,
         ClipColor::Purple,
-        ClipColor::Violet,
-        ClipColor::Pink,
-        ClipColor::Tan,
-        ClipColor::Beige,
-        ClipColor::Brown,
-        ClipColor::Chocolate,
+        ClipColor::Magenta,
+        ClipColor::Rose,
+        ClipColor::Slate,
+        ClipColor::Gray,
     ];
 
     pub fn rgb(self) -> (u8, u8, u8) {
         match self {
-            ClipColor::Orange => (223, 129, 48),
-            ClipColor::Apricot => (232, 176, 101),
-            ClipColor::Yellow => (222, 202, 84),
-            ClipColor::Lime => (168, 203, 86),
-            ClipColor::Olive => (118, 160, 76),
-            ClipColor::Green => (86, 175, 128),
-            ClipColor::Teal => (74, 175, 175),
-            ClipColor::Navy => (58, 112, 186),
-            ClipColor::Blue => (76, 160, 214),
-            ClipColor::Purple => (146, 122, 200),
-            ClipColor::Violet => (178, 116, 190),
-            ClipColor::Pink => (224, 134, 178),
-            ClipColor::Tan => (196, 168, 142),
-            ClipColor::Beige => (201, 185, 160),
-            ClipColor::Brown => (150, 110, 80),
-            ClipColor::Chocolate => (118, 86, 68),
+            ClipColor::Red => (228, 124, 117),
+            ClipColor::Orange => (218, 136, 68),
+            ClipColor::Yellow => (216, 189, 81),
+            ClipColor::Green => (103, 179, 106),
+            ClipColor::Cyan => (43, 179, 185),
+            ClipColor::Blue => (90, 163, 236),
+            ClipColor::Indigo => (117, 124, 211),
+            ClipColor::Purple => (177, 136, 223),
+            ClipColor::Magenta => (211, 125, 184),
+            ClipColor::Rose => (243, 175, 184),
+            ClipColor::Slate => (114, 130, 149),
+            ClipColor::Gray => (146, 146, 146),
         }
     }
 }
