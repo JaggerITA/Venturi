@@ -64,6 +64,7 @@ fn an_empty_area_of_a_compound_clip_shows_the_layer_below_it() {
         fps: Rational::new(25, 1),
         resolution: (4, 4),
         tracks: vec![video_track(vec![red])],
+        markers: Vec::new(),
     });
     let compound_media = project
         .media_pool
@@ -90,6 +91,7 @@ fn an_empty_area_of_a_compound_clip_shows_the_layer_below_it() {
         fps: Rational::new(25, 1),
         resolution: (4, 4),
         tracks: vec![video_track(vec![blue]), video_track(vec![compound_clip])],
+        markers: Vec::new(),
     };
 
     let compositor = vv_render::Compositor::new_headless();
@@ -156,6 +158,7 @@ fn an_adjustment_inside_a_compound_clip_leaves_the_outer_timeline_alone() {
         fps: Rational::new(25, 1),
         resolution: (4, 4),
         tracks: vec![video_track(vec![red]), video_track(vec![adjustment])],
+        markers: Vec::new(),
     });
     let compound_media = project
         .media_pool
@@ -181,6 +184,7 @@ fn an_adjustment_inside_a_compound_clip_leaves_the_outer_timeline_alone() {
         fps: Rational::new(25, 1),
         resolution: (4, 4),
         tracks: vec![video_track(vec![blue]), video_track(vec![compound_clip])],
+        markers: Vec::new(),
     };
 
     let compositor = vv_render::Compositor::new_headless();
@@ -248,6 +252,7 @@ fn a_compound_clip_has_no_layer_until_its_nested_media_is_ready() {
             0,
             Rational::one(),
         )])],
+        markers: Vec::new(),
     });
     let compound_media = project
         .media_pool
@@ -265,6 +270,7 @@ fn a_compound_clip_has_no_layer_until_its_nested_media_is_ready() {
         fps: Rational::new(25, 1),
         resolution: (4, 4),
         tracks: vec![video_track(vec![clip.clone()])],
+        markers: Vec::new(),
     };
 
     let compositor = vv_render::Compositor::new_headless();
@@ -353,6 +359,7 @@ fn crossing_offsets_clear_a_zoomed_clip_fully_off_screen() {
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![track],
+        markers: Vec::new(),
     };
     let project = Project::default();
     let mut provider = NoMediaProvider;

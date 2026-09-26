@@ -151,3 +151,19 @@ history.move_keyframes:
 history.set_interpolation:
   en: "Keyframe interpolation"
   it: "Interpolazione keyframe"
+
+history.add_marker:
+  en: "Add marker"
+  it: "Aggiungi marker"
+
+history.edit_marker:
+  en: "Edit marker"
+  it: "Modifica marker"
+
+history.move_marker:
+  en: "Move marker"
+  it: "Sposta marker"
+
+history.delete_marker:
+  en: "Delete marker"
+  it: "Elimina marker"

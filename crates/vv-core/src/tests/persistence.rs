@@ -9,6 +9,7 @@ fn save_then_load_round_trips_a_project_with_clips_and_keyframes() {
         fps: Rational::new(30, 1),
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        markers: Vec::new(),
     });
     let media_id = project.media_pool.insert(MediaItem {
         path: "/tmp/example.mp4".into(),
@@ -119,4 +120,17 @@ fn unknown_clip_colors_load_as_no_color() {
         let holder: Holder = ron::from_str(text).unwrap();
         assert_eq!(holder.color, expected, "{text}");
     }
+}
+
+#[test]
+fn timelines_saved_without_markers_load_with_none() {
+    let text = r#"(name: "T", fps: (num: 25, den: 1), resolution: (1920, 1080), tracks: [])"#;
+    let timeline: Timeline = ron::from_str(text).unwrap();
+    assert!(timeline.markers.is_empty());
+
+    let text = r#"(name: "T", fps: (num: 25, den: 1), resolution: (1920, 1080), tracks: [],
+        markers: [(id: (3), start: 12)])"#;
+    let timeline: Timeline = ron::from_str(text).unwrap();
+    assert_eq!(timeline.markers[0].color, Marker::default_color());
+    assert_eq!(timeline.markers[0].duration, 0);
 }

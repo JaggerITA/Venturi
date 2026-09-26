@@ -16,6 +16,8 @@ struct Harness {
     time: f64,
     /// `clip_rects` of the frame the button was released in.
     release_rects: std::collections::HashMap<ClipId, egui::Rect>,
+    /// Held down during every following frame.
+    modifiers: egui::Modifiers,
 }
 
 impl Harness {
@@ -26,6 +28,7 @@ impl Harness {
             fps: Rational::new(25, 1),
             resolution: (1920, 1080),
             tracks,
+            markers: Vec::new(),
         });
         let mut harness = Self {
             ctx: egui::Context::default(),
@@ -35,6 +38,7 @@ impl Harness {
             state: TimelineState::default(),
             time: 0.0,
             release_rects: std::collections::HashMap::new(),
+            modifiers: egui::Modifiers::NONE,
         };
         // Two frames: the first one only lays the panes out.
         harness.frame(Vec::new());
@@ -50,7 +54,9 @@ impl Harness {
         ));
         input.time = Some(self.time);
         self.time += 1.0 / 60.0;
-        input.events = events;
+        input.events = std::iter::once(egui::Event::ModifiersChanged(self.modifiers))
+            .chain(events)
+            .collect();
         let mut output = self.ctx.run_ui(input, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 show_timeline(
@@ -81,11 +87,12 @@ impl Harness {
     /// the next frame): a pickup step past egui's threshold comes first, in
     /// the same direction, so the gesture itself moves by exactly `delta`.
     fn drag(&mut self, from: egui::Pos2, delta: egui::Vec2) {
+        let modifiers = self.modifiers;
         let button = |pos, pressed| egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
             pressed,
-            modifiers: egui::Modifiers::NONE,
+            modifiers,
         };
         let picked_up = from + delta.normalized() * 12.0;
         self.frame(vec![egui::Event::PointerMoved(from)]);
@@ -99,6 +106,54 @@ impl Harness {
         self.frame(vec![button(picked_up + delta, false)]);
         self.release_rects = self.state.clip_rects.clone();
         self.frame(Vec::new());
+    }
+
+    fn click(&mut self, pos: egui::Pos2) {
+        let modifiers = self.modifiers;
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        self.frame(vec![egui::Event::PointerMoved(pos)]);
+        self.frame(vec![button(true)]);
+        self.frame(vec![button(false)]);
+    }
+
+    fn with_markers(mut self, markers: Vec<vv_core::Marker>) -> Self {
+        self.project.timelines[self.timeline_id].markers = markers;
+        self.frame(Vec::new());
+        self
+    }
+
+    /// Point in the marker lane over `frame`; needs a clip starting at 0.
+    fn marker_pos(&self, frame: FrameIdx) -> egui::Pos2 {
+        let origin_x = self
+            .state
+            .clip_rects
+            .values()
+            .map(|r| r.left())
+            .fold(f32::MAX, f32::min);
+        egui::pos2(
+            origin_x + frame as f32 * PX_PER_FRAME,
+            self.state.marker_lane.center().y,
+        )
+    }
+
+    /// Markers follow the pointer from the press, pickup step included:
+    /// drags by `frames` in total.
+    fn drag_marker(&mut self, from: egui::Pos2, frames: f32) {
+        let delta = frames * PX_PER_FRAME;
+        self.drag(from, egui::vec2(delta - 12.0 * delta.signum(), 0.0));
+    }
+
+    fn markers(&self) -> Vec<(FrameIdx, FrameIdx)> {
+        self.project.timelines[self.timeline_id]
+            .markers
+            .iter()
+            .map(|m| (m.start, m.duration))
+            .collect()
     }
 
     fn clip(&self, track_index: usize, id: ClipId) -> &Clip {
@@ -431,4 +486,109 @@ fn a_conformed_retimed_clip_ends_exactly_where_its_edge_is_released() {
             "dragged by {frames} frames"
         );
     }
+}
+
+fn marker(id: u64, start: FrameIdx, duration: FrameIdx) -> vv_core::Marker {
+    vv_core::Marker {
+        id: vv_core::MarkerId(id),
+        start,
+        duration,
+        note: String::new(),
+        color: vv_core::Marker::default_color(),
+    }
+}
+
+fn marker_harness(markers: Vec<vv_core::Marker>) -> Harness {
+    Harness::new(vec![track(TrackKind::Video, vec![solid(1, 0, 200)])]).with_markers(markers)
+}
+
+#[test]
+fn dragging_a_marker_moves_it_in_one_undo_step() {
+    let mut h = marker_harness(vec![marker(0, 20, 0)]);
+    let from = h.marker_pos(20);
+    h.drag_marker(from, 30.0);
+    assert_eq!(h.markers(), [(50, 0)]);
+    assert_eq!(h.history.position(), 1);
+    assert!(h.state.marker_drag.is_none());
+    h.history.undo(&mut h.project);
+    assert_eq!(h.markers(), [(20, 0)]);
+}
+
+#[test]
+fn alt_dragging_a_marker_stretches_it_into_a_range() {
+    let mut h = marker_harness(vec![marker(0, 40, 0)]);
+    h.modifiers = egui::Modifiers::ALT;
+    let from = h.marker_pos(40);
+    h.drag_marker(from, 25.0);
+    assert_eq!(h.markers(), [(40, 25)]);
+
+    // Leftwards the dragged end becomes the start.
+    let mut h = marker_harness(vec![marker(0, 40, 0)]);
+    h.modifiers = egui::Modifiers::ALT;
+    let from = h.marker_pos(40);
+    h.drag_marker(from, -15.0);
+    assert_eq!(h.markers(), [(25, 15)]);
+}
+
+#[test]
+fn dragging_the_ends_of_a_range_marker_resizes_it() {
+    let mut h = marker_harness(vec![marker(0, 20, 40)]);
+    let from = h.marker_pos(60) - egui::vec2(1.0, 0.0);
+    h.drag_marker(from, -10.0);
+    assert_eq!(h.markers(), [(20, 30)]);
+
+    let from = h.marker_pos(20) + egui::vec2(1.0, 0.0);
+    h.drag_marker(from, 8.0);
+    assert_eq!(h.markers(), [(28, 22)]);
+
+    let from = h.marker_pos(39);
+    h.drag_marker(from, 10.0);
+    assert_eq!(h.markers(), [(38, 22)], "the middle moves it whole");
+}
+
+#[test]
+fn clicking_a_marker_moves_the_playhead_to_it() {
+    let mut h = marker_harness(vec![marker(0, 30, 0)]);
+    let pos = h.marker_pos(30) + egui::vec2(3.0, 0.0);
+    h.click(pos);
+    assert_eq!(h.state.playhead, 30);
+}
+
+#[test]
+fn the_marker_editor_saves_on_ctrl_enter_and_discards_on_escape() {
+    let mut h = marker_harness(vec![marker(0, 30, 0)]);
+    let pos = h.marker_pos(30);
+    h.click(pos);
+    h.click(pos);
+    let editor = h
+        .state
+        .marker_editor
+        .as_mut()
+        .expect("double click opens it");
+    assert_eq!(editor.id, vv_core::MarkerId(0));
+    editor.note = "retake".into();
+    editor.color = vv_core::ClipColor::Cyan;
+    let key = |key, modifiers| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+    h.frame(vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)]);
+    h.frame(Vec::new());
+    assert!(h.state.marker_editor.is_none());
+    let saved = &h.project.timelines[h.timeline_id].markers[0];
+    assert_eq!(
+        (saved.note.as_str(), saved.color),
+        ("retake", vv_core::ClipColor::Cyan)
+    );
+
+    h.time += 1.0; // not a triple click
+    h.click(pos);
+    h.click(pos);
+    h.state.marker_editor.as_mut().unwrap().note = "discarded".into();
+    h.frame(vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    assert!(h.state.marker_editor.is_none());
+    assert_eq!(h.project.timelines[h.timeline_id].markers[0].note, "retake");
 }

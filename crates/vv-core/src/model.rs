@@ -21,6 +21,34 @@ pub struct LinkGroupId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClipId(pub u64);
 
+/// Unique within its timeline, see `Timeline::alloc_marker_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MarkerId(pub u64);
+
+/// A note pinned to the timeline ruler, on one frame or over a range.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub id: MarkerId,
+    pub start: FrameIdx,
+    /// 0 = a single frame.
+    #[serde(default)]
+    pub duration: FrameIdx,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default = "Marker::default_color")]
+    pub color: ClipColor,
+}
+
+impl Marker {
+    pub fn default_color() -> ClipColor {
+        ClipColor::Yellow
+    }
+
+    pub fn end(&self) -> FrameIdx {
+        self.start + self.duration
+    }
+}
+
 /// Frame rate as an exact fraction (e.g. 30000/1001 for 29.97fps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rational {
@@ -1773,9 +1801,20 @@ pub struct Timeline {
     pub resolution: (u32, u32),
     /// Compositing order: bottom -> top.
     pub tracks: Vec<Track>,
+    /// Sorted by `start`.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
 }
 
 impl Timeline {
+    pub fn marker(&self, id: MarkerId) -> Option<&Marker> {
+        self.markers.iter().find(|m| m.id == id)
+    }
+
+    pub fn alloc_marker_id(&self) -> MarkerId {
+        MarkerId(self.markers.iter().map(|m| m.id.0 + 1).max().unwrap_or(0))
+    }
+
     pub fn clip(&self, track_index: usize, id: ClipId) -> Option<&Clip> {
         self.tracks.get(track_index)?.clip(id)
     }

@@ -52,6 +52,7 @@ fn timeline(tracks: Vec<Track>) -> Timeline {
         fps: Rational::new(10, 1),
         resolution: (4, 2),
         tracks,
+        markers: Vec::new(),
     }
 }
 

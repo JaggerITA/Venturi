@@ -262,6 +262,7 @@ impl Importer<'_> {
             fps,
             resolution,
             tracks,
+            markers: Vec::new(),
         });
     }
 

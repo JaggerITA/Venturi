@@ -246,6 +246,7 @@ fn timeline_with(tracks: Vec<Track>) -> Timeline {
         fps: Rational::new(25, 1),
         resolution: (320, 240),
         tracks,
+        markers: Vec::new(),
     }
 }
 
@@ -442,6 +443,7 @@ fn project_with_compound_clip() -> (Project, Timeline, MediaId, MediaId) {
             locked: false,
             crossings: Vec::new(),
         }],
+        markers: Vec::new(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),

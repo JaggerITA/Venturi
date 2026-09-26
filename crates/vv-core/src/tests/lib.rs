@@ -7,6 +7,7 @@ fn make_project_with_two_tracks() -> (Project, TimelineId) {
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        markers: Vec::new(),
     });
     (project, timeline)
 }
@@ -558,6 +559,7 @@ fn moving_a_clip_to_another_track_removes_its_crossings_and_undo_restores_them()
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
+        markers: Vec::new(),
     });
     let mut history = History::default();
 
@@ -2074,4 +2076,87 @@ fn cross_transition_window_straddles_the_cut_and_progresses_from_zero_to_one() {
     let (left_off, right_off) = crossing.offsets(1.0, frame_size, zoom, zoom);
     assert_eq!(left_off, [1920.0, 0.0]);
     assert_eq!(right_off, [0.0, 0.0]);
+}
+
+fn marker(id: u64, start: FrameIdx, duration: FrameIdx) -> Marker {
+    Marker {
+        id: MarkerId(id),
+        start,
+        duration,
+        note: String::new(),
+        color: Marker::default_color(),
+    }
+}
+
+#[test]
+fn set_marker_adds_edits_and_removes_with_undo() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMarker::add(timeline, marker(0, 50, 0))),
+    );
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMarker::add(timeline, marker(1, 10, 0))),
+    );
+    let starts = |p: &Project| {
+        p.timelines[timeline]
+            .markers
+            .iter()
+            .map(|m| m.start)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(starts(&project), [10, 50], "kept sorted");
+
+    let mut edited = marker(0, 5, 20);
+    edited.note = "retake".into();
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMarker::edit(timeline, edited.clone())),
+    );
+    assert_eq!(
+        project.timelines[timeline].marker(MarkerId(0)),
+        Some(&edited)
+    );
+    assert_eq!(starts(&project), [5, 10]);
+
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMarker::remove(timeline, MarkerId(1))),
+    );
+    assert_eq!(starts(&project), [5]);
+
+    history.undo(&mut project);
+    history.undo(&mut project);
+    assert_eq!(starts(&project), [10, 50]);
+    history.undo(&mut project);
+    history.undo(&mut project);
+    assert!(project.timelines[timeline].markers.is_empty());
+}
+
+#[test]
+fn ripple_gap_moves_the_markers_after_it_and_undo_restores_them() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    for m in [marker(0, 5, 0), marker(1, 25, 10), marker(2, 40, 3)] {
+        history.do_command(&mut project, Box::new(command::SetMarker::add(timeline, m)));
+    }
+    assert_eq!(project.timelines[timeline].alloc_marker_id(), MarkerId(3));
+
+    history.do_command(
+        &mut project,
+        Box::new(command::RippleDeleteGap::new(timeline, 20, 10)),
+    );
+    let spans = |p: &Project| {
+        p.timelines[timeline]
+            .markers
+            .iter()
+            .map(|m| (m.start, m.duration))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(spans(&project), [(5, 0), (20, 10), (30, 3)]);
+
+    history.undo(&mut project);
+    assert_eq!(spans(&project), [(5, 0), (25, 10), (40, 3)]);
 }

@@ -3,9 +3,9 @@
 
 use crate::model::{
     Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack,
-    FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem, MediaMeta, Project,
-    Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind, Transform, TransformParam,
-    Transition,
+    FrameIdx, Interpolation, Keyframed, LinkGroupId, Marker, MarkerId, MediaId, MediaItem,
+    MediaMeta, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind,
+    Transform, TransformParam, Transition,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -57,6 +57,10 @@ pub enum CommandLabel {
     SetInterpolation,
     PasteAttributes,
     ClipSpeed,
+    AddMarker,
+    EditMarker,
+    MoveMarker,
+    DeleteMarker,
 }
 
 /// Several commands in a single history step.
@@ -530,6 +534,7 @@ pub struct RippleDeleteGap {
     pub gap_start: FrameIdx,
     pub gap_len: FrameIdx,
     shifted: Vec<(usize, ClipId, FrameIdx)>,
+    markers_before: Vec<Marker>,
 }
 
 impl RippleDeleteGap {
@@ -539,6 +544,7 @@ impl RippleDeleteGap {
             gap_start,
             gap_len,
             shifted: Vec::new(),
+            markers_before: Vec::new(),
         }
     }
 }
@@ -564,6 +570,18 @@ impl Command for RippleDeleteGap {
             resort(track);
         }
         self.shifted = shifted;
+        self.markers_before = tl.markers.clone();
+        // A marker inside the closed gap lands on its start instead of
+        // vanishing with the removed material.
+        let gap_end = self.gap_start + self.gap_len;
+        for marker in &mut tl.markers {
+            if marker.start >= gap_end {
+                marker.start -= self.gap_len;
+            } else if marker.start >= self.gap_start {
+                marker.start = self.gap_start;
+            }
+        }
+        tl.markers.sort_by_key(|m| m.start);
     }
 
     fn undo(&self, project: &mut Project) {
@@ -576,6 +594,78 @@ impl Command for RippleDeleteGap {
         for track in &mut tl.tracks {
             resort(track);
         }
+        tl.markers = self.markers_before.clone();
+    }
+}
+
+/// Adds, replaces or removes (`marker: None`) the marker `id`.
+#[derive(Debug)]
+pub struct SetMarker {
+    pub timeline: TimelineId,
+    pub id: MarkerId,
+    pub marker: Option<Marker>,
+    label: CommandLabel,
+    old: Option<Marker>,
+}
+
+impl SetMarker {
+    pub fn add(timeline: TimelineId, marker: Marker) -> Self {
+        Self::new(timeline, marker.id, Some(marker), CommandLabel::AddMarker)
+    }
+
+    pub fn edit(timeline: TimelineId, marker: Marker) -> Self {
+        Self::new(timeline, marker.id, Some(marker), CommandLabel::EditMarker)
+    }
+
+    pub fn moved(timeline: TimelineId, marker: Marker) -> Self {
+        Self::new(timeline, marker.id, Some(marker), CommandLabel::MoveMarker)
+    }
+
+    pub fn remove(timeline: TimelineId, id: MarkerId) -> Self {
+        Self::new(timeline, id, None, CommandLabel::DeleteMarker)
+    }
+
+    fn new(
+        timeline: TimelineId,
+        id: MarkerId,
+        marker: Option<Marker>,
+        label: CommandLabel,
+    ) -> Self {
+        Self {
+            timeline,
+            id,
+            marker,
+            label,
+            old: None,
+        }
+    }
+
+    fn put(markers: &mut Vec<Marker>, id: MarkerId, marker: Option<&Marker>) -> Option<Marker> {
+        let old = markers
+            .iter()
+            .position(|m| m.id == id)
+            .map(|i| markers.remove(i));
+        if let Some(marker) = marker {
+            markers.push(marker.clone());
+            markers.sort_by_key(|m| m.start);
+        }
+        old
+    }
+}
+
+impl Command for SetMarker {
+    fn label(&self) -> CommandLabel {
+        self.label
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let markers = &mut project.timelines[self.timeline].markers;
+        self.old = Self::put(markers, self.id, self.marker.as_ref());
+    }
+
+    fn undo(&self, project: &mut Project) {
+        let markers = &mut project.timelines[self.timeline].markers;
+        Self::put(markers, self.id, self.old.as_ref());
     }
 }
 
@@ -2576,6 +2666,7 @@ pub fn plan_compound_clip(
             fps: timeline.fps,
             resolution: timeline.resolution,
             tracks: nested_tracks,
+            markers: Vec::new(),
         },
         range_start,
         len: range_end - range_start,

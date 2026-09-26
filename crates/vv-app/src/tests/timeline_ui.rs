@@ -723,14 +723,24 @@ fn test_layout(slack: f32) -> PaneLayout {
 #[test]
 fn track_drag_target_above_video_group_is_new_track_when_margin_exists() {
     let row_order = [1, 0, 2]; // 2 video tracks (descending), 1 audio
-    let target = track_drag_target(40.0, TrackKind::Video, &row_order, &test_layout(50.0));
+    let target = track_drag_target(
+        RULER_HEIGHT + 20.0,
+        TrackKind::Video,
+        &row_order,
+        &test_layout(50.0),
+    );
     assert!(matches!(target, Some(TrackDragTarget::NewTrack)));
 }
 
 #[test]
 fn track_drag_target_above_video_group_without_margin_is_the_top_track() {
     let row_order = [1, 0, 2];
-    let target = track_drag_target(15.0, TrackKind::Video, &row_order, &test_layout(0.0));
+    let target = track_drag_target(
+        RULER_HEIGHT - 5.0,
+        TrackKind::Video,
+        &row_order,
+        &test_layout(0.0),
+    );
     assert!(matches!(target, Some(TrackDragTarget::Track(1))));
 }
 
@@ -738,16 +748,21 @@ fn track_drag_target_above_video_group_without_margin_is_the_top_track() {
 fn track_drag_target_lands_on_the_right_video_row() {
     let row_order = [1, 0, 2];
     let layout = test_layout(50.0);
-    let first_row = track_drag_target(80.0, TrackKind::Video, &row_order, &layout);
+    let first_row = track_drag_target(RULER_HEIGHT + 60.0, TrackKind::Video, &row_order, &layout);
     assert!(matches!(first_row, Some(TrackDragTarget::Track(1))));
-    let second_row = track_drag_target(120.0, TrackKind::Video, &row_order, &layout);
+    let second_row = track_drag_target(RULER_HEIGHT + 100.0, TrackKind::Video, &row_order, &layout);
     assert!(matches!(second_row, Some(TrackDragTarget::Track(0))));
 }
 
 #[test]
 fn track_drag_target_video_over_audio_group_is_none() {
     let row_order = [1, 0, 2];
-    let target = track_drag_target(170.0, TrackKind::Video, &row_order, &test_layout(50.0));
+    let target = track_drag_target(
+        RULER_HEIGHT + 150.0,
+        TrackKind::Video,
+        &row_order,
+        &test_layout(50.0),
+    );
     assert!(target.is_none());
 }
 
@@ -789,14 +804,24 @@ fn media_pool_drop_target_over_a_locked_track_refuses_the_drop() {
 #[test]
 fn track_drag_target_below_audio_group_is_new_track_when_margin_exists() {
     let row_order = [1, 0, 2];
-    let target = track_drag_target(200.0, TrackKind::Audio, &row_order, &test_layout(50.0));
+    let target = track_drag_target(
+        RULER_HEIGHT + 180.0,
+        TrackKind::Audio,
+        &row_order,
+        &test_layout(50.0),
+    );
     assert!(matches!(target, Some(TrackDragTarget::NewTrack)));
 }
 
 #[test]
 fn track_drag_target_below_audio_group_without_margin_is_the_bottom_track() {
     let row_order = [1, 0, 2];
-    let target = track_drag_target(200.0, TrackKind::Audio, &row_order, &test_layout(0.0));
+    let target = track_drag_target(
+        RULER_HEIGHT + 180.0,
+        TrackKind::Audio,
+        &row_order,
+        &test_layout(0.0),
+    );
     assert!(matches!(target, Some(TrackDragTarget::Track(2))));
 }
 
@@ -1358,6 +1383,7 @@ fn duplicate_clips_keeps_the_originals_relinks_the_copies_and_cuts_what_they_cov
             vv_core::Track::new(TrackKind::Video),
             vv_core::Track::new(TrackKind::Audio),
         ],
+        markers: Vec::new(),
     });
     let mut history = History::default();
     let solid = |id, start, len| {
@@ -1445,6 +1471,7 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+        markers: Vec::new(),
     });
     let mut history = History::default();
     let solid = |id, start, len| {
@@ -1553,6 +1580,7 @@ fn show_timeline_renders_without_panicking_with_real_clips() {
             vv_core::Track::new(TrackKind::Video),
             vv_core::Track::new(TrackKind::Audio),
         ],
+        markers: Vec::new(),
     });
     let mut history = History::default();
 
@@ -1622,6 +1650,7 @@ fn show_timeline_renders_without_panicking_with_more_than_two_tracks() {
             vv_core::Track::new(TrackKind::Video),
             vv_core::Track::new(TrackKind::Audio),
         ],
+        markers: Vec::new(),
     });
     let mut history = History::default();
     let mut state = TimelineState::default();
@@ -1666,6 +1695,7 @@ fn zoom_keeps_playhead_at_same_screen_position() {
             vv_core::Track::new(TrackKind::Video),
             vv_core::Track::new(TrackKind::Audio),
         ],
+        markers: Vec::new(),
     });
     let mut history = History::default();
     // Clip long enough to make the timeline scrollable (content
@@ -1790,6 +1820,7 @@ fn show_timeline_panel_does_not_shrink_to_short_content() {
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: vec![vv_core::Track::new(TrackKind::Video)],
+        markers: Vec::new(),
     });
     let mut history = History::default();
     let clip = Clip::from_source_range(

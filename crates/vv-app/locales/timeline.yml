@@ -147,3 +147,31 @@ speed.ripple_hint:
 speed.apply:
   en: "Apply"
   it: "Applica"
+
+timeline.add_marker:
+  en: "Add marker"
+  it: "Aggiungi marker"
+
+timeline.marker:
+  en: "Marker"
+  it: "Marker"
+
+timeline.edit_marker:
+  en: "Edit marker…"
+  it: "Modifica marker…"
+
+timeline.delete_marker:
+  en: "Delete"
+  it: "Elimina"
+
+timeline.marker_save:
+  en: "Save"
+  it: "Salva"
+
+timeline.marker_note_hint:
+  en: "Note"
+  it: "Nota"
+
+timeline.marker_editor_hint:
+  en: "Ctrl+click or Ctrl+Enter: save and close"
+  it: "Ctrl+clic o Ctrl+Invio: salva e chiudi"

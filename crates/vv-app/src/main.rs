@@ -608,6 +608,7 @@ impl VenturiApp {
             fps: meta.fps,
             resolution: (meta.width, meta.height),
             tracks: vec![track],
+            markers: Vec::new(),
         });
         let render_ahead = render_ahead::RenderAhead::spawn(
             project,
@@ -1167,6 +1168,7 @@ impl VenturiApp {
             fps,
             resolution,
             tracks,
+            markers: Vec::new(),
         });
         self.timeline_id = Some(id);
         self.spawn_render_ahead_if_needed(id);
@@ -1209,6 +1211,7 @@ impl VenturiApp {
             fps,
             resolution,
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
+            markers: Vec::new(),
         });
         let media_id = self.project.media_pool.insert(vv_core::MediaItem {
             path: name.into(),
@@ -2703,6 +2706,17 @@ impl VenturiApp {
     /// Cuts at the playhead the selected clips covering it or, without a
     /// selection, all of them. The right halves of a linked group get
     /// relinked to each other.
+    fn add_marker_at_playhead(&mut self) {
+        if let Some(timeline_id) = self.timeline_id {
+            timeline_ui::add_marker_at_playhead(
+                &mut self.project,
+                &mut self.history,
+                timeline_id,
+                self.timeline_state.playhead,
+            );
+        }
+    }
+
     fn split_at_playhead(&mut self) {
         let Some(timeline_id) = self.timeline_id else {
             return;

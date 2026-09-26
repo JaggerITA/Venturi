@@ -8,6 +8,7 @@ fn setup(kinds: &[TrackKind]) -> (Project, TimelineId, MediaId) {
         fps: Rational::new(25, 1),
         resolution: (1920, 1080),
         tracks: kinds.iter().map(|k| Track::new(*k)).collect(),
+        markers: Vec::new(),
     });
     let media = project.media_pool.insert(MediaItem {
         path: "a.mp4".into(),
