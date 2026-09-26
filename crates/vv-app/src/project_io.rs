@@ -1055,10 +1055,14 @@ impl VenturiApp {
                 continue;
             };
             let content_hash = vv_media::content_fingerprint(&found).unwrap_or(0);
-            commands.push(
-                Box::new(vv_core::SetMediaPath::new(media_id, found, content_hash))
-                    as Box<dyn vv_core::Command>,
-            );
+            // An offline media imported from OTIO only has a guessed meta.
+            let meta = vv_media::probe_media(&found).ok();
+            commands.push(Box::new(vv_core::SetMediaPath::new(
+                media_id,
+                found,
+                content_hash,
+                meta,
+            )) as Box<dyn vv_core::Command>);
             relinked_ids.push(media_id);
         }
         self.relink_message = Some(if commands.is_empty() {
@@ -1112,7 +1116,7 @@ fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
         W::TransitionIgnored => t!("otio.transition_ignored"),
         W::UnsupportedItem { schema } => t!("otio.unsupported_item", schema = schema),
         W::ClipWithoutDuration { clip } => t!("otio.clip_without_duration", clip = clip),
-        W::ClipDisabled { clip } => t!("otio.clip_disabled", clip = clip),
+        W::Placeholder { clip } => t!("otio.placeholder", clip = clip),
         W::ClipShorterThanAFrame { clip } => t!("otio.clip_too_short", clip = clip),
         W::AudioOnlyOnVideoTrack { clip } => t!("otio.audio_only_on_video_track", clip = clip),
         W::UnsupportedReference { clip, schema } => {

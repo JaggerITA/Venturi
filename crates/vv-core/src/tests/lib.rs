@@ -91,6 +91,7 @@ fn set_media_path_relinks_and_undo_restores_the_old_path() {
             media,
             "/other/workstation/clip.mp4".into(),
             42,
+            None,
         )),
     );
     assert_eq!(
@@ -102,6 +103,43 @@ fn set_media_path_relinks_and_undo_restores_the_old_path() {
     history.undo(&mut project);
     assert_eq!(project.media_pool[media].path, old_path);
     assert_eq!(project.media_pool[media].content_hash, 7);
+}
+
+/// Relinking an offline media probes the real file: its fps changes the
+/// conform rate of the clips, undo brings both back.
+#[test]
+fn set_media_path_with_meta_updates_the_clip_rates() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let media = insert_media(&mut project);
+    let old_meta = project.media_pool[media].meta.clone();
+    let tl_fps = project.timelines[timeline].fps;
+    let old_rate = Rational::conform_rate(tl_fps, old_meta.fps);
+    let clip_id = project.alloc_clip_id();
+    let clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 10, 0, old_rate);
+    project.timelines[timeline].tracks[0].clips.push(clip);
+    let new_meta = MediaMeta {
+        fps: Rational::new(old_meta.fps.num * 2, old_meta.fps.den),
+        ..old_meta.clone()
+    };
+
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMediaPath::new(
+            media,
+            "/found/clip.mp4".into(),
+            1,
+            Some(new_meta.clone()),
+        )),
+    );
+    let rate = |project: &Project| project.timelines[timeline].clip(0, clip_id).unwrap().rate;
+    assert_eq!(project.media_pool[media].meta.fps, new_meta.fps);
+    assert_eq!(rate(&project), Rational::conform_rate(tl_fps, new_meta.fps));
+    assert_ne!(rate(&project), old_rate);
+
+    history.undo(&mut project);
+    assert_eq!(project.media_pool[media].meta.fps, old_meta.fps);
+    assert_eq!(rate(&project), old_rate);
 }
 
 #[test]

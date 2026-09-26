@@ -124,9 +124,9 @@ otio.clip_without_duration:
   en: "clip \"%{clip}\" has no duration: ignored"
   it: "clip \"%{clip}\" senza durata: ignorata"
 
-otio.clip_disabled:
-  en: "clip \"%{clip}\" is disabled: ignored"
-  it: "clip \"%{clip}\" disattivata: ignorata"
+otio.placeholder:
+  en: "clip \"%{clip}\": content not in the file, a disabled placeholder title takes its place"
+  it: "clip \"%{clip}\": contenuto assente nel file, al suo posto un titolo segnaposto disattivato"
 
 otio.clip_too_short:
   en: "clip \"%{clip}\" is shorter than a frame: ignored"
@@ -145,8 +145,8 @@ otio.unsupported_url:
   it: "%{url}: indirizzo non supportato"
 
 otio.media_unreadable:
-  en: "%{path}: %{error}"
-  it: "%{path}: %{error}"
+  en: "%{path}: %{error} — imported offline, use Relink media"
+  it: "%{path}: %{error} — importato offline, usa Ricollega media"
 
 project.untitled:
   en: "Untitled project"
