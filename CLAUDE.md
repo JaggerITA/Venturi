@@ -31,25 +31,3 @@ Unit tests do NOT go inline in the source file: they live in
 `#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;`. Never add an inline
 `mod tests { … }`. Details in the "Where unit tests live" section of
 `README.md`.
-
-## Task management (Vikunja)
-
-This project's task list is kept on Vikunja. When a feature is completed:
-
-1. Create the commit for the feature.
-2. Mark the corresponding task as done on Vikunja.
-3. Leave a comment on the completed task with the short hash of the related
-   git commit (e.g. `849a7f8`).
-
-## Build
-
-When a build is requested, copy the freshly compiled version to
-`~/Nextcloud/Share/Venturi-builds` with architecture and timestamp as the
-name suffix.
-
-E.g.:
-```
-export TIMESTAMP=$(date +%s)
-cp target/appimage/Venturi-x86_64.AppImage ~/Nextcloud/Share/Venturi-builds/vv-app-$(uname -m)-${TIMESTAMP}.AppImage
-cp target/release/vv-app ~/Nextcloud/Share/Venturi-builds/vv-app-$(uname -m)-${TIMESTAMP}
-```

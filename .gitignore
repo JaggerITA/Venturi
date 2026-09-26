@@ -3,3 +3,4 @@
 .venturi/waveforms/
 *.vvproj.bak
 /container/shots/
+/CLAUDE.local.md
