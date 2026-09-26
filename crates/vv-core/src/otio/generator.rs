@@ -7,63 +7,118 @@
 //! are ours in timeline pixels become fractions of the frame.
 
 use super::MeasureTitle;
-use crate::model::{
-    HAnchor, Rgba, TextAlign, TitleBackground, TitleParams, TitleShadow, VAnchor,
-};
+use crate::model::{HAnchor, Rgba, TextAlign, TitleBackground, TitleParams, TitleShadow, VAnchor};
 use serde_json::{Value, json};
 
 pub(super) fn solid_color(color: Rgba) -> Value {
-    reference("Solid Color", "Solid Color", json!([block(
+    reference(
         "Solid Color",
-        "Generator",
-        5,
-        0,
-        true,
-        json!([
-            parameter("Display Name", json!(""), json!(""), "String"),
-            parameter("color", hex(color), json!("#000000"), "Color"),
-        ]),
-    )]))
+        "Solid Color",
+        json!([block(
+            "Solid Color",
+            "Generator",
+            5,
+            0,
+            true,
+            json!([
+                parameter("Display Name", json!(""), json!(""), "String"),
+                parameter("color", hex(color), json!("#000000"), "Color"),
+            ]),
+        )]),
+    )
 }
 
 pub(super) fn text(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTitle>) -> Value {
-    reference("Text", "Rich", json!([
-        rich_text(title, frame),
-        drop_shadow(&title.shadow, frame),
-        stroke(),
-        background(title, frame, measure),
-    ]))
+    reference(
+        "Text",
+        "Rich",
+        json!([
+            rich_text(title, frame),
+            drop_shadow(&title.shadow, frame),
+            stroke(),
+            background(title, frame, measure),
+        ]),
+    )
 }
 
 fn rich_text(title: &TitleParams, frame: (f32, f32)) -> Value {
-    block("Rich Text", "Rich Text", 24, 0, true, json!([
-        parameter("rich text", json!(title.content), json!("Title"), "String"),
-        json!({ "Parameter ID": "title blob", "Title HTML": html(title) }),
-        parameter("anchor", json!(anchor_index(title.anchor)), json!(4), "UInt"),
-        point("position", centred(title.position, frame), json!([0.5, 0.5])),
-        animatable("transformationZoomX", json!(1.0), json!(1.0), [0.25, 4.0]),
-        animatable("transformationZoomY", json!(1.0), json!(1.0), [0.25, 4.0]),
-        parameter("transformationZoomLink", json!(true), json!(true), "Bool"),
-        animatable("transformationRotationAngle", json!(0.0), json!(0.0), [-100_000.0, 100_000.0]),
-    ]))
+    block(
+        "Rich Text",
+        "Rich Text",
+        24,
+        0,
+        true,
+        json!([
+            parameter("rich text", json!(title.content), json!("Title"), "String"),
+            json!({ "Parameter ID": "title blob", "Title HTML": html(title) }),
+            parameter(
+                "anchor",
+                json!(anchor_index(title.anchor)),
+                json!(4),
+                "UInt"
+            ),
+            point(
+                "position",
+                centred(title.position, frame),
+                json!([0.5, 0.5])
+            ),
+            animatable("transformationZoomX", json!(1.0), json!(1.0), [0.25, 4.0]),
+            animatable("transformationZoomY", json!(1.0), json!(1.0), [0.25, 4.0]),
+            parameter("transformationZoomLink", json!(true), json!(true), "Bool"),
+            animatable(
+                "transformationRotationAngle",
+                json!(0.0),
+                json!(0.0),
+                [-100_000.0, 100_000.0]
+            ),
+        ]),
+    )
 }
 
 fn drop_shadow(shadow: &TitleShadow, frame: (f32, f32)) -> Value {
-    block("Drop Shadow", "Drop Shadow", 8, 1, shadow.enabled, json!([
-        parameter("shadow color", hex(shadow.color), json!("#000000"), "Color"),
-        point("shadow offset", fraction(shadow.offset, frame), json!([0.0, 0.0])),
-        animatable("shadow", json!(shadow.blur.round() as i64), json!(20), [1.0, 100.0]),
-        animatable("shadow opacity", json!(shadow.opacity.round() as i64), json!(75), [0.0, 100.0]),
-    ]))
+    block(
+        "Drop Shadow",
+        "Drop Shadow",
+        8,
+        1,
+        shadow.enabled,
+        json!([
+            parameter("shadow color", hex(shadow.color), json!("#000000"), "Color"),
+            point(
+                "shadow offset",
+                fraction(shadow.offset, frame),
+                json!([0.0, 0.0])
+            ),
+            animatable(
+                "shadow",
+                json!(shadow.blur.round() as i64),
+                json!(20),
+                [1.0, 100.0]
+            ),
+            animatable(
+                "shadow opacity",
+                json!(shadow.opacity.round() as i64),
+                json!(75),
+                [0.0, 100.0]
+            ),
+        ]),
+    )
 }
 
 /// We have no stroke: the block exists only because Resolve writes it.
 fn stroke() -> Value {
-    block("Stroke", "Stroke", 28, 1, true, json!([
-        parameter("strokeColor", json!("#ffffff"), json!("#ffffff"), "Color"),
-        animatable_no_keyframes("strokeSize", json!(0), json!(1), [0.0, 16.0]),
-        parameter("strokeOutsideOnly", json!(false), json!(false), "Bool"),
-    ]))
+    block(
+        "Stroke",
+        "Stroke",
+        28,
+        1,
+        true,
+        json!([
+            parameter("strokeColor", json!("#ffffff"), json!("#ffffff"), "Color"),
+            animatable_no_keyframes("strokeSize", json!(0), json!(1), [0.0, 16.0]),
+            parameter("strokeOutsideOnly", json!(false), json!(false), "Bool"),
+        ]),
+    )
 }
 
 /// A width or a height of 0 means "around the text" for us and literally
@@ -73,26 +128,62 @@ fn background(title: &TitleParams, frame: (f32, f32), measure: Option<MeasureTit
     // The rectangle Resolve will draw, in timeline pixels: what the radius
     // and the two fractions both have to agree on.
     let box_size = rectangle(title, frame, measure);
-    block("Background", "Background", 27, 1, background.enabled, json!([
-        parameter("backgroundColor", hex(background.color), json!("#000000"), "Color"),
-        parameter("backgroundOutlineColor", hex(background.outline_color), json!("#000000"), "Color"),
-        animatable(
-            "backgroundOutlineWidth",
-            json!(background.outline_width.round() as i64),
-            json!(0),
-            [0.0, 30.0],
-        ),
-        animatable("backgroundWidth", json!(box_size.0 / frame.0), json!(0.9), [0.0, 2.0]),
-        animatable("backgroundHeight", json!(box_size.1 / frame.1), json!(0.0), [0.0, 2.0]),
-        animatable(
-            "backgroundCornerRadius",
-            json!(corner_radius(background.corner_radius, box_size, frame.1)),
-            json!(0.037_037_037_037_037_035),
-            [0.0, 1.0],
-        ),
-        point("backgroundCenter", fraction(background.center, frame), json!([0.0, 0.0])),
-        animatable("backgroundOpacity", json!(background.opacity.round() as i64), json!(50), [0.0, 100.0]),
-    ]))
+    block(
+        "Background",
+        "Background",
+        27,
+        1,
+        background.enabled,
+        json!([
+            parameter(
+                "backgroundColor",
+                hex(background.color),
+                json!("#000000"),
+                "Color"
+            ),
+            parameter(
+                "backgroundOutlineColor",
+                hex(background.outline_color),
+                json!("#000000"),
+                "Color"
+            ),
+            animatable(
+                "backgroundOutlineWidth",
+                json!(background.outline_width.round() as i64),
+                json!(0),
+                [0.0, 30.0],
+            ),
+            animatable(
+                "backgroundWidth",
+                json!(box_size.0 / frame.0),
+                json!(0.9),
+                [0.0, 2.0]
+            ),
+            animatable(
+                "backgroundHeight",
+                json!(box_size.1 / frame.1),
+                json!(0.0),
+                [0.0, 2.0]
+            ),
+            animatable(
+                "backgroundCornerRadius",
+                json!(corner_radius(background.corner_radius, box_size, frame.1)),
+                json!(0.037_037_037_037_037_035),
+                [0.0, 1.0],
+            ),
+            point(
+                "backgroundCenter",
+                fraction(background.center, frame),
+                json!([0.0, 0.0])
+            ),
+            animatable(
+                "backgroundOpacity",
+                json!(background.opacity.round() as i64),
+                json!(50),
+                [0.0, 100.0]
+            ),
+        ]),
+    )
 }
 
 /// Resolve shapes the same line wider than we do, so a background left to
@@ -129,11 +220,7 @@ fn corner_radius(radius: f32, box_size: (f32, f32), frame_height: f32) -> f32 {
 
 /// Back from the frame to the rectangle, for a title that comes from
 /// Resolve.
-fn corner_radius_from_resolve(
-    radius: f32,
-    box_size: (f32, f32),
-    frame_height: f32,
-) -> f32 {
+fn corner_radius_from_resolve(radius: f32, box_size: (f32, f32), frame_height: f32) -> f32 {
     let shorter = box_size.0.min(box_size.1);
     match shorter > 0.0 {
         true => (radius * frame_height / shorter).clamp(0.0, 0.5),
@@ -193,7 +280,10 @@ fn animatable(id: &str, value: Value, default: Value, range: [f64; 2]) -> Value 
 /// keyframe.
 fn animatable_no_keyframes(id: &str, value: Value, default: Value, range: [f64; 2]) -> Value {
     let mut parameter = animatable(id, value, default, range);
-    parameter.as_object_mut().expect("object").remove("Key Frames");
+    parameter
+        .as_object_mut()
+        .expect("object")
+        .remove("Key Frames");
     parameter
 }
 
@@ -216,7 +306,12 @@ fn fraction(offset: [f32; 2], frame: (f32, f32)) -> [f32; 2] {
 
 fn hex(color: Rgba) -> Value {
     let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    json!(format!("#{:02x}{:02x}{:02x}", channel(color.r), channel(color.g), channel(color.b)))
+    json!(format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(color.r),
+        channel(color.g),
+        channel(color.b)
+    ))
 }
 
 /// Row by row from the top left, so the centre falls on Resolve's default 4.
@@ -296,7 +391,9 @@ fn display_lines(title: &TitleParams) -> impl Iterator<Item = String> {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The colour of a `Solid Color`, or `None` if the block is not there.
@@ -352,10 +449,7 @@ fn read_rich_text(block: &Value, title: &mut TitleParams, frame: (f32, f32)) {
         title.anchor = read_anchor(index);
     }
     if let Some(position) = value_of(block, "position").and_then(read_point) {
-        title.position = [
-            (position[0] - 0.5) * frame.0,
-            (position[1] - 0.5) * frame.1,
-        ];
+        title.position = [(position[0] - 0.5) * frame.0, (position[1] - 0.5) * frame.1];
     }
 }
 
@@ -375,7 +469,11 @@ fn read_shadow(block: &Value, shadow: &mut TitleShadow, frame: (f32, f32)) {
 }
 
 fn read_background(block: &Value, background: &mut TitleBackground, frame: (f32, f32)) {
-    let number = |id: &str| value_of(block, id).and_then(|v| v.as_f64()).map(|v| v as f32);
+    let number = |id: &str| {
+        value_of(block, id)
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+    };
     if let Some(color) = value_of(block, "backgroundColor").and_then(|v| read_hex(&v)) {
         background.color = color;
     }
@@ -426,9 +524,16 @@ fn read_point(value: Value) -> Option<[f32; 2]> {
 fn read_hex(value: &Value) -> Option<Rgba> {
     let text = value.as_str()?.strip_prefix('#')?;
     let channel = |i: usize| {
-        u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok().map(|v| v as f32 / 255.0)
+        u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16)
+            .ok()
+            .map(|v| v as f32 / 255.0)
     };
-    Some(Rgba { r: channel(0)?, g: channel(1)?, b: channel(2)?, a: 1.0 })
+    Some(Rgba {
+        r: channel(0)?,
+        g: channel(1)?,
+        b: channel(2)?,
+        a: 1.0,
+    })
 }
 
 fn read_anchor(index: u64) -> (HAnchor, VAnchor) {
@@ -456,7 +561,9 @@ fn read_html(html: &str, title: &mut TitleParams) {
             let start = p.find("<span")?;
             let text = &p[start..];
             let text = &text[text.find('>')? + 1..];
-            Some(unescape(&text[..text.find("</span>").unwrap_or(text.len())]))
+            Some(unescape(
+                &text[..text.find("</span>").unwrap_or(text.len())],
+            ))
         })
         .collect();
     if !lines.is_empty() {
@@ -480,7 +587,8 @@ fn read_html(html: &str, title: &mut TitleParams) {
     if let Some(family) = css(style, "font-family") {
         title.font_family = family.trim_matches('\'').to_owned();
     }
-    if let Some(size) = css(style, "font-size").and_then(|v| v.trim_end_matches("pt").parse().ok()) {
+    if let Some(size) = css(style, "font-size").and_then(|v| v.trim_end_matches("pt").parse().ok())
+    {
         title.size = size;
     }
     if let Some(weight) = css(style, "font-weight").and_then(|v| v.parse().ok()) {
@@ -489,8 +597,8 @@ fn read_html(html: &str, title: &mut TitleParams) {
     if let Some(color) = css(style, "color").and_then(|v| read_hex(&json!(v))) {
         title.color = color;
     }
-    if let Some(spacing) = css(style, "letter-spacing")
-        .and_then(|v| v.trim_end_matches("em").parse::<f32>().ok())
+    if let Some(spacing) =
+        css(style, "letter-spacing").and_then(|v| v.trim_end_matches("em").parse::<f32>().ok())
     {
         title.tracking = spacing * 1000.0;
     }
@@ -518,5 +626,7 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<String> {
 }
 
 fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }

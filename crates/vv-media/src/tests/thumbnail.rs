@@ -23,7 +23,10 @@ fn generate_thumbnail_scales_down_preserving_aspect_ratio() {
     assert_eq!((thumb.width, thumb.height), (96, 54));
     assert_eq!(thumb.rgba.len(), 96 * 54 * 4);
     let center = &thumb.rgba[(27 * 96 + 48) * 4..][..3];
-    assert!(center[0] > 200 && center[1] < 60 && center[2] < 60, "{center:?}");
+    assert!(
+        center[0] > 200 && center[1] < 60 && center[2] < 60,
+        "{center:?}"
+    );
 }
 
 /// A still image passes the `duration_frames`/`fps` sentinel (see
@@ -53,5 +56,8 @@ fn generate_thumbnail_works_on_a_still_image_despite_the_sentinel_duration() {
     let thumb = generate_thumbnail(&path, sentinel_secs, 96).unwrap();
     assert_eq!((thumb.width, thumb.height), (96, 54));
     let center = &thumb.rgba[(27 * 96 + 48) * 4..][..3];
-    assert!(center[0] > 200 && center[1] < 60 && center[2] < 60, "{center:?}");
+    assert!(
+        center[0] > 200 && center[1] < 60 && center[2] < 60,
+        "{center:?}"
+    );
 }

@@ -93,7 +93,10 @@ fn set_media_path_relinks_and_undo_restores_the_old_path() {
             42,
         )),
     );
-    assert_eq!(project.media_pool[media].path, std::path::PathBuf::from("/other/workstation/clip.mp4"));
+    assert_eq!(
+        project.media_pool[media].path,
+        std::path::PathBuf::from("/other/workstation/clip.mp4")
+    );
     assert_eq!(project.media_pool[media].content_hash, 42);
 
     history.undo(&mut project);
@@ -129,7 +132,12 @@ fn go_to_jumps_back_and_forth_through_the_history() {
     }
     history.do_command(
         &mut project,
-        Box::new(command::SetTrackFlag::new(timeline, 0, TrackFlag::Muted, true)),
+        Box::new(command::SetTrackFlag::new(
+            timeline,
+            0,
+            TrackFlag::Muted,
+            true,
+        )),
     );
 
     history.go_to(&mut project, 1);
@@ -160,10 +168,18 @@ fn group_takes_the_explicit_label_over_its_first_command() {
     );
     history.do_command(
         &mut project,
-        Box::new(command::SetTrackFlag::new(timeline, 2, TrackFlag::Locked, true)),
+        Box::new(command::SetTrackFlag::new(
+            timeline,
+            2,
+            TrackFlag::Locked,
+            true,
+        )),
     );
     history.end_group_as(mark, CommandLabel::InsertClips);
-    assert_eq!(history.labels().collect::<Vec<_>>(), [CommandLabel::InsertClips]);
+    assert_eq!(
+        history.labels().collect::<Vec<_>>(),
+        [CommandLabel::InsertClips]
+    );
 }
 
 #[test]
@@ -363,21 +379,51 @@ fn splitting_either_side_of_a_crossing_removes_it_and_undo_restores_it() {
         let a_id = a.id;
         let b = make_clip(&mut project, 20, 20);
         let b_id = b.id;
-        history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: a }));
-        history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: b }));
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: a,
+            }),
+        );
+        history.do_command(
+            &mut project,
+            Box::new(command::InsertClip {
+                timeline,
+                track_index: 0,
+                clip: b,
+            }),
+        );
         history.do_command(
             &mut project,
             Box::new(command::SetCrossTransition::new(
                 timeline,
                 0,
                 a_id,
-                Some(CrossTransition { left_clip: a_id, right_clip: b_id, transition: make_transition() }),
+                Some(CrossTransition {
+                    left_clip: a_id,
+                    right_clip: b_id,
+                    transition: make_transition(),
+                }),
             )),
         );
         assert_eq!(project.timelines[timeline].tracks[0].crossings.len(), 1);
 
-        let (split_clip_id, split_at) = if split_the_right_clip { (b_id, 28) } else { (a_id, 8) };
-        history.do_command(&mut project, Box::new(command::SplitClip::new(timeline, 0, split_clip_id, split_at)));
+        let (split_clip_id, split_at) = if split_the_right_clip {
+            (b_id, 28)
+        } else {
+            (a_id, 8)
+        };
+        history.do_command(
+            &mut project,
+            Box::new(command::SplitClip::new(
+                timeline,
+                0,
+                split_clip_id,
+                split_at,
+            )),
+        );
 
         assert!(
             project.timelines[timeline].tracks[0].crossings.is_empty(),
@@ -387,7 +433,11 @@ fn splitting_either_side_of_a_crossing_removes_it_and_undo_restores_it() {
         history.undo(&mut project);
         assert_eq!(
             project.timelines[timeline].tracks[0].crossings,
-            vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition: make_transition() }],
+            vec![CrossTransition {
+                left_clip: a_id,
+                right_clip: b_id,
+                transition: make_transition()
+            }],
             "split_the_right_clip={split_the_right_clip}: undoing the split must bring the crossing back"
         );
     }
@@ -402,8 +452,22 @@ fn deleting_a_clip_removes_its_crossings_and_undo_restores_them() {
     let a_id = a.id;
     let b = make_clip(&mut project, 20, 20);
     let b_id = b.id;
-    history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: a }));
-    history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: b }));
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: a,
+        }),
+    );
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: b,
+        }),
+    );
     let transition = Transition {
         kind: TransitionKind::Push,
         duration: 4,
@@ -417,12 +481,19 @@ fn deleting_a_clip_removes_its_crossings_and_undo_restores_them() {
             timeline,
             0,
             a_id,
-            Some(CrossTransition { left_clip: a_id, right_clip: b_id, transition: transition.clone() }),
+            Some(CrossTransition {
+                left_clip: a_id,
+                right_clip: b_id,
+                transition: transition.clone(),
+            }),
         )),
     );
     assert_eq!(project.timelines[timeline].tracks[0].crossings.len(), 1);
 
-    history.do_command(&mut project, Box::new(command::LiftDelete::new(timeline, 0, a_id)));
+    history.do_command(
+        &mut project,
+        Box::new(command::LiftDelete::new(timeline, 0, a_id)),
+    );
     assert!(
         project.timelines[timeline].tracks[0].crossings.is_empty(),
         "deleting a_id must remove the crossing, not leave it pointing at a nonexistent ClipId"
@@ -432,7 +503,11 @@ fn deleting_a_clip_removes_its_crossings_and_undo_restores_them() {
     assert_eq!(project.timelines[timeline].tracks[0].clips.len(), 2);
     assert_eq!(
         project.timelines[timeline].tracks[0].crossings,
-        vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition }],
+        vec![CrossTransition {
+            left_clip: a_id,
+            right_clip: b_id,
+            transition
+        }],
     );
 }
 
@@ -451,8 +526,22 @@ fn moving_a_clip_to_another_track_removes_its_crossings_and_undo_restores_them()
     let a_id = a.id;
     let b = make_clip(&mut project, 20, 20);
     let b_id = b.id;
-    history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: a }));
-    history.do_command(&mut project, Box::new(command::InsertClip { timeline, track_index: 0, clip: b }));
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: a,
+        }),
+    );
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: b,
+        }),
+    );
     let transition = Transition {
         kind: TransitionKind::Push,
         duration: 4,
@@ -466,11 +555,18 @@ fn moving_a_clip_to_another_track_removes_its_crossings_and_undo_restores_them()
             timeline,
             0,
             a_id,
-            Some(CrossTransition { left_clip: a_id, right_clip: b_id, transition: transition.clone() }),
+            Some(CrossTransition {
+                left_clip: a_id,
+                right_clip: b_id,
+                transition: transition.clone(),
+            }),
         )),
     );
 
-    history.do_command(&mut project, Box::new(command::MoveClips::new(timeline, vec![(a_id, 0, 1, 0)])));
+    history.do_command(
+        &mut project,
+        Box::new(command::MoveClips::new(timeline, vec![(a_id, 0, 1, 0)])),
+    );
     assert!(
         project.timelines[timeline].tracks[0].crossings.is_empty(),
         "moving a_id to another track must remove the crossing from the source track"
@@ -479,11 +575,18 @@ fn moving_a_clip_to_another_track_removes_its_crossings_and_undo_restores_them()
     history.undo(&mut project);
     assert_eq!(
         project.timelines[timeline].tracks[0].crossings,
-        vec![CrossTransition { left_clip: a_id, right_clip: b_id, transition }],
+        vec![CrossTransition {
+            left_clip: a_id,
+            right_clip: b_id,
+            transition
+        }],
     );
 }
 
-fn split_clip_with_gain_keyframes(keyframes: &[(FrameIdx, f32)], split_at: FrameIdx) -> (Project, History, TimelineId) {
+fn split_clip_with_gain_keyframes(
+    keyframes: &[(FrameIdx, f32)],
+    split_at: FrameIdx,
+) -> (Project, History, TimelineId) {
     let (mut project, timeline) = make_project_with_two_tracks();
     let mut history = History::default();
     let mut a = make_clip(&mut project, 0, 20);
@@ -513,7 +616,11 @@ fn split_after_the_last_keyframe_leaves_the_right_half_without_keyframes() {
     assert_eq!(clips[0].effects.gain_db.keyframes().len(), 2);
     let right = &clips[1].effects.gain_db;
     assert!(right.is_constant());
-    assert_eq!(right.value_at(12), -6.0, "keeps the value it had at the cut");
+    assert_eq!(
+        right.value_at(12),
+        -6.0,
+        "keeps the value it had at the cut"
+    );
 }
 
 #[test]
@@ -633,7 +740,13 @@ fn trim_cuts_exactly_and_preserves_every_remaining_frame_at_any_rate() {
             for edge_at in original.timeline_start + 1..original.timeline_end() {
                 history.do_command(
                     &mut project,
-                    Box::new(command::TrimClip::new(timeline, 0, original.id, edge, edge_at)),
+                    Box::new(command::TrimClip::new(
+                        timeline,
+                        0,
+                        original.id,
+                        edge,
+                        edge_at,
+                    )),
                 );
                 let clip = &project.timelines[timeline].tracks[0].clips[0];
                 let expected = match edge {
@@ -685,7 +798,13 @@ fn trim_start_on_a_conformed_clip_keeps_the_timeline_end_fixed() {
 
     history.do_command(
         &mut project,
-        Box::new(command::TrimClip::new(timeline, 0, a_id, TrimEdge::Start, new_start)),
+        Box::new(command::TrimClip::new(
+            timeline,
+            0,
+            a_id,
+            TrimEdge::Start,
+            new_start,
+        )),
     );
 
     let clip = &project.timelines[timeline].tracks[0].clips[0];
@@ -939,7 +1058,11 @@ fn clip_with_two_gain_keyframes() -> (Project, History, TimelineId, ClipId) {
     let a_id = a.id;
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip: a }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: a,
+        }),
     );
     for (frame, value) in [(5, -6.0), (10, 3.0)] {
         history.do_command(
@@ -966,18 +1089,25 @@ fn moving_keyframes_shifts_them_and_undo_puts_them_back() {
             timeline,
             0,
             clip_id,
-            vec![(command::KeyframeTarget::Gain, 5), (command::KeyframeTarget::Gain, 10)],
+            vec![
+                (command::KeyframeTarget::Gain, 5),
+                (command::KeyframeTarget::Gain, 10),
+            ],
             4,
         )),
     );
 
-    let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+    let gain = &project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .gain_db;
     assert_eq!(gain.keyframe_at(5), None);
     assert_eq!(gain.keyframe_at(9), Some((-6.0, Interpolation::Linear)));
     assert_eq!(gain.keyframe_at(14), Some((3.0, Interpolation::Linear)));
 
     history.undo(&mut project);
-    let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+    let gain = &project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .gain_db;
     assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::Linear)));
     assert_eq!(gain.keyframe_at(10), Some((3.0, Interpolation::Linear)));
     assert_eq!(gain.keyframes().len(), 2);
@@ -997,12 +1127,20 @@ fn moving_a_keyframe_onto_another_restores_it_on_undo() {
         )),
     );
 
-    let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
-    assert_eq!(gain.keyframes().len(), 1, "the one at the destination was overwritten");
+    let gain = &project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .gain_db;
+    assert_eq!(
+        gain.keyframes().len(),
+        1,
+        "the one at the destination was overwritten"
+    );
     assert_eq!(gain.keyframe_at(10), Some((-6.0, Interpolation::Linear)));
 
     history.undo(&mut project);
-    let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+    let gain = &project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .gain_db;
     assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::Linear)));
     assert_eq!(gain.keyframe_at(10), Some((3.0, Interpolation::Linear)));
 }
@@ -1021,12 +1159,16 @@ fn setting_interpolation_only_touches_the_picked_keyframes() {
         )),
     );
 
-    let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+    let gain = &project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .gain_db;
     assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::EaseIn)));
     assert_eq!(gain.keyframe_at(10), Some((3.0, Interpolation::Linear)));
 
     history.undo(&mut project);
-    let gain = &project.timelines[timeline].tracks[0].clips[0].effects.gain_db;
+    let gain = &project.timelines[timeline].tracks[0].clips[0]
+        .effects
+        .gain_db;
     assert_eq!(gain.keyframe_at(5), Some((-6.0, Interpolation::Linear)));
 }
 
@@ -1169,7 +1311,11 @@ fn set_display_color_applies_to_every_clip_and_undo_restores_each_one() {
     }
     history.do_command(
         &mut project,
-        Box::new(command::SetClipsDisplayColor::new(timeline, vec![(0, a_id)], Some(ClipColor::Navy))),
+        Box::new(command::SetClipsDisplayColor::new(
+            timeline,
+            vec![(0, a_id)],
+            Some(ClipColor::Navy),
+        )),
     );
     history.do_command(
         &mut project,
@@ -1180,7 +1326,12 @@ fn set_display_color_applies_to_every_clip_and_undo_restores_each_one() {
         )),
     );
 
-    let color = |project: &Project, id| project.timelines[timeline].clip(0, id).unwrap().display_color;
+    let color = |project: &Project, id| {
+        project.timelines[timeline]
+            .clip(0, id)
+            .unwrap()
+            .display_color
+    };
     assert_eq!(color(&project, a_id), Some(ClipColor::Pink));
     assert_eq!(color(&project, b_id), Some(ClipColor::Pink));
 
@@ -1379,15 +1530,27 @@ fn unlink_clip_in_a_group_of_three_dissolves_all_three_not_just_the_clicked_one(
 
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip: a }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: a,
+        }),
     );
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip: b }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: b,
+        }),
     );
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 1, clip: c }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 1,
+            clip: c,
+        }),
     );
 
     // "Unlink" invoked on *a* alone: it must dissolve the whole
@@ -1397,14 +1560,30 @@ fn unlink_clip_in_a_group_of_three_dissolves_all_three_not_just_the_clicked_one(
         Box::new(command::UnlinkClip::new(timeline, 0, a_id)),
     );
     let tl = &project.timelines[timeline];
-    let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+    let find = |id: ClipId| {
+        tl.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .find(|c| c.id == id)
+            .unwrap()
+    };
     assert_eq!(find(a_id).linked_group, None);
-    assert_eq!(find(b_id).linked_group, None, "the whole group is dissolved, not just a");
+    assert_eq!(
+        find(b_id).linked_group,
+        None,
+        "the whole group is dissolved, not just a"
+    );
     assert_eq!(find(c_id).linked_group, None);
 
     history.undo(&mut project);
     let tl = &project.timelines[timeline];
-    let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+    let find = |id: ClipId| {
+        tl.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .find(|c| c.id == id)
+            .unwrap()
+    };
     assert_eq!(find(a_id).linked_group, Some(group));
     assert_eq!(find(b_id).linked_group, Some(group));
     assert_eq!(find(c_id).linked_group, Some(group));
@@ -1423,15 +1602,27 @@ fn link_clips_groups_an_arbitrary_number_and_undo_restores_previous() {
     let audio_b_id = audio_b.id;
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip: video }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip: video,
+        }),
     );
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 1, clip: audio_a }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 1,
+            clip: audio_a,
+        }),
     );
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 1, clip: audio_b }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 1,
+            clip: audio_b,
+        }),
     );
 
     history.do_command(
@@ -1442,14 +1633,26 @@ fn link_clips_groups_an_arbitrary_number_and_undo_restores_previous() {
         )),
     );
     let tl = &project.timelines[timeline];
-    let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+    let find = |id: ClipId| {
+        tl.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .find(|c| c.id == id)
+            .unwrap()
+    };
     let group = find(video_id).linked_group.expect("linked");
     assert_eq!(find(audio_a_id).linked_group, Some(group));
     assert_eq!(find(audio_b_id).linked_group, Some(group));
 
     history.undo(&mut project);
     let tl = &project.timelines[timeline];
-    let find = |id: ClipId| tl.tracks.iter().flat_map(|t| &t.clips).find(|c| c.id == id).unwrap();
+    let find = |id: ClipId| {
+        tl.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .find(|c| c.id == id)
+            .unwrap()
+    };
     assert_eq!(find(video_id).linked_group, None);
     assert_eq!(find(audio_a_id).linked_group, None);
     assert_eq!(find(audio_b_id).linked_group, None);
@@ -1522,10 +1725,13 @@ fn composite_command_applies_and_undoes_all_as_one_step() {
     // "Cut everything at frame 8": two SplitClips in a single history step.
     history.do_command(
         &mut project,
-        Box::new(command::CompositeCommand::new(CommandLabel::SplitClips, vec![
-            Box::new(command::SplitClip::new(timeline, 0, video_id, 8)),
-            Box::new(command::SplitClip::new(timeline, 1, audio_id, 8)),
-        ])),
+        Box::new(command::CompositeCommand::new(
+            CommandLabel::SplitClips,
+            vec![
+                Box::new(command::SplitClip::new(timeline, 0, video_id, 8)),
+                Box::new(command::SplitClip::new(timeline, 1, audio_id, 8)),
+            ],
+        )),
     );
 
     let tl = &project.timelines[timeline];
@@ -1547,15 +1753,27 @@ fn ripple_gap_leaves_locked_tracks_where_they_are() {
         let clip = make_clip(&mut project, 20, 10);
         history.do_command(
             &mut project,
-            Box::new(command::InsertClip { timeline, track_index, clip }),
+            Box::new(command::InsertClip {
+                timeline,
+                track_index,
+                clip,
+            }),
         );
     }
     history.do_command(
         &mut project,
-        Box::new(command::SetTrackFlag::new(timeline, 1, TrackFlag::Locked, true)),
+        Box::new(command::SetTrackFlag::new(
+            timeline,
+            1,
+            TrackFlag::Locked,
+            true,
+        )),
     );
 
-    history.do_command(&mut project, Box::new(command::RippleDeleteGap::new(timeline, 0, 20)));
+    history.do_command(
+        &mut project,
+        Box::new(command::RippleDeleteGap::new(timeline, 0, 20)),
+    );
     let tl = &project.timelines[timeline];
     assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
     assert_eq!(tl.tracks[1].clips[0].timeline_start, 20, "locked track");
@@ -1573,24 +1791,46 @@ fn disabling_clips_is_undoable_and_hides_them_from_compositing() {
     let id = clip.id;
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip,
+        }),
     );
 
     history.do_command(
         &mut project,
-        Box::new(command::SetClipsDisabled::new(timeline, vec![(0, id)], true)),
-    );
-    assert!(project.timelines[timeline].active_video_clips_at(5).is_empty());
-
-    history.undo(&mut project);
-    assert_eq!(project.timelines[timeline].active_video_clips_at(5).len(), 1);
-
-    history.do_command(
-        &mut project,
-        Box::new(command::SetTrackFlag::new(timeline, 0, TrackFlag::Muted, true)),
+        Box::new(command::SetClipsDisabled::new(
+            timeline,
+            vec![(0, id)],
+            true,
+        )),
     );
     assert!(
-        project.timelines[timeline].active_video_clips_at(5).is_empty(),
+        project.timelines[timeline]
+            .active_video_clips_at(5)
+            .is_empty()
+    );
+
+    history.undo(&mut project);
+    assert_eq!(
+        project.timelines[timeline].active_video_clips_at(5).len(),
+        1
+    );
+
+    history.do_command(
+        &mut project,
+        Box::new(command::SetTrackFlag::new(
+            timeline,
+            0,
+            TrackFlag::Muted,
+            true,
+        )),
+    );
+    assert!(
+        project.timelines[timeline]
+            .active_video_clips_at(5)
+            .is_empty(),
         "video track disabled"
     );
 }
@@ -1603,22 +1843,42 @@ fn set_clip_fade_is_undoable_and_clamped_to_clip_length() {
     let id = clip.id;
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip,
+        }),
     );
 
     history.do_command(
         &mut project,
-        Box::new(command::SetClipFade::new(timeline, 0, id, command::FadeEdge::In, 4)),
+        Box::new(command::SetClipFade::new(
+            timeline,
+            0,
+            id,
+            command::FadeEdge::In,
+            4,
+        )),
     );
     history.do_command(
         &mut project,
-        Box::new(command::SetClipFade::new(timeline, 0, id, command::FadeEdge::Out, 999)),
+        Box::new(command::SetClipFade::new(
+            timeline,
+            0,
+            id,
+            command::FadeEdge::Out,
+            999,
+        )),
     );
     fn find<'p>(p: &'p Project, timeline: TimelineId, id: ClipId) -> &'p Clip {
         p.timelines[timeline].clip(0, id).unwrap()
     }
     assert_eq!(find(&project, timeline, id).fade_in, 4);
-    assert_eq!(find(&project, timeline, id).fade_out, 10, "clamped past the clip duration");
+    assert_eq!(
+        find(&project, timeline, id).fade_out,
+        10,
+        "clamped past the clip duration"
+    );
 
     history.undo(&mut project);
     assert_eq!(find(&project, timeline, id).fade_out, 0);
@@ -1654,7 +1914,11 @@ fn set_clip_transition_is_undoable() {
     let id = clip.id;
     history.do_command(
         &mut project,
-        Box::new(command::InsertClip { timeline, track_index: 0, clip }),
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip,
+        }),
     );
     let transition = Transition {
         kind: TransitionKind::Push,
@@ -1665,13 +1929,27 @@ fn set_clip_transition_is_undoable() {
     };
     history.do_command(
         &mut project,
-        Box::new(set_clip_transition(timeline, 0, id, FadeEdge::In, Some(transition.clone()))),
+        Box::new(set_clip_transition(
+            timeline,
+            0,
+            id,
+            FadeEdge::In,
+            Some(transition.clone()),
+        )),
     );
     fn find<'p>(p: &'p Project, timeline: TimelineId, id: ClipId) -> &'p Clip {
         p.timelines[timeline].clip(0, id).unwrap()
     }
-    assert_eq!(find(&project, timeline, id).effects.transition_in, Some(transition));
-    assert!(find(&project, timeline, id).effects.transition_out.is_none());
+    assert_eq!(
+        find(&project, timeline, id).effects.transition_in,
+        Some(transition)
+    );
+    assert!(
+        find(&project, timeline, id)
+            .effects
+            .transition_out
+            .is_none()
+    );
 
     history.undo(&mut project);
     assert!(find(&project, timeline, id).effects.transition_in.is_none());
@@ -1699,7 +1977,10 @@ fn transition_offset_slides_in_from_the_push_direction_then_settles() {
     // At the start of the clip: off screen on the opposite side to the one
     // it arrives from ("Right" is the direction the content reaches the
     // center from).
-    assert_eq!(clip.transition_offset_at(0, frame_size, zoom), [-1920.0, 0.0]);
+    assert_eq!(
+        clip.transition_offset_at(0, frame_size, zoom),
+        [-1920.0, 0.0]
+    );
     let mid = clip.transition_offset_at(10, frame_size, zoom);
     assert!((mid[0] - (-960.0)).abs() < 1.0);
     // Transition over: in place, no residual offset.
@@ -1709,9 +1990,23 @@ fn transition_offset_slides_in_from_the_push_direction_then_settles() {
 
 #[test]
 fn cross_transition_window_straddles_the_cut_and_progresses_from_zero_to_one() {
-    let left = Clip::from_source_range(ClipId(1), ClipSource::Media(MediaId::default()), 0, 100, 0, Rational::one());
+    let left = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(MediaId::default()),
+        0,
+        100,
+        0,
+        Rational::one(),
+    );
     // Adjacent: starts exactly where `left` ends (100).
-    let right = Clip::from_source_range(ClipId(2), ClipSource::Media(MediaId::default()), 0, 100, 100, Rational::one());
+    let right = Clip::from_source_range(
+        ClipId(2),
+        ClipSource::Media(MediaId::default()),
+        0,
+        100,
+        100,
+        Rational::one(),
+    );
     let crossing = CrossTransition {
         left_clip: left.id,
         right_clip: right.id,

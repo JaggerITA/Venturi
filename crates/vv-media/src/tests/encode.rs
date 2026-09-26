@@ -22,8 +22,7 @@ fn encodes_video_only_file_with_correct_dimensions_and_frame_count() {
     let path = dir.join("video_only.mp4");
 
     let fps = vv_core::Rational::new(25, 1);
-    let mut encoder =
-        Encoder::new(&path, 16, 16, fps, &VideoSettings::default(), None).unwrap();
+    let mut encoder = Encoder::new(&path, 16, 16, fps, &VideoSettings::default(), None).unwrap();
     // Red in BT.709 limited range.
     let red = solid_i420(16, 16, [63, 102, 240]);
     for _ in 0..25 {

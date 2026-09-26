@@ -11,6 +11,7 @@ mod export;
 mod export_dialog;
 mod frame_provider;
 mod i18n;
+mod import_worker;
 mod keyframe_editor;
 mod media_pool;
 mod media_pool_ui;
@@ -23,7 +24,6 @@ mod proxy_worker;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
-mod import_worker;
 mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
@@ -42,12 +42,12 @@ use paste_attributes::PasteAttributesDialog;
 use project_io::*;
 use properties_panel::*;
 use settings::Action;
-use timeline_audio::TimelineAudio;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use timeline_audio::TimelineAudio;
 use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 /// ~6 s of margin at 1080p, ~1.5 s at 4K.
@@ -57,7 +57,12 @@ const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 const MIN_LOOKAHEAD_SECS: f64 = 0.5;
 
 /// Color of a freshly created Solid Color clip.
-const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba { r: 1.0, g: 1.0, b: 0.0, a: 1.0 };
+const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 0.0,
+    a: 1.0,
+};
 
 /// After how long (s) an arrow held down stops doing the single
 /// step and starts scrolling at `ARROW_HOLD_SPEED`.
@@ -74,7 +79,8 @@ struct ArrowHold {
 /// Playhead position with an arrow held for `elapsed` seconds:
 /// one frame immediately, then continuous scrolling after `ARROW_HOLD_DELAY_SECS`.
 fn arrow_hold_target(hold: &ArrowHold, elapsed: f64, fps: f64) -> FrameIdx {
-    let scrolled = ((elapsed - ARROW_HOLD_DELAY_SECS).max(0.0) * fps * ARROW_HOLD_SPEED) as FrameIdx;
+    let scrolled =
+        ((elapsed - ARROW_HOLD_DELAY_SECS).max(0.0) * fps * ARROW_HOLD_SPEED) as FrameIdx;
     (hold.start_frame + hold.direction * (1 + scrolled)).max(0)
 }
 
@@ -157,7 +163,8 @@ struct FontCatalog {
 
 impl FontCatalog {
     fn families(&mut self) -> &[String] {
-        self.families.get_or_insert_with(vv_render::text::font_families)
+        self.families
+            .get_or_insert_with(vv_render::text::font_families)
     }
 
     fn faces(&mut self, family: &str) -> &[vv_render::text::FontFace] {
@@ -482,7 +489,6 @@ impl Default for VenturiApp {
 }
 
 impl VenturiApp {
-
     /// Stereo output peak meter, with decay.
     fn draw_audiometer(&mut self, ui: &mut egui::Ui) {
         const DECAY: f32 = 0.85;
@@ -573,7 +579,10 @@ impl VenturiApp {
 
     /// A timeline at the media fps with only it on top: the timeline frames
     /// coincide with the source ones.
-    fn spawn_browsing_render_ahead(&self, media_id: MediaId) -> (render_ahead::RenderAhead, MediaId) {
+    fn spawn_browsing_render_ahead(
+        &self,
+        media_id: MediaId,
+    ) -> (render_ahead::RenderAhead, MediaId) {
         let item = self.project.media_pool[media_id].clone();
         let meta = item.meta.clone();
         let mut project = vv_core::Project::default();
@@ -634,7 +643,8 @@ impl VenturiApp {
         };
         let mut selected = BTreeSet::from([(track_index, clip_id)]);
         if let Some(timeline_id) = self.timeline_id {
-            selected.extend(self.project.timelines[timeline_id].linked_members(track_index, clip_id));
+            selected
+                .extend(self.project.timelines[timeline_id].linked_members(track_index, clip_id));
         }
         self.timeline_state
             .set_selection(selected, Some((track_index, clip_id)));
@@ -706,7 +716,9 @@ impl VenturiApp {
     }
 
     fn browse_fps(&self) -> f64 {
-        self.preview_meta.as_ref().map_or(1.0, |m| m.fps.as_f64().max(1e-9))
+        self.preview_meta
+            .as_ref()
+            .map_or(1.0, |m| m.fps.as_f64().max(1e-9))
     }
 
     /// The mixer clock acts as the playhead for the preview too, as for the
@@ -787,7 +799,11 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return false;
         };
-        if self.arrow_hold.as_ref().is_none_or(|h| h.direction != direction) {
+        if self
+            .arrow_hold
+            .as_ref()
+            .is_none_or(|h| h.direction != direction)
+        {
             if self.is_timeline_playing() {
                 self.toggle_playback();
             }
@@ -1411,7 +1427,9 @@ impl VenturiApp {
         if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, true, false) {
             // A generator always has video: `resolve_drop_tracks` with
             // `any_video: true` always resolves to `Some`.
-            let video_track = tracks.video.expect("generator: video track always resolved");
+            let video_track = tracks
+                .video
+                .expect("generator: video track always resolved");
             match generator {
                 timeline_ui::Generator::SolidColor => {
                     self.insert_solid_color_clip(timeline_id, video_track, start)
@@ -1421,7 +1439,8 @@ impl VenturiApp {
                 }
             }
         }
-        self.history.end_group_as(group, vv_core::CommandLabel::InsertClips);
+        self.history
+            .end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
     fn add_drop_to_timeline_at(
@@ -1442,7 +1461,12 @@ impl VenturiApp {
 
     /// The initial color is mid grey, editable right away from the properties
     /// panel once selected.
-    fn insert_solid_color_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
+    fn insert_solid_color_clip(
+        &mut self,
+        timeline_id: TimelineId,
+        track_index: usize,
+        start: FrameIdx,
+    ) {
         let default_len =
             timeline_ui::Generator::SolidColor.default_len(self.project.timelines[timeline_id].fps);
 
@@ -1460,7 +1484,11 @@ impl VenturiApp {
             vv_core::Rational::one(),
         );
         clip.effects = effects;
-        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)], vv_core::CommandLabel::InsertClips);
+        self.insert_clips_overwriting(
+            timeline_id,
+            vec![(track_index, clip, None)],
+            vv_core::CommandLabel::InsertClips,
+        );
     }
 
     fn insert_text_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
@@ -1474,7 +1502,11 @@ impl VenturiApp {
             vv_core::Rational::one(),
         );
         clip.effects.title = Some(vv_core::TitleParams::default());
-        self.insert_clips_overwriting(timeline_id, vec![(track_index, clip, None)], vv_core::CommandLabel::InsertClips);
+        self.insert_clips_overwriting(
+            timeline_id,
+            vec![(track_index, clip, None)],
+            vv_core::CommandLabel::InsertClips,
+        );
     }
 
     /// As in a real NLE, the clips already present under the new ones are
@@ -1494,7 +1526,11 @@ impl VenturiApp {
 
     /// Composes `layers` and shows the resulting texture in the viewer, without
     /// readback. It does nothing without a shared device (tests).
-    fn show_composited(&mut self, layers: Vec<frame_provider::OwnedLayer>, output: vv_render::OutputFrame) {
+    fn show_composited(
+        &mut self,
+        layers: Vec<frame_provider::OwnedLayer>,
+        output: vv_render::OutputFrame,
+    ) {
         let unchanged = self.video_texture_id.is_some()
             && self
                 .viewer_content
@@ -1509,9 +1545,13 @@ impl VenturiApp {
         let Some(render_state) = self.egui_render_state.clone() else {
             return;
         };
-        let render_layers: Vec<vv_render::Layer> =
-            layers.iter().map(frame_provider::OwnedLayer::as_render).collect();
-        let texture = self.compositor.render_layers_to_texture(&render_layers, output);
+        let render_layers: Vec<vv_render::Layer> = layers
+            .iter()
+            .map(frame_provider::OwnedLayer::as_render)
+            .collect();
+        let texture = self
+            .compositor
+            .render_layers_to_texture(&render_layers, output);
         drop(render_layers);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut renderer = render_state.renderer.write();
@@ -1550,7 +1590,10 @@ impl VenturiApp {
     /// preview. During a crossing transition both halves must be ready.
     fn timeline_video_layers(&mut self) -> Option<Vec<frame_provider::OwnedLayer>> {
         let timeline = &self.project.timelines[self.timeline_id?];
-        let still_filling = self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up());
+        let still_filling = self
+            .render_ahead
+            .as_ref()
+            .is_some_and(|r| !r.is_caught_up());
         let render_ahead = self.render_ahead.as_mut()?;
         let playhead = self.timeline_state.playhead;
         let clips = timeline.active_video_clips_at(playhead);
@@ -1648,11 +1691,7 @@ impl VenturiApp {
         start: FrameIdx,
         target: timeline_ui::MediaDropTarget,
     ) {
-        self.add_media_set_to_timeline_at(
-            &timeline_ui::MediaDragSet::one(drag),
-            start,
-            target,
-        );
+        self.add_media_set_to_timeline_at(&timeline_ui::MediaDragSet::one(drag), start, target);
     }
 
     /// Drop of one or more media: appended from `start` in pool order. The
@@ -1697,7 +1736,8 @@ impl VenturiApp {
         // One drop = one Ctrl+Z, even if inside there are N clips (one
         // per audio stream of each media) plus the tracks created on the fly.
         let group = self.history.begin_group();
-        let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_video, any_audio) else {
+        let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_video, any_audio)
+        else {
             self.history.end_group(group);
             return;
         };
@@ -1709,7 +1749,8 @@ impl VenturiApp {
             let rate = vv_core::Rational::conform_rate(timeline_fps, meta.fps);
             cursor += drag.timeline_len(rate);
         }
-        self.history.end_group_as(group, vv_core::CommandLabel::InsertClips);
+        self.history
+            .end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
     /// Creates the tracks required by `target` (once per drop) and
@@ -1725,33 +1766,43 @@ impl VenturiApp {
             None
         } else {
             Some(match target {
-                timeline_ui::MediaDropTarget::NewVideoTrack => {
-                    timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Video)
-                }
+                timeline_ui::MediaDropTarget::NewVideoTrack => timeline_ui::add_track(
+                    &mut self.project,
+                    &mut self.history,
+                    timeline_id,
+                    TrackKind::Video,
+                ),
                 timeline_ui::MediaDropTarget::Track(track) => {
                     if self.project.timelines[timeline_id].is_locked(track) {
                         return None;
                     }
                     track
                 }
-                _ => match self.project.timelines[timeline_id].first_unlocked_track_index(TrackKind::Video) {
+                _ => match self.project.timelines[timeline_id]
+                    .first_unlocked_track_index(TrackKind::Video)
+                {
                     Some(track) => track,
                     // No free video track: one is created.
-                    None => {
-                        timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Video)
-                    }
+                    None => timeline_ui::add_track(
+                        &mut self.project,
+                        &mut self.history,
+                        timeline_id,
+                        TrackKind::Video,
+                    ),
                 },
             })
         };
         let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
-            Some(timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Audio))
+            Some(timeline_ui::add_track(
+                &mut self.project,
+                &mut self.history,
+                timeline_id,
+                TrackKind::Audio,
+            ))
         } else {
             None
         };
-        Some(DropTracks {
-            video,
-            extra_audio,
-        })
+        Some(DropTracks { video, extra_audio })
     }
 
     /// Inserts the video clip and one audio clip per stream at `start`, all
@@ -1765,10 +1816,8 @@ impl VenturiApp {
         tracks: DropTracks,
     ) {
         let media_id = drag.media_id;
-        let rate = vv_core::Rational::conform_rate(
-            self.project.timelines[timeline_id].fps,
-            meta.fps,
-        );
+        let rate =
+            vv_core::Rational::conform_rate(self.project.timelines[timeline_id].fps, meta.fps);
         let has_audio_tracks = self.project.timelines[timeline_id]
             .first_track_index(TrackKind::Audio)
             .is_some();
@@ -1797,7 +1846,12 @@ impl VenturiApp {
         };
 
         while audio_track_indices.len() < num_audio_streams {
-            audio_track_indices.push(timeline_ui::add_track(&mut self.project, &mut self.history, timeline_id, TrackKind::Audio));
+            audio_track_indices.push(timeline_ui::add_track(
+                &mut self.project,
+                &mut self.history,
+                timeline_id,
+                TrackKind::Audio,
+            ));
         }
 
         let audio_clip_ids: Vec<ClipId> = (0..num_audio_streams)
@@ -1823,8 +1877,10 @@ impl VenturiApp {
                 Some(0),
             ));
         }
-        for (stream_index, (&track_index, &clip_id)) in
-            audio_track_indices.iter().zip(audio_clip_ids.iter()).enumerate()
+        for (stream_index, (&track_index, &clip_id)) in audio_track_indices
+            .iter()
+            .zip(audio_clip_ids.iter())
+            .enumerate()
         {
             let mut audio_clip = vv_core::Clip::from_source_range(
                 clip_id,
@@ -1886,7 +1942,12 @@ impl VenturiApp {
         let playing = self.is_timeline_playing();
         if self.browsing_media.is_some() {
             let total = self.browse_total_frames();
-            (total, self.browse_playhead, self.browse_marks.resolve(total), playing)
+            (
+                total,
+                self.browse_playhead,
+                self.browse_marks.resolve(total),
+                playing,
+            )
         } else {
             let total = self
                 .timeline_id
@@ -1917,9 +1978,9 @@ impl VenturiApp {
                 ui.painter().rect_filled(screen, 0.0, egui::Color32::BLACK);
 
                 let image = match self.last_viewer_frame_kind {
-                    Some(ViewerFrameKind::Video) => self
-                        .video_texture_id
-                        .zip(self.video_display_size),
+                    Some(ViewerFrameKind::Video) => {
+                        self.video_texture_id.zip(self.video_display_size)
+                    }
                     Some(ViewerFrameKind::Offline) | None => None,
                 };
                 if let Some((id, size)) = image {
@@ -1949,7 +2010,8 @@ impl VenturiApp {
                         egui::pos2(screen.left(), screen.bottom() - BAR_ZONE),
                         screen.max,
                     );
-                    ui.painter().rect_filled(bar, 0.0, egui::Color32::from_black_alpha(170));
+                    ui.painter()
+                        .rect_filled(bar, 0.0, egui::Color32::from_black_alpha(170));
                     let inner = bar.shrink2(egui::vec2(24.0, 24.0));
                     ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                         action = transport::show_transport(ui, total, playhead, marks, playing);
@@ -1971,56 +2033,63 @@ impl VenturiApp {
             None => "–".to_owned(),
         };
         let keymap = &self.settings.keymap;
-        let shortcut_text =
-            |action| keymap.shortcuts(action).first().map(ToString::to_string).unwrap_or_default();
-        let zoom_rect = ui.add_enabled_ui(geometry.is_some(), |ui| {
-            ui.menu_button(format!("{label} ⏷"), |ui| {
-                let Some((area, frame_px)) = geometry else {
-                    return;
-                };
-                let fit = egui::Button::selectable(self.viewer_zoom.is_fit(), t!("viewer.zoom_fit"))
-                    .shortcut_text(shortcut_text(Action::ViewerZoomFit));
-                if ui.add(fit).clicked() {
-                    self.viewer_zoom.fit();
-                    ui.close();
-                }
-                ui.separator();
-                let current = self.viewer_zoom.scale(area, frame_px, ppp);
-                for preset in viewer_zoom::PRESETS {
-                    let percent = viewer_zoom::percent_label(preset);
-                    let button = if preset == 1.0 {
-                        egui::Button::selectable(false, t!("viewer.zoom_actual", percent = percent))
-                            .shortcut_text(shortcut_text(Action::ViewerZoomActual))
-                    } else {
-                        egui::Button::selectable(false, percent)
+        let shortcut_text = |action| {
+            keymap
+                .shortcuts(action)
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        };
+        let zoom_rect = ui
+            .add_enabled_ui(geometry.is_some(), |ui| {
+                ui.menu_button(format!("{label} ⏷"), |ui| {
+                    let Some((area, frame_px)) = geometry else {
+                        return;
                     };
-                    let selected = !self.viewer_zoom.is_fit() && (current - preset).abs() < 1e-4;
-                    if ui.add(button.selected(selected)).clicked() {
-                        self.viewer_zoom.set_scale(preset, area, frame_px, ppp);
+                    let fit =
+                        egui::Button::selectable(self.viewer_zoom.is_fit(), t!("viewer.zoom_fit"))
+                            .shortcut_text(shortcut_text(Action::ViewerZoomFit));
+                    if ui.add(fit).clicked() {
+                        self.viewer_zoom.fit();
                         ui.close();
                     }
-                }
+                    ui.separator();
+                    let current = self.viewer_zoom.scale(area, frame_px, ppp);
+                    for preset in viewer_zoom::PRESETS {
+                        let percent = viewer_zoom::percent_label(preset);
+                        let button = if preset == 1.0 {
+                            egui::Button::selectable(
+                                false,
+                                t!("viewer.zoom_actual", percent = percent),
+                            )
+                            .shortcut_text(shortcut_text(Action::ViewerZoomActual))
+                        } else {
+                            egui::Button::selectable(false, percent)
+                        };
+                        let selected =
+                            !self.viewer_zoom.is_fit() && (current - preset).abs() < 1e-4;
+                        if ui.add(button.selected(selected)).clicked() {
+                            self.viewer_zoom.set_scale(preset, area, frame_px, ppp);
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(t!("viewer.zoom_hint"));
             })
             .response
-            .on_hover_text(t!("viewer.zoom_hint"));
-        })
-        .response
-        .rect;
+            .rect;
         if let Some(timeline_id) = self.timeline_id {
             // Symmetric around the center, so it never overlaps the zoom menu.
             let full = ui.max_rect();
-            let half_width = (full.width() / 2.0 - (zoom_rect.right() - full.left()) - 8.0).max(0.0);
+            let half_width =
+                (full.width() / 2.0 - (zoom_rect.right() - full.left()) - 8.0).max(0.0);
             let rect = egui::Rect::from_x_y_ranges(
                 full.center().x - half_width..=full.center().x + half_width,
                 zoom_rect.y_range(),
             );
             let name = self.timeline_display_name(timeline_id);
-            ui.put(
-                rect,
-                egui::Label::new(name)
-                    .selectable(false)
-                    .truncate(),
-            );
+            ui.put(rect, egui::Label::new(name).selectable(false).truncate());
         }
     }
 
@@ -2035,10 +2104,7 @@ impl VenturiApp {
         let visible = self.show_transform_overlay
             && self.browsing_media.is_none()
             && !self.is_timeline_playing()
-            && matches!(
-                self.last_viewer_frame_kind,
-                Some(ViewerFrameKind::Video)
-            );
+            && matches!(self.last_viewer_frame_kind, Some(ViewerFrameKind::Video));
         let Some((timeline_id, target)) = self.timeline_id.zip(video_targets.first().copied())
         else {
             self.overlay_drag = None;
@@ -2048,7 +2114,10 @@ impl VenturiApp {
         let under_playhead = self.project.timelines[timeline_id]
             .clip(target.track_index, target.clip_id)
             .is_some_and(|c| c.contains(playhead));
-        let Some(info) = self.clip_panel_info(target).filter(|_| visible && under_playhead) else {
+        let Some(info) = self
+            .clip_panel_info(target)
+            .filter(|_| visible && under_playhead)
+        else {
             self.overlay_drag = None;
             return;
         };
@@ -2090,12 +2159,15 @@ impl VenturiApp {
             return;
         }
         let all_disabled = selected.iter().all(|&(track_index, clip_id)| {
-            tl.clip(track_index, clip_id)
-                .is_some_and(|c| c.disabled)
+            tl.clip(track_index, clip_id).is_some_and(|c| c.disabled)
         });
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::SetClipsDisabled::new(timeline_id, selected, !all_disabled)),
+            Box::new(vv_core::SetClipsDisabled::new(
+                timeline_id,
+                selected,
+                !all_disabled,
+            )),
         );
     }
 
@@ -2170,7 +2242,10 @@ impl VenturiApp {
             .collect();
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::DeleteClips, commands)),
+            Box::new(vv_core::CompositeCommand::new(
+                vv_core::CommandLabel::DeleteClips,
+                commands,
+            )),
         );
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
@@ -2198,7 +2273,10 @@ impl VenturiApp {
         }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RemoveMedia, commands)),
+            Box::new(vv_core::CompositeCommand::new(
+                vv_core::CommandLabel::RemoveMedia,
+                commands,
+            )),
         );
         self.media_pool_state.clear();
         self.leave_removed_timelines();
@@ -2229,7 +2307,8 @@ impl VenturiApp {
         if self.browsing_media.is_some() {
             return false;
         }
-        let (Some(timeline_id), Some((track_index, clip_id))) = (self.timeline_id, self.active_clip)
+        let (Some(timeline_id), Some((track_index, clip_id))) =
+            (self.timeline_id, self.active_clip)
         else {
             return false;
         };
@@ -2285,8 +2364,7 @@ impl VenturiApp {
             .selected
             .iter()
             .filter_map(|&(track_index, clip_id)| {
-                let clip = tl
-                    .clip(track_index, clip_id)?;
+                let clip = tl.clip(track_index, clip_id)?;
                 Some((
                     clip.linked_group,
                     timeline_ui::ClipboardEntry {
@@ -2383,11 +2461,13 @@ impl VenturiApp {
                 clip.linked_group = None;
                 if entry.timeline_fps != timeline_fps {
                     let rate = match &clip.source {
-                        vv_core::ClipSource::Media(media_id) => {
-                            self.project.media_pool.get(*media_id).map_or(clip.rate, |item| {
+                        vv_core::ClipSource::Media(media_id) => self
+                            .project
+                            .media_pool
+                            .get(*media_id)
+                            .map_or(clip.rate, |item| {
                                 vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
-                            })
-                        }
+                            }),
                         vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => clip.rate,
                     };
                     clip.retime(entry.timeline_fps, timeline_fps, rate);
@@ -2396,11 +2476,14 @@ impl VenturiApp {
                 (*track_index, clip, entry.link_tag)
             })
             .collect();
-        let new_selection: BTreeSet<(usize, ClipId)> =
-            clips.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
+        let new_selection: BTreeSet<(usize, ClipId)> = clips
+            .iter()
+            .map(|(track, clip, _)| (*track, clip.id))
+            .collect();
         let end = clips.iter().map(|(_, clip, _)| clip.timeline_end()).max();
         self.insert_clips_overwriting(timeline_id, clips, vv_core::CommandLabel::PasteClips);
-        self.history.end_group_as(mark, vv_core::CommandLabel::PasteClips);
+        self.history
+            .end_group_as(mark, vv_core::CommandLabel::PasteClips);
         let anchor = new_selection.iter().next().copied();
         self.timeline_state.set_selection(new_selection, anchor);
         if let Some(end) = end {
@@ -2424,10 +2507,14 @@ impl VenturiApp {
                 .map(|e| e.track_number)
                 .max()
                 .unwrap_or(0);
-            let existing = self.project.timelines[timeline_id].tracks_of_kind(kind).count();
+            let existing = self.project.timelines[timeline_id]
+                .tracks_of_kind(kind)
+                .count();
             for _ in existing..wanted {
-                self.history
-                    .do_command(&mut self.project, Box::new(vv_core::AddTrack::new(timeline_id, kind)));
+                self.history.do_command(
+                    &mut self.project,
+                    Box::new(vv_core::AddTrack::new(timeline_id, kind)),
+                );
             }
         }
     }
@@ -2471,8 +2558,7 @@ impl VenturiApp {
                 {
                     continue;
                 }
-                let Some(clip) = self.project.timelines[timeline_id]
-                    .clip(member_track, member_id)
+                let Some(clip) = self.project.timelines[timeline_id].clip(member_track, member_id)
                 else {
                     continue;
                 };
@@ -2522,7 +2608,10 @@ impl VenturiApp {
         let mark = self.history.begin_group();
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RippleDelete, commands)),
+            Box::new(vv_core::CompositeCommand::new(
+                vv_core::CommandLabel::RippleDelete,
+                commands,
+            )),
         );
         self.cut_remaining_overlaps(timeline_id);
         self.history.end_group(mark);
@@ -2544,13 +2633,20 @@ impl VenturiApp {
         }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)),
+            Box::new(vv_core::CompositeCommand::new(
+                vv_core::CommandLabel::TrimClips,
+                commands,
+            )),
         );
     }
 
     /// Brings the playhead where the clip that slid in to close the hole now starts;
     /// if none arrived it stays where it is.
-    fn move_playhead_to_closed_gap(&mut self, timeline_id: vv_core::TimelineId, position: FrameIdx) {
+    fn move_playhead_to_closed_gap(
+        &mut self,
+        timeline_id: vv_core::TimelineId,
+        position: FrameIdx,
+    ) {
         let landed = self.project.timelines[timeline_id]
             .tracks
             .iter()
@@ -2607,8 +2703,10 @@ impl VenturiApp {
             })
             .collect();
 
-        let mut right_halves_by_group: std::collections::HashMap<vv_core::LinkGroupId, Vec<(usize, ClipId)>> =
-            std::collections::HashMap::new();
+        let mut right_halves_by_group: std::collections::HashMap<
+            vv_core::LinkGroupId,
+            Vec<(usize, ClipId)>,
+        > = std::collections::HashMap::new();
         for (track_index, clip_id, group) in &targets {
             if let Some(g) = group {
                 right_halves_by_group
@@ -2625,7 +2723,10 @@ impl VenturiApp {
 
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::SplitClips, commands)),
+            Box::new(vv_core::CompositeCommand::new(
+                vv_core::CommandLabel::SplitClips,
+                commands,
+            )),
         );
 
         // Selects the *left* half (the one under the playhead would be the
@@ -2640,7 +2741,9 @@ impl VenturiApp {
                 .max_by_key(|(track_index, _, _)| *track_index)
         {
             let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
-            selected.extend(self.project.timelines[timeline_id].linked_members(*video_track, *video_clip_id));
+            selected.extend(
+                self.project.timelines[timeline_id].linked_members(*video_track, *video_clip_id),
+            );
             self.timeline_state
                 .set_selection(selected, Some((*video_track, *video_clip_id)));
         }
@@ -2713,7 +2816,8 @@ fn compose_compound_waveform(
                     * source_wf.peaks.len() as f64) as usize)
                     .min(source_wf.peaks.len() - 1);
                 let source_frame = (source_secs * source.meta.fps.as_f64()) as FrameIdx;
-                let gain = vv_audio::mixer::db_to_linear(clip.effects.gain_db.value_at(source_frame));
+                let gain =
+                    vv_audio::mixer::db_to_linear(clip.effects.gain_db.value_at(source_frame));
                 peaks[bin] = peaks[bin].max(source_wf.peaks[source_bin] * gain);
             }
         }
@@ -2823,9 +2927,23 @@ fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Resp
         painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
         let color = visuals.fg_stroke.color;
         let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 11.0));
-        painter.rect_stroke(frame, 0.0, egui::Stroke::new(1.2, color), egui::StrokeKind::Middle);
-        for corner in [frame.left_top(), frame.right_top(), frame.left_bottom(), frame.right_bottom()] {
-            painter.rect_filled(egui::Rect::from_center_size(corner, egui::vec2(4.0, 4.0)), 0.0, color);
+        painter.rect_stroke(
+            frame,
+            0.0,
+            egui::Stroke::new(1.2, color),
+            egui::StrokeKind::Middle,
+        );
+        for corner in [
+            frame.left_top(),
+            frame.right_top(),
+            frame.left_bottom(),
+            frame.right_bottom(),
+        ] {
+            painter.rect_filled(
+                egui::Rect::from_center_size(corner, egui::vec2(4.0, 4.0)),
+                0.0,
+                color,
+            );
         }
         painter.circle_stroke(frame.center(), 2.0, egui::Stroke::new(1.2, color));
     }
@@ -2846,23 +2964,40 @@ fn show_stream_drag_handles(
     let audio_rect = egui::Rect::from_center_size(center + offset, SIZE);
 
     let video = ui
-        .interact(video_rect, ui.id().with("viewer_drag_video_only"), egui::Sense::drag())
+        .interact(
+            video_rect,
+            ui.id().with("viewer_drag_video_only"),
+            egui::Sense::drag(),
+        )
         .on_hover_text(t!("viewer.drag_video_only"));
     let audio = ui
-        .interact(audio_rect, ui.id().with("viewer_drag_audio_only"), egui::Sense::drag())
+        .interact(
+            audio_rect,
+            ui.id().with("viewer_drag_audio_only"),
+            egui::Sense::drag(),
+        )
         .on_hover_text(t!("viewer.drag_audio_only"));
 
     let visible = ui.rect_contains_pointer(viewer) || video.dragged() || audio.dragged();
     if visible {
         let painter = ui.painter();
         for resp in [&video, &audio] {
-            let alpha = if resp.hovered() || resp.dragged() { 220 } else { 150 };
+            let alpha = if resp.hovered() || resp.dragged() {
+                220
+            } else {
+                150
+            };
             painter.rect_filled(resp.rect, 4.0, egui::Color32::from_black_alpha(alpha));
         }
         let color = egui::Color32::from_gray(230);
 
         let film = egui::Rect::from_center_size(video_rect.center(), egui::vec2(18.0, 14.0));
-        painter.rect_stroke(film, 1.0, egui::Stroke::new(1.3, color), egui::StrokeKind::Middle);
+        painter.rect_stroke(
+            film,
+            1.0,
+            egui::Stroke::new(1.3, color),
+            egui::StrokeKind::Middle,
+        );
         for i in 0..4 {
             let x = film.left() + 3.0 + i as f32 * 4.0;
             for y in [film.top() + 2.0, film.bottom() - 2.0] {
@@ -2948,8 +3083,13 @@ impl eframe::App for VenturiApp {
         self.poll_dropped_files(&ui.ctx().clone());
         self.poll_pending_import(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
-        if self.thumbnail_worker.as_ref().is_some_and(|w| w.has_pending()) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        if self
+            .thumbnail_worker
+            .as_ref()
+            .is_some_and(|w| w.has_pending())
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
         // The jump is applied by the timeline scroll sync of this frame; the
         // command that set it may have run after the timeline was drawn.
@@ -2972,8 +3112,14 @@ impl eframe::App for VenturiApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.toggle_value(&mut self.settings.panels.media_pool_open, t!("toolbar.media_pool"));
-                ui.toggle_value(&mut self.settings.panels.effects_open, t!("toolbar.effects"));
+                ui.toggle_value(
+                    &mut self.settings.panels.media_pool_open,
+                    t!("toolbar.media_pool"),
+                );
+                ui.toggle_value(
+                    &mut self.settings.panels.effects_open,
+                    t!("toolbar.effects"),
+                );
                 ui.toggle_value(
                     &mut self.settings.panels.keyframe_editor_open,
                     t!("toolbar.keyframe_editor"),
@@ -2992,7 +3138,10 @@ impl eframe::App for VenturiApp {
                 }
                 // Above the panel it opens, like the toggles on the left.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.settings.panels.inspector_open, t!("menu.inspector"));
+                    ui.toggle_value(
+                        &mut self.settings.panels.inspector_open,
+                        t!("menu.inspector"),
+                    );
                 });
             });
         });
@@ -3058,11 +3207,15 @@ impl eframe::App for VenturiApp {
                                 .show(ui, |ui| self.show_media_pool(ui, &mut preview_action))
                                 .response
                         } else {
-                            ui.scope(|ui| self.show_media_pool(ui, &mut preview_action)).response
+                            ui.scope(|ui| self.show_media_pool(ui, &mut preview_action))
+                                .response
                         };
                         // Whoever got the last click decides who gets Del/Backspace.
                         if let Some(pos) = ui.ctx().input(|i| {
-                            i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()
+                            i.pointer
+                                .any_pressed()
+                                .then(|| i.pointer.interact_pos())
+                                .flatten()
                         }) {
                             self.media_pool_state.focused = pool.rect.contains(pos);
                         }
@@ -3101,8 +3254,7 @@ impl eframe::App for VenturiApp {
             timeline_ui::TimelineDrag,
             FrameIdx,
             timeline_ui::MediaDropTarget,
-        )> =
-            None;
+        )> = None;
         let mut dropped_on_empty_timeline: Option<timeline_ui::TimelineDrag> = None;
         egui::Panel::bottom("timeline")
             .default_size(self.settings.panels.timeline_height)
@@ -3146,7 +3298,11 @@ impl eframe::App for VenturiApp {
                     let proxy_ranges = self.proxy_timeline_ranges();
                     // The buffer advances on another thread: without a repaint the
                     // "buffered" strip would not update.
-                    if self.render_ahead.as_ref().is_some_and(|r| !r.is_caught_up()) {
+                    if self
+                        .render_ahead
+                        .as_ref()
+                        .is_some_and(|r| !r.is_caught_up())
+                    {
                         ui.ctx().request_repaint();
                     }
                     // Audio peaks already in memory (loaded from the cache file
@@ -3201,7 +3357,8 @@ impl eframe::App for VenturiApp {
         // playhead) takes control of the viewer back from the "raw"
         // media pool preview, if active.
         if self.browsing_media.is_some()
-            && (self.timeline_state.selected != selected_before_timeline_ui || user_scrubbed_playhead)
+            && (self.timeline_state.selected != selected_before_timeline_ui
+                || user_scrubbed_playhead)
         {
             self.stop_browsing();
         }
@@ -3287,7 +3444,8 @@ impl eframe::App for VenturiApp {
             egui::Panel::bottom("transport")
                 .resizable(false)
                 .show(ui, |ui| {
-                    transport_action = transport::show_transport(ui, total, playhead, marks, playing);
+                    transport_action =
+                        transport::show_transport(ui, total, playhead, marks, playing);
                 });
             egui::Panel::top("viewer_zoom_bar")
                 .resizable(false)
@@ -3396,7 +3554,10 @@ impl eframe::App for VenturiApp {
                 }
                 None => {
                     if let Some(err) = &self.preview_error {
-                        ui.colored_label(egui::Color32::RED, t!("viewer.player_error", error = err));
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            t!("viewer.player_error", error = err),
+                        );
                     } else {
                         let audio_only = self.browsing_media.is_some()
                             && self.preview_meta.as_ref().is_some_and(|m| !m.has_video);
@@ -3428,14 +3589,17 @@ impl eframe::App for VenturiApp {
 
             if let Some(media_id) = self.browsing_media {
                 let rect = rect.intersect(area);
-                let (source_in, source_out) =
-                    self.browse_marks.resolve(self.browse_total_frames());
+                let (source_in, source_out) = self.browse_marks.resolve(self.browse_total_frames());
                 let drag_id = ui.id().with("viewer_media_drag");
                 let resp = ui
                     .interact(rect, drag_id, egui::Sense::drag())
                     .on_hover_text(t!("viewer.drag_in_out"));
                 let mut drags = vec![(resp, timeline_ui::DragStreams::All)];
-                if self.preview_meta.as_ref().is_some_and(|m| m.has_video && m.has_audio) {
+                if self
+                    .preview_meta
+                    .as_ref()
+                    .is_some_and(|m| m.has_video && m.has_audio)
+                {
                     drags.extend(show_stream_drag_handles(ui, rect));
                 }
                 for (resp, streams) in drags {
@@ -3519,7 +3683,11 @@ fn app_icon() -> Option<egui::IconData> {
         return None;
     }
     buf.truncate(info.buffer_size());
-    Some(egui::IconData { rgba: buf, width: info.width, height: info.height })
+    Some(egui::IconData {
+        rgba: buf,
+        width: info.width,
+        height: info.height,
+    })
 }
 
 fn main() -> eframe::Result<()> {

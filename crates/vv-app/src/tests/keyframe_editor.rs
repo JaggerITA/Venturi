@@ -12,7 +12,10 @@ fn zoom_link_adds_the_twin_axis_once_and_only_for_zoom() {
     assert_eq!(linked.len(), 3, "gain has no twins");
 
     let both = with_zoom_link(
-        vec![zoom(TransformParam::ZoomX, 5), zoom(TransformParam::ZoomY, 5)],
+        vec![
+            zoom(TransformParam::ZoomX, 5),
+            zoom(TransformParam::ZoomY, 5),
+        ],
         true,
     );
     assert_eq!(both.len(), 2, "no duplicates if both are already selected");
@@ -24,11 +27,17 @@ fn zoom_link_adds_the_twin_axis_once_and_only_for_zoom() {
 fn the_delete_key_is_the_editors_only_with_a_selection_and_the_last_click() {
     let mut state = KeyframeEditorState::default();
     state.selection.insert((KeyframeTarget::Gain, 3));
-    assert!(!state.owns_delete(), "without the last click Delete belongs to the timeline");
+    assert!(
+        !state.owns_delete(),
+        "without the last click Delete belongs to the timeline"
+    );
     state.focused = true;
     assert!(state.owns_delete());
     state.selection.clear();
-    assert!(!state.owns_delete(), "nothing to delete: Delete goes back to the clip");
+    assert!(
+        !state.owns_delete(),
+        "nothing to delete: Delete goes back to the clip"
+    );
 }
 
 #[test]
@@ -41,7 +50,10 @@ fn removing_the_selection_empties_it_and_follows_the_zoom_link() {
 
     let mut state = KeyframeEditorState::default();
     state.selection.insert((KeyframeTarget::Gain, 1));
-    assert!(state.remove_selected(false).is_empty(), "without a clip there is nothing to remove");
+    assert!(
+        state.remove_selected(false).is_empty(),
+        "without a clip there is nothing to remove"
+    );
 }
 
 #[test]

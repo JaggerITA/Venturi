@@ -89,11 +89,18 @@ fn generate_waveform_produces_normalized_peaks_and_caches_to_disk() {
     // A 440Hz sine is not silent: the global (normalized) peak must
     // reach 1.0 and the values must stay in [0,1].
     let peak = wf.peaks.iter().cloned().fold(0.0_f32, f32::max);
-    assert!((peak - 1.0).abs() < 1e-6, "peak={peak}, expected 1.0 after normalization");
+    assert!(
+        (peak - 1.0).abs() < 1e-6,
+        "peak={peak}, expected 1.0 after normalization"
+    );
     assert!(wf.peaks.iter().all(|p| (0.0..=1.0).contains(p)));
 
     // The audio duration must be ~2s (the file is 2s long).
-    assert!((wf.audio_duration_secs - 2.0).abs() < 0.2, "dur={:?}", wf.audio_duration_secs);
+    assert!(
+        (wf.audio_duration_secs - 2.0).abs() < 0.2,
+        "dur={:?}",
+        wf.audio_duration_secs
+    );
 
     // The cache file, read back, returns the same peaks.
     let reloaded = load_waveform(content_hash, 0).expect("reload failed");
@@ -179,7 +186,11 @@ fn peaks_stay_aligned_when_samples_per_bin_is_fractional() {
     let wf = generate_waveform(&path, content_hash, 0, num_peaks)
         .expect("waveform generation failed")
         .expect("audio expected");
-    let first_loud_bin = wf.peaks.iter().position(|&p| p > 0.3).expect("tone expected");
+    let first_loud_bin = wf
+        .peaks
+        .iter()
+        .position(|&p| p > 0.3)
+        .expect("tone expected");
     let expected = num_peaks * 8 / 10;
     assert!(
         // The sine starts at 0: it crosses the threshold a few samples later.
@@ -200,7 +211,9 @@ fn six_channel_audio_peaks_are_not_compressed_into_the_first_half_of_bins() {
             "-f",
             "lavfi",
             "-i",
-            &format!("aevalsrc=exprs='{tone}|{tone}|{tone}|{tone}|{tone}|{tone}':s=48000:d=4:c=5.1"),
+            &format!(
+                "aevalsrc=exprs='{tone}|{tone}|{tone}|{tone}|{tone}|{tone}':s=48000:d=4:c=5.1"
+            ),
             "-c:a",
             "ac3",
         ],
@@ -290,7 +303,9 @@ fn generate_waveform_selects_the_requested_stream_index() {
     assert!((second.audio_duration_secs - 1.0).abs() < 0.2);
 
     assert!(
-        generate_waveform(&path, content_hash, 2, 200).unwrap().is_none(),
+        generate_waveform(&path, content_hash, 2, 200)
+            .unwrap()
+            .is_none(),
         "no audio stream at index 2"
     );
 }

@@ -20,9 +20,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use vv_core::{ClipSource, FrameIdx, MediaId, Project, Timeline, TimelineId};
-use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 use vv_media::proxy::ProxyQuality;
-
+use vv_media::{Decoder, FrameYuv420, SharedFrameCache, WantedRange};
 
 /// Seconds buffered ahead of the playhead, by default.
 pub const DEFAULT_LOOKAHEAD_SECS: f64 = 3.0;
@@ -153,7 +152,9 @@ impl RenderAhead {
     }
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
-        self.shared.cache_budget_bytes.store(bytes, Ordering::Relaxed);
+        self.shared
+            .cache_budget_bytes
+            .store(bytes, Ordering::Relaxed);
     }
 
     /// Seconds buffered ahead (Settings > Playback), never below
@@ -328,7 +329,10 @@ fn worker_loop(
             }
         };
         // The commands already queued too: only the final state counts.
-        for cmd in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
+        for cmd in first
+            .into_iter()
+            .chain(std::iter::from_fn(|| rx.try_recv().ok()))
+        {
             match cmd {
                 Command::Stop => return,
                 Command::UpdateProject(p, id) => {
@@ -432,7 +436,12 @@ fn collect_media_segments_behind(
     start_frame: FrameIdx,
 ) -> Vec<WantedRange> {
     let mut real = clipped_media_segments(project, timeline, start_frame, from_frame, 0);
-    real.sort_by_key(|(track, s)| (std::cmp::Reverse(s.timeline_start), std::cmp::Reverse(*track)));
+    real.sort_by_key(|(track, s)| {
+        (
+            std::cmp::Reverse(s.timeline_start),
+            std::cmp::Reverse(*track),
+        )
+    });
     strip_track(real)
 }
 
@@ -496,10 +505,20 @@ fn push_or_recurse(
     depth: u32,
     real: &mut Vec<(usize, WantedRange)>,
 ) {
-    match project.media_pool.get(segment.media_id).and_then(|m| m.compound) {
+    match project
+        .media_pool
+        .get(segment.media_id)
+        .and_then(|m| m.compound)
+    {
         Some(nested_id) => {
             if let Some(nested) = project.timelines.get(nested_id) {
-                real.extend(clipped_media_segments(project, nested, segment.source_start, segment.source_end + 1, depth + 1));
+                real.extend(clipped_media_segments(
+                    project,
+                    nested,
+                    segment.source_start,
+                    segment.source_end + 1,
+                    depth + 1,
+                ));
             }
         }
         None => real.push((track_index, segment)),
@@ -521,7 +540,10 @@ fn crossing_borrowed_segments(
     let mut real = Vec::new();
     for (_, track) in timeline.visible_video_tracks() {
         for crossing in &track.crossings {
-            let (Some(left), Some(right)) = (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) else {
+            let (Some(left), Some(right)) = (
+                track.clip(crossing.left_clip),
+                track.clip(crossing.right_clip),
+            ) else {
                 continue;
             };
             let window = crossing.window(left, right);
@@ -532,10 +554,22 @@ fn crossing_borrowed_segments(
             // `right` the one before: the other half of each is already covered
             // by its own normal segment.
             if window.end > left.timeline_end() {
-                push_borrowed_segment(project, left, left.timeline_end(), window.end - 1, &mut real);
+                push_borrowed_segment(
+                    project,
+                    left,
+                    left.timeline_end(),
+                    window.end - 1,
+                    &mut real,
+                );
             }
             if window.start < right.timeline_start {
-                push_borrowed_segment(project, right, window.start, right.timeline_start - 1, &mut real);
+                push_borrowed_segment(
+                    project,
+                    right,
+                    window.start,
+                    right.timeline_start - 1,
+                    &mut real,
+                );
             }
         }
     }
@@ -636,9 +670,7 @@ fn without_already_cached_chunks(
 ) -> Vec<WantedRange> {
     chunks
         .into_iter()
-        .filter(|chunk| {
-            !caches.covers(chunk.media_id, chunk.source_start, chunk.source_end)
-        })
+        .filter(|chunk| !caches.covers(chunk.media_id, chunk.source_start, chunk.source_end))
         .collect()
 }
 
@@ -691,7 +723,11 @@ fn position_decoder(
     let debug_start = debug_enabled().then(std::time::Instant::now);
     // An image must be opened with `open_image`, or it would hit EOF after the
     // first frame.
-    let opened = if is_image { Decoder::open_image(path) } else { Decoder::open(path) };
+    let opened = if is_image {
+        Decoder::open_image(path)
+    } else {
+        Decoder::open(path)
+    };
     let Ok(mut decoder) = opened else {
         return Positioned::Failed;
     };
@@ -757,9 +793,17 @@ fn walk_and_fill(
     let start_frame = (from_frame - behind_frames).max(0);
 
     let mut forward_segments = collect_media_segments(project, timeline, from_frame, end_frame);
-    let mut behind_segments = collect_media_segments_behind(project, timeline, from_frame, start_frame);
-    forward_segments.extend(crossing_borrowed_segments(project, timeline, from_frame, end_frame));
-    behind_segments.extend(crossing_borrowed_segments(project, timeline, start_frame, from_frame));
+    let mut behind_segments =
+        collect_media_segments_behind(project, timeline, from_frame, start_frame);
+    forward_segments.extend(crossing_borrowed_segments(
+        project, timeline, from_frame, end_frame,
+    ));
+    behind_segments.extend(crossing_borrowed_segments(
+        project,
+        timeline,
+        start_frame,
+        from_frame,
+    ));
     if forward_segments.is_empty() && behind_segments.is_empty() {
         return WalkOutcome::SETTLED;
     }
@@ -768,7 +812,11 @@ fn walk_and_fill(
     open.retain(|id, _| forward_media.contains(id));
     open_behind.retain(|id, _| behind_media.contains(id));
 
-    let window: Vec<WantedRange> = forward_segments.iter().chain(&behind_segments).copied().collect();
+    let window: Vec<WantedRange> = forward_segments
+        .iter()
+        .chain(&behind_segments)
+        .copied()
+        .collect();
     // Discards what is outside both windows and, past the budget, the
     // farthest from the playhead.
     caches.reconcile(from_frame, &window, cache_budget_bytes);
@@ -869,7 +917,10 @@ fn fill_segments(
         };
         // Already all cached: the position the decoder believes it has is not
         // trusted.
-        if ctx.caches.covers(segment.media_id, segment.source_start, segment.source_end) {
+        if ctx
+            .caches
+            .covers(segment.media_id, segment.source_start, segment.source_end)
+        {
             continue;
         }
         // Without room for even one frame it does not start: it would pay the
@@ -927,7 +978,9 @@ fn fill_segments(
             // rest is already there. A single contiguous interval is needed, not two points
             // present on different islands.
             if resumed
-                && ctx.caches.covers(segment.media_id, od.next_frame, segment.source_end)
+                && ctx
+                    .caches
+                    .covers(segment.media_id, od.next_frame, segment.source_end)
             {
                 if debug_enabled() {
                     eprintln!(

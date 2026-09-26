@@ -66,9 +66,8 @@ impl VenturiApp {
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
                         ui.label(t!("pool.timeline_name"));
-                        let name_edit = ui.add(
-                            egui::TextEdit::singleline(&mut dialog.name).desired_width(220.0),
-                        );
+                        let name_edit = ui
+                            .add(egui::TextEdit::singleline(&mut dialog.name).desired_width(220.0));
                         if name_edit.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter))
                             && !dialog.name.trim().is_empty()

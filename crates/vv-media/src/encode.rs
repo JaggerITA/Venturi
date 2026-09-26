@@ -283,7 +283,11 @@ impl Encoder {
                 }
                 let mut audio_opts = Dictionary::new();
                 if settings.codec == AudioCodec::Aac {
-                    let coder = if settings.fast_coder { "fast" } else { "twoloop" };
+                    let coder = if settings.fast_coder {
+                        "fast"
+                    } else {
+                        "twoloop"
+                    };
                     audio_opts.set("aac_coder", coder);
                 }
                 let audio_encoder = audio_ctx.open_as_with(audio_codec, audio_opts)?;
@@ -303,19 +307,19 @@ impl Encoder {
                 let frame_size = (audio_encoder.frame_size() as usize).max(1);
 
                 Some(AudioState {
-                        encoder: audio_encoder,
-                        resampler,
-                        input_layout,
-                        stream_index: audio_stream_index,
-                        time_base: audio_time_base,
-                        // Updated after `write_header`.
-                        ost_time_base: audio_time_base,
-                        frame_size,
-                        channels,
-                        rate: sample_rate,
-                        pending: Vec::new(),
-                        next_pts: 0,
-                    })
+                    encoder: audio_encoder,
+                    resampler,
+                    input_layout,
+                    stream_index: audio_stream_index,
+                    time_base: audio_time_base,
+                    // Updated after `write_header`.
+                    ost_time_base: audio_time_base,
+                    frame_size,
+                    channels,
+                    rate: sample_rate,
+                    pending: Vec::new(),
+                    next_pts: 0,
+                })
             }
             None => None,
         };
@@ -479,7 +483,12 @@ pub(crate) fn drain_packets(
 
 /// Copies a dense plane (rows of `row_width` bytes) into a plane of `frame`,
 /// which may have a wider stride.
-pub(crate) fn fill_plane(frame: &mut ffmpeg::frame::Video, plane: usize, src: &[u8], row_width: usize) {
+pub(crate) fn fill_plane(
+    frame: &mut ffmpeg::frame::Video,
+    plane: usize,
+    src: &[u8],
+    row_width: usize,
+) {
     let stride = frame.stride(plane);
     let data = frame.data_mut(plane);
     for (y, row) in src.chunks_exact(row_width.max(1)).enumerate() {

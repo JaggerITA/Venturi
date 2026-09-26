@@ -149,7 +149,10 @@ impl Action {
         use egui::Key;
         let plain = Shortcut::plain;
         let ctrl = Shortcut::ctrl;
-        let ctrl_shift = |key| Shortcut { shift: true, ..Shortcut::ctrl(key) };
+        let ctrl_shift = |key| Shortcut {
+            shift: true,
+            ..Shortcut::ctrl(key)
+        };
         match self {
             Action::TogglePlayback => vec![plain(Key::Space)],
             Action::FastPlayback => vec![plain(Key::A)],
@@ -159,20 +162,30 @@ impl Action {
             Action::MarkOut => vec![plain(Key::O)],
             Action::FullscreenViewer => vec![ctrl(Key::F)],
             Action::ViewerZoomFit => vec![plain(Key::Z)],
-            Action::ViewerZoomActual => vec![Shortcut { alt: true, shift: true, ..plain(Key::Z) }],
+            Action::ViewerZoomActual => vec![Shortcut {
+                alt: true,
+                shift: true,
+                ..plain(Key::Z)
+            }],
             Action::Undo => vec![ctrl(Key::Z)],
             Action::Redo => vec![ctrl_shift(Key::Z)],
             Action::Copy => vec![ctrl(Key::C)],
             Action::Cut => vec![ctrl(Key::X)],
             Action::Paste => vec![ctrl(Key::V)],
-            Action::PasteAttributes => vec![Shortcut { alt: true, ..plain(Key::V) }],
+            Action::PasteAttributes => vec![Shortcut {
+                alt: true,
+                ..plain(Key::V)
+            }],
             Action::Delete => vec![plain(Key::Delete), plain(Key::Backspace)],
             // ISO key between left Shift and Z ("<" on Italian layouts).
             Action::RippleDelete => vec![plain(Key::IntlBackslash)],
             Action::Split => vec![plain(Key::T)],
             Action::ToggleDisabled => vec![plain(Key::D)],
             Action::SelectAll => vec![ctrl(Key::A)],
-            Action::SelectFromPlayhead => vec![Shortcut { alt: true, ..plain(Key::Y) }],
+            Action::SelectFromPlayhead => vec![Shortcut {
+                alt: true,
+                ..plain(Key::Y)
+            }],
             Action::OpenProject => vec![ctrl(Key::O)],
             Action::SaveProject => vec![ctrl(Key::S)],
             Action::SaveProjectAs => vec![ctrl_shift(Key::S)],
@@ -200,19 +213,37 @@ pub struct Shortcut {
 
 impl Shortcut {
     pub fn plain(key: egui::Key) -> Self {
-        Self { key, ctrl: false, shift: false, alt: false }
+        Self {
+            key,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        }
     }
 
     pub fn ctrl(key: egui::Key) -> Self {
-        Self { ctrl: true, ..Self::plain(key) }
+        Self {
+            ctrl: true,
+            ..Self::plain(key)
+        }
     }
 
     pub fn from_event(key: egui::Key, modifiers: egui::Modifiers) -> Self {
-        Self { key, ctrl: modifiers.command, shift: modifiers.shift, alt: modifiers.alt }
+        Self {
+            key,
+            ctrl: modifiers.command,
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+        }
     }
 
     fn modifiers(self) -> egui::Modifiers {
-        egui::Modifiers { alt: self.alt, shift: self.shift, command: self.ctrl, ..Default::default() }
+        egui::Modifiers {
+            alt: self.alt,
+            shift: self.shift,
+            command: self.ctrl,
+            ..Default::default()
+        }
     }
 
     fn modifiers_match(self, current: egui::Modifiers) -> bool {
@@ -280,7 +311,11 @@ impl Shortcut {
 
     fn join(self, key: &str) -> String {
         let mut text = String::new();
-        for (on, name) in [(self.ctrl, "Ctrl+"), (self.shift, "Shift+"), (self.alt, "Alt+")] {
+        for (on, name) in [
+            (self.ctrl, "Ctrl+"),
+            (self.shift, "Shift+"),
+            (self.alt, "Alt+"),
+        ] {
             if on {
                 text.push_str(name);
             }
@@ -339,7 +374,10 @@ pub struct Keymap {
 impl Default for Keymap {
     fn default() -> Self {
         Self {
-            bindings: Action::ALL.into_iter().map(|a| (a, a.default_shortcuts())).collect(),
+            bindings: Action::ALL
+                .into_iter()
+                .map(|a| (a, a.default_shortcuts()))
+                .collect(),
         }
     }
 }
@@ -368,7 +406,12 @@ impl Keymap {
     /// Assigns `shortcut` to `action` (replacing `slot`, or in addition if
     /// `None`), removing it from any other action. Returns the actions it
     /// was taken away from.
-    pub fn assign(&mut self, action: Action, slot: Option<usize>, shortcut: Shortcut) -> Vec<Action> {
+    pub fn assign(
+        &mut self,
+        action: Action,
+        slot: Option<usize>,
+        shortcut: Shortcut,
+    ) -> Vec<Action> {
         let mut stolen = Vec::new();
         for (&other, shortcuts) in &mut self.bindings {
             if other != action && shortcuts.contains(&shortcut) {
@@ -545,11 +588,18 @@ impl Settings {
             }
         };
         let mut settings = Self::default();
-        settings.language = file.language.as_deref().and_then(Language::from_id).unwrap_or_default();
+        settings.language = file
+            .language
+            .as_deref()
+            .and_then(Language::from_id)
+            .unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
         settings.proxy_enabled = file.use_proxies.unwrap_or(settings.proxy_enabled);
-        settings.proxy_quality =
-            file.proxy_quality.as_deref().and_then(ProxyQuality::from_id).unwrap_or_default();
+        settings.proxy_quality = file
+            .proxy_quality
+            .as_deref()
+            .and_then(ProxyQuality::from_id)
+            .unwrap_or_default();
         settings.lookahead_secs = file.lookahead_secs.unwrap_or(settings.lookahead_secs);
         settings.behind_secs = file.behind_secs.unwrap_or(settings.behind_secs);
         settings.cache_budget_bytes = file
@@ -558,22 +608,40 @@ impl Settings {
         settings.recent_projects = file.recent_projects;
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
-            media_pool_open: file.panels.media_pool_open.unwrap_or(defaults.media_pool_open),
+            media_pool_open: file
+                .panels
+                .media_pool_open
+                .unwrap_or(defaults.media_pool_open),
             effects_open: file.panels.effects_open.unwrap_or(defaults.effects_open),
-            inspector_open: file.panels.inspector_open.unwrap_or(defaults.inspector_open),
+            inspector_open: file
+                .panels
+                .inspector_open
+                .unwrap_or(defaults.inspector_open),
             keyframe_editor_open: file
                 .panels
                 .keyframe_editor_open
                 .unwrap_or(defaults.keyframe_editor_open),
-            left_column_width: file.panels.left_column_width.unwrap_or(defaults.left_column_width),
-            inspector_width: file.panels.inspector_width.unwrap_or(defaults.inspector_width),
-            timeline_height: file.panels.timeline_height.unwrap_or(defaults.timeline_height),
+            left_column_width: file
+                .panels
+                .left_column_width
+                .unwrap_or(defaults.left_column_width),
+            inspector_width: file
+                .panels
+                .inspector_width
+                .unwrap_or(defaults.inspector_width),
+            timeline_height: file
+                .panels
+                .timeline_height
+                .unwrap_or(defaults.timeline_height),
         };
         for (id, shortcuts) in file.shortcuts {
             let Some(action) = Action::from_id(&id) else {
                 continue;
             };
-            let parsed = shortcuts.iter().filter_map(|s| Shortcut::from_config(s)).collect();
+            let parsed = shortcuts
+                .iter()
+                .filter_map(|s| Shortcut::from_config(s))
+                .collect();
             settings.keymap.bindings.insert(action, parsed);
         }
         settings
@@ -586,7 +654,10 @@ impl Settings {
                 .bindings
                 .iter()
                 .map(|(action, shortcuts)| {
-                    (action.id().to_owned(), shortcuts.iter().map(|s| s.to_config()).collect())
+                    (
+                        action.id().to_owned(),
+                        shortcuts.iter().map(|s| s.to_config()).collect(),
+                    )
                 })
                 .collect(),
             language: Some(self.language.id().to_owned()),

@@ -236,7 +236,10 @@ enum EdgeZone {
     Trim(TrimEdge),
     /// On the contact point with the adjacent clip `neighbor`: `edge` is the
     /// edge of this clip, the neighbor moves with the opposite one.
-    Roll { edge: TrimEdge, neighbor: ClipKey },
+    Roll {
+        edge: TrimEdge,
+        neighbor: ClipKey,
+    },
 }
 
 impl EdgeZone {
@@ -381,7 +384,8 @@ impl TimelineState {
 
     /// Removes from the selection whatever is on locked tracks.
     pub fn drop_locked(&mut self, timeline: &vv_core::Timeline) {
-        self.selected.retain(|&(track_index, _)| !timeline.is_locked(track_index));
+        self.selected
+            .retain(|&(track_index, _)| !timeline.is_locked(track_index));
         if self
             .selection_anchor
             .is_some_and(|(track_index, _)| timeline.is_locked(track_index))
@@ -671,10 +675,14 @@ impl PaneLayout {
     fn row_at_y(&self, y: f32) -> usize {
         let in_video = self.video_count > 0 && (self.audio_count == 0 || y < self.audio_pane.min);
         if in_video {
-            let row = ((y - self.video_rows_top) / self.row_height).floor().max(0.0) as usize;
+            let row = ((y - self.video_rows_top) / self.row_height)
+                .floor()
+                .max(0.0) as usize;
             row.min(self.video_count - 1)
         } else {
-            let row = ((y - self.audio_rows_top) / self.row_height).floor().max(0.0) as usize;
+            let row = ((y - self.audio_rows_top) / self.row_height)
+                .floor()
+                .max(0.0) as usize;
             self.video_count + row.min(self.audio_count.saturating_sub(1))
         }
     }
@@ -722,7 +730,10 @@ fn track_drag_target(
                 return Some(TrackDragTarget::NewTrack);
             }
             if y < layout.video_rows_bottom() {
-                return row_order.get(layout.row_at_y(y)).copied().map(TrackDragTarget::Track);
+                return row_order
+                    .get(layout.row_at_y(y))
+                    .copied()
+                    .map(TrackDragTarget::Track);
             }
             None
         }
@@ -735,7 +746,10 @@ fn track_drag_target(
                 return Some(TrackDragTarget::NewTrack);
             }
             if y >= layout.audio_rows_top {
-                return row_order.get(layout.row_at_y(y)).copied().map(TrackDragTarget::Track);
+                return row_order
+                    .get(layout.row_at_y(y))
+                    .copied()
+                    .map(TrackDragTarget::Track);
             }
             None
         }
@@ -801,9 +815,9 @@ fn drag_group_row_targets(
             TrackKind::Audio if candidate_row > track_count as isize - 1 => {
                 EffectiveTrack::New((candidate_row - (track_count as isize - 1)) as usize)
             }
-            TrackKind::Video => {
-                EffectiveTrack::Existing(row_order[candidate_row.min(video_count as isize - 1) as usize])
-            }
+            TrackKind::Video => EffectiveTrack::Existing(
+                row_order[candidate_row.min(video_count as isize - 1) as usize],
+            ),
             TrackKind::Audio => EffectiveTrack::Existing(
                 row_order[candidate_row.max(video_count as isize) as usize],
             ),
@@ -828,8 +842,10 @@ fn draw_track_headers(
     playhead: FrameIdx,
     fps: f64,
 ) {
-    let (rect, _resp) =
-        ui.allocate_exact_size(egui::vec2(TRACK_HEADER_WIDTH, RULER_HEIGHT), egui::Sense::hover());
+    let (rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(TRACK_HEADER_WIDTH, RULER_HEIGHT),
+        egui::Sense::hover(),
+    );
     let origin = rect.min;
     let full_clip = ui.clip_rect();
     let text_color = ui.visuals().text_color();
@@ -838,7 +854,10 @@ fn draw_track_headers(
     // ruler row (as in DaVinci Resolve).
     let playhead_secs = playhead as f64 / fps;
     ui.painter().text(
-        egui::pos2(origin.x + TRACK_HEADER_WIDTH / 2.0, origin.y + RULER_HEIGHT / 2.0),
+        egui::pos2(
+            origin.x + TRACK_HEADER_WIDTH / 2.0,
+            origin.y + RULER_HEIGHT / 2.0,
+        ),
         egui::Align2::CENTER_CENTER,
         format_timecode(playhead_secs, fps),
         egui::FontId::monospace(14.0),
@@ -871,10 +890,15 @@ fn draw_track_headers(
                 egui::vec2(20.0, 20.0),
             );
             let resp = ui
-                .interact(rect, ui.id().with(id).with(track_index), egui::Sense::click())
+                .interact(
+                    rect,
+                    ui.id().with(id).with(track_index),
+                    egui::Sense::click(),
+                )
                 .on_hover_text(hover);
             if resp.hovered() {
-                ui.painter().rect_filled(rect, 3.0, egui::Color32::from_gray(60));
+                ui.painter()
+                    .rect_filled(rect, 3.0, egui::Color32::from_gray(60));
             }
             paint(ui.painter(), rect);
             resp.clicked()
@@ -890,9 +914,12 @@ fn draw_track_headers(
         }
         match kind {
             TrackKind::Video => {
-                if toggle(66.0, "mute_track", &t!("timeline.disable_video_track"), &|p, r| {
-                    paint_film_icon(p, r, !flags.muted)
-                }) {
+                if toggle(
+                    66.0,
+                    "mute_track",
+                    &t!("timeline.disable_video_track"),
+                    &|p, r| paint_film_icon(p, r, !flags.muted),
+                ) {
                     *pending = Some(PendingAction::SetTrackFlag(
                         track_index,
                         TrackFlag::Muted,
@@ -905,8 +932,11 @@ fn draw_track_headers(
                 if toggle(66.0, "solo_track", &t!("timeline.solo"), &|p, r| {
                     paint_letter_button(p, r, "S", flags.solo.then_some(solo_color))
                 }) {
-                    *pending =
-                        Some(PendingAction::SetTrackFlag(track_index, TrackFlag::Solo, !flags.solo));
+                    *pending = Some(PendingAction::SetTrackFlag(
+                        track_index,
+                        TrackFlag::Solo,
+                        !flags.solo,
+                    ));
                 }
                 let mute_color = egui::Color32::from_rgb(200, 60, 60);
                 if toggle(90.0, "mute_track", &t!("timeline.mute"), &|p, r| {
@@ -933,7 +963,11 @@ fn draw_track_headers(
             egui::Sense::click()
         };
         let remove_resp = ui
-            .interact(remove_rect, ui.id().with("remove_track").with(track_index), sense)
+            .interact(
+                remove_rect,
+                ui.id().with("remove_track").with(track_index),
+                sense,
+            )
             .on_hover_text(if is_last_of_kind {
                 t!("timeline.cannot_remove_last_track")
             } else {
@@ -1073,7 +1107,12 @@ fn paint_lock_icon(painter: &egui::Painter, rect: egui::Rect, locked: bool) {
 fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
     let color = egui::Color32::from_gray(if enabled { 200 } else { 100 });
     let film = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 11.0));
-    painter.rect_stroke(film, 1.0, egui::Stroke::new(1.3, color), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        film,
+        1.0,
+        egui::Stroke::new(1.3, color),
+        egui::StrokeKind::Inside,
+    );
     for i in 0..4 {
         let x = film.left() + 2.5 + i as f32 * 3.0;
         for y in [film.top() + 2.0, film.bottom() - 2.0] {
@@ -1086,7 +1125,10 @@ fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
     }
     if !enabled {
         painter.line_segment(
-            [film.left_bottom() + egui::vec2(-1.0, 1.0), film.right_top() + egui::vec2(1.0, -1.0)],
+            [
+                film.left_bottom() + egui::vec2(-1.0, 1.0),
+                film.right_top() + egui::vec2(1.0, -1.0),
+            ],
             egui::Stroke::new(1.6, egui::Color32::from_rgb(220, 70, 70)),
         );
     }
@@ -1095,7 +1137,12 @@ fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
 /// Hand-drawn gear (ring + radial teeth): no Unicode glyph, which
 /// on some platforms (Asahi) is missing from egui's fonts (see the comment
 /// on the link icon in `paint_clip_overlay`).
-pub(crate) fn paint_gear_icon(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32) {
+pub(crate) fn paint_gear_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: egui::Color32,
+) {
     let stroke = egui::Stroke::new(1.6, color);
     painter.circle_stroke(center, radius * 0.55, stroke);
     painter.circle_filled(center, radius * 0.16, color);
@@ -1103,7 +1150,10 @@ pub(crate) fn paint_gear_icon(painter: &egui::Painter, center: egui::Pos2, radiu
     for i in 0..TEETH {
         let angle = std::f32::consts::TAU * i as f32 / TEETH as f32;
         let dir = egui::vec2(angle.cos(), angle.sin());
-        painter.line_segment([center + dir * radius * 0.55, center + dir * radius], stroke);
+        painter.line_segment(
+            [center + dir * radius * 0.55, center + dir * radius],
+            stroke,
+        );
     }
 }
 
@@ -1160,7 +1210,9 @@ fn nice_tick_interval_secs(pixels_per_sec: f32) -> f64 {
 pub(crate) fn pointer_over(ctx: &egui::Context, rect: egui::Rect) -> bool {
     ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
         rect.contains(p)
-            && ctx.layer_id_at(p).is_none_or(|l| l.order == egui::Order::Background)
+            && ctx
+                .layer_id_at(p)
+                .is_none_or(|l| l.order == egui::Order::Background)
     })
 }
 
@@ -1216,7 +1268,10 @@ fn draw_ruler_ticks(
         }
         let x = origin.x + (secs * pixels_per_sec as f64) as f32;
         painter.line_segment(
-            [egui::pos2(x, origin.y), egui::pos2(x, origin.y + MAJOR_TICK_HEIGHT)],
+            [
+                egui::pos2(x, origin.y),
+                egui::pos2(x, origin.y + MAJOR_TICK_HEIGHT),
+            ],
             egui::Stroke::new(1.0, tick_color),
         );
         painter.text(
@@ -1401,7 +1456,10 @@ impl TimelineDrag {
     pub fn hovered(resp: &egui::Response) -> Option<Self> {
         resp.dnd_hover_payload::<MediaDragSet>()
             .map(|set| Self::Media((*set).clone()))
-            .or_else(|| resp.dnd_hover_payload::<Generator>().map(|g| Self::Generator(*g)))
+            .or_else(|| {
+                resp.dnd_hover_payload::<Generator>()
+                    .map(|g| Self::Generator(*g))
+            })
     }
 
     pub fn released(resp: &egui::Response) -> Option<Self> {
@@ -1421,7 +1479,8 @@ impl TimelineDrag {
             return None;
         }
         if egui::DragAndDrop::has_payload_of_type::<Generator>(&resp.ctx) {
-            resp.dnd_release_payload::<Generator>().map(|g| Self::Generator(*g))
+            resp.dnd_release_payload::<Generator>()
+                .map(|g| Self::Generator(*g))
         } else {
             resp.dnd_release_payload::<MediaDragSet>()
                 .map(|set| Self::Media((*set).clone()))
@@ -1557,7 +1616,10 @@ pub fn show_timeline(
     // always stay visible, so the view "turns the page" to
     // follow it when it leaves the visible area (see below).
     playback_active: bool,
-) -> (Option<(TimelineDrag, FrameIdx, MediaDropTarget)>, Option<TimelineId>) {
+) -> (
+    Option<(TimelineDrag, FrameIdx, MediaDropTarget)>,
+    Option<TimelineId>,
+) {
     let mut media_drop = None;
     // Double click on a compound clip: the caller (main.rs) opens it
     // as a timeline of its own (see `VenturiApp::enter_compound_timeline`).
@@ -1586,7 +1648,13 @@ pub fn show_timeline(
             || (pointer_over_panel
                 && (i.pointer.any_pressed()
                     || i.events.iter().any(|e| {
-                        matches!(e, egui::Event::MouseWheel { phase: egui::TouchPhase::Start, .. })
+                        matches!(
+                            e,
+                            egui::Event::MouseWheel {
+                                phase: egui::TouchPhase::Start,
+                                ..
+                            }
+                        )
                     })))
     });
     if touch_started {
@@ -1644,15 +1712,17 @@ pub fn show_timeline(
     // At low zoom the natural content is narrower than the panel: we force
     // at least `viewport_width` so the ruler always reaches the edge.
     let viewport_width = (panel_rect.width() - TRACK_HEADER_WIDTH).max(1.0);
-    let content_width =
-        ((total_secs * state.pixels_per_sec as f64) as f32).max(viewport_width);
+    let content_width = ((total_secs * state.pixels_per_sec as f64) as f32).max(viewport_width);
 
     let row_order = track_row_order(&track_kinds);
     let mut row_of_track = vec![0usize; track_count];
     for (row, &track_index) in row_order.iter().enumerate() {
         row_of_track[track_index] = row;
     }
-    let video_count = track_kinds.iter().filter(|k| **k == TrackKind::Video).count();
+    let video_count = track_kinds
+        .iter()
+        .filter(|k| **k == TrackKind::Video)
+        .count();
     let audio_count = track_count - video_count;
     let avail_below_ruler = (panel_rect.height() - RULER_HEIGHT).max(0.0);
     let mut layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
@@ -1664,10 +1734,18 @@ pub fn show_timeline(
 
     // Residual inertia from a touchpad swipe just finished: it keeps
     // scrolling and braking, even if the pointer moved in the meantime.
-    let video_coasted =
-        apply_kinetic_scroll(&mut state.video_scroll, &mut state.video_scroll_vel, layout.video_max_scroll, dt);
-    let audio_coasted =
-        apply_kinetic_scroll(&mut state.audio_scroll, &mut state.audio_scroll_vel, layout.audio_max_scroll, dt);
+    let video_coasted = apply_kinetic_scroll(
+        &mut state.video_scroll,
+        &mut state.video_scroll_vel,
+        layout.video_max_scroll,
+        dt,
+    );
+    let audio_coasted = apply_kinetic_scroll(
+        &mut state.audio_scroll,
+        &mut state.audio_scroll_vel,
+        layout.audio_max_scroll,
+        dt,
+    );
     if video_coasted || audio_coasted {
         layout = PaneLayout::new(avail_below_ruler, video_count, audio_count, state);
         ui.ctx().request_repaint();
@@ -1688,13 +1766,19 @@ pub fn show_timeline(
         } else if wheel != 0.0 {
             let scrolled = if layout.video_pane.contains(local_y) && layout.video_max_scroll > 0.0 {
                 state.video_scroll += wheel;
-                state.video_scroll_vel =
-                    if kinetic_scroll_enabled && dt > 0.0 { KINETIC_VELOCITY_GAIN * wheel / dt } else { 0.0 };
+                state.video_scroll_vel = if kinetic_scroll_enabled && dt > 0.0 {
+                    KINETIC_VELOCITY_GAIN * wheel / dt
+                } else {
+                    0.0
+                };
                 true
             } else if layout.audio_pane.contains(local_y) && layout.audio_max_scroll > 0.0 {
                 state.audio_scroll -= wheel;
-                state.audio_scroll_vel =
-                    if kinetic_scroll_enabled && dt > 0.0 { -KINETIC_VELOCITY_GAIN * wheel / dt } else { 0.0 };
+                state.audio_scroll_vel = if kinetic_scroll_enabled && dt > 0.0 {
+                    -KINETIC_VELOCITY_GAIN * wheel / dt
+                } else {
+                    0.0
+                };
                 true
             } else {
                 false
@@ -1769,10 +1853,8 @@ pub fn show_timeline(
                 let origin = rect.min;
                 // Not allocated: the height of the boxes depends on the panel,
                 // and allocating it would make `Panel::bottom` grow indefinitely.
-                let visual_rect = egui::Rect::from_min_size(
-                    origin,
-                    egui::vec2(content_width, visual_height),
-                );
+                let visual_rect =
+                    egui::Rect::from_min_size(origin, egui::vec2(content_width, visual_height));
                 let painter = ui.painter_at(visual_rect);
                 let to_local = |pos: egui::Pos2| egui::pos2(pos.x - origin.x, pos.y - origin.y);
                 let pane_rect = |pane: egui::Rangef| {
@@ -1783,14 +1865,15 @@ pub fn show_timeline(
                 };
                 let track_pane_rect = |track_index: usize| pane_rect(pane_of(track_index));
                 let track_painter = |track_index: usize| {
-                    painter.with_clip_rect(painter.clip_rect().intersect(track_pane_rect(track_index)))
+                    painter
+                        .with_clip_rect(painter.clip_rect().intersect(track_pane_rect(track_index)))
                 };
-                let local_pane_rect = |track_index: usize| {
-                    track_pane_rect(track_index).translate(-origin.to_vec2())
-                };
+                let local_pane_rect =
+                    |track_index: usize| track_pane_rect(track_index).translate(-origin.to_vec2());
                 // Only the part of the clip visible in its box.
                 let visible_clip_rect = |v: &ClipVisual| {
-                    clip_local_rect(v, px_per_frame, &row_y, row_height).intersect(local_pane_rect(v.track_index))
+                    clip_local_rect(v, px_per_frame, &row_y, row_height)
+                        .intersect(local_pane_rect(v.track_index))
                 };
                 let press_over_a_clip = |pos: egui::Pos2| {
                     let local = to_local(pos);
@@ -1835,9 +1918,8 @@ pub fn show_timeline(
                     egui::pos2(origin.x, origin.y + RULER_HEIGHT),
                     egui::pos2(origin.x + content_width, origin.y + visual_height),
                 );
-                let pointer_over_tracks = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .is_some_and(over_rows);
+                let pointer_over_tracks =
+                    ui.input(|i| i.pointer.hover_pos()).is_some_and(over_rows);
                 let marquee_resp = ui.interact(
                     marquee_area_rect,
                     ui.id().with("timeline_marquee"),
@@ -1873,7 +1955,12 @@ pub fn show_timeline(
                             .iter()
                             .any(|d| d.takes_video(&project.media_pool[d.media_id].meta)),
                     };
-                    media_pool_drop_target(track, has_video, track_kinds[track], track_locked(track))
+                    media_pool_drop_target(
+                        track,
+                        has_video,
+                        track_kinds[track],
+                        track_locked(track),
+                    )
                 };
                 // Where a drop falls: the frame under the pointer, with the snapping.
                 let playhead = state.playhead;
@@ -1921,8 +2008,9 @@ pub fn show_timeline(
                         ];
                         for (_, y, pane) in rows.into_iter().filter(|(present, _, _)| *present) {
                             let Some(y) = y else { continue };
-                            let ghost_painter = ghost_painter
-                                .with_clip_rect(ghost_painter.clip_rect().intersect(pane_rect(pane)));
+                            let ghost_painter = ghost_painter.with_clip_rect(
+                                ghost_painter.clip_rect().intersect(pane_rect(pane)),
+                            );
                             let rect = egui::Rect::from_min_size(
                                 egui::pos2(x, y),
                                 egui::vec2(seg.len as f32 * px_per_frame, row_height),
@@ -1962,7 +2050,12 @@ pub fn show_timeline(
                     && egui::DragAndDrop::has_payload_of_type::<vv_core::FilterKind>(ui.ctx())
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 {
-                    paint_gear_icon(&ghost_painter, pos + egui::vec2(14.0, 14.0), 10.0, egui::Color32::WHITE);
+                    paint_gear_icon(
+                        &ghost_painter,
+                        pos + egui::vec2(14.0, 14.0),
+                        10.0,
+                        egui::Color32::WHITE,
+                    );
                 }
 
                 // Same gear ghost as the filters: a transition
@@ -1974,7 +2067,12 @@ pub fn show_timeline(
                         || egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(ui.ctx()))
                     && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
                 {
-                    paint_gear_icon(&ghost_painter, pos + egui::vec2(14.0, 14.0), 10.0, egui::Color32::WHITE);
+                    paint_gear_icon(
+                        &ghost_painter,
+                        pos + egui::vec2(14.0, 14.0),
+                        10.0,
+                        egui::Color32::WHITE,
+                    );
                 }
 
                 // "Add a new track" zones: margins above/below the
@@ -1992,7 +2090,11 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if TimelineDrag::hovered(&above_video_resp).is_some() {
-                    paint_drop_zone(&painter, above_video_rect, Some(&t!("timeline.new_video_track")));
+                    paint_drop_zone(
+                        &painter,
+                        above_video_rect,
+                        Some(&t!("timeline.new_video_track")),
+                    );
                 }
                 if let Some(drag) = TimelineDrag::released(&above_video_resp)
                     && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
@@ -2014,7 +2116,11 @@ pub fn show_timeline(
                     egui::Sense::hover(),
                 );
                 if TimelineDrag::hovered(&below_audio_resp).is_some_and(|d| d.is_media()) {
-                    paint_drop_zone(&painter, below_audio_rect, Some(&t!("timeline.new_audio_track")));
+                    paint_drop_zone(
+                        &painter,
+                        below_audio_rect,
+                        Some(&t!("timeline.new_audio_track")),
+                    );
                 }
                 if let Some(drag) = TimelineDrag::released(&below_audio_resp)
                     && drag.is_media()
@@ -2127,12 +2233,7 @@ pub fn show_timeline(
                 let drag_effective_track = state.moving().map(|d| {
                     let kind = track_kinds[d.track_index];
                     let target = ui.input(|i| i.pointer.interact_pos()).and_then(|pos| {
-                        track_drag_target(
-                            to_local(pos).y,
-                            kind,
-                            &row_order,
-                            &layout,
-                        )
+                        track_drag_target(to_local(pos).y, kind, &row_order, &layout)
                     });
                     match target {
                         Some(TrackDragTarget::Track(idx)) if !track_locked(idx) => {
@@ -2142,7 +2243,9 @@ pub fn show_timeline(
                         _ => EffectiveTrack::Existing(d.track_index),
                     }
                 });
-                if let (Some(d), Some(EffectiveTrack::New(_))) = (state.moving(), drag_effective_track) {
+                if let (Some(d), Some(EffectiveTrack::New(_))) =
+                    (state.moving(), drag_effective_track)
+                {
                     let rect = match track_kinds[d.track_index] {
                         TrackKind::Video => above_video_rect,
                         TrackKind::Audio => below_audio_rect,
@@ -2305,7 +2408,8 @@ pub fn show_timeline(
                 }
                 for visual in draw_order {
                     let painter = track_painter(visual.track_index);
-                    let is_trimming_this = trimmed_keys.contains(&(visual.track_index, visual.clip.id));
+                    let is_trimming_this =
+                        trimmed_keys.contains(&(visual.track_index, visual.clip.id));
                     let (display_start, display_len) = display_range(
                         visual,
                         state,
@@ -2325,14 +2429,18 @@ pub fn show_timeline(
                         Some((_, EffectiveTrack::Existing(track))) => origin.y + row_y[*track],
                         // Every "depth" stacks another row past the
                         // current edge (see `EffectiveTrack::New`).
-                        Some((_, EffectiveTrack::New(depth))) => match track_kinds[visual.track_index] {
-                            TrackKind::Video => {
-                                origin.y + layout.video_rows_top - *depth as f32 * row_height
+                        Some((_, EffectiveTrack::New(depth))) => {
+                            match track_kinds[visual.track_index] {
+                                TrackKind::Video => {
+                                    origin.y + layout.video_rows_top - *depth as f32 * row_height
+                                }
+                                TrackKind::Audio => {
+                                    origin.y
+                                        + layout.audio_rows_bottom()
+                                        + (*depth - 1) as f32 * row_height
+                                }
                             }
-                            TrackKind::Audio => {
-                                origin.y + layout.audio_rows_bottom() + (*depth - 1) as f32 * row_height
-                            }
-                        },
+                        }
                         None => origin.y + row_y[visual.track_index],
                     };
                     let w = (display_len as f32 * px_per_frame).max(2.0);
@@ -2359,7 +2467,9 @@ pub fn show_timeline(
                         sense,
                     );
 
-                    let is_selected = state.selected.contains(&(visual.track_index, visual.clip.id));
+                    let is_selected = state
+                        .selected
+                        .contains(&(visual.track_index, visual.clip.id));
                     paint_clip_box(&painter, clip_rect, visual, is_selected);
 
                     // Filter dragged from the Effects panel: only video clips,
@@ -2400,22 +2510,39 @@ pub fn show_timeline(
                     // above, same reason.
                     if !visual.locked
                         && track_kinds[visual.track_index] == TrackKind::Video
-                        && egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(ui.ctx())
+                        && egui::DragAndDrop::has_payload_of_type::<vv_core::TransitionKind>(
+                            ui.ctx(),
+                        )
                     {
                         let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
-                        let hover_edge = ui.input(|i| i.pointer.hover_pos())
+                        let hover_edge = ui
+                            .input(|i| i.pointer.hover_pos())
                             .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px));
-                        if resp.dnd_hover_payload::<vv_core::TransitionKind>().is_some()
+                        if resp
+                            .dnd_hover_payload::<vv_core::TransitionKind>()
+                            .is_some()
                             && let Some(edge) = hover_edge
                         {
                             let x = match edge {
                                 FadeEdge::In => clip_rect.left() + drop_zone_px,
                                 FadeEdge::Out => clip_rect.right() - drop_zone_px,
                             };
-                            let is_crossing = has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
-                            paint_transition_marker(&painter, clip_rect, edge, x, false, is_crossing);
+                            let is_crossing =
+                                has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
+                            paint_transition_marker(
+                                &painter,
+                                clip_rect,
+                                edge,
+                                x,
+                                false,
+                                is_crossing,
+                            );
                             if is_crossing {
-                                pending_crossing_previews.push((visual.track_index, visual.clip.id, edge));
+                                pending_crossing_previews.push((
+                                    visual.track_index,
+                                    visual.clip.id,
+                                    edge,
+                                ));
                             }
                         }
                         if let Some(kind) = resp.dnd_release_payload::<vv_core::TransitionKind>()
@@ -2441,7 +2568,8 @@ pub fn show_timeline(
                         && egui::DragAndDrop::has_payload_of_type::<vv_core::Transition>(ui.ctx())
                     {
                         let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
-                        let hover_edge = ui.input(|i| i.pointer.hover_pos())
+                        let hover_edge = ui
+                            .input(|i| i.pointer.hover_pos())
                             .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px));
                         if resp.dnd_hover_payload::<vv_core::Transition>().is_some()
                             && let Some(edge) = hover_edge
@@ -2450,10 +2578,22 @@ pub fn show_timeline(
                                 FadeEdge::In => clip_rect.left() + drop_zone_px,
                                 FadeEdge::Out => clip_rect.right() - drop_zone_px,
                             };
-                            let is_crossing = has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
-                            paint_transition_marker(&painter, clip_rect, edge, x, false, is_crossing);
+                            let is_crossing =
+                                has_neighbor(&visuals, visual.track_index, visual.clip.id, edge);
+                            paint_transition_marker(
+                                &painter,
+                                clip_rect,
+                                edge,
+                                x,
+                                false,
+                                is_crossing,
+                            );
                             if is_crossing {
-                                pending_crossing_previews.push((visual.track_index, visual.clip.id, edge));
+                                pending_crossing_previews.push((
+                                    visual.track_index,
+                                    visual.clip.id,
+                                    edge,
+                                ));
                             }
                         }
                         if let Some(transition) = resp.dnd_release_payload::<vv_core::Transition>()
@@ -2472,8 +2612,8 @@ pub fn show_timeline(
                     if track_kinds[visual.track_index] == TrackKind::Audio
                         && let ClipSource::Media(media_id) = &visual.clip.source
                         && let Some(item) = project.media_pool.get(*media_id)
-                        && let Some(wf) = waveform_cache
-                            .get(&(item.content_hash, visual.clip.audio_stream_index))
+                        && let Some(wf) =
+                            waveform_cache.get(&(item.content_hash, visual.clip.audio_stream_index))
                     {
                         // During a trim the drawn clip covers another
                         // band of the source: without remapping it the
@@ -2524,8 +2664,13 @@ pub fn show_timeline(
                     // Fade-in/fade-out handles: always present if the
                     // fade is already set, otherwise only while the
                     // clip is under the mouse (to grab them from the corner).
-                    let (fade_in_preview, fade_out_preview) = fade_preview(state, visual, px_per_frame);
-                    let fading_edge = |edge| state.fading().is_some_and(|d| d.clip_id == visual.clip.id && d.edge == edge);
+                    let (fade_in_preview, fade_out_preview) =
+                        fade_preview(state, visual, px_per_frame);
+                    let fading_edge = |edge| {
+                        state
+                            .fading()
+                            .is_some_and(|d| d.clip_id == visual.clip.id && d.edge == edge)
+                    };
                     let fade_in_dragging = fading_edge(FadeEdge::In);
                     let fade_out_dragging = fading_edge(FadeEdge::Out);
                     let show_fades = !visual.locked && clip_rect.width() >= MIN_FADE_CLIP_WIDTH_PX;
@@ -2533,16 +2678,35 @@ pub fn show_timeline(
                         + (fade_in_preview as f32 * px_per_frame).min(clip_rect.width());
                     let fade_out_x = clip_rect.right()
                         - (fade_out_preview as f32 * px_per_frame).min(clip_rect.width());
-                    if show_fades && (visual.clip.fade_in > 0 || fade_in_dragging || resp.hovered()) {
-                        paint_fade_wedge(&painter, clip_rect, clip_rect.left(), fade_in_x, fade_in_dragging);
+                    if show_fades && (visual.clip.fade_in > 0 || fade_in_dragging || resp.hovered())
+                    {
+                        paint_fade_wedge(
+                            &painter,
+                            clip_rect,
+                            clip_rect.left(),
+                            fade_in_x,
+                            fade_in_dragging,
+                        );
                     }
-                    if show_fades && (visual.clip.fade_out > 0 || fade_out_dragging || resp.hovered()) {
-                        paint_fade_wedge(&painter, clip_rect, clip_rect.right(), fade_out_x, fade_out_dragging);
+                    if show_fades
+                        && (visual.clip.fade_out > 0 || fade_out_dragging || resp.hovered())
+                    {
+                        paint_fade_wedge(
+                            &painter,
+                            clip_rect,
+                            clip_rect.right(),
+                            fade_out_x,
+                            fade_out_dragging,
+                        );
                     }
                     if let Some(pos) = ui.input(|i| i.pointer.latest_pos())
                         && (fade_in_dragging || fade_out_dragging)
                     {
-                        let frames = if fade_in_dragging { fade_in_preview } else { fade_out_preview };
+                        let frames = if fade_in_dragging {
+                            fade_in_preview
+                        } else {
+                            fade_out_preview
+                        };
                         paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
                     }
 
@@ -2552,32 +2716,56 @@ pub fn show_timeline(
                     // always visible, the end (duration) draggable.
                     let track = &project.timelines[timeline_id].tracks[visual.track_index];
                     let left_marker = edge_marker(track, state, visual, px_per_frame, FadeEdge::In);
-                    let right_marker = edge_marker(track, state, visual, px_per_frame, FadeEdge::Out);
+                    let right_marker =
+                        edge_marker(track, state, visual, px_per_frame, FadeEdge::Out);
                     let transition_in_x = left_marker.as_ref().map(|m| {
                         clip_rect.left() + (m.duration as f32 * px_per_frame).min(clip_rect.width())
                     });
                     let transition_out_x = right_marker.as_ref().map(|m| {
-                        clip_rect.right() - (m.duration as f32 * px_per_frame).min(clip_rect.width())
+                        clip_rect.right()
+                            - (m.duration as f32 * px_per_frame).min(clip_rect.width())
                     });
                     if let (Some(m), Some(x)) = (&left_marker, transition_in_x) {
                         let selected = state.selected_transition == Some(m.selection);
-                        paint_transition_marker(&painter, clip_rect, FadeEdge::In, x, selected, m.is_crossing);
+                        paint_transition_marker(
+                            &painter,
+                            clip_rect,
+                            FadeEdge::In,
+                            x,
+                            selected,
+                            m.is_crossing,
+                        );
                     }
                     if let (Some(m), Some(x)) = (&right_marker, transition_out_x) {
                         let selected = state.selected_transition == Some(m.selection);
-                        paint_transition_marker(&painter, clip_rect, FadeEdge::Out, x, selected, m.is_crossing);
+                        paint_transition_marker(
+                            &painter,
+                            clip_rect,
+                            FadeEdge::Out,
+                            x,
+                            selected,
+                            m.is_crossing,
+                        );
                     }
                     // Overlay with the duration during the drag of its
                     // end: general behavior (see
                     // `paint_duration_overlay`), not only for the fade above.
                     if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
-                        if let Some(d) = state.sizing_transition().filter(|d| d.clip_id == visual.clip.id) {
-                            let frames = edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 1);
+                        if let Some(d) = state
+                            .sizing_transition()
+                            .filter(|d| d.clip_id == visual.clip.id)
+                        {
+                            let frames =
+                                edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 1);
                             paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
                         } else if let Some(d) = state.sizing_crossing().filter(|d| {
-                            [&left_marker, &right_marker].into_iter().flatten().any(|m| {
-                                m.selection == TransitionSelection::Crossing(d.track_index, d.left_clip)
-                            })
+                            [&left_marker, &right_marker]
+                                .into_iter()
+                                .flatten()
+                                .any(|m| {
+                                    m.selection
+                                        == TransitionSelection::Crossing(d.track_index, d.left_clip)
+                                })
                         }) {
                             let frames = crossing_drag_value(d, px_per_frame);
                             paint_duration_overlay(ui.ctx(), pos, frames, timeline_fps.as_f64());
@@ -2618,7 +2806,8 @@ pub fn show_timeline(
                     let idle_hover = resp.hovered() && state.gesture.is_none();
                     if idle_hover
                         && let Some(pos) = resp.hover_pos()
-                        && transition_handle_at(pos, clip_rect, transition_in_x, transition_out_x).is_some()
+                        && transition_handle_at(pos, clip_rect, transition_in_x, transition_out_x)
+                            .is_some()
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     } else if idle_hover
@@ -2646,27 +2835,34 @@ pub fn show_timeline(
                         FadeEdge::Out => right_marker.as_ref(),
                     };
                     let owns_crossing = |d: &CrossingDragState| {
-                        [&left_marker, &right_marker].into_iter().flatten().any(|m| {
-                            m.selection == TransitionSelection::Crossing(d.track_index, d.left_clip)
-                        })
+                        [&left_marker, &right_marker]
+                            .into_iter()
+                            .flatten()
+                            .any(|m| {
+                                m.selection
+                                    == TransitionSelection::Crossing(d.track_index, d.left_clip)
+                            })
                     };
                     if resp.drag_started() {
                         // `press_origin` and not the current position: egui declares the drag after a
                         // small movement, and towards the inside one would already have left the zone
                         // of the edge.
                         let press_pos = ui.input(|i| i.pointer.press_origin());
-                        let transition_handle =
-                            press_pos.and_then(|p| transition_handle_at(p, clip_rect, transition_in_x, transition_out_x));
+                        let transition_handle = press_pos.and_then(|p| {
+                            transition_handle_at(p, clip_rect, transition_in_x, transition_out_x)
+                        });
                         // Alt+drag on the body (not on the handle) of an already
                         // present marker duplicates instead of resizing — the handle
                         // keeps priority, as the fade ignores Alt on its own.
                         let transition_duplicate_edge = if ui.input(|i| i.modifiers.alt) {
                             press_pos.and_then(|p| {
-                                if transition_in_x.is_some_and(|x| transition_body_hit(p, clip_rect, FadeEdge::In, x)) {
+                                if transition_in_x.is_some_and(|x| {
+                                    transition_body_hit(p, clip_rect, FadeEdge::In, x)
+                                }) {
                                     Some(FadeEdge::In)
-                                } else if transition_out_x
-                                    .is_some_and(|x| transition_body_hit(p, clip_rect, FadeEdge::Out, x))
-                                {
+                                } else if transition_out_x.is_some_and(|x| {
+                                    transition_body_hit(p, clip_rect, FadeEdge::Out, x)
+                                }) {
                                     Some(FadeEdge::Out)
                                 } else {
                                     None
@@ -2676,31 +2872,54 @@ pub fn show_timeline(
                             None
                         };
                         let fade_zone = if show_fades {
-                            press_pos.and_then(|p| fade_zone_at(p, clip_rect, fade_in_x, fade_out_x))
+                            press_pos
+                                .and_then(|p| fade_zone_at(p, clip_rect, fade_in_x, fade_out_x))
                         } else {
                             None
                         };
-                        match transition_handle.and_then(|edge| marker_at(edge).map(|m| (edge, m))) {
+                        match transition_handle.and_then(|edge| marker_at(edge).map(|m| (edge, m)))
+                        {
                             Some((edge, m)) => match m.selection {
                                 TransitionSelection::Crossing(track_index, left_clip) => {
-                                    begin_crossing_drag(state, project, timeline_id, track_index, left_clip, edge);
+                                    begin_crossing_drag(
+                                        state,
+                                        project,
+                                        timeline_id,
+                                        track_index,
+                                        left_clip,
+                                        edge,
+                                    );
                                 }
-                                TransitionSelection::Edge(..) => begin_transition_drag(state, visual, edge),
+                                TransitionSelection::Edge(..) => {
+                                    begin_transition_drag(state, visual, edge)
+                                }
                             },
                             None => match transition_duplicate_edge.and_then(marker_at) {
-                            Some(m) => begin_transition_duplicate_drag(state, &resp, project, timeline_id, visual, m),
-                            None => match fade_zone {
-                            Some(edge) => begin_fade_drag(state, visual, edge),
-                            None => match press_pos.and_then(edge_at) {
-                                Some(zone) => begin_trim(state, &visuals, project, visual, zone),
-                                None if press_pos.is_some_and(volume_hit) => {
-                                    begin_volume_drag(state, history, visual)
-                                }
-                                None => {
-                                    begin_drag(state, &visuals, visual, ui.input(|i| i.modifiers.alt))
-                                }
-                            },
-                            },
+                                Some(m) => begin_transition_duplicate_drag(
+                                    state,
+                                    &resp,
+                                    project,
+                                    timeline_id,
+                                    visual,
+                                    m,
+                                ),
+                                None => match fade_zone {
+                                    Some(edge) => begin_fade_drag(state, visual, edge),
+                                    None => match press_pos.and_then(edge_at) {
+                                        Some(zone) => {
+                                            begin_trim(state, &visuals, project, visual, zone)
+                                        }
+                                        None if press_pos.is_some_and(volume_hit) => {
+                                            begin_volume_drag(state, history, visual)
+                                        }
+                                        None => begin_drag(
+                                            state,
+                                            &visuals,
+                                            visual,
+                                            ui.input(|i| i.modifiers.alt),
+                                        ),
+                                    },
+                                },
                             },
                         }
                     } else if resp.dragged() {
@@ -2709,8 +2928,12 @@ pub fn show_timeline(
                             Some(Gesture::TransitionLength(d)) if d.clip_id == visual.clip.id => {
                                 d.accum_px += delta.x;
                             }
-                            Some(Gesture::CrossingLength(d)) if owns_crossing(d) => d.accum_px += delta.x,
-                            Some(Gesture::Fade(d)) if d.clip_id == visual.clip.id => d.accum_px += delta.x,
+                            Some(Gesture::CrossingLength(d)) if owns_crossing(d) => {
+                                d.accum_px += delta.x
+                            }
+                            Some(Gesture::Fade(d)) if d.clip_id == visual.clip.id => {
+                                d.accum_px += delta.x
+                            }
                             Some(Gesture::Volume(d)) if d.clip_id == visual.clip.id => {
                                 d.accum_px += delta.y;
                                 // Unlike fade/trim/move, it is applied right here,
@@ -2721,8 +2944,12 @@ pub fn show_timeline(
                                     new_value: volume_drag_value(d, clip_rect.height() / 2.0),
                                 });
                             }
-                            Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => t.accum_px += delta.x,
-                            Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => d.accum_px += delta.x,
+                            Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => {
+                                t.accum_px += delta.x
+                            }
+                            Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => {
+                                d.accum_px += delta.x
+                            }
                             _ => {}
                         }
                     } else if resp.drag_stopped() {
@@ -2733,7 +2960,12 @@ pub fn show_timeline(
                                     track_index: d.track_index,
                                     clip_id: d.clip_id,
                                     edge: d.edge,
-                                    new_value: edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 1),
+                                    new_value: edge_drag_value(
+                                        d,
+                                        visual.clip.timeline_len,
+                                        px_per_frame,
+                                        1,
+                                    ),
                                 });
                             }
                             Some(Gesture::CrossingLength(d)) if owns_crossing(d) => {
@@ -2745,13 +2977,19 @@ pub fn show_timeline(
                             }
                             // The real drop, if any, is handled by
                             // `dnd_release_payload` in the clip it landed on.
-                            Some(Gesture::DuplicateTransition(clip_id)) if *clip_id == visual.clip.id => {}
+                            Some(Gesture::DuplicateTransition(clip_id))
+                                if *clip_id == visual.clip.id => {}
                             Some(Gesture::Fade(d)) if d.clip_id == visual.clip.id => {
                                 pending = Some(PendingAction::SetFade {
                                     track_index: d.track_index,
                                     clip_id: d.clip_id,
                                     edge: d.edge,
-                                    new_value: edge_drag_value(d, visual.clip.timeline_len, px_per_frame, 0),
+                                    new_value: edge_drag_value(
+                                        d,
+                                        visual.clip.timeline_len,
+                                        px_per_frame,
+                                        0,
+                                    ),
                                 });
                             }
                             Some(Gesture::Volume(d)) if d.clip_id == visual.clip.id => {
@@ -2763,7 +3001,12 @@ pub fn show_timeline(
                                 volume_drag_group = Some(d.group);
                             }
                             Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => {
-                                pending = Some(finish_trim(t, visual, &visuals, trimmed_primary_new_value));
+                                pending = Some(finish_trim(
+                                    t,
+                                    visual,
+                                    &visuals,
+                                    trimmed_primary_new_value,
+                                ));
                             }
                             Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => {
                                 pending = Some(finish_drag(
@@ -2777,17 +3020,20 @@ pub fn show_timeline(
                         }
                     } else if resp.double_clicked() {
                         if let ClipSource::Media(media_id) = visual.clip.source
-                            && let Some(nested_id) = project.media_pool.get(media_id).and_then(|m| m.compound)
+                            && let Some(nested_id) =
+                                project.media_pool.get(media_id).and_then(|m| m.compound)
                         {
                             enter_compound = Some(nested_id);
                         }
                     } else if resp.clicked() {
                         let clicked_transition = resp.interact_pointer_pos().and_then(|pos| {
-                            if transition_in_x.is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::In, x)) {
+                            if transition_in_x.is_some_and(|x| {
+                                transition_body_hit(pos, clip_rect, FadeEdge::In, x)
+                            }) {
                                 left_marker.as_ref()
-                            } else if transition_out_x
-                                .is_some_and(|x| transition_body_hit(pos, clip_rect, FadeEdge::Out, x))
-                            {
+                            } else if transition_out_x.is_some_and(|x| {
+                                transition_body_hit(pos, clip_rect, FadeEdge::Out, x)
+                            }) {
                                 right_marker.as_ref()
                             } else {
                                 None
@@ -2827,8 +3073,9 @@ pub fn show_timeline(
                             }
                         } else if state.selected.len() >= 2 {
                             if ui.button(t!("timeline.link")).clicked() {
-                                pending =
-                                    Some(PendingAction::Link(state.selected.iter().copied().collect()));
+                                pending = Some(PendingAction::Link(
+                                    state.selected.iter().copied().collect(),
+                                ));
                                 ui.close();
                             }
                         } else {
@@ -2846,7 +3093,9 @@ pub fn show_timeline(
                             ui.close();
                         }
                         ui.menu_button(t!("timeline.clip_color"), |ui| {
-                            let targets = || color_targets(&visuals, state, visual.track_index, visual.clip.id);
+                            let targets = || {
+                                color_targets(&visuals, state, visual.track_index, visual.clip.id)
+                            };
                             if ui.button(t!("timeline.clear_clip_color")).clicked() {
                                 pending = Some(PendingAction::SetDisplayColor(targets(), None));
                                 ui.close();
@@ -2855,7 +3104,10 @@ pub fn show_timeline(
                             for color in vv_core::ClipColor::ALL {
                                 let checked = visual.clip.display_color == Some(color);
                                 if clip_color_item(ui, color, checked).clicked() {
-                                    pending = Some(PendingAction::SetDisplayColor(targets(), Some(color)));
+                                    pending = Some(PendingAction::SetDisplayColor(
+                                        targets(),
+                                        Some(color),
+                                    ));
                                     ui.close();
                                 }
                             }
@@ -2870,7 +3122,8 @@ pub fn show_timeline(
                                 state.selected.clone()
                             };
                             let selection = expand_to_linked_groups(&visuals, base);
-                            pending = Some(PendingAction::MakeCompound(selection.into_iter().collect()));
+                            pending =
+                                Some(PendingAction::MakeCompound(selection.into_iter().collect()));
                             ui.close();
                         }
                     });
@@ -2910,7 +3163,12 @@ pub fn show_timeline(
                     paint_edge_cursor(ui.ctx(), pos, cursor);
                 }
 
-                paint_playhead(&painter, origin, state.playhead as f32 * px_per_frame, visual_height);
+                paint_playhead(
+                    &painter,
+                    origin,
+                    state.playhead as f32 * px_per_frame,
+                    visual_height,
+                );
 
                 // On the visible right edge, not on the content's one.
                 let scrollbar_x = egui::Rangef::new(
@@ -2945,8 +3203,7 @@ pub fn show_timeline(
                     state.audio_scroll = offset;
                 }
             });
-
-        });
+    });
 
     if let Some(action) = pending {
         apply_pending_action(project, history, state, timeline_id, action);
@@ -3001,7 +3258,12 @@ fn display_range(
 }
 
 /// Fill and border of a clip.
-fn paint_clip_box(painter: &egui::Painter, clip_rect: egui::Rect, visual: &ClipVisual, is_selected: bool) {
+fn paint_clip_box(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    visual: &ClipVisual,
+    is_selected: bool,
+) {
     let stroke = if is_selected {
         egui::Stroke::new(2.0, egui::Color32::WHITE)
     } else {
@@ -3101,8 +3363,7 @@ fn paint_clip_overlay(
     } else {
         egui::Color32::BLACK
     };
-    let show_link_icon =
-        visual.clip.linked_group.is_some() && clip_rect.width() > LINK_ICON_WIDTH;
+    let show_link_icon = visual.clip.linked_group.is_some() && clip_rect.width() > LINK_ICON_WIDTH;
     let reserved_right = if show_link_icon { LINK_ICON_WIDTH } else { 4.0 };
     paint_clip_label(
         painter,
@@ -3137,7 +3398,13 @@ fn paint_clip_overlay(
 /// dot of the handle itself. `x` is the current position of the handle,
 /// `corner_x` the corner (left for the fade-in, right for the fade-out) the
 /// triangle starts from.
-fn paint_fade_wedge(painter: &egui::Painter, clip_rect: egui::Rect, corner_x: f32, x: f32, dragging: bool) {
+fn paint_fade_wedge(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    corner_x: f32,
+    x: f32,
+    dragging: bool,
+) {
     let top = clip_rect.top();
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -3149,9 +3416,17 @@ fn paint_fade_wedge(painter: &egui::Painter, clip_rect: egui::Rect, corner_x: f3
         egui::Stroke::NONE,
     ));
     let center = egui::pos2(x, top + FADE_HANDLE_ZONE_HEIGHT * 0.5);
-    let radius = if dragging { FADE_HANDLE_RADIUS + 1.0 } else { FADE_HANDLE_RADIUS };
+    let radius = if dragging {
+        FADE_HANDLE_RADIUS + 1.0
+    } else {
+        FADE_HANDLE_RADIUS
+    };
     painter.circle_filled(center, radius, egui::Color32::WHITE);
-    painter.circle_stroke(center, radius, egui::Stroke::new(1.0, egui::Color32::from_gray(40)));
+    painter.circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
+    );
 }
 
 /// Overlay with the duration (fade, single transition or crossing)
@@ -3165,7 +3440,8 @@ fn paint_duration_overlay(ctx: &egui::Context, pos: egui::Pos2, frames: FrameIdx
     ));
     let text = format!("+{}", format_duration(frames, fps));
     let text_pos = pos + egui::vec2(12.0, 14.0);
-    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
+    let galley =
+        painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
     let bg = egui::Rect::from_min_size(text_pos, galley.size()).expand(3.0);
     painter.rect_filled(bg, 3.0, egui::Color32::from_black_alpha(200));
     painter.galley(text_pos, galley, egui::Color32::WHITE);
@@ -3235,8 +3511,17 @@ fn begin_trim(
 }
 
 /// Starts dragging `visual` together with its selection group.
-fn begin_drag(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVisual, duplicate: bool) {
-    let drag_group = drag_group_for(&state.selected, visuals, (visual.track_index, visual.clip.id));
+fn begin_drag(
+    state: &mut TimelineState,
+    visuals: &[ClipVisual],
+    visual: &ClipVisual,
+    duplicate: bool,
+) {
+    let drag_group = drag_group_for(
+        &state.selected,
+        visuals,
+        (visual.track_index, visual.clip.id),
+    );
     state.selected = drag_group.clone();
     state.selection_anchor = Some((visual.track_index, visual.clip.id));
 
@@ -3275,7 +3560,12 @@ fn begin_fade_drag(state: &mut TimelineState, visual: &ClipVisual, edge: FadeEdg
 /// the clip lengthens it — opposite directions on the X axis for `In` and
 /// `Out`. `min` is 0 for a fade, which can be dragged away, 1 for a
 /// transition, which cannot.
-fn edge_drag_value(d: &EdgeDragState, clip_len: FrameIdx, px_per_frame: f32, min: FrameIdx) -> FrameIdx {
+fn edge_drag_value(
+    d: &EdgeDragState,
+    clip_len: FrameIdx,
+    px_per_frame: f32,
+    min: FrameIdx,
+) -> FrameIdx {
     let signed_delta = match d.edge {
         FadeEdge::In => d.accum_px,
         FadeEdge::Out => -d.accum_px,
@@ -3287,7 +3577,11 @@ fn edge_drag_value(d: &EdgeDragState, clip_len: FrameIdx, px_per_frame: f32, min
 
 /// `(fade_in, fade_out)` to show for `visual`: the preview of the drag in
 /// progress if it concerns it, otherwise the already saved values.
-fn fade_preview(state: &TimelineState, visual: &ClipVisual, px_per_frame: f32) -> (FrameIdx, FrameIdx) {
+fn fade_preview(
+    state: &TimelineState,
+    visual: &ClipVisual,
+    px_per_frame: f32,
+) -> (FrameIdx, FrameIdx) {
     let mut fade_in = visual.clip.fade_in;
     let mut fade_out = visual.clip.fade_out;
     if let Some(d) = state.fading()
@@ -3304,7 +3598,12 @@ fn fade_preview(state: &TimelineState, visual: &ClipVisual, px_per_frame: f32) -
 
 /// Fade handle under `pos`, only in the band at the top of the clip: below
 /// stays the trim/roll of the existing edge.
-fn fade_zone_at(pos: egui::Pos2, clip_rect: egui::Rect, fade_in_x: f32, fade_out_x: f32) -> Option<FadeEdge> {
+fn fade_zone_at(
+    pos: egui::Pos2,
+    clip_rect: egui::Rect,
+    fade_in_x: f32,
+    fade_out_x: f32,
+) -> Option<FadeEdge> {
     if pos.y > clip_rect.top() + FADE_HANDLE_ZONE_HEIGHT {
         return None;
     }
@@ -3376,10 +3675,19 @@ fn apply_new_crossing(
     };
     let max_duration = (2 * left.timeline_len.min(right.timeline_len)).max(1);
     transition.duration = transition.duration.clamp(1, max_duration);
-    let crossing = vv_core::CrossTransition { left_clip: left_id, right_clip: right_id, transition };
+    let crossing = vv_core::CrossTransition {
+        left_clip: left_id,
+        right_clip: right_id,
+        transition,
+    };
     history.do_command(
         project,
-        Box::new(vv_core::SetCrossTransition::new(timeline_id, track_index, left_id, Some(crossing))),
+        Box::new(vv_core::SetCrossTransition::new(
+            timeline_id,
+            track_index,
+            left_id,
+            Some(crossing),
+        )),
     );
     state.selected.clear();
     state.selection_anchor = None;
@@ -3404,7 +3712,10 @@ fn begin_crossing_drag(
     let Some(crossing) = track.crossing_from(left_clip) else {
         return;
     };
-    let (Some(left), Some(right)) = (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) else {
+    let (Some(left), Some(right)) = (
+        track.clip(crossing.left_clip),
+        track.clip(crossing.right_clip),
+    ) else {
         return;
     };
     let max_duration = (2 * left.timeline_len.min(right.timeline_len)).max(1);
@@ -3458,7 +3769,11 @@ fn crossing_drag_value(d: &CrossingDragState, px_per_frame: f32) -> FrameIdx {
     // away from the cut), the right one an "In" edge (inside the right
     // clip, it grows by dragging it to the right) — here doubled in addition
     // on the other side, see above.
-    let signed_delta = if d.grabbed_left_side { -d.accum_px } else { d.accum_px };
+    let signed_delta = if d.grabbed_left_side {
+        -d.accum_px
+    } else {
+        d.accum_px
+    };
     (d.original_duration as f32 + 2.0 * signed_delta / px_per_frame)
         .round()
         .clamp(1.0, d.max_duration.max(1) as f32) as FrameIdx
@@ -3566,7 +3881,11 @@ fn transition_body_hit(pos: egui::Pos2, clip_rect: egui::Rect, edge: FadeEdge, x
 /// by the drop of a `TransitionKind` from the Effects panel and by the drop of a
 /// whole `Transition` (duplication via Alt+drag): the same "only
 /// near an edge" rule in both cases.
-fn transition_drop_edge(pos: egui::Pos2, clip_rect: egui::Rect, drop_zone_px: f32) -> Option<FadeEdge> {
+fn transition_drop_edge(
+    pos: egui::Pos2,
+    clip_rect: egui::Rect,
+    drop_zone_px: f32,
+) -> Option<FadeEdge> {
     if pos.x - clip_rect.left() <= drop_zone_px {
         Some(FadeEdge::In)
     } else if clip_rect.right() - pos.x <= drop_zone_px {
@@ -3588,7 +3907,9 @@ fn neighbor_visual<'a, 'b>(
     clip_id: ClipId,
     edge: FadeEdge,
 ) -> Option<&'a ClipVisual<'b>> {
-    let visual = visuals.iter().find(|v| v.track_index == track_index && v.clip.id == clip_id)?;
+    let visual = visuals
+        .iter()
+        .find(|v| v.track_index == track_index && v.clip.id == clip_id)?;
     let at = match edge {
         FadeEdge::In => visual.clip.timeline_start,
         FadeEdge::Out => visual.clip.timeline_end(),
@@ -3603,7 +3924,12 @@ fn neighbor_visual<'a, 'b>(
     })
 }
 
-fn has_neighbor(visuals: &[ClipVisual], track_index: usize, clip_id: ClipId, edge: FadeEdge) -> bool {
+fn has_neighbor(
+    visuals: &[ClipVisual],
+    track_index: usize,
+    clip_id: ClipId,
+    edge: FadeEdge,
+) -> bool {
     neighbor_visual(visuals, track_index, clip_id, edge).is_some()
 }
 
@@ -3667,7 +3993,10 @@ fn paint_transition_marker(
 ) {
     let x = x.clamp(clip_rect.left(), clip_rect.right());
     let band = egui::Rect::from_min_max(
-        egui::pos2(clip_rect.left(), clip_rect.bottom() - TRANSITION_HANDLE_ZONE_HEIGHT),
+        egui::pos2(
+            clip_rect.left(),
+            clip_rect.bottom() - TRANSITION_HANDLE_ZONE_HEIGHT,
+        ),
         clip_rect.max,
     );
     let body = match edge {
@@ -3690,17 +4019,40 @@ fn paint_transition_marker(
             FadeEdge::In => FadeEdge::Out,
             FadeEdge::Out => FadeEdge::In,
         };
-        paint_bracket_icon(painter, egui::pos2(edge_x, band.center().y), band.height() * 0.7, opposite, egui::Color32::WHITE);
+        paint_bracket_icon(
+            painter,
+            egui::pos2(edge_x, band.center().y),
+            band.height() * 0.7,
+            opposite,
+            egui::Color32::WHITE,
+        );
     } else {
-        paint_gear_icon(painter, egui::pos2(edge_x, band.center().y), band.height() * 0.4, egui::Color32::WHITE);
+        paint_gear_icon(
+            painter,
+            egui::pos2(edge_x, band.center().y),
+            band.height() * 0.4,
+            egui::Color32::WHITE,
+        );
     }
-    paint_bracket_icon(painter, egui::pos2(x, band.center().y), band.height() * 0.7, edge, egui::Color32::WHITE);
+    paint_bracket_icon(
+        painter,
+        egui::pos2(x, band.center().y),
+        band.height() * 0.7,
+        edge,
+        egui::Color32::WHITE,
+    );
 }
 
 /// Hand-drawn bracket (no Unicode glyph, see `paint_gear_icon`):
 /// a vertical line with two notches opening towards the fixed edge of the
 /// clip (`In`: notches on the left, towards the gear; `Out`: on the right).
-pub(crate) fn paint_bracket_icon(painter: &egui::Painter, center: egui::Pos2, height: f32, edge: FadeEdge, color: egui::Color32) {
+pub(crate) fn paint_bracket_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    height: f32,
+    edge: FadeEdge,
+    color: egui::Color32,
+) {
     let stroke = egui::Stroke::new(1.6, color);
     let half = height / 2.0;
     let tick = height * 0.3;
@@ -3709,7 +4061,10 @@ pub(crate) fn paint_bracket_icon(painter: &egui::Painter, center: egui::Pos2, he
         FadeEdge::Out => 1.0,
     };
     painter.line_segment(
-        [egui::pos2(center.x, center.y - half), egui::pos2(center.x, center.y + half)],
+        [
+            egui::pos2(center.x, center.y - half),
+            egui::pos2(center.x, center.y + half),
+        ],
         stroke,
     );
     painter.line_segment(
@@ -3784,9 +4139,15 @@ fn gain_line_y(db: f32, clip_rect: egui::Rect) -> f32 {
 
 fn paint_gain_line(painter: &egui::Painter, clip_rect: egui::Rect, line_y: f32, dragging: bool) {
     let alpha = if dragging { 220 } else { 130 };
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+    let stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+    );
     painter.line_segment(
-        [egui::pos2(clip_rect.left(), line_y), egui::pos2(clip_rect.right(), line_y)],
+        [
+            egui::pos2(clip_rect.left(), line_y),
+            egui::pos2(clip_rect.right(), line_y),
+        ],
         stroke,
     );
 }
@@ -3831,11 +4192,13 @@ fn finish_trim(
 ) -> PendingAction {
     let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
     let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_value)];
-    let mut overwritten: Vec<_> =
-        grown_range(&visual.clip, visual.track_index, t.edge, new_value).into_iter().collect();
+    let mut overwritten: Vec<_> = grown_range(&visual.clip, visual.track_index, t.edge, new_value)
+        .into_iter()
+        .collect();
     for &(other_id, other_track, offset, edge) in &t.followers {
-        let Some(other) =
-            visuals.iter().find(|v| v.clip.id == other_id && v.track_index == other_track)
+        let Some(other) = visuals
+            .iter()
+            .find(|v| v.clip.id == other_id && v.track_index == other_track)
         else {
             continue;
         };
@@ -3929,9 +4292,7 @@ fn sync_timeline_scroll(
     // ScrollArea (same id) is corrected before the `show`, so the playhead stays still on
     // screen.
     if state.pixels_per_sec != state.last_rendered_pps {
-        if let Some(mut scroll_state) =
-            egui::containers::scroll_area::State::load(ctx, scroll_id)
-        {
+        if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id) {
             let playhead_secs = state.playhead as f64 / fps;
             scroll_state.offset.x +=
                 (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
@@ -3946,11 +4307,10 @@ fn sync_timeline_scroll(
     let reveal = std::mem::take(&mut state.reveal_playhead);
     if playback_active || reveal {
         let playhead_x = state.playhead as f32 * px_per_frame;
-        let visible_start =
-            match egui::containers::scroll_area::State::load(ctx, scroll_id) {
-                Some(st) => st.offset.x,
-                None => 0.0,
-            };
+        let visible_start = match egui::containers::scroll_area::State::load(ctx, scroll_id) {
+            Some(st) => st.offset.x,
+            None => 0.0,
+        };
         let visible_end = visible_start + viewport_width;
         const FOLLOW_MARGIN_FRAC: f32 = 1.0 / 3.0;
         if playhead_x < visible_start || playhead_x > visible_end {
@@ -3982,8 +4342,7 @@ fn sync_timeline_scroll(
         0.0
     };
     if wheel_x != 0.0 {
-        if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
-        {
+        if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id) {
             scroll_state.offset.x = (scroll_state.offset.x - wheel_x).clamp(0.0, max_offset_x);
             scroll_state.store(ctx, scroll_id);
         }
@@ -3994,7 +4353,8 @@ fn sync_timeline_scroll(
         };
         // Consumed here: the ScrollArea must not reapply it in its `show`.
         ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
-    } else if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
+    } else if let Some(mut scroll_state) =
+        egui::containers::scroll_area::State::load(ctx, scroll_id)
     {
         let mut offset_x = scroll_state.offset.x;
         if apply_kinetic_scroll(&mut offset_x, &mut state.hscroll_vel, max_offset_x, dt) {
@@ -4020,8 +4380,7 @@ fn show_ruler(
     buffered_ranges: &[(FrameIdx, FrameIdx)],
     max_end_frames: FrameIdx,
 ) {
-    let ruler_rect =
-        egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
+    let ruler_rect = egui::Rect::from_min_size(origin, egui::vec2(content_width, RULER_HEIGHT));
     painter.rect_filled(ruler_rect, 0.0, egui::Color32::from_gray(45));
     let ruler_resp = ui.interact(
         ruler_rect,
@@ -4048,10 +4407,16 @@ fn show_ruler(
         ruler_resp.interact_pointer_pos()
     };
     if let Some(pos) = ruler_pos {
-        let raw_frame =
-            (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
-        state.playhead =
-            snap_frame(raw_frame, 0, &visuals, &[], &[], px_per_frame, snapping_enabled);
+        let raw_frame = (((pos.x - origin.x) / px_per_frame).round() as FrameIdx).max(0);
+        state.playhead = snap_frame(
+            raw_frame,
+            0,
+            &visuals,
+            &[],
+            &[],
+            px_per_frame,
+            snapping_enabled,
+        );
     }
 
     // Only the visible ticks: a long timeline zoomed to the frame would have
@@ -4180,15 +4545,15 @@ fn apply_pending_action(
                 .flat_map(|&(id, from_track, to_track, _)| [(from_track, id), (to_track, id)])
                 .collect();
             let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-            vv_core::make_room_for_ranges(
-                project,
-                timeline_id,
-                &ranges,
-                &exclude,
-                &mut commands,
-            );
+            vv_core::make_room_for_ranges(project, timeline_id, &ranges, &exclude, &mut commands);
             commands.push(Box::new(vv_core::MoveClips::new(timeline_id, moves)));
-            history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::MoveClips, commands)));
+            history.do_command(
+                project,
+                Box::new(vv_core::CompositeCommand::new(
+                    vv_core::CommandLabel::MoveClips,
+                    commands,
+                )),
+            );
         }
         PendingAction::Trim { trims, overwritten } => {
             // The stretch gained by lengthening overwrites what was there; the trimmed
@@ -4205,50 +4570,97 @@ fn apply_pending_action(
                 &exclude,
                 &mut commands,
             );
-            commands.extend(trims.into_iter().map(
-                |(clip_id, track_index, edge, new_value)| {
-                    Box::new(vv_core::TrimClip::new(
-                        timeline_id,
-                        track_index,
-                        clip_id,
-                        edge,
-                        new_value,
-                    )) as Box<dyn vv_core::Command>
-                },
-            ));
-            history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)));
-        }
-        PendingAction::SetFade { track_index, clip_id, edge, new_value } => {
+            commands.extend(
+                trims
+                    .into_iter()
+                    .map(|(clip_id, track_index, edge, new_value)| {
+                        Box::new(vv_core::TrimClip::new(
+                            timeline_id,
+                            track_index,
+                            clip_id,
+                            edge,
+                            new_value,
+                        )) as Box<dyn vv_core::Command>
+                    }),
+            );
             history.do_command(
                 project,
-                Box::new(vv_core::SetClipFade::new(timeline_id, track_index, clip_id, edge, new_value)),
+                Box::new(vv_core::CompositeCommand::new(
+                    vv_core::CommandLabel::TrimClips,
+                    commands,
+                )),
             );
         }
-        PendingAction::SetGain { track_index, clip_id, new_value } => {
+        PendingAction::SetFade {
+            track_index,
+            clip_id,
+            edge,
+            new_value,
+        } => {
             history.do_command(
                 project,
-                Box::new(vv_core::set_clip_gain(timeline_id, track_index, clip_id, new_value)),
+                Box::new(vv_core::SetClipFade::new(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                    edge,
+                    new_value,
+                )),
             );
         }
-        PendingAction::ApplyFilter { track_index, clip_id, filter } => {
+        PendingAction::SetGain {
+            track_index,
+            clip_id,
+            new_value,
+        } => {
+            history.do_command(
+                project,
+                Box::new(vv_core::set_clip_gain(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                    new_value,
+                )),
+            );
+        }
+        PendingAction::ApplyFilter {
+            track_index,
+            clip_id,
+            filter,
+        } => {
             // If it is already present (dropping it again) it is only re-enabled,
             // instead of being duplicated at the end.
-            let new_filters = project.timelines[timeline_id].clip(track_index, clip_id).map(|clip| {
-                let mut filters = clip.effects.filters.clone();
-                match filters.iter_mut().find(|f| f.kind == filter) {
-                    Some(existing) => existing.enabled = true,
-                    None => filters.push(vv_core::ClipFilter { kind: filter, enabled: true }),
-                }
-                filters
-            });
+            let new_filters = project.timelines[timeline_id]
+                .clip(track_index, clip_id)
+                .map(|clip| {
+                    let mut filters = clip.effects.filters.clone();
+                    match filters.iter_mut().find(|f| f.kind == filter) {
+                        Some(existing) => existing.enabled = true,
+                        None => filters.push(vv_core::ClipFilter {
+                            kind: filter,
+                            enabled: true,
+                        }),
+                    }
+                    filters
+                });
             if let Some(filters) = new_filters {
                 history.do_command(
                     project,
-                    Box::new(vv_core::set_clip_filters(timeline_id, track_index, clip_id, filters)),
+                    Box::new(vv_core::set_clip_filters(
+                        timeline_id,
+                        track_index,
+                        clip_id,
+                        filters,
+                    )),
                 );
             }
         }
-        PendingAction::ApplyTransition { track_index, clip_id, edge, kind } => {
+        PendingAction::ApplyTransition {
+            track_index,
+            clip_id,
+            edge,
+            kind,
+        } => {
             let default_duration =
                 (project.timelines[timeline_id].fps.as_f64() * 0.45).round() as FrameIdx;
             let transition = vv_core::Transition {
@@ -4258,27 +4670,52 @@ fn apply_pending_action(
                 ease: vv_core::Ease::InOut,
                 curve: 0.5,
             };
-            let neighbor = adjacent_clip(&project.timelines[timeline_id].tracks[track_index], clip_id, edge);
+            let neighbor = adjacent_clip(
+                &project.timelines[timeline_id].tracks[track_index],
+                clip_id,
+                edge,
+            );
             if let Some(neighbor_id) = neighbor {
                 let (left_id, right_id) = match edge {
                     FadeEdge::In => (neighbor_id, clip_id),
                     FadeEdge::Out => (clip_id, neighbor_id),
                 };
-                apply_new_crossing(project, history, state, timeline_id, track_index, left_id, right_id, transition);
+                apply_new_crossing(
+                    project,
+                    history,
+                    state,
+                    timeline_id,
+                    track_index,
+                    left_id,
+                    right_id,
+                    transition,
+                );
             } else if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
                 let mut transition = transition;
                 transition.duration = transition.duration.clamp(1, clip.timeline_len.max(1));
                 history.do_command(
                     project,
-                    Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
+                    Box::new(vv_core::set_clip_transition(
+                        timeline_id,
+                        track_index,
+                        clip_id,
+                        edge,
+                        Some(transition),
+                    )),
                 );
                 state.selected.clear();
                 state.selection_anchor = None;
                 state.selected_gap = None;
-                state.selected_transition = Some(TransitionSelection::Edge((track_index, clip_id), edge));
+                state.selected_transition =
+                    Some(TransitionSelection::Edge((track_index, clip_id), edge));
             }
         }
-        PendingAction::SetTransitionDuration { track_index, clip_id, edge, new_value } => {
+        PendingAction::SetTransitionDuration {
+            track_index,
+            clip_id,
+            edge,
+            new_value,
+        } => {
             if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
                 let mut transition = match edge {
                     FadeEdge::In => clip.effects.transition_in.clone(),
@@ -4290,44 +4727,89 @@ fn apply_pending_action(
                 if let Some(transition) = transition {
                     history.do_command(
                         project,
-                        Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
+                        Box::new(vv_core::set_clip_transition(
+                            timeline_id,
+                            track_index,
+                            clip_id,
+                            edge,
+                            Some(transition),
+                        )),
                     );
                 }
             }
         }
-        PendingAction::SetCrossingDuration { track_index, left_clip, new_value } => {
+        PendingAction::SetCrossingDuration {
+            track_index,
+            left_clip,
+            new_value,
+        } => {
             let track = &project.timelines[timeline_id].tracks[track_index];
             if let Some(mut crossing) = track.crossing_from(left_clip).cloned() {
-                let max_duration = match (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) {
-                    (Some(left), Some(right)) => (2 * left.timeline_len.min(right.timeline_len)).max(1),
+                let max_duration = match (
+                    track.clip(crossing.left_clip),
+                    track.clip(crossing.right_clip),
+                ) {
+                    (Some(left), Some(right)) => {
+                        (2 * left.timeline_len.min(right.timeline_len)).max(1)
+                    }
                     _ => new_value.max(1),
                 };
                 crossing.transition.duration = new_value.clamp(1, max_duration);
                 history.do_command(
                     project,
-                    Box::new(vv_core::SetCrossTransition::new(timeline_id, track_index, left_clip, Some(crossing))),
+                    Box::new(vv_core::SetCrossTransition::new(
+                        timeline_id,
+                        track_index,
+                        left_clip,
+                        Some(crossing),
+                    )),
                 );
             }
         }
-        PendingAction::DuplicateTransition { track_index, clip_id, edge, transition } => {
-            let neighbor = adjacent_clip(&project.timelines[timeline_id].tracks[track_index], clip_id, edge);
+        PendingAction::DuplicateTransition {
+            track_index,
+            clip_id,
+            edge,
+            transition,
+        } => {
+            let neighbor = adjacent_clip(
+                &project.timelines[timeline_id].tracks[track_index],
+                clip_id,
+                edge,
+            );
             if let Some(neighbor_id) = neighbor {
                 let (left_id, right_id) = match edge {
                     FadeEdge::In => (neighbor_id, clip_id),
                     FadeEdge::Out => (clip_id, neighbor_id),
                 };
-                apply_new_crossing(project, history, state, timeline_id, track_index, left_id, right_id, transition);
+                apply_new_crossing(
+                    project,
+                    history,
+                    state,
+                    timeline_id,
+                    track_index,
+                    left_id,
+                    right_id,
+                    transition,
+                );
             } else if let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) {
                 let mut transition = transition;
                 transition.duration = transition.duration.clamp(1, clip.timeline_len.max(1));
                 history.do_command(
                     project,
-                    Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, Some(transition))),
+                    Box::new(vv_core::set_clip_transition(
+                        timeline_id,
+                        track_index,
+                        clip_id,
+                        edge,
+                        Some(transition),
+                    )),
                 );
                 state.selected.clear();
                 state.selection_anchor = None;
                 state.selected_gap = None;
-                state.selected_transition = Some(TransitionSelection::Edge((track_index, clip_id), edge));
+                state.selected_transition =
+                    Some(TransitionSelection::Edge((track_index, clip_id), edge));
             }
         }
         PendingAction::Unlink(track_index, clip_id) => {
@@ -4345,7 +4827,12 @@ fn apply_pending_action(
         PendingAction::SetTrackFlag(track_index, flag, value) => {
             history.do_command(
                 project,
-                Box::new(vv_core::SetTrackFlag::new(timeline_id, track_index, flag, value)),
+                Box::new(vv_core::SetTrackFlag::new(
+                    timeline_id,
+                    track_index,
+                    flag,
+                    value,
+                )),
             );
             if flag == TrackFlag::Locked && value {
                 state.drop_locked(&project.timelines[timeline_id]);
@@ -4366,7 +4853,11 @@ fn apply_pending_action(
         PendingAction::SetDisplayColor(clips, color) => {
             history.do_command(
                 project,
-                Box::new(vv_core::SetClipsDisplayColor::new(timeline_id, clips, color)),
+                Box::new(vv_core::SetClipsDisplayColor::new(
+                    timeline_id,
+                    clips,
+                    color,
+                )),
             );
         }
     }
@@ -4411,7 +4902,10 @@ fn make_compound_clip(
     let commands = vv_core::compound_clip_commands(project, timeline_id, &clips, &plan, media_id);
     history.do_command(
         project,
-        Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::MakeCompoundClip, commands)),
+        Box::new(vv_core::CompositeCommand::new(
+            vv_core::CommandLabel::MakeCompoundClip,
+            commands,
+        )),
     );
 }
 
@@ -4453,10 +4947,18 @@ fn duplicate_clips(
             (track, clip, group)
         })
         .collect();
-    let new_selection: BTreeSet<ClipKey> =
-        copies.iter().map(|(track, clip, _)| (*track, clip.id)).collect();
+    let new_selection: BTreeSet<ClipKey> = copies
+        .iter()
+        .map(|(track, clip, _)| (*track, clip.id))
+        .collect();
     let commands = vv_core::insert_overwriting(project, timeline_id, copies);
-    history.do_command(project, Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::DuplicateClips, commands)));
+    history.do_command(
+        project,
+        Box::new(vv_core::CompositeCommand::new(
+            vv_core::CommandLabel::DuplicateClips,
+            commands,
+        )),
+    );
 
     let anchor = new_selection.iter().next().copied();
     state.set_selection(new_selection, anchor);
@@ -4533,9 +5035,13 @@ fn color_targets(
 ) -> Vec<ClipKey> {
     let clicked = (track_index, clip_id);
     if state.selected.contains(&clicked) {
-        expand_to_linked_groups(visuals, state.selected.clone()).into_iter().collect()
+        expand_to_linked_groups(visuals, state.selected.clone())
+            .into_iter()
+            .collect()
     } else {
-        expand_to_linked_groups(visuals, BTreeSet::from([clicked])).into_iter().collect()
+        expand_to_linked_groups(visuals, BTreeSet::from([clicked]))
+            .into_iter()
+            .collect()
     }
 }
 
@@ -4546,11 +5052,18 @@ const COLOR_MENU_DOT_RADIUS: f32 = 5.0;
 fn clip_color_item(ui: &mut egui::Ui, color: vv_core::ClipColor, checked: bool) -> egui::Response {
     let (r, g, b) = color.rgb();
     let label = clip_color_label(color);
-    let text = if checked { format!("✔ {label}") } else { label.into_owned() };
+    let text = if checked {
+        format!("✔ {label}")
+    } else {
+        label.into_owned()
+    };
     let resp = ui.add(egui::Button::new(text).min_size(egui::vec2(COLOR_MENU_WIDTH, 0.0)));
     let center = egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y);
-    ui.painter()
-        .circle_filled(center, COLOR_MENU_DOT_RADIUS, egui::Color32::from_rgb(r, g, b));
+    ui.painter().circle_filled(
+        center,
+        COLOR_MENU_DOT_RADIUS,
+        egui::Color32::from_rgb(r, g, b),
+    );
     resp
 }
 
@@ -4635,7 +5148,10 @@ fn draw_clip_waveform(
 
     let center_y = clip_rect.center().y;
     let half_height = clip_rect.height() / 2.0;
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 140));
+    let stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 140),
+    );
     let clipped_stroke =
         egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 90, 90, 200));
 
@@ -4658,7 +5174,11 @@ fn draw_clip_waveform(
         let h = (half_height * amplified.min(1.0)).max(0.5);
         painter.line_segment(
             [egui::pos2(x, center_y - h), egui::pos2(x, center_y + h)],
-            if amplified > 1.0 { clipped_stroke } else { stroke },
+            if amplified > 1.0 {
+                clipped_stroke
+            } else {
+                stroke
+            },
         );
         x += 1.0;
     }
@@ -4688,7 +5208,9 @@ fn clips_intersecting_rect(
 ) -> Vec<ClipKey> {
     visuals
         .iter()
-        .filter(|v| !v.locked && clip_local_rect(v, px_per_frame, row_y, row_height).intersects(rect))
+        .filter(|v| {
+            !v.locked && clip_local_rect(v, px_per_frame, row_y, row_height).intersects(rect)
+        })
         .map(|v| (v.track_index, v.clip.id))
         .collect()
 }
@@ -4706,10 +5228,7 @@ fn gap_at(
         .collect();
     track_clips.sort_by_key(|c| c.timeline_start);
 
-    if track_clips
-        .iter()
-        .any(|c| c.contains(frame))
-    {
+    if track_clips.iter().any(|c| c.contains(frame)) {
         return None; // `frame` is inside a clip, not in a gap.
     }
     let next = track_clips.iter().find(|c| c.timeline_start > frame)?;
@@ -4941,19 +5460,20 @@ fn group_drag_bounds(
     followers: &[(ClipId, usize, FrameIdx)],
 ) -> (FrameIdx, FrameIdx) {
     let exclude: Vec<ClipId> = targets.iter().map(|(id, _)| *id).collect();
-    let bound_for = |id: ClipId, target: EffectiveTrack, reference: FrameIdx| -> (FrameIdx, FrameIdx) {
-        let len = visuals
-            .iter()
-            .find(|v| v.clip.id == id)
-            .map(|v| v.clip.timeline_len)
-            .unwrap_or(0);
-        match target {
-            EffectiveTrack::Existing(track) => {
-                drag_range_at(visuals, track, &exclude, reference, len)
+    let bound_for =
+        |id: ClipId, target: EffectiveTrack, reference: FrameIdx| -> (FrameIdx, FrameIdx) {
+            let len = visuals
+                .iter()
+                .find(|v| v.clip.id == id)
+                .map(|v| v.clip.timeline_len)
+                .unwrap_or(0);
+            match target {
+                EffectiveTrack::Existing(track) => {
+                    drag_range_at(visuals, track, &exclude, reference, len)
+                }
+                EffectiveTrack::New(_) => (0, max_start_in_slot(0, FrameIdx::MAX, len)),
             }
-            EffectiveTrack::New(_) => (0, max_start_in_slot(0, FrameIdx::MAX, len)),
-        }
-    };
+        };
 
     let (primary_id, primary_target) = targets[0];
     let (mut min_start, mut max_start) = bound_for(primary_id, primary_target, reference_start);
@@ -5117,8 +5637,14 @@ fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
         ]
     };
     let (brackets, arrows) = match cursor {
-        EdgeCursor::TrimEnd => (vec![bracket(pos.x, -1.0)], vec![arrow(pos.x - 11.0, -1.0), arrow(pos.x + 8.0, 1.0)]),
-        EdgeCursor::TrimStart => (vec![bracket(pos.x, 1.0)], vec![arrow(pos.x - 8.0, -1.0), arrow(pos.x + 11.0, 1.0)]),
+        EdgeCursor::TrimEnd => (
+            vec![bracket(pos.x, -1.0)],
+            vec![arrow(pos.x - 11.0, -1.0), arrow(pos.x + 8.0, 1.0)],
+        ),
+        EdgeCursor::TrimStart => (
+            vec![bracket(pos.x, 1.0)],
+            vec![arrow(pos.x - 8.0, -1.0), arrow(pos.x + 11.0, 1.0)],
+        ),
         EdgeCursor::Roll => (
             vec![bracket(pos.x - 2.0, -1.0), bracket(pos.x + 2.0, 1.0)],
             vec![arrow(pos.x - 10.0, -1.0), arrow(pos.x + 10.0, 1.0)],
@@ -5251,8 +5777,17 @@ fn snap_frame(
 /// Highlights a "new track" zone under a drag in progress.
 fn paint_drop_zone(painter: &egui::Painter, rect: egui::Rect, label: Option<&str>) {
     let green = egui::Color32::from_rgb(120, 220, 120);
-    painter.rect_filled(rect, 4.0, egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60));
-    painter.rect_stroke(rect, 4.0, egui::Stroke::new(2.0, green), egui::StrokeKind::Inside);
+    painter.rect_filled(
+        rect,
+        4.0,
+        egui::Color32::from_rgba_unmultiplied(120, 220, 120, 60),
+    );
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(2.0, green),
+        egui::StrokeKind::Inside,
+    );
     if let Some(label) = label {
         painter.text(
             rect.center(),

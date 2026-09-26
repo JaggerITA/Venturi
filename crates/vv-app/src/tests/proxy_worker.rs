@@ -28,13 +28,20 @@ fn pause_holds_the_queue_and_resume_completes_it() {
         &path,
     );
     let content_hash = 0x5EED_0001;
-    let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(content_hash, ProxyQuality::Low));
+    let _ = std::fs::remove_file(vv_media::proxy::proxy_path_for(
+        content_hash,
+        ProxyQuality::Low,
+    ));
 
     let worker = ProxyWorker::spawn(ProxyQuality::Low);
     worker.set_paused(true);
     worker.enqueue(path.clone(), content_hash, 25);
     worker.enqueue(path, content_hash, 25);
-    assert_eq!(worker.progress().total, 1, "a requeued media does not count twice");
+    assert_eq!(
+        worker.progress().total,
+        1,
+        "a requeued media does not count twice"
+    );
 
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(worker.state(content_hash), Some(ProxyState::Queued));

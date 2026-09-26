@@ -21,7 +21,10 @@ fn stretch_at_tempo_2x_roughly_halves_duration() {
         "original={original_frames} stretched={stretched_frames} ratio={ratio}"
     );
 
-    let peak = stretched.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
+    let peak = stretched
+        .iter()
+        .cloned()
+        .fold(0.0_f32, |a, b| a.max(b.abs()));
     assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
 }
 
@@ -59,6 +62,9 @@ fn stretch_stereo_roughly_halves_duration_and_stays_interleaved() {
     let ratio = samples.len() as f64 / stretched.len() as f64;
     assert!((ratio - 2.0).abs() < 0.05, "ratio={ratio}");
 
-    let peak = stretched.iter().cloned().fold(0.0_f32, |a, b| a.max(b.abs()));
+    let peak = stretched
+        .iter()
+        .cloned()
+        .fold(0.0_f32, |a, b| a.max(b.abs()));
     assert!(peak > 0.1, "peak={peak}, expected a non-silent signal");
 }

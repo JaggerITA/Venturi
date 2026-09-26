@@ -108,7 +108,11 @@ impl ProxyWorker {
                 }
             }
         });
-        Self { shared, worker, quality }
+        Self {
+            shared,
+            worker,
+            quality,
+        }
     }
 
     /// Queues `path` (keyed by `content_hash`) for proxy generation —
@@ -145,7 +149,12 @@ impl ProxyWorker {
     }
 
     pub fn state(&self, content_hash: u64) -> Option<ProxyState> {
-        self.shared.states.lock().unwrap().get(&content_hash).copied()
+        self.shared
+            .states
+            .lock()
+            .unwrap()
+            .get(&content_hash)
+            .copied()
     }
 
     pub fn progress(&self) -> ProxyProgress {

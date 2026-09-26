@@ -129,7 +129,10 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
     app.paste_clipboard_at_playhead();
 
     let tl = &app.project.timelines[root_id];
-    let video_tracks: Vec<usize> = tl.tracks_of_kind(TrackKind::Video).map(|(i, _)| i).collect();
+    let video_tracks: Vec<usize> = tl
+        .tracks_of_kind(TrackKind::Video)
+        .map(|(i, _)| i)
+        .collect();
     assert_eq!(video_tracks.len(), 2, "the missing V2 is created");
     for &index in &video_tracks {
         assert_eq!(tl.tracks[index].clips.len(), 1);
@@ -213,8 +216,14 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
     assert!(complete);
     assert_eq!(waveform.audio_duration_secs, 2.0);
     let half = waveform.peaks.len() / 2;
-    assert!(waveform.peaks[..half].iter().all(|&p| p > 0.0), "first half plays");
-    assert!(waveform.peaks[half + 1..].iter().all(|&p| p == 0.0), "second half silent");
+    assert!(
+        waveform.peaks[..half].iter().all(|&p| p > 0.0),
+        "first half plays"
+    );
+    assert!(
+        waveform.peaks[half + 1..].iter().all(|&p| p == 0.0),
+        "second half silent"
+    );
 }
 
 #[test]
@@ -234,14 +243,27 @@ fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_u
     app.enter_compound_timeline(nested_id);
 
     assert_eq!(app.timeline_id, Some(nested_id));
-    assert_eq!(app.timeline_stack, vec![root_id], "the root stays on the stack for the breadcrumb");
-    assert_eq!(app.timeline_state.playhead, 0, "playhead reset when entering a new level");
-    assert!(app.timeline_state.selected.is_empty(), "selection cleared when entering a new level");
+    assert_eq!(
+        app.timeline_stack,
+        vec![root_id],
+        "the root stays on the stack for the breadcrumb"
+    );
+    assert_eq!(
+        app.timeline_state.playhead, 0,
+        "playhead reset when entering a new level"
+    );
+    assert!(
+        app.timeline_state.selected.is_empty(),
+        "selection cleared when entering a new level"
+    );
 
     app.exit_to_timeline_stack_index(0);
 
     assert_eq!(app.timeline_id, Some(root_id));
-    assert!(app.timeline_stack.is_empty(), "back at the root, the stack empties");
+    assert!(
+        app.timeline_stack.is_empty(),
+        "back at the root, the stack empties"
+    );
 }
 
 #[test]
@@ -268,7 +290,11 @@ fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op(
     // The root is already an ancestor on the stack: re-entering it must not
     // stack `nested_id` a second time over itself.
     app.enter_compound_timeline(root_id);
-    assert_eq!(app.timeline_id, Some(nested_id), "stays where it was, the attempt is ignored");
+    assert_eq!(
+        app.timeline_id,
+        Some(nested_id),
+        "stays where it was, the attempt is ignored"
+    );
     assert_eq!(app.timeline_stack, vec![root_id], "the stack does not grow");
 }
 
@@ -303,7 +329,11 @@ fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
     }];
 
     app.enter_compound_timeline(nested_id);
-    assert_eq!(app.timeline_state.clipboard.len(), 1, "the clipboard survives navigation");
+    assert_eq!(
+        app.timeline_state.clipboard.len(),
+        1,
+        "the clipboard survives navigation"
+    );
 
     app.timeline_state.playhead = 0;
     app.paste_clipboard_at_playhead();
@@ -313,7 +343,10 @@ fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
         1,
         "pasted into the nested timeline"
     );
-    assert!(app.project.timelines[root_id].tracks[0].clips.is_empty(), "not in the root");
+    assert!(
+        app.project.timelines[root_id].tracks[0].clips.is_empty(),
+        "not in the root"
+    );
 }
 
 /// Bug reported by the user: dragging the entry of a timeline (the
@@ -336,7 +369,10 @@ fn dropping_a_timelines_own_media_into_itself_is_refused() {
     app.add_media_to_timeline(root_media);
 
     assert!(
-        app.project.timelines[root_id].tracks.iter().all(|t| t.clips.is_empty()),
+        app.project.timelines[root_id]
+            .tracks
+            .iter()
+            .all(|t| t.clips.is_empty()),
         "the drop was rejected, no clip must appear"
     );
 }
@@ -363,14 +399,16 @@ fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
         .unwrap();
     // The nested timeline already contains a clip referencing the
     // root of the project.
-    app.project.timelines[nested_id].tracks[0].clips.push(vv_core::Clip::from_source_range(
-        ClipId(1),
-        vv_core::ClipSource::Media(root_media),
-        0,
-        10,
-        0,
-        vv_core::Rational::one(),
-    ));
+    app.project.timelines[nested_id].tracks[0]
+        .clips
+        .push(vv_core::Clip::from_source_range(
+            ClipId(1),
+            vv_core::ClipSource::Media(root_media),
+            0,
+            10,
+            0,
+            vv_core::Rational::one(),
+        ));
 
     // Dragging the compound clip (which leads to `nested_id`, which already
     // leads to the root) inside the root would close the cycle.
@@ -391,7 +429,11 @@ fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
 /// Timeline at 30 fps + media at 29.97: the inserted clip carries the
 /// conforming `rate` and lasts on the timeline the real time of the
 /// media, not its frames counted 1:1.
-fn app_with_media_at(timeline_fps: vv_core::Rational, media_fps: vv_core::Rational, duration_frames: FrameIdx) -> (VenturiApp, MediaId) {
+fn app_with_media_at(
+    timeline_fps: vv_core::Rational,
+    media_fps: vv_core::Rational,
+    duration_frames: FrameIdx,
+) -> (VenturiApp, MediaId) {
     let mut app = VenturiApp::default();
     let media_id = app.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-conform-test.mp4".into(),
@@ -472,8 +514,8 @@ fn the_prefetch_window_shrinks_to_what_the_cache_budget_holds() {
 
     let (ahead, behind) = app.effective_window_secs(timeline_id);
 
-    let frame_bytes = vv_media::yuv420_frame_bytes(1920, 1080)
-        + vv_media::yuv420_frame_bytes(1080, 2400);
+    let frame_bytes =
+        vv_media::yuv420_frame_bytes(1920, 1080) + vv_media::yuv420_frame_bytes(1080, 2400);
     let needed = (ahead + behind) * 60.0 * frame_bytes as f64;
     assert!(
         needed <= app.settings.cache_budget_bytes as f64,
@@ -598,7 +640,11 @@ fn dropping_several_media_is_a_single_undo_step() {
         tl.tracks.iter().all(|t| t.clips.is_empty()),
         "a single Ctrl+Z must remove all the clips of the drop"
     );
-    assert_eq!(tl.tracks.len(), tracks_before, "and the track created by the drop too");
+    assert_eq!(
+        tl.tracks.len(),
+        tracks_before,
+        "and the track created by the drop too"
+    );
 }
 
 /// Multiple drop on the "new video track" band: the track is created once
@@ -700,7 +746,10 @@ fn select_all_media_selects_every_media_in_the_pool() {
 
     app.select_all_media();
 
-    assert_eq!(app.media_pool_state.selected, BTreeSet::from([media_a, media_b]));
+    assert_eq!(
+        app.media_pool_state.selected,
+        BTreeSet::from([media_a, media_b])
+    );
 }
 
 /// Simulates moving workstation: the media points at a path that
@@ -782,7 +831,10 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
 /// the rest of the pool — even if relinkable.
 #[test]
 fn relink_media_with_a_selection_only_touches_the_selected_media() {
-    let dir = std::env::temp_dir().join(format!("vv-app-relink-selection-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "vv-app-relink-selection-test-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let found_path = dir.join("a.mp4");
     std::fs::write(&found_path, b"a").unwrap();
@@ -898,7 +950,10 @@ fn extending_a_clip_over_its_neighbor_cuts_the_neighbor() {
     assert_eq!(clips[0].id, a);
     assert_eq!(clips[0].timeline_end(), 15);
     assert_eq!(clips[1].id, b);
-    assert_eq!(clips[1].timeline_start, 15, "the neighbour is cut, not moved");
+    assert_eq!(
+        clips[1].timeline_start, 15,
+        "the neighbour is cut, not moved"
+    );
     assert_eq!(clips[1].timeline_end(), 20);
 }
 
@@ -918,7 +973,10 @@ fn extending_a_clip_over_a_whole_neighbor_removes_it() {
     assert_eq!(clips[0].id, a);
     assert_eq!(clips[0].timeline_end(), 20);
     assert_eq!(clips[1].id, c, "the fully covered clip is gone");
-    assert_eq!(clips[1].timeline_start, 20, "the one after stays where it is");
+    assert_eq!(
+        clips[1].timeline_start, 20,
+        "the one after stays where it is"
+    );
 }
 
 /// Lengthening the *left* edge backwards follows the same rule.
@@ -998,7 +1056,10 @@ fn apply_trim_with_overwrite(
     )));
     app.history.do_command(
         &mut app.project,
-        Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::TrimClips, commands)),
+        Box::new(vv_core::CompositeCommand::new(
+            vv_core::CommandLabel::TrimClips,
+            commands,
+        )),
     );
 }
 
@@ -1194,13 +1255,20 @@ fn moving_a_clip_onto_another_cuts_the_one_underneath() {
     )));
     app.history.do_command(
         &mut app.project,
-        Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::MoveClips, commands)),
+        Box::new(vv_core::CompositeCommand::new(
+            vv_core::CommandLabel::MoveClips,
+            commands,
+        )),
     );
 
     let clips = &app.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, target);
-    assert_eq!(clips[0].timeline_end(), 10, "cut where the other one arrives");
+    assert_eq!(
+        clips[0].timeline_end(),
+        10,
+        "cut where the other one arrives"
+    );
     assert_eq!(clips[1].id, moved);
     assert_eq!(clips[1].timeline_start, 10);
 }
@@ -1427,7 +1495,9 @@ fn loading_a_media_clip_sets_active_clip_and_gain() {
 
     let mut app = VenturiApp::default();
     app.import_media(path);
-    let timeline_id = app.timeline_id.expect("import should have created the timeline");
+    let timeline_id = app
+        .timeline_id
+        .expect("import should have created the timeline");
     let media_id = app
         .project
         .media_pool
@@ -1507,7 +1577,10 @@ fn keyframe_arrows_ignore_keyframes_outside_the_clip() {
     let clip = &mut app.project.timelines[timeline_id].tracks[0].clips[0];
     clip.source_offset = 50;
     clip.timeline_len = 50;
-    let zoom = clip.effects.transform.track_mut(vv_core::TransformParam::ZoomX);
+    let zoom = clip
+        .effects
+        .transform
+        .track_mut(vv_core::TransformParam::ZoomX);
     zoom.upsert(10, 2.0, vv_core::Interpolation::Linear);
     zoom.upsert(40, 1.0, vv_core::Interpolation::Linear);
     let target = PanelTarget {
@@ -1520,7 +1593,10 @@ fn keyframe_arrows_ignore_keyframes_outside_the_clip() {
         is_text: false,
     };
     let info = app.clip_panel_info(target).unwrap();
-    assert_eq!(info.params[vv_core::TransformParam::ZoomX.index()].prev, None);
+    assert_eq!(
+        info.params[vv_core::TransformParam::ZoomX.index()].prev,
+        None
+    );
 }
 
 /// Multiple selection: the panel builds one command per clip and
@@ -1535,12 +1611,19 @@ fn effect_changes_on_several_clips_are_one_undo_step() {
     let commands: Vec<Box<dyn vv_core::Command>> = [first, second]
         .into_iter()
         .map(|clip_id| {
-            set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::PositionX, 120.0)
+            set_transform_param_default(
+                (timeline_id, 0, clip_id),
+                vv_core::TransformParam::PositionX,
+                120.0,
+            )
         })
         .collect();
     app.history.do_command(
         &mut app.project,
-        Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::Transform, commands)),
+        Box::new(vv_core::CompositeCommand::new(
+            vv_core::CommandLabel::Transform,
+            commands,
+        )),
     );
 
     let clips = &app.project.timelines[timeline_id].tracks[0].clips;
@@ -1603,8 +1686,14 @@ fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_positio
 
     let clips = &app.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips[0].effects.transform.value_at(0).position, [0.0, 80.0]);
-    assert_eq!(clips[1].effects.transform.value_at(0).position, [50.0, 85.0]);
-    assert_eq!(clips[1].effects.transform.value_at(10).position, [50.0, 5.0]);
+    assert_eq!(
+        clips[1].effects.transform.value_at(0).position,
+        [50.0, 85.0]
+    );
+    assert_eq!(
+        clips[1].effects.transform.value_at(10).position,
+        [50.0, 5.0]
+    );
 
     // Moved again with different coordinates: the same increment to all of them.
     let before = clips[0].effects.transform.value_at(0);
@@ -1621,8 +1710,14 @@ fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_positio
     );
     app.apply_effect_changes(pending, false);
     let clips = &app.project.timelines[timeline_id].tracks[0].clips;
-    assert_eq!(clips[0].effects.transform.value_at(0).position, [10.0, 80.0]);
-    assert_eq!(clips[1].effects.transform.value_at(0).position, [60.0, 85.0]);
+    assert_eq!(
+        clips[0].effects.transform.value_at(0).position,
+        [10.0, 80.0]
+    );
+    assert_eq!(
+        clips[1].effects.transform.value_at(0).position,
+        [60.0, 85.0]
+    );
 }
 
 #[test]
@@ -1631,7 +1726,11 @@ fn dragging_a_value_is_a_single_undo_step() {
     let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
     let timeline_id = app.timeline_id.unwrap();
     let set_x = |v| {
-        vec![set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::PositionX, v)]
+        vec![set_transform_param_default(
+            (timeline_id, 0, clip_id),
+            vv_core::TransformParam::PositionX,
+            v,
+        )]
     };
     let x = |app: &VenturiApp| {
         app.project.timelines[timeline_id].tracks[0].clips[0]
@@ -1680,7 +1779,12 @@ fn effect_command_remove_transform_keyframe_applies_correctly() {
 
     app.history.do_command(
         &mut app.project,
-        upsert_transform_keyframe((timeline_id, 0, clip_id), 3, vv_core::TransformParam::ZoomX, 2.5),
+        upsert_transform_keyframe(
+            (timeline_id, 0, clip_id),
+            3,
+            vv_core::TransformParam::ZoomX,
+            2.5,
+        ),
     );
     app.history.do_command(
         &mut app.project,
@@ -1703,7 +1807,11 @@ fn effect_command_set_defaults_applies_correctly() {
     );
     app.history.do_command(
         &mut app.project,
-        set_transform_param_default((timeline_id, 0, clip_id), vv_core::TransformParam::ZoomX, 1.5),
+        set_transform_param_default(
+            (timeline_id, 0, clip_id),
+            vv_core::TransformParam::ZoomX,
+            1.5,
+        ),
     );
 
     let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
@@ -1722,7 +1830,9 @@ fn dropping_solid_color_creates_timeline_and_initialized_color() {
         timeline_ui::MediaDropTarget::Default,
     );
 
-    let timeline_id = app.timeline_id.expect("a timeline should have been created");
+    let timeline_id = app
+        .timeline_id
+        .expect("a timeline should have been created");
     let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
     assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
     assert!(clip.effects.color.is_some());
@@ -1748,7 +1858,10 @@ fn dropping_solid_color_on_new_video_track_places_it_at_the_drop_frame() {
     assert_eq!(clip.timeline_start, 50);
     // New track and clip: a single Ctrl+Z.
     app.history.undo(&mut app.project);
-    assert_eq!(app.project.timelines[timeline_id].tracks.len(), tracks_before);
+    assert_eq!(
+        app.project.timelines[timeline_id].tracks.len(),
+        tracks_before
+    );
 }
 
 #[test]
@@ -1773,7 +1886,10 @@ fn dropping_solid_color_on_a_track_overwrites_what_is_under_it() {
     assert_eq!(spans, vec![(0, 50), (50, 175)]);
 
     app.history.undo(&mut app.project);
-    assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].timeline_end(), 125);
+    assert_eq!(
+        app.project.timelines[timeline_id].tracks[0].clips[0].timeline_end(),
+        125
+    );
 }
 
 #[test]
@@ -2038,7 +2154,10 @@ fn playback_reaches_the_end_of_audio_only_content_and_stops_there() {
 fn wait_for_playback_speed(app: &mut VenturiApp, speed: f64) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.playback_speed != speed {
-        assert!(std::time::Instant::now() < deadline, "speed {speed}x never applied");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "speed {speed}x never applied"
+        );
         std::thread::sleep(std::time::Duration::from_millis(5));
         let audio = app.timeline_audio();
         audio.tick();
@@ -2118,7 +2237,13 @@ fn preview_mix_follows_audio_clip_edits() {
 
     let mut app = VenturiApp::default();
     app.import_media(path);
-    let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
+    let media_id = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .unwrap()
+        .0;
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
     let audio_track = app.project.timelines[timeline_id]
@@ -2134,7 +2259,10 @@ fn preview_mix_follows_audio_clip_edits() {
             app.sync_timeline_audio();
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "audio decode never arrived");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "audio decode never arrived"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let peak = |app: &VenturiApp, frame| {
@@ -2150,7 +2278,10 @@ fn preview_mix_follows_audio_clip_edits() {
 
     app.history.do_command(
         &mut app.project,
-        Box::new(vv_core::MoveClips::new(timeline_id, vec![(audio_clip, audio_track, audio_track, 50)])),
+        Box::new(vv_core::MoveClips::new(
+            timeline_id,
+            vec![(audio_clip, audio_track, audio_track, 50)],
+        )),
     );
     app.sync_timeline_audio();
     assert_eq!(peak(&app, 10), 0.0, "the old position is now silent");
@@ -2168,7 +2299,10 @@ fn preview_mix_follows_audio_clip_edits() {
     app.project.timelines[timeline_id].tracks[audio_track].muted = true;
     app.history.do_command(
         &mut app.project,
-        Box::new(vv_core::MoveClips::new(timeline_id, vec![(audio_clip, audio_track, audio_track, 55)])),
+        Box::new(vv_core::MoveClips::new(
+            timeline_id,
+            vec![(audio_clip, audio_track, audio_track, 55)],
+        )),
     );
     app.sync_timeline_audio();
     assert_eq!(peak(&app, 60), 0.0, "track muted");
@@ -2191,7 +2325,10 @@ fn alt_released_mid_wheel_gesture_stops_zooming() {
         (egui::TouchPhase::Move, egui::Modifiers::NONE),
     ] {
         let mut raw_input = egui::RawInput {
-            events: vec![egui::Event::ModifiersChanged(modifiers), wheel(phase, modifiers)],
+            events: vec![
+                egui::Event::ModifiersChanged(modifiers),
+                wheel(phase, modifiers),
+            ],
             ..Default::default()
         };
         unstick_wheel_modifiers(&mut raw_input);
@@ -2199,7 +2336,10 @@ fn alt_released_mid_wheel_gesture_stops_zooming() {
         zooms.push(ctx.input(|i| i.zoom_delta()));
     }
     assert_ne!(zooms[1], 1.0, "with Alt, scrolling zooms");
-    assert_eq!(zooms[2], 1.0, "with Alt released, scrolling no longer zooms");
+    assert_eq!(
+        zooms[2], 1.0,
+        "with Alt released, scrolling no longer zooms"
+    );
 }
 
 /// Without a selection, T cuts all the tracks in one go.
@@ -2277,8 +2417,7 @@ fn locked_tracks_are_not_split_selected_or_pasted_on() {
         .set_selection(BTreeSet::from([(0, video_id)]), Some((0, video_id)));
     app.ripple_delete_selected();
     assert_eq!(
-        app.project.timelines[timeline_id].tracks[1].clips[0].timeline_start,
-        0,
+        app.project.timelines[timeline_id].tracks[1].clips[0].timeline_start, 0,
         "ripple does not move the locked track"
     );
 }
@@ -2333,7 +2472,11 @@ fn dropping_media_skips_locked_tracks() {
         timeline_ui::MediaDropTarget::Default,
     );
     let tl = &app.project.timelines[timeline_id];
-    assert_eq!(tl.tracks[video].clips.len(), 1, "nothing on the locked track");
+    assert_eq!(
+        tl.tracks[video].clips.len(),
+        1,
+        "nothing on the locked track"
+    );
     let new_video = tl.first_unlocked_track_index(TrackKind::Video).unwrap();
     assert_ne!(new_video, video);
     assert_eq!(tl.tracks[new_video].clips.len(), 1);
@@ -2527,14 +2670,20 @@ fn arrows_step_one_frame_then_scroll_at_half_speed_while_held() {
     app.step_playhead_with_arrows(Some(1), 10.0);
     assert_eq!(app.timeline_state.playhead, 101, "one frame right away");
     app.step_playhead_with_arrows(Some(1), 10.2);
-    assert_eq!(app.timeline_state.playhead, 101, "before the delay it stays there");
+    assert_eq!(
+        app.timeline_state.playhead, 101,
+        "before the delay it stays there"
+    );
     // 25fps at 0.5x: 1s after the delay = 12 more frames.
     app.step_playhead_with_arrows(Some(1), 10.0 + ARROW_HOLD_DELAY_SECS + 1.0);
     assert_eq!(app.timeline_state.playhead, 113);
 
     app.step_playhead_with_arrows(None, 12.0);
     app.step_playhead_with_arrows(Some(-1), 12.1);
-    assert_eq!(app.timeline_state.playhead, 112, "released, a new single step");
+    assert_eq!(
+        app.timeline_state.playhead, 112,
+        "released, a new single step"
+    );
 }
 
 #[test]
@@ -2561,7 +2710,10 @@ fn copy_then_paste_creates_a_new_clip_at_the_playhead_with_a_new_id() {
         BTreeSet::from([(0, pasted.id)]),
         "the pasted clip becomes the selection"
     );
-    assert_eq!(app.timeline_state.playhead, 60, "playhead at the end of the pasted clip");
+    assert_eq!(
+        app.timeline_state.playhead, 60,
+        "playhead at the end of the pasted clip"
+    );
 }
 
 #[test]
@@ -2685,7 +2837,11 @@ fn cut_copies_the_selected_clips_and_removes_them() {
 
     assert_eq!(app.timeline_state.clipboard.len(), 1);
     let timeline_id = app.timeline_id.unwrap();
-    assert!(app.project.timelines[timeline_id].tracks[0].clips.is_empty());
+    assert!(
+        app.project.timelines[timeline_id].tracks[0]
+            .clips
+            .is_empty()
+    );
 }
 
 /// With nothing selected, `copy_selected_clips` is a no-op: it must
@@ -2831,7 +2987,11 @@ fn paste_inside_an_existing_clip_splits_it_in_two() {
         .filter(|c| c.timeline_start == 0 || c.timeline_start == 13)
         .collect();
     halves.sort_by_key(|c| c.timeline_start);
-    assert_eq!(halves.len(), 2, "the original clip should have split in two");
+    assert_eq!(
+        halves.len(),
+        2,
+        "the original clip should have split in two"
+    );
     assert_eq!(
         halves[0].id, existing,
         "the left half keeps the original id (SplitClip behaviour)"
@@ -2933,7 +3093,13 @@ fn buffered_timeline_ranges_reports_the_clip_under_the_playheads_decoded_frames(
 
     let mut app = VenturiApp::default();
     app.import_media(path);
-    let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
+    let media_id = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .unwrap()
+        .0;
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
     let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
@@ -3079,7 +3245,13 @@ fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
     let mut app = VenturiApp::default();
     app.settings.proxy_enabled = true;
     app.import_media(path); // it also queues the proxy generation
-    let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
+    let media_id = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .unwrap()
+        .0;
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
     let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
@@ -3147,13 +3319,25 @@ fn import_media_files_imports_every_file_and_queues_their_proxies() {
     app.wait_for_import();
 
     // +1: the project timeline shows up in the pool too.
-    assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 2);
+    assert_eq!(
+        app.project
+            .media_pool
+            .values()
+            .filter(|m| m.compound.is_none())
+            .count(),
+        2
+    );
     let warnings = &app.import_warnings;
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("nonexistent.mp4"), "{warnings:?}");
     let worker = app.proxy_worker.as_ref().unwrap();
     assert_eq!(worker.progress().total, 2);
-    for item in app.project.media_pool.values().filter(|m| m.compound.is_none()) {
+    for item in app
+        .project
+        .media_pool
+        .values()
+        .filter(|m| m.compound.is_none())
+    {
         assert!(worker.state(item.content_hash).is_some());
         assert!(app.thumbnails.contains_key(&item.content_hash));
     }
@@ -3205,8 +3389,13 @@ fn importing_an_already_present_path_is_skipped() {
     let path = make_wav("already-present.wav");
     let mut app = VenturiApp::default();
     app.import_media(path.clone());
-    let pool_count =
-        |app: &VenturiApp| app.project.media_pool.values().filter(|m| m.compound.is_none()).count();
+    let pool_count = |app: &VenturiApp| {
+        app.project
+            .media_pool
+            .values()
+            .filter(|m| m.compound.is_none())
+            .count()
+    };
     assert_eq!(pool_count(&app), 1);
     let media_id = app
         .project
@@ -3221,7 +3410,12 @@ fn importing_an_already_present_path_is_skipped() {
     assert_eq!(app.media_pool_state.selected, BTreeSet::from([media_id]));
 
     // Same file via a non-canonical path, and duplicated inside the batch.
-    let detour = path.parent().unwrap().join("..").join(path.parent().unwrap().file_name().unwrap()).join("already-present.wav");
+    let detour = path
+        .parent()
+        .unwrap()
+        .join("..")
+        .join(path.parent().unwrap().file_name().unwrap())
+        .join("already-present.wav");
     app.import_media_files(vec![path.clone(), detour, make_wav("new.wav")]);
     app.wait_for_import();
     assert_eq!(pool_count(&app), 2);
@@ -3259,8 +3453,20 @@ fn dropping_a_file_from_the_file_manager_imports_it_into_the_pool() {
     assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
     // +1: the project timeline, created on the fly by the import (see
     // `ensure_timeline_for`), shows up in the pool too.
-    assert_eq!(app.project.media_pool.values().filter(|m| m.compound.is_none()).count(), 1);
-    let item = app.project.media_pool.values().find(|m| m.compound.is_none()).unwrap();
+    assert_eq!(
+        app.project
+            .media_pool
+            .values()
+            .filter(|m| m.compound.is_none())
+            .count(),
+        1
+    );
+    let item = app
+        .project
+        .media_pool
+        .values()
+        .find(|m| m.compound.is_none())
+        .unwrap();
     assert_eq!(item.path, path);
 }
 
@@ -3289,7 +3495,10 @@ fn disabling_proxies_stops_generation_and_enabling_requeues_the_pool() {
     app.settings.proxy_enabled = false;
     app.import_media_files(vec![path]);
     app.wait_for_import();
-    assert!(app.proxy_worker.is_none(), "with the toggle off no proxy starts");
+    assert!(
+        app.proxy_worker.is_none(),
+        "with the toggle off no proxy starts"
+    );
 
     app.settings.proxy_enabled = true;
     app.apply_proxy_settings();
@@ -3299,12 +3508,19 @@ fn disabling_proxies_stops_generation_and_enabling_requeues_the_pool() {
     app.settings.proxy_quality = vv_media::proxy::ProxyQuality::Low;
     app.apply_proxy_settings();
     let worker = app.proxy_worker.as_ref().unwrap();
-    assert_eq!(worker.quality(), vv_media::proxy::ProxyQuality::Low, "changing quality restarts the queue");
+    assert_eq!(
+        worker.quality(),
+        vv_media::proxy::ProxyQuality::Low,
+        "changing quality restarts the queue"
+    );
     assert_eq!(worker.progress().total, 1);
 
     app.settings.proxy_enabled = false;
     app.apply_proxy_settings();
-    assert!(app.proxy_worker.is_none(), "turning the toggle off must drop the queue");
+    assert!(
+        app.proxy_worker.is_none(),
+        "turning the toggle off must drop the queue"
+    );
 }
 
 /// The export pauses the proxy generation (which would otherwise
@@ -3368,7 +3584,10 @@ fn space_plays_the_media_pool_preview_instead_of_leaving_it() {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
     app.drive_browse_playback();
-    assert!(app.browse_playhead > 0, "the preview playhead should have advanced");
+    assert!(
+        app.browse_playhead > 0,
+        "the preview playhead should have advanced"
+    );
 
     app.toggle_playback();
     assert!(!app.is_timeline_playing());
@@ -3386,7 +3605,10 @@ fn preview_plays_the_media_audio_and_leaving_it_restores_the_timeline_mix() {
             app.sync_timeline_audio();
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "audio decode never arrived");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "audio decode never arrived"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let peak = |app: &VenturiApp| {
@@ -3401,7 +3623,11 @@ fn preview_plays_the_media_audio_and_leaving_it_restores_the_timeline_mix() {
 
     app.stop_browsing();
     app.sync_timeline_audio();
-    assert_eq!(peak(&app), 0.0, "outside the preview the timeline mix is back, empty here");
+    assert_eq!(
+        peak(&app),
+        0.0,
+        "outside the preview the timeline mix is back, empty here"
+    );
 }
 
 #[test]
@@ -3428,7 +3654,10 @@ fn in_out_marks_on_the_preview_trim_the_clip_dropped_on_the_timeline() {
     let clips: Vec<_> = timeline.tracks.iter().flat_map(|t| &t.clips).collect();
     assert_eq!(clips.len(), 2, "video + audio");
     for clip in clips {
-        assert_eq!((clip.source_in(), clip.source_out(), clip.timeline_start), (10, 30, 5));
+        assert_eq!(
+            (clip.source_in(), clip.source_out(), clip.timeline_start),
+            (10, 30, 5)
+        );
     }
 }
 
@@ -3500,16 +3729,28 @@ fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it(
     let mut app = VenturiApp::default();
     app.import_media(path_a);
     app.import_media(path_b);
-    let mut media_ids = app.project.media_pool.iter().filter(|(_, item)| item.compound.is_none()).map(|(id, _)| id);
+    let mut media_ids = app
+        .project
+        .media_pool
+        .iter()
+        .filter(|(_, item)| item.compound.is_none())
+        .map(|(id, _)| id);
     let media_a = media_ids.next().unwrap();
     let media_b = media_ids.next().unwrap();
     drop(media_ids);
 
-    let whole = |app: &VenturiApp, id| {
-        timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
-    };
-    app.add_media_to_timeline_at(whole(&app, media_a), 0, timeline_ui::MediaDropTarget::Default); // [0,50)
-    app.add_media_to_timeline_at(whole(&app, media_b), 50, timeline_ui::MediaDropTarget::Default); // [50,75), adjacent
+    let whole =
+        |app: &VenturiApp, id| timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta);
+    app.add_media_to_timeline_at(
+        whole(&app, media_a),
+        0,
+        timeline_ui::MediaDropTarget::Default,
+    ); // [0,50)
+    app.add_media_to_timeline_at(
+        whole(&app, media_b),
+        50,
+        timeline_ui::MediaDropTarget::Default,
+    ); // [50,75), adjacent
     let timeline_id = app.timeline_id.unwrap();
     let clip_b = app.project.timelines[timeline_id].tracks[0].clips[1].clone();
 
@@ -3607,7 +3848,11 @@ fn export_otio_to_writes_the_file_and_reports_failures() {
 
     app.export_otio_to(timeline_id, &path);
     assert!(app.project_error.is_none());
-    assert!(std::fs::read_to_string(&path).unwrap().contains("\"Timeline.1\""));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"Timeline.1\"")
+    );
 
     app.export_otio_to(timeline_id, &dir.join("nope/timeline.otio"));
     assert!(app.project_error.is_some());
@@ -3669,9 +3914,15 @@ fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
     let clips = &timeline.tracks[0].clips;
     assert_eq!(clips.len(), 1);
     let clip = &clips[0];
-    assert_eq!((clip.timeline_start, clip.timeline_len, clip.source_in()), (0, 20, 5));
+    assert_eq!(
+        (clip.timeline_start, clip.timeline_len, clip.source_in()),
+        (0, 20, 5)
+    );
     let warnings = &app.import_warnings;
-    assert!(warnings.iter().any(|w| w.contains("gone.mp4")), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("gone.mp4")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -3708,7 +3959,10 @@ fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure
     app.resolve_unsaved_changes(UnsavedChoice::Save);
     assert!(app.project_error.is_some(), "save failed");
     assert!(app.has_unsaved_changes());
-    assert_eq!(app.project.timelines[timeline_id].tracks[0].clips[0].id, clip_id);
+    assert_eq!(
+        app.project.timelines[timeline_id].tracks[0].clips[0].id,
+        clip_id
+    );
 }
 
 /// The waveform cache may be missing (deleted, another machine):
@@ -3759,7 +4013,10 @@ fn opening_a_project_regenerates_missing_waveforms() {
     app.load_project_from(project_path);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !vv_media::waveform::waveform_exists(content_hash, 0) {
-        assert!(std::time::Instant::now() < deadline, "waveform not generated");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "waveform not generated"
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let _ = std::fs::remove_file(vv_media::waveform::waveform_path_for(content_hash, 0));
@@ -3790,9 +4047,17 @@ fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
     app.import_media_files(vec![path]);
     app.wait_for_import();
     assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
-    let (media_id, item) = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap();
+    let (media_id, item) = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .unwrap();
     assert!(!item.meta.has_video);
-    assert!(app.proxy_worker.is_none(), "no proxy for an audio-only media");
+    assert!(
+        app.proxy_worker.is_none(),
+        "no proxy for an audio-only media"
+    );
     assert!(app.thumbnails.is_empty());
 
     let timeline_id = app.timeline_id.unwrap();
@@ -3818,7 +4083,10 @@ fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
         timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
         "the drop must not have created any video track"
     );
-    let (_, audio) = timeline.tracks_of_kind(TrackKind::Audio).next().expect("track created");
+    let (_, audio) = timeline
+        .tracks_of_kind(TrackKind::Audio)
+        .next()
+        .expect("track created");
     assert_eq!(audio.clips.len(), 1);
     let clip = &audio.clips[0];
     assert_eq!(clip.timeline_start, 10);
@@ -3860,7 +4128,12 @@ fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
     app.wait_for_import();
     assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
 
-    let (media_id, item) = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap();
+    let (media_id, item) = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .unwrap();
     assert!(item.meta.is_image());
     assert!(item.meta.has_video);
     assert!(!item.meta.has_audio);
@@ -3868,7 +4141,9 @@ fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
     assert_eq!(item.meta.duration_frames, vv_core::IMAGE_DURATION_FRAMES);
     assert!(app.proxy_worker.is_none(), "no proxy for an image");
 
-    let timeline_id = app.timeline_id.expect("an image creates the timeline like a video");
+    let timeline_id = app
+        .timeline_id
+        .expect("an image creates the timeline like a video");
     let meta = item.meta.clone();
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
@@ -3876,12 +4151,18 @@ fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
         timeline_ui::MediaDropTarget::Default,
     );
     let timeline = &app.project.timelines[timeline_id];
-    let (_, video) = timeline.tracks_of_kind(TrackKind::Video).next().expect("track created");
+    let (_, video) = timeline
+        .tracks_of_kind(TrackKind::Video)
+        .next()
+        .expect("track created");
     assert_eq!(video.clips.len(), 1);
     let clip = &video.clips[0];
     assert_eq!(clip.timeline_len, 5 * 25, "5 s by default at 25 fps");
     assert!(
-        timeline.tracks.iter().all(|t| t.kind == TrackKind::Video || t.clips.is_empty()),
+        timeline
+            .tracks
+            .iter()
+            .all(|t| t.kind == TrackKind::Video || t.clips.is_empty()),
         "an image has no audio: no audio clip must appear"
     );
 }
@@ -3916,7 +4197,9 @@ fn dropping_audio_only_media_creates_no_video_track() {
         timeline_ui::MediaDropTarget::Default,
     );
 
-    let timeline_id = app.timeline_id.expect("the drop creates the timeline on the fly");
+    let timeline_id = app
+        .timeline_id
+        .expect("the drop creates the timeline on the fly");
     let timeline = &app.project.timelines[timeline_id];
     assert!(
         timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
@@ -3949,7 +4232,10 @@ fn close_request_commands(app: &mut VenturiApp) -> Vec<egui::ViewportCommand> {
 fn closing_the_window_asks_to_save_unsaved_changes() {
     let mut app = VenturiApp::default();
     let commands = close_request_commands(&mut app);
-    assert!(!commands.contains(&egui::ViewportCommand::CancelClose), "nothing to save");
+    assert!(
+        !commands.contains(&egui::ViewportCommand::CancelClose),
+        "nothing to save"
+    );
 
     let mut app = VenturiApp::default();
     make_timeline_with_clip(&mut app, 0, 0, 10);
@@ -4012,7 +4298,13 @@ fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
 
     let mut app = VenturiApp::default();
     app.import_media(path.clone());
-    let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).unwrap().0;
+    let media_id = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .unwrap()
+        .0;
     app.add_media_to_timeline(media_id);
 
     let timeline_id = app.timeline_id.unwrap();

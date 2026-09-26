@@ -73,7 +73,8 @@ pub fn show_transport(
         egui::pos2(rect.right() - SIDE_PADDING, rect.top() + TRACK_Y + 2.0),
     );
     let span = total.max(1) as f32;
-    let x_of = |frame: FrameIdx| track.left() + track.width() * (frame as f32 / span).clamp(0.0, 1.0);
+    let x_of =
+        |frame: FrameIdx| track.left() + track.width() * (frame as f32 / span).clamp(0.0, 1.0);
 
     if total > 0
         && let Some(pos) = bar_resp.interact_pointer_pos()

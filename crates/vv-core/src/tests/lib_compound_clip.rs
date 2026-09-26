@@ -11,8 +11,21 @@ fn project_with_tracks(kinds: &[TrackKind]) -> (Project, TimelineId) {
     (project, timeline)
 }
 
-fn insert_clip(project: &mut Project, timeline: TimelineId, track_index: usize, start: FrameIdx, len: FrameIdx) -> ClipId {
-    let clip = Clip::from_source_range(project.alloc_clip_id(), ClipSource::SolidColor, 0, len, start, Rational::one());
+fn insert_clip(
+    project: &mut Project,
+    timeline: TimelineId,
+    track_index: usize,
+    start: FrameIdx,
+    len: FrameIdx,
+) -> ClipId {
+    let clip = Clip::from_source_range(
+        project.alloc_clip_id(),
+        ClipSource::SolidColor,
+        0,
+        len,
+        start,
+        Rational::one(),
+    );
     let id = clip.id;
     project.timelines[timeline].tracks[track_index].insert_sorted(clip);
     id
@@ -78,9 +91,17 @@ fn plan_folds_multiple_video_tracks_into_a_single_result_clip_on_the_bottommost(
 
     assert!(plan.has_video);
     assert!(!plan.has_audio);
-    assert_eq!(plan.video_track, Some(0), "the lowest of the tracks involved");
+    assert_eq!(
+        plan.video_track,
+        Some(0),
+        "the lowest of the tracks involved"
+    );
     assert_eq!(plan.audio_track, None);
-    assert_eq!(plan.nested_timeline.tracks.len(), 2, "one nested track per video track involved");
+    assert_eq!(
+        plan.nested_timeline.tracks.len(),
+        2,
+        "one nested track per video track involved"
+    );
 }
 
 #[test]
@@ -89,14 +110,24 @@ fn deleting_a_compound_clip_frees_its_name_and_its_nested_timeline() {
     let id = insert_clip(&mut project, timeline, 0, 0, 20);
     let plan = plan_compound_clip(&project, timeline, &[(0, id)]).unwrap();
     let media = insert_compound_media(&mut project, &plan);
-    assert_eq!(project.media_pool[media].path.to_str(), Some("Compound Clip 1"));
+    assert_eq!(
+        project.media_pool[media].path.to_str(),
+        Some("Compound Clip 1")
+    );
 
     let mut history = History::default();
     history.do_command(&mut project, Box::new(command::RemoveMedia::new(media)));
-    assert_eq!(project.timelines.len(), 1, "the nested timeline goes away with the media");
+    assert_eq!(
+        project.timelines.len(),
+        1,
+        "the nested timeline goes away with the media"
+    );
 
     let again = insert_compound_media(&mut project, &plan);
-    assert_eq!(project.media_pool[again].path.to_str(), Some("Compound Clip 1"));
+    assert_eq!(
+        project.media_pool[again].path.to_str(),
+        Some("Compound Clip 1")
+    );
 }
 
 #[test]
@@ -111,7 +142,13 @@ fn undoing_the_deletion_of_a_compound_clip_restores_its_nested_timeline() {
     history.undo(&mut project);
 
     assert_eq!(project.media_pool.len(), 1);
-    let nested = project.media_pool.values().next().unwrap().compound.unwrap();
+    let nested = project
+        .media_pool
+        .values()
+        .next()
+        .unwrap()
+        .compound
+        .unwrap();
     assert!(project.timelines.contains_key(nested));
 }
 
@@ -135,7 +172,10 @@ fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores
     let mut history = History::default();
     history.do_command(
         &mut project,
-        Box::new(CompositeCommand::new(CommandLabel::MakeCompoundClip, commands)),
+        Box::new(CompositeCommand::new(
+            CommandLabel::MakeCompoundClip,
+            commands,
+        )),
     );
 
     let video_track = &project.timelines[timeline].tracks[0];
@@ -147,7 +187,9 @@ fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores
     let audio_track = &project.timelines[timeline].tracks[1];
     assert_eq!(audio_track.clips.len(), 1);
     assert!(matches!(audio_track.clips[0].source, ClipSource::Media(id) if id == media_id));
-    let group = video_track.clips[0].linked_group.expect("video linked to the audio");
+    let group = video_track.clips[0]
+        .linked_group
+        .expect("video linked to the audio");
     assert_eq!(audio_track.clips[0].linked_group, Some(group));
 
     // The pool and the nested timeline stay out of the history.
@@ -157,7 +199,10 @@ fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores
     history.undo(&mut project);
     assert_eq!(project.timelines[timeline].tracks[0].clips.len(), 1);
     assert_eq!(project.timelines[timeline].tracks[0].clips[0].id, video_id);
-    assert_eq!(project.timelines[timeline].tracks[0].clips[0].timeline_start, 10);
+    assert_eq!(
+        project.timelines[timeline].tracks[0].clips[0].timeline_start,
+        10
+    );
     assert_eq!(project.timelines[timeline].tracks[1].clips[0].id, audio_id);
     // Undo does not un-import the compound clip from the pool, like an import.
     assert_eq!(project.media_pool.len(), 1);
@@ -193,7 +238,10 @@ fn would_create_a_cycle_catches_importing_a_timeline_into_itself() {
     });
     let media = compound_media_for(&mut project, timeline);
 
-    assert!(project.would_create_a_cycle(media, timeline), "T inside itself");
+    assert!(
+        project.would_create_a_cycle(media, timeline),
+        "T inside itself"
+    );
 }
 
 #[test]
@@ -217,7 +265,14 @@ fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip
     // would close the cycle A -> B -> A.
     project.timelines[b].tracks.push(Track {
         kind: TrackKind::Video,
-        clips: vec![Clip::from_source_range(ClipId(1), ClipSource::Media(media_a), 0, 10, 0, Rational::one())],
+        clips: vec![Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(media_a),
+            0,
+            10,
+            0,
+            Rational::one(),
+        )],
         muted: false,
         solo: false,
         locked: false,
@@ -225,7 +280,10 @@ fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip
     });
 
     assert!(project.would_create_a_cycle(media_b, a), "A -> B -> A");
-    assert!(!project.would_create_a_cycle(media_a, b), "B -> A not yet a cycle on B");
+    assert!(
+        !project.would_create_a_cycle(media_a, b),
+        "B -> A not yet a cycle on B"
+    );
 }
 
 #[test]

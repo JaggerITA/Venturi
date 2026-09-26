@@ -37,7 +37,10 @@ fn proxy_path_for_is_deterministic_and_keyed_by_content_hash_and_quality() {
     let medium = ProxyQuality::Medium;
     assert_eq!(proxy_path_for(42, medium), proxy_path_for(42, medium));
     assert_ne!(proxy_path_for(42, medium), proxy_path_for(43, medium));
-    assert_ne!(proxy_path_for(42, medium), proxy_path_for(42, ProxyQuality::High));
+    assert_ne!(
+        proxy_path_for(42, medium),
+        proxy_path_for(42, ProxyQuality::High)
+    );
     assert!(
         proxy_path_for(42, medium)
             .to_string_lossy()
@@ -57,8 +60,12 @@ fn generate_proxy_produces_a_smaller_all_intra_file_that_decodes_back_correctly(
     let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
     assert!(!proxy_exists(content_hash, ProxyQuality::Medium));
-    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("proxy generation failed");
-    assert_eq!(proxy_path, proxy_path_for(content_hash, ProxyQuality::Medium));
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true)
+        .expect("proxy generation failed");
+    assert_eq!(
+        proxy_path,
+        proxy_path_for(content_hash, ProxyQuality::Medium)
+    );
     assert!(proxy_exists(content_hash, ProxyQuality::Medium));
 
     // The proxy must be a valid H.264 file, re-decodable with the same
@@ -100,7 +107,8 @@ fn generate_proxy_downscales_a_wider_source() {
     let content_hash = 0x123456;
     let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
-    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true).expect("proxy generation failed");
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true)
+        .expect("proxy generation failed");
     let proxy_decoder = Decoder::open(&proxy_path).unwrap();
     assert_eq!(proxy_decoder.width(), 960);
     assert_eq!(proxy_decoder.height(), 540);

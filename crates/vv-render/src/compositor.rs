@@ -302,7 +302,10 @@ impl TransformUniform {
                 for (slot, kind) in ids.iter_mut().zip(filters.iter().take(MAX_LAYER_FILTERS)) {
                     *slot = filter_shader_id(*kind);
                 }
-                [[ids[0], ids[1], ids[2], ids[3]], [ids[4], ids[5], ids[6], ids[7]]]
+                [
+                    [ids[0], ids[1], ids[2], ids[3]],
+                    [ids[4], ids[5], ids[6], ids[7]],
+                ]
             },
         }
     }
@@ -362,7 +365,9 @@ impl std::ops::Deref for PooledTexture {
     type Target = wgpu::Texture;
 
     fn deref(&self) -> &wgpu::Texture {
-        self.texture.as_ref().expect("the texture exists until Drop")
+        self.texture
+            .as_ref()
+            .expect("the texture exists until Drop")
     }
 }
 
@@ -478,7 +483,8 @@ impl Compositor {
             "vv-render transform pipeline",
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
-        let blend_pipeline = transform_pipeline("vv-render blend pipeline", Some(wgpu::BlendState::REPLACE));
+        let blend_pipeline =
+            transform_pipeline("vv-render blend pipeline", Some(wgpu::BlendState::REPLACE));
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vv-render transform sampler"),
@@ -578,8 +584,14 @@ impl Compositor {
                 }),
             });
         }
-        let I420Buffers { storage, params: params_buffer, readback, .. } = pool.i420.as_ref().unwrap();
-        self.queue.write_buffer(params_buffer, 0, bytemuck::cast_slice(&params));
+        let I420Buffers {
+            storage,
+            params: params_buffer,
+            readback,
+            ..
+        } = pool.i420.as_ref().unwrap();
+        self.queue
+            .write_buffer(params_buffer, 0, bytemuck::cast_slice(&params));
         let texture_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vv-render i420 bind group"),
@@ -691,7 +703,11 @@ impl Compositor {
     /// timeline has nothing to show must stay transparent, not
     /// black, or they would cover what is below instead of letting it show
     /// (see `YuvFrame::alpha`, which carries this transparency around).
-    pub fn render_layers_to_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> wgpu::Texture {
+    pub fn render_layers_to_texture_transparent(
+        &self,
+        layers: &[Layer],
+        output: OutputFrame,
+    ) -> wgpu::Texture {
         self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::Immediately)
     }
 
@@ -699,9 +715,18 @@ impl Compositor {
     /// whoever receives it until they let it go, so it can be used in the meantime
     /// as a `LayerContent::Texture`: with immediate recycling the first render of the
     /// same size would draw over it.
-    pub fn render_layers_to_owned_texture_transparent(&self, layers: &[Layer], output: OutputFrame) -> PooledTexture {
+    pub fn render_layers_to_owned_texture_transparent(
+        &self,
+        layers: &[Layer],
+        output: OutputFrame,
+    ) -> PooledTexture {
         PooledTexture {
-            texture: Some(self.render_layers_to_texture_with_clear(layers, output, TRANSPARENT, Recycle::OnDrop)),
+            texture: Some(self.render_layers_to_texture_with_clear(
+                layers,
+                output,
+                TRANSPARENT,
+                Recycle::OnDrop,
+            )),
             pool: Arc::clone(&self.scratch),
         }
     }
@@ -738,7 +763,13 @@ impl Compositor {
         }
         let mut first = true;
         for layer in layers {
-            let Layer { content, transform, opacity, filters, blend } = layer;
+            let Layer {
+                content,
+                transform,
+                opacity,
+                filters,
+                blend,
+            } = layer;
             let blend = *blend;
             let backdrop_view = |backdrops: &mut Vec<Option<wgpu::Texture>>| {
                 let texture = (blend != BlendMode::Normal)
@@ -765,7 +796,10 @@ impl Compositor {
                     blend,
                     &backdrop_view(&mut backdrops),
                 )],
-                LayerContent::Texture { texture, source_size } => vec![self.texture_bind_group(
+                LayerContent::Texture {
+                    texture,
+                    source_size,
+                } => vec![self.texture_bind_group(
                     &mut planes,
                     texture,
                     transform,
@@ -850,12 +884,20 @@ impl Compositor {
                     wgpu::LoadOp::Load
                 };
                 first = false;
-                self.pass(&mut encoder, &output_view, load, Some((bind_group, pipeline)));
+                self.pass(
+                    &mut encoder,
+                    &output_view,
+                    load,
+                    Some((bind_group, pipeline)),
+                );
             }
         }
 
         self.queue.submit(Some(encoder.finish()));
-        give_back(&mut self.scratch.lock().unwrap(), backdrops.into_iter().flatten());
+        give_back(
+            &mut self.scratch.lock().unwrap(),
+            backdrops.into_iter().flatten(),
+        );
         let mut pool = self.pool.lock().unwrap();
         planes.push(no_backdrop);
         give_back(&mut pool.planes, planes);
@@ -909,7 +951,11 @@ impl Compositor {
         // A single byte = "opaque everywhere" placeholder (see the docs of
         // `YuvFrame::alpha`): the texture stays 1x1, sampled everywhere
         // by the `ClampToEdge` as Y/U/V already are for Solid/Text.
-        let (alpha_w, alpha_h) = if frame.alpha.len() == 1 { (1, 1) } else { (frame.width, frame.height) };
+        let (alpha_w, alpha_h) = if frame.alpha.len() == 1 {
+            (1, 1)
+        } else {
+            (frame.width, frame.height)
+        };
         let a_texture = self.plane_texture(frame.alpha, alpha_w, alpha_h);
         let y_view = y_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -931,7 +977,8 @@ impl Compositor {
             filters,
             blend,
         );
-        let bind_group = self.bind_group_for([&y_view, &u_view, &v_view, &a_view, backdrop], &uniform);
+        let bind_group =
+            self.bind_group_for([&y_view, &u_view, &v_view, &a_view, backdrop], &uniform);
         planes.extend([y_texture, u_texture, v_texture, a_texture]);
         bind_group
     }
@@ -967,7 +1014,10 @@ impl Compositor {
             ColorMatrix::Bt709,
             false,
             fit_factors(
-                (texture.width().max(1) as f32, texture.height().max(1) as f32),
+                (
+                    texture.width().max(1) as f32,
+                    texture.height().max(1) as f32,
+                ),
                 (output.width as f32, output.height as f32),
             ),
             output,
@@ -977,14 +1027,19 @@ impl Compositor {
             filters,
             blend,
         );
-        let bind_group = self.bind_group_for([&rgba_view, &u_view, &v_view, &a_view, backdrop], &uniform);
+        let bind_group =
+            self.bind_group_for([&rgba_view, &u_view, &v_view, &a_view, backdrop], &uniform);
         planes.extend([u_texture, v_texture, a_texture]);
         bind_group
     }
 
     /// The bind group of the pass: the views in the order `[source, U, V, alpha,
     /// backdrop]` (the first is the Y plane or the RGBA texture, see `Fill`).
-    fn bind_group_for(&self, views: [&wgpu::TextureView; 5], uniform: &TransformUniform) -> wgpu::BindGroup {
+    fn bind_group_for(
+        &self,
+        views: [&wgpu::TextureView; 5],
+        uniform: &TransformUniform,
+    ) -> wgpu::BindGroup {
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1070,7 +1125,8 @@ impl Compositor {
     }
 
     fn output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
-        if let Some(texture) = take_sized(&mut self.pool.lock().unwrap().outputs, output_w, output_h)
+        if let Some(texture) =
+            take_sized(&mut self.pool.lock().unwrap().outputs, output_w, output_h)
         {
             return texture;
         }

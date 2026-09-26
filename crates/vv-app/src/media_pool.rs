@@ -21,7 +21,10 @@ pub struct Sort {
 
 impl Default for Sort {
     fn default() -> Self {
-        Self { key: SortKey::Name, ascending: true }
+        Self {
+            key: SortKey::Name,
+            ascending: true,
+        }
     }
 }
 
@@ -56,7 +59,8 @@ impl MediaPoolState {
     /// `order` is the order the items are drawn in the panel: that is what
     /// defines the range of a shift+click.
     pub fn click(&mut self, clicked: MediaId, modifiers: egui::Modifiers, order: &[MediaId]) {
-        let (selected, anchor) = apply_click(&self.selected, self.anchor, clicked, modifiers, order);
+        let (selected, anchor) =
+            apply_click(&self.selected, self.anchor, clicked, modifiers, order);
         self.selected = selected;
         self.anchor = anchor;
     }
@@ -75,7 +79,10 @@ impl MediaPoolState {
         if self.sort.key == key {
             self.sort.ascending = !self.sort.ascending;
         } else {
-            self.sort = Sort { key, ascending: true };
+            self.sort = Sort {
+                key,
+                ascending: true,
+            };
         }
     }
 
@@ -107,7 +114,9 @@ pub fn sort_items<T>(
 }
 
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
 }
 
 fn apply_click(

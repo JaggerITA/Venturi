@@ -199,7 +199,10 @@ impl VenturiApp {
             .filter(|(_, item)| item.compound.is_none())
             .map(|(_, item)| canonical_path(&item.path))
             .collect();
-        paths.into_iter().filter(|path| seen.insert(canonical_path(path))).collect()
+        paths
+            .into_iter()
+            .filter(|path| seen.insert(canonical_path(path)))
+            .collect()
     }
 
     pub(crate) fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
@@ -363,7 +366,11 @@ impl VenturiApp {
     /// the pool, wherever they land.
     pub(crate) fn poll_dropped_files(&mut self, ctx: &egui::Context) {
         let paths: Vec<PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
         });
         if !paths.is_empty() {
             self.import_media_files(paths);
@@ -375,17 +382,20 @@ impl VenturiApp {
     pub(crate) fn import_media_dialog(&mut self) {
         self.spawn_dialog(DialogKind::ImportMedia, |dlg| {
             DialogOutcome::Files(
-            dlg.add_filter(
-                "media",
-                &[
-                    "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg", "opus",
-                    "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
-                ],
-            )
-            .add_filter("video", &["mp4", "mov", "mkv", "avi"])
-            .add_filter("audio", &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"])
-            .add_filter(t!("file_filter.images"), vv_media::IMAGE_EXTENSIONS)
-            .pick_files(),
+                dlg.add_filter(
+                    "media",
+                    &[
+                        "mp4", "mov", "mkv", "avi", "wav", "mp3", "flac", "m4a", "aac", "ogg",
+                        "opus", "jpg", "jpeg", "png", "bmp", "webp", "tif", "tiff",
+                    ],
+                )
+                .add_filter("video", &["mp4", "mov", "mkv", "avi"])
+                .add_filter(
+                    "audio",
+                    &["wav", "mp3", "flac", "m4a", "aac", "ogg", "opus"],
+                )
+                .add_filter(t!("file_filter.images"), vv_media::IMAGE_EXTENSIONS)
+                .pick_files(),
             )
         });
     }
@@ -436,8 +446,7 @@ impl VenturiApp {
 
     pub(crate) fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
         let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
-        self.project_error =
-            vv_core::export_otio(&self.project, timeline_id, path, Some(&measure))
+        self.project_error = vv_core::export_otio(&self.project, timeline_id, path, Some(&measure))
             .err()
             .map(|e| t!("project.otio_export_failed", error = e).into_owned());
     }
@@ -579,13 +588,16 @@ impl VenturiApp {
                 self.replace_project(imported.project, None);
                 self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
             }
-            Err(e) => self.project_error = Some(t!("project.otio_import_failed", error = e).into_owned()),
+            Err(e) => {
+                self.project_error = Some(t!("project.otio_import_failed", error = e).into_owned())
+            }
         }
     }
 
     pub(crate) fn open_project_dialog(&mut self) {
         self.spawn_file_dialog(DialogKind::OpenProject, |dlg| {
-            dlg.add_filter(t!("file_filter.project"), &["vvproj"]).pick_file()
+            dlg.add_filter(t!("file_filter.project"), &["vvproj"])
+                .pick_file()
         });
     }
 
@@ -629,7 +641,10 @@ impl VenturiApp {
             audio.invalidate();
         }
         self.reset_playback_speed_to_normal();
-        if let Some(fps) = self.timeline_id.map(|id| self.project.timelines[id].fps.as_f64()) {
+        if let Some(fps) = self
+            .timeline_id
+            .map(|id| self.project.timelines[id].fps.as_f64())
+        {
             self.timeline_audio().seek_frame(0, fps);
         }
         self.current_project_path = path;
@@ -745,19 +760,24 @@ impl VenturiApp {
             return;
         }
         let mut close = false;
-        egui::Window::new(t!("project.import_warnings", count = self.import_warnings.len()))
-            .id(egui::Id::new("import_warnings"))
-            .collapsible(true)
-            .default_width(480.0)
-            .show(ui.ctx(), |ui| {
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+        egui::Window::new(t!(
+            "project.import_warnings",
+            count = self.import_warnings.len()
+        ))
+        .id(egui::Id::new("import_warnings"))
+        .collapsible(true)
+        .default_width(480.0)
+        .show(ui.ctx(), |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
                     for warning in &self.import_warnings {
                         ui.label(warning);
                     }
                 });
-                ui.separator();
-                close = ui.button(t!("common.close")).clicked();
-            });
+            ui.separator();
+            close = ui.button(t!("common.close")).clicked();
+        });
         if close {
             self.import_warnings.clear();
         }
@@ -788,7 +808,13 @@ impl VenturiApp {
 
         let (current, total, done, error, elapsed) = {
             let p = state.progress.lock().unwrap();
-            (p.current_frame, p.total_frames, p.done, p.error.clone(), p.elapsed)
+            (
+                p.current_frame,
+                p.total_frames,
+                p.done,
+                p.error.clone(),
+                p.elapsed,
+            )
         };
 
         let mut should_close = false;
@@ -803,7 +829,11 @@ impl VenturiApp {
                 };
                 ui.add(
                     egui::ProgressBar::new(fraction)
-                        .text(t!("project.export_progress", current = current, total = total))
+                        .text(t!(
+                            "project.export_progress",
+                            current = current,
+                            total = total
+                        ))
                         .animate(!done),
                 );
                 if let Some(err) = &error {
@@ -859,13 +889,19 @@ impl VenturiApp {
                 item.compound.is_none() && item.meta.has_video && !item.meta.is_image()
             })
             .map(|(_, item)| {
-                (item.path.clone(), item.content_hash, item.meta.duration_frames.max(0) as u64)
+                (
+                    item.path.clone(),
+                    item.content_hash,
+                    item.meta.duration_frames.max(0) as u64,
+                )
             })
             .collect();
         if media.is_empty() {
             return;
         }
-        let worker = self.proxy_worker.get_or_insert_with(|| proxy_worker::ProxyWorker::spawn(quality));
+        let worker = self
+            .proxy_worker
+            .get_or_insert_with(|| proxy_worker::ProxyWorker::spawn(quality));
         for (path, content_hash, frames) in media {
             worker.enqueue(path, content_hash, frames);
         }
@@ -931,8 +967,10 @@ impl VenturiApp {
                 continue;
             };
             let content_hash = vv_media::content_fingerprint(&found).unwrap_or(0);
-            commands.push(Box::new(vv_core::SetMediaPath::new(media_id, found, content_hash))
-                as Box<dyn vv_core::Command>);
+            commands.push(
+                Box::new(vv_core::SetMediaPath::new(media_id, found, content_hash))
+                    as Box<dyn vv_core::Command>,
+            );
             relinked_ids.push(media_id);
         }
         self.relink_message = Some(if commands.is_empty() {
@@ -940,14 +978,22 @@ impl VenturiApp {
         } else if missing == 0 {
             t!("project.relink_done", count = commands.len()).into_owned()
         } else {
-            t!("project.relink_partial", count = commands.len(), missing = missing).into_owned()
+            t!(
+                "project.relink_partial",
+                count = commands.len(),
+                missing = missing
+            )
+            .into_owned()
         });
         if commands.is_empty() {
             return;
         }
         self.history.do_command(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(vv_core::CommandLabel::RelinkMedia, commands)),
+            Box::new(vv_core::CompositeCommand::new(
+                vv_core::CommandLabel::RelinkMedia,
+                commands,
+            )),
         );
         self.unsaved_media = true;
         for media_id in relinked_ids {
@@ -959,7 +1005,9 @@ impl VenturiApp {
 fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
     use vv_core::OtioWarning as W;
     match warning {
-        W::EffectIgnored { effect, clips } => t!("otio.effect_ignored", effect = effect, clips = clips),
+        W::EffectIgnored { effect, clips } => {
+            t!("otio.effect_ignored", effect = effect, clips = clips)
+        }
         W::SpeedNotApplied { clip, percent } => {
             t!("otio.speed_not_applied", clip = clip, percent = percent)
         }
@@ -968,7 +1016,10 @@ fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
         }
         W::UnsupportedInStack { schema } => t!("otio.unsupported_in_stack", schema = schema),
         W::TrackKindIgnored { kind } => {
-            t!("otio.track_kind_ignored", kind = kind.as_deref().unwrap_or("?"))
+            t!(
+                "otio.track_kind_ignored",
+                kind = kind.as_deref().unwrap_or("?")
+            )
         }
         W::TransitionIgnored => t!("otio.transition_ignored"),
         W::UnsupportedItem { schema } => t!("otio.unsupported_item", schema = schema),
@@ -981,7 +1032,11 @@ fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
         }
         W::UnsupportedUrl { url } => t!("otio.unsupported_url", url = url),
         W::MediaUnreadable { path, error } => {
-            t!("otio.media_unreadable", path = path.display(), error = error)
+            t!(
+                "otio.media_unreadable",
+                path = path.display(),
+                error = error
+            )
         }
     }
     .into_owned()

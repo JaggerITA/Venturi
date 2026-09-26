@@ -120,7 +120,11 @@ impl Importer<'_> {
         let venturi = &otio["metadata"]["venturi"];
         let fps = serde_json::from_value::<Rational>(venturi["fps"].clone())
             .ok()
-            .or_else(|| otio["global_start_time"]["rate"].as_f64().map(Rational::from_fps))
+            .or_else(|| {
+                otio["global_start_time"]["rate"]
+                    .as_f64()
+                    .map(Rational::from_fps)
+            })
             .or_else(|| first_item_rate(otio).map(Rational::from_fps))
             .unwrap_or(Rational::new(30, 1));
 
@@ -129,14 +133,18 @@ impl Importer<'_> {
         let mut tracks = Vec::new();
         for otio_track in children(&otio["tracks"]) {
             if schema(otio_track) != "Track" {
-                self.warn(OtioWarning::UnsupportedInStack { schema: schema(otio_track).to_owned() });
+                self.warn(OtioWarning::UnsupportedInStack {
+                    schema: schema(otio_track).to_owned(),
+                });
                 continue;
             }
             let kind = match otio_track["kind"].as_str() {
                 Some("Video") => TrackKind::Video,
                 Some("Audio") => TrackKind::Audio,
                 other => {
-                    self.warn(OtioWarning::TrackKindIgnored { kind: other.map(str::to_owned) });
+                    self.warn(OtioWarning::TrackKindIgnored {
+                        kind: other.map(str::to_owned),
+                    });
                     continue;
                 }
             };
@@ -171,7 +179,9 @@ impl Importer<'_> {
                         duration
                     }
                     other => {
-                        self.warn(OtioWarning::UnsupportedItem { schema: other.to_owned() });
+                        self.warn(OtioWarning::UnsupportedItem {
+                            schema: other.to_owned(),
+                        });
                         item_duration(item)
                     }
                 };
@@ -211,7 +221,10 @@ impl Importer<'_> {
             return None;
         }
         let build = |duration: FrameIdx| match &saved {
-            Some(transition) => Transition { duration, ..transition.clone() },
+            Some(transition) => Transition {
+                duration,
+                ..transition.clone()
+            },
             None => {
                 let effect = &item["metadata"]["Resolve_OTIO"]["Effects"];
                 Transition {
@@ -247,7 +260,9 @@ impl Importer<'_> {
         let name = item["name"].as_str().unwrap_or("");
         let reference = match item.get("media_references") {
             Some(refs) => {
-                let key = item["active_media_reference_key"].as_str().unwrap_or("DEFAULT_MEDIA");
+                let key = item["active_media_reference_key"]
+                    .as_str()
+                    .unwrap_or("DEFAULT_MEDIA");
                 &refs[key]
             }
             None => &item["media_reference"],
@@ -255,22 +270,28 @@ impl Importer<'_> {
         let Some((source_start, duration)) =
             time_range(&item["source_range"]).or_else(|| time_range(&reference["available_range"]))
         else {
-            self.warn(OtioWarning::ClipWithoutDuration { clip: name.to_owned() });
+            self.warn(OtioWarning::ClipWithoutDuration {
+                clip: name.to_owned(),
+            });
             return (0.0, None);
         };
         let timeline_len = to_frames(cursor + duration, fps) - timeline_start;
         if item["enabled"] == false {
-            self.warn(OtioWarning::ClipDisabled { clip: name.to_owned() });
+            self.warn(OtioWarning::ClipDisabled {
+                clip: name.to_owned(),
+            });
             return (duration, None);
         }
         if timeline_len < 1 {
-            self.warn(OtioWarning::ClipShorterThanAFrame { clip: name.to_owned() });
+            self.warn(OtioWarning::ClipShorterThanAFrame {
+                clip: name.to_owned(),
+            });
             return (duration, None);
         }
         let venturi = &item["metadata"]["venturi"];
         let ours = !venturi["effects"].is_null();
-        let mut effects = serde_json::from_value::<EffectStack>(venturi["effects"].clone())
-            .unwrap_or_default();
+        let mut effects =
+            serde_json::from_value::<EffectStack>(venturi["effects"].clone()).unwrap_or_default();
         let mut fades = (
             venturi["fade_in"].as_i64().unwrap_or(0) as FrameIdx,
             venturi["fade_out"].as_i64().unwrap_or(0) as FrameIdx,
@@ -285,7 +306,9 @@ impl Importer<'_> {
                 };
                 let meta = &self.project.media_pool[media_id].meta;
                 if kind == TrackKind::Video && !meta.has_video {
-                    self.warn(OtioWarning::AudioOnlyOnVideoTrack { clip: name.to_owned() });
+                    self.warn(OtioWarning::AudioOnlyOnVideoTrack {
+                        clip: name.to_owned(),
+                    });
                     return (duration, None);
                 }
                 let media_fps = meta.fps;
@@ -299,7 +322,12 @@ impl Importer<'_> {
                 } else {
                     to_frames(secs, fps)
                 };
-                (ClipSource::Media(media_id), rate, offset.max(0), Some((secs, media_fps)))
+                (
+                    ClipSource::Media(media_id),
+                    rate,
+                    offset.max(0),
+                    Some((secs, media_fps)),
+                )
             }
             "GeneratorReference" if reference["generator_kind"] == "Solid Color" => {
                 if effects.color.is_none() {
@@ -316,7 +344,10 @@ impl Importer<'_> {
                 (ClipSource::Text, Rational::one(), 0, None)
             }
             other => {
-                self.warn(OtioWarning::UnsupportedReference { clip: name.to_owned(), schema: other.to_owned() });
+                self.warn(OtioWarning::UnsupportedReference {
+                    clip: name.to_owned(),
+                    schema: other.to_owned(),
+                });
                 return (duration, None);
             }
         };
@@ -354,8 +385,11 @@ impl Importer<'_> {
             .map(GroupKey::Venturi)
             .or_else(|| resolve["Link Group ID"].as_u64().map(GroupKey::Resolve));
         let is_foreign = group_key.is_none();
-        let linked_group = group_key
-            .map(|key| *groups.entry(key).or_insert_with(|| self.project.alloc_link_group_id()));
+        let linked_group = group_key.map(|key| {
+            *groups
+                .entry(key)
+                .or_insert_with(|| self.project.alloc_link_group_id())
+        });
         let audio_stream_index = venturi["audio_stream_index"]
             .as_u64()
             .or_else(|| resolve_source_track(resolve))
@@ -396,8 +430,13 @@ impl Importer<'_> {
         }
         let resolve = &effect["metadata"]["Resolve_OTIO"];
         if resolve.is_null() {
-            let name = effect["effect_name"].as_str().unwrap_or_else(|| schema(effect));
-            *self.ignored_effects.entry((name.to_owned(), false)).or_default() += 1;
+            let name = effect["effect_name"]
+                .as_str()
+                .unwrap_or_else(|| schema(effect));
+            *self
+                .ignored_effects
+                .entry((name.to_owned(), false))
+                .or_default() += 1;
             return;
         }
         if resolve["Enabled"] == false {
@@ -414,7 +453,10 @@ impl Importer<'_> {
             }
         }
         if untranslated {
-            *self.ignored_effects.entry((name.to_owned(), translated)).or_default() += 1;
+            *self
+                .ignored_effects
+                .entry((name.to_owned(), translated))
+                .or_default() += 1;
         }
     }
 
@@ -441,7 +483,9 @@ impl Importer<'_> {
     /// The media at `target_url`, probed once per file.
     fn media(&mut self, url: &str) -> Option<MediaId> {
         let Some(path) = url_to_path(url, self.base_dir) else {
-            self.warn(OtioWarning::UnsupportedUrl { url: url.to_owned() });
+            self.warn(OtioWarning::UnsupportedUrl {
+                url: url.to_owned(),
+            });
             return None;
         };
         if let Some(media) = self.media.get(&path) {
@@ -455,7 +499,10 @@ impl Importer<'_> {
                 compound: None,
             })),
             Err(e) => {
-                self.warn(OtioWarning::MediaUnreadable { path: path.clone(), error: e });
+                self.warn(OtioWarning::MediaUnreadable {
+                    path: path.clone(),
+                    error: e,
+                });
                 None
             }
         };
@@ -471,7 +518,12 @@ impl Importer<'_> {
         for clip_ref in foreign {
             let clip = &tracks[clip_ref.track].clips[clip_ref.index];
             if let ClipSource::Media(media_id) = clip.source {
-                let key = (media_id, clip.timeline_start, clip.source_offset, clip.timeline_len);
+                let key = (
+                    media_id,
+                    clip.timeline_start,
+                    clip.source_offset,
+                    clip.timeline_len,
+                );
                 by_span.entry(key).or_default().push(clip_ref);
             }
         }
@@ -493,9 +545,11 @@ impl Importer<'_> {
             .filter(|t| t.kind == TrackKind::Video)
             .flat_map(|t| &t.clips)
             .find_map(|clip| match clip.source {
-                ClipSource::Media(id) => {
-                    self.project.media_pool.get(id).map(|m| (m.meta.width, m.meta.height))
-                }
+                ClipSource::Media(id) => self
+                    .project
+                    .media_pool
+                    .get(id)
+                    .map(|m| (m.meta.width, m.meta.height)),
                 ClipSource::SolidColor | ClipSource::Text => None,
             })
     }
@@ -538,7 +592,13 @@ fn resolve_parameter(
         ("Transform", "transformationTilt") => track(PositionY, context.display.1),
         ("Transform", "transformationRotationAngle") => track(Rotation, -1.0),
         ("Transform", "transformationAnchorPoint") => {
-            resolve_point(parameter, effects, [AnchorX, AnchorY], context.display, context);
+            resolve_point(
+                parameter,
+                effects,
+                [AnchorX, AnchorY],
+                context.display,
+                context,
+            );
             true
         }
         ("Transform", "transformationFlipX") => resolve_flip(parameter, effects, 0),
@@ -560,13 +620,11 @@ fn resolve_parameter(
             // Resolve has modes we do not: let the warning through.
             None => false,
         },
-        ("Video Faders", "videoFaderIn")
-        | ("Fairlight Clip Volume and Fades", "faderIn") => {
+        ("Video Faders", "videoFaderIn") | ("Fairlight Clip Volume and Fades", "faderIn") => {
             fades.0 = resolve_frames(parameter);
             true
         }
-        ("Video Faders", "videoFaderOut")
-        | ("Fairlight Clip Volume and Fades", "faderOut") => {
+        ("Video Faders", "videoFaderOut") | ("Fairlight Clip Volume and Fades", "faderOut") => {
             fades.1 = resolve_frames(parameter);
             true
         }
@@ -586,7 +644,11 @@ fn resolve_flip(parameter: &Value, effects: &mut EffectStack, axis: usize) -> bo
 }
 
 fn resolve_frames(parameter: &Value) -> FrameIdx {
-    parameter["Parameter Value"].as_f64().unwrap_or(0.0).round().max(0.0) as FrameIdx
+    parameter["Parameter Value"]
+        .as_f64()
+        .unwrap_or(0.0)
+        .round()
+        .max(0.0) as FrameIdx
 }
 
 fn resolve_track(
@@ -601,7 +663,9 @@ fn resolve_track(
         track.default = value as f32 * multiplier;
     }
     for (frame, value) in resolve_keyframes(parameter, context) {
-        let Some(value) = value.as_f64() else { continue };
+        let Some(value) = value.as_f64() else {
+            continue;
+        };
         track.upsert(frame, value as f32 * multiplier, Interpolation::Linear);
     }
 }
@@ -622,7 +686,9 @@ fn resolve_point(
             track.default = value as f32 * multiplier[i];
         }
         for (frame, value) in resolve_keyframes(parameter, context) {
-            let Some(value) = axis(&value, i) else { continue };
+            let Some(value) = axis(&value, i) else {
+                continue;
+            };
             track.upsert(frame, value as f32 * multiplier[i], Interpolation::Linear);
         }
     }
@@ -644,13 +710,18 @@ fn resolve_keyframes<'v>(
         .filter_map(|(frame, keyframe)| {
             let frame = frame.parse::<f64>().ok()?;
             let secs = start_secs + frame / context.rate;
-            Some(((secs * media_fps.as_f64()).round() as FrameIdx, &keyframe["Value"]))
+            Some((
+                (secs * media_fps.as_f64()).round() as FrameIdx,
+                &keyframe["Value"],
+            ))
         })
         .collect()
 }
 
 fn is_default_parameter(parameter: &Value) -> bool {
-    let no_keyframes = parameter["Key Frames"].as_object().is_none_or(|k| k.is_empty());
+    let no_keyframes = parameter["Key Frames"]
+        .as_object()
+        .is_none_or(|k| k.is_empty());
     no_keyframes && parameter["Parameter Value"] == parameter["Default Parameter Value"]
 }
 
@@ -662,7 +733,9 @@ fn resolve_volume(parameter: &Value, effects: &mut EffectStack, context: &Resolv
     }
     for (frame, value) in resolve_keyframes(parameter, context) {
         let Some(db) = value.as_f64() else { continue };
-        effects.gain_db.upsert(frame, db as f32, Interpolation::Linear);
+        effects
+            .gain_db
+            .upsert(frame, db as f32, Interpolation::Linear);
     }
 }
 

@@ -4,7 +4,10 @@ use vv_core::Project;
 fn wait_done(cache: &mut MixBufferCache) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while cache.has_pending() {
-        assert!(std::time::Instant::now() < deadline, "decode never finished");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "decode never finished"
+        );
         std::thread::yield_now();
     }
 }
@@ -15,7 +18,12 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("compound_source.wav");
     vv_media::test_support::ffmpeg(
-        &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"],
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+        ],
         &path,
     );
 
@@ -87,7 +95,10 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
     let vv_audio::ClipAudio::Ready(buffer) = mixdown(&mut cache) else {
         panic!("the decode is over: the mixdown must be complete");
     };
-    assert!(buffer.iter().any(|&s| s.abs() > 0.01), "the sine wave must reach the mixdown");
+    assert!(
+        buffer.iter().any(|&s| s.abs() > 0.01),
+        "the sine wave must reach the mixdown"
+    );
 
     // Same content_hash: the cached buffer, not a new mix.
     let vv_audio::ClipAudio::Ready(cached) = mixdown(&mut cache) else {
@@ -132,9 +143,20 @@ fn buffers_are_decoded_in_background_per_path_and_stream() {
     let s0 = cache.get_or_request(&path, 0).expect("stream 0 pronto");
     let s1 = cache.get_or_request(&path, 1).expect("stream 1 pronto");
     let frames = |b: &Vec<f32>| b.len() / 2;
-    assert!((frames(&s0) as i64 - 48_000).abs() < 100, "s0={}", frames(&s0));
-    assert!((frames(&s1) as i64 - 24_000).abs() < 100, "s1={}", frames(&s1));
-    assert!(cache.get_or_request(&path, 5).is_none(), "nonexistent stream");
+    assert!(
+        (frames(&s0) as i64 - 48_000).abs() < 100,
+        "s0={}",
+        frames(&s0)
+    );
+    assert!(
+        (frames(&s1) as i64 - 24_000).abs() < 100,
+        "s1={}",
+        frames(&s1)
+    );
+    assert!(
+        cache.get_or_request(&path, 5).is_none(),
+        "nonexistent stream"
+    );
 }
 
 #[test]
@@ -157,7 +179,10 @@ fn a_long_track_is_published_partially_before_decoding_ends() {
     let mut lengths = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while cache.has_pending() {
-        assert!(std::time::Instant::now() < deadline, "decode never finished");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "decode never finished"
+        );
         if let Some(buffer) = cache.get_or_request(&path, 0)
             && lengths.last() != Some(&buffer.len())
         {
@@ -257,7 +282,11 @@ fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
         }
         std::thread::yield_now();
     }
-    assert_eq!(cache.in_progress.len(), 3, "no stream should have finished yet");
+    assert_eq!(
+        cache.in_progress.len(),
+        3,
+        "no stream should have finished yet"
+    );
     let full = 120 * 48_000 * 2;
     assert!((0..3).all(|stream| cache.get_or_request(&path, stream).unwrap().len() < full));
 }

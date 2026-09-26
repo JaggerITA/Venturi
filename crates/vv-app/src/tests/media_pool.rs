@@ -86,19 +86,43 @@ fn sorted(items: &[(&str, f64)], sort: Sort) -> Vec<String> {
 fn sorts_by_name_and_duration_in_both_directions() {
     let items = [("b.mp4", 5.0), ("a.mp4", 9.0), ("c.mp4", 1.0)];
     assert_eq!(
-        sorted(&items, Sort { key: SortKey::Name, ascending: true }),
+        sorted(
+            &items,
+            Sort {
+                key: SortKey::Name,
+                ascending: true
+            }
+        ),
         ["a.mp4", "b.mp4", "c.mp4"]
     );
     assert_eq!(
-        sorted(&items, Sort { key: SortKey::Name, ascending: false }),
+        sorted(
+            &items,
+            Sort {
+                key: SortKey::Name,
+                ascending: false
+            }
+        ),
         ["c.mp4", "b.mp4", "a.mp4"]
     );
     assert_eq!(
-        sorted(&items, Sort { key: SortKey::Duration, ascending: true }),
+        sorted(
+            &items,
+            Sort {
+                key: SortKey::Duration,
+                ascending: true
+            }
+        ),
         ["c.mp4", "b.mp4", "a.mp4"]
     );
     assert_eq!(
-        sorted(&items, Sort { key: SortKey::Duration, ascending: false }),
+        sorted(
+            &items,
+            Sort {
+                key: SortKey::Duration,
+                ascending: false
+            }
+        ),
         ["a.mp4", "b.mp4", "c.mp4"]
     );
 }
@@ -107,7 +131,13 @@ fn sorts_by_name_and_duration_in_both_directions() {
 fn equal_durations_keep_the_name_order() {
     let items = [("b.mp4", 5.0), ("a.mp4", 5.0)];
     assert_eq!(
-        sorted(&items, Sort { key: SortKey::Duration, ascending: true }),
+        sorted(
+            &items,
+            Sort {
+                key: SortKey::Duration,
+                ascending: true
+            }
+        ),
         ["a.mp4", "b.mp4"]
     );
 }
@@ -115,15 +145,45 @@ fn equal_durations_keep_the_name_order() {
 #[test]
 fn clicking_the_same_column_inverts_the_order() {
     let mut state = MediaPoolState::default();
-    assert_eq!(state.sort, Sort { key: SortKey::Name, ascending: true });
+    assert_eq!(
+        state.sort,
+        Sort {
+            key: SortKey::Name,
+            ascending: true
+        }
+    );
     state.toggle_sort(SortKey::Name);
-    assert_eq!(state.sort, Sort { key: SortKey::Name, ascending: false });
+    assert_eq!(
+        state.sort,
+        Sort {
+            key: SortKey::Name,
+            ascending: false
+        }
+    );
     state.toggle_sort(SortKey::Duration);
-    assert_eq!(state.sort, Sort { key: SortKey::Duration, ascending: true });
+    assert_eq!(
+        state.sort,
+        Sort {
+            key: SortKey::Duration,
+            ascending: true
+        }
+    );
     state.toggle_sort(SortKey::Duration);
-    assert_eq!(state.sort, Sort { key: SortKey::Duration, ascending: false });
+    assert_eq!(
+        state.sort,
+        Sort {
+            key: SortKey::Duration,
+            ascending: false
+        }
+    );
     state.toggle_sort(SortKey::Name);
-    assert_eq!(state.sort, Sort { key: SortKey::Name, ascending: true });
+    assert_eq!(
+        state.sort,
+        Sort {
+            key: SortKey::Name,
+            ascending: true
+        }
+    );
 }
 
 #[test]

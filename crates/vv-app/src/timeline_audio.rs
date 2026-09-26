@@ -260,12 +260,18 @@ impl TimelineAudio {
         if let Some(mixer) = &self.mixer {
             return mixer.position();
         }
-        let elapsed = self.wall_started_at.map_or(0.0, |t| t.elapsed().as_secs_f64());
+        let elapsed = self
+            .wall_started_at
+            .map_or(0.0, |t| t.elapsed().as_secs_f64());
         self.wall_base_sample + (elapsed * self.speed * PROJECT_SAMPLE_RATE as f64) as u64
     }
 
     pub fn seek_frame(&mut self, frame: FrameIdx, fps: f64) {
-        self.seek_sample(timeline_frame_to_sample(frame.max(0), fps, PROJECT_SAMPLE_RATE));
+        self.seek_sample(timeline_frame_to_sample(
+            frame.max(0),
+            fps,
+            PROJECT_SAMPLE_RATE,
+        ));
     }
 
     pub fn position_frame(&self, fps: f64) -> FrameIdx {

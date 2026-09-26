@@ -9,16 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vv_core::{
-    Clip, ClipId, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind,
-};
+use vv_core::{Clip, ClipId, FrameIdx, MediaId, Project, Timeline, TimelineId, TrackKind};
 
 use vv_audio::mixer::{
     AudioSource, ClipAudio, MixSnapshot, PROJECT_SAMPLE_RATE, mix_range, remix_channels_into,
     timeline_frame_to_sample,
 };
 
-use crate::frame_provider::{FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at};
+use crate::frame_provider::{
+    FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at,
+};
 
 const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
@@ -92,7 +92,11 @@ struct ActiveClipDecoder {
 }
 
 impl ActiveClipDecoder {
-    fn open_for(path: &Path, target_source_frame: FrameIdx, is_image: bool) -> Result<Self, String> {
+    fn open_for(
+        path: &Path,
+        target_source_frame: FrameIdx,
+        is_image: bool,
+    ) -> Result<Self, String> {
         // `Decoder::open` on an image would hit EOF after the first frame.
         let mut decoder = if is_image {
             vv_media::Decoder::open_image(path)
@@ -177,7 +181,9 @@ impl FrameProvider for StreamingFrameProvider {
 
         let decoder = match self.active.entry(clip.id) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(ActiveClipDecoder::open_for(&path, source_frame, is_image)?),
+            Entry::Vacant(e) => {
+                e.insert(ActiveClipDecoder::open_for(&path, source_frame, is_image)?)
+            }
         };
         decoder.advance_to(source_frame)
     }
@@ -256,8 +262,14 @@ pub fn export_timeline(
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let decoded =
-                    decode_video_frame(project, timeline, &mut provider, compositor, frame, resolution);
+                let decoded = decode_video_frame(
+                    project,
+                    timeline,
+                    &mut provider,
+                    compositor,
+                    frame,
+                    resolution,
+                );
                 let failed = decoded.is_err();
                 // `send` fails only if the next stage has already stopped.
                 if decoded_tx.send(decoded).is_err() || failed {
@@ -352,7 +364,15 @@ fn decode_video_frame(
     let mut gpu = GpuCompounds::new(provider, compositor);
     let mut layers = Vec::with_capacity(clips.len());
     for (track_index, clip) in clips {
-        layers.extend(track_layers_at(project, timeline, track_index, clip, frame, resolution, &mut gpu)?);
+        layers.extend(track_layers_at(
+            project,
+            timeline,
+            track_index,
+            clip,
+            frame,
+            resolution,
+            &mut gpu,
+        )?);
     }
     Ok(layers)
 }
@@ -425,7 +445,13 @@ fn mix_audio_track(
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, String> {
     let mut wanted = WantedStreams::default();
-    MixSnapshot::from_timeline(project, timeline, PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, &mut wanted);
+    MixSnapshot::from_timeline(
+        project,
+        timeline,
+        PROJECT_SAMPLE_RATE,
+        PROJECT_CHANNELS,
+        &mut wanted,
+    );
     // The same decoding as the preview (`mix_buffers`): swresample to
     // `PROJECT_SAMPLE_RATE`, all the streams of a file in one pass.
     let mut audio = DecodedAudio::default();
@@ -443,18 +469,24 @@ fn mix_audio_track(
         .map_err(|e| e.to_string())?;
         for ((stream, samples), format) in streams.into_iter().zip(decoded).zip(formats) {
             if format.is_some() {
-                audio.files.insert((path.clone(), stream), Arc::new(samples));
+                audio
+                    .files
+                    .insert((path.clone(), stream), Arc::new(samples));
             }
         }
     }
 
-    let snapshot =
-        MixSnapshot::from_timeline(project, timeline, PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, &mut audio);
+    let snapshot = MixSnapshot::from_timeline(
+        project,
+        timeline,
+        PROJECT_SAMPLE_RATE,
+        PROJECT_CHANNELS,
+        &mut audio,
+    );
     let fps = timeline.fps.as_f64();
     let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
     let end_sample = timeline_frame_to_sample(range.end, fps, PROJECT_SAMPLE_RATE);
-    let mut mixed =
-        vec![0.0_f32; (end_sample - start_sample) as usize * PROJECT_CHANNELS as usize];
+    let mut mixed = vec![0.0_f32; (end_sample - start_sample) as usize * PROJECT_CHANNELS as usize];
     mix_range(&snapshot, start_sample, &mut mixed);
     Ok(mixed)
 }
@@ -485,7 +517,9 @@ impl AudioSource for DecodedAudio {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
         self.files
             .get(&(path.to_path_buf(), stream))
-            .map_or(ClipAudio::Missing, |buffer| ClipAudio::Ready(buffer.clone()))
+            .map_or(ClipAudio::Missing, |buffer| {
+                ClipAudio::Ready(buffer.clone())
+            })
     }
 
     fn cached_compound(&mut self, media_id: MediaId, _content_hash: u64) -> Option<Arc<Vec<f32>>> {

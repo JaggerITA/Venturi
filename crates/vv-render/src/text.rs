@@ -139,7 +139,13 @@ pub fn render_title(
     let TextState {
         font_system, swash, ..
     } = &mut *state;
-    let mask = Arc::new(rasterize(font_system, swash, params, timeline_size, output_size));
+    let mask = Arc::new(rasterize(
+        font_system,
+        swash,
+        params,
+        timeline_size,
+        output_size,
+    ));
     if state.cache.len() >= CACHE_LEN {
         state.cache.remove(0);
     }
@@ -159,7 +165,11 @@ fn text_attrs(params: &TitleParams) -> (Attrs<'_>, Align) {
     let mut attrs = Attrs::new()
         .family(family)
         .weight(Weight(params.font_weight))
-        .style(if params.italic { Style::Italic } else { Style::Normal })
+        .style(if params.italic {
+            Style::Italic
+        } else {
+            Style::Normal
+        })
         .letter_spacing(params.tracking / 1000.0);
     if params.underline {
         attrs.text_decoration.underline = UnderlineStyle::Single;
@@ -186,7 +196,12 @@ fn shape_block(
     align: Align,
 ) -> (f32, f32) {
     buffer.set_size(None, None);
-    buffer.set_text(&params.display_text(), attrs, Shaping::Advanced, Some(align));
+    buffer.set_text(
+        &params.display_text(),
+        attrs,
+        Shaping::Advanced,
+        Some(align),
+    );
     buffer.shape_until_scroll(font_system, false);
     let block_w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
     buffer.set_size(Some(block_w + 1.0), None);
@@ -210,7 +225,10 @@ pub fn title_metrics(params: &TitleParams) -> vv_core::TitleMetrics {
     let (attrs, align) = text_attrs(params);
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
     let block = shape_block(font_system, &mut buffer, params, &attrs, align);
-    vv_core::TitleMetrics { block, padding: font_size * BACKGROUND_PADDING }
+    vv_core::TitleMetrics {
+        block,
+        padding: font_size * BACKGROUND_PADDING,
+    }
 }
 
 fn with_opacity(color: Rgba, opacity: f32) -> Rgba {
@@ -254,25 +272,30 @@ fn rasterize(
         };
     let (origin_x, origin_y) = (origin_x.round() as i32, origin_y.round() as i32);
 
-    buffer.draw(font_system, swash, Color::rgb(255, 255, 255), |x, y, w, h, color| {
-        let coverage = color.a() as u32;
-        if coverage == 0 {
-            return;
-        }
-        for py in y + origin_y..y + origin_y + h as i32 {
-            if py < 0 || py >= height as i32 {
-                continue;
+    buffer.draw(
+        font_system,
+        swash,
+        Color::rgb(255, 255, 255),
+        |x, y, w, h, color| {
+            let coverage = color.a() as u32;
+            if coverage == 0 {
+                return;
             }
-            for px in x + origin_x..x + origin_x + w as i32 {
-                if px < 0 || px >= width as i32 {
+            for py in y + origin_y..y + origin_y + h as i32 {
+                if py < 0 || py >= height as i32 {
                     continue;
                 }
-                let dst = &mut data[(py as u32 * width + px as u32) as usize];
-                // Overlapping glyphs (negative tracking): "over" between coverages.
-                *dst = (*dst as u32 + coverage * (255 - *dst as u32) / 255) as u8;
+                for px in x + origin_x..x + origin_x + w as i32 {
+                    if px < 0 || px >= width as i32 {
+                        continue;
+                    }
+                    let dst = &mut data[(py as u32 * width + px as u32) as usize];
+                    // Overlapping glyphs (negative tracking): "over" between coverages.
+                    *dst = (*dst as u32 + coverage * (255 - *dst as u32) / 255) as u8;
+                }
             }
-        }
-    });
+        },
+    );
 
     let scale_px = |v: f32| v * scale;
     let text = TextMask {
@@ -301,7 +324,8 @@ fn rasterize(
         );
         let radius = bg.corner_radius.clamp(0.0, 0.5) * box_w.min(box_h);
         let outline = scale_px(bg.outline_width).max(0.0);
-        let (fill, ring) = rounded_rect_masks(width, height, center, (box_w, box_h), radius, outline);
+        let (fill, ring) =
+            rounded_rect_masks(width, height, center, (box_w, box_h), radius, outline);
         layers.push((fill, with_opacity(bg.color, bg.opacity)));
         if let Some(ring) = ring {
             layers.push((ring, with_opacity(bg.outline_color, bg.opacity)));
@@ -405,12 +429,16 @@ fn blur(mask: &mut TextMask, radius: f32) {
         for y in ys.clone() {
             line.clear();
             line.extend_from_slice(&mask.data[y * w + xs.start..y * w + xs.end]);
-            box_blur_line(&line, box_radius, |x, v| mask.data[y * w + xs.start + x] = v);
+            box_blur_line(&line, box_radius, |x, v| {
+                mask.data[y * w + xs.start + x] = v
+            });
         }
         for x in xs.clone() {
             line.clear();
             line.extend(ys.clone().map(|y| mask.data[y * w + x]));
-            box_blur_line(&line, box_radius, |y, v| mask.data[(ys.start + y) * w + x] = v);
+            box_blur_line(&line, box_radius, |y, v| {
+                mask.data[(ys.start + y) * w + x] = v
+            });
         }
     }
 }
@@ -420,9 +448,10 @@ fn coverage_bounds(mask: &TextMask) -> Option<(usize, usize, usize, usize)> {
     let w = mask.width as usize;
     let mut bounds: Option<(usize, usize, usize, usize)> = None;
     for (y, row) in mask.data.chunks_exact(w.max(1)).enumerate() {
-        let (Some(first), Some(last)) =
-            (row.iter().position(|&v| v > 0), row.iter().rposition(|&v| v > 0))
-        else {
+        let (Some(first), Some(last)) = (
+            row.iter().position(|&v| v > 0),
+            row.iter().rposition(|&v| v > 0),
+        ) else {
             continue;
         };
         let b = bounds.get_or_insert((first, y, last, y));

@@ -4,7 +4,10 @@ use super::*;
 fn validate_path_appends_mp4_and_rejects_missing_dirs() {
     let dir = std::env::temp_dir();
     let expected = dir.join("video.mp4");
-    assert_eq!(validate_path(dir.join("video").to_str().unwrap()), Ok(expected.clone()));
+    assert_eq!(
+        validate_path(dir.join("video").to_str().unwrap()),
+        Ok(expected.clone())
+    );
     assert_eq!(validate_path(expected.to_str().unwrap()), Ok(expected));
     assert!(validate_path("").is_err());
     assert!(validate_path("/does/not/really/exist/video.mp4").is_err());

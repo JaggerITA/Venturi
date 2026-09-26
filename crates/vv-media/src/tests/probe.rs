@@ -56,7 +56,16 @@ fn verify_last_decodable_frame_corrects_an_inflated_nominal() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dieci_frame.mp4");
     crate::test_support::ffmpeg(
-        &["-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=10:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
         &path,
     );
 
@@ -64,8 +73,14 @@ fn verify_last_decodable_frame_corrects_an_inflated_nominal() {
     let real = verify_last_decodable_frame(&path, fps, 10);
     let corrected = verify_last_decodable_frame(&path, fps, 10_000);
 
-    assert_eq!(corrected, real, "an inflated nominal count must converge to the real last decodable frame");
-    assert!(corrected <= 15, "10 real frames at 10fps: the corrected count must not stay near the inflated nominal ({corrected})");
+    assert_eq!(
+        corrected, real,
+        "an inflated nominal count must converge to the real last decodable frame"
+    );
+    assert!(
+        corrected <= 15,
+        "10 real frames at 10fps: the corrected count must not stay near the inflated nominal ({corrected})"
+    );
 }
 
 /// Real case of the overestimate: the audio lasts longer than the video, so
@@ -78,9 +93,20 @@ fn probe_ignores_frames_promised_by_an_audio_track_longer_than_the_video() {
     let path = dir.join("audio_piu_lungo.mp4");
     crate::test_support::ffmpeg(
         &[
-            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=25:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=4",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
         ],
         &path,
     );
@@ -193,7 +219,16 @@ fn probe_media_recognizes_an_image_by_its_extension() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("STILL.PNG");
     crate::test_support::ffmpeg(
-        &["-f", "lavfi", "-i", "color=c=blue:size=64x48:rate=1:duration=1", "-frames:v", "1", "-update", "1"],
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:size=64x48:rate=1:duration=1",
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+        ],
         &path,
     );
     assert!(probe_media(&path).expect("probe_media failed").is_image());

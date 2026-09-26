@@ -13,7 +13,6 @@ pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
 pub const GAIN_BLOCK_FRAMES: u64 = 800;
 
-
 pub struct MixClip {
     /// In timeline audio frames (one sample per channel).
     pub start: u64,
@@ -188,11 +187,17 @@ fn compound_audio(
     if let Some(mixdown) = source.cached_compound(media_id, item.content_hash) {
         return ClipAudio::Ready(mixdown);
     }
-    let (snapshot, readiness) = collect_clips(project, nested, sample_rate, channels, source, depth + 1);
+    let (snapshot, readiness) =
+        collect_clips(project, nested, sample_rate, channels, source, depth + 1);
     if readiness == Readiness::Pending {
         return ClipAudio::Pending;
     }
-    let len = snapshot.clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+    let len = snapshot
+        .clips
+        .iter()
+        .map(|c| c.start + c.len)
+        .max()
+        .unwrap_or(0);
     let mut mixdown = vec![0.0f32; len as usize * channels.max(1) as usize];
     mix_range(&snapshot, 0, &mut mixdown);
     let mixdown = Arc::new(mixdown);
@@ -214,8 +219,11 @@ fn mix_clip_from(
 ) -> Option<MixClip> {
     let ch = channels.max(1);
     let buffer_frames = buffer.len() as u64 / ch;
-    let source_offset = seconds_to_frames(clip.media_secs_at(clip.timeline_start, timeline_fps), sample_rate)
-        .min(buffer_frames);
+    let source_offset = seconds_to_frames(
+        clip.media_secs_at(clip.timeline_start, timeline_fps),
+        sample_rate,
+    )
+    .min(buffer_frames);
     let len = seconds_to_frames(clip.timeline_len as f64 / timeline_fps, sample_rate)
         .min(buffer_frames - source_offset);
     if len == 0 {

@@ -3,7 +3,10 @@ use super::*;
 const TIMELINE: (u32, u32) = (1920, 1080);
 
 fn assert_close(a: [f32; 2], b: [f32; 2]) {
-    assert!((a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3, "{a:?} != {b:?}");
+    assert!(
+        (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3,
+        "{a:?} != {b:?}"
+    );
 }
 
 #[test]

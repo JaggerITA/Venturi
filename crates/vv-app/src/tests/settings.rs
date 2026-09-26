@@ -7,7 +7,10 @@ fn shortcuts_round_trip_through_the_config_format() {
             assert_eq!(Shortcut::from_config(&shortcut.to_config()), Some(shortcut));
         }
     }
-    assert_eq!(Shortcut::from_config("Ctrl++"), Some(Shortcut::ctrl(egui::Key::Plus)));
+    assert_eq!(
+        Shortcut::from_config("Ctrl++"),
+        Some(Shortcut::ctrl(egui::Key::Plus))
+    );
 }
 
 #[test]
@@ -15,7 +18,10 @@ fn every_action_label_is_translated() {
     for locale in rust_i18n::available_locales!() {
         for action in Action::ALL {
             let key = format!("action.{}", action.id());
-            assert!(crate::_rust_i18n_try_translate(&locale, &key).is_some(), "{locale}: {key}");
+            assert!(
+                crate::_rust_i18n_try_translate(&locale, &key).is_some(),
+                "{locale}: {key}"
+            );
         }
     }
 }
@@ -37,7 +43,10 @@ fn assigning_a_shortcut_takes_it_away_from_other_actions() {
     let mut keymap = Keymap::default();
     let stolen = keymap.assign(Action::Split, Some(0), Shortcut::plain(egui::Key::D));
     assert_eq!(stolen, vec![Action::ToggleDisabled]);
-    assert_eq!(keymap.shortcuts(Action::Split), &[Shortcut::plain(egui::Key::D)]);
+    assert_eq!(
+        keymap.shortcuts(Action::Split),
+        &[Shortcut::plain(egui::Key::D)]
+    );
     assert!(keymap.shortcuts(Action::ToggleDisabled).is_empty());
 }
 
@@ -47,7 +56,9 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
         .join(format!("vv-settings-{}", std::process::id()))
         .join("settings.json");
     let mut settings = Settings::default();
-    settings.keymap.assign(Action::Split, Some(0), Shortcut::ctrl(egui::Key::K));
+    settings
+        .keymap
+        .assign(Action::Split, Some(0), Shortcut::ctrl(egui::Key::K));
     settings.keymap.remove(Action::ZoomIn, 1);
     settings.language = Language::Italian;
     settings.proxy_enabled = true;
@@ -60,13 +71,29 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     let loaded = Settings::load(&path);
     assert_eq!(loaded, settings);
 
-    std::fs::write(&path, r#"{"shortcuts": {"split": ["Alt+K"]}, "proxy_enabled": true}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"shortcuts": {"split": ["Alt+K"]}, "proxy_enabled": true}"#,
+    )
+    .unwrap();
     let loaded = Settings::load(&path);
-    assert_eq!(loaded.keymap.shortcuts(Action::Split), &[Shortcut { alt: true, ..Shortcut::plain(egui::Key::K) }]);
-    assert_eq!(loaded.keymap.shortcuts(Action::Undo), Keymap::default().shortcuts(Action::Undo));
+    assert_eq!(
+        loaded.keymap.shortcuts(Action::Split),
+        &[Shortcut {
+            alt: true,
+            ..Shortcut::plain(egui::Key::K)
+        }]
+    );
+    assert_eq!(
+        loaded.keymap.shortcuts(Action::Undo),
+        Keymap::default().shortcuts(Action::Undo)
+    );
     assert!(!loaded.proxy_enabled);
     assert_eq!(loaded.proxy_quality, ProxyQuality::default());
-    assert_eq!(loaded.cache_budget_bytes, Settings::default().cache_budget_bytes);
+    assert_eq!(
+        loaded.cache_budget_bytes,
+        Settings::default().cache_budget_bytes
+    );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 

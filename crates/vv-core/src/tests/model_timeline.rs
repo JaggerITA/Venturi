@@ -78,10 +78,16 @@ fn active_video_clip_at_skips_what_is_not_composited() {
         resolution: (1920, 1080),
         tracks: vec![track(clip_at(0, 10, 1), false), track(disabled, false)],
     };
-    assert_eq!(tl.active_video_clip_at(5).map(|(_, c)| c.id), Some(ClipId(1)));
+    assert_eq!(
+        tl.active_video_clip_at(5).map(|(_, c)| c.id),
+        Some(ClipId(1))
+    );
 
     tl.tracks[1] = track(clip_at(0, 10, 3), true);
-    assert_eq!(tl.active_video_clip_at(5).map(|(_, c)| c.id), Some(ClipId(1)));
+    assert_eq!(
+        tl.active_video_clip_at(5).map(|(_, c)| c.id),
+        Some(ClipId(1))
+    );
 }
 
 #[test]
@@ -312,8 +318,14 @@ fn timeline_frame_at_is_the_inverse_of_source_frame_at() {
     for s in (clip.source_in()..clip.source_out()).step_by(7) {
         assert_eq!(clip.source_frame_at(clip.timeline_frame_at(s)), s);
     }
-    assert_eq!(clip.timeline_frame_at(clip.source_in()), clip.timeline_start);
-    assert_eq!(clip.timeline_frame_at(clip.source_out()), clip.timeline_end());
+    assert_eq!(
+        clip.timeline_frame_at(clip.source_in()),
+        clip.timeline_start
+    );
+    assert_eq!(
+        clip.timeline_frame_at(clip.source_out()),
+        clip.timeline_end()
+    );
 }
 
 #[test]
@@ -360,7 +372,10 @@ fn refresh_clip_rates_conforms_a_clip_loaded_without_a_rate() {
         Rational::one(),
         "a SolidColor does not conform to anything"
     );
-    assert_eq!(clips[0].timeline_len, 1000, "the timeline duration does not change");
+    assert_eq!(
+        clips[0].timeline_len, 1000,
+        "the timeline duration does not change"
+    );
 }
 
 #[test]
@@ -377,7 +392,10 @@ fn retime_keeps_seconds_and_round_trips() {
     assert_eq!(clip.rate, rate_25);
 
     clip.retime(Rational::new(25, 1), Rational::new(30, 1), rate_30);
-    assert_eq!((clip.timeline_start, clip.source_offset, clip.timeline_len), original);
+    assert_eq!(
+        (clip.timeline_start, clip.source_offset, clip.timeline_len),
+        original
+    );
 }
 
 #[test]
@@ -459,7 +477,10 @@ fn duplicate_timeline_copies_clips_with_fresh_ids() {
     let source_tl = &project.timelines[project.media_pool[source].compound.unwrap()];
     let copy_tl = &project.timelines[project.media_pool[copy].compound.unwrap()];
     assert_eq!(copy_tl.name, "Timeline 1 copy");
-    assert_eq!(project.media_pool[copy].path, std::path::Path::new("Timeline 1 copy"));
+    assert_eq!(
+        project.media_pool[copy].path,
+        std::path::Path::new("Timeline 1 copy")
+    );
     assert_eq!(project.media_pool[copy].meta.duration_frames, 20);
 
     let (src, dup) = (&source_tl.tracks[0], &copy_tl.tracks[0]);
@@ -478,7 +499,10 @@ fn duplicate_timeline_copies_clips_with_fresh_ids() {
 fn rename_timeline_renames_pool_item_and_timeline() {
     let (mut project, media_id) = project_with_timeline_item();
     project.rename_timeline(media_id, "Edit".into());
-    assert_eq!(project.media_pool[media_id].path, std::path::Path::new("Edit"));
+    assert_eq!(
+        project.media_pool[media_id].path,
+        std::path::Path::new("Edit")
+    );
     let timeline = project.media_pool[media_id].compound.unwrap();
     assert_eq!(project.timelines[timeline].name, "Edit");
 }

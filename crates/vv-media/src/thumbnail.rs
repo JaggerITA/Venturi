@@ -41,17 +41,23 @@ fn downscale_to_rgba(frame: &FrameYuv420, max_width: u32) -> Thumbnail {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for ty in 0..height {
         let sy = (ty as u64 * frame.height as u64 / height as u64) as usize;
-        let cy = (sy * frame.u_height as usize / frame.height as usize).min(frame.u_height as usize - 1);
+        let cy =
+            (sy * frame.u_height as usize / frame.height as usize).min(frame.u_height as usize - 1);
         for tx in 0..width {
             let sx = (tx as u64 * frame.width as u64 / width as u64) as usize;
-            let cx = (sx * frame.u_width as usize / frame.width as usize).min(frame.u_width as usize - 1);
+            let cx = (sx * frame.u_width as usize / frame.width as usize)
+                .min(frame.u_width as usize - 1);
             let y = frame.y[sy * frame.width as usize + sx] as f32;
             let u = frame.u[cy * frame.u_width as usize + cx] as f32 - 128.0;
             let v = frame.v[cy * frame.u_width as usize + cx] as f32 - 128.0;
             let (y, u, v) = if frame.full_range {
                 (y, u, v)
             } else {
-                ((y - 16.0) * 255.0 / 219.0, u * 255.0 / 224.0, v * 255.0 / 224.0)
+                (
+                    (y - 16.0) * 255.0 / 219.0,
+                    u * 255.0 / 224.0,
+                    v * 255.0 / 224.0,
+                )
             };
             let r = y + 2.0 * (1.0 - kr) * v;
             let b = y + 2.0 * (1.0 - kb) * u;
@@ -64,7 +70,11 @@ fn downscale_to_rgba(frame: &FrameYuv420, max_width: u32) -> Thumbnail {
             ]);
         }
     }
-    Thumbnail { width, height, rgba }
+    Thumbnail {
+        width,
+        height,
+        rgba,
+    }
 }
 
 #[cfg(test)]

@@ -48,7 +48,11 @@ pub struct SettingsDialogResponse {
 
 impl SettingsDialog {
     pub fn new(section: Section) -> Self {
-        Self { section, capture: None, notice: None }
+        Self {
+            section,
+            capture: None,
+            notice: None,
+        }
     }
 
     /// While waiting for a key, global shortcuts must be suspended.
@@ -57,7 +61,10 @@ impl SettingsDialog {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, settings: &mut Settings) -> SettingsDialogResponse {
-        let mut response = SettingsDialogResponse { open: true, changed: false };
+        let mut response = SettingsDialogResponse {
+            open: true,
+            changed: false,
+        };
         response.changed |= self.capture_key(ctx, &mut settings.keymap);
         egui::Window::new(t!("settings.title"))
             .id(egui::Id::new("settings_window"))
@@ -98,9 +105,13 @@ impl SettingsDialog {
         };
         let pressed = ctx.input(|i| {
             i.events.iter().find_map(|event| match event {
-                egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
-                    Some(Shortcut::from_event(*key, *modifiers))
-                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some(Shortcut::from_event(*key, *modifiers)),
                 egui::Event::Copy => Some(Shortcut::ctrl(egui::Key::C)),
                 egui::Event::Cut => Some(Shortcut::ctrl(egui::Key::X)),
                 egui::Event::Paste(_) => Some(Shortcut::ctrl(egui::Key::V)),
@@ -172,14 +183,29 @@ impl SettingsDialog {
                 shortcut.to_string()
             };
             if ui.button(text).clicked() {
-                self.capture = Some(Capture { action, slot: Some(slot) });
+                self.capture = Some(Capture {
+                    action,
+                    slot: Some(slot),
+                });
             }
-            if ui.small_button("x").on_hover_text(t!("settings.remove")).clicked() {
+            if ui
+                .small_button("x")
+                .on_hover_text(t!("settings.remove"))
+                .clicked()
+            {
                 remove = Some(slot);
             }
         }
-        let add = if waiting(None) { t!("settings.press_a_key") } else { "+".into() };
-        if ui.small_button(add).on_hover_text(t!("settings.add_shortcut")).clicked() {
+        let add = if waiting(None) {
+            t!("settings.press_a_key")
+        } else {
+            "+".into()
+        };
+        if ui
+            .small_button(add)
+            .on_hover_text(t!("settings.add_shortcut"))
+            .clicked()
+        {
             self.capture = Some(Capture { action, slot: None });
         }
         if let Some(slot) = remove {
@@ -199,45 +225,74 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             .iter()
             .map(|language| (*language, language.label().to_string(), true))
             .collect();
-        changed |= preview_combo(ui, "settings_language", &mut settings.language, &items, None, None, None);
+        changed |= preview_combo(
+            ui,
+            "settings_language",
+            &mut settings.language,
+            &items,
+            None,
+            None,
+            None,
+        );
     });
     if changed {
         settings.language.apply();
     }
-    changed |= ui.checkbox(&mut settings.kinetic_scroll, t!("settings.kinetic_scroll")).changed();
+    changed |= ui
+        .checkbox(&mut settings.kinetic_scroll, t!("settings.kinetic_scroll"))
+        .changed();
     changed
 }
 
 fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     let mut changed = false;
     ui.strong(t!("settings.read_ahead"));
-    egui::Grid::new("settings_read_ahead").num_columns(2).show(ui, |ui| {
-        ui.label(t!("settings.read_ahead_forward")).on_hover_text(t!("settings.read_ahead_forward_hint"));
-        changed |= ui
-            .add(egui::DragValue::new(&mut settings.lookahead_secs).range(0.0..=30.0).speed(0.1).suffix(" s"))
-            .on_hover_text(t!("settings.read_ahead_forward_hint"))
-            .changed();
-        ui.end_row();
+    egui::Grid::new("settings_read_ahead")
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label(t!("settings.read_ahead_forward"))
+                .on_hover_text(t!("settings.read_ahead_forward_hint"));
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.lookahead_secs)
+                        .range(0.0..=30.0)
+                        .speed(0.1)
+                        .suffix(" s"),
+                )
+                .on_hover_text(t!("settings.read_ahead_forward_hint"))
+                .changed();
+            ui.end_row();
 
-        ui.label(t!("settings.read_ahead_behind")).on_hover_text(t!("settings.read_ahead_behind_hint"));
-        changed |= ui
-            .add(egui::DragValue::new(&mut settings.behind_secs).range(0.0..=30.0).speed(0.1).suffix(" s"))
-            .on_hover_text(t!("settings.read_ahead_behind_hint"))
-            .changed();
-        ui.end_row();
+            ui.label(t!("settings.read_ahead_behind"))
+                .on_hover_text(t!("settings.read_ahead_behind_hint"));
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.behind_secs)
+                        .range(0.0..=30.0)
+                        .speed(0.1)
+                        .suffix(" s"),
+                )
+                .on_hover_text(t!("settings.read_ahead_behind_hint"))
+                .changed();
+            ui.end_row();
 
-        ui.label(t!("settings.video_cache")).on_hover_text(t!("settings.video_cache_hint"));
-        let mut budget_mb = (settings.cache_budget_bytes / 1_000_000) as u32;
-        if ui
-            .add(egui::DragValue::new(&mut budget_mb).range(100..=8000).suffix(" MB"))
-            .on_hover_text(t!("settings.video_cache_hint"))
-            .changed()
-        {
-            settings.cache_budget_bytes = budget_mb as usize * 1_000_000;
-            changed = true;
-        }
-        ui.end_row();
-    });
+            ui.label(t!("settings.video_cache"))
+                .on_hover_text(t!("settings.video_cache_hint"));
+            let mut budget_mb = (settings.cache_budget_bytes / 1_000_000) as u32;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut budget_mb)
+                        .range(100..=8000)
+                        .suffix(" MB"),
+                )
+                .on_hover_text(t!("settings.video_cache_hint"))
+                .changed()
+            {
+                settings.cache_budget_bytes = budget_mb as usize * 1_000_000;
+                changed = true;
+            }
+            ui.end_row();
+        });
 
     ui.add_space(12.0);
     ui.strong(t!("settings.proxy"));
@@ -249,11 +304,18 @@ fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
         ui.label(t!("settings.proxy_quality"));
         for quality in ProxyQuality::ALL {
             let (label, hint) = match quality {
-                ProxyQuality::Low => (t!("settings.proxy_quality_low"), t!("settings.proxy_quality_low_hint")),
-                ProxyQuality::Medium => {
-                    (t!("settings.proxy_quality_medium"), t!("settings.proxy_quality_medium_hint"))
-                }
-                ProxyQuality::High => (t!("settings.proxy_quality_high"), t!("settings.proxy_quality_high_hint")),
+                ProxyQuality::Low => (
+                    t!("settings.proxy_quality_low"),
+                    t!("settings.proxy_quality_low_hint"),
+                ),
+                ProxyQuality::Medium => (
+                    t!("settings.proxy_quality_medium"),
+                    t!("settings.proxy_quality_medium_hint"),
+                ),
+                ProxyQuality::High => (
+                    t!("settings.proxy_quality_high"),
+                    t!("settings.proxy_quality_high_hint"),
+                ),
             };
             let text = format!("{label} ({} px)", quality.max_width());
             changed |= ui

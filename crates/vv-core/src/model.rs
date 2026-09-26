@@ -212,7 +212,10 @@ pub enum Interpolation {
     EaseOut,
     /// Free curve: control points of a cubic bezier normalized
     /// on the segment (from `(0,0)` to `(1,1)`), like CSS's `cubic-bezier`.
-    Bezier { c1: [f32; 2], c2: [f32; 2] },
+    Bezier {
+        c1: [f32; 2],
+        c2: [f32; 2],
+    },
 }
 
 impl Interpolation {
@@ -321,7 +324,11 @@ impl<T: Clone> Keyframed<T> {
 
     /// Frame of the nearest keyframe before `frame`.
     pub fn keyframe_before(&self, frame: FrameIdx) -> Option<FrameIdx> {
-        self.keyframes.iter().rev().map(|k| k.0).find(|&f| f < frame)
+        self.keyframes
+            .iter()
+            .rev()
+            .map(|k| k.0)
+            .find(|&f| f < frame)
     }
 
     /// Frame of the nearest keyframe after `frame`.
@@ -655,7 +662,11 @@ impl TransformTracks {
 
     /// The keyframe nearest to `frame` *before* it, among those of the
     /// given parameters: used by the panel's navigation arrows.
-    pub fn previous_keyframe(&self, params: &[TransformParam], frame: FrameIdx) -> Option<FrameIdx> {
+    pub fn previous_keyframe(
+        &self,
+        params: &[TransformParam],
+        frame: FrameIdx,
+    ) -> Option<FrameIdx> {
         params
             .iter()
             .filter_map(|p| self.track(*p).keyframe_before(frame))
@@ -1269,7 +1280,9 @@ impl Clip {
 
     /// Exclusive: the last source frame shown, plus one.
     pub fn source_out(&self) -> FrameIdx {
-        self.rate.unscale_round(self.source_offset + self.timeline_len - 1) + 1
+        self.rate
+            .unscale_round(self.source_offset + self.timeline_len - 1)
+            + 1
     }
 
     /// Duration in *source* frames, for the computations living in that
@@ -1355,7 +1368,12 @@ impl Clip {
     /// popping in halfway through the transition instead of sliding in from off
     /// screen, because its real edge stays past the displacement
     /// computed for zoom 1.
-    pub fn transition_offset_at(&self, timeline_frame: FrameIdx, frame_size: (f32, f32), zoom: [f32; 2]) -> [f32; 2] {
+    pub fn transition_offset_at(
+        &self,
+        timeline_frame: FrameIdx,
+        frame_size: (f32, f32),
+        zoom: [f32; 2],
+    ) -> [f32; 2] {
         let len = self.timeline_len.max(1);
         let pos = timeline_frame - self.timeline_start;
         let mut offset = [0.0f32; 2];
@@ -1498,7 +1516,9 @@ impl Track {
             if left.timeline_end() != right.timeline_start {
                 return None;
             }
-            c.window(left, right).contains(&frame).then_some((left, right, c))
+            c.window(left, right)
+                .contains(&frame)
+                .then_some((left, right, c))
         })
     }
 
@@ -1578,7 +1598,11 @@ impl CrossTransition {
         let window = self.window(left, right);
         let len = (window.end - window.start).max(1);
         let raw = (frame - window.start) as f32 / len as f32;
-        eased(raw.clamp(0.0, 1.0), self.transition.ease, self.transition.curve)
+        eased(
+            raw.clamp(0.0, 1.0),
+            self.transition.ease,
+            self.transition.curve,
+        )
     }
 
     /// Position offset (same pixel units as `Transform.position`) of the
@@ -1592,12 +1616,24 @@ impl CrossTransition {
     /// `Clip::transition_offset_at`): each can have its own, the push
     /// of the more zoomed one must reach farther to really
     /// clear the screen.
-    pub fn offsets(&self, progress: f32, frame_size: (f32, f32), left_zoom: [f32; 2], right_zoom: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+    pub fn offsets(
+        &self,
+        progress: f32,
+        frame_size: (f32, f32),
+        left_zoom: [f32; 2],
+        right_zoom: [f32; 2],
+    ) -> ([f32; 2], [f32; 2]) {
         let vec = self.transition.direction.vector();
         let left_amount = progress * push_clearance(vec, left_zoom);
         let right_amount = -(1.0 - progress) * push_clearance(vec, right_zoom);
-        let left = [vec[0] * frame_size.0 * left_amount, vec[1] * frame_size.1 * left_amount];
-        let right = [vec[0] * frame_size.0 * right_amount, vec[1] * frame_size.1 * right_amount];
+        let left = [
+            vec[0] * frame_size.0 * left_amount,
+            vec[1] * frame_size.1 * left_amount,
+        ];
+        let right = [
+            vec[0] * frame_size.0 * right_amount,
+            vec[1] * frame_size.1 * right_amount,
+        ];
         (left, right)
     }
 }
@@ -1644,12 +1680,17 @@ impl Timeline {
     /// `track_label`).
     pub fn track_number(&self, track_index: usize) -> usize {
         let kind = self.tracks[track_index].kind;
-        self.tracks[..=track_index].iter().filter(|t| t.kind == kind).count()
+        self.tracks[..=track_index]
+            .iter()
+            .filter(|t| t.kind == kind)
+            .count()
     }
 
     /// Absolute index of the `number`-th track (from 1) of kind `kind`.
     pub fn track_of_kind_numbered(&self, kind: TrackKind, number: usize) -> Option<usize> {
-        self.tracks_of_kind(kind).map(|(i, _)| i).nth(number.checked_sub(1)?)
+        self.tracks_of_kind(kind)
+            .map(|(i, _)| i)
+            .nth(number.checked_sub(1)?)
     }
 
     /// The tracks of kind `kind`, with their absolute index in `tracks`.
@@ -1670,7 +1711,8 @@ impl Timeline {
 
     /// The video tracks that get composited: not muted.
     pub fn visible_video_tracks(&self) -> impl DoubleEndedIterator<Item = (usize, &Track)> {
-        self.tracks_of_kind(TrackKind::Video).filter(|(_, t)| !t.muted)
+        self.tracks_of_kind(TrackKind::Video)
+            .filter(|(_, t)| !t.muted)
     }
 
     /// Every clip that gets composited somewhere, with its track.
@@ -1701,7 +1743,9 @@ impl Timeline {
 
     /// The first unlocked track of kind `kind`.
     pub fn first_unlocked_track_index(&self, kind: TrackKind) -> Option<usize> {
-        self.tracks_of_kind(kind).find(|(_, t)| !t.locked).map(|(i, _)| i)
+        self.tracks_of_kind(kind)
+            .find(|(_, t)| !t.locked)
+            .map(|(i, _)| i)
     }
 
     /// The topmost of `active_video_clips_at`: the clip the viewer shows.
@@ -1740,7 +1784,11 @@ impl Timeline {
 
 /// The clip of `track` covering `frame`, unless it is disabled.
 fn visible_clip_at(track: &Track, frame: FrameIdx) -> Option<&Clip> {
-    track.clips.iter().find(|c| c.contains(frame)).filter(|c| !c.disabled)
+    track
+        .clips
+        .iter()
+        .find(|c| c.contains(frame))
+        .filter(|c| !c.disabled)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1782,7 +1830,11 @@ impl Project {
             .values()
             .filter(|item| item.compound.is_some())
             .filter_map(|item| {
-                item.path.to_str()?.strip_prefix(COMPOUND_NAME_PREFIX)?.parse().ok()
+                item.path
+                    .to_str()?
+                    .strip_prefix(COMPOUND_NAME_PREFIX)?
+                    .parse()
+                    .ok()
             })
             .collect();
         let number = (1..).find(|n| !used.contains(n)).unwrap_or(1);
@@ -1817,13 +1869,17 @@ impl Project {
                 clip_ids.insert(clip.id, id);
                 clip.id = id;
                 if let Some(group) = clip.linked_group {
-                    let new_group =
-                        *groups.entry(group).or_insert_with(|| self.alloc_link_group_id());
+                    let new_group = *groups
+                        .entry(group)
+                        .or_insert_with(|| self.alloc_link_group_id());
                     clip.linked_group = Some(new_group);
                 }
             }
             track.crossings.retain_mut(|crossing| {
-                match (clip_ids.get(&crossing.left_clip), clip_ids.get(&crossing.right_clip)) {
+                match (
+                    clip_ids.get(&crossing.left_clip),
+                    clip_ids.get(&crossing.right_clip),
+                ) {
                     (Some(&left), Some(&right)) => {
                         crossing.left_clip = left;
                         crossing.right_clip = right;
@@ -1844,8 +1900,12 @@ impl Project {
 
     /// Renames a compound pool item together with its timeline.
     pub fn rename_timeline(&mut self, media_id: MediaId, name: String) {
-        let Some(item) = self.media_pool.get_mut(media_id) else { return };
-        let Some(timeline_id) = item.compound else { return };
+        let Some(item) = self.media_pool.get_mut(media_id) else {
+            return;
+        };
+        let Some(timeline_id) = item.compound else {
+            return;
+        };
         item.path = name.clone().into();
         if let Some(timeline) = self.timelines.get_mut(timeline_id) {
             timeline.name = name;
@@ -1868,9 +1928,15 @@ impl Project {
     /// must reflect the real content, not the one at the time of
     /// creation.
     pub fn sync_compound_meta(&mut self, media_id: MediaId) {
-        let Some(item) = self.media_pool.get(media_id) else { return };
-        let Some(timeline_id) = item.compound else { return };
-        let Some(timeline) = self.timelines.get(timeline_id) else { return };
+        let Some(item) = self.media_pool.get(media_id) else {
+            return;
+        };
+        let Some(timeline_id) = item.compound else {
+            return;
+        };
+        let Some(timeline) = self.timelines.get(timeline_id) else {
+            return;
+        };
         let has_video = timeline
             .tracks_of_kind(TrackKind::Video)
             .any(|(_, t)| !t.clips.is_empty());

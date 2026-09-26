@@ -3,7 +3,7 @@
 //! the UI for seconds.
 
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use vv_core::MediaMeta;
 
@@ -45,19 +45,21 @@ impl ImportWorker {
         for _ in 0..threads {
             let job_rx = Arc::clone(&job_rx);
             let result_tx = result_tx.clone();
-            std::thread::spawn(move || loop {
-                let Ok(job) = ({
-                    let rx = job_rx.lock().unwrap();
-                    rx.recv()
-                }) else {
-                    return;
-                };
-                let probed = vv_media::probe_media(&job.path);
-                if result_tx
-                    .send((job.index, probed.map_err(|e| e.to_string())))
-                    .is_err()
-                {
-                    return;
+            std::thread::spawn(move || {
+                loop {
+                    let Ok(job) = ({
+                        let rx = job_rx.lock().unwrap();
+                        rx.recv()
+                    }) else {
+                        return;
+                    };
+                    let probed = vv_media::probe_media(&job.path);
+                    if result_tx
+                        .send((job.index, probed.map_err(|e| e.to_string())))
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             });
         }

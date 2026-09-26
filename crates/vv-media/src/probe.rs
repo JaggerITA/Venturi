@@ -312,12 +312,20 @@ pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "ti
 pub fn is_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| IMAGE_EXTENSIONS.iter().any(|img| img.eq_ignore_ascii_case(ext)))
+        .is_some_and(|ext| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .any(|img| img.eq_ignore_ascii_case(ext))
+        })
 }
 
 /// `probe_image` or `probe`, by extension.
 pub fn probe_media(path: &Path) -> Result<MediaMeta, crate::MediaError> {
-    if is_image_path(path) { probe_image(path) } else { probe(path) }
+    if is_image_path(path) {
+        probe_image(path)
+    } else {
+        probe(path)
+    }
 }
 
 /// Like `probe` but for an image: `duration_frames` is the sentinel

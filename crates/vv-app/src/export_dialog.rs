@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use crate::properties_panel::preview_combo;
 use vv_core::{FrameIdx, Rational};
 use vv_media::{AudioCodec, VideoCodec};
-use crate::properties_panel::preview_combo;
 
 use crate::export::ExportSettings;
 use crate::format_duration;
@@ -82,7 +82,10 @@ impl ExportDialog {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.path_text).desired_width(340.0));
             if ui
-                .add_enabled(self.browsing.is_none(), egui::Button::new(t!("export.browse")))
+                .add_enabled(
+                    self.browsing.is_none(),
+                    egui::Button::new(t!("export.browse")),
+                )
                 .clicked()
             {
                 let current = PathBuf::from(&self.path_text);
@@ -108,7 +111,8 @@ impl ExportDialog {
                         self.browsing = None;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => self.browsing = None,
                 }
@@ -116,10 +120,7 @@ impl ExportDialog {
         });
         match validate_path(&self.path_text) {
             Ok(path) if path.exists() => {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    t!("export.overwrite_warning"),
-                );
+                ui.colored_label(egui::Color32::YELLOW, t!("export.overwrite_warning"));
             }
             Ok(_) => {}
             Err(e) => {
@@ -146,7 +147,10 @@ impl ExportDialog {
                 ui.radio_value(
                     &mut self.whole_timeline,
                     true,
-                    t!("export.range_whole", duration = format_duration(info.total_frames, fps)),
+                    t!(
+                        "export.range_whole",
+                        duration = format_duration(info.total_frames, fps)
+                    ),
                 );
             }
             None => {
@@ -169,7 +173,13 @@ impl ExportDialog {
                 let before = video.codec;
                 let items: Vec<_> = VideoCodec::ALL
                     .iter()
-                    .map(|codec| (*codec, video_codec_label(*codec).to_string(), codec.is_available()))
+                    .map(|codec| {
+                        (
+                            *codec,
+                            video_codec_label(*codec).to_string(),
+                            codec.is_available(),
+                        )
+                    })
                     .collect();
                 preview_combo(
                     ui,
@@ -185,14 +195,23 @@ impl ExportDialog {
                 }
                 ui.end_row();
 
-                ui.label(t!("export.preset")).on_hover_text(t!("export.preset_hint"));
+                ui.label(t!("export.preset"))
+                    .on_hover_text(t!("export.preset_hint"));
                 let items: Vec<_> = video
                     .codec
                     .presets()
                     .iter()
                     .map(|preset| (preset.to_string(), preset.to_string(), true))
                     .collect();
-                preview_combo(ui, "export_video_preset", &mut video.preset, &items, None, None, None);
+                preview_combo(
+                    ui,
+                    "export_video_preset",
+                    &mut video.preset,
+                    &items,
+                    None,
+                    None,
+                    None,
+                );
                 ui.end_row();
 
                 ui.label(match video.codec {
@@ -219,7 +238,10 @@ impl ExportDialog {
                 ui.end_row();
 
                 ui.label(t!("export.frame_rate"));
-                ui.label(t!("export.fps_of_timeline", fps = format!("{:.3}", info.fps.as_f64())));
+                ui.label(t!(
+                    "export.fps_of_timeline",
+                    fps = format!("{:.3}", info.fps.as_f64())
+                ));
                 ui.end_row();
             });
     }
@@ -249,7 +271,13 @@ impl ExportDialog {
                 ui.label(t!("export.encoder"));
                 let items: Vec<_> = AudioCodec::ALL
                     .iter()
-                    .map(|codec| (*codec, audio_codec_label(*codec).to_string(), codec.is_available()))
+                    .map(|codec| {
+                        (
+                            *codec,
+                            audio_codec_label(*codec).to_string(),
+                            codec.is_available(),
+                        )
+                    })
                     .collect();
                 preview_combo(
                     ui,
@@ -268,7 +296,15 @@ impl ExportDialog {
                         .into_iter()
                         .map(|fast| (fast, aac_coder_label(fast).to_string(), true))
                         .collect();
-                    preview_combo(ui, "export_audio_coder", &mut audio.fast_coder, &items, None, None, None);
+                    preview_combo(
+                        ui,
+                        "export_audio_coder",
+                        &mut audio.fast_coder,
+                        &items,
+                        None,
+                        None,
+                        None,
+                    );
                     ui.end_row();
                 }
 
@@ -277,7 +313,15 @@ impl ExportDialog {
                     .into_iter()
                     .map(|kbps| (kbps, format!("{kbps} kbps"), true))
                     .collect();
-                preview_combo(ui, "export_audio_bitrate", &mut audio.bitrate_kbps, &items, None, None, None);
+                preview_combo(
+                    ui,
+                    "export_audio_bitrate",
+                    &mut audio.bitrate_kbps,
+                    &items,
+                    None,
+                    None,
+                    None,
+                );
                 ui.end_row();
             });
     }
@@ -293,7 +337,9 @@ impl ExportDialog {
         let path = validate_path(&self.path_text);
         let mut action = ExportDialogAction::None;
         ui.horizontal(|ui| {
-            if ui.add_enabled(path.is_ok(), egui::Button::new(t!("export.start"))).clicked()
+            if ui
+                .add_enabled(path.is_ok(), egui::Button::new(t!("export.start")))
+                .clicked()
                 && let Ok(path) = path
             {
                 let mut settings = self.settings.clone();
@@ -360,7 +406,11 @@ fn audio_codec_label(codec: AudioCodec) -> Cow<'static, str> {
 }
 
 fn aac_coder_label(fast: bool) -> Cow<'static, str> {
-    if fast { t!("export.coder_fast") } else { t!("export.coder_quality") }
+    if fast {
+        t!("export.coder_fast")
+    } else {
+        t!("export.coder_quality")
+    }
 }
 
 #[cfg(test)]

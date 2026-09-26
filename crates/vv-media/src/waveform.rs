@@ -50,7 +50,8 @@ pub fn waveform_exists(content_hash: u64, stream_index: usize) -> bool {
     if f.read_exact(&mut header).is_err() {
         return false;
     }
-    &header[..4] == PEAKS_MAGIC && u32::from_le_bytes(header[4..8].try_into().unwrap()) == PEAKS_VERSION
+    &header[..4] == PEAKS_MAGIC
+        && u32::from_le_bytes(header[4..8].try_into().unwrap()) == PEAKS_VERSION
 }
 
 /// The peaks of a waveform and the duration of the audio track they cover
@@ -115,9 +116,11 @@ fn generate_waveform(
     stream_index: usize,
     num_peaks: usize,
 ) -> Result<Option<Waveform>, crate::MediaError> {
-    Ok(generate_waveforms(source_path, content_hash, &[stream_index], num_peaks)?
-        .pop()
-        .flatten())
+    Ok(
+        generate_waveforms(source_path, content_hash, &[stream_index], num_peaks)?
+            .pop()
+            .flatten(),
+    )
 }
 
 /// `(duration in seconds, sample rate)` of each requested audio stream.
@@ -165,8 +168,7 @@ impl PeakBins {
         let num_peaks = num_peaks.max(1);
         Self {
             peaks: vec![0.0; num_peaks],
-            samples_per_bin: (audio_duration_secs * sample_rate as f64 / num_peaks as f64)
-                .max(1.0),
+            samples_per_bin: (audio_duration_secs * sample_rate as f64 / num_peaks as f64).max(1.0),
             frames_seen: 0,
             audio_duration_secs,
         }
@@ -215,7 +217,11 @@ const PEAKS_MAGIC: &[u8; 4] = b"vbwf";
 // v4: bins of fractional samples (truncating them made the waveform slide).
 const PEAKS_VERSION: u32 = 4;
 
-fn write_peaks_file(path: &Path, peaks: &[f32], audio_duration_secs: f64) -> Result<(), crate::MediaError> {
+fn write_peaks_file(
+    path: &Path,
+    peaks: &[f32],
+    audio_duration_secs: f64,
+) -> Result<(), crate::MediaError> {
     let mut bytes = Vec::with_capacity(20 + peaks.len() * 4);
     bytes.extend_from_slice(PEAKS_MAGIC);
     bytes.extend_from_slice(&PEAKS_VERSION.to_le_bytes());

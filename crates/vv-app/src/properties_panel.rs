@@ -57,10 +57,10 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
 /// halves.
 pub(crate) fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
     ui.columns(2, |cols| {
-        for (col, (tab, label)) in cols
-            .iter_mut()
-            .zip([(VideoSubTab::Title, t!("props.subtab_title")), (VideoSubTab::Settings, t!("props.subtab_settings"))])
-        {
+        for (col, (tab, label)) in cols.iter_mut().zip([
+            (VideoSubTab::Title, t!("props.subtab_title")),
+            (VideoSubTab::Settings, t!("props.subtab_settings")),
+        ]) {
             let button = egui::Button::selectable(*current == tab, label)
                 .min_size(egui::vec2(col.available_width(), 22.0));
             if col.add(button).clicked() {
@@ -72,7 +72,11 @@ pub(crate) fn video_subtab_bar(ui: &mut egui::Ui, current: &mut VideoSubTab) {
 
 /// Text alignment button: lines drawn like the classic icon,
 /// shorter where the text does not reach the margin.
-pub(crate) fn text_align_button(ui: &mut egui::Ui, selected: bool, align: vv_core::TextAlign) -> egui::Response {
+pub(crate) fn text_align_button(
+    ui: &mut egui::Ui,
+    selected: bool,
+    align: vv_core::TextAlign,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 20.0), egui::Sense::click());
     let visuals = ui.style().interact_selectable(&response, selected);
     let painter = ui.painter();
@@ -122,7 +126,12 @@ pub(crate) fn title_editor(
 
     let row = param_row(ui, &t!("props.font"), None, |ui| {
         let mut items = vec![(String::new(), "Sans-serif".to_string(), true)];
-        items.extend(fonts.families().iter().map(|f| (f.clone(), f.clone(), true)));
+        items.extend(
+            fonts
+                .families()
+                .iter()
+                .map(|f| (f.clone(), f.clone(), true)),
+        );
         preview_combo(
             ui,
             "title_font_family",
@@ -178,11 +187,31 @@ pub(crate) fn title_editor(
     }
 
     for (label, value, default, range, speed) in [
-        (t!("props.size"), &mut title.size, defaults.size, 1.0..=1000.0, 1.0),
-        (t!("props.tracking"), &mut title.tracking, defaults.tracking, -300.0..=1000.0, 1.0),
-        (t!("props.line_spacing"), &mut title.line_spacing, defaults.line_spacing, -200.0..=500.0, 1.0),
+        (
+            t!("props.size"),
+            &mut title.size,
+            defaults.size,
+            1.0..=1000.0,
+            1.0,
+        ),
+        (
+            t!("props.tracking"),
+            &mut title.tracking,
+            defaults.tracking,
+            -300.0..=1000.0,
+            1.0,
+        ),
+        (
+            t!("props.line_spacing"),
+            &mut title.line_spacing,
+            defaults.line_spacing,
+            -200.0..=500.0,
+            1.0,
+        ),
     ] {
-        let row = param_row(ui, &label, None, |ui| slider_field(ui, value, range, speed, 0));
+        let row = param_row(ui, &label, None, |ui| {
+            slider_field(ui, value, range, speed, 0)
+        });
         if row.reset {
             *value = default;
         }
@@ -194,7 +223,10 @@ pub(crate) fn title_editor(
             .on_hover_text(t!("props.underline"))
             .clicked();
         let s = ui
-            .selectable_label(title.strikethrough, egui::RichText::new("S").strikethrough())
+            .selectable_label(
+                title.strikethrough,
+                egui::RichText::new("S").strikethrough(),
+            )
             .on_hover_text(t!("props.strikethrough"))
             .clicked();
         title.underline ^= u;
@@ -213,10 +245,15 @@ pub(crate) fn title_editor(
             FontCase::Lower => t!("props.case_lower"),
             FontCase::Title => t!("props.case_title"),
         };
-        let items: Vec<_> = [FontCase::Mixed, FontCase::Upper, FontCase::Lower, FontCase::Title]
-            .into_iter()
-            .map(|case| (case, label(case).to_string(), true))
-            .collect();
+        let items: Vec<_> = [
+            FontCase::Mixed,
+            FontCase::Upper,
+            FontCase::Lower,
+            FontCase::Title,
+        ]
+        .into_iter()
+        .map(|case| (case, label(case).to_string(), true))
+        .collect();
         preview_combo(
             ui,
             "title_font_case",
@@ -239,7 +276,10 @@ pub(crate) fn title_editor(
             (TextAlign::Right, t!("props.align_right")),
             (TextAlign::Justify, t!("props.align_justify")),
         ] {
-            if text_align_button(ui, title.align == align, align).on_hover_text(hint).clicked() {
+            if text_align_button(ui, title.align == align, align)
+                .on_hover_text(hint)
+                .clicked()
+            {
                 title.align = align;
                 changed = true;
             }
@@ -257,7 +297,11 @@ pub(crate) fn title_editor(
             (HAnchor::Center, "↔", t!("props.anchor_center")),
             (HAnchor::Right, "⇥", t!("props.anchor_right")),
         ] {
-            if ui.selectable_label(title.anchor.0 == anchor, text).on_hover_text(hint).clicked() {
+            if ui
+                .selectable_label(title.anchor.0 == anchor, text)
+                .on_hover_text(hint)
+                .clicked()
+            {
                 title.anchor.0 = anchor;
                 changed = true;
             }
@@ -268,7 +312,11 @@ pub(crate) fn title_editor(
             (VAnchor::Middle, "↕", t!("props.anchor_center")),
             (VAnchor::Bottom, "⤓", t!("props.anchor_bottom")),
         ] {
-            if ui.selectable_label(title.anchor.1 == anchor, text).on_hover_text(hint).clicked() {
+            if ui
+                .selectable_label(title.anchor.1 == anchor, text)
+                .on_hover_text(hint)
+                .clicked()
+            {
                 title.anchor.1 = anchor;
                 changed = true;
             }
@@ -315,9 +363,18 @@ pub(crate) fn title_editor(
         }
         for (label, value, default, range) in [
             (t!("props.blur"), &mut shadow.blur, d.blur, 0.0..=200.0),
-            (t!("props.opacity"), &mut shadow.opacity, d.opacity, 0.0..=100.0),
+            (
+                t!("props.opacity"),
+                &mut shadow.opacity,
+                d.opacity,
+                0.0..=100.0,
+            ),
         ] {
-            if param_row(ui, &label, None, |ui| slider_field(ui, value, range, 0.5, 0)).reset {
+            if param_row(ui, &label, None, |ui| {
+                slider_field(ui, value, range, 0.5, 0)
+            })
+            .reset
+            {
                 *value = default;
             }
         }
@@ -340,13 +397,27 @@ pub(crate) fn title_editor(
             bg.outline_color = d.outline_color;
         }
         for (label, value, default, range, decimals) in [
-            (t!("props.outline_width"), &mut bg.outline_width, d.outline_width, 0.0..=100.0, 0),
+            (
+                t!("props.outline_width"),
+                &mut bg.outline_width,
+                d.outline_width,
+                0.0..=100.0,
+                0,
+            ),
             (t!("props.width"), &mut bg.width, d.width, 0.0..=1.0, 3),
             (t!("props.height"), &mut bg.height, d.height, 0.0..=1.0, 3),
-            (t!("props.corner_radius"), &mut bg.corner_radius, d.corner_radius, 0.0..=0.5, 3),
+            (
+                t!("props.corner_radius"),
+                &mut bg.corner_radius,
+                d.corner_radius,
+                0.0..=0.5,
+                3,
+            ),
         ] {
             let speed = if decimals == 0 { 0.5 } else { 0.005 };
-            let row = param_row(ui, &label, None, |ui| slider_field(ui, value, range, speed, decimals));
+            let row = param_row(ui, &label, None, |ui| {
+                slider_field(ui, value, range, speed, decimals)
+            });
             if row.reset {
                 *value = default;
             }
@@ -527,26 +598,17 @@ pub(crate) fn param_row(
                 // Arrows and diamond in a fixed area: the diamond must not move
                 // when an arrow disappears.
                 let spacing = ui.spacing().item_spacing.x;
-                let width =
-                    KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_DIAMOND_SIZE.x + spacing * 2.0;
+                let width = KEYFRAME_ARROW_SIZE.x * 2.0 + KEYFRAME_DIAMOND_SIZE.x + spacing * 2.0;
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, KEYFRAME_DIAMOND_SIZE.y),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        let prev = keyframe_arrow(
-                            ui,
-                            "◀",
-                            keyframe.prev,
-                            &t!("props.prev_keyframe"),
-                        );
+                        let prev =
+                            keyframe_arrow(ui, "◀", keyframe.prev, &t!("props.prev_keyframe"));
                         response.toggled_keyframe =
                             keyframe_button(ui, keyframe.on_keyframe).clicked();
-                        let next = keyframe_arrow(
-                            ui,
-                            "▶",
-                            keyframe.next,
-                            &t!("props.next_keyframe"),
-                        );
+                        let next =
+                            keyframe_arrow(ui, "▶", keyframe.next, &t!("props.next_keyframe"));
                         response.goto = prev.or(next);
                     },
                 );
@@ -564,8 +626,7 @@ pub(crate) fn target_effects<'a>(
     tl: Option<&'a vv_core::Timeline>,
     t: &PanelTarget,
 ) -> Option<&'a vv_core::EffectStack> {
-    tl?.clip(t.track_index, t.clip_id)
-        .map(|c| &c.effects)
+    tl?.clip(t.track_index, t.clip_id).map(|c| &c.effects)
 }
 
 /// Commands for the parameters changed relative to `before`, so the other
@@ -598,7 +659,12 @@ pub(crate) fn push_param_changes(
             pending.push(if effects.transform.track(param).is_constant() {
                 set_transform_param_default((t.timeline, t.track_index, t.clip_id), param, value)
             } else {
-                upsert_transform_keyframe((t.timeline, t.track_index, t.clip_id), t.source_frame, param, value)
+                upsert_transform_keyframe(
+                    (t.timeline, t.track_index, t.clip_id),
+                    t.source_frame,
+                    param,
+                    value,
+                )
             });
         }
     }
@@ -615,7 +681,14 @@ pub(crate) fn axis_field(
 ) -> bool {
     ui.label(axis);
     let mut v = *value as f64;
-    let changed = drag_field(ui, &mut v, speed, (*range.start() as f64)..=(*range.end() as f64), decimals, "");
+    let changed = drag_field(
+        ui,
+        &mut v,
+        speed,
+        (*range.start() as f64)..=(*range.end() as f64),
+        decimals,
+        "",
+    );
     if changed {
         *value = v as f32;
     }
@@ -654,7 +727,9 @@ pub(crate) fn drag_field(
 
     if response.drag_started() {
         ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked));
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                egui::viewport::CursorGrab::Locked,
+            ));
     }
     if response.dragged() {
         let (motion, precise) = ui.input(|i| (i.pointer.motion(), i.modifiers.shift));
@@ -667,7 +742,9 @@ pub(crate) fn drag_field(
     }
     if response.drag_stopped() {
         ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None));
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(
+                egui::viewport::CursorGrab::None,
+            ));
     }
     changed
 }
@@ -780,7 +857,9 @@ where
                 .events
                 .iter()
                 .map(|e| match e {
-                    egui::Event::MouseWheel { delta, .. } if delta.y != 0.0 => -delta.y.signum() as i32,
+                    egui::Event::MouseWheel { delta, .. } if delta.y != 0.0 => {
+                        -delta.y.signum() as i32
+                    }
                     _ => 0,
                 })
                 .sum()
@@ -919,7 +998,9 @@ pub(crate) fn set_transform_param_default(
     param: vv_core::TransformParam,
     value: f32,
 ) -> BoxedCommand {
-    Box::new(vv_core::set_clip_transform_param(tl, track, clip, param, value))
+    Box::new(vv_core::set_clip_transform_param(
+        tl, track, clip, param, value,
+    ))
 }
 
 pub(crate) fn set_flip((tl, track, clip): ClipRef, value: [bool; 2]) -> BoxedCommand {
@@ -931,7 +1012,9 @@ pub(crate) fn reset_transform_params(
     params: Vec<vv_core::TransformParam>,
     reset_flip: bool,
 ) -> BoxedCommand {
-    Box::new(vv_core::ResetTransformParams::new(tl, track, clip, params, reset_flip))
+    Box::new(vv_core::ResetTransformParams::new(
+        tl, track, clip, params, reset_flip,
+    ))
 }
 
 pub(crate) fn set_gain_default((tl, track, clip): ClipRef, value: f32) -> BoxedCommand {
@@ -971,11 +1054,17 @@ pub(crate) fn blend_mode_label(mode: vv_core::BlendMode) -> Cow<'static, str> {
     }
 }
 
-pub(crate) fn set_blend_mode((tl, track, clip): ClipRef, value: vv_core::BlendMode) -> BoxedCommand {
+pub(crate) fn set_blend_mode(
+    (tl, track, clip): ClipRef,
+    value: vv_core::BlendMode,
+) -> BoxedCommand {
     Box::new(vv_core::set_clip_blend_mode(tl, track, clip, value))
 }
 
-pub(crate) fn set_filters((tl, track, clip): ClipRef, value: Vec<vv_core::ClipFilter>) -> BoxedCommand {
+pub(crate) fn set_filters(
+    (tl, track, clip): ClipRef,
+    value: Vec<vv_core::ClipFilter>,
+) -> BoxedCommand {
     Box::new(vv_core::set_clip_filters(tl, track, clip, value))
 }
 
@@ -990,9 +1079,9 @@ pub(crate) fn set_transition_command(
     value: Option<vv_core::Transition>,
 ) -> BoxedCommand {
     match sel {
-        timeline_ui::TransitionSelection::Edge((track_index, clip_id), edge) => {
-            Box::new(vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, value))
-        }
+        timeline_ui::TransitionSelection::Edge((track_index, clip_id), edge) => Box::new(
+            vv_core::set_clip_transition(timeline_id, track_index, clip_id, edge, value),
+        ),
         timeline_ui::TransitionSelection::Crossing(track_index, left_clip) => {
             let right_clip = project.timelines[timeline_id]
                 .tracks
@@ -1000,12 +1089,19 @@ pub(crate) fn set_transition_command(
                 .and_then(|t| t.crossing_from(left_clip))
                 .map(|c| c.right_clip);
             let crossing_value = match (value, right_clip) {
-                (Some(transition), Some(right_clip)) => {
-                    Some(vv_core::CrossTransition { left_clip, right_clip, transition })
-                }
+                (Some(transition), Some(right_clip)) => Some(vv_core::CrossTransition {
+                    left_clip,
+                    right_clip,
+                    transition,
+                }),
                 _ => None,
             };
-            Box::new(vv_core::SetCrossTransition::new(timeline_id, track_index, left_clip, crossing_value))
+            Box::new(vv_core::SetCrossTransition::new(
+                timeline_id,
+                track_index,
+                left_clip,
+                crossing_value,
+            ))
         }
     }
 }
@@ -1031,14 +1127,22 @@ pub(crate) fn upsert_transform_keyframe(
     param: vv_core::TransformParam,
     value: f32,
 ) -> BoxedCommand {
-    upsert_keyframe(clip, frame, vv_core::KeyframeValue::TransformParam(param, value))
+    upsert_keyframe(
+        clip,
+        frame,
+        vv_core::KeyframeValue::TransformParam(param, value),
+    )
 }
 
 pub(crate) fn upsert_gain_keyframe(clip: ClipRef, frame: FrameIdx, value: f32) -> BoxedCommand {
     upsert_keyframe(clip, frame, vv_core::KeyframeValue::Gain(value))
 }
 
-pub(crate) fn upsert_color_keyframe(clip: ClipRef, frame: FrameIdx, value: vv_core::Rgba) -> BoxedCommand {
+pub(crate) fn upsert_color_keyframe(
+    clip: ClipRef,
+    frame: FrameIdx,
+    value: vv_core::Rgba,
+) -> BoxedCommand {
     upsert_keyframe(clip, frame, vv_core::KeyframeValue::Color(value))
 }
 
@@ -1101,8 +1205,7 @@ impl VenturiApp {
                 ui.end_row();
                 for (kind, target) in rows {
                     let clip = self.timeline_id.and_then(|tid| {
-                        self.project.timelines[tid]
-                            .clip(target.track_index, target.clip_id)
+                        self.project.timelines[tid].clip(target.track_index, target.clip_id)
                     });
                     let (name, len) = match clip {
                         Some(clip) => (
@@ -1113,7 +1216,9 @@ impl VenturiApp {
                                     .get(*id)
                                     .map(|item| file_label(&item.path))
                                     .unwrap_or_else(|| "⚠ offline".to_string()),
-                                vv_core::ClipSource::SolidColor => t!("generator.solid_color").into_owned(),
+                                vv_core::ClipSource::SolidColor => {
+                                    t!("generator.solid_color").into_owned()
+                                }
                                 vv_core::ClipSource::Text => t!("generator.text").into_owned(),
                             },
                             clip.timeline_len,
@@ -1136,8 +1241,7 @@ impl VenturiApp {
     pub(crate) fn clip_panel_info(&self, target: PanelTarget) -> Option<ClipPanelInfo> {
         let timeline_id = self.timeline_id?;
         let timeline_size = self.project.timelines[timeline_id].resolution;
-        let clip = self.project.timelines[timeline_id]
-            .clip(target.track_index, target.clip_id)?;
+        let clip = self.project.timelines[timeline_id].clip(target.track_index, target.clip_id)?;
         let frame = target.source_frame;
         // A keyframe outside the trim would take the playhead outside the clip.
         let in_clip = |f: &FrameIdx| (clip.source_in()..clip.source_out()).contains(f);
@@ -1151,8 +1255,16 @@ impl VenturiApp {
                     let track = clip.effects.transform.track(*p);
                     RowKeyframe {
                         on_keyframe: track.keyframe_at(frame).is_some(),
-                        prev: clip.effects.transform.previous_keyframe(&[*p], frame).filter(in_clip),
-                        next: clip.effects.transform.next_keyframe(&[*p], frame).filter(in_clip),
+                        prev: clip
+                            .effects
+                            .transform
+                            .previous_keyframe(&[*p], frame)
+                            .filter(in_clip),
+                        next: clip
+                            .effects
+                            .transform
+                            .next_keyframe(&[*p], frame)
+                            .filter(in_clip),
                     }
                 })
                 .collect(),
@@ -1179,7 +1291,11 @@ impl VenturiApp {
         })
     }
 
-    pub(crate) fn apply_effect_changes(&mut self, mut commands: Vec<BoxedCommand>, pointer_down: bool) {
+    pub(crate) fn apply_effect_changes(
+        &mut self,
+        mut commands: Vec<BoxedCommand>,
+        pointer_down: bool,
+    ) {
         if !commands.is_empty() {
             if pointer_down && self.edit_drag_group.is_none() {
                 self.edit_drag_group = Some(self.history.begin_group());
@@ -1187,7 +1303,10 @@ impl VenturiApp {
             let cmd = if commands.len() == 1 {
                 commands.remove(0)
             } else {
-                Box::new(vv_core::CompositeCommand::new(commands[0].label(), commands))
+                Box::new(vv_core::CompositeCommand::new(
+                    commands[0].label(),
+                    commands,
+                ))
             };
             self.history.do_command(&mut self.project, cmd);
         }
@@ -1232,8 +1351,13 @@ impl VenturiApp {
                 let Some(crossing) = track.crossing_from(left_clip) else {
                     return;
                 };
-                let max_duration = match (track.clip(crossing.left_clip), track.clip(crossing.right_clip)) {
-                    (Some(left), Some(right)) => (2 * left.timeline_len.min(right.timeline_len)).max(1),
+                let max_duration = match (
+                    track.clip(crossing.left_clip),
+                    track.clip(crossing.right_clip),
+                ) {
+                    (Some(left), Some(right)) => {
+                        (2 * left.timeline_len.min(right.timeline_len)).max(1)
+                    }
                     _ => return,
                 };
                 (crossing.transition.clone(), max_duration)
@@ -1252,7 +1376,14 @@ impl VenturiApp {
         ui.horizontal(|ui| {
             ui.label(t!("props.duration"));
             let mut secs = transition.duration as f64 / fps;
-            if drag_field(ui, &mut secs, 0.02, 0.0..=(max_duration as f64 / fps), 2, " s") {
+            if drag_field(
+                ui,
+                &mut secs,
+                0.02,
+                0.0..=(max_duration as f64 / fps),
+                2,
+                " s",
+            ) {
                 transition.duration = ((secs * fps).round() as FrameIdx).clamp(1, max_duration);
             }
             let mut frames = transition.duration as f64;
@@ -1268,7 +1399,15 @@ impl VenturiApp {
                 .iter()
                 .map(|d| (*d, timeline_ui::push_direction_label(*d).to_string(), true))
                 .collect();
-            preview_combo(ui, "transition_direction", &mut transition.direction, &items, None, None, None);
+            preview_combo(
+                ui,
+                "transition_direction",
+                &mut transition.direction,
+                &items,
+                None,
+                None,
+                None,
+            );
         });
 
         ui.horizontal(|ui| {
@@ -1277,7 +1416,15 @@ impl VenturiApp {
                 .iter()
                 .map(|e| (*e, timeline_ui::ease_label(*e).to_string(), true))
                 .collect();
-            preview_combo(ui, "transition_ease", &mut transition.ease, &items, None, None, None);
+            preview_combo(
+                ui,
+                "transition_ease",
+                &mut transition.ease,
+                &items,
+                None,
+                None,
+                None,
+            );
         });
 
         ui.horizontal(|ui| {
@@ -1286,12 +1433,22 @@ impl VenturiApp {
         });
 
         if transition != before {
-            pending.push(set_transition_command(&self.project, timeline_id, sel, Some(transition)));
+            pending.push(set_transition_command(
+                &self.project,
+                timeline_id,
+                sel,
+                Some(transition),
+            ));
         }
 
         ui.add_space(8.0);
         if ui.button(t!("props.remove_transition")).clicked() {
-            pending.push(set_transition_command(&self.project, timeline_id, sel, None));
+            pending.push(set_transition_command(
+                &self.project,
+                timeline_id,
+                sel,
+                None,
+            ));
             self.timeline_state.selected_transition = None;
         }
     }

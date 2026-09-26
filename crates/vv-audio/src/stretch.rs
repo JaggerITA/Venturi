@@ -3,9 +3,9 @@
 //! the whole track: stretching everything would delay the first sound by
 //! seconds.
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::channel_layout::ChannelLayout;
 use ffmpeg::format::sample::{Sample as SampleFormat, Type as SampleType};
+use ffmpeg_next as ffmpeg;
 use std::sync::Once;
 
 static INIT: Once = Once::new();

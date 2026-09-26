@@ -19,14 +19,20 @@ fn main() {
     if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
         let git_dir = Path::new(&git_dir);
         println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-        println!("cargo:rerun-if-changed={}", git_dir.join("packed-refs").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join("packed-refs").display()
+        );
         // A missing path would make cargo rerun this on every build.
         let tags_dir = git_dir.join("refs/tags");
         if tags_dir.exists() {
             println!("cargo:rerun-if-changed={}", tags_dir.display());
         }
         if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
-            println!("cargo:rerun-if-changed={}", git_dir.join(head_ref).display());
+            println!(
+                "cargo:rerun-if-changed={}",
+                git_dir.join(head_ref).display()
+            );
         }
     }
 }

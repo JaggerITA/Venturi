@@ -79,7 +79,10 @@ fn format_timecode_includes_frames_and_hours() {
     // With a fraction of a second: 0.4s at 25fps = frame 10
     assert_eq!(format_timecode(5.4, 25.0), "00:00:05:10");
     // 29.97: 30 frames per nominal second, not 29.
-    assert_eq!(format_timecode(1799.0 / (30_000.0 / 1001.0), 30_000.0 / 1001.0), "00:00:59:29");
+    assert_eq!(
+        format_timecode(1799.0 / (30_000.0 / 1001.0), 30_000.0 / 1001.0),
+        "00:00:59:29"
+    );
 }
 
 #[test]
@@ -106,9 +109,15 @@ fn fade_zone_at_only_matches_the_top_band_near_the_handle() {
         Some(FadeEdge::Out)
     );
     // Same X as the fade-in handle, but below the top band: it is trim/roll, not fade.
-    assert_eq!(fade_zone_at(egui::pos2(120.0, 50.0), clip_rect, fade_in_x, fade_out_x), None);
+    assert_eq!(
+        fade_zone_at(egui::pos2(120.0, 50.0), clip_rect, fade_in_x, fade_out_x),
+        None
+    );
     // Far from both handles.
-    assert_eq!(fade_zone_at(egui::pos2(200.0, 22.0), clip_rect, fade_in_x, fade_out_x), None);
+    assert_eq!(
+        fade_zone_at(egui::pos2(200.0, 22.0), clip_rect, fade_in_x, fade_out_x),
+        None
+    );
 }
 
 #[test]
@@ -123,10 +132,19 @@ fn edge_drag_value_moves_in_opposite_screen_directions_for_in_and_out() {
     };
     // 20px to the right = 10 frames: the fade-in grows, the fade-out (its
     // handle approaching the corner) shrinks.
-    assert_eq!(edge_drag_value(&drag(FadeEdge::In, 20.0), 100, px_per_frame, 0), 20);
-    assert_eq!(edge_drag_value(&drag(FadeEdge::Out, 20.0), 100, px_per_frame, 0), 0);
+    assert_eq!(
+        edge_drag_value(&drag(FadeEdge::In, 20.0), 100, px_per_frame, 0),
+        20
+    );
+    assert_eq!(
+        edge_drag_value(&drag(FadeEdge::Out, 20.0), 100, px_per_frame, 0),
+        0
+    );
     // Clamped to the duration of the clip.
-    assert_eq!(edge_drag_value(&drag(FadeEdge::In, 1000.0), 30, px_per_frame, 0), 30);
+    assert_eq!(
+        edge_drag_value(&drag(FadeEdge::In, 1000.0), 30, px_per_frame, 0),
+        30
+    );
 }
 
 /// A fade can be dragged away to nothing, a transition keeps a frame.
@@ -205,8 +223,18 @@ fn gain_offset_is_zero_at_zero_db_and_reaches_the_edges_at_the_range_extremes() 
 
 #[test]
 fn gain_from_offset_is_the_inverse_of_gain_offset() {
-    for db in [vv_core::GAIN_DB_MIN, -50.0, -6.0, 0.0, 6.0, vv_core::GAIN_DB_MAX] {
-        assert!((gain_from_offset(gain_offset(db)) - db).abs() < 1e-4, "db={db}");
+    for db in [
+        vv_core::GAIN_DB_MIN,
+        -50.0,
+        -6.0,
+        0.0,
+        6.0,
+        vv_core::GAIN_DB_MAX,
+    ] {
+        assert!(
+            (gain_from_offset(gain_offset(db)) - db).abs() < 1e-4,
+            "db={db}"
+        );
     }
 }
 
@@ -226,13 +254,21 @@ fn volume_drag_value_follows_the_pointer_and_clamps_at_the_range_extremes() {
     assert!(volume_drag_value(&drag(-half_height), half_height) > 0.0);
     assert!(volume_drag_value(&drag(half_height), half_height) < 0.0);
     // Past the available run it clamps to the extremes of the range.
-    assert_eq!(volume_drag_value(&drag(-half_height * 10.0), half_height), vv_core::GAIN_DB_MAX);
-    assert_eq!(volume_drag_value(&drag(half_height * 10.0), half_height), vv_core::GAIN_DB_MIN);
+    assert_eq!(
+        volume_drag_value(&drag(-half_height * 10.0), half_height),
+        vv_core::GAIN_DB_MAX
+    );
+    assert_eq!(
+        volume_drag_value(&drag(half_height * 10.0), half_height),
+        vv_core::GAIN_DB_MIN
+    );
 }
 
 /// "Identity" `row_y` (no grouping/margin) for the tests.
 fn test_row_y(n: usize) -> Vec<f32> {
-    (0..n).map(|i| RULER_HEIGHT + i as f32 * ROW_HEIGHT).collect()
+    (0..n)
+        .map(|i| RULER_HEIGHT + i as f32 * ROW_HEIGHT)
+        .collect()
 }
 
 fn visual(track_index: usize, id: u64, start: FrameIdx, len: FrameIdx) -> ClipVisual<'static> {
@@ -267,7 +303,10 @@ fn visual_linked(
 
 #[test]
 fn expand_to_linked_groups_includes_the_whole_group() {
-    let visuals = vec![visual_linked(0, 1, 0, 10, 100), visual_linked(1, 2, 0, 10, 100)];
+    let visuals = vec![
+        visual_linked(0, 1, 0, 10, 100),
+        visual_linked(1, 2, 0, 10, 100),
+    ];
     assert_eq!(
         expand_to_linked_groups(&visuals, [(0, ClipId(1))]),
         BTreeSet::from([(0, ClipId(1)), (1, ClipId(2))]),
@@ -351,7 +390,10 @@ fn drag_group_for_replaces_the_selection_when_dragging_an_unselected_clip() {
 
 #[test]
 fn drag_group_for_expands_to_the_link_group_when_dragging_an_unselected_linked_clip() {
-    let visuals = vec![visual_linked(0, 1, 0, 10, 100), visual_linked(1, 2, 0, 10, 100)];
+    let visuals = vec![
+        visual_linked(0, 1, 0, 10, 100),
+        visual_linked(1, 2, 0, 10, 100),
+    ];
     let selected = BTreeSet::new();
     assert_eq!(
         drag_group_for(&selected, &visuals, (0, ClipId(1))),
@@ -484,9 +526,12 @@ fn clips_intersecting_rect_finds_overlapping_clips_only() {
     // Rectangle covering only the area of clips 1 and 3 (starting
     // column, both tracks), not 2.
     let row_y = test_row_y(2);
-    let rect =
-        clip_local_rect(&visuals[0], 1.0, &row_y, ROW_HEIGHT)
-            .union(clip_local_rect(&visuals[2], 1.0, &row_y, ROW_HEIGHT));
+    let rect = clip_local_rect(&visuals[0], 1.0, &row_y, ROW_HEIGHT).union(clip_local_rect(
+        &visuals[2],
+        1.0,
+        &row_y,
+        ROW_HEIGHT,
+    ));
     let hits: BTreeSet<_> = clips_intersecting_rect(&visuals, 1.0, &row_y, ROW_HEIGHT, rect)
         .into_iter()
         .collect();
@@ -510,7 +555,10 @@ fn neighbor_bounds_clamped_by_prev_and_next_on_same_track() {
         visual(0, 3, 50, 5),  // starts at 50
         visual(1, 4, 15, 3),  // other track: ignored
     ];
-    assert_eq!(neighbor_bounds_at(&visuals, 0, &[ClipId(2)], 20, 30), (10, 50));
+    assert_eq!(
+        neighbor_bounds_at(&visuals, 0, &[ClipId(2)], 20, 30),
+        (10, 50)
+    );
 }
 
 #[test]
@@ -645,7 +693,11 @@ fn group_drag_bounds_lets_group_members_land_on_the_same_track_without_blocking_
 
 #[test]
 fn dragging_from_the_middle_of_a_group_onto_an_empty_track_does_not_overflow() {
-    let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10), visual(0, 3, 40, 10)];
+    let visuals = vec![
+        visual(0, 1, 0, 10),
+        visual(0, 2, 20, 10),
+        visual(0, 3, 40, 10),
+    ];
     let targets = vec![
         (ClipId(2), EffectiveTrack::Existing(1)),
         (ClipId(1), EffectiveTrack::Existing(1)),
@@ -656,7 +708,8 @@ fn dragging_from_the_middle_of_a_group_onto_an_empty_track_does_not_overflow() {
     assert_eq!(min_start, 20);
     assert!(max_start > 1_000_000);
 
-    let (min_start, _, _) = combined_drag_range(&visuals, 0, ClipId(2), &[(0, ClipId(1)), (0, ClipId(3))]);
+    let (min_start, _, _) =
+        combined_drag_range(&visuals, 0, ClipId(2), &[(0, ClipId(1)), (0, ClipId(3))]);
     assert_eq!(min_start, 20);
 }
 
@@ -727,7 +780,10 @@ fn media_pool_drop_target_over_an_audio_track_falls_back_to_default() {
 
 #[test]
 fn media_pool_drop_target_over_a_locked_track_refuses_the_drop() {
-    assert_eq!(media_pool_drop_target(2, true, TrackKind::Video, true), None);
+    assert_eq!(
+        media_pool_drop_target(2, true, TrackKind::Video, true),
+        None
+    );
 }
 
 #[test]
@@ -758,12 +814,18 @@ fn divider_can_shrink_an_overflowing_video_pane_which_then_scrolls() {
     assert_eq!(layout.video_height(), 60.0);
     // Resting against the separator until it scrolls.
     assert_eq!(layout.video_rows_bottom(), layout.video_pane.max);
-    assert_eq!(layout.video_max_scroll, 6.0 * ROW_HEIGHT + NEW_TRACK_ZONE_HEIGHT - 60.0);
+    assert_eq!(
+        layout.video_max_scroll,
+        6.0 * ROW_HEIGHT + NEW_TRACK_ZONE_HEIGHT - 60.0
+    );
 
     state.video_scroll = 10_000.0;
     let scrolled = PaneLayout::new(avail, 6, 1, &mut state);
     assert_eq!(state.video_scroll, layout.video_max_scroll);
-    assert_eq!(scrolled.video_rows_top, scrolled.video_pane.min + NEW_TRACK_ZONE_HEIGHT);
+    assert_eq!(
+        scrolled.video_rows_top,
+        scrolled.video_pane.min + NEW_TRACK_ZONE_HEIGHT
+    );
 }
 
 #[test]
@@ -784,7 +846,12 @@ fn audio_pane_scrolls_when_its_tracks_overflow() {
 fn drag_group_row_targets_shifts_a_same_kind_follower_by_the_same_amount() {
     // track_kinds: [Video, Audio, Video, Video] -> row_order [3,2,0,1]
     // (video descending, audio ascending), row_of_track [2,3,1,0].
-    let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video, TrackKind::Video];
+    let track_kinds = [
+        TrackKind::Video,
+        TrackKind::Audio,
+        TrackKind::Video,
+        TrackKind::Video,
+    ];
     let row_of_track = [2, 3, 1, 0];
     let row_order = [3, 2, 0, 1];
     // Primary (track 2, row 1) rises one row -> track 3 (row 0).
@@ -817,7 +884,12 @@ fn drag_group_row_targets_shifts_a_same_kind_follower_by_the_same_amount() {
 fn drag_group_row_targets_moves_an_audio_follower_in_the_opposite_row_direction() {
     // track_kinds: [Video, Audio, Audio, Video] -> row_order [3,0,1,2]
     // (2 video tracks, 2 audio), row_of_track [1,2,3,0].
-    let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Audio, TrackKind::Video];
+    let track_kinds = [
+        TrackKind::Video,
+        TrackKind::Audio,
+        TrackKind::Audio,
+        TrackKind::Video,
+    ];
     let row_of_track = [1, 2, 3, 0];
     let row_order = [3, 0, 1, 2];
     // Video primary (track 0, row 1) rises one row -> track 3
@@ -847,7 +919,12 @@ fn drag_group_row_targets_moves_an_audio_follower_in_the_opposite_row_direction(
 
 #[test]
 fn drag_group_row_targets_creates_a_new_track_for_a_follower_that_would_overflow() {
-    let track_kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video, TrackKind::Video];
+    let track_kinds = [
+        TrackKind::Video,
+        TrackKind::Audio,
+        TrackKind::Video,
+        TrackKind::Video,
+    ];
     let row_of_track = [2, 3, 1, 0];
     let row_order = [3, 2, 0, 1];
     // Single audio track: the audio follower has nowhere to go among
@@ -1006,8 +1083,7 @@ fn single_trim_range_start_is_clamped_by_source_in() {
         20,
         vv_core::MediaId::default(),
     )];
-    let (min_value, max_value) =
-        single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
+    let (min_value, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
     assert_eq!(min_value, 7);
     assert_eq!(
         max_value, 26,
@@ -1032,8 +1108,7 @@ fn single_trim_range_end_is_clamped_by_media_duration() {
     // source_out starts at 20 on a media 25 frames long: the end cannot
     // be extended past timeline_start + (25 - source_in) = 25.
     let visuals = vec![media_clip_visual(0, 1, 0, 0, 20, media_id)];
-    let (_, max_value) =
-        single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, 25);
 }
 
@@ -1057,15 +1132,13 @@ fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
         ),
     ));
 
-    let (min_value, _) =
-        single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
+    let (min_value, _) = single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
     assert_eq!(
         min_value, 998,
         "2000 source frames before = 2002 timeline frames before 3000"
     );
 
-    let (_, max_value) =
-        single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(
         max_value, 5002,
         "2000 remaining source frames = 2002 timeline frames after 3000"
@@ -1076,8 +1149,7 @@ fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
 fn single_trim_range_end_is_unbounded_for_solid_color() {
     let project = Project::default();
     let visuals = vec![visual(0, 1, 0, 10)];
-    let (_, max_value) =
-        single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, FrameIdx::MAX);
 }
 
@@ -1176,7 +1248,10 @@ fn edge_zones_roll_at_the_contact_point_and_trim_just_inside() {
     assert_eq!(zones.at(90.0), Some(EdgeZone::Trim(TrimEdge::End)));
     assert_eq!(
         zones.at(98.0),
-        Some(EdgeZone::Roll { edge: TrimEdge::End, neighbor: (0, ClipId(9)) })
+        Some(EdgeZone::Roll {
+            edge: TrimEdge::End,
+            neighbor: (0, ClipId(9))
+        })
     );
 }
 
@@ -1185,8 +1260,14 @@ fn edge_zones_roll_at_the_contact_point_and_trim_just_inside() {
 #[test]
 fn snap_frame_of_an_edge_snaps_to_the_playhead() {
     let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
-    assert_eq!(snap_frame(14, 0, &visuals, &[ClipId(1)], &[15], 5.0, true), 15);
-    assert_eq!(snap_frame(4, 10, &visuals, &[ClipId(1)], &[15], 5.0, true), 5);
+    assert_eq!(
+        snap_frame(14, 0, &visuals, &[ClipId(1)], &[15], 5.0, true),
+        15
+    );
+    assert_eq!(
+        snap_frame(4, 10, &visuals, &[ClipId(1)], &[15], 5.0, true),
+        5
+    );
 }
 
 #[test]
@@ -1194,18 +1275,30 @@ fn snap_frame_of_an_edge_snaps_the_trimmed_edge_to_a_nearby_clip_edge() {
     // Neighboring clip [20,30): the edge dragged to 18, within the threshold
     // (10px / 5px per frame = 2 frames), snaps to 20.
     let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
-    assert_eq!(snap_frame(18, 0, &visuals, &[ClipId(1)], &[], 5.0, true), 20);
+    assert_eq!(
+        snap_frame(18, 0, &visuals, &[ClipId(1)], &[], 5.0, true),
+        20
+    );
 }
 
 #[test]
 fn snap_frame_of_an_edge_ignores_the_clip_being_trimmed_and_far_edges() {
     let visuals = vec![visual(0, 1, 0, 10), visual(0, 2, 20, 10)];
     // Its own edge (10) is not a valid snap.
-    assert_eq!(snap_frame(11, 0, &visuals, &[ClipId(1)], &[], 5.0, true), 11);
+    assert_eq!(
+        snap_frame(11, 0, &visuals, &[ClipId(1)], &[], 5.0, true),
+        11
+    );
     // Outside the threshold: no snap.
-    assert_eq!(snap_frame(15, 0, &visuals, &[ClipId(1)], &[], 5.0, true), 15);
+    assert_eq!(
+        snap_frame(15, 0, &visuals, &[ClipId(1)], &[], 5.0, true),
+        15
+    );
     // Snapping off: no snap even within the threshold.
-    assert_eq!(snap_frame(18, 0, &visuals, &[ClipId(1)], &[], 5.0, false), 18);
+    assert_eq!(
+        snap_frame(18, 0, &visuals, &[ClipId(1)], &[], 5.0, false),
+        18
+    );
 }
 
 #[test]
@@ -1277,11 +1370,23 @@ fn duplicate_clips_keeps_the_originals_relinks_the_copies_and_cuts_what_they_cov
     };
     // Video [0,20) linked to the audio [0,20); further along on the video
     // another clip [30,60) that the copy will partly cover.
-    let (v, a, other) = (project.alloc_clip_id(), project.alloc_clip_id(), project.alloc_clip_id());
-    for (track_index, clip) in [(0, solid(v, 0, 20)), (1, solid(a, 0, 20)), (0, solid(other, 30, 30))] {
+    let (v, a, other) = (
+        project.alloc_clip_id(),
+        project.alloc_clip_id(),
+        project.alloc_clip_id(),
+    );
+    for (track_index, clip) in [
+        (0, solid(v, 0, 20)),
+        (1, solid(a, 0, 20)),
+        (0, solid(other, 30, 30)),
+    ] {
         history.do_command(
             &mut project,
-            Box::new(vv_core::InsertClip { timeline: timeline_id, track_index, clip }),
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index,
+                clip,
+            }),
         );
     }
     history.do_command(
@@ -1300,9 +1405,17 @@ fn duplicate_clips_keeps_the_originals_relinks_the_copies_and_cuts_what_they_cov
 
     let tl = &project.timelines[timeline_id];
     let spans = |track: usize| -> Vec<(FrameIdx, FrameIdx)> {
-        tl.tracks[track].clips.iter().map(|c| (c.timeline_start, c.timeline_end())).collect()
+        tl.tracks[track]
+            .clips
+            .iter()
+            .map(|c| (c.timeline_start, c.timeline_end()))
+            .collect()
     };
-    assert_eq!(spans(0), vec![(0, 20), (25, 45), (45, 60)], "the other clip is cut");
+    assert_eq!(
+        spans(0),
+        vec![(0, 20), (25, 45), (45, 60)],
+        "the other clip is cut"
+    );
     assert_eq!(spans(1), vec![(0, 20), (25, 45)]);
     let copy_v = &tl.tracks[0].clips[1];
     let copy_a = &tl.tracks[1].clips[1];
@@ -1315,7 +1428,11 @@ fn duplicate_clips_keeps_the_originals_relinks_the_copies_and_cuts_what_they_cov
     );
 
     history.undo(&mut project);
-    assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 2, "a single undo step");
+    assert_eq!(
+        project.timelines[timeline_id].tracks[0].clips.len(),
+        2,
+        "a single undo step"
+    );
 }
 
 #[test]
@@ -1329,20 +1446,40 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
     });
     let mut history = History::default();
     let solid = |id, start, len| {
-        Clip::from_source_range(id, vv_core::ClipSource::SolidColor, 0, len, start, vv_core::Rational::one())
+        Clip::from_source_range(
+            id,
+            vv_core::ClipSource::SolidColor,
+            0,
+            len,
+            start,
+            vv_core::Rational::one(),
+        )
     };
     let (v, a) = (project.alloc_clip_id(), project.alloc_clip_id());
     for (track_index, clip) in [(0, solid(v, 10, 30)), (1, solid(a, 20, 30))] {
         history.do_command(
             &mut project,
-            Box::new(vv_core::InsertClip { timeline: timeline_id, track_index, clip }),
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index,
+                clip,
+            }),
         );
     }
 
-    make_compound_clip(&mut project, &mut history, timeline_id, vec![(0, v), (1, a)]);
+    make_compound_clip(
+        &mut project,
+        &mut history,
+        timeline_id,
+        vec![(0, v), (1, a)],
+    );
 
     let video_track = &project.timelines[timeline_id].tracks[0];
-    assert_eq!(video_track.clips.len(), 1, "the two originals become a single video clip");
+    assert_eq!(
+        video_track.clips.len(),
+        1,
+        "the two originals become a single video clip"
+    );
     let vv_core::ClipSource::Media(media_id) = video_track.clips[0].source else {
         panic!("the resulting compound clip must point to the media pool");
     };
@@ -1350,14 +1487,20 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
     assert_eq!(video_track.clips[0].timeline_len, 40);
     let audio_track = &project.timelines[timeline_id].tracks[1];
     assert_eq!(audio_track.clips.len(), 1);
-    assert_eq!(video_track.clips[0].linked_group, audio_track.clips[0].linked_group);
+    assert_eq!(
+        video_track.clips[0].linked_group,
+        audio_track.clips[0].linked_group
+    );
 
     let item = project.media_pool.get(media_id).expect("added to the pool");
     assert_eq!(item.path.to_str(), Some("Compound Clip 1"));
     assert!(item.meta.has_video && item.meta.has_audio);
     let nested_id = item.compound.expect("it is a compound clip");
     let nested = &project.timelines[nested_id];
-    assert_eq!(nested.tracks[0].clips[0].timeline_start, 0, "re-offset to the start of the selection");
+    assert_eq!(
+        nested.tracks[0].clips[0].timeline_start, 0,
+        "re-offset to the start of the selection"
+    );
     assert_eq!(nested.tracks[1].clips[0].timeline_start, 10);
 
     // An undo gives back the original clips, but the pool (like an
@@ -1372,10 +1515,19 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
     for (track_index, clip) in [(0, solid(v2, 100, 10)), (1, solid(a2, 100, 10))] {
         history.do_command(
             &mut project,
-            Box::new(vv_core::InsertClip { timeline: timeline_id, track_index, clip }),
+            Box::new(vv_core::InsertClip {
+                timeline: timeline_id,
+                track_index,
+                clip,
+            }),
         );
     }
-    make_compound_clip(&mut project, &mut history, timeline_id, vec![(0, v2), (1, a2)]);
+    make_compound_clip(
+        &mut project,
+        &mut history,
+        timeline_id,
+        vec![(0, v2), (1, a2)],
+    );
     let second = project
         .media_pool
         .values()

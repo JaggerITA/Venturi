@@ -24,11 +24,18 @@ fn every_key_used_in_the_source_is_translated_in_every_locale() {
             }
         }
     }
-    assert!(missing.is_empty(), "missing translations:\n{}", missing.join("\n"));
+    assert!(
+        missing.is_empty(),
+        "missing translations:\n{}",
+        missing.join("\n")
+    );
 }
 
 #[test]
 fn english_and_italian_are_available() {
     let locales = rust_i18n::available_locales!();
-    assert!(["en", "it"].iter().all(|l| locales.iter().any(|x| x == l)), "{locales:?}");
+    assert!(
+        ["en", "it"].iter().all(|l| locales.iter().any(|x| x == l)),
+        "{locales:?}"
+    );
 }

@@ -5,9 +5,9 @@
 //! Resolve does not read) ends up in `metadata.venturi`; the transform and
 //! the transitions also travel in Resolve's own namespace (see `resolve`).
 
-use super::{MeasureTitle, OtioError};
 use super::generator;
 use super::resolve::{self, Scale};
+use super::{MeasureTitle, OtioError};
 use crate::FadeEdge;
 use crate::model::{
     Clip, ClipSource, FrameIdx, Project, Rational, Rgba, TimelineId, Track, TrackKind,
@@ -38,7 +38,14 @@ pub fn timeline_to_otio(
         .iter()
         .enumerate()
         .map(|(i, track)| {
-            track_to_otio(project, track, timeline.track_label(i), fps, timeline.resolution, measure)
+            track_to_otio(
+                project,
+                track,
+                timeline.track_label(i),
+                fps,
+                timeline.resolution,
+                measure,
+            )
         })
         .collect();
 
@@ -86,7 +93,9 @@ fn track_to_otio(
         if let Some(transition) = &clip.effects.transition_in {
             children.push(resolve::transition_to_otio(transition, FadeEdge::In, fps));
         }
-        children.push(clip_to_otio(project, clip, track.kind, fps, resolution, measure));
+        children.push(clip_to_otio(
+            project, clip, track.kind, fps, resolution, measure,
+        ));
         if let Some(transition) = &clip.effects.transition_out {
             children.push(resolve::transition_to_otio(transition, FadeEdge::Out, fps));
         }
@@ -146,7 +155,11 @@ fn clip_to_otio(
         // Resolve names a generator clip after its kind: ours used to carry
         // the colour or the text, which its importer does not expect.
         ClipSource::SolidColor => {
-            let color = clip.effects.color.as_ref().map_or(Rgba::BLACK, |c| c.default);
+            let color = clip
+                .effects
+                .color
+                .as_ref()
+                .map_or(Rgba::BLACK, |c| c.default);
             ("Solid Color".to_owned(), generator::solid_color(color))
         }
         ClipSource::Text => {

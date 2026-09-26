@@ -63,7 +63,10 @@ impl ClipBox {
             s if s > 0.0 => hi,
             _ => (lo + hi) / 2.0,
         };
-        [pick(sx, self.left, self.right), pick(sy, self.bottom, self.top)]
+        [
+            pick(sx, self.left, self.right),
+            pick(sy, self.bottom, self.top),
+        ]
     }
 }
 
@@ -74,9 +77,15 @@ fn rotate_cw(v: [f32; 2], degrees: f32) -> [f32; 2] {
 
 /// From a point of the clip to the frame (timeline pixels from the center, Y up).
 fn clip_to_frame(t: &Transform, p: [f32; 2]) -> [f32; 2] {
-    let scaled = [t.zoom[0] * (p[0] - t.anchor[0]), t.zoom[1] * (p[1] - t.anchor[1])];
+    let scaled = [
+        t.zoom[0] * (p[0] - t.anchor[0]),
+        t.zoom[1] * (p[1] - t.anchor[1]),
+    ];
     let r = rotate_cw(scaled, t.rotation);
-    [t.position[0] + t.anchor[0] + r[0], t.position[1] + t.anchor[1] + r[1]]
+    [
+        t.position[0] + t.anchor[0] + r[0],
+        t.position[1] + t.anchor[1] + r[1],
+    ]
 }
 
 /// The new transform from dragging `handle` by `delta` (timeline pixels,
@@ -109,9 +118,7 @@ fn drag_transform(
             ];
             let moved = rotate_cw(delta, -start.rotation);
             let to = [from[0] + moved[0], from[1] + moved[1]];
-            let ratio = |axis: usize| {
-                (from[axis].abs() > 1e-3).then(|| to[axis] / from[axis])
-            };
+            let ratio = |axis: usize| (from[axis].abs() > 1e-3).then(|| to[axis] / from[axis]);
             let uniform = sx != 0.0 && sy != 0.0 && !free;
             if uniform {
                 let len2 = from[0] * from[0] + from[1] * from[1];
@@ -157,8 +164,7 @@ pub fn show(
     drag: &mut Option<OverlayDrag>,
 ) -> Option<Transform> {
     let scale = frame_rect.width() / timeline_size.0.max(1) as f32;
-    let to_screen =
-        |p: [f32; 2]| frame_rect.center() + egui::vec2(p[0] * scale, -p[1] * scale);
+    let to_screen = |p: [f32; 2]| frame_rect.center() + egui::vec2(p[0] * scale, -p[1] * scale);
     let clip_box = ClipBox::new(timeline_size, source_size, transform.crop);
 
     let screen_of = |sx, sy| to_screen(clip_to_frame(transform, clip_box.point(sx, sy)));
@@ -168,8 +174,8 @@ pub fn show(
     ]);
     let (sn, cs) = transform.rotation.to_radians().sin_cos();
     let knob = pivot + egui::vec2(sn, -cs) * ROTATION_ARM;
-    let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
-        .map(|(sx, sy)| screen_of(sx, sy));
+    let corners =
+        [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)].map(|(sx, sy)| screen_of(sx, sy));
     let scale_handles: Vec<(Handle, egui::Pos2)> = [
         (-1.0, 1.0),
         (1.0, 1.0),
@@ -198,7 +204,11 @@ pub fn show(
         point_in_convex(pos, &corners).then_some(Handle::Move)
     };
 
-    let resp = ui.interact(area, ui.id().with("viewer_transform_overlay"), egui::Sense::drag());
+    let resp = ui.interact(
+        area,
+        ui.id().with("viewer_transform_overlay"),
+        egui::Sense::drag(),
+    );
     let mut changed = None;
     if resp.drag_started()
         && let Some(press) = ui.input(|i| i.pointer.press_origin())
@@ -230,7 +240,13 @@ pub fn show(
             t
         } else {
             let delta = pos - d.start_pointer;
-            drag_transform(&d.start, &clip_box, d.handle, [delta.x / scale, -delta.y / scale], shift)
+            drag_transform(
+                &d.start,
+                &clip_box,
+                d.handle,
+                [delta.x / scale, -delta.y / scale],
+                shift,
+            )
         };
         changed = Some(new);
     }
@@ -265,7 +281,12 @@ pub fn show(
     painter.add(egui::Shape::line(outline, line));
     painter.line_segment([pivot, knob], line);
     let dot = |center: egui::Pos2, radius: f32| {
-        painter.circle(center, radius, egui::Color32::WHITE, egui::Stroke::new(1.5, accent));
+        painter.circle(
+            center,
+            radius,
+            egui::Color32::WHITE,
+            egui::Stroke::new(1.5, accent),
+        );
     };
     for (_, p) in &scale_handles {
         dot(*p, HANDLE_RADIUS);

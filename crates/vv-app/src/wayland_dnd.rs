@@ -63,13 +63,13 @@ impl WaylandDnd {
         std::thread::Builder::new()
             .name("wayland-dnd".into())
             .spawn(move || {
-            loop {
-                if let Err(e) = queue.blocking_dispatch(&mut state) {
-                    eprintln!("wayland-dnd: {e}");
-                    return;
+                loop {
+                    if let Err(e) = queue.blocking_dispatch(&mut state) {
+                        eprintln!("wayland-dnd: {e}");
+                        return;
+                    }
                 }
-            }
-        })
+            })
             .ok()?;
         Some(Self { shared })
     }
@@ -80,10 +80,9 @@ impl WaylandDnd {
             raw_input.hovered_files.push(egui::HoveredFile::default());
         }
         raw_input.dropped_files.extend(
-            shared
-                .dropped
-                .drain(..)
-                .map(|path| Arc::new(DroppedPath(path)) as Arc<dyn egui::DroppedFile + Send + Sync>),
+            shared.dropped.drain(..).map(|path| {
+                Arc::new(DroppedPath(path)) as Arc<dyn egui::DroppedFile + Send + Sync>
+            }),
         );
     }
 }
@@ -116,7 +115,11 @@ impl State {
     }
 
     fn drag_offer(&self, device: &WlDataDevice) -> Option<DragOffer> {
-        self.devices.iter().find(|d| d.inner() == device)?.data().drag_offer()
+        self.devices
+            .iter()
+            .find(|d| d.inner() == device)?
+            .data()
+            .drag_offer()
     }
 
     fn set_hovering(&self, hovering: bool) {
@@ -174,7 +177,11 @@ impl DataDeviceHandler for State {
             offer.finish();
             offer.destroy();
             let _ = conn.flush();
-            shared.lock().unwrap().dropped.extend(parse_uri_list(&uri_list));
+            shared
+                .lock()
+                .unwrap()
+                .dropped
+                .extend(parse_uri_list(&uri_list));
             ctx.request_repaint();
         });
     }
@@ -233,7 +240,13 @@ impl SeatHandler for State {
         self.add_device(qh, &seat);
     }
     fn new_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat, _: Capability) {}
-    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat, _: Capability) {
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: WlSeat,
+        _: Capability,
+    ) {
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: WlSeat) {
         self.devices.retain(|d| d.data().seat() != &seat);

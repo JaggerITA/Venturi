@@ -44,7 +44,10 @@ impl Harness {
 
     fn frame(&mut self, events: Vec<egui::Event>) {
         let mut input = egui::RawInput::default();
-        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0)));
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 700.0),
+        ));
         input.time = Some(self.time);
         self.time += 1.0 / 60.0;
         input.events = events;
@@ -89,7 +92,9 @@ impl Harness {
         self.frame(vec![button(from, true)]);
         self.frame(vec![egui::Event::PointerMoved(picked_up)]);
         for step in 1..=5 {
-            self.frame(vec![egui::Event::PointerMoved(picked_up + delta * (step as f32 / 5.0))]);
+            self.frame(vec![egui::Event::PointerMoved(
+                picked_up + delta * (step as f32 / 5.0),
+            )]);
         }
         self.frame(vec![button(picked_up + delta, false)]);
         self.release_rects = self.state.clip_rects.clone();
@@ -97,7 +102,9 @@ impl Harness {
     }
 
     fn clip(&self, track_index: usize, id: ClipId) -> &Clip {
-        self.project.timelines[self.timeline_id].clip(track_index, id).unwrap()
+        self.project.timelines[self.timeline_id]
+            .clip(track_index, id)
+            .unwrap()
     }
 
     fn no_gesture(&self) -> bool {
@@ -106,7 +113,14 @@ impl Harness {
 }
 
 fn solid(id: u64, start: FrameIdx, len: FrameIdx) -> Clip {
-    Clip::from_source_range(ClipId(id), ClipSource::SolidColor, 0, len, start, Rational::one())
+    Clip::from_source_range(
+        ClipId(id),
+        ClipSource::SolidColor,
+        0,
+        len,
+        start,
+        Rational::one(),
+    )
 }
 
 fn track(kind: TrackKind, clips: Vec<Clip>) -> Track {
@@ -165,7 +179,13 @@ fn dragging_a_transition_handle_sets_its_duration() {
     let rect = h.rect(ClipId(1));
     let from = egui::pos2(rect.left() + 10.0 * PX_PER_FRAME, rect.bottom() - 5.0);
     h.drag(from, egui::vec2(20.0 * PX_PER_FRAME, 0.0));
-    let duration = h.clip(0, ClipId(1)).effects.transition_in.as_ref().unwrap().duration;
+    let duration = h
+        .clip(0, ClipId(1))
+        .effects
+        .transition_in
+        .as_ref()
+        .unwrap()
+        .duration;
     assert_eq!(duration, 30);
     assert!(h.no_gesture());
 }
@@ -204,11 +224,17 @@ fn dragging_the_volume_line_sets_the_gain_in_one_undo_step() {
 
 #[test]
 fn a_marquee_from_an_empty_area_selects_the_clips_it_touches() {
-    let mut h = Harness::new(vec![track(TrackKind::Video, vec![solid(1, 0, 40), solid(2, 60, 40)])]);
+    let mut h = Harness::new(vec![track(
+        TrackKind::Video,
+        vec![solid(1, 0, 40), solid(2, 60, 40)],
+    )]);
     let first = h.rect(ClipId(1));
     let second = h.rect(ClipId(2));
     let from = egui::pos2(second.right() + 30.0, second.center().y);
-    h.drag(from, egui::pos2(second.center().x, first.center().y + 1.0) - from);
+    h.drag(
+        from,
+        egui::pos2(second.center().x, first.center().y + 1.0) - from,
+    );
     assert_eq!(h.state.selected, BTreeSet::from([(0, ClipId(2))]));
     assert!(h.no_gesture());
 }
@@ -223,7 +249,10 @@ fn a_linked_clip_drawn_after_the_dragged_one_does_not_flash_back_on_release() {
     video.linked_group = group;
     let mut audio = solid(2, 0, 100);
     audio.linked_group = group;
-    let mut h = Harness::new(vec![track(TrackKind::Video, vec![video]), track(TrackKind::Audio, vec![audio])]);
+    let mut h = Harness::new(vec![
+        track(TrackKind::Video, vec![video]),
+        track(TrackKind::Audio, vec![audio]),
+    ]);
     let from = h.rect(ClipId(1)).center();
     h.drag(from, egui::vec2(50.0 * PX_PER_FRAME, 0.0));
     assert_eq!(h.clip(1, ClipId(2)).timeline_start, 50);

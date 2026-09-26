@@ -92,7 +92,6 @@ fn quadrant_frame() -> OwnedYuvFrame {
     }
 }
 
-
 /// Even for a "neutral" chroma (128), 128/255 is not exactly
 /// 0.5: a residue of a few levels in the 8 bits is expected
 /// quantization of the YUV→RGB matrix (the same residue appears
@@ -143,7 +142,11 @@ fn yuv_to_rgb_reference(y: u8, u: u8, v: u8, matrix: ColorMatrix, full_range: bo
 fn identity_transform_passes_through_solid_color() {
     let compositor = Compositor::new_headless();
     let input = solid_frame(8, 8, 128, 128, 128, ColorMatrix::Bt601, true);
-    let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(8, 8));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &Transform::default(),
+        OutputFrame::exact(8, 8),
+    );
 
     assert_eq!(out.len(), 8 * 8 * 4);
     // Neutral chroma (128) and full range: Y=128 maps to R=G=B=128 within
@@ -174,7 +177,11 @@ fn yuv_to_rgb_matches_the_reference_formula_across_matrices_and_ranges() {
 
     for (matrix, full_range) in cases {
         let input = solid_frame(2, 2, y, u, v, matrix, full_range);
-        let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(2, 2));
+        let out = compositor.render_frame(
+            &input.as_yuv_frame(),
+            &Transform::default(),
+            OutputFrame::exact(2, 2),
+        );
         let expected = yuv_to_rgb_reference(y, u, v, matrix, full_range);
         let got = &out[0..3];
         for i in 0..3 {
@@ -200,7 +207,11 @@ fn crop_cuts_without_moving_what_is_left() {
         position: [0.0, 0.0],
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -224,7 +235,11 @@ fn crop_to_bottom_right_quadrant_leaves_it_in_the_bottom_right() {
         position: [0.0, 0.0],
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -238,7 +253,11 @@ fn crop_to_bottom_right_quadrant_leaves_it_in_the_bottom_right() {
 fn taller_source_in_wider_output_gets_black_side_bars() {
     let compositor = Compositor::new_headless();
     let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
-    let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(32, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &Transform::default(),
+        OutputFrame::exact(32, 16),
+    );
 
     let pixel = |x: usize, y: usize| {
         let i = (y * 32 + x) * 4;
@@ -254,7 +273,11 @@ fn taller_source_in_wider_output_gets_black_side_bars() {
 fn matching_aspect_ratio_leaves_no_bars() {
     let compositor = Compositor::new_headless();
     let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
-    let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(16, 32));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &Transform::default(),
+        OutputFrame::exact(16, 32),
+    );
 
     for corner in [0usize, 15, 16 * 31, 16 * 32 - 1] {
         let i = corner * 4;
@@ -273,7 +296,11 @@ fn zoom_enlarges_the_clip_until_it_covers_the_whole_output_frame() {
     let compositor = Compositor::new_headless();
     let input = solid_frame(8, 16, 235, 128, 128, ColorMatrix::Bt709, false);
 
-    let bars = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(32, 16));
+    let bars = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &Transform::default(),
+        OutputFrame::exact(32, 16),
+    );
     assert_eq!(&bars[0..4], &[0, 0, 0, 255], "at zoom 1 the bars remain");
 
     let transform = Transform {
@@ -282,7 +309,11 @@ fn zoom_enlarges_the_clip_until_it_covers_the_whole_output_frame() {
         position: [0.0, 0.0],
         ..Transform::default()
     };
-    let zoomed = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(32, 16));
+    let zoomed = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(32, 16),
+    );
     for px in zoomed.as_chunks::<4>().0 {
         assert_close_rgba(*px, [255, 255, 255, 255]);
     }
@@ -301,7 +332,11 @@ fn position_moves_the_clip_inside_the_output_frame() {
         position: [8.0, 0.0], // half a frame to the right (output 16x16)
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -321,7 +356,11 @@ fn rotation_turns_the_clip_clockwise_around_its_center() {
         rotation: 90.0,
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -342,7 +381,11 @@ fn zoom_scales_around_the_anchor_point() {
         anchor: [-8.0, 8.0], // top-left corner of the clip (output 16x16)
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -396,7 +439,10 @@ fn crop_is_in_native_source_pixels_even_on_a_proxy_frame() {
     };
     let out = compositor.render_layers(
         &[Layer::new(
-            LayerContent::Video { frame: input.as_yuv_frame(), source_size: (1920, 1080) },
+            LayerContent::Video {
+                frame: input.as_yuv_frame(),
+                source_size: (1920, 1080),
+            },
             transform,
         )],
         OutputFrame::scaled(16, 16, (1920, 1080)),
@@ -419,7 +465,11 @@ fn a_positive_y_position_lifts_the_clip() {
         position: [0.0, 8.0], // half a frame up (output 16x16)
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -439,7 +489,11 @@ fn flip_mirrors_the_clip_on_each_axis() {
         flip: [true, false],
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let pixel = |x: usize, y: usize| {
         let i = (y * 16 + x) * 4;
         [out[i], out[i + 1], out[i + 2], out[i + 3]]
@@ -461,7 +515,11 @@ fn negative_crop_softness_fades_inward_from_the_edge() {
         crop_softness: -1.6,
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
 
     // Black clear below: the closer to the crop edge, the darker.
@@ -487,10 +545,17 @@ fn positive_crop_softness_fades_outward_past_the_edge() {
         crop_softness: 1.6,
         ..Transform::default()
     };
-    let out = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let luma = |x: usize, y: usize| out[(y * 16 + x) * 4] as i32;
 
-    assert!(luma(7, 8) > 200, "inside the crop it stays full up to the edge");
+    assert!(
+        luma(7, 8) > 200,
+        "inside the crop it stays full up to the edge"
+    );
     assert!(
         luma(8, 8) > 0 && luma(8, 8) < luma(7, 8),
         "just past the edge it fades instead of vanishing: {} {}",
@@ -555,7 +620,12 @@ fn a_solid_layer_covers_everything_below_it() {
         ],
         OutputFrame::exact(16, 16),
     );
-    assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[255, 0, 0, 255]));
+    assert!(
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| px == &[255, 0, 0, 255])
+    );
 }
 
 /// The black and white filter converts any kind of layer to luma,
@@ -576,7 +646,10 @@ fn grayscale_flattens_a_solid_layer_to_its_luma() {
     let pixel = out.as_chunks::<4>().0[0];
     assert_eq!(pixel[0], pixel[1], "grigio: R=G=B");
     assert_eq!(pixel[1], pixel[2]);
-    assert!(pixel[0] > 0 && pixel[0] < 255, "luma of red, neither black nor white");
+    assert!(
+        pixel[0] > 0 && pixel[0] < 255,
+        "luma of red, neither black nor white"
+    );
 }
 
 #[test]
@@ -594,7 +667,10 @@ fn a_text_layer_paints_its_color_only_where_the_glyphs_are() {
     );
     let pixels = out.as_chunks::<4>().0;
     assert_eq!(pixels[0], [0, 0, 0, 255], "outside the text it stays black");
-    assert!(pixels.iter().any(|px| px == &[255, 0, 0, 255]), "no text pixel");
+    assert!(
+        pixels.iter().any(|px| px == &[255, 0, 0, 255]),
+        "no text pixel"
+    );
 }
 
 #[test]
@@ -620,7 +696,10 @@ fn a_text_shadow_darkens_the_layer_below() {
         OutputFrame::exact(160, 90),
     );
     let pixels = out.as_chunks::<4>().0;
-    assert!(pixels.iter().any(|px| px == &[0, 0, 0, 255]), "no shadow pixel");
+    assert!(
+        pixels.iter().any(|px| px == &[0, 0, 0, 255]),
+        "no shadow pixel"
+    );
 }
 
 const BLUE: vv_core::Rgba = vv_core::Rgba {
@@ -660,7 +739,10 @@ fn a_texture_layer_composites_like_the_layers_it_was_made_of() {
         &[
             below(),
             Layer::new(
-                LayerContent::Texture { texture: &nested, source_size: (16, 16) },
+                LayerContent::Texture {
+                    texture: &nested,
+                    source_size: (16, 16),
+                },
                 Transform::default(),
             ),
         ],
@@ -698,7 +780,10 @@ fn a_semitransparent_texture_layer_is_not_faded_twice() {
         &[
             Layer::new(LayerContent::Solid(WHITE), Transform::default()),
             Layer::new(
-                LayerContent::Texture { texture: &nested, source_size: (8, 8) },
+                LayerContent::Texture {
+                    texture: &nested,
+                    source_size: (8, 8),
+                },
                 Transform::default(),
             ),
         ],
@@ -717,12 +802,18 @@ fn an_owned_texture_returns_to_the_pool_when_dropped() {
     let output = OutputFrame::exact(8, 8);
 
     let texture = compositor.render_layers_to_owned_texture_transparent(&[], output);
-    assert!(compositor.scratch.lock().unwrap().is_empty(), "in use, not in the pool");
+    assert!(
+        compositor.scratch.lock().unwrap().is_empty(),
+        "in use, not in the pool"
+    );
     drop(texture);
     assert_eq!(compositor.scratch.lock().unwrap().len(), 1);
 
     let _reused = compositor.render_layers_to_owned_texture_transparent(&[], output);
-    assert!(compositor.scratch.lock().unwrap().is_empty(), "taken from the pool, not allocated");
+    assert!(
+        compositor.scratch.lock().unwrap().is_empty(),
+        "taken from the pool, not allocated"
+    );
 }
 
 /// `render_layers_to_owned_texture_transparent` does not put the texture
@@ -740,7 +831,10 @@ fn an_owned_texture_is_not_recycled_by_the_next_render() {
         &[Layer::new(LayerContent::Solid(BLUE), Transform::default())],
         output,
     );
-    assert_eq!(read_back(&compositor, &nested, 8, 8).as_chunks::<4>().0[0], [255, 0, 0, 255]);
+    assert_eq!(
+        read_back(&compositor, &nested, 8, 8).as_chunks::<4>().0[0],
+        [255, 0, 0, 255]
+    );
 }
 
 const RED: vv_core::Rgba = vv_core::Rgba {
@@ -756,11 +850,14 @@ fn a_solid_layer_is_cropped_and_moved_like_a_video_layer() {
     // Crop in timeline pixels: right half cut, then moved
     // a quarter to the right.
     let out = compositor.render_layers(
-        &[Layer::new(LayerContent::Solid(RED), Transform {
+        &[Layer::new(
+            LayerContent::Solid(RED),
+            Transform {
                 crop: [0.0, 0.0, 8.0, 0.0],
                 position: [4.0, 0.0],
                 ..Transform::default()
-            })],
+            },
+        )],
         OutputFrame::scaled(8, 4, (16, 8)),
     );
     let px = |x: usize, y: usize| &out[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
@@ -795,7 +892,9 @@ fn layer_opacity_blends_with_what_is_below() {
         OutputFrame::exact(4, 4),
     );
     let px = |out: &[u8], x: usize, y: usize| -> [u8; 4] {
-        out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].try_into().unwrap()
+        out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4]
+            .try_into()
+            .unwrap()
     };
     assert_close_rgba(px(&out, 2, 2), [255, 127, 127, 255]); // 50% red over white = pink
 
@@ -839,9 +938,7 @@ fn render_layers_i420_packs_dense_planes_for_odd_sizes() {
 #[test]
 fn render_layers_i420_reuses_its_buffers_across_frames_and_sizes() {
     let compositor = Compositor::new_headless();
-    let solid = |color| {
-        [Layer::new(LayerContent::Solid(color), Transform::default())]
-    };
+    let solid = |color| [Layer::new(LayerContent::Solid(color), Transform::default())];
     let fresh = |color, w, h| {
         Compositor::new_headless().render_layers_i420(&solid(color), OutputFrame::exact(w, h))
     };
@@ -856,7 +953,12 @@ fn render_layers_i420_reuses_its_buffers_across_frames_and_sizes() {
 fn no_layers_renders_a_black_frame() {
     let compositor = Compositor::new_headless();
     let out = compositor.render_layers(&[], OutputFrame::exact(4, 4));
-    assert!(out.as_chunks::<4>().0.iter().all(|px| px == &[0, 0, 0, 255]));
+    assert!(
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| px == &[0, 0, 0, 255])
+    );
 }
 
 /// `render_layers_rgba_transparent` is what composes the nested
@@ -876,15 +978,26 @@ fn render_layers_rgba_transparent_leaves_uncovered_areas_transparent_not_black()
     let compositor = Compositor::new_headless();
     // Crop in timeline pixels: right half cut away.
     let out = compositor.render_layers_rgba_transparent(
-        &[Layer::new(LayerContent::Solid(RED), Transform {
+        &[Layer::new(
+            LayerContent::Solid(RED),
+            Transform {
                 crop: [0.0, 0.0, 8.0, 0.0],
                 ..Transform::default()
-            })],
+            },
+        )],
         OutputFrame::exact(16, 8),
     );
     let px = |x: usize, y: usize| &out[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4];
-    assert_eq!(px(2, 4), &[255, 0, 0, 255], "covered by the layer: opaque red");
-    assert_eq!(px(12, 4), &[0, 0, 0, 0], "uncovered: transparent, not black");
+    assert_eq!(
+        px(2, 4),
+        &[255, 0, 0, 255],
+        "covered by the layer: opaque red"
+    );
+    assert_eq!(
+        px(12, 4),
+        &[0, 0, 0, 0],
+        "uncovered: transparent, not black"
+    );
 }
 
 /// The mechanism by which an already composed compound clip comes back as a
@@ -897,11 +1010,16 @@ fn a_videos_own_alpha_plane_lets_the_layer_below_show_through() {
     let compositor = Compositor::new_headless();
     let frame = solid_frame(4, 4, 255, 128, 128, ColorMatrix::Bt709, true); // white
     // Left opaque, right transparent.
-    let alpha: Vec<u8> = (0..16u32).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
+    let alpha: Vec<u8> = (0..16u32)
+        .map(|i| if i % 4 < 2 { 255 } else { 0 })
+        .collect();
     let out = compositor.render_layers(
         &[Layer::new(
             LayerContent::Video {
-                frame: YuvFrame { alpha: &alpha, ..frame.as_yuv_frame() },
+                frame: YuvFrame {
+                    alpha: &alpha,
+                    ..frame.as_yuv_frame()
+                },
                 source_size: (4, 4),
             },
             Transform::default(),
@@ -909,8 +1027,16 @@ fn a_videos_own_alpha_plane_lets_the_layer_below_show_through() {
         OutputFrame::exact(4, 4),
     );
     let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
-    assert_eq!(px(0, 0), &[255, 255, 255, 255], "left: the video shows, opaque");
-    assert_eq!(px(3, 0), &[0, 0, 0, 255], "right: alpha 0 in the plane lets the black below show");
+    assert_eq!(
+        px(0, 0),
+        &[255, 255, 255, 255],
+        "left: the video shows, opaque"
+    );
+    assert_eq!(
+        px(3, 0),
+        &[0, 0, 0, 255],
+        "right: alpha 0 in the plane lets the black below show"
+    );
 }
 
 #[test]
@@ -924,7 +1050,11 @@ fn fit_output_size_wraps_the_source_in_the_requested_aspect() {
 fn output_size_can_differ_from_input_size() {
     let compositor = Compositor::new_headless();
     let input = solid_frame(4, 4, 1, 2, 3, ColorMatrix::Bt601, true);
-    let out = compositor.render_frame(&input.as_yuv_frame(), &Transform::default(), OutputFrame::exact(37, 21));
+    let out = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &Transform::default(),
+        OutputFrame::exact(37, 21),
+    );
     assert_eq!(out.len(), 37 * 21 * 4);
 }
 
@@ -1001,8 +1131,16 @@ fn render_frame_to_texture_produces_the_same_pixels_as_render_frame() {
         ..Transform::default()
     };
 
-    let via_readback = compositor.render_frame(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
-    let texture = compositor.render_frame_to_texture(&input.as_yuv_frame(), &transform, OutputFrame::exact(16, 16));
+    let via_readback = compositor.render_frame(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
+    let texture = compositor.render_frame_to_texture(
+        &input.as_yuv_frame(),
+        &transform,
+        OutputFrame::exact(16, 16),
+    );
     let via_texture = read_back(&compositor, &texture, 16, 16);
 
     assert_eq!(
@@ -1017,7 +1155,12 @@ fn render_frame_to_texture_produces_the_same_pixels_as_render_frame() {
 fn a_blend_mode_combines_the_layer_with_what_is_below() {
     let compositor = Compositor::new_headless();
     let output = OutputFrame::exact(8, 8);
-    let grey = vv_core::Rgba { r: 0.5, g: 0.5, b: 0.5, a: 1.0 };
+    let grey = vv_core::Rgba {
+        r: 0.5,
+        g: 0.5,
+        b: 0.5,
+        a: 1.0,
+    };
     let blended = |mode| {
         let out = compositor.render_layers(
             &[
@@ -1056,9 +1199,9 @@ fn a_blended_layer_leaves_the_backdrop_where_it_does_not_cover() {
                 content: LayerContent::Solid(WHITE),
                 // Away with the right half: the blue must remain there.
                 transform: Transform {
-                        crop: [0.0, 0.0, 8.0, 0.0],
-                        ..Transform::default()
-                    },
+                    crop: [0.0, 0.0, 8.0, 0.0],
+                    ..Transform::default()
+                },
                 opacity: 1.0,
                 filters: &[],
                 blend: BlendMode::Screen,

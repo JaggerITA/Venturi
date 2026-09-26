@@ -2,9 +2,9 @@
 //! needed to invert itself at the moment it is applied.
 
 use crate::model::{
-    Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack, FrameIdx, Interpolation, Keyframed,
-    LinkGroupId, MediaId, MediaItem, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track,
-    TrackKind, Transform, TransformParam, Transition,
+    Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack,
+    FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem, Project, Rational, Rgba,
+    Timeline, TimelineId, TitleParams, Track, TrackKind, Transform, TransformParam, Transition,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -320,7 +320,10 @@ impl Command for SetTrackFlag {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(track) = project.timelines[self.timeline].tracks.get_mut(self.track_index) else {
+        let Some(track) = project.timelines[self.timeline]
+            .tracks
+            .get_mut(self.track_index)
+        else {
             return;
         };
         let field = self.flag.field(track);
@@ -329,9 +332,12 @@ impl Command for SetTrackFlag {
     }
 
     fn undo(&self, project: &mut Project) {
-        let (Some(old), Some(track)) =
-            (self.old, project.timelines[self.timeline].tracks.get_mut(self.track_index))
-        else {
+        let (Some(old), Some(track)) = (
+            self.old,
+            project.timelines[self.timeline]
+                .tracks
+                .get_mut(self.track_index),
+        ) else {
             return;
         };
         *self.flag.field(track) = old;
@@ -395,7 +401,11 @@ pub struct SetClipsDisplayColor {
 }
 
 impl SetClipsDisplayColor {
-    pub fn new(timeline: TimelineId, clips: Vec<(usize, ClipId)>, color: Option<ClipColor>) -> Self {
+    pub fn new(
+        timeline: TimelineId,
+        clips: Vec<(usize, ClipId)>,
+        color: Option<ClipColor>,
+    ) -> Self {
         Self {
             timeline,
             clips,
@@ -499,7 +509,9 @@ impl Command for LiftDelete {
         if let Some(clip) = &self.removed {
             track.insert_sorted(clip.clone());
         }
-        track.crossings.extend(self.removed_crossings.iter().cloned());
+        track
+            .crossings
+            .extend(self.removed_crossings.iter().cloned());
     }
 }
 
@@ -618,8 +630,11 @@ impl Command for MoveClips {
     }
 
     fn undo(&self, project: &mut Project) {
-        for ((&(clip_id, from_track, to_track, _new_start), old_start), removed) in
-            self.moves.iter().zip(&self.old_starts).zip(&self.removed_crossings)
+        for ((&(clip_id, from_track, to_track, _new_start), old_start), removed) in self
+            .moves
+            .iter()
+            .zip(&self.old_starts)
+            .zip(&self.removed_crossings)
         {
             let Some(old_start) = old_start else {
                 continue;
@@ -630,7 +645,9 @@ impl Command for MoveClips {
             };
             clip.timeline_start = *old_start;
             tl.tracks[from_track].insert_sorted(clip);
-            tl.tracks[from_track].crossings.extend(removed.iter().cloned());
+            tl.tracks[from_track]
+                .crossings
+                .extend(removed.iter().cloned());
         }
     }
 }
@@ -699,7 +716,10 @@ impl Command for TrimClip {
                 clip.timeline_len = self.new_value - clip.timeline_start;
             }
         }
-        debug_assert!(clip.timeline_len >= 1 && clip.source_offset >= 0, "trim out of bounds");
+        debug_assert!(
+            clip.timeline_len >= 1 && clip.source_offset >= 0,
+            "trim out of bounds"
+        );
         resort(track);
     }
 
@@ -817,7 +837,9 @@ impl Command for UnlinkClip {
 
     fn apply(&mut self, project: &mut Project) {
         let tl = &mut project.timelines[self.timeline];
-        let Some(group) = tl.clip(self.track_index, self.clip_id).and_then(|c| c.linked_group)
+        let Some(group) = tl
+            .clip(self.track_index, self.clip_id)
+            .and_then(|c| c.linked_group)
         else {
             return;
         };
@@ -997,7 +1019,9 @@ impl Command for SplitClip {
         // otherwise the right one would interpolate from the left one's keyframes.
         self.original_effects = Some(clip.effects.clone());
         clip.effects.drop_keyframes_from(clip.source_out());
-        second_half.effects.drop_keyframes_before(second_half.source_in());
+        second_half
+            .effects
+            .drop_keyframes_before(second_half.source_in());
 
         track.insert_sorted(second_half);
 
@@ -1009,8 +1033,7 @@ impl Command for SplitClip {
     }
 
     fn undo(&self, project: &mut Project) {
-        let (Some(original_len), Some(new_clip_id)) = (self.original_len, self.new_clip_id)
-        else {
+        let (Some(original_len), Some(new_clip_id)) = (self.original_len, self.new_clip_id) else {
             return;
         };
         let track = &mut project.timelines[self.timeline].tracks[self.track_index];
@@ -1021,7 +1044,9 @@ impl Command for SplitClip {
                 clip.effects = effects.clone();
             }
         }
-        track.crossings.extend(self.removed_crossings.iter().cloned());
+        track
+            .crossings
+            .extend(self.removed_crossings.iter().cloned());
     }
 }
 
@@ -1073,7 +1098,9 @@ impl<T: Clone> Command for SetClipValue<T> {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        if let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) {
+        if let Some(clip) =
+            project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        {
             self.old = Some(std::mem::replace((self.access)(clip), self.value.clone()));
         }
     }
@@ -1101,8 +1128,19 @@ pub struct SetClipAttributes {
 }
 
 impl SetClipAttributes {
-    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, value: ClipAttributes) -> Self {
-        Self { timeline, track_index, clip_id, value, old: None }
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        clip_id: ClipId,
+        value: ClipAttributes,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            value,
+            old: None,
+        }
     }
 }
 
@@ -1112,7 +1150,9 @@ impl Command for SetClipAttributes {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        if let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) {
+        if let Some(clip) =
+            project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        {
             self.old = Some(ClipAttributes::of(clip));
             self.value.clone().apply_to(clip);
         }
@@ -1136,9 +1176,14 @@ pub fn set_clip_transform_param(
     param: TransformParam,
     value: f32,
 ) -> SetClipValue<f32> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Transform, value, move |c| {
-        &mut c.effects.transform.track_mut(param).default
-    })
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Transform,
+        value,
+        move |c| &mut c.effects.transform.track_mut(param).default,
+    )
 }
 
 pub fn set_clip_flip(
@@ -1147,7 +1192,14 @@ pub fn set_clip_flip(
     clip_id: ClipId,
     value: [bool; 2],
 ) -> SetClipValue<[bool; 2]> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Flip, value, |c| &mut c.effects.transform.flip)
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Flip,
+        value,
+        |c| &mut c.effects.transform.flip,
+    )
 }
 
 /// Static gain (dB).
@@ -1157,7 +1209,14 @@ pub fn set_clip_gain(
     clip_id: ClipId,
     value: f32,
 ) -> SetClipValue<f32> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Gain, value, |c| &mut c.effects.gain_db.default)
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Gain,
+        value,
+        |c| &mut c.effects.gain_db.default,
+    )
 }
 
 /// Gain at 0 dB, keyframes included.
@@ -1166,9 +1225,14 @@ pub fn reset_clip_gain(
     track_index: usize,
     clip_id: ClipId,
 ) -> SetClipValue<Keyframed<f32>> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::ResetGain, Keyframed::constant(0.0), |c| {
-        &mut c.effects.gain_db
-    })
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::ResetGain,
+        Keyframed::constant(0.0),
+        |c| &mut c.effects.gain_db,
+    )
 }
 
 pub fn set_clip_title(
@@ -1177,7 +1241,14 @@ pub fn set_clip_title(
     clip_id: ClipId,
     value: TitleParams,
 ) -> SetClipValue<Option<TitleParams>> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Title, Some(value), |c| &mut c.effects.title)
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Title,
+        Some(value),
+        |c| &mut c.effects.title,
+    )
 }
 
 /// Replaces the whole filter list, order included: adding one,
@@ -1189,9 +1260,14 @@ pub fn set_clip_filters(
     clip_id: ClipId,
     value: Vec<ClipFilter>,
 ) -> SetClipValue<Vec<ClipFilter>> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Filters, value, |c| {
-        &mut c.effects.filters
-    })
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Filters,
+        value,
+        |c| &mut c.effects.filters,
+    )
 }
 
 /// Compositing method of the clip's layer.
@@ -1201,9 +1277,14 @@ pub fn set_clip_blend_mode(
     clip_id: ClipId,
     value: crate::model::BlendMode,
 ) -> SetClipValue<crate::model::BlendMode> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::BlendMode, value, |c| {
-        &mut c.effects.blend_mode
-    })
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::BlendMode,
+        value,
+        |c| &mut c.effects.blend_mode,
+    )
 }
 
 /// Sets (or removes, with `None`) the transition of one edge of the clip.
@@ -1214,12 +1295,17 @@ pub fn set_clip_transition(
     edge: FadeEdge,
     value: Option<Transition>,
 ) -> SetClipValue<Option<Transition>> {
-    SetClipValue::new(timeline, track_index, clip_id, CommandLabel::Transition, value, move |c| {
-        match edge {
+    SetClipValue::new(
+        timeline,
+        track_index,
+        clip_id,
+        CommandLabel::Transition,
+        value,
+        move |c| match edge {
             FadeEdge::In => &mut c.effects.transition_in,
             FadeEdge::Out => &mut c.effects.transition_out,
-        }
-    })
+        },
+    )
 }
 
 /// Adds, replaces or removes (`value: None`) the crossing transition whose
@@ -1238,12 +1324,30 @@ pub struct SetCrossTransition {
 }
 
 impl SetCrossTransition {
-    pub fn new(timeline: TimelineId, track_index: usize, left_clip: ClipId, value: Option<CrossTransition>) -> Self {
-        Self { timeline, track_index, left_clip, value, old: None }
+    pub fn new(
+        timeline: TimelineId,
+        track_index: usize,
+        left_clip: ClipId,
+        value: Option<CrossTransition>,
+    ) -> Self {
+        Self {
+            timeline,
+            track_index,
+            left_clip,
+            value,
+            old: None,
+        }
     }
 
-    fn write(track: &mut Track, left_clip: ClipId, value: &Option<CrossTransition>) -> Option<CrossTransition> {
-        let pos = track.crossings.iter().position(|c| c.left_clip == left_clip);
+    fn write(
+        track: &mut Track,
+        left_clip: ClipId,
+        value: &Option<CrossTransition>,
+    ) -> Option<CrossTransition> {
+        let pos = track
+            .crossings
+            .iter()
+            .position(|c| c.left_clip == left_clip);
         let old = pos.map(|i| track.crossings[i].clone());
         match (pos, value) {
             (Some(i), Some(new)) => track.crossings[i] = new.clone(),
@@ -1315,7 +1419,8 @@ impl Command for ResetTransformParams {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         let defaults = Transform::default();
@@ -1337,7 +1442,8 @@ impl Command for ResetTransformParams {
         let Some((previous, flip)) = &self.previous else {
             return;
         };
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         for (param, track) in self.params.iter().zip(previous) {
@@ -1378,7 +1484,8 @@ impl Command for SetClipColor {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         self.old_value = Some(clip.effects.color.as_ref().map(|k| k.default));
@@ -1392,7 +1499,8 @@ impl Command for SetClipColor {
         let Some(old) = self.old_value else {
             return;
         };
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         match old {
@@ -1456,7 +1564,8 @@ impl Command for UpsertKeyframe {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         match self.value {
@@ -1490,7 +1599,8 @@ impl Command for UpsertKeyframe {
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         match &self.previous {
@@ -1510,7 +1620,10 @@ impl Command for UpsertKeyframe {
             }
             None => match self.value {
                 KeyframeValue::TransformParam(param, _) => {
-                    clip.effects.transform.track_mut(param).remove_at(self.frame);
+                    clip.effects
+                        .transform
+                        .track_mut(param)
+                        .remove_at(self.frame);
                 }
                 KeyframeValue::Gain(_) => {
                     clip.effects.gain_db.remove_at(self.frame);
@@ -1578,7 +1691,10 @@ fn put_keyframe(
 ) {
     match value {
         KeyframeValue::TransformParam(param, v) => {
-            effects.transform.track_mut(param).upsert(frame, v, interpolation)
+            effects
+                .transform
+                .track_mut(param)
+                .upsert(frame, v, interpolation)
         }
         KeyframeValue::Gain(v) => effects.gain_db.upsert(frame, v, interpolation),
         KeyframeValue::Color(v) => {
@@ -1649,7 +1765,8 @@ impl Command for MoveKeyframes {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         // First they are all removed, then put back down: otherwise a
@@ -1675,7 +1792,8 @@ impl Command for MoveKeyframes {
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         for &(target, frame, _, _) in &self.moved {
@@ -1726,7 +1844,8 @@ impl Command for SetKeyframeInterpolation {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         self.previous = self
@@ -1740,7 +1859,8 @@ impl Command for SetKeyframeInterpolation {
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         for &(target, frame, interp) in &self.previous {
@@ -1785,7 +1905,8 @@ impl Command for RemoveKeyframe {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         self.removed = match self.target {
@@ -1813,7 +1934,8 @@ impl Command for RemoveKeyframe {
         let Some((value, interp)) = self.removed else {
             return;
         };
-        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id) else {
+        let Some(clip) = project.timelines[self.timeline].clip_mut(self.track_index, self.clip_id)
+        else {
             return;
         };
         match value {
@@ -1961,11 +2083,7 @@ fn resolve_overlap(
     commands: &mut Vec<Box<dyn Command>>,
 ) -> Option<ClipId> {
     if old_start >= new_start && old_end <= new_end {
-        commands.push(Box::new(LiftDelete::new(
-            timeline_id,
-            track_index,
-            clip_id,
-        )));
+        commands.push(Box::new(LiftDelete::new(timeline_id, track_index, clip_id)));
         None
     } else if old_start < new_start && old_end > new_end {
         // The new interval falls in the middle: splits the clip in two,
@@ -1973,8 +2091,7 @@ fn resolve_overlap(
         // `new_end`.
         let right_id = project.alloc_clip_id();
         commands.push(Box::new(
-            SplitClip::new(timeline_id, track_index, clip_id, new_start)
-                .with_new_clip_id(right_id),
+            SplitClip::new(timeline_id, track_index, clip_id, new_start).with_new_clip_id(right_id),
         ));
         commands.push(Box::new(TrimClip::new(
             timeline_id,
@@ -2027,37 +2144,25 @@ pub fn make_room_for_ranges(
         if new_start >= new_end {
             continue;
         }
-        type Overlapping = (
-            ClipId,
-            FrameIdx,
-            FrameIdx,
-            Option<LinkGroupId>,
-        );
-        let overlapping: Vec<Overlapping> =
-            project.timelines[timeline_id]
-                .tracks
-                .get(track_index)
-                .map(|t| {
-                    t.clips
-                        .iter()
-                        .filter(|c| c.timeline_start < new_end && c.timeline_end() > new_start)
-                        .map(|c| {
-                            (
-                                c.id,
-                                c.timeline_start,
-                                c.timeline_end(),
-                                c.linked_group,
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+        type Overlapping = (ClipId, FrameIdx, FrameIdx, Option<LinkGroupId>);
+        let overlapping: Vec<Overlapping> = project.timelines[timeline_id]
+            .tracks
+            .get(track_index)
+            .map(|t| {
+                t.clips
+                    .iter()
+                    .filter(|c| c.timeline_start < new_end && c.timeline_end() > new_start)
+                    .map(|c| (c.id, c.timeline_start, c.timeline_end(), c.linked_group))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         for (clip_id, old_start, old_end, group) in overlapping {
             if !processed.insert((track_index, clip_id)) {
                 continue;
             }
-            let split_halves = resolve_overlap(project, 
+            let split_halves = resolve_overlap(
+                project,
                 timeline_id,
                 track_index,
                 clip_id,
@@ -2071,10 +2176,14 @@ pub fn make_room_for_ranges(
             if group.is_none() {
                 continue;
             }
-            let mut new_rights: Vec<(usize, ClipId)> =
-                split_halves.map(|right| (track_index, right)).into_iter().collect();
+            let mut new_rights: Vec<(usize, ClipId)> = split_halves
+                .map(|right| (track_index, right))
+                .into_iter()
+                .collect();
 
-            for (member_track, member_id) in project.timelines[timeline_id].linked_members(track_index, clip_id) {
+            for (member_track, member_id) in
+                project.timelines[timeline_id].linked_members(track_index, clip_id)
+            {
                 if !range_tracks.contains(&member_track)
                     || !processed.insert((member_track, member_id))
                 {
@@ -2085,7 +2194,8 @@ pub fn make_room_for_ranges(
                 else {
                     continue;
                 };
-                let member_split = resolve_overlap(project, 
+                let member_split = resolve_overlap(
+                    project,
                     timeline_id,
                     member_track,
                     member_id,
@@ -2106,7 +2216,6 @@ pub fn make_room_for_ranges(
         }
     }
 }
-
 
 /// Commands inserting `clips` (track, clip, group) overwriting
 /// what is underneath; the clips with the same group key end up in
@@ -2171,9 +2280,7 @@ pub fn cut_overlaps(
                 // overlap anything, or it is the one fully covered.
                 if clips[i + 1..]
                     .iter()
-                    .any(|&(_, other_start, other_end)| {
-                        other_start <= start && other_end >= end
-                    })
+                    .any(|&(_, other_start, other_end)| other_start <= start && other_end >= end)
                 {
                     commands.push(Box::new(LiftDelete::new(timeline_id, track_index, clip_id)));
                 }
@@ -2223,7 +2330,10 @@ pub fn plan_compound_clip(
     let mut originals: Vec<(usize, Clip)> = clips
         .iter()
         .filter_map(|&(track_index, id)| {
-            Some((track_index, timeline.tracks.get(track_index)?.clip(id)?.clone()))
+            Some((
+                track_index,
+                timeline.tracks.get(track_index)?.clip(id)?.clone(),
+            ))
         })
         .collect();
     if originals.is_empty() {
@@ -2234,7 +2344,10 @@ pub fn plan_compound_clip(
     let range_start = originals.iter().map(|(_, c)| c.timeline_start).min()?;
     let range_end = originals.iter().map(|(_, c)| c.timeline_end()).max()?;
 
-    let mut distinct: Vec<usize> = originals.iter().map(|(track_index, _)| *track_index).collect();
+    let mut distinct: Vec<usize> = originals
+        .iter()
+        .map(|(track_index, _)| *track_index)
+        .collect();
     distinct.sort_unstable();
     distinct.dedup();
 
@@ -2309,18 +2422,23 @@ pub fn compound_clip_commands(
         .collect();
 
     let mut new_members = Vec::new();
-    let mut push_clip = |project: &mut Project, track_index: usize, commands: &mut Vec<Box<dyn Command>>| {
-        let clip = Clip::from_source_range(
-            project.alloc_clip_id(),
-            ClipSource::Media(media_id),
-            0,
-            plan.len,
-            plan.range_start,
-            Rational::one(),
-        );
-        new_members.push((track_index, clip.id));
-        commands.push(Box::new(InsertClip { timeline: timeline_id, track_index, clip }));
-    };
+    let mut push_clip =
+        |project: &mut Project, track_index: usize, commands: &mut Vec<Box<dyn Command>>| {
+            let clip = Clip::from_source_range(
+                project.alloc_clip_id(),
+                ClipSource::Media(media_id),
+                0,
+                plan.len,
+                plan.range_start,
+                Rational::one(),
+            );
+            new_members.push((track_index, clip.id));
+            commands.push(Box::new(InsertClip {
+                timeline: timeline_id,
+                track_index,
+                clip,
+            }));
+        };
     if let Some(track_index) = plan.video_track.filter(|_| plan.has_video) {
         push_clip(project, track_index, &mut commands);
     }
@@ -2332,4 +2450,3 @@ pub fn compound_clip_commands(
     }
     commands
 }
-

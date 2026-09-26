@@ -14,7 +14,11 @@ fn duplicating_a_timeline_twice_numbers_the_copies() {
     let mut app = VenturiApp::default();
     let timeline_id = app.ensure_timeline();
     let source = timeline_item(&app, timeline_id);
-    let base = format!("{} {}", file_label(&app.project.media_pool[source].path), t!("pool.copy_suffix"));
+    let base = format!(
+        "{} {}",
+        file_label(&app.project.media_pool[source].path),
+        t!("pool.copy_suffix")
+    );
 
     app.duplicate_timeline(source);
     app.duplicate_timeline(source);

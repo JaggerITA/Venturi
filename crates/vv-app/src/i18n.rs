@@ -49,7 +49,10 @@ fn system_locale() -> String {
     sys_locale::get_locale()
         .and_then(|locale| {
             let lang = locale.split(['-', '_']).next()?.to_lowercase();
-            rust_i18n::available_locales!().iter().any(|l| *l == lang).then_some(lang)
+            rust_i18n::available_locales!()
+                .iter()
+                .any(|l| *l == lang)
+                .then_some(lang)
         })
         .unwrap_or_else(|| "en".to_owned())
 }

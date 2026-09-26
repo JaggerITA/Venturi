@@ -22,7 +22,9 @@ fn decode_audio_track_handles_unspecified_channel_layout() {
         &path,
     );
 
-    let audio = decode_audio_track(&path, 0).unwrap().expect("audio expected");
+    let audio = decode_audio_track(&path, 0)
+        .unwrap()
+        .expect("audio expected");
     assert_eq!(audio.channels, 2);
     assert_eq!(audio.samples.len(), 48_000 * 2);
 }
@@ -45,7 +47,9 @@ fn decode_audio_track_reads_correct_length_and_is_not_silent() {
         &path,
     );
 
-    let audio = decode_audio_track(&path, 0).unwrap().expect("audio expected");
+    let audio = decode_audio_track(&path, 0)
+        .unwrap()
+        .expect("audio expected");
     assert_eq!(audio.sample_rate, 48000);
     assert_eq!(audio.channels, 1);
 
@@ -78,18 +82,26 @@ fn streaming_decode_resamples_continuously_in_many_chunks() {
 
     let mut chunks = 0;
     let mut samples = Vec::new();
-    let formats = decode_audio_streams_streaming(&path, &[0], Some(48_000), |_, channels, chunk| {
-        assert_eq!(channels, 1);
-        chunks += 1;
-        samples.extend_from_slice(chunk);
-        ControlFlow::Continue(())
-    })
-    .unwrap();
+    let formats =
+        decode_audio_streams_streaming(&path, &[0], Some(48_000), |_, channels, chunk| {
+            assert_eq!(channels, 1);
+            chunks += 1;
+            samples.extend_from_slice(chunk);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
     assert_eq!(formats, vec![Some((48_000, 1))]);
     assert!(chunks > 1, "chunks={chunks}");
-    assert!((samples.len() as i64 - 96_000).abs() < 100, "len={}", samples.len());
+    assert!(
+        (samples.len() as i64 - 96_000).abs() < 100,
+        "len={}",
+        samples.len()
+    );
     // A continuous sine: no jumps between samples near the chunk boundaries.
-    let max_step = samples.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+    let max_step = samples
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max);
     assert!(max_step < 0.1, "max_step={max_step}");
 }
 
@@ -150,20 +162,32 @@ fn streaming_decode_delivers_every_requested_stream_in_one_pass() {
 
     let mut order = Vec::new();
     let mut lengths = [0usize; 3];
-    let formats = decode_audio_streams_streaming(&path, &[2, 0, 5, 1], Some(48_000), |slot, _, chunk| {
-        order.push(slot);
-        let i = [0, 1, usize::MAX, 2][slot];
-        lengths[i] += chunk.len();
-        ControlFlow::Continue(())
-    })
-    .unwrap();
-    assert_eq!(formats, vec![Some((48_000, 1)), Some((48_000, 1)), None, Some((48_000, 1))]);
+    let formats =
+        decode_audio_streams_streaming(&path, &[2, 0, 5, 1], Some(48_000), |slot, _, chunk| {
+            order.push(slot);
+            let i = [0, 1, usize::MAX, 2][slot];
+            lengths[i] += chunk.len();
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert_eq!(
+        formats,
+        vec![
+            Some((48_000, 1)),
+            Some((48_000, 1)),
+            None,
+            Some((48_000, 1))
+        ]
+    );
     for len in lengths {
         assert!((len as i64 - 144_000).abs() < 3_000, "{lengths:?}");
     }
     // Interleaved: the first chunk of each stream arrives well before the end.
     let first_of = |slot| order.iter().position(|&s| s == slot).unwrap();
-    assert!([0, 1, 3].iter().all(|&s| first_of(s) < order.len() / 4), "{order:?}");
+    assert!(
+        [0, 1, 3].iter().all(|&s| first_of(s) < order.len() / 4),
+        "{order:?}"
+    );
 }
 
 /// A file with *two* audio streams (real case: stereo mix + separate
@@ -197,10 +221,14 @@ fn decode_audio_track_selects_the_requested_stream_index_not_just_the_best() {
         &path,
     );
 
-    let first = decode_audio_track(&path, 0).unwrap().expect("stream 0 expected");
+    let first = decode_audio_track(&path, 0)
+        .unwrap()
+        .expect("stream 0 expected");
     assert_eq!(first.sample_rate, 44100);
 
-    let second = decode_audio_track(&path, 1).unwrap().expect("stream 1 expected");
+    let second = decode_audio_track(&path, 1)
+        .unwrap()
+        .expect("stream 1 expected");
     assert_eq!(second.sample_rate, 48000);
 
     assert!(

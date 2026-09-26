@@ -35,9 +35,16 @@ const CURVE_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 150, 230);
 enum Drag {
     /// Moving the selection in time. `applied` is the delta already sent
     /// to the history: each frame only the difference is sent.
-    Time { origin_frame: FrameIdx, applied: FrameIdx },
+    Time {
+        origin_frame: FrameIdx,
+        applied: FrameIdx,
+    },
     /// Point of the curve: time as above, plus the value.
-    Point { pick: KeyframePick, origin_frame: FrameIdx, applied: FrameIdx },
+    Point {
+        pick: KeyframePick,
+        origin_frame: FrameIdx,
+        applied: FrameIdx,
+    },
     /// Handle of a bezier: `outgoing` tells the one of the segment's start
     /// keyframe from the one of its end keyframe.
     Handle { pick: KeyframePick, outgoing: bool },
@@ -81,7 +88,11 @@ impl KeyframeEditorState {
             .into_iter()
             .map(|(target, frame)| {
                 Box::new(vv_core::RemoveKeyframe::new(
-                    timeline, track_index, clip_id, target, frame,
+                    timeline,
+                    track_index,
+                    clip_id,
+                    target,
+                    frame,
                 )) as BoxedCommand
             })
             .collect()
@@ -120,9 +131,13 @@ fn rows(effects: &EffectStack) -> Vec<KeyframeTarget> {
 /// The frames of the keyframes of a row.
 fn frames_of(effects: &EffectStack, target: KeyframeTarget) -> Vec<FrameIdx> {
     match target {
-        KeyframeTarget::TransformParam(p) => {
-            effects.transform.track(p).keyframes().iter().map(|k| k.0).collect()
-        }
+        KeyframeTarget::TransformParam(p) => effects
+            .transform
+            .track(p)
+            .keyframes()
+            .iter()
+            .map(|k| k.0)
+            .collect(),
         KeyframeTarget::Gain => effects.gain_db.keyframes().iter().map(|k| k.0).collect(),
         KeyframeTarget::Color => effects
             .color
@@ -277,7 +292,10 @@ pub(crate) fn show_keyframe_editor(
     // together, otherwise the editor would break the constraint.
     zoom_link: bool,
 ) -> KeyframeEditorResponse {
-    let mut response = KeyframeEditorResponse { commands: Vec::new(), playhead: None };
+    let mut response = KeyframeEditorResponse {
+        commands: Vec::new(),
+        playhead: None,
+    };
     let mut window_open = *open;
     let window = egui::Window::new(t!("keyframes.title"))
         .id(egui::Id::new("keyframe_editor"))
@@ -302,11 +320,17 @@ pub(crate) fn show_keyframe_editor(
             if !state.row.is_some_and(|r| rows.contains(&r)) {
                 state.row = Some(rows[0]);
             }
-            state.selection.retain(|(t, f)| {
-                rows.contains(t) && frames_of(&clip.effects, *t).contains(f)
-            });
+            state
+                .selection
+                .retain(|(t, f)| rows.contains(t) && frames_of(&clip.effects, *t).contains(f));
 
-            show_toolbar(ui, state, zoom_link, (timeline, track_index, clip_id), &mut response);
+            show_toolbar(
+                ui,
+                state,
+                zoom_link,
+                (timeline, track_index, clip_id),
+                &mut response,
+            );
             ui.separator();
 
             let axis_rect = |rect: egui::Rect| rect.with_min_x(rect.left() + LABEL_WIDTH);
@@ -346,34 +370,42 @@ pub(crate) fn show_keyframe_editor(
                 .0;
             let axis = TimeAxis::new(axis_rect(ruler), view);
             draw_ruler(ui, ruler, axis, clip, project, timeline, head);
-            let ruler_response =
-                ui.interact(axis_rect(ruler), ui.id().with("kf_ruler"), egui::Sense::click_and_drag());
+            let ruler_response = ui.interact(
+                axis_rect(ruler),
+                ui.id().with("kf_ruler"),
+                egui::Sense::click_and_drag(),
+            );
             if let Some(pos) = ruler_response.interact_pointer_pos() {
                 response.playhead = Some(clip.timeline_frame_at(
                     axis.frame(pos.x).clamp(clip.source_in(), clip.source_out()),
                 ));
             }
 
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                draw_rows(
-                    ui,
-                    state,
-                    clip,
-                    (timeline, track_index, clip_id),
-                    &rows,
-                    view,
-                    head,
-                    zoom_link,
-                    &mut response,
-                );
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_rows(
+                        ui,
+                        state,
+                        clip,
+                        (timeline, track_index, clip_id),
+                        &rows,
+                        view,
+                        head,
+                        zoom_link,
+                        &mut response,
+                    );
+                });
         });
     *open = window_open;
     // Whoever got the last click decides who takes Del, as between
     // media pool and timeline.
-    if let Some(pos) =
-        ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
-    {
+    if let Some(pos) = ctx.input(|i| {
+        i.pointer
+            .any_pressed()
+            .then(|| i.pointer.interact_pos())
+            .flatten()
+    }) {
         state.focused = *open && window.is_some_and(|w| w.response.rect.contains(pos));
     }
     response
@@ -407,9 +439,7 @@ fn handle_zoom(
     let first = anchor
         - ((anchor - axis.first) as f32 * span as f32 / axis.span as f32).round() as FrameIdx
         - axis.delta(pan);
-    state.view = (span < full.1).then(|| {
-        (first.clamp(full.0, full.0 + full.1 - span), span)
-    });
+    state.view = (span < full.1).then(|| (first.clamp(full.0, full.0 + full.1 - span), span));
 }
 
 /// With zoom locked to proportions, X and Y are twins: whatever is done
@@ -449,9 +479,11 @@ fn show_toolbar(
                 if ui.button(preset_label(preset)).clicked() {
                     let picks =
                         with_zoom_link(state.selection.iter().copied().collect(), zoom_link);
-                    response.commands.push(Box::new(vv_core::SetKeyframeInterpolation::new(
-                        clip.0, clip.1, clip.2, picks, preset,
-                    )));
+                    response
+                        .commands
+                        .push(Box::new(vv_core::SetKeyframeInterpolation::new(
+                            clip.0, clip.1, clip.2, picks, preset,
+                        )));
                 }
             }
         });
@@ -484,13 +516,19 @@ fn draw_ruler(
         if frame >= axis.first {
             let x = axis.x(frame);
             painter.line_segment(
-                [egui::pos2(x, rect.bottom() - 5.0), egui::pos2(x, rect.bottom())],
+                [
+                    egui::pos2(x, rect.bottom() - 5.0),
+                    egui::pos2(x, rect.bottom()),
+                ],
                 egui::Stroke::new(1.0, visuals.weak_text_color()),
             );
             painter.text(
                 egui::pos2(x + 3.0, rect.top()),
                 egui::Align2::LEFT_TOP,
-                crate::timeline_ui::format_timecode(clip.timeline_frame_at(frame) as f64 / fps, fps),
+                crate::timeline_ui::format_timecode(
+                    clip.timeline_frame_at(frame) as f64 / fps,
+                    fps,
+                ),
                 egui::FontId::proportional(10.0),
                 visuals.weak_text_color(),
             );
@@ -509,7 +547,10 @@ fn round_step(minimum: FrameIdx) -> FrameIdx {
     let mut step = 1;
     while step < minimum {
         let digits = [1, 2, 5];
-        let next = digits.iter().map(|d| d * step).find(|s| *s > step && *s >= minimum);
+        let next = digits
+            .iter()
+            .map(|d| d * step)
+            .find(|s| *s > step && *s >= minimum);
         step = next.unwrap_or(step * 10);
     }
     step
@@ -589,11 +630,17 @@ fn draw_curve(
         }
         x += 1.0;
     }
-    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, CURVE_COLOR)));
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.5, CURVE_COLOR),
+    ));
 
     let head_x = axis.x(head);
     painter.line_segment(
-        [egui::pos2(head_x, plot.top()), egui::pos2(head_x, plot.bottom())],
+        [
+            egui::pos2(head_x, plot.top()),
+            egui::pos2(head_x, plot.bottom()),
+        ],
         egui::Stroke::new(1.0, PLAYHEAD_COLOR),
     );
 
@@ -633,31 +680,56 @@ fn draw_curve(
             continue;
         };
         let control = |c: [f32; 2]| {
-            egui::pos2(from.x + (to.x - from.x) * c[0], from.y + (to.y - from.y) * c[1])
+            egui::pos2(
+                from.x + (to.x - from.x) * c[0],
+                from.y + (to.y - from.y) * c[1],
+            )
         };
         for (outgoing, pos) in [(true, control(c1)), (false, control(c2))] {
             let anchor = if outgoing { from } else { to };
-            painter.line_segment([anchor, pos], egui::Stroke::new(1.0, visuals.weak_text_color()));
+            painter.line_segment(
+                [anchor, pos],
+                egui::Stroke::new(1.0, visuals.weak_text_color()),
+            );
             painter.circle_filled(pos, HANDLE_RADIUS, visuals.weak_text_color());
             handles.push(((row, frame), outgoing, pos));
         }
     }
 
     for &frame in &frames {
-        let Some(pos) = point_pos(frame) else { continue };
+        let Some(pos) = point_pos(frame) else {
+            continue;
+        };
         let selected = state.selection.contains(&(row, frame));
         painter.circle(
             pos,
             POINT_RADIUS,
-            if selected { PLAYHEAD_COLOR } else { visuals.extreme_bg_color },
-            egui::Stroke::new(1.5, if selected { PLAYHEAD_COLOR } else { CURVE_COLOR }),
+            if selected {
+                PLAYHEAD_COLOR
+            } else {
+                visuals.extreme_bg_color
+            },
+            egui::Stroke::new(
+                1.5,
+                if selected {
+                    PLAYHEAD_COLOR
+                } else {
+                    CURVE_COLOR
+                },
+            ),
         );
     }
 
-    let interaction = ui.interact(plot, ui.id().with("kf_curve"), egui::Sense::click_and_drag());
+    let interaction = ui.interact(
+        plot,
+        ui.id().with("kf_curve"),
+        egui::Sense::click_and_drag(),
+    );
     let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
 
-    if interaction.drag_started() && let Some(pos) = interaction.interact_pointer_pos() {
+    if interaction.drag_started()
+        && let Some(pos) = interaction.interact_pointer_pos()
+    {
         let handle = handles
             .iter()
             .filter(|(_, _, p)| p.distance(pos) <= HANDLE_PICK_RADIUS)
@@ -692,7 +764,9 @@ fn draw_curve(
         };
     }
 
-    if interaction.dragged() && let Some(pos) = interaction.interact_pointer_pos() {
+    if interaction.dragged()
+        && let Some(pos) = interaction.interact_pointer_pos()
+    {
         match state.drag {
             Some(Drag::Handle { pick, outgoing }) => {
                 let next = frames.iter().find(|f| **f > pick.1).copied();
@@ -717,17 +791,27 @@ fn draw_curve(
                     } else {
                         c2[1]
                     };
-                    let (c1, c2) = if outgoing { ([nx, ny], c2) } else { (c1, [nx, ny]) };
-                    response.commands.push(Box::new(vv_core::SetKeyframeInterpolation::new(
-                        clip_ref.0,
-                        clip_ref.1,
-                        clip_ref.2,
-                        with_zoom_link(vec![pick], zoom_link),
-                        Interpolation::Bezier { c1, c2 },
-                    )));
+                    let (c1, c2) = if outgoing {
+                        ([nx, ny], c2)
+                    } else {
+                        (c1, [nx, ny])
+                    };
+                    response
+                        .commands
+                        .push(Box::new(vv_core::SetKeyframeInterpolation::new(
+                            clip_ref.0,
+                            clip_ref.1,
+                            clip_ref.2,
+                            with_zoom_link(vec![pick], zoom_link),
+                            Interpolation::Bezier { c1, c2 },
+                        )));
                 }
             }
-            Some(Drag::Point { pick, origin_frame, applied }) => {
+            Some(Drag::Point {
+                pick,
+                origin_frame,
+                applied,
+            }) => {
                 let wanted = axis.frame(pos.x) - origin_frame;
                 let step = wanted - applied;
                 let (tl, track, id) = clip_ref;
@@ -762,14 +846,16 @@ fn draw_curve(
                         if scalar_at(&clip.effects, target, pick.1).is_none() {
                             continue;
                         }
-                        response.commands.push(Box::new(vv_core::UpsertKeyframe::new(
-                            tl,
-                            track,
-                            id,
-                            frame,
-                            keyframe_value(target, value),
-                            interp,
-                        )));
+                        response
+                            .commands
+                            .push(Box::new(vv_core::UpsertKeyframe::new(
+                                tl,
+                                track,
+                                id,
+                                frame,
+                                keyframe_value(target, value),
+                                interp,
+                            )));
                     }
                 }
             }
@@ -842,7 +928,11 @@ fn draw_rows(
         )
     };
     let diamond = |pos: egui::Pos2, selected: bool| {
-        let color = if selected { PLAYHEAD_COLOR } else { visuals.weak_text_color() };
+        let color = if selected {
+            PLAYHEAD_COLOR
+        } else {
+            visuals.weak_text_color()
+        };
         egui::Shape::convex_polygon(
             vec![
                 egui::pos2(pos.x, pos.y - 5.0),
@@ -887,7 +977,10 @@ fn draw_rows(
 
     let head_x = axis.x(head);
     painter.line_segment(
-        [egui::pos2(head_x, rect.top()), egui::pos2(head_x, rect.bottom())],
+        [
+            egui::pos2(head_x, rect.top()),
+            egui::pos2(head_x, rect.bottom()),
+        ],
         egui::Stroke::new(1.0, PLAYHEAD_COLOR),
     );
 
@@ -907,8 +1000,12 @@ fn draw_rows(
             .map(|(f, _)| (row, f))
     };
 
-    if interaction.drag_started() && let Some(pos) = interaction.interact_pointer_pos() {
-        if pos.x < track_rect.left() && let Some(row) = row_at(pos) {
+    if interaction.drag_started()
+        && let Some(pos) = interaction.interact_pointer_pos()
+    {
+        if pos.x < track_rect.left()
+            && let Some(row) = row_at(pos)
+        {
             state.row = Some(row);
         } else if let Some(pick) = hit(pos) {
             state.row = Some(pick.0);
@@ -916,7 +1013,10 @@ fn draw_rows(
                 state.selection.clear();
             }
             state.selection.insert(pick);
-            state.drag = Some(Drag::Time { origin_frame: axis.frame(pos.x), applied: 0 });
+            state.drag = Some(Drag::Time {
+                origin_frame: axis.frame(pos.x),
+                applied: 0,
+            });
         } else {
             if !additive {
                 state.selection.clear();
@@ -927,7 +1027,10 @@ fn draw_rows(
 
     if interaction.dragged()
         && let Some(pos) = interaction.interact_pointer_pos()
-        && let Some(Drag::Time { origin_frame, applied }) = state.drag
+        && let Some(Drag::Time {
+            origin_frame,
+            applied,
+        }) = state.drag
     {
         let wanted = axis.frame(pos.x) - origin_frame;
         let step = wanted - applied;
@@ -936,8 +1039,15 @@ fn draw_rows(
             response.commands.push(Box::new(vv_core::MoveKeyframes::new(
                 clip_ref.0, clip_ref.1, clip_ref.2, picks, step,
             )));
-            state.selection = state.selection.iter().map(|(t, f)| (*t, f + step)).collect();
-            state.drag = Some(Drag::Time { origin_frame, applied: wanted });
+            state.selection = state
+                .selection
+                .iter()
+                .map(|(t, f)| (*t, f + step))
+                .collect();
+            state.drag = Some(Drag::Time {
+                origin_frame,
+                applied: wanted,
+            });
         }
     }
 
@@ -964,8 +1074,12 @@ fn draw_rows(
         }
     }
 
-    if interaction.clicked() && let Some(pos) = interaction.interact_pointer_pos() {
-        if pos.x < track_rect.left() && let Some(row) = row_at(pos) {
+    if interaction.clicked()
+        && let Some(pos) = interaction.interact_pointer_pos()
+    {
+        if pos.x < track_rect.left()
+            && let Some(row) = row_at(pos)
+        {
             state.row = Some(row);
         } else if let Some(pick) = hit(pos) {
             state.row = Some(pick.0);

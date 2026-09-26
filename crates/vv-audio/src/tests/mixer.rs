@@ -1,8 +1,6 @@
 use super::*;
 use std::path::PathBuf;
-use vv_core::{
-    Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track, TrackKind,
-};
+use vv_core::{Clip, ClipId, Interpolation, MediaItem, MediaMeta, Rational, Track, TrackKind};
 
 const RATE: u32 = 100;
 
@@ -239,7 +237,11 @@ fn a_compound_used_twice_is_mixed_once() {
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
     assert_eq!(snap.clips.len(), 2);
     assert_eq!(source.stored, [compound]);
-    assert_eq!(source.files_asked.len(), 1, "the second use comes from the cache");
+    assert_eq!(
+        source.files_asked.len(),
+        1,
+        "the second use comes from the cache"
+    );
 }
 
 /// A mixdown built on a file still decoding plays, but caching it would
@@ -323,17 +325,24 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
         compound: None,
     });
     let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
-    let clip =
-        Clip::from_source_range(ClipId(0), ClipSource::Media(media), 0, SOURCE_FRAMES, 0, rate);
+    let clip = Clip::from_source_range(
+        ClipId(0),
+        ClipSource::Media(media),
+        0,
+        SOURCE_FRAMES,
+        0,
+        rate,
+    );
     assert_eq!(clip.timeline_len, 1001, "100,1 s a 10 fps");
     let tl = timeline(vec![audio_track(vec![clip])]);
 
     let buffer: Arc<Vec<f32>> =
         Arc::new((0..AUDIO_SAMPLES).map(|i| i as f32 / 100_000.0).collect());
-    let buffer_for = |path: &Path, _stream: usize| {
-        (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
-    };
-    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |p: &Path, s: usize| buffer_for(p, s));
+    let buffer_for =
+        |path: &Path, _stream: usize| (path.to_str() == Some("slow.wav")).then(|| buffer.clone());
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |p: &Path, s: usize| {
+        buffer_for(p, s)
+    });
     assert_eq!(snap.clips.len(), 1);
     assert_eq!(
         snap.clips[0].len, AUDIO_SAMPLES as u64,
@@ -346,7 +355,10 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
     mix_range(&snap, AUDIO_SAMPLES as u64 - 10, &mut out);
     for (i, s) in out.iter().enumerate() {
         let expected = (AUDIO_SAMPLES - 10 + i) as f32 / 100_000.0;
-        assert!((s - expected).abs() < 1e-6, "campione {i}: {s} != {expected}");
+        assert!(
+            (s - expected).abs() < 1e-6,
+            "campione {i}: {s} != {expected}"
+        );
     }
 }
 
@@ -373,16 +385,24 @@ fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
     });
     let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
     let clip = Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 1000, 0, rate);
-    assert_eq!(clip.source_frame_at(500), clip.source_frame_at(499), "500 is mid-frame");
-    let timeline_id = project.timelines.insert(timeline(vec![audio_track(vec![clip])]));
+    assert_eq!(
+        clip.source_frame_at(500),
+        clip.source_frame_at(499),
+        "500 is mid-frame"
+    );
+    let timeline_id = project
+        .timelines
+        .insert(timeline(vec![audio_track(vec![clip])]));
 
     let buffer: Arc<Vec<f32>> = Arc::new((0..10_010).map(|i| i as f32 / 100_000.0).collect());
-    let buffer_for = |path: &Path, _stream: usize| {
-        (path.to_str() == Some("slow.wav")).then(|| buffer.clone())
-    };
+    let buffer_for =
+        |path: &Path, _stream: usize| (path.to_str() == Some("slow.wav")).then(|| buffer.clone());
     let mix_all = |project: &Project| {
         let timeline = &project.timelines[timeline_id];
-        let snap = MixSnapshot::from_timeline(project, timeline, RATE, 1, &mut |p: &Path, s: usize| buffer_for(p, s));
+        let snap =
+            MixSnapshot::from_timeline(project, timeline, RATE, 1, &mut |p: &Path, s: usize| {
+                buffer_for(p, s)
+            });
         let mut out = vec![0.0; 10_010];
         mix_range(&snap, 0, &mut out);
         out
@@ -420,13 +440,9 @@ fn keyframed_gain_is_evaluated_per_block_at_the_source_frame() {
     gain.upsert(80, -200.0, Interpolation::Hold);
     clip.effects.gain_db = gain;
     let tl = timeline(vec![audio_track(vec![clip])]);
-    let snap = MixSnapshot::from_timeline(
-        &project,
-        &tl,
-        RATE,
-        1,
-        &mut |_: &Path, _: usize| Some(Arc::new(vec![0.5; len_frames])),
-    );
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
+        Some(Arc::new(vec![0.5; len_frames]))
+    });
     let mut out = vec![0.0; len_frames];
     mix_range(&snap, 0, &mut out);
     let block = GAIN_BLOCK_FRAMES as usize;
@@ -450,13 +466,9 @@ fn clip_whose_buffer_is_not_ready_is_silent() {
         audio_track(vec![clip_at(a, 0, 0, 5)]),
         audio_track(vec![clip_at(b, 0, 0, 5)]),
     ]);
-    let snap = MixSnapshot::from_timeline(
-        &project,
-        &tl,
-        RATE,
-        1,
-        &mut |p: &Path, s: usize| (p != Path::new("b.wav")).then(|| buffers(p, s)).flatten(),
-    );
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |p: &Path, s: usize| {
+        (p != Path::new("b.wav")).then(|| buffers(p, s)).flatten()
+    });
     let mut out = vec![0.0; 10];
     mix_range(&snap, 0, &mut out);
     assert!(out.iter().all(|&s| s == 0.5));
@@ -496,13 +508,9 @@ fn mix_is_independent_of_how_the_range_is_split() {
 fn stereo_mix_keeps_channels_interleaved() {
     let (project, a, _) = project();
     let tl = timeline(vec![audio_track(vec![clip_at(a, 1, 0, 1)])]);
-    let snap = MixSnapshot::from_timeline(
-        &project,
-        &tl,
-        RATE,
-        2,
-        &mut |_: &Path, _: usize| Some(Arc::new([0.1, 0.9].repeat(100))),
-    );
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut |_: &Path, _: usize| {
+        Some(Arc::new([0.1, 0.9].repeat(100)))
+    });
     let mut out = vec![0.0; 40];
     mix_range(&snap, 5, &mut out);
     assert!(out[..10].iter().all(|&s| s == 0.0));
@@ -516,7 +524,11 @@ fn stereo_mix_keeps_channels_interleaved() {
 fn mixer_seek_and_snapshot_swaps_do_not_reopen_or_leak() {
     let mut mixer = Mixer::new().unwrap();
     mixer.seek(12_345);
-    assert_eq!(mixer.position(), 12_345, "paused, the position does not advance");
+    assert_eq!(
+        mixer.position(),
+        12_345,
+        "paused, the position does not advance"
+    );
     for _ in 0..50 {
         let mix = Arc::new(MixSnapshot::empty(mixer.sample_rate(), mixer.channels()));
         mixer.set_state(Arc::new(MixerState {
@@ -524,7 +536,11 @@ fn mixer_seek_and_snapshot_swaps_do_not_reopen_or_leak() {
             stretched: None,
         }));
     }
-    assert!(mixer.retained.len() <= 3, "retained={}", mixer.retained.len());
+    assert!(
+        mixer.retained.len() <= 3,
+        "retained={}",
+        mixer.retained.len()
+    );
 }
 
 fn window(tempo: u64, origin: u64, chunks: &[&[f32]]) -> StretchedWindow {
@@ -649,8 +665,15 @@ fn fade_multiplier_ramps_linearly_in_and_out() {
     assert_eq!(fade_multiplier(&clip, 0), 0.0);
     assert!((fade_multiplier(&clip, 50) - 0.5).abs() < 1e-6);
     assert_eq!(fade_multiplier(&clip, 100), 1.0);
-    assert_eq!(fade_multiplier(&clip, 500), 1.0, "on the plateau it stays at full volume");
-    assert!((fade_multiplier(&clip, 900) - 0.5).abs() < 1e-6, "200 samples from the end");
+    assert_eq!(
+        fade_multiplier(&clip, 500),
+        1.0,
+        "on the plateau it stays at full volume"
+    );
+    assert!(
+        (fade_multiplier(&clip, 900) - 0.5).abs() < 1e-6,
+        "200 samples from the end"
+    );
     assert_eq!(fade_multiplier(&clip, 1000), 0.0);
 }
 
@@ -679,17 +702,16 @@ fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
     let mut clip = clip_at(a, 0, 0, (len_frames / 10) as FrameIdx);
     clip.fade_in = (GAIN_BLOCK_FRAMES / 10) as FrameIdx;
     let tl = timeline(vec![audio_track(vec![clip])]);
-    let snap = MixSnapshot::from_timeline(
-        &project,
-        &tl,
-        RATE,
-        1,
-        &mut |_: &Path, _: usize| Some(Arc::new(vec![0.5; len_frames])),
-    );
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut |_: &Path, _: usize| {
+        Some(Arc::new(vec![0.5; len_frames]))
+    });
     let mut out = vec![9.0; len_frames];
     mix_range(&snap, 0, &mut out);
     let block = GAIN_BLOCK_FRAMES as usize;
-    assert!(out[..block].iter().all(|&s| s == 0.0), "first block silenced by the fade-in");
+    assert!(
+        out[..block].iter().all(|&s| s == 0.0),
+        "first block silenced by the fade-in"
+    );
     assert!(
         out[block..].iter().all(|&s| s == 0.5),
         "past the fade-in the gain is unchanged"

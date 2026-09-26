@@ -49,7 +49,8 @@ pub(crate) fn show_drag_ghost(ui: &egui::Ui, id: egui::Id, label: &str) {
 pub(crate) fn effects_section_header(ui: &mut egui::Ui, title: &str) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, ui.visuals().widgets.inactive.weak_bg_fill);
+    ui.painter()
+        .rect_filled(rect, 0.0, ui.visuals().widgets.inactive.weak_bg_fill);
     ui.painter().text(
         rect.left_center() + egui::vec2(6.0, 0.0),
         egui::Align2::LEFT_CENTER,
@@ -62,16 +63,23 @@ pub(crate) fn effects_section_header(ui: &mut egui::Ui, title: &str) {
 /// Effects panel entry: thumbnail on the left and name, draggable onto
 /// the timeline.
 pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
     let id = ui.id().with(("effect_item", generator.label()));
     let resp = ui
         .interact(rect, id, egui::Sense::click_and_drag())
         .on_hover_text(t!("pool.drag_to_timeline"));
     let visuals = ui.visuals();
     let (bg, stroke) = if resp.hovered() || resp.dragged() {
-        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+        (
+            visuals.widgets.hovered.weak_bg_fill,
+            visuals.widgets.hovered.fg_stroke.color,
+        )
     } else {
-        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
+        (
+            visuals.widgets.inactive.weak_bg_fill,
+            visuals.widgets.noninteractive.bg_stroke.color,
+        )
     };
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, bg);
@@ -91,7 +99,12 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
             );
         }
     }
-    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
         egui::pos2(thumb.right() + 14.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -111,23 +124,40 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
 /// and model.
 pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
     let label = timeline_ui::filter_label(filter);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
     let id = ui.id().with(("filter_item", &label));
     let resp = ui
         .interact(rect, id, egui::Sense::click_and_drag())
         .on_hover_text(t!("pool.drag_to_clip"));
     let visuals = ui.visuals();
     let (bg, stroke) = if resp.hovered() || resp.dragged() {
-        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+        (
+            visuals.widgets.hovered.weak_bg_fill,
+            visuals.widgets.hovered.fg_stroke.color,
+        )
     } else {
-        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
+        (
+            visuals.widgets.inactive.weak_bg_fill,
+            visuals.widgets.noninteractive.bg_stroke.color,
+        )
     };
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, bg);
     let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
     painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
-    timeline_ui::paint_gear_icon(&painter, thumb.center(), 11.0, egui::Color32::from_gray(220));
-    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    timeline_ui::paint_gear_icon(
+        &painter,
+        thumb.center(),
+        11.0,
+        egui::Color32::from_gray(220),
+    );
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
         egui::pos2(thumb.right() + 14.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -147,23 +177,41 @@ pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
 /// `EffectStack::transition_in`/`transition_out`.
 pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) {
     let label = timeline_ui::transition_kind_label(kind);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
     let id = ui.id().with(("transition_item", &label));
     let resp = ui
         .interact(rect, id, egui::Sense::click_and_drag())
         .on_hover_text(t!("pool.drag_to_clip_edge"));
     let visuals = ui.visuals();
     let (bg, stroke) = if resp.hovered() || resp.dragged() {
-        (visuals.widgets.hovered.weak_bg_fill, visuals.widgets.hovered.fg_stroke.color)
+        (
+            visuals.widgets.hovered.weak_bg_fill,
+            visuals.widgets.hovered.fg_stroke.color,
+        )
     } else {
-        (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke.color)
+        (
+            visuals.widgets.inactive.weak_bg_fill,
+            visuals.widgets.noninteractive.bg_stroke.color,
+        )
     };
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, bg);
     let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
     painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
-    timeline_ui::paint_bracket_icon(&painter, thumb.center(), thumb.height() * 0.6, vv_core::FadeEdge::Out, egui::Color32::from_gray(220));
-    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    timeline_ui::paint_bracket_icon(
+        &painter,
+        thumb.center(),
+        thumb.height() * 0.6,
+        vv_core::FadeEdge::Out,
+        egui::Color32::from_gray(220),
+    );
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
         egui::pos2(thumb.right() + 14.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -194,14 +242,17 @@ pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 pub(crate) fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::MediaPoolState) {
     use media_pool::SortKey;
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(width, HEADER_HEIGHT),
-        egui::Sense::hover(),
-    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
     let duration_w = DURATION_COL_W.min(width);
     let (name_rect, duration_rect) = (
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right() - duration_w, rect.bottom())),
-        egui::Rect::from_min_max(egui::pos2(rect.right() - duration_w, rect.top()), rect.right_bottom()),
+        egui::Rect::from_min_max(
+            rect.left_top(),
+            egui::pos2(rect.right() - duration_w, rect.bottom()),
+        ),
+        egui::Rect::from_min_max(
+            egui::pos2(rect.right() - duration_w, rect.top()),
+            rect.right_bottom(),
+        ),
     );
     let sort = state.sort;
     for (key, label, cell) in [
@@ -282,7 +333,10 @@ fn rename_field(ui: &mut egui::Ui, rename: &mut media_pool::Rename) -> Option<Op
         output
             .state
             .cursor
-            .set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), end)));
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                end,
+            )));
         output.state.store(ui.ctx(), edit_id);
     }
     if !output.response.lost_focus() {
@@ -335,7 +389,9 @@ fn paint_film_icon(
 
 impl VenturiApp {
     fn start_rename(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else { return };
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
         self.media_pool_state.renaming = Some(media_pool::Rename {
             media_id,
             text: file_label(&item.path),
@@ -359,7 +415,9 @@ impl VenturiApp {
     /// The copy is called "<name> copy", "<name> copy 2", ... and ends up
     /// selected.
     pub(crate) fn duplicate_timeline(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else { return };
+        let Some(item) = self.project.media_pool.get(media_id) else {
+            return;
+        };
         let base = format!("{} {}", file_label(&item.path), t!("pool.copy_suffix"));
         let taken: std::collections::HashSet<String> = self
             .project
@@ -379,13 +437,21 @@ impl VenturiApp {
     }
 
     /// Contents of the Media pool section in the left column.
-    pub(crate) fn show_media_pool(&mut self, ui: &mut egui::Ui, preview_action: &mut Option<MediaId>) {
+    pub(crate) fn show_media_pool(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview_action: &mut Option<MediaId>,
+    ) {
         if let Some(worker) = &self.proxy_worker {
             let progress = worker.progress();
             let paused = worker.is_paused();
             if progress.finished < progress.total {
                 ui.horizontal(|ui| {
-                    let label = if paused { t!("pool.resume") } else { t!("pool.pause") };
+                    let label = if paused {
+                        t!("pool.resume")
+                    } else {
+                        t!("pool.pause")
+                    };
                     if ui
                         .small_button(label)
                         .on_hover_text(t!("pool.proxy_generation"))
@@ -399,7 +465,8 @@ impl VenturiApp {
                     );
                 });
                 if !paused {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
         }
@@ -428,9 +495,7 @@ impl VenturiApp {
                     &mut items,
                     self.media_pool_state.sort,
                     |(_, label, ..)| label.as_str(),
-                    |(_, _, meta, ..)| {
-                        meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9)
-                    },
+                    |(_, _, meta, ..)| meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9),
                 );
                 let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
                 let drags: Vec<timeline_ui::MediaDrag> = items
@@ -465,271 +530,302 @@ impl VenturiApp {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(SIDE_PAD, 0))
                     .show(ui, |ui| {
-                for (id, label, meta, content_hash, is_timeline) in items {
-                    let proxy_state = self
-                        .proxy_worker
-                        .as_ref()
-                        .and_then(|w| w.state(content_hash));
-                    let thumbnail = if is_timeline {
-                        None
-                    } else {
-                        self.thumbnails.get(&content_hash).cloned().flatten()
-                    };
-                    let renaming = self
-                        .media_pool_state
-                        .renaming
-                        .as_mut()
-                        .filter(|r| r.media_id == id);
-                    let is_renaming = renaming.is_some();
-                    let mut rename_done = None;
-                    let mut label_rect = egui::Rect::NOTHING;
-                    let group_resp = ui
-                        .group(|ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                let thumb_size = egui::vec2(64.0, 36.0);
-                                match &thumbnail {
-                                    Some(texture) => {
-                                        let tex_size = texture.size_vec2();
-                                        let scale = (thumb_size.x / tex_size.x)
-                                            .min(thumb_size.y / tex_size.y);
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            thumb_size,
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
-                                        egui::Image::new(texture)
-                                            .fit_to_exact_size(tex_size * scale)
-                                            .paint_at(
-                                                ui,
-                                                egui::Rect::from_center_size(
-                                                    rect.center(),
-                                                    tex_size * scale,
-                                                ),
-                                            );
-                                    }
-                                    None => {
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            thumb_size,
-                                            egui::Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            2.0,
-                                            ui.visuals().extreme_bg_color,
-                                        );
-                                        if is_timeline {
-                                            paint_film_icon(
-                                                ui.painter(),
-                                                rect,
-                                                ui.visuals().weak_text_color(),
-                                                ui.visuals().extreme_bg_color,
-                                            );
-                                        } else if !meta.has_video {
-                                            ui.painter().text(
-                                                rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "🔊",
-                                                egui::FontId::proportional(18.0),
-                                                ui.visuals().weak_text_color(),
-                                            );
+                        for (id, label, meta, content_hash, is_timeline) in items {
+                            let proxy_state = self
+                                .proxy_worker
+                                .as_ref()
+                                .and_then(|w| w.state(content_hash));
+                            let thumbnail = if is_timeline {
+                                None
+                            } else {
+                                self.thumbnails.get(&content_hash).cloned().flatten()
+                            };
+                            let renaming = self
+                                .media_pool_state
+                                .renaming
+                                .as_mut()
+                                .filter(|r| r.media_id == id);
+                            let is_renaming = renaming.is_some();
+                            let mut rename_done = None;
+                            let mut label_rect = egui::Rect::NOTHING;
+                            let group_resp = ui
+                                .group(|ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        let thumb_size = egui::vec2(64.0, 36.0);
+                                        match &thumbnail {
+                                            Some(texture) => {
+                                                let tex_size = texture.size_vec2();
+                                                let scale = (thumb_size.x / tex_size.x)
+                                                    .min(thumb_size.y / tex_size.y);
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    thumb_size,
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    2.0,
+                                                    egui::Color32::BLACK,
+                                                );
+                                                egui::Image::new(texture)
+                                                    .fit_to_exact_size(tex_size * scale)
+                                                    .paint_at(
+                                                        ui,
+                                                        egui::Rect::from_center_size(
+                                                            rect.center(),
+                                                            tex_size * scale,
+                                                        ),
+                                                    );
+                                            }
+                                            None => {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    thumb_size,
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    2.0,
+                                                    ui.visuals().extreme_bg_color,
+                                                );
+                                                if is_timeline {
+                                                    paint_film_icon(
+                                                        ui.painter(),
+                                                        rect,
+                                                        ui.visuals().weak_text_color(),
+                                                        ui.visuals().extreme_bg_color,
+                                                    );
+                                                } else if !meta.has_video {
+                                                    ui.painter().text(
+                                                        rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "🔊",
+                                                        egui::FontId::proportional(18.0),
+                                                        ui.visuals().weak_text_color(),
+                                                    );
+                                                }
+                                            }
                                         }
-                                    }
-                                }
-                                ui.vertical(|ui| {
-                                    match renaming {
-                                        Some(rename) => {
-                                            rename_done = rename_field(ui, rename);
-                                        }
-                                        None => label_rect = ui.label(&label).rect,
-                                    }
-                                    ui.small(if meta.is_image() {
-                                        t!("pool.meta_image", width = meta.width, height = meta.height)
-                                    } else if meta.has_video {
-                                        format!(
-                                            "{}x{} · {:.2}fps · {}",
-                                            meta.width,
-                                            meta.height,
-                                            meta.fps.as_f64(),
-                                            if meta.has_audio { t!("pool.audio") } else { t!("pool.muted") }
-                                        )
-                                        .into()
-                                    } else {
-                                        t!(
-                                            "pool.meta_audio",
-                                            rate = meta.sample_rate,
-                                            channels = meta.channels
-                                        )
+                                        ui.vertical(|ui| {
+                                            match renaming {
+                                                Some(rename) => {
+                                                    rename_done = rename_field(ui, rename);
+                                                }
+                                                None => label_rect = ui.label(&label).rect,
+                                            }
+                                            ui.small(if meta.is_image() {
+                                                t!(
+                                                    "pool.meta_image",
+                                                    width = meta.width,
+                                                    height = meta.height
+                                                )
+                                            } else if meta.has_video {
+                                                format!(
+                                                    "{}x{} · {:.2}fps · {}",
+                                                    meta.width,
+                                                    meta.height,
+                                                    meta.fps.as_f64(),
+                                                    if meta.has_audio {
+                                                        t!("pool.audio")
+                                                    } else {
+                                                        t!("pool.muted")
+                                                    }
+                                                )
+                                                .into()
+                                            } else {
+                                                t!(
+                                                    "pool.meta_audio",
+                                                    rate = meta.sample_rate,
+                                                    channels = meta.channels
+                                                )
+                                            });
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // An image has no real duration.
+                                                let duration_label = if meta.is_image() {
+                                                    "—".to_string()
+                                                } else {
+                                                    format_duration(
+                                                        meta.duration_frames,
+                                                        meta.fps.as_f64(),
+                                                    )
+                                                };
+                                                ui.add_sized(
+                                                    egui::vec2(
+                                                        DURATION_COL_W,
+                                                        ui.available_height(),
+                                                    ),
+                                                    egui::Label::new(
+                                                        egui::RichText::new(duration_label)
+                                                            .monospace(),
+                                                    ),
+                                                );
+                                                match proxy_state {
+                                                    Some(proxy_worker::ProxyState::Generating(
+                                                        f,
+                                                    )) => {
+                                                        proxy_progress_ring(ui, Some(f))
+                                                            .on_hover_text(t!(
+                                                                "pool.proxy_progress",
+                                                                percent =
+                                                                    format!("{:.0}", f * 100.0)
+                                                            ));
+                                                    }
+                                                    Some(proxy_worker::ProxyState::Queued) => {
+                                                        proxy_progress_ring(ui, None)
+                                                            .on_hover_text(t!("pool.proxy_queued"));
+                                                    }
+                                                    Some(proxy_worker::ProxyState::Failed) => {
+                                                        ui.colored_label(egui::Color32::RED, "!")
+                                                            .on_hover_text(t!("pool.proxy_failed"));
+                                                    }
+                                                    _ => {}
+                                                }
+                                            },
+                                        );
                                     });
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        // An image has no real duration.
-                                        let duration_label = if meta.is_image() {
-                                            "—".to_string()
-                                        } else {
-                                            format_duration(meta.duration_frames, meta.fps.as_f64())
-                                        };
-                                        ui.add_sized(
-                                            egui::vec2(DURATION_COL_W, ui.available_height()),
-                                            egui::Label::new(
-                                                egui::RichText::new(duration_label).monospace(),
-                                            ),
-                                        );
-                                        match proxy_state {
-                                        Some(proxy_worker::ProxyState::Generating(f)) => {
-                                            proxy_progress_ring(ui, Some(f))
-                                                .on_hover_text(t!("pool.proxy_progress", percent = format!("{:.0}", f * 100.0)));
-                                        }
-                                        Some(proxy_worker::ProxyState::Queued) => {
-                                            proxy_progress_ring(ui, None)
-                                                .on_hover_text(t!("pool.proxy_queued"));
-                                        }
-                                        Some(proxy_worker::ProxyState::Failed) => {
-                                            ui.colored_label(egui::Color32::RED, "!")
-                                                .on_hover_text(t!("pool.proxy_failed"));
-                                        }
-                                        _ => {}
-                                        }
-                                    },
-                                );
-                            });
-                        })
-                        .response;
-                    if proxy_state == Some(proxy_worker::ProxyState::Ready) {
-                        let rect = group_resp.rect.shrink(1.0);
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
-                            1.0,
-                            timeline_ui::PROXY_COLOR,
-                        );
-                    }
-                    // Double click: preview. Drag: adds the media onto the timeline.
-                    let interact_id = ui.id().with("media_pool_item").with(id);
-                    // While renaming, the item must not steal the clicks of
-                    // the text field.
-                    let sense = if is_renaming {
-                        egui::Sense::hover()
-                    } else {
-                        egui::Sense::click_and_drag()
-                    };
-                    let resp = ui
-                        .interact(group_resp.rect, interact_id, sense)
-                        .on_hover_text(
-                            t!("pool.item_hint"),
-                        );
-                    if let Some(new_name) = rename_done {
-                        self.media_pool_state.renaming = None;
-                        if let Some(name) = new_name {
-                            self.rename_timeline(id, name);
-                        }
-                    }
-                    item_rects.push((id, group_resp.rect));
-                    if self.media_pool_state.selected.contains(&id) {
-                        ui.painter().rect_stroke(
-                            group_resp.rect,
-                            4.0,
-                            egui::Stroke::new(2.0, egui::Color32::WHITE),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.painter().rect_filled(
-                            group_resp.rect,
-                            4.0,
-                            egui::Color32::from_white_alpha(18),
-                        );
-                    }
-                    if resp.clicked() {
-                        let modifiers = ui.input(|i| i.modifiers);
-                        let on_name = is_timeline
-                            && modifiers.is_none()
-                            && self.media_pool_state.selected.len() == 1
-                            && self.media_pool_state.selected.contains(&id)
-                            && resp
-                                .interact_pointer_pos()
-                                .is_some_and(|pos| label_rect.contains(pos));
-                        self.media_pool_state.click(id, modifiers, &order);
-                        self.media_pool_state.rename_pending =
-                            on_name.then(|| (id, ui.input(|i| i.time)));
-                    }
-                    // Right click outside the selection replaces it, like a drag.
-                    if resp.secondary_clicked() && !self.media_pool_state.selected.contains(&id) {
-                        self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
-                    }
-                    resp.context_menu(|ui| {
-                        if is_timeline {
-                            if ui.button(t!("pool.duplicate_timeline")).clicked() {
-                                self.duplicate_timeline(id);
-                                ui.close();
-                            }
-                            if ui.button(t!("pool.rename")).clicked() {
-                                self.start_rename(id);
-                                ui.close();
-                            }
-                            ui.separator();
-                        }
-                        let count = self.media_pool_state.selected.len().max(1);
-                        let label = if count > 1 {
-                            t!("pool.relink_many", count = count)
-                        } else {
-                            t!("pool.relink_one")
-                        };
-                        if ui.button(label).clicked() {
-                            self.relink_media_dialog();
-                            ui.close();
-                        }
-                    });
-                    // Dragging an item outside the selection replaces it
-                    // with that item (as on the timeline, see
-                    // `timeline_ui::drag_group_for`).
-                    if resp.drag_started() {
-                        self.media_pool_state.rename_pending = None;
-                    }
-                    if resp.drag_started() && !self.media_pool_state.selected.contains(&id) {
-                        self.media_pool_state.click(id, egui::Modifiers::NONE, &order);
-                    }
-                    // Dragging an item of the selection drags the whole
-                    // selection, in panel order: the timeline appends them
-                    // one after the other.
-                    let payload = if self.media_pool_state.selected.len() > 1
-                        && self.media_pool_state.selected.contains(&id)
-                    {
-                        timeline_ui::MediaDragSet {
-                            items: drags
-                                .iter()
-                                .filter(|d| {
-                                    self.media_pool_state.selected.contains(&d.media_id)
                                 })
-                                .copied()
-                                .collect(),
+                                .response;
+                            if proxy_state == Some(proxy_worker::ProxyState::Ready) {
+                                let rect = group_resp.rect.shrink(1.0);
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        rect.left_top(),
+                                        egui::vec2(2.0, rect.height()),
+                                    ),
+                                    1.0,
+                                    timeline_ui::PROXY_COLOR,
+                                );
+                            }
+                            // Double click: preview. Drag: adds the media onto the timeline.
+                            let interact_id = ui.id().with("media_pool_item").with(id);
+                            // While renaming, the item must not steal the clicks of
+                            // the text field.
+                            let sense = if is_renaming {
+                                egui::Sense::hover()
+                            } else {
+                                egui::Sense::click_and_drag()
+                            };
+                            let resp = ui
+                                .interact(group_resp.rect, interact_id, sense)
+                                .on_hover_text(t!("pool.item_hint"));
+                            if let Some(new_name) = rename_done {
+                                self.media_pool_state.renaming = None;
+                                if let Some(name) = new_name {
+                                    self.rename_timeline(id, name);
+                                }
+                            }
+                            item_rects.push((id, group_resp.rect));
+                            if self.media_pool_state.selected.contains(&id) {
+                                ui.painter().rect_stroke(
+                                    group_resp.rect,
+                                    4.0,
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.painter().rect_filled(
+                                    group_resp.rect,
+                                    4.0,
+                                    egui::Color32::from_white_alpha(18),
+                                );
+                            }
+                            if resp.clicked() {
+                                let modifiers = ui.input(|i| i.modifiers);
+                                let on_name = is_timeline
+                                    && modifiers.is_none()
+                                    && self.media_pool_state.selected.len() == 1
+                                    && self.media_pool_state.selected.contains(&id)
+                                    && resp
+                                        .interact_pointer_pos()
+                                        .is_some_and(|pos| label_rect.contains(pos));
+                                self.media_pool_state.click(id, modifiers, &order);
+                                self.media_pool_state.rename_pending =
+                                    on_name.then(|| (id, ui.input(|i| i.time)));
+                            }
+                            // Right click outside the selection replaces it, like a drag.
+                            if resp.secondary_clicked()
+                                && !self.media_pool_state.selected.contains(&id)
+                            {
+                                self.media_pool_state
+                                    .click(id, egui::Modifiers::NONE, &order);
+                            }
+                            resp.context_menu(|ui| {
+                                if is_timeline {
+                                    if ui.button(t!("pool.duplicate_timeline")).clicked() {
+                                        self.duplicate_timeline(id);
+                                        ui.close();
+                                    }
+                                    if ui.button(t!("pool.rename")).clicked() {
+                                        self.start_rename(id);
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                }
+                                let count = self.media_pool_state.selected.len().max(1);
+                                let label = if count > 1 {
+                                    t!("pool.relink_many", count = count)
+                                } else {
+                                    t!("pool.relink_one")
+                                };
+                                if ui.button(label).clicked() {
+                                    self.relink_media_dialog();
+                                    ui.close();
+                                }
+                            });
+                            // Dragging an item outside the selection replaces it
+                            // with that item (as on the timeline, see
+                            // `timeline_ui::drag_group_for`).
+                            if resp.drag_started() {
+                                self.media_pool_state.rename_pending = None;
+                            }
+                            if resp.drag_started() && !self.media_pool_state.selected.contains(&id)
+                            {
+                                self.media_pool_state
+                                    .click(id, egui::Modifiers::NONE, &order);
+                            }
+                            // Dragging an item of the selection drags the whole
+                            // selection, in panel order: the timeline appends them
+                            // one after the other.
+                            let payload = if self.media_pool_state.selected.len() > 1
+                                && self.media_pool_state.selected.contains(&id)
+                            {
+                                timeline_ui::MediaDragSet {
+                                    items: drags
+                                        .iter()
+                                        .filter(|d| {
+                                            self.media_pool_state.selected.contains(&d.media_id)
+                                        })
+                                        .copied()
+                                        .collect(),
+                                }
+                            } else {
+                                timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
+                                    id, &meta,
+                                ))
+                            };
+                            let dragged_count = payload.items.len();
+                            resp.dnd_set_drag_payload(payload);
+                            if resp.double_clicked() {
+                                self.media_pool_state.rename_pending = None;
+                                // A compound clip (or a project timeline, see
+                                // `MediaItem::compound`) opens as a top level timeline:
+                                // from the pool there is no parent to stack in the
+                                // breadcrumb. "Preview" makes no sense for it.
+                                match self.project.media_pool.get(id).and_then(|m| m.compound) {
+                                    Some(timeline_id) => self.open_timeline(timeline_id),
+                                    None => *preview_action = Some(id),
+                                }
+                            }
+                            if resp.dragged() {
+                                let ghost = if dragged_count > 1 {
+                                    t!("pool.items", count = dragged_count).into_owned()
+                                } else {
+                                    label.clone()
+                                };
+                                show_drag_ghost(ui, interact_id, &ghost);
+                            }
                         }
-                    } else {
-                        timeline_ui::MediaDragSet::one(timeline_ui::MediaDrag::whole(
-                            id, &meta,
-                        ))
-                    };
-                    let dragged_count = payload.items.len();
-                    resp.dnd_set_drag_payload(payload);
-                    if resp.double_clicked() {
-                        self.media_pool_state.rename_pending = None;
-                        // A compound clip (or a project timeline, see
-                        // `MediaItem::compound`) opens as a top level timeline:
-                        // from the pool there is no parent to stack in the
-                        // breadcrumb. "Preview" makes no sense for it.
-                        match self.project.media_pool.get(id).and_then(|m| m.compound) {
-                            Some(timeline_id) => self.open_timeline(timeline_id),
-                            None => *preview_action = Some(id),
-                        }
-                    }
-                    if resp.dragged() {
-                        let ghost = if dragged_count > 1 {
-                            t!("pool.items", count = dragged_count).into_owned()
-                        } else {
-                            label.clone()
-                        };
-                        show_drag_ghost(ui, interact_id, &ghost);
-                    }
-                }
                     });
                 ui.add_space(BOTTOM_PAD);
                 if let Some((id, clicked_at)) = self.media_pool_state.rename_pending {
@@ -739,9 +835,10 @@ impl VenturiApp {
                         self.media_pool_state.rename_pending = None;
                         self.start_rename(id);
                     } else {
-                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(
-                            wait - elapsed,
-                        ));
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_secs_f64(
+                                wait - elapsed,
+                            ));
                     }
                 }
 
@@ -750,9 +847,10 @@ impl VenturiApp {
                         self.media_pool_state.marquee = Some((pos, pos));
                     }
                 } else if bg.dragged() {
-                    if let (Some((_, end)), Some(pos)) =
-                        (&mut self.media_pool_state.marquee, bg.interact_pointer_pos())
-                    {
+                    if let (Some((_, end)), Some(pos)) = (
+                        &mut self.media_pool_state.marquee,
+                        bg.interact_pointer_pos(),
+                    ) {
                         *end = pos;
                     }
                 } else if bg.drag_stopped() {

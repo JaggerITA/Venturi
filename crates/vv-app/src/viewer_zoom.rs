@@ -72,7 +72,10 @@ impl ViewerZoom {
             let (factor, wheel_pan) = if i.modifiers.command {
                 (pinch_factor(i), ctrl_wheel_pan(i, line_speed))
             } else {
-                ((i.smooth_scroll_delta.y / 200.0).exp() * i.zoom_delta(), Vec2::ZERO)
+                (
+                    (i.smooth_scroll_delta.y / 200.0).exp() * i.zoom_delta(),
+                    Vec2::ZERO,
+                )
             };
             (
                 factor,
@@ -166,7 +169,10 @@ fn fit_scale(area: Rect, frame_px: Vec2, ppp: f32) -> f32 {
     if frame_px.x <= 0.0 || frame_px.y <= 0.0 {
         return 0.0;
     }
-    (area.width() / frame_px.x).min(area.height() / frame_px.y).max(0.0) * ppp
+    (area.width() / frame_px.x)
+        .min(area.height() / frame_px.y)
+        .max(0.0)
+        * ppp
 }
 
 /// `352%`, `6.25%`.

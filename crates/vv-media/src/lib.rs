@@ -11,18 +11,18 @@ pub mod proxy;
 pub mod thumbnail;
 pub mod waveform;
 
-pub use audio::{AudioBuffer, decode_audio_track, decode_audio_streams_streaming};
+pub use audio::{AudioBuffer, decode_audio_streams_streaming, decode_audio_track};
 pub use cache::{SharedFrameCache, WantedRange};
 pub use decode::{ColorMatrix, Decoder, FrameYuv420, yuv420_frame_bytes};
 pub use encode::{AudioCodec, AudioSettings, Encoder, VideoCodec, VideoSettings};
-pub use thumbnail::{Thumbnail, generate_thumbnail};
 pub use probe::{
-    AUDIO_ONLY_FPS, AudioStreamInfo, IMAGE_EXTENSIONS, IMAGE_FPS, audio_streams, content_fingerprint,
-    is_image_path, probe, probe_image, probe_media,
+    AUDIO_ONLY_FPS, AudioStreamInfo, IMAGE_EXTENSIONS, IMAGE_FPS, audio_streams,
+    content_fingerprint, is_image_path, probe, probe_image, probe_media,
 };
+pub use thumbnail::{Thumbnail, generate_thumbnail};
 pub use waveform::{
-    generate_waveforms, load_waveform, recommended_num_peaks, waveform_exists, waveform_path_for,
-    Waveform,
+    Waveform, generate_waveforms, load_waveform, recommended_num_peaks, waveform_exists,
+    waveform_path_for,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -14,8 +14,14 @@ fn clip(id: u64, source_in: FrameIdx, source_out: FrameIdx) -> Clip {
 
 fn source_clip() -> Clip {
     let mut clip = clip(1, 0, 20);
-    clip.effects.transform.track_mut(TransformParam::ZoomX).default = 2.0;
-    clip.effects.transform.track_mut(TransformParam::Opacity).default = 0.5;
+    clip.effects
+        .transform
+        .track_mut(TransformParam::ZoomX)
+        .default = 2.0;
+    clip.effects
+        .transform
+        .track_mut(TransformParam::Opacity)
+        .default = 0.5;
     clip.fade_in = 4;
     clip
 }
@@ -24,12 +30,32 @@ fn source_clip() -> Clip {
 fn only_the_ticked_attributes_are_pasted() {
     let target = clip(2, 0, 20);
     let selected = HashSet::from([Attribute::Zoom]);
-    let pasted = merged_attributes(&source_clip(), &target, &selected, KeyframeMode::MaintainTiming);
+    let pasted = merged_attributes(
+        &source_clip(),
+        &target,
+        &selected,
+        KeyframeMode::MaintainTiming,
+    );
 
-    assert_eq!(pasted.effects.transform.track(TransformParam::ZoomX).default, 2.0);
     assert_eq!(
-        pasted.effects.transform.track(TransformParam::Opacity).default,
-        target.effects.transform.track(TransformParam::Opacity).default,
+        pasted
+            .effects
+            .transform
+            .track(TransformParam::ZoomX)
+            .default,
+        2.0
+    );
+    assert_eq!(
+        pasted
+            .effects
+            .transform
+            .track(TransformParam::Opacity)
+            .default,
+        target
+            .effects
+            .transform
+            .track(TransformParam::Opacity)
+            .default,
         "unselected opacity stays that of the destination clip"
     );
     assert_eq!(pasted.fade_in, 0, "unselected fades are left alone");
@@ -55,7 +81,11 @@ fn maintain_timing_keeps_the_offsets_from_the_start_of_the_clip() {
         KeyframeMode::MaintainTiming,
     );
 
-    let keyframes = pasted.effects.transform.track(TransformParam::ZoomX).keyframes();
+    let keyframes = pasted
+        .effects
+        .transform
+        .track(TransformParam::ZoomX)
+        .keyframes();
     assert_eq!(keyframes.len(), 1);
     assert_eq!(keyframes[0].0, 105);
 }
@@ -76,8 +106,15 @@ fn stretch_to_fit_scales_the_keyframes_on_the_target_duration() {
         KeyframeMode::StretchToFit,
     );
 
-    let keyframes = pasted.effects.transform.track(TransformParam::ZoomX).keyframes();
-    assert_eq!(keyframes.iter().map(|k| k.0).collect::<Vec<_>>(), vec![20, 30]);
+    let keyframes = pasted
+        .effects
+        .transform
+        .track(TransformParam::ZoomX)
+        .keyframes();
+    assert_eq!(
+        keyframes.iter().map(|k| k.0).collect::<Vec<_>>(),
+        vec![20, 30]
+    );
 }
 
 /// A keyframe past the end of the target clip has nowhere to go.
@@ -98,8 +135,21 @@ fn keyframes_outside_the_target_clip_are_dropped() {
         KeyframeMode::MaintainTiming,
     );
 
-    assert!(pasted.effects.transform.track(TransformParam::ZoomX).is_constant());
-    assert_eq!(pasted.effects.transform.track(TransformParam::ZoomX).default, 2.0);
+    assert!(
+        pasted
+            .effects
+            .transform
+            .track(TransformParam::ZoomX)
+            .is_constant()
+    );
+    assert_eq!(
+        pasted
+            .effects
+            .transform
+            .track(TransformParam::ZoomX)
+            .default,
+        2.0
+    );
 }
 
 #[test]
@@ -132,7 +182,11 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
 
     let mut source = clip(0, 0, 20);
     source.id = app.project.alloc_clip_id();
-    source.effects.transform.track_mut(TransformParam::ZoomX).default = 2.0;
+    source
+        .effects
+        .transform
+        .track_mut(TransformParam::ZoomX)
+        .default = 2.0;
     let source_id = source.id;
     let mut target = clip(0, 0, 20);
     target.id = app.project.alloc_clip_id();
@@ -144,8 +198,10 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
 
     app.timeline_state.selected.insert((track_index, source_id));
     app.copy_selected_clips();
-    app.timeline_state
-        .set_selection(std::collections::BTreeSet::from([(track_index, target_id)]), None);
+    app.timeline_state.set_selection(
+        std::collections::BTreeSet::from([(track_index, target_id)]),
+        None,
+    );
     app.paste_attributes_selection = HashSet::from([Attribute::Zoom]);
     app.open_paste_attributes_dialog();
     let dialog = app.paste_attributes.take().expect("the dialog opens");

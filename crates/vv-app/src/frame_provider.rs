@@ -3,7 +3,9 @@
 //! `export.rs`). The clip -> source frame mapping is a single one.
 
 use std::sync::Arc;
-use vv_core::{Clip, ClipSource, FrameIdx, MediaId, Project, Rgba, TitleParams, Timeline, Transform};
+use vv_core::{
+    Clip, ClipSource, FrameIdx, MediaId, Project, Rgba, Timeline, TitleParams, Transform,
+};
 use vv_media::FrameYuv420;
 
 /// `&mut self`: the export keeps the decoders open.
@@ -114,7 +116,10 @@ impl OwnedLayer {
                 frame: as_render_yuv_frame(frame),
                 source_size: *source_size,
             },
-            OwnedContent::Texture { texture, source_size } => vv_render::LayerContent::Texture {
+            OwnedContent::Texture {
+                texture,
+                source_size,
+            } => vv_render::LayerContent::Texture {
                 texture,
                 source_size: *source_size,
             },
@@ -137,7 +142,10 @@ impl OwnedLayer {
         let same_content = match (&self.content, &other.content) {
             (
                 OwnedContent::Video { frame, source_size },
-                OwnedContent::Video { frame: frame2, source_size: source_size2 },
+                OwnedContent::Video {
+                    frame: frame2,
+                    source_size: source_size2,
+                },
             ) => Arc::ptr_eq(frame, frame2) && source_size == source_size2,
             (OwnedContent::Solid(color), OwnedContent::Solid(color2)) => color == color2,
             (OwnedContent::Text(title), OwnedContent::Text(title2)) => title == title2,
@@ -203,15 +211,18 @@ impl FrameProvider for GpuCompounds<'_> {
         let Some(layers) = layers? else {
             return Ok(None);
         };
-        let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+        let render_layers: Vec<vv_render::Layer> =
+            layers.iter().map(OwnedLayer::as_render).collect();
         let (width, height) = nested.resolution;
         // Transparent background: where `nested` has nothing to show, what is
         // below in the outer timeline must stay visible. And the texture does
         // not go back to the pool, because we hold it until the pass.
-        Ok(Some(self.compositor.render_layers_to_owned_texture_transparent(
-            &render_layers,
-            vv_render::OutputFrame::exact(width, height),
-        )))
+        Ok(Some(
+            self.compositor.render_layers_to_owned_texture_transparent(
+                &render_layers,
+                vv_render::OutputFrame::exact(width, height),
+            ),
+        ))
     }
 }
 
@@ -255,12 +266,24 @@ pub fn clip_layer(
 ) -> Result<Option<OwnedLayer>, String> {
     let source_frame = clip.source_frame_at(frame);
     let mut transform = clip.effects.transform.value_at(source_frame);
-    let push = clip.transition_offset_at(frame, (timeline_size.0 as f32, timeline_size.1 as f32), transform.zoom);
+    let push = clip.transition_offset_at(
+        frame,
+        (timeline_size.0 as f32, timeline_size.1 as f32),
+        transform.zoom,
+    );
     transform.position[0] += push[0];
     transform.position[1] += push[1];
     let opacity = clip.fade_multiplier_at(frame);
     let content = clip_content(project, clip, frame, provider)?;
-    Ok(build_layer(project, clip, source_frame, transform, opacity, content, timeline_size))
+    Ok(build_layer(
+        project,
+        clip,
+        source_frame,
+        transform,
+        opacity,
+        content,
+        timeline_size,
+    ))
 }
 
 /// What a clip shows at `timeline_frame`: nothing if it is not a Media clip,
@@ -276,7 +299,8 @@ fn clip_content(
         return Ok(ClipContent::None);
     }
     if let Some(nested) = nested_timeline_of(project, clip)
-        && let Some(texture) = provider.compound_texture(project, nested, clip.source_frame_at(timeline_frame))?
+        && let Some(texture) =
+            provider.compound_texture(project, nested, clip.source_frame_at(timeline_frame))?
     {
         return Ok(ClipContent::Texture(texture));
     }
@@ -329,7 +353,10 @@ fn build_layer(
             match content {
                 ClipContent::None => return None,
                 ClipContent::Yuv(frame) => OwnedContent::Video { frame, source_size },
-                ClipContent::Texture(texture) => OwnedContent::Texture { texture, source_size },
+                ClipContent::Texture(texture) => OwnedContent::Texture {
+                    texture,
+                    source_size,
+                },
             }
         }
     };
@@ -377,8 +404,21 @@ fn crossing_side_layer(
     transform.position[0] += extra_offset[0];
     transform.position[1] += extra_offset[1];
     let opacity = clip.fade_multiplier_at(frame);
-    let content = clip_content(project, clip, held_timeline_frame(project, clip, frame), provider)?;
-    Ok(build_layer(project, clip, source_frame, transform, opacity, content, timeline_size))
+    let content = clip_content(
+        project,
+        clip,
+        held_timeline_frame(project, clip, frame),
+        provider,
+    )?;
+    Ok(build_layer(
+        project,
+        clip,
+        source_frame,
+        transform,
+        opacity,
+        content,
+        timeline_size,
+    ))
 }
 
 /// The layers of an active crossing transition at `frame`: tail of `left`,
@@ -400,12 +440,34 @@ fn crossing_layers(
     // — see `push_clearance`. Recomputed here and again inside
     // `crossing_side_layer`: it costs very little (`Keyframed`), not worth
     // threading through as an extra parameter in several places.
-    let left_zoom = left.effects.transform.value_at(left.source_frame_at(frame)).zoom;
-    let right_zoom = right.effects.transform.value_at(right.source_frame_at(frame)).zoom;
+    let left_zoom = left
+        .effects
+        .transform
+        .value_at(left.source_frame_at(frame))
+        .zoom;
+    let right_zoom = right
+        .effects
+        .transform
+        .value_at(right.source_frame_at(frame))
+        .zoom;
     let (left_offset, right_offset) = crossing.offsets(progress, frame_size, left_zoom, right_zoom);
     let mut layers = Vec::with_capacity(2);
-    layers.extend(crossing_side_layer(project, left, frame, timeline_size, provider, left_offset)?);
-    layers.extend(crossing_side_layer(project, right, frame, timeline_size, provider, right_offset)?);
+    layers.extend(crossing_side_layer(
+        project,
+        left,
+        frame,
+        timeline_size,
+        provider,
+        left_offset,
+    )?);
+    layers.extend(crossing_side_layer(
+        project,
+        right,
+        frame,
+        timeline_size,
+        provider,
+        right_offset,
+    )?);
     Ok(layers)
 }
 
@@ -429,9 +491,19 @@ pub fn track_layers_at(
     if let Some((left, right, crossing)) = track.crossing_at(frame)
         && (left.id == clip.id || right.id == clip.id)
     {
-        return crossing_layers(project, left, right, crossing, frame, timeline_size, provider);
+        return crossing_layers(
+            project,
+            left,
+            right,
+            crossing,
+            frame,
+            timeline_size,
+            provider,
+        );
     }
-    Ok(clip_layer(project, clip, frame, timeline_size, provider)?.into_iter().collect())
+    Ok(clip_layer(project, clip, frame, timeline_size, provider)?
+        .into_iter()
+        .collect())
 }
 
 #[cfg(test)]

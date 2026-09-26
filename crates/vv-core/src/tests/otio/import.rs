@@ -17,9 +17,7 @@ fn meta(fps: Rational, duration_frames: FrameIdx) -> MediaMeta {
     }
 }
 
-fn probe_from(
-    media: Vec<(&'static str, MediaMeta)>,
-) -> impl FnMut(&Path) -> ProbeResult {
+fn probe_from(media: Vec<(&'static str, MediaMeta)>) -> impl FnMut(&Path) -> ProbeResult {
     move |path| {
         media
             .iter()
@@ -30,7 +28,12 @@ fn probe_from(
 }
 
 fn span(clip: &Clip) -> (FrameIdx, FrameIdx, FrameIdx, Rational) {
-    (clip.timeline_start, clip.source_offset, clip.timeline_len, clip.rate)
+    (
+        clip.timeline_start,
+        clip.source_offset,
+        clip.timeline_len,
+        clip.rate,
+    )
 }
 
 /// Exporting and importing a Venturi project returns the same clips,
@@ -57,22 +60,30 @@ fn a_venturi_export_imports_back_unchanged() {
     });
     let rate = Rational::conform_rate(Rational::new(30, 1), media_meta.fps);
     let group = project.alloc_link_group_id();
-    let mut video = Clip::from_source_range(
-        ClipId(1),
-        ClipSource::Media(media),
-        100,
-        900,
-        20,
-        rate,
-    );
+    let mut video =
+        Clip::from_source_range(ClipId(1), ClipSource::Media(media), 100, 900, 20, rate);
     video.linked_group = Some(group);
     let mut audio = video.clone();
     audio.id = ClipId(2);
     audio.audio_stream_index = 1;
-    audio.effects.gain_db.upsert(10, -6.0, Interpolation::Linear);
-    let mut color =
-        Clip::from_source_range(ClipId(3), ClipSource::SolidColor, 0, 45, 300, Rational::one());
-    color.effects.color = Some(Keyframed::constant(Rgba { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }));
+    audio
+        .effects
+        .gain_db
+        .upsert(10, -6.0, Interpolation::Linear);
+    let mut color = Clip::from_source_range(
+        ClipId(3),
+        ClipSource::SolidColor,
+        0,
+        45,
+        300,
+        Rational::one(),
+    );
+    color.effects.color = Some(Keyframed::constant(Rgba {
+        r: 0.2,
+        g: 0.4,
+        b: 0.6,
+        a: 1.0,
+    }));
     color.fade_in = 5;
     color.fade_out = 7;
     color.effects.transition_in = Some(Transition {
@@ -112,13 +123,20 @@ fn a_venturi_export_imports_back_unchanged() {
     assert_eq!(audio.effects.gain_db.value_at(10), -6.0);
     assert!(audio.linked_group.is_some());
     assert_eq!(back.tracks[0].clips[0].linked_group, audio.linked_group);
-    assert_eq!(back.tracks[0].clips[1].linked_group, None, "right half unlinked");
+    assert_eq!(
+        back.tracks[0].clips[1].linked_group, None,
+        "right half unlinked"
+    );
     let generated = &back.tracks[1].clips[0];
     let color = generated.effects.color.as_ref().unwrap().default;
     assert_eq!((color.r, color.g, color.b), (0.2, 0.4, 0.6));
     assert_eq!((generated.fade_in, generated.fade_out), (5, 7));
     assert_eq!(
-        generated.effects.transition_in.as_ref().map(|t| (t.direction, t.duration, t.ease)),
+        generated
+            .effects
+            .transition_in
+            .as_ref()
+            .map(|t| (t.direction, t.duration, t.ease)),
         Some((PushDirection::Up, 9, Ease::In)),
         "the transition comes back whole from metadata.venturi"
     );
@@ -129,8 +147,9 @@ fn a_venturi_export_imports_back_unchanged() {
 /// Qt rich text and the colour from the hex.
 #[test]
 fn reads_back_the_generators_without_our_metadata() {
-    let measure = |_: &crate::model::TitleParams| {
-        crate::TitleMetrics { block: (440.0, 176.0), padding: 20.0 }
+    let measure = |_: &crate::model::TitleParams| crate::TitleMetrics {
+        block: (440.0, 176.0),
+        padding: 20.0,
     };
     let mut project = Project::default();
     let timeline_id = project.timelines.insert(Timeline {
@@ -141,10 +160,13 @@ fn reads_back_the_generators_without_our_metadata() {
     });
     let mut color =
         Clip::from_source_range(ClipId(1), ClipSource::SolidColor, 0, 60, 0, Rational::one());
-    color.effects.color =
-        Some(Keyframed::constant(Rgba { r: 0.231_372_55, g: 0.709_803_94, b: 0.207_843_14, a: 1.0 }));
-    let mut text =
-        Clip::from_source_range(ClipId(2), ClipSource::Text, 0, 60, 0, Rational::one());
+    color.effects.color = Some(Keyframed::constant(Rgba {
+        r: 0.231_372_55,
+        g: 0.709_803_94,
+        b: 0.207_843_14,
+        a: 1.0,
+    }));
+    let mut text = Clip::from_source_range(ClipId(2), ClipSource::Text, 0, 60, 0, Rational::one());
     let title = crate::model::TitleParams {
         content: "Two\nlines & <>".into(),
         font_family: "Open Sans".into(),
@@ -175,16 +197,26 @@ fn reads_back_the_generators_without_our_metadata() {
         }
     }
     let mut probe = probe_from(vec![]);
-    let imported =
-        project_from_otio(&otio, Path::new("/"), &mut probe, Some(&measure)).unwrap();
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, Some(&measure)).unwrap();
     assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
 
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
-    let color = tl.tracks[0].clips[0].effects.color.as_ref().unwrap().default;
-    assert_eq!(((color.r * 255.0).round(), (color.g * 255.0).round()), (59.0, 181.0));
+    let color = tl.tracks[0].clips[0]
+        .effects
+        .color
+        .as_ref()
+        .unwrap()
+        .default;
+    assert_eq!(
+        ((color.r * 255.0).round(), (color.g * 255.0).round()),
+        (59.0, 181.0)
+    );
 
     let back = tl.tracks[1].clips[0].effects.title.as_ref().unwrap();
-    assert_eq!(back.content, title.content, "text and lines from the HTML blob");
+    assert_eq!(
+        back.content, title.content,
+        "text and lines from the HTML blob"
+    );
     assert_eq!(back.font_family, "Open Sans");
     assert_eq!((back.font_weight, back.size), (700, 72.0));
     assert!(back.italic && back.underline && !back.strikethrough);
@@ -283,11 +315,17 @@ fn reads_the_transform_of_a_resolve_clip() {
             }],
         }]},
     });
-    let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+    let mut probe = probe_from(vec![(
+        "/media/b roll.mov",
+        meta(Rational::new(24, 1), 2400),
+    )]);
     let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
     assert_eq!(
         imported.warnings,
-        vec![OtioWarning::SpeedNotApplied { clip: "one".into(), percent: 200 }],
+        vec![OtioWarning::SpeedNotApplied {
+            clip: "one".into(),
+            percent: 200
+        }],
         "speed is kept but not played back"
     );
 
@@ -382,13 +420,27 @@ fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
             },
         }],
     });
-    let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+    let mut probe = probe_from(vec![(
+        "/media/b roll.mov",
+        meta(Rational::new(24, 1), 2400),
+    )]);
     let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
 
     assert_eq!(imported.warnings.len(), 2, "{:?}", imported.warnings);
-    assert_eq!(imported.warnings[0], OtioWarning::ClipDisabled { clip: "disabled".into() });
-    assert!(matches!(&imported.warnings[1], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("missing.mov")));
-    assert_eq!(imported.project.media_pool.len(), 1, "same file probed once");
+    assert_eq!(
+        imported.warnings[0],
+        OtioWarning::ClipDisabled {
+            clip: "disabled".into()
+        }
+    );
+    assert!(
+        matches!(&imported.warnings[1], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("missing.mov"))
+    );
+    assert_eq!(
+        imported.project.media_pool.len(),
+        1,
+        "same file probed once"
+    );
 
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     assert_eq!(tl.fps, Rational::new(24_000, 1001));
@@ -397,10 +449,21 @@ fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
     assert_eq!(video.len(), 2);
     assert_eq!((video[0].timeline_start, video[0].timeline_len), (24, 48));
     assert_eq!(video[0].source_in(), 48, "from the media start timecode");
-    assert_eq!(video[1].timeline_start, 24 + 48 + 24 + 24, "after disabled and lost");
+    assert_eq!(
+        video[1].timeline_start,
+        24 + 48 + 24 + 24,
+        "after disabled and lost"
+    );
     assert_eq!(video[1].source_in(), 0, "relative path");
-    let transition = video[0].effects.transition_out.as_ref().expect("outgoing transition");
-    assert_eq!(transition.duration, 6, "in_offset reaches into the previous clip");
+    let transition = video[0]
+        .effects
+        .transition_out
+        .as_ref()
+        .expect("outgoing transition");
+    assert_eq!(
+        transition.duration, 6,
+        "in_offset reaches into the previous clip"
+    );
 
     let audio = &tl.tracks[1];
     assert!(audio.muted);
@@ -453,9 +516,7 @@ fn resolve_effects_links_and_channels_are_translated() {
         "Default Parameter Value": 1.0,
         "Parameter Value": 1.5,
     }]);
-    let track = |kind: &str, children: Vec<Value>| {
-        json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": children })
-    };
+    let track = |kind: &str, children: Vec<Value>| json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": children });
     let otio = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "global_start_time": rt(0.0, 24.0),
@@ -484,15 +545,28 @@ fn resolve_effects_links_and_channels_are_translated() {
             ]),
         ]},
     });
-    let mut probe = probe_from(vec![("/media/b roll.mov", meta(Rational::new(24, 1), 2400))]);
+    let mut probe = probe_from(vec![(
+        "/media/b roll.mov",
+        meta(Rational::new(24, 1), 2400),
+    )]);
     let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
 
-    assert_eq!(imported.warnings, [OtioWarning::EffectIgnored { effect: "Zoom".into(), clips: 2 }]);
+    assert_eq!(
+        imported.warnings,
+        [OtioWarning::EffectIgnored {
+            effect: "Zoom".into(),
+            clips: 2
+        }]
+    );
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     let (video, audio) = (&tl.tracks[0].clips, &tl.tracks[1].clips);
     assert_eq!(audio[0].effects.gain_db.value_at(0), 3.5);
     let gain = &audio[1].effects.gain_db;
-    assert_eq!(gain.value_at(24), -6.0, "keyframe on the first source frame of the clip");
+    assert_eq!(
+        gain.value_at(24),
+        -6.0,
+        "keyframe on the first source frame of the clip"
+    );
     assert_eq!(gain.value_at(36), 0.0);
     assert_eq!(gain.value_at(30), -3.0);
     assert_eq!(audio[0].audio_stream_index, 1);
@@ -535,14 +609,16 @@ fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
     });
     let rate = Rational::conform_rate(fps, Rational::new(30, 1));
-    project.timelines[timeline_id].tracks[1].clips.push(Clip::from_source_range(
-        ClipId(1),
-        ClipSource::Media(media),
-        30,
-        270,
-        10,
-        rate,
-    ));
+    project.timelines[timeline_id].tracks[1]
+        .clips
+        .push(Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(media),
+            30,
+            270,
+            10,
+            rate,
+        ));
     let mut split = crate::SplitClip::new(timeline_id, 1, ClipId(1), 77);
     crate::Command::apply(&mut split, &mut project);
 
@@ -566,9 +642,7 @@ fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
             "active_media_reference_key": "DEFAULT_MEDIA",
         })
     };
-    let track = |kind: &str| {
-        json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": [wav_clip(24_000.0)] })
-    };
+    let track = |kind: &str| json!({ "OTIO_SCHEMA": "Track.1", "kind": kind, "children": [wav_clip(24_000.0)] });
     let foreign = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "global_start_time": rt(0.0, 25.0),
@@ -576,11 +650,18 @@ fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
     });
     let imported = project_from_otio(&foreign, Path::new("/"), &mut probe, None).unwrap();
     assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
-    assert!(matches!(imported.warnings[0], OtioWarning::AudioOnlyOnVideoTrack { .. }));
+    assert!(matches!(
+        imported.warnings[0],
+        OtioWarning::AudioOnlyOnVideoTrack { .. }
+    ));
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     assert!(tl.tracks[0].clips.is_empty());
     let clip = &tl.tracks[1].clips[0];
-    assert_eq!((clip.timeline_len, clip.source_offset), (25, 13), "1 s from 0.5 s, at 25 fps");
+    assert_eq!(
+        (clip.timeline_len, clip.source_offset),
+        (25, 13),
+        "1 s from 0.5 s, at 25 fps"
+    );
     assert_eq!(clip.rate, rate);
     assert_eq!(tl.resolution, (1920, 1080));
 }
@@ -597,7 +678,10 @@ fn a_file_without_timelines_is_an_error() {
 fn fps_from_float_recognises_ntsc_rates() {
     assert_eq!(Rational::from_fps(25.0), Rational::new(25, 1));
     assert_eq!(Rational::from_fps(29.97), Rational::new(30_000, 1001));
-    assert_eq!(Rational::from_fps(30_000.0 / 1001.0), Rational::new(30_000, 1001));
+    assert_eq!(
+        Rational::from_fps(30_000.0 / 1001.0),
+        Rational::new(30_000, 1001)
+    );
     assert_eq!(Rational::from_fps(23.976), Rational::new(24_000, 1001));
     assert_eq!(Rational::from_fps(59.94), Rational::new(60_000, 1001));
     assert_eq!(Rational::from_fps(12.5), Rational::new(25, 2));

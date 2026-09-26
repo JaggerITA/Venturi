@@ -5,7 +5,11 @@ fn ease_in_and_ease_out_are_slow_then_fast_and_viceversa() {
     assert!(Interpolation::EaseIn.ease(0.5) < 0.5);
     assert!(Interpolation::EaseOut.ease(0.5) > 0.5);
     for interp in Interpolation::PRESETS {
-        assert_eq!(interp.ease(1.0), 1.0, "{interp:?} must reach the destination");
+        assert_eq!(
+            interp.ease(1.0),
+            1.0,
+            "{interp:?} must reach the destination"
+        );
     }
 }
 
@@ -25,7 +29,14 @@ fn a_bezier_keyframe_interpolates_along_its_curve() {
     let mut k: Keyframed<f32> = Keyframed::constant(0.0);
     // Controls squashed low: at half the segment the value is
     // still below half.
-    k.upsert(0, 0.0, Interpolation::Bezier { c1: [0.5, 0.0], c2: [1.0, 0.0] });
+    k.upsert(
+        0,
+        0.0,
+        Interpolation::Bezier {
+            c1: [0.5, 0.0],
+            c2: [1.0, 0.0],
+        },
+    );
     k.upsert(10, 100.0, Interpolation::Linear);
     assert!(k.value_at(5) < 50.0);
     assert_eq!(k.value_at(0), 0.0);
@@ -36,7 +47,10 @@ fn a_bezier_keyframe_interpolates_along_its_curve() {
 fn set_interpolation_returns_the_previous_one_and_ignores_empty_frames() {
     let mut k: Keyframed<f32> = Keyframed::constant(0.0);
     k.upsert(4, 1.0, Interpolation::Linear);
-    assert_eq!(k.set_interpolation(4, Interpolation::Hold), Some(Interpolation::Linear));
+    assert_eq!(
+        k.set_interpolation(4, Interpolation::Hold),
+        Some(Interpolation::Linear)
+    );
     assert_eq!(k.keyframe_at(4), Some((1.0, Interpolation::Hold)));
     assert_eq!(k.set_interpolation(7, Interpolation::Hold), None);
 }
@@ -121,11 +135,7 @@ fn remove_at_deletes_and_returns_the_keyframe() {
     let removed = k.remove_at(5);
     assert_eq!(removed, Some((42.0, Interpolation::Linear)));
     assert!(k.is_constant());
-    assert_eq!(
-        k.remove_at(5),
-        None,
-        "removing twice must do nothing"
-    );
+    assert_eq!(k.remove_at(5), None, "removing twice must do nothing");
 }
 
 #[test]
@@ -196,7 +206,11 @@ fn transform_lerp_interpolates_each_field() {
     assert_eq!(mid.rotation, 45.0);
     assert_eq!(mid.anchor, [0.1, 0.2]);
     assert_eq!(mid.opacity, 50.0);
-    assert_eq!(mid.flip, [true, true], "flip snaps halfway, it does not blend");
+    assert_eq!(
+        mid.flip,
+        [true, true],
+        "flip snaps halfway, it does not blend"
+    );
 }
 
 #[test]

@@ -79,13 +79,59 @@ fn transform(clip: &Clip, scale: &Scale) -> Option<Value> {
     use TransformParam::*;
     let t = &clip.effects.transform;
     let parameters = [
-        scalar(clip, t, ZoomX, "transformationZoomX", 1.0, 1.0, [0.01, 100.0]),
-        scalar(clip, t, ZoomY, "transformationZoomY", 1.0, 1.0, [0.01, 100.0]),
-        scalar(clip, t, PositionX, "transformationPan", scale.display.0, 0.0, [-4.0, 4.0]),
-        scalar(clip, t, PositionY, "transformationTilt", scale.display.1, 0.0, [-4.0, 4.0]),
+        scalar(
+            clip,
+            t,
+            ZoomX,
+            "transformationZoomX",
+            1.0,
+            1.0,
+            [0.01, 100.0],
+        ),
+        scalar(
+            clip,
+            t,
+            ZoomY,
+            "transformationZoomY",
+            1.0,
+            1.0,
+            [0.01, 100.0],
+        ),
+        scalar(
+            clip,
+            t,
+            PositionX,
+            "transformationPan",
+            scale.display.0,
+            0.0,
+            [-4.0, 4.0],
+        ),
+        scalar(
+            clip,
+            t,
+            PositionY,
+            "transformationTilt",
+            scale.display.1,
+            0.0,
+            [-4.0, 4.0],
+        ),
         // Resolve turns counter-clockwise on a positive angle, we turn clockwise.
-        scalar(clip, t, Rotation, "transformationRotationAngle", -1.0, 0.0, [-100_000.0, 100_000.0]),
-        point(clip, t, [AnchorX, AnchorY], "transformationAnchorPoint", scale.display),
+        scalar(
+            clip,
+            t,
+            Rotation,
+            "transformationRotationAngle",
+            -1.0,
+            0.0,
+            [-100_000.0, 100_000.0],
+        ),
+        point(
+            clip,
+            t,
+            [AnchorX, AnchorY],
+            "transformationAnchorPoint",
+            scale.display,
+        ),
         boolean("transformationFlipX", t.flip[0]),
         boolean("transformationFlipY", t.flip[1]),
     ];
@@ -96,11 +142,43 @@ fn cropping(clip: &Clip, scale: &Scale) -> Option<Value> {
     use TransformParam::*;
     let t = &clip.effects.transform;
     let parameters = [
-        scalar(clip, t, CropLeft, "cropLeft", scale.media.0, 0.0, [0.0, 1.0]),
-        scalar(clip, t, CropRight, "cropRight", scale.media.0, 0.0, [0.0, 1.0]),
+        scalar(
+            clip,
+            t,
+            CropLeft,
+            "cropLeft",
+            scale.media.0,
+            0.0,
+            [0.0, 1.0],
+        ),
+        scalar(
+            clip,
+            t,
+            CropRight,
+            "cropRight",
+            scale.media.0,
+            0.0,
+            [0.0, 1.0],
+        ),
         scalar(clip, t, CropTop, "cropTop", scale.media.1, 0.0, [0.0, 1.0]),
-        scalar(clip, t, CropBottom, "cropBottom", scale.media.1, 0.0, [0.0, 1.0]),
-        scalar(clip, t, CropSoftness, "cropSoftness", 1.0, 0.0, [-100.0, 100.0]),
+        scalar(
+            clip,
+            t,
+            CropBottom,
+            "cropBottom",
+            scale.media.1,
+            0.0,
+            [0.0, 1.0],
+        ),
+        scalar(
+            clip,
+            t,
+            CropSoftness,
+            "cropSoftness",
+            1.0,
+            0.0,
+            [-100.0, 100.0],
+        ),
         None,
     ];
     effect("Cropping", "Cropping", 3, 1, parameters)
@@ -108,7 +186,15 @@ fn cropping(clip: &Clip, scale: &Scale) -> Option<Value> {
 
 fn composite(clip: &Clip) -> Option<Value> {
     let t = &clip.effects.transform;
-    let opacity = scalar(clip, t, TransformParam::Opacity, "opacity", 1.0, 100.0, [0.0, 100.0]);
+    let opacity = scalar(
+        clip,
+        t,
+        TransformParam::Opacity,
+        "opacity",
+        1.0,
+        100.0,
+        [0.0, 100.0],
+    );
     let mode = composite_mode(clip.effects.blend_mode);
     let mode = (mode != 0).then(|| {
         json!({
@@ -118,7 +204,13 @@ fn composite(clip: &Clip) -> Option<Value> {
             "Variant Type": "UInt",
         })
     });
-    effect("Composite", "Composite", 1, 1, [mode, opacity, None, None, None, None])
+    effect(
+        "Composite",
+        "Composite",
+        1,
+        1,
+        [mode, opacity, None, None, None, None],
+    )
 }
 
 /// Values of Resolve's `composite mode`, read off a file with one clip per
@@ -143,22 +235,34 @@ const COMPOSITE_MODES: [(BlendMode, u64); 15] = [
 ];
 
 pub(super) fn composite_mode(blend: BlendMode) -> u64 {
-    COMPOSITE_MODES.iter().find(|(b, _)| *b == blend).map_or(0, |(_, mode)| *mode)
+    COMPOSITE_MODES
+        .iter()
+        .find(|(b, _)| *b == blend)
+        .map_or(0, |(_, mode)| *mode)
 }
 
 pub(super) fn blend_mode(mode: u64) -> Option<BlendMode> {
-    COMPOSITE_MODES.iter().find(|(_, m)| *m == mode).map(|(blend, _)| *blend)
+    COMPOSITE_MODES
+        .iter()
+        .find(|(_, m)| *m == mode)
+        .map(|(blend, _)| *blend)
 }
 
 fn video_faders(clip: &Clip) -> Option<Value> {
-    effect("Video Faders", "Video Faders", 36, 3, [
-        frames("videoFaderIn", clip.fade_in),
-        frames("videoFaderOut", clip.fade_out),
-        None,
-        None,
-        None,
-        None,
-    ])
+    effect(
+        "Video Faders",
+        "Video Faders",
+        36,
+        3,
+        [
+            frames("videoFaderIn", clip.fade_in),
+            frames("videoFaderOut", clip.fade_out),
+            None,
+            None,
+            None,
+            None,
+        ],
+    )
 }
 
 fn volume_and_fades(clip: &Clip) -> Option<Value> {
@@ -169,14 +273,20 @@ fn volume_and_fades(clip: &Clip) -> Option<Value> {
         [-100.0, 30.0],
         key_frames(clip, &clip.effects.gain_db, 1.0),
     );
-    effect("Volume", "Fairlight Clip Volume and Fades", 62, 1, [
-        gain,
-        frames("faderIn", clip.fade_in),
-        frames("faderOut", clip.fade_out),
-        None,
-        None,
-        None,
-    ])
+    effect(
+        "Volume",
+        "Fairlight Clip Volume and Fades",
+        62,
+        1,
+        [
+            gain,
+            frames("faderIn", clip.fade_in),
+            frames("faderOut", clip.fade_out),
+            None,
+            None,
+            None,
+        ],
+    )
 }
 
 fn effect<const N: usize>(
@@ -219,7 +329,13 @@ fn scalar(
     range: [f32; 2],
 ) -> Option<Value> {
     let track = tracks.track(param);
-    parameter(id, track.default / divisor, default, range, key_frames(clip, track, divisor))
+    parameter(
+        id,
+        track.default / divisor,
+        default,
+        range,
+        key_frames(clip, track, divisor),
+    )
 }
 
 /// A `POINTF`: one keyframe per instant at which either axis has one, with
@@ -233,16 +349,25 @@ fn point(
 ) -> Option<Value> {
     let axes = params.map(|p| tracks.track(p));
     let value = |t: FrameIdx| {
-        json!([axes[0].value_at(t) / divisor.0, axes[1].value_at(t) / divisor.1])
+        json!([
+            axes[0].value_at(t) / divisor.0,
+            axes[1].value_at(t) / divisor.1
+        ])
     };
-    let mut instants: Vec<FrameIdx> =
-        axes.iter().flat_map(|a| a.keyframes()).map(|(f, _, _)| *f).collect();
+    let mut instants: Vec<FrameIdx> = axes
+        .iter()
+        .flat_map(|a| a.keyframes())
+        .map(|(f, _, _)| *f)
+        .collect();
     instants.sort_unstable();
     instants.dedup();
     let keys: Map<String, Value> = instants
         .into_iter()
         .map(|t| {
-            (local_frame(clip, t).to_string(), json!({ "Value": value(t), "Variant Type": "POINTF" }))
+            (
+                local_frame(clip, t).to_string(),
+                json!({ "Value": value(t), "Variant Type": "POINTF" }),
+            )
         })
         .collect();
 

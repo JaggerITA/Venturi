@@ -228,7 +228,14 @@ fn media_clip_trimmed(
 }
 
 fn solid_clip(id: u64, start: FrameIdx, len: FrameIdx) -> Clip {
-    Clip::from_source_range(ClipId(id), ClipSource::SolidColor, 0, len, start, Rational::one())
+    Clip::from_source_range(
+        ClipId(id),
+        ClipSource::SolidColor,
+        0,
+        len,
+        start,
+        Rational::one(),
+    )
 }
 
 fn timeline_with(tracks: Vec<Track>) -> Timeline {
@@ -256,11 +263,7 @@ fn collect_media_segments_walks_across_a_straight_cut_between_two_media() {
     }]);
 
     let segments = collect_media_segments(&Project::default(), &tl, 40, 60);
-    assert_eq!(
-        segments.len(),
-        2,
-        "must cross the cut in one go"
-    );
+    assert_eq!(segments.len(), 2, "must cross the cut in one go");
     assert_eq!(segments[0].source_start, 40);
     assert_eq!(segments[0].source_end, 49);
     assert_eq!(segments[1].source_start, 0);
@@ -352,11 +355,7 @@ fn collect_media_segments_behind_walks_across_a_straight_cut_between_two_media()
     // Window behind [40,60): crosses the cut at 50 going
     // backwards, symmetric to the forward test above.
     let segments = collect_media_segments_behind(&Project::default(), &tl, 60, 40);
-    assert_eq!(
-        segments.len(),
-        2,
-        "must cross the cut backwards in one go"
-    );
+    assert_eq!(segments.len(), 2, "must cross the cut backwards in one go");
     // Discovery order: from the nearest to the playhead (60) to the
     // farthest — first the piece of media_b [50,60), then the one of
     // media_a [40,50).
@@ -475,9 +474,16 @@ fn collect_media_segments_recurses_into_a_compound_clips_nested_timeline() {
 
     let real = collect_media_segments(&project, &root, 10, 30);
 
-    assert_eq!(real.len(), 1, "only the real media inside the compound clip, the only one to decode");
+    assert_eq!(
+        real.len(),
+        1,
+        "only the real media inside the compound clip, the only one to decode"
+    );
     assert_eq!(real[0].media_id, real_media);
-    assert_eq!(real[0].source_start, 10, "same range, in frames of the nested timeline");
+    assert_eq!(
+        real[0].source_start, 10,
+        "same range, in frames of the nested timeline"
+    );
     assert_eq!(real[0].source_end, 29);
 }
 
@@ -858,7 +864,10 @@ fn render_ahead_keeps_both_sides_of_a_crossing_readable_through_the_whole_window
             missing.push((frame, ok, expected));
         }
     }
-    assert!(missing.is_empty(), "frames with missing layers (frame, ok, expected): {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "frames with missing layers (frame, ok, expected): {missing:?}"
+    );
 }
 
 /// End-to-end reproduction (real worker thread, not a direct
@@ -1078,7 +1087,9 @@ fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening
     );
 
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 1000, false, false, false),
+        position_decoder(
+            &caches, &mut open, media_a, &path, 1000, false, false, false
+        ),
         Positioned::Seeked,
         "a real seek on an already open media must reuse the decoder, not reopen it"
     );
@@ -1619,8 +1630,8 @@ fn walk_and_fill_buffers_only_a_minimal_margin_when_configured_to_zero_seconds()
         generous_budget,
         false,
         None, // proxy: irrelevant for this test
-        0.0,   // lookahead_secs: the one under test
-        0.0,   // behind_secs: the one under test
+        0.0,  // lookahead_secs: the one under test
+        0.0,  // behind_secs: the one under test
         &AtomicI64::new(60),
     );
 
@@ -1729,12 +1740,8 @@ fn walk_and_fill_prioritizes_frames_near_the_playhead_when_the_budget_is_too_sma
 /// window a prefetch that is by now obsolete.
 #[test]
 fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_drifted() {
-    let path = make_test_clip_with_short_gop(
-        "vv-app-render-ahead-test",
-        "reactivity_drift.mp4",
-        20,
-        25,
-    );
+    let path =
+        make_test_clip_with_short_gop("vv-app-render-ahead-test", "reactivity_drift.mp4", 20, 25);
     let mut project = Project::default();
     let media_a = project.media_pool.insert(MediaItem {
         path,
@@ -1994,8 +2001,7 @@ fn walk_and_fill_does_not_let_one_segment_of_a_media_evict_another_via_capacity_
 /// this test wants to isolate (the contamination between segments of the
 /// same media, not that threshold).
 #[test]
-fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments()
-{
+fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in_two_segments() {
     let path = make_test_clip("vv-app-render-ahead-test", "same_media_two_segments.mp4", 3);
     let (media_a, _) = two_media_ids();
     let caches = SharedFrameCache::new();
@@ -2762,8 +2768,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
     // Explicit GOP=10: keyframes at 0,10,20,... — it only needs to make
     // one predictable near the start of the requested segment, no
     // other requirement on the distance between the two islands below.
-    let path =
-        make_test_clip_with_short_gop("vv-app-render-ahead-test", "bridge_gap.mp4", 4, 10);
+    let path = make_test_clip_with_short_gop("vv-app-render-ahead-test", "bridge_gap.mp4", 4, 10);
     let mut project = Project::default();
     let media_a = project.media_pool.insert(MediaItem {
         path,
@@ -3167,7 +3172,10 @@ fn a_replaced_project_never_shows_the_previous_projects_frames() {
     let path_b = make_color_clip(dir, "b.mp4", "red");
     let (project_a, media_a, timeline_a) = single_media_project(path_a);
     let (project_b, media_b, timeline_b) = single_media_project(path_b.clone());
-    assert_eq!(media_a, media_b, "the premise: both projects reuse the same key");
+    assert_eq!(
+        media_a, media_b,
+        "the premise: both projects reuse the same key"
+    );
 
     let render_ahead = RenderAhead::spawn(project_a, timeline_a, 100_000_000, None, 1.0, 0.0);
     render_ahead.set_target(0);
@@ -3176,9 +3184,18 @@ fn a_replaced_project_never_shows_the_previous_projects_frames() {
 
     render_ahead.update_project(&project_b, timeline_b);
     wait_caught_up(&render_ahead);
-    let shown = render_ahead.get_frame(media_b, 0).expect("frame 0 of the new project");
-    let (_, expected) = vv_media::Decoder::open(&path_b).unwrap().next_frame().unwrap().unwrap();
-    assert!(shown.y == expected.y, "frame 0 still comes from the previous project's file");
+    let shown = render_ahead
+        .get_frame(media_b, 0)
+        .expect("frame 0 of the new project");
+    let (_, expected) = vv_media::Decoder::open(&path_b)
+        .unwrap()
+        .next_frame()
+        .unwrap()
+        .unwrap();
+    assert!(
+        shown.y == expected.y,
+        "frame 0 still comes from the previous project's file"
+    );
 }
 
 /// An open decoder for `media` on `path`, and a cached frame of it.
@@ -3201,11 +3218,12 @@ fn an_edit_that_keeps_the_media_keeps_its_decoder_and_frames() {
     let path = make_test_clip("vv-app-render-ahead-forget-test", "keep.mp4", 1);
     let (old, media, timeline_id) = single_media_project(path.clone());
     let mut new = old.clone();
-    new.timelines[timeline_id].tracks[0].clips[0].effects.transform =
-        vv_core::TransformTracks::constant(vv_core::Transform {
-            zoom: [2.0, 2.0],
-            ..Default::default()
-        });
+    new.timelines[timeline_id].tracks[0].clips[0]
+        .effects
+        .transform = vv_core::TransformTracks::constant(vv_core::Transform {
+        zoom: [2.0, 2.0],
+        ..Default::default()
+    });
     let (caches, mut open) = opened_media(media, &path);
     let mut open_behind = HashMap::new();
 

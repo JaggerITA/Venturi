@@ -85,8 +85,7 @@ fn render_video_frame_reads_solid_color_at_the_clips_source_frame() {
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut active = StreamingFrameProvider::default();
-    let frame =
-        render_video_frame(&project, &tl, &compositor, &mut active, 12, (2, 2)).unwrap();
+    let frame = render_video_frame(&project, &tl, &compositor, &mut active, 12, (2, 2)).unwrap();
     assert_eq!(frame, solid_i420(2, 2, RED_I420));
 }
 
@@ -126,8 +125,14 @@ fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
         content_hash: 1,
         compound: Some(nested_id),
     });
-    let compound_clip =
-        Clip::from_source_range(ClipId(2), ClipSource::Media(compound_media), 0, 10, 5, vv_core::Rational::one());
+    let compound_clip = Clip::from_source_range(
+        ClipId(2),
+        ClipSource::Media(compound_media),
+        0,
+        10,
+        5,
+        vv_core::Rational::one(),
+    );
     let tl = timeline_with(vec![Track {
         kind: TrackKind::Video,
         clips: vec![compound_clip],
@@ -140,10 +145,18 @@ fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
     let mut provider = StreamingFrameProvider::default();
 
     let before = render_video_frame(&project, &tl, &compositor, &mut provider, 0, (2, 2)).unwrap();
-    assert_eq!(before, solid_i420(2, 2, BLACK_I420), "before the compound clip: empty");
+    assert_eq!(
+        before,
+        solid_i420(2, 2, BLACK_I420),
+        "before the compound clip: empty"
+    );
 
     let during = render_video_frame(&project, &tl, &compositor, &mut provider, 7, (2, 2)).unwrap();
-    assert_eq!(during, solid_i420(2, 2, RED_I420), "inside: the content of the nested timeline");
+    assert_eq!(
+        during,
+        solid_i420(2, 2, RED_I420),
+        "inside: the content of the nested timeline"
+    );
 }
 
 /// Bug reported by the user: a compound clip is a timeline like any
@@ -188,8 +201,14 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
         content_hash: 1,
         compound: Some(nested_id),
     });
-    let compound_clip =
-        Clip::from_source_range(ClipId(2), ClipSource::Media(compound_media), 0, 10, 0, vv_core::Rational::one());
+    let compound_clip = Clip::from_source_range(
+        ClipId(2),
+        ClipSource::Media(compound_media),
+        0,
+        10,
+        0,
+        vv_core::Rational::one(),
+    );
     let tl = timeline_with(vec![
         Track {
             kind: TrackKind::Video,
@@ -215,7 +234,10 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
     // Y plane, one byte per pixel: left covered by the red of the
     // compound clip, right uncovered (the blue below must show).
     assert_eq!(frame[0], RED_I420[0], "left: the red of the compound clip");
-    assert_eq!(frame[3], BLUE_I420[0], "right: the blue of the track below, not black");
+    assert_eq!(
+        frame[3], BLUE_I420[0],
+        "right: the blue of the track below, not black"
+    );
 }
 
 /// A PNG with transparency imported into the pool must let the track
@@ -251,8 +273,14 @@ fn render_video_frame_lets_the_track_below_show_through_a_transparent_png() {
         content_hash: 1,
         compound: None,
     });
-    let png_clip =
-        Clip::from_source_range(ClipId(2), ClipSource::Media(png_media), 0, 10, 0, vv_core::Rational::one());
+    let png_clip = Clip::from_source_range(
+        ClipId(2),
+        ClipSource::Media(png_media),
+        0,
+        10,
+        0,
+        vv_core::Rational::one(),
+    );
     let tl = timeline_with(vec![
         Track {
             kind: TrackKind::Video,
@@ -306,8 +334,7 @@ fn render_video_frame_applies_the_transform_to_a_solid_color_clip() {
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut active = StreamingFrameProvider::default();
-    let frame =
-        render_video_frame(&project, &tl, &compositor, &mut active, 0, (4, 2)).unwrap();
+    let frame = render_video_frame(&project, &tl, &compositor, &mut active, 0, (4, 2)).unwrap();
     // First row of the Y plane.
     assert_eq!(frame[0], RED_I420[0]);
     assert_eq!(frame[3], BLACK_I420[0]);
@@ -383,13 +410,19 @@ fn render_video_frame_prefers_the_topmost_video_track() {
     let compositor = vv_render::Compositor::new_headless();
     let mut provider = StreamingFrameProvider::default();
 
-    let below =
-        render_video_frame(&project, &tl, &compositor, &mut provider, 5, (2, 2)).unwrap();
-    assert_eq!(below, solid_i420(2, 2, RED_I420), "below the top track: the bottom one shows");
+    let below = render_video_frame(&project, &tl, &compositor, &mut provider, 5, (2, 2)).unwrap();
+    assert_eq!(
+        below,
+        solid_i420(2, 2, RED_I420),
+        "below the top track: the bottom one shows"
+    );
 
-    let above =
-        render_video_frame(&project, &tl, &compositor, &mut provider, 15, (2, 2)).unwrap();
-    assert_eq!(above, solid_i420(2, 2, BLUE_I420), "the top track has a clip here: it wins");
+    let above = render_video_frame(&project, &tl, &compositor, &mut provider, 15, (2, 2)).unwrap();
+    assert_eq!(
+        above,
+        solid_i420(2, 2, BLUE_I420),
+        "the top track has a clip here: it wins"
+    );
 }
 
 #[test]
@@ -431,7 +464,12 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("compound_audio_source.wav");
     vv_media::test_support::ffmpeg(
-        &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"],
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+        ],
         &path,
     );
 
@@ -452,8 +490,14 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
         content_hash: 1,
         compound: None,
     });
-    let real_clip =
-        Clip::from_source_range(ClipId(100), ClipSource::Media(real_media), 0, 25, 0, vv_core::Rational::one());
+    let real_clip = Clip::from_source_range(
+        ClipId(100),
+        ClipSource::Media(real_media),
+        0,
+        25,
+        0,
+        vv_core::Rational::one(),
+    );
     let nested_id = project.timelines.insert(Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
@@ -484,8 +528,14 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
         compound: Some(nested_id),
     });
     // At 25 (1s after the start): silence before, sine wave during.
-    let compound_clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Media(compound_media), 0, 25, 25, vv_core::Rational::one());
+    let compound_clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(compound_media),
+        0,
+        25,
+        25,
+        vv_core::Rational::one(),
+    );
     let tl = timeline_with(vec![Track {
         kind: TrackKind::Audio,
         clips: vec![compound_clip],
@@ -497,7 +547,10 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
 
     let mixed = mix_audio_track(&project, &tl, 0..50).unwrap();
     let per_second = PROJECT_SAMPLE_RATE as usize * PROJECT_CHANNELS as usize;
-    assert!(mixed[..per_second].iter().all(|&s| s == 0.0), "silence before the compound clip");
+    assert!(
+        mixed[..per_second].iter().all(|&s| s == 0.0),
+        "silence before the compound clip"
+    );
     assert!(
         mixed[per_second..].iter().any(|&s| s.abs() > 0.01),
         "the nested timeline content reaches the mix at the compound clip position"
@@ -536,7 +589,9 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
 
     let mut app = crate::VenturiApp::default();
     app.import_media(source_path);
-    let timeline_id = app.timeline_id.expect("import should have created the timeline");
+    let timeline_id = app
+        .timeline_id
+        .expect("import should have created the timeline");
     let media_id = app
         .project
         .media_pool
@@ -551,8 +606,15 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
     let cancel = AtomicBool::new(false);
     let total = app.project.timelines[timeline_id].total_frames();
     let settings = ExportSettings::new(output_path.clone());
-    export_timeline(&app.project, timeline_id, &settings, 0..total, &progress, &cancel)
-        .expect("export failed");
+    export_timeline(
+        &app.project,
+        timeline_id,
+        &settings,
+        0..total,
+        &progress,
+        &cancel,
+    )
+    .expect("export failed");
 
     assert!(progress.lock().unwrap().done);
 
@@ -596,7 +658,12 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
     std::fs::create_dir_all(&dir).unwrap();
     let beep_path = dir.join("beep.wav");
     vv_media::test_support::ffmpeg(
-        &["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=1"],
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:sample_rate=48000:duration=1",
+        ],
         &beep_path,
     );
 
@@ -659,8 +726,15 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
     let cancel = AtomicBool::new(false);
     let total = project.timelines[timeline_id].total_frames();
     let settings = ExportSettings::new(output_path.clone());
-    export_timeline(&project, timeline_id, &settings, 0..total, &progress, &cancel)
-        .expect("export failed");
+    export_timeline(
+        &project,
+        timeline_id,
+        &settings,
+        0..total,
+        &progress,
+        &cancel,
+    )
+    .expect("export failed");
 
     let fps = 30000.0_f64 / 1001.0;
 
@@ -676,7 +750,9 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
     }
     let white_frame_idx = white_frame_idx.expect("no white frame found in the export");
 
-    let audio = vv_media::decode_audio_track(&output_path, 0).unwrap().expect("audio expected");
+    let audio = vv_media::decode_audio_track(&output_path, 0)
+        .unwrap()
+        .expect("audio expected");
     let mut onset_sample = None;
     for (i, &s) in audio.samples.iter().enumerate() {
         if s.abs() > 0.05 {
@@ -688,20 +764,34 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
     let onset_secs = onset_sample as f64 / audio.sample_rate as f64;
     let onset_frame = (onset_secs * fps).floor() as i64;
 
-    assert_eq!(white_frame_idx, FLASH_FRAME, "the video flash is not at the expected frame");
     assert_eq!(
-        onset_frame, FLASH_FRAME,
+        white_frame_idx, FLASH_FRAME,
+        "the video flash is not at the expected frame"
+    );
+    assert_eq!(
+        onset_frame,
+        FLASH_FRAME,
         "the audio onset ({onset_secs:.6}s) falls in frame {onset_frame} instead of the video flash frame {FLASH_FRAME}: {} frame offset",
         FLASH_FRAME - onset_frame
     );
 }
 
 fn black() -> Rgba {
-    Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
+    Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    }
 }
 
 fn white() -> Rgba {
-    Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+    Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    }
 }
 
 /// End-to-end regression for exporting an image (see
@@ -731,7 +821,9 @@ fn export_timeline_covers_a_stretched_image_clip_past_its_only_real_frame() {
 
     let mut app = crate::VenturiApp::default();
     app.import_media(source_path);
-    let timeline_id = app.timeline_id.expect("import should have created the timeline");
+    let timeline_id = app
+        .timeline_id
+        .expect("import should have created the timeline");
     let media_id = app
         .project
         .media_pool
@@ -748,8 +840,15 @@ fn export_timeline_covers_a_stretched_image_clip_past_its_only_real_frame() {
     let total = app.project.timelines[timeline_id].total_frames();
     assert_eq!(total, 5 * 25, "5 s by default at 25 fps");
     let settings = ExportSettings::new(output_path.clone());
-    export_timeline(&app.project, timeline_id, &settings, 0..total, &progress, &cancel)
-        .expect("export failed");
+    export_timeline(
+        &app.project,
+        timeline_id,
+        &settings,
+        0..total,
+        &progress,
+        &cancel,
+    )
+    .expect("export failed");
 
     assert!(progress.lock().unwrap().done);
 
@@ -759,7 +858,10 @@ fn export_timeline_covers_a_stretched_image_clip_past_its_only_real_frame() {
         // Yellow over the whole frame, for the whole export: if
         // the image "ended" halfway, black would appear here (or an
         // error would already have interrupted the export above).
-        assert!(frame.y[0] > 150, "expected the image frame still, not black");
+        assert!(
+            frame.y[0] > 150,
+            "expected the image frame still, not black"
+        );
         count += 1;
     }
     assert!((total - 1..=total).contains(&count), "count={count}");
@@ -822,12 +924,20 @@ fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
 
     let mut app = crate::VenturiApp::default();
     app.import_media(mute_25);
-    let timeline_id = app.timeline_id.expect("import should have created the timeline");
+    let timeline_id = app
+        .timeline_id
+        .expect("import should have created the timeline");
     assert_eq!(
         app.project.timelines[timeline_id].fps,
         vv_core::Rational::new(25, 1)
     );
-    let first = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
+    let first = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .map(|(id, _)| id)
+        .unwrap();
     app.add_media_to_timeline(first);
 
     app.import_media(sine_23976);
@@ -941,7 +1051,13 @@ fn export_timeline_scales_the_output_and_can_drop_the_audio() {
 
     let mut app = crate::VenturiApp::default();
     app.import_media(source_path);
-    let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
+    let media_id = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .map(|(id, _)| id)
+        .unwrap();
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
     let total = app.project.timelines[timeline_id].total_frames();
@@ -985,7 +1101,13 @@ fn export_timeline_writes_only_the_in_out_range() {
 
     let mut app = crate::VenturiApp::default();
     app.import_media(source_path);
-    let media_id = app.project.media_pool.iter().find(|(_, item)| item.compound.is_none()).map(|(id, _)| id).unwrap();
+    let media_id = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .map(|(id, _)| id)
+        .unwrap();
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
 

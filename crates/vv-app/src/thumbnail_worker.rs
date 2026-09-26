@@ -27,14 +27,15 @@ impl ThumbnailWorker {
         let (result_tx, rx) = mpsc::channel();
         let worker = Worker::spawn(move |job_rx: mpsc::Receiver<Job>| {
             while let Ok(job) = job_rx.recv() {
-                let thumb = vv_media::generate_thumbnail(&job.path, job.duration_secs, THUMBNAIL_WIDTH)
-                    .inspect_err(|e| {
-                        eprintln!(
-                            "[thumbnail_worker] thumbnail failed for {}: {e}",
-                            job.path.display()
-                        )
-                    })
-                    .ok();
+                let thumb =
+                    vv_media::generate_thumbnail(&job.path, job.duration_secs, THUMBNAIL_WIDTH)
+                        .inspect_err(|e| {
+                            eprintln!(
+                                "[thumbnail_worker] thumbnail failed for {}: {e}",
+                                job.path.display()
+                            )
+                        })
+                        .ok();
                 if result_tx.send((job.content_hash, thumb)).is_err() {
                     return;
                 }

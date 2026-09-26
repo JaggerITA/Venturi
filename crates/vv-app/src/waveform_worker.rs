@@ -41,7 +41,13 @@ impl WaveformWorker {
 
     /// Queues generation of the waveforms of all audio streams of `path`
     /// that are not already on disk — non-blocking, returns immediately.
-    pub fn enqueue(&self, path: PathBuf, content_hash: u64, audio_streams: usize, num_peaks: usize) {
+    pub fn enqueue(
+        &self,
+        path: PathBuf,
+        content_hash: u64,
+        audio_streams: usize,
+        num_peaks: usize,
+    ) {
         self.worker.send(Job {
             path,
             content_hash,
@@ -50,7 +56,6 @@ impl WaveformWorker {
         });
     }
 }
-
 
 /// Generates the missing waveforms of `job` in one pass; returns the keys
 /// of those ready on disk.

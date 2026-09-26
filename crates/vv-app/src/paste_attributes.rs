@@ -128,8 +128,12 @@ impl PasteAttributesDialog {
     fn group_applies(&self, group: AttributeGroup) -> bool {
         match group {
             AttributeGroup::Clip => !self.targets.is_empty(),
-            AttributeGroup::Video => self.video_targets > 0 && self.has_source_for(TrackKind::Video),
-            AttributeGroup::Audio => self.audio_targets > 0 && self.has_source_for(TrackKind::Audio),
+            AttributeGroup::Video => {
+                self.video_targets > 0 && self.has_source_for(TrackKind::Video)
+            }
+            AttributeGroup::Audio => {
+                self.audio_targets > 0 && self.has_source_for(TrackKind::Audio)
+            }
         }
     }
 }
@@ -178,7 +182,8 @@ impl VenturiApp {
                 .filter(|&&(track_index, _)| tl.tracks[track_index].kind == kind)
                 .count()
         };
-        let (video_targets, audio_targets) = (count_of(TrackKind::Video), count_of(TrackKind::Audio));
+        let (video_targets, audio_targets) =
+            (count_of(TrackKind::Video), count_of(TrackKind::Audio));
 
         self.paste_attributes = Some(PasteAttributesDialog {
             source_name,
@@ -269,7 +274,10 @@ impl VenturiApp {
                         .collect();
                     ui.separator();
                     let mut all = members.iter().all(|a| dialog.selected.contains(a));
-                    if ui.checkbox(&mut all, egui::RichText::new(title).strong()).changed() {
+                    if ui
+                        .checkbox(&mut all, egui::RichText::new(title).strong())
+                        .changed()
+                    {
                         for attribute in &members {
                             if all {
                                 dialog.selected.insert(*attribute);
@@ -304,7 +312,10 @@ impl VenturiApp {
                         cancel = true;
                     }
                     if ui
-                        .add_enabled(!dialog.selected.is_empty(), egui::Button::new(t!("paste_attr.apply")))
+                        .add_enabled(
+                            !dialog.selected.is_empty(),
+                            egui::Button::new(t!("paste_attr.apply")),
+                        )
                         .clicked()
                     {
                         apply = true;
@@ -334,7 +345,8 @@ impl VenturiApp {
         {
             let tl = &self.project.timelines[timeline_id];
             for &(track_index, clip_id) in &dialog.targets {
-                let (Some(track), Some(target)) = (tl.tracks.get(track_index), tl.clip(track_index, clip_id))
+                let (Some(track), Some(target)) =
+                    (tl.tracks.get(track_index), tl.clip(track_index, clip_id))
                 else {
                     continue;
                 };
@@ -365,7 +377,12 @@ impl VenturiApp {
         for (track_index, clip_id, attributes) in commands {
             self.history.do_command(
                 &mut self.project,
-                Box::new(vv_core::SetClipAttributes::new(timeline_id, track_index, clip_id, attributes)),
+                Box::new(vv_core::SetClipAttributes::new(
+                    timeline_id,
+                    track_index,
+                    clip_id,
+                    attributes,
+                )),
             );
         }
         self.history

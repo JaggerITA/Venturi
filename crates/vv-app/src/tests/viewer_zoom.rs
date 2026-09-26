@@ -18,7 +18,10 @@ fn fit_fills_the_viewer() {
 fn actual_size_maps_frame_pixels_to_physical_pixels() {
     let mut zoom = ViewerZoom::default();
     zoom.set_scale(1.0, area(), FRAME, 2.0);
-    assert_eq!(zoom.frame_rect(area(), FRAME, 2.0).size(), egui::vec2(960.0, 540.0));
+    assert_eq!(
+        zoom.frame_rect(area(), FRAME, 2.0).size(),
+        egui::vec2(960.0, 540.0)
+    );
     zoom.set_scale(1.0, area(), FRAME, 1.0);
     assert_eq!(zoom.frame_rect(area(), FRAME, 1.0).size(), FRAME);
 }

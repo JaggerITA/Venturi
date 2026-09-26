@@ -47,7 +47,12 @@ fn exports_tracks_in_compositing_order_with_gaps_between_clips() {
     ));
     let mut color =
         Clip::from_source_range(ClipId(2), ClipSource::SolidColor, 0, 60, 0, Rational::one());
-    color.effects.color = Some(Keyframed::constant(Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }));
+    color.effects.color = Some(Keyframed::constant(Rgba {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    }));
     tl.tracks[1].clips.push(color);
     tl.tracks[2].muted = true;
 
@@ -83,21 +88,29 @@ fn exports_tracks_in_compositing_order_with_gaps_between_clips() {
 fn a_split_conformed_clip_exports_contiguous_source_ranges() {
     let (mut project, timeline_id, media) = project();
     let rate = Rational::conform_rate(Rational::new(30, 1), Rational::new(30_000, 1001));
-    project.timelines[timeline_id].tracks[0].clips.push(Clip::from_source_range(
-        ClipId(1),
-        ClipSource::Media(media),
-        0,
-        1000,
-        0,
-        rate,
-    ));
+    project.timelines[timeline_id].tracks[0]
+        .clips
+        .push(Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(media),
+            0,
+            1000,
+            0,
+            rate,
+        ));
     let mut split = crate::SplitClip::new(timeline_id, 0, ClipId(1), 500);
     crate::Command::apply(&mut split, &mut project);
 
     let otio = timeline_to_otio(&project, timeline_id, None);
-    let v1 = otio["tracks"]["children"][0]["children"].as_array().unwrap();
+    let v1 = otio["tracks"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
     assert_eq!(v1.len(), 2, "no gap between the two halves");
-    let start = |i: usize| v1[i]["source_range"]["start_time"]["value"].as_f64().unwrap();
+    let start = |i: usize| {
+        v1[i]["source_range"]["start_time"]["value"]
+            .as_f64()
+            .unwrap()
+    };
     let len = |i: usize| v1[i]["source_range"]["duration"]["value"].as_f64().unwrap();
     assert_eq!(start(0) + len(0), start(1));
     assert_eq!(len(0) + len(1), 1001.0);
@@ -108,8 +121,14 @@ fn a_split_conformed_clip_exports_contiguous_source_ranges() {
 #[test]
 fn exports_the_transform_as_resolve_effects() {
     let (mut project, timeline_id, media) = project();
-    let mut clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 100, 0, Rational::one());
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        100,
+        0,
+        Rational::one(),
+    );
     let t = &mut clip.effects.transform;
     t.track_mut(TransformParam::ZoomX).default = 1.07;
     t.track_mut(TransformParam::PositionX).default = 96.0;
@@ -125,7 +144,9 @@ fn exports_the_transform_as_resolve_effects() {
     project.timelines[timeline_id].tracks[0].clips.push(clip);
 
     let otio = timeline_to_otio(&project, timeline_id, None);
-    let effects = otio["tracks"]["children"][0]["children"][0]["effects"].as_array().unwrap();
+    let effects = otio["tracks"]["children"][0]["children"][0]["effects"]
+        .as_array()
+        .unwrap();
     let named = |name: &str| {
         effects
             .iter()
@@ -144,16 +165,26 @@ fn exports_the_transform_as_resolve_effects() {
     };
     // The values are f32 widened to f64: comparing them exactly would
     // only measure the widening.
-    let value = |effect: &Value, id: &str| {
-        (raw(effect, id).as_f64().unwrap() * 1e6).round() / 1e6
-    };
+    let value = |effect: &Value, id: &str| (raw(effect, id).as_f64().unwrap() * 1e6).round() / 1e6;
 
     let transform = named("Transform");
     assert_eq!(transform["effect_name"], "Resolve Effect");
     assert_eq!(value(&transform, "transformationZoomX"), 1.07);
-    assert_eq!(value(&transform, "transformationPan"), 0.05, "96 px out of 1920");
-    assert_eq!(value(&transform, "transformationTilt"), -0.05, "-54 px out of 1080");
-    assert_eq!(value(&transform, "transformationRotationAngle"), -7.8, "opposite direction");
+    assert_eq!(
+        value(&transform, "transformationPan"),
+        0.05,
+        "96 px out of 1920"
+    );
+    assert_eq!(
+        value(&transform, "transformationTilt"),
+        -0.05,
+        "-54 px out of 1080"
+    );
+    assert_eq!(
+        value(&transform, "transformationRotationAngle"),
+        -7.8,
+        "opposite direction"
+    );
     let anchor = raw(&transform, "transformationAnchorPoint");
     assert!((anchor[0].as_f64().unwrap() - 0.1).abs() < 1e-6);
     assert_eq!(anchor[1].as_f64().unwrap(), 0.0);
@@ -182,14 +213,23 @@ fn exports_the_transform_as_resolve_effects() {
     // The speed is the one thing Resolve reads from the standard schema.
     let warp = &effects[0];
     assert_eq!(warp["OTIO_SCHEMA"], "LinearTimeWarp.1");
-    assert_eq!((warp["time_scalar"].as_f64().unwrap() * 1e6).round() / 1e6, 1.705748);
+    assert_eq!(
+        (warp["time_scalar"].as_f64().unwrap() * 1e6).round() / 1e6,
+        1.705748
+    );
 }
 
 #[test]
 fn exports_the_keyframes_on_the_timeline_frames_of_the_clip() {
     let (mut project, timeline_id, media) = project();
-    let mut clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Media(media), 30, 130, 0, Rational::one());
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        30,
+        130,
+        0,
+        Rational::one(),
+    );
     clip.effects
         .transform
         .track_mut(TransformParam::ZoomX)
@@ -197,9 +237,12 @@ fn exports_the_keyframes_on_the_timeline_frames_of_the_clip() {
     project.timelines[timeline_id].tracks[0].clips.push(clip);
 
     let otio = timeline_to_otio(&project, timeline_id, None);
-    let keys = &otio["tracks"]["children"][0]["children"][0]["effects"][0]["metadata"]
-        ["Resolve_OTIO"]["Parameters"][0]["Key Frames"];
-    assert_eq!(keys["10"]["Value"], 2.0, "source frame 40, tenth of the clip");
+    let keys = &otio["tracks"]["children"][0]["children"][0]["effects"][0]["metadata"]["Resolve_OTIO"]
+        ["Parameters"][0]["Key Frames"];
+    assert_eq!(
+        keys["10"]["Value"], 2.0,
+        "source frame 40, tenth of the clip"
+    );
 }
 
 /// "Around the text" is a shorthand we have and Resolve does not: the
@@ -208,8 +251,7 @@ fn exports_the_keyframes_on_the_timeline_frames_of_the_clip() {
 #[test]
 fn a_background_around_the_text_becomes_an_explicit_size() {
     let (mut project, timeline_id, _) = project();
-    let mut clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Text, 0, 60, 0, Rational::one());
+    let mut clip = Clip::from_source_range(ClipId(1), ClipSource::Text, 0, 60, 0, Rational::one());
     let mut title = TitleParams::default();
     title.background.enabled = true;
     title.background.width = 0.0;
@@ -217,11 +259,13 @@ fn a_background_around_the_text_becomes_an_explicit_size() {
     clip.effects.title = Some(title);
     project.timelines[timeline_id].tracks[0].clips.push(clip);
 
-    let measure =
-        |_: &TitleParams| crate::TitleMetrics { block: (440.0, 176.0), padding: 20.0 };
+    let measure = |_: &TitleParams| crate::TitleMetrics {
+        block: (440.0, 176.0),
+        padding: 20.0,
+    };
     let otio = timeline_to_otio(&project, timeline_id, Some(&measure));
-    let blocks = &otio["tracks"]["children"][0]["children"][0]["media_references"]
-        ["DEFAULT_MEDIA"]["parameters"]["Resolve_OTIO"];
+    let blocks = &otio["tracks"]["children"][0]["children"][0]["media_references"]["DEFAULT_MEDIA"]
+        ["parameters"]["Resolve_OTIO"];
     let background = blocks
         .as_array()
         .unwrap()
@@ -239,11 +283,20 @@ fn a_background_around_the_text_becomes_an_explicit_size() {
             .unwrap()
     };
     // 440 px of text plus 10% margin, plus 20 px of padding per side.
-    assert!((value("backgroundWidth") - 524.0 / 1920.0).abs() < 1e-6, "524 px out of 1920");
-    assert!((value("backgroundHeight") - 0.2).abs() < 1e-6, "216 px out of 1080");
+    assert!(
+        (value("backgroundWidth") - 524.0 / 1920.0).abs() < 1e-6,
+        "524 px out of 1920"
+    );
+    assert!(
+        (value("backgroundHeight") - 0.2).abs() < 1e-6,
+        "216 px out of 1080"
+    );
     // 0.1 of the rectangle's short side (216 px) is 21.6 px, which for
     // Resolve is a fraction of the frame height.
-    assert!((value("backgroundCornerRadius") - 0.02).abs() < 1e-6, "21.6 px out of 1080");
+    assert!(
+        (value("backgroundCornerRadius") - 0.02).abs() < 1e-6,
+        "21.6 px out of 1080"
+    );
 
     // Without a measurement there is nothing better than the frame.
     let otio = timeline_to_otio(&project, timeline_id, None);
@@ -261,7 +314,10 @@ fn a_background_around_the_text_becomes_an_explicit_size() {
 fn marks_the_file_as_written_by_resolve() {
     let (project, timeline_id, _) = project();
     let otio = timeline_to_otio(&project, timeline_id, None);
-    assert_eq!(otio["metadata"]["Resolve_OTIO"]["Resolve OTIO Meta Version"], "1.0");
+    assert_eq!(
+        otio["metadata"]["Resolve_OTIO"]["Resolve OTIO Meta Version"],
+        "1.0"
+    );
     for track in otio["tracks"]["children"].as_array().unwrap() {
         assert_eq!(track["metadata"]["Resolve_OTIO"]["Locked"], false);
     }
@@ -295,9 +351,18 @@ fn normalizes_the_position_on_the_clip_not_on_the_frame() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
     });
-    let mut clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 100, 0, Rational::one());
-    clip.effects.transform.track_mut(TransformParam::PositionX).default = -700.0;
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        100,
+        0,
+        Rational::one(),
+    );
+    clip.effects
+        .transform
+        .track_mut(TransformParam::PositionX)
+        .default = -700.0;
     project.timelines[timeline_id].tracks[0].clips.push(clip);
 
     let otio = timeline_to_otio(&project, timeline_id, None);
@@ -305,7 +370,11 @@ fn normalizes_the_position_on_the_clip_not_on_the_frame() {
         ["Resolve_OTIO"]["Parameters"][0]["Parameter Value"]
         .as_f64()
         .unwrap();
-    assert_eq!((pan * 1e4).round() / 1e4, -1.4403, "-700 out of 486 px of clip");
+    assert_eq!(
+        (pan * 1e4).round() / 1e4,
+        -1.4403,
+        "-700 out of 486 px of clip"
+    );
     assert_eq!(
         (pan * 1920.0).round(),
         -2765.0,
@@ -316,8 +385,14 @@ fn normalizes_the_position_on_the_clip_not_on_the_frame() {
 #[test]
 fn exports_a_transition_as_an_item_that_takes_no_time() {
     let (mut project, timeline_id, media) = project();
-    let mut clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 100, 0, Rational::one());
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        100,
+        0,
+        Rational::one(),
+    );
     clip.effects.transition_in = Some(Transition {
         kind: TransitionKind::Push,
         duration: 24,
@@ -328,14 +403,25 @@ fn exports_a_transition_as_an_item_that_takes_no_time() {
     project.timelines[timeline_id].tracks[0].clips.push(clip);
 
     let otio = timeline_to_otio(&project, timeline_id, None);
-    let children = otio["tracks"]["children"][0]["children"].as_array().unwrap();
+    let children = otio["tracks"]["children"][0]["children"]
+        .as_array()
+        .unwrap();
     assert_eq!(children.len(), 2);
     let transition = &children[0];
     assert_eq!(transition["OTIO_SCHEMA"], "Transition.1");
     assert_eq!(transition["in_offset"]["value"], 0.0);
-    assert_eq!(transition["out_offset"]["value"], 24.0, "reaches into the following clip");
-    assert_eq!(transition["metadata"]["Resolve_OTIO"]["Transition Type"], "Push");
-    assert_eq!(transition["metadata"]["venturi"]["transition"]["direction"], "Left");
+    assert_eq!(
+        transition["out_offset"]["value"], 24.0,
+        "reaches into the following clip"
+    );
+    assert_eq!(
+        transition["metadata"]["Resolve_OTIO"]["Transition Type"],
+        "Push"
+    );
+    assert_eq!(
+        transition["metadata"]["venturi"]["transition"]["direction"],
+        "Left"
+    );
 
     // Without the progress curve Resolve holds the transition at 0.
     let curve = &transition["metadata"]["Resolve_OTIO"]["Effects"]["Parameters"][1];
@@ -343,9 +429,8 @@ fn exports_a_transition_as_an_item_that_takes_no_time() {
     let keys = &curve["Key Frames"];
     assert_eq!(keys["0"]["Value"], 0.0);
     assert_eq!(keys["24"]["Value"], 1.0);
-    let handle = |key: &Value, name: &str| {
-        (key[name][name][0].as_f64().unwrap() * 1e3).round() / 1e3
-    };
+    let handle =
+        |key: &Value, name: &str| (key[name][name][0].as_f64().unwrap() * 1e3).round() / 1e3;
     assert_eq!(handle(&keys["0"], "OutBez"), 7.2, "0.5 * 0.6 * 24");
     assert_eq!(handle(&keys["24"], "InBez"), -7.2);
 }
@@ -353,8 +438,14 @@ fn exports_a_transition_as_an_item_that_takes_no_time() {
 #[test]
 fn keeps_what_otio_cannot_represent_in_metadata() {
     let (mut project, timeline_id, media) = project();
-    let mut clip =
-        Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 10, 0, Rational::one());
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        10,
+        0,
+        Rational::one(),
+    );
     clip.audio_stream_index = 1;
     clip.linked_group = Some(LinkGroupId(7));
     clip.effects.gain_db = Keyframed::constant(-6.0);

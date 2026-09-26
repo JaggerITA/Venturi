@@ -26,7 +26,8 @@ pub enum ProxyQuality {
 }
 
 impl ProxyQuality {
-    pub const ALL: [ProxyQuality; 3] = [ProxyQuality::Low, ProxyQuality::Medium, ProxyQuality::High];
+    pub const ALL: [ProxyQuality; 3] =
+        [ProxyQuality::Low, ProxyQuality::Medium, ProxyQuality::High];
 
     /// Key in the settings file: must never be changed.
     pub fn id(self) -> &'static str {

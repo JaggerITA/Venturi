@@ -130,7 +130,11 @@ fn the_frames_filling_a_hole_share_one_allocation() {
         .iter()
         .map(|f| Arc::as_ptr(f))
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(distinct.len(), 6, "expected the 6 allocations of the real frames");
+    assert_eq!(
+        distinct.len(),
+        6,
+        "expected the 6 allocations of the real frames"
+    );
 }
 
 #[test]
@@ -306,7 +310,11 @@ fn a_transparent_png_keeps_its_alpha_channel() {
         .alpha
         .as_ref()
         .expect("a PNG with transparency must carry the alpha plane");
-    assert_eq!(alpha.len(), (frame.width * frame.height) as usize, "alpha not subsampled");
+    assert_eq!(
+        alpha.len(),
+        (frame.width * frame.height) as usize,
+        "alpha not subsampled"
+    );
     let at = |x: u32, y: u32| alpha[(y * frame.width + x) as usize];
     assert_eq!(at(2, 4), 255, "left: opaque");
     assert_eq!(at(13, 4), 0, "right: transparent, not opaque");
@@ -362,13 +370,25 @@ fn open_image_returns_the_same_frame_for_any_requested_position() {
     assert_eq!(idx0, 0);
 
     decoder.seek_to_time(120.0).unwrap();
-    let (idx_far, frame_far) = decoder.next_frame().unwrap().expect("frame expected even far ahead in time");
-    assert_eq!(idx_far, (120.0 * crate::probe::IMAGE_FPS.as_f64()).round() as FrameIdx);
-    assert_eq!(frame_far.y, frame0.y, "the very same frame, whatever the position");
+    let (idx_far, frame_far) = decoder
+        .next_frame()
+        .unwrap()
+        .expect("frame expected even far ahead in time");
+    assert_eq!(
+        idx_far,
+        (120.0 * crate::probe::IMAGE_FPS.as_f64()).round() as FrameIdx
+    );
+    assert_eq!(
+        frame_far.y, frame0.y,
+        "the very same frame, whatever the position"
+    );
 
     // Without a seek in between, next_frame keeps returning
     // something (never None) instead of behaving like a real EOF.
-    let (idx_next, frame_next) = decoder.next_frame().unwrap().expect("never EOF for an image");
+    let (idx_next, frame_next) = decoder
+        .next_frame()
+        .unwrap()
+        .expect("never EOF for an image");
     assert!(idx_next > idx_far);
     assert_eq!(frame_next.y, frame0.y);
 }
@@ -381,13 +401,26 @@ fn full_range_jpeg_keeps_its_luma_range() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("white.jpg");
     crate::test_support::ffmpeg(
-        &["-f", "lavfi", "-i", "color=white:size=64x64", "-frames:v", "1", "-update", "1"],
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=white:size=64x64",
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+        ],
         &path,
     );
     let mut decoder = Decoder::open_image(&path).expect("image open failed");
     let (_, frame) = decoder.next_frame().unwrap().expect("frame expected");
     assert!(frame.full_range);
-    assert!(frame.y.iter().all(|&y| y >= 250), "compressed luma: {}", frame.y[0]);
+    assert!(
+        frame.y.iter().all(|&y| y >= 250),
+        "compressed luma: {}",
+        frame.y[0]
+    );
 }
 
 #[test]
