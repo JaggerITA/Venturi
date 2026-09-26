@@ -3353,13 +3353,18 @@ impl eframe::App for VenturiApp {
             egui::Panel::left("left_column")
                 .default_size(self.settings.panels.left_column_width)
                 .show(ui, |ui| {
+                    let mut effects_rect = None;
                     if self.settings.panels.media_pool_open {
                         let pool = if self.settings.panels.effects_open {
-                            egui::Panel::top("media_pool")
-                                .exact_size(ui.available_height() / 2.0)
-                                .resizable(false)
-                                .show(ui, |ui| self.show_media_pool(ui, &mut preview_action))
-                                .response
+                            let (pool_rect, rest) = split_left_column(
+                                ui,
+                                &mut self.settings.panels.media_pool_fraction,
+                            );
+                            effects_rect = Some(rest);
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(pool_rect), |ui| {
+                                self.show_media_pool(ui, &mut preview_action)
+                            })
+                            .response
                         } else {
                             ui.scope(|ui| self.show_media_pool(ui, &mut preview_action))
                                 .response
@@ -3388,7 +3393,11 @@ impl eframe::App for VenturiApp {
                                 );
                         }
                     }
-                    if self.settings.panels.effects_open {
+                    if let Some(rect) = effects_rect {
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                            Self::show_effects_list(ui)
+                        });
+                    } else if self.settings.panels.effects_open {
                         Self::show_effects_list(ui);
                     }
                 });

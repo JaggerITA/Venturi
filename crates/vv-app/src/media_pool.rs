@@ -46,6 +46,18 @@ pub struct MediaPoolState {
     /// click").
     pub rename_pending: Option<(MediaId, f64)>,
     pub expanded: HashSet<FolderId>,
+    /// Residual touchpad inertia (px/s), see `timeline_ui::apply_kinetic_scroll`.
+    pub scroll_vel: f32,
+    /// The pool's ScrollArea as of the last frame: its offset is driven
+    /// before `show`, when the current frame's geometry is not known yet.
+    pub scroll_area: Option<PoolScrollArea>,
+}
+
+#[derive(Clone, Copy)]
+pub struct PoolScrollArea {
+    pub id: egui::Id,
+    pub viewport: egui::Rect,
+    pub max_offset: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

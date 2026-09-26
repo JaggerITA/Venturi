@@ -241,6 +241,12 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     changed |= ui
         .checkbox(&mut settings.kinetic_scroll, t!("settings.kinetic_scroll"))
         .changed();
+    changed |= ui
+        .checkbox(
+            &mut settings.kinetic_scroll_media_pool,
+            t!("settings.kinetic_scroll_media_pool"),
+        )
+        .changed();
     changed
 }
 

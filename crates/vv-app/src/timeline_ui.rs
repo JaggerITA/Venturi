@@ -357,7 +357,7 @@ const KINETIC_STOP_SPEED: f32 = 15.0; // px/s
 const KINETIC_FRICTION: f32 = 500.0; // px/s^2
 /// Amplifies the speed captured from the swipe: the native sensitivity
 /// felt weak, a normal gesture barely set the inertia in motion.
-const KINETIC_VELOCITY_GAIN: f32 = 1.6;
+pub(crate) const KINETIC_VELOCITY_GAIN: f32 = 1.6;
 
 impl Default for TimelineState {
     fn default() -> Self {
@@ -4639,7 +4639,12 @@ fn finish_drag(
 /// with the same friction physics as egui's native drag-to-scroll, and
 /// zeroes the speed if the resulting scroll hits a limit.
 /// Returns `true` if `scroll_val` was updated (a repaint is needed).
-fn apply_kinetic_scroll(scroll_val: &mut f32, vel: &mut f32, max_scroll: f32, dt: f32) -> bool {
+pub(crate) fn apply_kinetic_scroll(
+    scroll_val: &mut f32,
+    vel: &mut f32,
+    max_scroll: f32,
+    dt: f32,
+) -> bool {
     if *vel == 0.0 {
         return false;
     }

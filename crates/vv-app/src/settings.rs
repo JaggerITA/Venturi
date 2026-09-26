@@ -464,6 +464,9 @@ pub struct PanelLayout {
     pub inspector_open: bool,
     pub keyframe_editor_open: bool,
     pub left_column_width: f32,
+    /// Share of the left column's height given to the media pool when the
+    /// Effects panel is open too.
+    pub media_pool_fraction: f32,
     pub inspector_width: f32,
     pub timeline_height: f32,
 }
@@ -476,6 +479,7 @@ impl Default for PanelLayout {
             inspector_open: true,
             keyframe_editor_open: false,
             left_column_width: 260.0,
+            media_pool_fraction: 0.5,
             inspector_width: 300.0,
             timeline_height: 240.0,
         }
@@ -488,6 +492,7 @@ pub struct Settings {
     pub language: Language,
     /// Kinetic scrolling (inertia after a touchpad swipe) on the timeline.
     pub kinetic_scroll: bool,
+    pub kinetic_scroll_media_pool: bool,
     /// Preview from the all-intra proxy once ready: smooth scrubbing on
     /// long-GOP sources. Export always uses the originals.
     pub proxy_enabled: bool,
@@ -508,6 +513,7 @@ impl Default for Settings {
             keymap: Keymap::default(),
             language: Language::default(),
             kinetic_scroll: true,
+            kinetic_scroll_media_pool: true,
             proxy_enabled: false,
             proxy_quality: ProxyQuality::default(),
             lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
@@ -540,6 +546,8 @@ struct SettingsFile {
     language: Option<String>,
     #[serde(default)]
     kinetic_scroll: Option<bool>,
+    #[serde(default)]
+    kinetic_scroll_media_pool: Option<bool>,
     /// Not `proxy_enabled`: that key was always saved as `true` when
     /// proxies were on by default, it does not reflect a user choice.
     #[serde(default)]
@@ -570,6 +578,8 @@ struct PanelLayoutFile {
     keyframe_editor_open: Option<bool>,
     #[serde(default)]
     left_column_width: Option<f32>,
+    #[serde(default)]
+    media_pool_fraction: Option<f32>,
     #[serde(default)]
     inspector_width: Option<f32>,
     #[serde(default)]
@@ -605,6 +615,7 @@ impl Settings {
             .and_then(Language::from_id)
             .unwrap_or_default();
         settings.kinetic_scroll = file.kinetic_scroll.unwrap_or(true);
+        settings.kinetic_scroll_media_pool = file.kinetic_scroll_media_pool.unwrap_or(true);
         settings.proxy_enabled = file.use_proxies.unwrap_or(settings.proxy_enabled);
         settings.proxy_quality = file
             .proxy_quality
@@ -636,6 +647,10 @@ impl Settings {
                 .panels
                 .left_column_width
                 .unwrap_or(defaults.left_column_width),
+            media_pool_fraction: file
+                .panels
+                .media_pool_fraction
+                .unwrap_or(defaults.media_pool_fraction),
             inspector_width: file
                 .panels
                 .inspector_width
@@ -673,6 +688,7 @@ impl Settings {
                 .collect(),
             language: Some(self.language.id().to_owned()),
             kinetic_scroll: Some(self.kinetic_scroll),
+            kinetic_scroll_media_pool: Some(self.kinetic_scroll_media_pool),
             use_proxies: Some(self.proxy_enabled),
             proxy_quality: Some(self.proxy_quality.id().to_owned()),
             lookahead_secs: Some(self.lookahead_secs),
@@ -685,6 +701,7 @@ impl Settings {
                 inspector_open: Some(self.panels.inspector_open),
                 keyframe_editor_open: Some(self.panels.keyframe_editor_open),
                 left_column_width: Some(self.panels.left_column_width),
+                media_pool_fraction: Some(self.panels.media_pool_fraction),
                 inspector_width: Some(self.panels.inspector_width),
                 timeline_height: Some(self.panels.timeline_height),
             },

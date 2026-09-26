@@ -109,6 +109,7 @@ fn save_then_load_keeps_custom_panel_layout_and_defaults_it_when_absent() {
         inspector_open: false,
         keyframe_editor_open: true,
         left_column_width: 321.0,
+        media_pool_fraction: 0.3,
         inspector_width: 456.0,
         timeline_height: 199.0,
     };

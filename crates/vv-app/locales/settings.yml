@@ -69,6 +69,9 @@ settings.language_system:
 settings.kinetic_scroll:
   en: Kinetic scrolling on the timeline
   it: Scrolling cinetico sulla timeline
+settings.kinetic_scroll_media_pool:
+  en: Kinetic scrolling in the media pool
+  it: Scrolling cinetico nel media pool
 settings.shortcuts_hint:
   en: Click a shortcut and press the new keys (Esc cancels).
   it: Clicca una scorciatoia e premi i tasti nuovi (Esc annulla).

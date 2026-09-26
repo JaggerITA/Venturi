@@ -672,9 +672,14 @@ impl VenturiApp {
             }
         }
         media_pool_header(ui, &mut self.media_pool_state);
+        kinetic_pool_scroll(
+            ui.ctx(),
+            &mut self.media_pool_state,
+            self.settings.kinetic_scroll_media_pool,
+        );
         // `auto_shrink` off: the panel must fill the assigned width,
         // otherwise its resize springs back.
-        egui::ScrollArea::vertical()
+        let output = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let mut items: Vec<(MediaId, String, vv_core::MediaMeta, u64, bool)> = self
@@ -1118,6 +1123,11 @@ impl VenturiApp {
                     );
                 }
             });
+        self.media_pool_state.scroll_area = Some(media_pool::PoolScrollArea {
+            id: output.id,
+            viewport: output.inner_rect,
+            max_offset: (output.content_size.y - output.inner_rect.height()).max(0.0),
+        });
     }
 
     /// Effects section: generators and effects to drag onto the timeline.
@@ -1141,6 +1151,89 @@ impl VenturiApp {
                     transition_item(ui, transition);
                 }
             });
+    }
+}
+
+const COLUMN_SPLITTER_HEIGHT: f32 = 8.0;
+const MIN_COLUMN_PANE_HEIGHT: f32 = 60.0;
+
+/// Draggable separator between the media pool (above) and the Effects panel
+/// (below). Returns the rects of the two panes. The split is kept as a
+/// fraction so the panes scale with the window.
+pub(crate) fn split_left_column(ui: &egui::Ui, fraction: &mut f32) -> (egui::Rect, egui::Rect) {
+    let column = ui.available_rect_before_wrap();
+    let panes_height = (column.height() - COLUMN_SPLITTER_HEIGHT).max(0.0);
+    let max_pool = (panes_height - MIN_COLUMN_PANE_HEIGHT).max(0.0);
+    let clamp_pool = |h: f32| h.min(max_pool).max(MIN_COLUMN_PANE_HEIGHT.min(max_pool));
+    let mut pool_height = clamp_pool(*fraction * panes_height);
+    let splitter_rect = |pool_height: f32| {
+        egui::Rect::from_min_size(
+            column.min + egui::vec2(0.0, pool_height),
+            egui::vec2(column.width(), COLUMN_SPLITTER_HEIGHT),
+        )
+    };
+    let resp = ui.interact(
+        splitter_rect(pool_height),
+        ui.id().with("left_column_splitter"),
+        egui::Sense::drag(),
+    );
+    let active = resp.hovered() || resp.dragged();
+    if active {
+        ui.ctx()
+            .output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
+    }
+    if resp.dragged() && panes_height > 0.0 {
+        pool_height = clamp_pool(pool_height + resp.drag_delta().y);
+        *fraction = pool_height / panes_height;
+    }
+    let splitter = splitter_rect(pool_height);
+    ui.painter().hline(
+        splitter.x_range(),
+        splitter.center().y,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(if active { 160 } else { 80 })),
+    );
+    let pool = egui::Rect::from_min_max(column.min, egui::pos2(column.max.x, splitter.top()));
+    let effects = egui::Rect::from_min_max(egui::pos2(column.min.x, splitter.bottom()), column.max);
+    (pool, effects)
+}
+
+/// Touchpad swipe on the pool, applied before its ScrollArea's `show` like
+/// the timeline's (`timeline_ui::sync_timeline_scroll`): the swipe's speed
+/// becomes an inertia that keeps scrolling after release.
+fn kinetic_pool_scroll(ctx: &egui::Context, state: &mut media_pool::MediaPoolState, enabled: bool) {
+    if !enabled {
+        state.scroll_vel = 0.0;
+        return;
+    }
+    let Some(area) = state.scroll_area else {
+        return;
+    };
+    let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, area.id) else {
+        return;
+    };
+    let dt = ctx.input(|i| i.stable_dt).min(0.1);
+    let wheel = if timeline_ui::pointer_over(ctx, area.viewport) {
+        ctx.input(|i| i.smooth_scroll_delta.y)
+    } else {
+        0.0
+    };
+    if wheel != 0.0 {
+        scroll_state.offset.y = (scroll_state.offset.y - wheel).clamp(0.0, area.max_offset);
+        state.scroll_vel = if dt > 0.0 {
+            -timeline_ui::KINETIC_VELOCITY_GAIN * wheel / dt
+        } else {
+            0.0
+        };
+        ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+        scroll_state.store(ctx, area.id);
+    } else if timeline_ui::apply_kinetic_scroll(
+        &mut scroll_state.offset.y,
+        &mut state.scroll_vel,
+        area.max_offset,
+        dt,
+    ) {
+        scroll_state.store(ctx, area.id);
+        ctx.request_repaint();
     }
 }
 
