@@ -13,24 +13,24 @@ viewer.drag_audio_only:
   it: "Trascina sulla timeline per aggiungere solo l'audio"
 
 toolbar.media_pool:
-  en: "Media pool"
-  it: "Media pool"
+  en: "Media"
+  it: "Media"
 
 toolbar.effects:
   en: "Effects"
-  it: "Effects"
+  it: "Effetti"
 
 timeline.empty_hint:
-  en: "Import a media file (or drag it here from the media pool) to create the timeline."
-  it: "Importa un media (o trascinalo qui dal media pool) per creare la timeline."
+  en: "Import a media file (or drag it here from the Media panel) to create the timeline."
+  it: "Importa un media (o trascinalo qui dal pannello Media) per creare la timeline."
 
 toolbar.snapping:
   en: "Magnet: snaps dragged clips to nearby edges"
   it: "Calamita: aggancia le clip trascinate ai bordi vicini"
 
 toolbar.transform_overlay:
-  en: "Position, scale and anchor point handles on the viewer"
-  it: "Handle di posizione, scala e anchor point sul viewer"
+  en: "Position, scale and pivot handles on the viewer"
+  it: "Maniglie di posizione, scala e pivot sul viewer"
 
 viewer.player_error:
   en: "Player error: %{error}"

@@ -183,8 +183,8 @@ props.next_keyframe:
   it: "Vai al keyframe successivo"
 
 props.link_zoom:
-  en: "Keep zoom X and Y together"
-  it: "Tieni insieme zoom X e Y"
+  en: "Keep scale X and Y together"
+  it: "Tieni insieme scala X e Y"
 
 props.remove_keyframe:
   en: "Remove the keyframe here"
@@ -231,16 +231,16 @@ props.col_frame:
   it: "Frame"
 
 generator.solid_color:
-  en: "Solid Color"
-  it: "Solid Color"
+  en: "Color Fill"
+  it: "Colore pieno"
 
 generator.text:
   en: "Text"
-  it: "Text"
+  it: "Testo"
 
 generator.adjustment:
-  en: "Adjustment Clip"
-  it: "Clip di regolazione"
+  en: "Effect Layer"
+  it: "Livello effetti"
 
 props.applies_to_all:
   en: "Changes apply to all %{count} clips in this tab."
@@ -251,16 +251,16 @@ props.transform:
   it: "Transform"
 
 props.zoom:
-  en: "Zoom"
-  it: "Zoom"
+  en: "Scale"
+  it: "Scala"
 
 props.rotation:
   en: "Rotation"
   it: "Rotazione"
 
 props.anchor_point:
-  en: "Anchor point"
-  it: "Anchor point"
+  en: "Pivot"
+  it: "Pivot"
 
 props.flip:
   en: "Flip"
@@ -275,8 +275,8 @@ props.flip_v:
   it: "Specchia in verticale"
 
 props.cropping:
-  en: "Cropping"
-  it: "Cropping"
+  en: "Crop"
+  it: "Ritaglio"
 
 props.crop_left:
   en: "Crop left"
@@ -323,8 +323,8 @@ props.ease:
   it: "Ease"
 
 props.transition_curve:
-  en: "Transition Curve"
-  it: "Curva transizione"
+  en: "Easing"
+  it: "Andamento"
 
 props.remove_transition:
   en: "Remove transition"
@@ -363,12 +363,12 @@ props.import_to_start:
   it: "Importa un media per creare la timeline."
 
 props.composite:
-  en: "Composite"
-  it: "Composite"
+  en: "Blending"
+  it: "Fusione"
 
 props.composite_mode:
-  en: "Composite Mode"
-  it: "Composizione"
+  en: "Blend mode"
+  it: "Metodo di fusione"
 
 blend.normal:
   en: "Normal"

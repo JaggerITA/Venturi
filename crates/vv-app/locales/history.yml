@@ -141,8 +141,8 @@ history.make_compound_clip:
   it: "Compound clip"
 
 history.blend_mode:
-  en: "Composite mode"
-  it: "Metodo di composizione"
+  en: "Blend mode"
+  it: "Metodo di fusione"
 
 history.move_keyframes:
   en: "Move keyframes"

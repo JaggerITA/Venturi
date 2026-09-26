@@ -2883,6 +2883,115 @@ pub(crate) fn format_duration(duration_frames: vv_core::FrameIdx, fps: f64) -> S
     }
 }
 
+#[derive(Clone, Copy)]
+enum ToolbarIcon {
+    Media,
+    Effects,
+    Curves,
+    Properties,
+}
+
+/// Panel toggle of the toolbar: hand-drawn icon and label, filled with the
+/// accent when the panel is open.
+fn toolbar_toggle(
+    ui: &mut egui::Ui,
+    on: &mut bool,
+    icon: ToolbarIcon,
+    label: &str,
+) -> egui::Response {
+    const ICON: f32 = 14.0;
+    const PADDING: f32 = 6.0;
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        egui::Color32::PLACEHOLDER,
+    );
+    let size = egui::vec2(
+        PADDING * 3.0 + ICON + galley.size().x,
+        ui.spacing().interact_size.y,
+    );
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let visuals = ui.style().interact_selectable(&response, *on);
+    let painter = ui.painter();
+    if *on || response.hovered() {
+        painter.rect_filled(rect, 3.0, visuals.weak_bg_fill);
+    }
+    let color = visuals.fg_stroke.color;
+    let icon_center = egui::pos2(rect.left() + PADDING + ICON / 2.0, rect.center().y);
+    paint_toolbar_icon(painter, icon, icon_center, color);
+    painter.galley(
+        egui::pos2(
+            rect.left() + PADDING * 2.0 + ICON,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    response
+}
+
+fn paint_toolbar_icon(
+    painter: &egui::Painter,
+    icon: ToolbarIcon,
+    c: egui::Pos2,
+    color: egui::Color32,
+) {
+    let stroke = egui::Stroke::new(1.3, color);
+    match icon {
+        // Two stacked frames.
+        ToolbarIcon::Media => {
+            let back =
+                egui::Rect::from_center_size(c + egui::vec2(2.0, -2.0), egui::vec2(10.0, 7.0));
+            let front = back.translate(egui::vec2(-4.0, 4.0));
+            painter.line_segment([back.left_top(), back.right_top()], stroke);
+            painter.line_segment([back.right_top(), back.right_bottom()], stroke);
+            painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Middle);
+        }
+        // Four-point spark.
+        ToolbarIcon::Effects => {
+            let (long, short) = (6.5, 1.8);
+            let points = (0..8)
+                .map(|i| {
+                    let angle =
+                        i as f32 * std::f32::consts::FRAC_PI_4 - std::f32::consts::FRAC_PI_2;
+                    let r = if i % 2 == 0 { long } else { short };
+                    c + r * egui::vec2(angle.cos(), angle.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(points, stroke));
+        }
+        // An S curve between two keyframe dots.
+        ToolbarIcon::Curves => {
+            let (from, to) = (c + egui::vec2(-6.0, 4.0), c + egui::vec2(6.0, -4.0));
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    from,
+                    c + egui::vec2(1.0, 4.0),
+                    c + egui::vec2(-1.0, -4.0),
+                    to,
+                ],
+                false,
+                egui::Color32::TRANSPARENT,
+                stroke,
+            ));
+            painter.circle_filled(from, 1.8, color);
+            painter.circle_filled(to, 1.8, color);
+        }
+        // Three slider tracks with their knobs.
+        ToolbarIcon::Properties => {
+            for (dy, knob) in [(-4.0, 2.0), (0.0, -3.0), (4.0, 0.5)] {
+                let y = c.y + dy;
+                painter.line_segment([egui::pos2(c.x - 6.0, y), egui::pos2(c.x + 6.0, y)], stroke);
+                painter.circle_filled(egui::pos2(c.x + knob, y), 1.8, color);
+            }
+        }
+    }
+}
+
 /// Hand-drawn magnet: on some platforms (Asahi) egui's fonts
 /// do not have the 🧲 glyph.
 fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
@@ -3144,21 +3253,27 @@ impl eframe::App for VenturiApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.toggle_value(
+                toolbar_toggle(
+                    ui,
                     &mut self.settings.panels.media_pool_open,
-                    t!("toolbar.media_pool"),
+                    ToolbarIcon::Media,
+                    &t!("toolbar.media_pool"),
                 );
-                ui.toggle_value(
+                toolbar_toggle(
+                    ui,
                     &mut self.settings.panels.effects_open,
-                    t!("toolbar.effects"),
+                    ToolbarIcon::Effects,
+                    &t!("toolbar.effects"),
                 );
-                ui.toggle_value(
+                toolbar_toggle(
+                    ui,
                     &mut self.settings.panels.keyframe_editor_open,
-                    t!("toolbar.keyframe_editor"),
+                    ToolbarIcon::Curves,
+                    &t!("toolbar.keyframe_editor"),
                 );
                 if let Some(err) = &self.project_error {
                     ui.separator();
-                    ui.colored_label(egui::Color32::RED, err);
+                    ui.colored_label(theme::ERROR, err);
                 }
                 if let Some((done, total)) = self.import_progress() {
                     ui.separator();
@@ -3170,9 +3285,11 @@ impl eframe::App for VenturiApp {
                 }
                 // Above the panel it opens, like the toggles on the left.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(
+                    toolbar_toggle(
+                        ui,
                         &mut self.settings.panels.inspector_open,
-                        t!("menu.inspector"),
+                        ToolbarIcon::Properties,
+                        &t!("menu.inspector"),
                     );
                 });
             });

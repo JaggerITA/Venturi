@@ -70,11 +70,7 @@ pool.items:
 
 effects.generators:
   en: "Generators"
-  it: "Generators"
-
-effects.effects:
-  en: "Effects"
-  it: "Effetti"
+  it: "Generatori"
 
 effects.filters:
   en: "Filters"

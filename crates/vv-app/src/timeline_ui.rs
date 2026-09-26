@@ -1494,8 +1494,11 @@ pub enum Generator {
 }
 
 impl Generator {
-    /// The Effects panel lists `Adjustment` in its own section, as Resolve does.
-    pub const ALL: [Generator; 2] = [Generator::SolidColor, Generator::Text];
+    pub const ALL: [Generator; 3] = [
+        Generator::SolidColor,
+        Generator::Text,
+        Generator::Adjustment,
+    ];
 
     const DEFAULT_SECS: f64 = 5.0;
 
@@ -5375,15 +5378,15 @@ fn clip_label_and_color(
                 label = format!("{label} ({})", format_speed(clip.speed));
             }
             let color = if track.kind == TrackKind::Video {
-                egui::Color32::from_rgb(90, 140, 200)
+                palette_color(vv_core::ClipColor::Slate)
             } else {
-                egui::Color32::from_rgb(90, 190, 140)
+                palette_color(vv_core::ClipColor::Cyan)
             };
             (label, clip_box_color(color, clip))
         }
         vv_core::ClipSource::SolidColor => (
             t!("generator.solid_color").into_owned(),
-            clip_box_color(egui::Color32::from_rgb(200, 170, 90), clip),
+            clip_box_color(palette_color(vv_core::ClipColor::Yellow), clip),
         ),
         vv_core::ClipSource::Text => (
             clip.effects
@@ -5391,11 +5394,11 @@ fn clip_label_and_color(
                 .as_ref()
                 .and_then(|t| t.content.lines().next())
                 .map_or_else(|| t!("generator.text").into_owned(), str::to_string),
-            clip_box_color(egui::Color32::from_rgb(170, 110, 200), clip),
+            clip_box_color(palette_color(vv_core::ClipColor::Magenta), clip),
         ),
         vv_core::ClipSource::Adjustment => (
             t!("generator.adjustment").into_owned(),
-            clip_box_color(egui::Color32::from_rgb(150, 150, 165), clip),
+            clip_box_color(palette_color(vv_core::ClipColor::Gray), clip),
         ),
     }
 }
@@ -5403,11 +5406,13 @@ fn clip_label_and_color(
 /// The color chosen by the user wins over the one of the source kind; the
 /// darkening for an edited clip applies to both.
 fn clip_box_color(default_color: egui::Color32, clip: &Clip) -> egui::Color32 {
-    let color = clip.display_color.map_or(default_color, |c| {
-        let (r, g, b) = c.rgb();
-        egui::Color32::from_rgb(r, g, b)
-    });
+    let color = clip.display_color.map_or(default_color, palette_color);
     darken_if_edited(color, clip)
+}
+
+fn palette_color(color: vv_core::ClipColor) -> egui::Color32 {
+    let (r, g, b) = color.rgb();
+    egui::Color32::from_rgb(r, g, b)
 }
 
 /// Clips with some effect changed from the default stand out

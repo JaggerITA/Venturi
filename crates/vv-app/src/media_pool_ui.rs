@@ -93,8 +93,8 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
             painter.text(
                 thumb.center(),
                 egui::Align2::CENTER_CENTER,
-                "Title",
-                egui::FontId::proportional(11.0),
+                "Aa",
+                egui::FontId::proportional(13.0),
                 egui::Color32::WHITE,
             );
         }
@@ -888,9 +888,6 @@ impl VenturiApp {
                 for generator in timeline_ui::Generator::ALL {
                     effect_item(ui, generator);
                 }
-                ui.add_space(8.0);
-                effects_section_header(ui, &t!("effects.effects"));
-                effect_item(ui, timeline_ui::Generator::Adjustment);
                 ui.add_space(8.0);
                 effects_section_header(ui, &t!("effects.filters"));
                 for filter in timeline_ui::ALL_FILTER_KINDS {
