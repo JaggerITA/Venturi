@@ -228,7 +228,13 @@ impl Interpolation {
     /// Weight of the arrival keyframe at `t` (0 = the starting one).
     pub fn ease(self, t: f32) -> f32 {
         match self {
-            Self::Hold => 0.0,
+            Self::Hold => {
+                if t >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             Self::Linear => t,
             Self::EaseInOut => smoothstep(t),
             Self::EaseIn => t * t,

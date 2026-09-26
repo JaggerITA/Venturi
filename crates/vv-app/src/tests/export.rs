@@ -541,7 +541,7 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
         .project
         .media_pool
         .iter()
-        .next()
+        .find(|(_, item)| item.compound.is_none())
         .map(|(id, _)| id)
         .expect("imported media expected in the pool");
     app.add_media_to_timeline(media_id);
