@@ -3,7 +3,7 @@
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
 use std::sync::Once;
-use vv_core::{FrameIdx, MediaMeta, Rational};
+use vv_core::{FrameIdx, MediaFileInfo, MediaMeta, Rational};
 
 static INIT: Once = Once::new();
 
@@ -193,6 +193,7 @@ pub fn probe(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         sample_rate,
         channels,
         audio_streams,
+        file: file_info(path, &input),
     })
 }
 
@@ -349,7 +350,64 @@ pub fn probe_image(path: &Path) -> Result<MediaMeta, crate::MediaError> {
         sample_rate: 0,
         channels: 0,
         audio_streams: 0,
+        file: file_info(path, &input),
     })
+}
+
+fn file_info(path: &Path, input: &ffmpeg::format::context::Input) -> MediaFileInfo {
+    let codec_of = |kind| {
+        input
+            .streams()
+            .best(kind)
+            .map(|s| s.parameters().id().name().to_owned())
+    };
+    let audio = input.streams().best(ffmpeg::media::Type::Audio);
+    let tag = |keys: &[&str]| {
+        let find = |dict: ffmpeg::DictionaryRef| {
+            dict.iter()
+                .find(|(k, v)| {
+                    keys.iter().any(|key| k.eq_ignore_ascii_case(key)) && !v.trim().is_empty()
+                })
+                .map(|(_, v)| v.trim().to_owned())
+        };
+        // Ogg/Opus keep their tags on the stream, not on the container.
+        find(input.metadata()).or_else(|| audio.as_ref().and_then(|s| find(s.metadata())))
+    };
+    MediaFileInfo {
+        size_bytes: std::fs::metadata(path).ok().map(|m| m.len()),
+        video_codec: codec_of(ffmpeg::media::Type::Video),
+        audio_codec: codec_of(ffmpeg::media::Type::Audio),
+        title: tag(&["title"]),
+        artist: tag(&["artist", "author", "album_artist"]),
+    }
+}
+
+/// `MediaMeta::file` alone, without the (slow) frame count verification.
+pub fn probe_file_info(path: &Path) -> Result<MediaFileInfo, crate::MediaError> {
+    ensure_init();
+    let input = ffmpeg::format::input(&path)?;
+    Ok(file_info(path, &input))
+}
+
+/// Every metadata tag of the container and of its streams, as ffprobe lists
+/// them.
+pub fn probe_tags(path: &Path) -> Result<Vec<(String, String)>, crate::MediaError> {
+    ensure_init();
+    let input = ffmpeg::format::input(&path)?;
+    let mut tags: Vec<(String, String)> = input
+        .metadata()
+        .iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    for stream in input.streams() {
+        tags.extend(
+            stream
+                .metadata()
+                .iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned())),
+        );
+    }
+    Ok(tags)
 }
 
 /// Info on an audio stream of the container, for multi-track import

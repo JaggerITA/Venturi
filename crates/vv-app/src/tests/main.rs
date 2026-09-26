@@ -88,6 +88,7 @@ fn insert_compound_media(app: &mut VenturiApp, nested_id: TimelineId) -> MediaId
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 1,
         compound: Some(nested_id),
@@ -180,6 +181,7 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
             sample_rate: 48_000,
             channels: 2,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash: 7,
         compound: None,
@@ -447,6 +449,7 @@ fn app_with_media_at(
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 1,
         compound: None,
@@ -474,6 +477,7 @@ fn hd_media(app: &mut VenturiApp, hash: u64, (w, h): (u32, u32)) -> MediaId {
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: hash,
         compound: None,
@@ -564,6 +568,7 @@ fn dropping_several_media_appends_them_in_pool_order() {
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 2,
         compound: None,
@@ -612,6 +617,7 @@ fn dropping_several_media_is_a_single_undo_step() {
             sample_rate: 48000,
             channels: 2,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash: 2,
         compound: None,
@@ -668,6 +674,7 @@ fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 2,
         compound: None,
@@ -739,6 +746,7 @@ fn select_all_media_selects_every_media_in_the_pool() {
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 2,
         compound: None,
@@ -776,6 +784,7 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
         sample_rate: 0,
         channels: 0,
         audio_streams: 0,
+        file: Default::default(),
     };
     let offline = app.project.media_pool.insert(vv_core::MediaItem {
         path: "/this/path/no/longer/exists/interview.mp4".into(),
@@ -827,6 +836,88 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The media a relink by name misses are offered to the forced relink, and
+/// what it finds is applied to those alone, in one undo step.
+#[test]
+fn media_not_found_by_name_can_be_force_relinked() {
+    let dir =
+        std::env::temp_dir().join(format!("vv-app-forced-relink-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("found.mp4"), b"aa").unwrap();
+    let converted = dir.join("renamed.mkv");
+    std::fs::write(&converted, b"b").unwrap();
+
+    let mut app = VenturiApp::default();
+    let mut meta = vv_core::MediaMeta {
+        duration_frames: 10,
+        fps: vv_core::Rational::new(25, 1),
+        width: 320,
+        height: 240,
+        has_video: true,
+        has_audio: false,
+        sample_rate: 0,
+        channels: 0,
+        audio_streams: 0,
+        file: Default::default(),
+    };
+    let found = app.project.media_pool.insert(vv_core::MediaItem {
+        path: "/missing/found.mp4".into(),
+        meta: meta.clone(),
+        content_hash: 1,
+        compound: None,
+    });
+    meta.file.size_bytes = Some(1);
+    let lost = app.project.media_pool.insert(vv_core::MediaItem {
+        path: "/missing/lost.mov".into(),
+        meta,
+        content_hash: 2,
+        compound: None,
+    });
+    app.relink_media(&dir, &[found, lost]);
+    assert_eq!(app.forced_relink_offer, Some((dir.clone(), vec![lost])));
+
+    let references = vec![forced_relink::Reference {
+        media_id: lost,
+        path: app.project.media_pool[lost].path.clone(),
+        meta: app.project.media_pool[lost].meta.clone(),
+        waveform: None,
+    }];
+    let criteria = forced_relink::Criteria {
+        enabled: [forced_relink::Criterion::Size].into(),
+        ..Default::default()
+    };
+    let matches = forced_relink::search(
+        &references,
+        &dir,
+        &criteria,
+        &forced_relink::SearchProgress::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        matches[0].iter().map(|m| &m.path).collect::<Vec<_>>(),
+        [&converted]
+    );
+    let relinks = matches[0]
+        .iter()
+        .map(|m| (lost, m.path.clone(), m.meta.clone()))
+        .collect();
+    assert_eq!(app.apply_relinks(relinks), 1);
+    assert_eq!(app.project.media_pool[lost].path, converted);
+
+    app.history.undo(&mut app.project);
+    assert_eq!(
+        app.project.media_pool[lost].path,
+        PathBuf::from("/missing/lost.mov")
+    );
+    assert_eq!(
+        app.project.media_pool[found].path,
+        dir.join("found.mp4"),
+        "the forced relink is its own undo step"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `relink_media` touches only the `targets` passed explicitly, never
 /// the rest of the pool — even if relinkable.
 #[test]
@@ -852,6 +943,7 @@ fn relink_media_with_a_selection_only_touches_the_selected_media() {
         sample_rate: 0,
         channels: 0,
         audio_streams: 0,
+        file: Default::default(),
     };
     let selected = app.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/a.mp4".into(),
@@ -4201,6 +4293,7 @@ fn dropping_audio_only_media_creates_no_video_track() {
             sample_rate: 48000,
             channels: 2,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash: 1,
         compound: None,

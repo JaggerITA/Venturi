@@ -275,6 +275,7 @@ fn media_harness() -> Harness {
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 1,
         compound: None,

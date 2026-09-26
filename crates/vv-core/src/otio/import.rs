@@ -908,6 +908,7 @@ fn offline_meta(reference: &Value, kind: TrackKind) -> MediaMeta {
         sample_rate: if has_audio { 48_000 } else { 0 },
         channels: if has_audio { 2 } else { 0 },
         audio_streams: has_audio as u16,
+        file: Default::default(),
     }
 }
 

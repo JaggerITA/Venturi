@@ -5303,6 +5303,7 @@ fn make_compound_clip(
             sample_rate: 48_000,
             channels: 2,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash,
         compound: Some(nested_id),

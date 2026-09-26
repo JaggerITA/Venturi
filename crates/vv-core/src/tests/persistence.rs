@@ -22,6 +22,7 @@ fn save_then_load_round_trips_a_project_with_clips_and_keyframes() {
             sample_rate: 48000,
             channels: 2,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash: 42,
         compound: None,

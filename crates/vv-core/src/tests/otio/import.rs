@@ -14,6 +14,7 @@ fn meta(fps: Rational, duration_frames: FrameIdx) -> MediaMeta {
         sample_rate: 48_000,
         channels: 2,
         audio_streams: 1,
+        file: Default::default(),
     }
 }
 
@@ -738,6 +739,7 @@ fn audio_only_meta() -> MediaMeta {
         sample_rate: 48_000,
         channels: 2,
         audio_streams: 1,
+        file: Default::default(),
     }
 }
 

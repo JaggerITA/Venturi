@@ -35,6 +35,7 @@ fn insert_media(project: &mut Project) -> MediaId {
             sample_rate: 0,
             channels: 0,
             audio_streams: 0,
+            file: Default::default(),
         },
         content_hash: 7,
         compound: None,

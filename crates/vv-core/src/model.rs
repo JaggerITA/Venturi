@@ -180,6 +180,26 @@ pub struct MediaMeta {
     /// field existed: the app recomputes it on opening.
     #[serde(default)]
     pub audio_streams: u16,
+    #[serde(default)]
+    pub file: MediaFileInfo,
+}
+
+/// What identifies the file beyond its path, recorded while it is still
+/// reachable: once it goes missing it is all a forced relink can compare
+/// candidates against.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaFileInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
 }
 
 impl MediaMeta {
@@ -2061,6 +2081,7 @@ impl Project {
             sample_rate: 48_000,
             channels: 2,
             audio_streams: 1,
+            file: Default::default(),
         };
         let generation = self.alloc_compound_generation();
         let item = self.media_pool.get_mut(media_id).expect("checked above");

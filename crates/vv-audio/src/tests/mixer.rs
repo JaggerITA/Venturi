@@ -29,6 +29,7 @@ fn project() -> (Project, vv_core::MediaId, vv_core::MediaId) {
         sample_rate: RATE,
         channels: 1,
         audio_streams: 1,
+        file: Default::default(),
     };
     let a = project.media_pool.insert(MediaItem {
         path: PathBuf::from("a.wav"),
@@ -320,6 +321,7 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
             sample_rate: RATE,
             channels: 1,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash: 7,
         compound: None,
@@ -379,6 +381,7 @@ fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
             sample_rate: RATE,
             channels: 1,
             audio_streams: 1,
+            file: Default::default(),
         },
         content_hash: 7,
         compound: None,

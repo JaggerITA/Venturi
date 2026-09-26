@@ -9,6 +9,8 @@ rust_i18n::i18n!("locales", fallback = "en");
 mod app_menu;
 mod export;
 mod export_dialog;
+mod forced_relink;
+mod forced_relink_dialog;
 mod frame_provider;
 mod i18n;
 mod import_worker;
@@ -375,6 +377,11 @@ struct VenturiApp {
     /// Outcome of the last relink from the media pool context menu,
     /// shown in a separate small window (see `show_relink_message`).
     relink_message: Option<String>,
+    /// Base folder and media the last relink could not find by name.
+    forced_relink_offer: Option<(PathBuf, Vec<MediaId>)>,
+    forced_relink: Option<forced_relink_dialog::ForcedRelinkDialog>,
+    /// Kept across dialogs within the session.
+    forced_relink_criteria: forced_relink::Criteria,
     /// File dialog opened on a separate thread: on the GNOME/Wayland event
     /// loop thread it marks the app as unresponsive.
     pending_dialog: Option<PendingDialog>,
@@ -469,6 +476,9 @@ impl Default for VenturiApp {
             quit_confirmed: false,
             project_error: None,
             relink_message: None,
+            forced_relink_offer: None,
+            forced_relink: None,
+            forced_relink_criteria: Default::default(),
             pending_dialog: None,
             audiometer_enabled: true,
             audiometer_level: (0.0, 0.0),
@@ -1177,6 +1187,7 @@ impl VenturiApp {
                 sample_rate: 48_000,
                 channels: 2,
                 audio_streams: 1,
+                file: Default::default(),
             },
             content_hash: 0,
             compound: Some(id),
@@ -1211,6 +1222,7 @@ impl VenturiApp {
                 sample_rate: 48_000,
                 channels: 2,
                 audio_streams: 1,
+                file: Default::default(),
             },
             content_hash: 0,
             compound: Some(id),
@@ -3302,6 +3314,7 @@ impl eframe::App for VenturiApp {
         self.show_import_warnings(ui);
         self.show_otio_import_progress(ui);
         self.show_relink_message(ui);
+        self.show_forced_relink_dialog(ui.ctx());
         self.show_unsaved_changes_dialog(ui);
         self.show_new_timeline_dialog(ui.ctx());
         if std::mem::take(&mut self.timeline_state.paste_attributes_requested) {

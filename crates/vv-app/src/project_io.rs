@@ -65,31 +65,19 @@ pub(crate) struct ExportUiState {
     pub(crate) handle: std::thread::JoinHandle<Result<(), String>>,
 }
 
-/// All the files under `base_dir` by name, breadth-first: on equal names the
-/// least nested one wins. Unreadable directories are skipped.
 /// Absolute, symlink-free form of `path`, or `path` itself if the file is
 /// not reachable (removed media must still compare equal to itself).
 fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// All the files under `base_dir` by name: on equal names the least nested
+/// one wins.
 pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
     let mut index = HashMap::new();
-    let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
-    while let Some(dir) = dirs.pop_front() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                dirs.push_back(path);
-            } else if file_type.is_file() {
-                index.entry(entry.file_name()).or_insert(path);
-            }
+    for path in forced_relink::files_under(base_dir) {
+        if let Some(name) = path.file_name() {
+            index.entry(name.to_owned()).or_insert(path);
         }
     }
     index
@@ -748,6 +736,14 @@ impl VenturiApp {
                 item.meta.audio_streams =
                     vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
             }
+            // Projects saved before `MediaMeta::file`: record it while the
+            // file is still reachable.
+            if item.compound.is_none()
+                && item.meta.file == vv_core::MediaFileInfo::default()
+                && let Ok(file) = vv_media::probe_file_info(&item.path)
+            {
+                item.meta.file = file;
+            }
         }
         let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
         for media_id in media_ids {
@@ -875,17 +871,30 @@ impl VenturiApp {
         let Some(message) = &self.relink_message else {
             return;
         };
-        let mut close = false;
-        egui::Window::new("Relink media")
+        let (mut close, mut force) = (false, false);
+        egui::Window::new(t!("relink.title"))
+            .id(egui::Id::new("relink_message"))
             .collapsible(false)
             .default_width(360.0)
             .show(ui.ctx(), |ui| {
                 ui.label(message.as_str());
                 ui.separator();
-                close = ui.button(t!("common.close")).clicked();
+                ui.horizontal(|ui| {
+                    close = ui.button(t!("common.close")).clicked();
+                    if self.forced_relink_offer.is_some() {
+                        force = ui
+                            .button(t!("relink.force_button"))
+                            .on_hover_text(t!("relink.force_hint"))
+                            .clicked();
+                    }
+                });
             });
-        if close {
+        if force && let Some((base_dir, failed)) = self.forced_relink_offer.take() {
+            self.open_forced_relink(base_dir, &failed);
+        }
+        if close || force {
             self.relink_message = None;
+            self.forced_relink_offer = None;
         }
     }
 
@@ -1030,12 +1039,12 @@ impl VenturiApp {
     }
 
     /// Relinks the media of `targets` that no longer exist at their path to
-    /// a file with the same name under `base_dir`.
+    /// a file with the same name under `base_dir`. The ones not found are
+    /// offered to the forced relink.
     pub(crate) fn relink_media(&mut self, base_dir: &Path, targets: &[MediaId]) {
         let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
-        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-        let mut relinked_ids: Vec<MediaId> = Vec::new();
-        let mut missing = 0usize;
+        let mut found: Vec<(MediaId, PathBuf, Option<vv_core::MediaMeta>)> = Vec::new();
+        let mut failed: Vec<MediaId> = Vec::new();
         for &media_id in targets {
             let Some(item) = self.project.media_pool.get(media_id) else {
                 continue;
@@ -1044,42 +1053,57 @@ impl VenturiApp {
                 continue;
             }
             let Some(file_name) = item.path.file_name() else {
+                failed.push(media_id);
                 continue;
             };
-            let found = index
+            match index
                 .get_or_insert_with(|| index_media_by_filename(base_dir))
                 .get(file_name)
-                .cloned();
-            let Some(found) = found else {
-                missing += 1;
-                continue;
-            };
-            let content_hash = vv_media::content_fingerprint(&found).unwrap_or(0);
-            // An offline media imported from OTIO only has a guessed meta.
-            let meta = vv_media::probe_media(&found).ok();
-            commands.push(Box::new(vv_core::SetMediaPath::new(
-                media_id,
-                found,
-                content_hash,
-                meta,
-            )) as Box<dyn vv_core::Command>);
-            relinked_ids.push(media_id);
+            {
+                Some(path) => found.push((media_id, path.clone(), None)),
+                None => failed.push(media_id),
+            }
         }
-        self.relink_message = Some(if commands.is_empty() {
+        let relinked = self.apply_relinks(found);
+        self.relink_message = Some(if relinked == 0 {
             t!("project.relink_none").into_owned()
-        } else if missing == 0 {
-            t!("project.relink_done", count = commands.len()).into_owned()
+        } else if failed.is_empty() {
+            t!("project.relink_done", count = relinked).into_owned()
         } else {
             t!(
                 "project.relink_partial",
-                count = commands.len(),
-                missing = missing
+                count = relinked,
+                missing = failed.len()
             )
             .into_owned()
         });
-        if commands.is_empty() {
-            return;
+        self.forced_relink_offer = (!failed.is_empty()).then(|| (base_dir.to_path_buf(), failed));
+    }
+
+    /// Points each media at its new file in a single undo step. `None` meta
+    /// is probed here: an offline media imported from OTIO only has a
+    /// guessed one.
+    pub(crate) fn apply_relinks(
+        &mut self,
+        relinks: Vec<(MediaId, PathBuf, Option<vv_core::MediaMeta>)>,
+    ) -> usize {
+        if relinks.is_empty() {
+            return 0;
         }
+        let media_ids: Vec<MediaId> = relinks.iter().map(|(id, ..)| *id).collect();
+        let commands: Vec<Box<dyn vv_core::Command>> = relinks
+            .into_iter()
+            .map(|(media_id, path, meta)| {
+                let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
+                let meta = meta.or_else(|| vv_media::probe_media(&path).ok());
+                Box::new(vv_core::SetMediaPath::new(
+                    media_id,
+                    path,
+                    content_hash,
+                    meta,
+                )) as Box<dyn vv_core::Command>
+            })
+            .collect();
         self.history.do_command(
             &mut self.project,
             Box::new(vv_core::CompositeCommand::new(
@@ -1088,9 +1112,10 @@ impl VenturiApp {
             )),
         );
         self.unsaved_media = true;
-        for media_id in relinked_ids {
+        for &media_id in &media_ids {
             self.enqueue_media_background_jobs(media_id);
         }
+        media_ids.len()
     }
 }
 

@@ -1,0 +1,117 @@
+_version: 2
+
+relink.title:
+  en: "Relink media"
+  it: "Relink media"
+
+relink.force_button:
+  en: "Force relink..."
+  it: "Relink forzato..."
+
+relink.force_hint:
+  en: "Look for the missing media by length, size, codec or other properties instead of the file name"
+  it: "Cerca i media mancanti per durata, dimensione, codec o altre proprietà invece che per nome del file"
+
+relink.force_title:
+  en: "Force relink"
+  it: "Relink forzato"
+
+relink.force_intro:
+  en: "%{count} media not found by name. Look under %{dir} for files matching all of:"
+  it: "%{count} media non trovati per nome. Cerca in %{dir} i file che corrispondono a tutti questi criteri:"
+
+relink.criterion_name:
+  en: "Name (without extension)"
+  it: "Nome (senza estensione)"
+
+relink.criterion_extension:
+  en: "Extension"
+  it: "Estensione"
+
+relink.criterion_duration:
+  en: "Length"
+  it: "Durata"
+
+relink.criterion_frames:
+  en: "Frame count"
+  it: "Numero di frame"
+
+relink.criterion_size:
+  en: "File size"
+  it: "Dimensione del file"
+
+relink.criterion_codec:
+  en: "Codec"
+  it: "Codec"
+
+relink.criterion_aspect_ratio:
+  en: "Aspect ratio"
+  it: "Proporzioni"
+
+relink.criterion_title:
+  en: "Title (audio tag)"
+  it: "Titolo (tag audio)"
+
+relink.criterion_artist:
+  en: "Artist (audio tag)"
+  it: "Artista (tag audio)"
+
+relink.criterion_waveform:
+  en: "Waveform similarity"
+  it: "Somiglianza della forma d'onda"
+
+relink.criterion_tag:
+  en: "Metadata tag"
+  it: "Tag dei metadati"
+
+relink.frames_suffix:
+  en: " frames"
+  it: " frame"
+
+relink.tag_key:
+  en: "tag (e.g. make)"
+  it: "tag (es. make)"
+
+relink.tag_value:
+  en: "value"
+  it: "valore"
+
+relink.unknown_for:
+  en: "Not recorded for %{count} of %{total} media: those cannot match on it"
+  it: "Non registrato per %{count} media su %{total}: per questi non può corrispondere"
+
+relink.search:
+  en: "Search"
+  it: "Cerca"
+
+relink.searching:
+  en: "Comparing files... %{done}/%{total}"
+  it: "Confronto dei file... %{done}/%{total}"
+
+relink.results_intro:
+  en: "Files that will be used:"
+  it: "File che verranno usati:"
+
+relink.no_match:
+  en: "no match"
+  it: "nessuna corrispondenza"
+
+relink.nothing_found:
+  en: "No file matches these criteria: go back and loosen them."
+  it: "Nessun file corrisponde a questi criteri: torna indietro e allentali."
+
+relink.select_all:
+  en: "Select all"
+  it: "Seleziona tutto"
+
+relink.deselect_all:
+  en: "Deselect all"
+  it: "Deseleziona tutto"
+
+relink.back:
+  en: "Change criteria"
+  it: "Cambia criteri"
+
+relink.apply:
+  en: "Relink selected (%{count})"
+  it: "Ricollega selezionati (%{count})"
