@@ -9,4 +9,4 @@ workspace = true
 [dependencies]
 ffmpeg-next = "9.0.0"
 thiserror = "2.0.20"
-vv-core = { version = "0.1.0", path = "../vv-core" }
+vv-core = { path = "../vv-core" }

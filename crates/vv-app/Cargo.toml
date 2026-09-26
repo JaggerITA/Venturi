@@ -16,10 +16,10 @@ rust-i18n = "4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sys-locale = "0.3"
-vv-audio = { version = "0.1.0", path = "../vv-audio" }
-vv-core = { version = "0.1.0", path = "../vv-core" }
-vv-media = { version = "0.1.0", path = "../vv-media" }
-vv-render = { version = "0.1.0", path = "../vv-render" }
+vv-audio = { path = "../vv-audio" }
+vv-core = { path = "../vv-core" }
+vv-media = { path = "../vv-media" }
+vv-render = { path = "../vv-render" }
 
 
 [target.'cfg(target_os = "linux")'.dependencies]

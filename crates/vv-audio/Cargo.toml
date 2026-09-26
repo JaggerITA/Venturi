@@ -9,4 +9,4 @@ workspace = true
 [dependencies]
 cpal = "0.18.2"
 ffmpeg-next = "9.0.0"
-vv-core = { version = "0.1.0", path = "../vv-core" }
+vv-core = { path = "../vv-core" }

@@ -183,9 +183,11 @@ macOS dmg. Pushing a `v*` tag also publishes a GitHub release with the three
 files attached and notes generated from the commits:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+scripts/release.sh 0.2.0          # bumps Cargo.toml/Cargo.lock, commits, tags
+git push origin master v0.2.0
 ```
+
+The workflow refuses a tag that does not match the Cargo version.
 
 Run manually from the Actions tab, it only builds and leaves the files as
 workflow artifacts.

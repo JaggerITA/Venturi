@@ -8,7 +8,23 @@ on:
     tags: ["v*"]
 
 jobs:
+  # A tag whose name differs from the Cargo version would ship a release
+  # whose metadata lies; scripts/release.sh keeps the two in sync.
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "v$cargo_version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $cargo_version (use scripts/release.sh)"
+            exit 1
+          fi
+
   appimage:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +72,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    needs: version
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
