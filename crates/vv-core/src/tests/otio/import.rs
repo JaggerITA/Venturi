@@ -273,11 +273,16 @@ fn a_resolve_adjustment_clip_is_recognised_by_its_type_74_effect() {
     let mut probe = probe_from(vec![]);
     let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
-    assert_eq!(tl.tracks[0].clips.len(), 1);
-    assert!(tl.tracks[0].clips[0].is_adjustment());
+    let clips = &tl.tracks[0].clips;
+    assert_eq!(clips.len(), 2);
+    assert!(clips[0].is_adjustment());
+    assert!(!clips[0].disabled);
+    // Without the effect it is a composition: a disabled placeholder.
+    assert!(matches!(clips[1].source, ClipSource::Text));
+    assert!(clips[1].disabled);
     assert!(matches!(
         imported.warnings.as_slice(),
-        [OtioWarning::UnsupportedReference { clip, .. }] if clip == "Fusion Composition"
+        [OtioWarning::Placeholder { clip }] if clip == "Fusion Composition"
     ));
 }
 
@@ -318,6 +323,7 @@ fn an_exported_adjustment_clip_reads_back_without_our_metadata() {
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     let back = &tl.tracks[0].clips[0];
     assert!(back.is_adjustment());
+    assert!(!back.disabled, "a MissingReference, but not a placeholder");
     assert_eq!((back.timeline_start, back.timeline_len), (10, 60));
     assert_eq!(back.effects.transform.value_at(0).zoom, [1.5, 1.5]);
 }
@@ -471,8 +477,8 @@ fn clip_1(name: &str, url: &str, start: f64, duration: f64, enabled: bool) -> Va
 }
 
 /// File from another editor: `Clip.1`, times in the media rate with a
-/// start timecode, transitions, disabled clips and missing media;
-/// video and audio of the same stretch must be relinked.
+/// start timecode, transitions, disabled clips and missing media (kept
+/// offline); video and audio of the same stretch must be relinked.
 #[test]
 fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
     let fps = 24_000.0 / 1001.0;
@@ -516,35 +522,45 @@ fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
     )]);
     let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
 
-    assert_eq!(imported.warnings.len(), 2, "{:?}", imported.warnings);
-    assert_eq!(
-        imported.warnings[0],
-        OtioWarning::ClipDisabled {
-            clip: "disabled".into()
-        }
-    );
+    assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
     assert!(
-        matches!(&imported.warnings[1], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("missing.mov"))
+        matches!(&imported.warnings[0], OtioWarning::MediaUnreadable { path, .. } if path.ends_with("missing.mov"))
     );
     assert_eq!(
         imported.project.media_pool.len(),
-        1,
-        "same file probed once"
+        2,
+        "same file probed once, plus the offline one"
     );
+    let offline = imported
+        .project
+        .media_pool
+        .values()
+        .find(|m| m.path.ends_with("missing.mov"))
+        .unwrap();
+    assert_eq!(
+        (
+            offline.meta.duration_frames,
+            offline.meta.fps,
+            offline.meta.width
+        ),
+        (2400, Rational::new(24, 1), 0),
+        "described by available_range, resolution unknown"
+    );
+    assert!(offline.meta.has_video && !offline.meta.has_audio);
 
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     assert_eq!(tl.fps, Rational::new(24_000, 1001));
     assert_eq!(tl.resolution, (1280, 720), "from the first video media");
     let video = &tl.tracks[0].clips;
-    assert_eq!(video.len(), 2);
+    assert_eq!(video.len(), 4);
     assert_eq!((video[0].timeline_start, video[0].timeline_len), (24, 48));
     assert_eq!(video[0].source_in(), 48, "from the media start timecode");
-    assert_eq!(
-        video[1].timeline_start,
-        24 + 48 + 24 + 24,
-        "after disabled and lost"
-    );
-    assert_eq!(video[1].source_in(), 0, "relative path");
+    assert!(!video[0].disabled);
+    assert!(video[1].disabled);
+    assert_eq!(video[1].timeline_start, 24 + 48);
+    assert!(!video[2].disabled, "offline, not disabled");
+    assert_eq!(video[3].timeline_start, 24 + 48 + 24 + 24);
+    assert_eq!(video[3].source_in(), 0, "relative path");
     let transition = video[0]
         .effects
         .transition_out
@@ -559,7 +575,53 @@ fn a_foreign_file_imports_with_warnings_for_what_is_skipped() {
     assert!(audio.muted);
     assert!(video[0].linked_group.is_some());
     assert_eq!(audio.clips[0].linked_group, video[0].linked_group);
-    assert_eq!(video[1].linked_group, None);
+    assert_eq!(video[3].linked_group, None);
+}
+
+/// Resolve's Text+ and Fusion compositions come as an empty
+/// `MissingReference`: a disabled title holds their place. An adjustment
+/// clip without its effect is left out.
+#[test]
+fn missing_references_become_disabled_placeholder_titles() {
+    let missing = |name: &str| {
+        json!({
+            "OTIO_SCHEMA": "Clip.2",
+            "name": name,
+            "source_range": range(0.0, 24.0, 24.0),
+            "media_references": { "DEFAULT_MEDIA": { "OTIO_SCHEMA": "MissingReference.1" } },
+            "active_media_reference_key": "DEFAULT_MEDIA",
+        })
+    };
+    let otio = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [{
+            "OTIO_SCHEMA": "Track.1",
+            "kind": "Video",
+            "children": [missing("Text+"), missing("Adjustment Clip")],
+        }]},
+    });
+    let mut probe = probe_from(vec![]);
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
+
+    assert_eq!(
+        imported.warnings,
+        vec![
+            OtioWarning::Placeholder {
+                clip: "Text+".into()
+            },
+            OtioWarning::UnsupportedReference {
+                clip: "Adjustment Clip".into(),
+                schema: "MissingReference".into()
+            },
+        ]
+    );
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    let clips = &tl.tracks[0].clips;
+    assert_eq!(clips.len(), 1);
+    assert!(matches!(clips[0].source, ClipSource::Text));
+    assert!(clips[0].disabled);
+    assert_eq!(clips[0].effects.title.as_ref().unwrap().content, "Text+");
+    assert_eq!(clips[0].timeline_len, 24);
 }
 
 fn resolve_effect(name: &str, enabled: bool, parameters: Value) -> Value {

@@ -3912,7 +3912,7 @@ fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
     let timeline = &app.project.timelines[app.timeline_id.unwrap()];
     assert_eq!(timeline.name, "Importata");
     let clips = &timeline.tracks[0].clips;
-    assert_eq!(clips.len(), 1);
+    assert_eq!(clips.len(), 2, "the missing one is kept offline");
     let clip = &clips[0];
     assert_eq!(
         (clip.timeline_start, clip.timeline_len, clip.source_in()),
@@ -3923,6 +3923,22 @@ fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
         warnings.iter().any(|w| w.contains("gone.mp4")),
         "{warnings:?}"
     );
+
+    // Relinking probes the file: the offline meta did not know its size.
+    let found_dir = dir.join("found");
+    std::fs::create_dir_all(&found_dir).unwrap();
+    std::fs::copy(&media, found_dir.join("gone.mp4")).unwrap();
+    let offline = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, m)| m.path.ends_with("gone.mp4"))
+        .map(|(id, _)| id)
+        .unwrap();
+    assert_eq!(app.project.media_pool[offline].meta.width, 0);
+    app.relink_media(&found_dir, &[offline]);
+    let meta = &app.project.media_pool[offline].meta;
+    assert_eq!((meta.width, meta.height), (320, 240));
 }
 
 #[test]

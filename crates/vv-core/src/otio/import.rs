@@ -6,9 +6,9 @@
 
 use super::{MeasureTitle, OtioError, generator, resolve};
 use crate::model::{
-    Clip, ClipSource, Ease, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
-    MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline, Track, TrackKind,
-    TransformParam, Transition, TransitionKind,
+    Clip, ClipSource, Ease, EffectStack, FrameIdx, IMAGE_DURATION_FRAMES, Interpolation, Keyframed,
+    LinkGroupId, MediaId, MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline,
+    TitleParams, Track, TrackKind, TransformParam, Transition, TransitionKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -26,20 +26,54 @@ pub struct OtioImport {
 /// The text is composed by the UI, in its own language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OtioWarning {
-    EffectIgnored { effect: String, clips: usize },
-    EffectPartlyIgnored { effect: String, clips: usize },
-    SpeedNotApplied { clip: String, percent: i64 },
-    UnsupportedInStack { schema: String },
-    TrackKindIgnored { kind: Option<String> },
+    EffectIgnored {
+        effect: String,
+        clips: usize,
+    },
+    EffectPartlyIgnored {
+        effect: String,
+        clips: usize,
+    },
+    SpeedNotApplied {
+        clip: String,
+        percent: i64,
+    },
+    UnsupportedInStack {
+        schema: String,
+    },
+    TrackKindIgnored {
+        kind: Option<String>,
+    },
     TransitionIgnored,
-    UnsupportedItem { schema: String },
-    ClipWithoutDuration { clip: String },
-    ClipDisabled { clip: String },
-    ClipShorterThanAFrame { clip: String },
-    AudioOnlyOnVideoTrack { clip: String },
-    UnsupportedReference { clip: String, schema: String },
-    UnsupportedUrl { url: String },
-    MediaUnreadable { path: PathBuf, error: String },
+    UnsupportedItem {
+        schema: String,
+    },
+    ClipWithoutDuration {
+        clip: String,
+    },
+    /// Content not in the file (Resolve's Text+, Fusion...): a disabled
+    /// title with the clip's name holds its place.
+    Placeholder {
+        clip: String,
+    },
+    ClipShorterThanAFrame {
+        clip: String,
+    },
+    AudioOnlyOnVideoTrack {
+        clip: String,
+    },
+    UnsupportedReference {
+        clip: String,
+        schema: String,
+    },
+    UnsupportedUrl {
+        url: String,
+    },
+    /// Imported offline, to relink.
+    MediaUnreadable {
+        path: PathBuf,
+        error: String,
+    },
 }
 
 pub fn import_otio(
@@ -88,6 +122,7 @@ pub fn project_from_otio(
         project: Project::default(),
         warnings: Vec::new(),
         media: HashMap::new(),
+        offline: Default::default(),
         ignored_effects: BTreeMap::new(),
         base_dir,
         probe,
@@ -111,7 +146,8 @@ pub fn project_from_otio(
 struct Importer<'a> {
     project: Project,
     warnings: Vec<OtioWarning>,
-    media: HashMap<PathBuf, Option<MediaId>>,
+    media: HashMap<PathBuf, MediaId>,
+    offline: std::collections::HashSet<MediaId>,
     /// Effect name → how many clips had it: one warning per effect,
     /// not one per clip. `partial`: something of the effect was translated.
     ignored_effects: BTreeMap<(String, bool), usize>,
@@ -296,12 +332,6 @@ impl Importer<'_> {
             return (0.0, None);
         };
         let timeline_len = to_frames(cursor + duration, fps) - timeline_start;
-        if item["enabled"] == false {
-            self.warn(OtioWarning::ClipDisabled {
-                clip: name.to_owned(),
-            });
-            return (duration, None);
-        }
         if timeline_len < 1 {
             self.warn(OtioWarning::ClipShorterThanAFrame {
                 clip: name.to_owned(),
@@ -325,7 +355,7 @@ impl Importer<'_> {
         let (source, rate, source_offset, media_start) = match schema(reference) {
             "ExternalReference" => {
                 let url = reference["target_url"].as_str().unwrap_or("");
-                let Some(media_id) = self.media(url) else {
+                let Some(media_id) = self.media(url, reference, kind) else {
                     return (duration, None);
                 };
                 let meta = &self.project.media_pool[media_id].meta;
@@ -368,6 +398,18 @@ impl Importer<'_> {
                     let frame = self.timeline_resolution(venturi, &ClipSource::Text);
                     effects.title = Some(generator::read_text(reference, frame, self.measure));
                 }
+                (ClipSource::Text, Rational::one(), 0, None)
+            }
+            // Adjustment clips were matched above by their effect; one without
+            // it is broken, not a title to rebuild.
+            "MissingReference" if kind == TrackKind::Video && name != "Adjustment Clip" => {
+                self.warn(OtioWarning::Placeholder {
+                    clip: name.to_owned(),
+                });
+                effects.title = Some(TitleParams {
+                    content: name.to_owned(),
+                    ..TitleParams::default()
+                });
                 (ClipSource::Text, Rational::one(), 0, None)
             }
             other => {
@@ -418,6 +460,11 @@ impl Importer<'_> {
         } else {
             Rational::one()
         };
+        // Placeholders stand in for content that is not in the file: off
+        // until the user rebuilds it. Adjustment clips are complete.
+        let disabled = item["enabled"] == false
+            || (matches!(schema(reference), "MissingReference")
+                && !matches!(source, ClipSource::Adjustment));
         let clip = Clip {
             id: self.project.alloc_clip_id(),
             source,
@@ -430,7 +477,7 @@ impl Importer<'_> {
             rate,
             speed,
             pitch_correction: venturi["pitch_correction"].as_bool().unwrap_or(true),
-            disabled: false,
+            disabled,
             fade_in: fades.0.clamp(0, timeline_len),
             fade_out: fades.1.clamp(0, timeline_len),
             display_color: serde_json::from_value(venturi["display_color"].clone()).unwrap_or(None),
@@ -519,39 +566,54 @@ impl Importer<'_> {
                 .project
                 .media_pool
                 .get(*id)
+                .filter(|m| m.meta.width > 0)
                 .map(|m| (m.meta.width as f32, m.meta.height as f32)),
             ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
         }
     }
 
-    /// The media at `target_url`, probed once per file.
-    fn media(&mut self, url: &str) -> Option<MediaId> {
+    /// The media at `target_url`, probed once per file. An unreadable one
+    /// goes in the pool offline, described by the file, so a relink can
+    /// bring its clips back.
+    fn media(&mut self, url: &str, reference: &Value, kind: TrackKind) -> Option<MediaId> {
         let Some(path) = url_to_path(url, self.base_dir) else {
             self.warn(OtioWarning::UnsupportedUrl {
                 url: url.to_owned(),
             });
             return None;
         };
-        if let Some(media) = self.media.get(&path) {
-            return *media;
+        if let Some(&media) = self.media.get(&path) {
+            if let Some(item) = self
+                .offline
+                .contains(&media)
+                .then(|| &mut self.project.media_pool[media])
+            {
+                item.meta.has_video |= kind == TrackKind::Video;
+                item.meta.has_audio |= kind == TrackKind::Audio;
+            }
+            return Some(media);
         }
-        let media = match (self.probe)(&path) {
-            Ok((meta, content_hash)) => Some(self.project.media_pool.insert(MediaItem {
-                path: path.clone(),
-                meta,
-                content_hash,
-                compound: None,
-            })),
+        let (meta, content_hash, offline) = match (self.probe)(&path) {
+            Ok((meta, content_hash)) => (meta, content_hash, false),
             Err(e) => {
                 self.warn(OtioWarning::MediaUnreadable {
                     path: path.clone(),
                     error: e,
                 });
-                None
+                (offline_meta(reference, kind), 0, true)
             }
         };
+        let media = self.project.media_pool.insert(MediaItem {
+            path: path.clone(),
+            meta,
+            content_hash,
+            compound: None,
+        });
+        if offline {
+            self.offline.insert(media);
+        }
         self.media.insert(path, media);
-        media
+        Some(media)
     }
 
     /// Other editors export video and audio of the same media as separate
@@ -593,6 +655,7 @@ impl Importer<'_> {
                     .project
                     .media_pool
                     .get(id)
+                    .filter(|m| m.meta.width > 0)
                     .map(|m| (m.meta.width, m.meta.height)),
                 ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
             })
@@ -817,6 +880,35 @@ fn resolve_source_track(resolve: &Value) -> Option<u64> {
     let mut tracks = children_of(resolve, "Channels").map(|c| c["Source Track ID"].as_u64());
     let first = tracks.next()??;
     tracks.all(|t| t == Some(first)).then_some(first)
+}
+
+/// What the file says of a media it could not probe. Resolution unknown (0)
+/// until the relink probes it.
+fn offline_meta(reference: &Value, kind: TrackKind) -> MediaMeta {
+    let range = &reference["available_range"];
+    let fps = range["duration"]["rate"]
+        .as_f64()
+        .filter(|rate| *rate > 0.0)
+        .map_or(Rational::new(25, 1), Rational::from_fps);
+    let duration_frames = range["duration"]["value"].as_f64().unwrap_or(0.0).round() as FrameIdx;
+    let has_audio = kind == TrackKind::Audio;
+    // Resolve gives stills a one-frame range.
+    let is_image = !has_audio && duration_frames <= 1;
+    MediaMeta {
+        duration_frames: if is_image {
+            IMAGE_DURATION_FRAMES
+        } else {
+            duration_frames.max(1)
+        },
+        fps,
+        width: 0,
+        height: 0,
+        has_video: !has_audio,
+        has_audio,
+        sample_rate: if has_audio { 48_000 } else { 0 },
+        channels: if has_audio { 2 } else { 0 },
+        audio_streams: has_audio as u16,
+    }
 }
 
 fn collect_timelines<'v>(value: &'v Value, out: &mut Vec<&'v Value>) {
