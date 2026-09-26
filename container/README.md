@@ -32,7 +32,7 @@ scripts/build-appimage.sh   # -> target/appimage/Venturi-<arch>.AppImage
 
 The script re-enters the container by itself (through
 `container/build-appimage.sh`, which builds the image on first use). See
-../README.md for the cache volumes.
+../docs/BUILDING.md for the cache volumes.
 
 ## Testing the UI (persistent session)
 

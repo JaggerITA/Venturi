@@ -311,4 +311,4 @@ Not yet:
 
 ## Environment setup
 
-Dependencies, build and tests: see [README.md](README.md).
+Dependencies, build and tests: see [docs/BUILDING.md](docs/BUILDING.md).

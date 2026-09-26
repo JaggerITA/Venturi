@@ -30,4 +30,4 @@ Unit tests do NOT go inline in the source file: they live in
 `crates/<crate>/src/tests/<same path as the source>.rs`, pulled in with
 `#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;`. Never add an inline
 `mod tests { … }`. Details in the "Where unit tests live" section of
-`README.md`.
+`docs/BUILDING.md`.

@@ -1,278 +1,92 @@
+<div align="center">
+
+<img src="media/icons/png/vv-icon-256.png" width="128" alt="Venturi logo">
+
 # Venturi
 
-A Linux-first, performance-oriented video editor written in Rust.
+**A Linux-first, performance-oriented video editor written in Rust.**
+
+Inspired by DaVinci Resolve's edit page, with full timeline interoperability via OpenTimelineIO.
+
+[![CI](https://github.com/morrolinux/VenturiVideo/actions/workflows/ci.yml/badge.svg)](https://github.com/morrolinux/VenturiVideo/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/morrolinux/VenturiVideo?label=release)](https://github.com/morrolinux/VenturiVideo/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://rustup.rs)
+
+[Download](https://github.com/morrolinux/VenturiVideo/releases/latest) •
+[Features](#features) •
+[Build from source](docs/BUILDING.md) •
+[Architecture](ARCHITECTURE.md) •
+[Contributing](#contributing)
+
+<img src="media/venturi.png" alt="Venturi editing a multi-track timeline, with the keyframe editor and settings open" width="100%">
+
+</div>
+
+---
 
 Venturi does little, and does it well. It is an "edit page only" NLE:
 multi-track cutting, the transforms and tools you actually reach for while
-editing (crop, zoom, rotation, position, speed, opacity, audio gain, titles,
-solid colours), keyframes on every parameter, transitions, compound clips,
-ripple delete. No node editor, no colour page, no Fusion-style compositor. The
-edit page is where the time goes, so that is the part that has to be perfect.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+editing, keyframes on every parameter, transitions, compound clips, ripple
+delete. No node editor, no colour page, no Fusion-style compositor. The edit
+page is where the time goes, so that is the part that has to be perfect.
 
 ## Features
 
-- DaVinci Resolve timeline interoperability via **OpenTimelineIO**.
-- **Professional timeline workflow**: track scrubbing with audio, ripple delete, compound clips, copy/paste for attributes, magnet snapping, unlimited undo with jumpable history
-- **Keyframes done right**: every parameter is keyframable. There's also a nice **keyframe editor** to make with custom curves.
-- **Crazy fast playback**: timeline-wide **frame cache**, optional background **proxies**, fast playback up to 8x with pitch-preserved audio.
+- **Fast playback and scrubbing.** Timeline-wide frame cache, optional
+  background proxies, playback up to 8x with pitch-preserved audio.
+- **Professional timeline workflow.** Track scrubbing with audio, ripple
+  delete, compound clips, copy/paste attributes, magnet snapping, unlimited
+  undo with a jumpable history.
+- **Keyframes done right.** Every parameter is keyframable: crop, zoom,
+  rotation, position, speed, opacity, audio gain. A dedicated keyframe editor
+  with custom curves.
+- **Titles, solid colours, filters, transitions.** Applied straight from the
+  timeline, no node graph to wire up.
+- **DaVinci Resolve interoperability.** Timelines move in both directions
+  through OpenTimelineIO, and the edit workflow is modelled on Resolve's edit
+  page so the habits carry over.
+- **Linux first.** Developed and tested on Linux, not ported to it. Also runs
+  on Apple Silicon Macs, and possibly Windows.
 
-## Why another editor
+## Install
 
-Minimal in scope, professional in workflow.
+Grab the latest build from the
+[Releases](https://github.com/morrolinux/VenturiVideo/releases/latest) page:
 
-- **Keep it simple.** A small set of features, done well.
-- **As fast as possible.** Scrubbing, cutting and playback should feel
-  instant, and not only on a professional workstation.
-- **Familiar to DaVinci Resolve users.** The edit workflow is modelled on
-  Resolve's edit page, so the habits carry over, and timelines can move
-  between the two through OpenTimelineIO.
-- **Linux first.** Developed and tested on Linux, not ported to it.
+| Platform | File | Notes |
+|---|---|---|
+| Linux x86_64 / aarch64 | `Venturi-<arch>.AppImage` | FFmpeg bundled. Needs a Vulkan driver. |
+| macOS (Apple Silicon) | `Venturi-arm64.dmg` | Ad-hoc signed, see [first launch on macOS](docs/BUILDING.md#opening-the-app-on-another-mac). |
+
+```sh
+chmod +x Venturi-x86_64.AppImage
+./Venturi-x86_64.AppImage
+```
+
+To build from source, see [docs/BUILDING.md](docs/BUILDING.md).
 
 ## The name
 
-Named after the Venturi effect: when a fluid passes through a constriction, it doesn't slow down, it speeds up. Venturi Video is built on the same principle: tight constraints make it faster, so your edits stay fluid even on modest hardware.
-
-## Dependencies
-
-- **Rust** 1.88 or newer (edition 2024, let chains) — [rustup.rs](https://rustup.rs)
-- **FFmpeg** (development headers/libs + `pkg-config`, for `ffmpeg-next`, the
-  binding used for decode/encode)
-- **clang/libclang** (for `ffmpeg-next`'s bindgen)
-- **Wayland/X11 + Vulkan** (for `eframe`/`wgpu`, the UI and the GPU compositor)
-- **ALSA** (for `cpal`, the audio)
-
-On Fedora (including Asahi Remix):
-
-```sh
-sudo dnf install \
-  rust cargo \
-  ffmpeg ffmpeg-devel \
-  clang clang-devel \
-  wayland-devel libxkbcommon-devel libxkbcommon-x11 libX11-devel \
-  vulkan-loader-devel mesa-vulkan-drivers \
-  alsa-lib-devel
-```
-
-`ffmpeg-devel` on Fedora requires the RPM Fusion (free) repository to be
-enabled — Fedora's own system build of FFmpeg does not include libx264 for
-licensing reasons, but this project needs it both for decoding common H.264
-sources and for export/proxies.
-
-On Debian/Ubuntu the equivalents (translated from the Fedora packages
-above, less regularly tested):
-
-```sh
-sudo apt install \
-  build-essential pkg-config \
-  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-  clang libclang-dev \
-  libwayland-dev libxkbcommon-dev libx11-dev \
-  libvulkan-dev mesa-vulkan-drivers \
-  libasound2-dev
-```
-
-### libav version
-
-If your system has a different version than the one linked against, e.g.:
-
-```
-error while loading shared libraries: libavutil.so.60: cannot open shared object file: No such file or directory
-```
-
-you can force a specific `libavutil` version through the `LD_LIBRARY_PATH`
-environment variable, e.g.:
-
-```
-export LD_LIBRARY_PATH="/path/to/local/library/:$LD_LIBRARY_PATH"
-./vv-app
-```
-
-to use a different local version.
-
-## Build
-
-From the workspace root:
-
-```sh
-cargo build -p vv-app            # debug
-cargo build -p vv-app --release  # release (optimised, much slower to compile)
-```
-
-The first build is slow (`ffmpeg-next`'s bindgen + compiling `wgpu`);
-subsequent ones are incremental.
-
-### AppImage
-
-```sh
-scripts/build-appimage.sh
-```
-
-Produces `target/appimage/Venturi-<arch>.AppImage` with FFmpeg compiled from
-source inside it (shared libraries, with libx264, librubberband, zlib and
-NVENC) plus libx264: the target machine needs neither FFmpeg nor RPM Fusion.
-glibc, ALSA, Vulkan and the NVIDIA driver, if any (NVENC requires >= 550),
-stay the system ones.
-
-The script re-runs itself inside a Debian 13 container
-(`container/Containerfile.appimage`, built on first use): a glibc binary only
-runs on a glibc >= the build one, so the release must not be compiled on
-Fedora. All the host needs is `podman`.
-
-FFmpeg is compiled once inside the build volume
-(`venturi-appimage-target`); to start over from scratch:
-`podman volume rm venturi-appimage-cargo venturi-appimage-target`,
-and `podman rmi venturi-appimage` if you change `Containerfile.appimage`.
-
-The `Release` GitHub Actions workflow (`.github/workflows/release.yml`) builds
-the same image and runs the same script on x86_64 and aarch64 runners, see
-[Releases](#releases).
-
-The AppImage is GPL (it includes libx264) and does not include FDK-AAC:
-export uses FFmpeg's native AAC encoder.
-
-### macOS (Apple Silicon)
-
-```sh
-scripts/build-macos.sh
-```
-
-Must run on a Mac with the Xcode command line tools and `pkgconf`. Produces
-`target/macos/Venturi.app` and `target/macos/Venturi-arm64.dmg`, with FFmpeg
-(libx264, librubberband, zlib, VideoToolbox) bundled in
-`Contents/Frameworks`.
-
-The `Release` GitHub Actions workflow runs the same script on a `macos-14`
-runner, see [Releases](#releases).
-
-#### Opening the app on another Mac
-
-The app is signed ad-hoc only, not notarized: once downloaded (browser,
-AirDrop, Nextcloud…) macOS quarantines it and refuses to launch it, with
-"The application Venturi can't be opened" or, from the terminal,
-`zsh: operation not permitted`. Distribute the `.dmg`, not the bare `.app`
-folder: zips and FAT/exFAT drives can drop the executable bit.
-
-1. Remove the quarantine and launch:
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Venturi.app
-   open /Applications/Venturi.app
-   ```
-2. If `xattr` also answers `operation not permitted`: System Settings →
-   Privacy & Security → App Management, enable Terminal and repeat step 1.
-   Alternatively, copy the app to the Desktop, remove the quarantine there and
-   move it to `/Applications` afterwards.
-3. Without a terminal: try to open the app once, then System Settings →
-   Privacy & Security → "Open Anyway" at the bottom. Right click → Open no
-   longer bypasses Gatekeeper since macOS Sequoia.
-
-If it still does not start:
-```sh
-ls -l /Applications/Venturi.app/Contents/MacOS/vv-app   # needs the x bit
-codesign -vvv --deep /Applications/Venturi.app          # signature intact?
-/Applications/Venturi.app/Contents/MacOS/vv-app         # real startup error
-```
-A missing `x` is fixed with `chmod +x` on that file, a broken signature with
-`codesign --force --deep --sign - /Applications/Venturi.app`.
-
-### Releases
-
-`.github/workflows/release.yml` builds the AppImages (x86_64, aarch64) and the
-macOS dmg. Pushing a `v*` tag also publishes a GitHub release with the three
-files attached and notes generated from the commits:
-
-```sh
-scripts/release.sh 0.2.0          # bumps Cargo.toml/Cargo.lock, commits, tags
-git push origin master v0.2.0
-```
-
-The workflow refuses a tag that does not match the Cargo version.
-
-Run manually from the Actions tab, it only builds and leaves the files as
-workflow artifacts.
-
-## Run
-
-```sh
-cargo run -p vv-app
-```
-
-A working graphics backend is required at runtime (Vulkan on Linux, through
-`mesa-vulkan-drivers` or the proprietary GPU driver): without one, `wgpu`
-finds no adapter and the window does not open.
-
-## Test
-
-```sh
-cargo test -p vv-app -- --test-threads=1
-```
-
-`--test-threads=1` is not optional for now: there is an intermittent flake
-(SIGSEGV, not yet investigated) when the tests run in parallel — single
-threaded they are stable. Some tests invoke `ffmpeg` from the command line to
-generate synthetic clips in `/tmp`, so the `ffmpeg` binary (not just the
-development libraries) also needs to be in `PATH`.
-
-### Where unit tests live
-
-Unlike the usual Rust convention (an inline `mod tests { … }` at the bottom
-of each file), unit tests are kept out of the source files, in
-`crates/<crate>/src/tests/`, mirroring the source path
-(`src/otio/import.rs` → `src/tests/otio/import.rs`). Each source file pulls
-its tests in as a child module, so they still see private items:
-
-```rust
-#[cfg(test)]
-#[path = "tests/export.rs"]
-mod tests;
-```
-
-Why: production code and tests can be measured separately with plain
-line counters, e.g.
-`cloc crates --include-lang=Rust --exclude-dir=tests`.
-
-Consequences to keep in mind:
-- a file getting its first tests needs the `#[path]` declaration above
-  (from a nested module the path climbs up, e.g. `"../tests/otio/import.rs"`);
-- renaming or moving a source file means updating its `#[path]` too;
-- `src/tests/` holds unit tests, not integration tests (those would go in
-  `crates/<crate>/tests/`, next to `src/`);
-- tools that walk `src/` must expect the `tests/` subdirectory.
-
-## Lint
-
-```sh
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
-
-## Headless test container
-
-[`container/`](container/README.md) contains a Podman environment to
-build/run/screenshot vv-app without a real graphical session (Xvfb + software
-Vulkan) — useful for checking the UI in isolation, or from a machine without a
-display.
+The Venturi effect: when a fluid passes through a constriction, it doesn't
+slow down, it speeds up. Tight constraints make Venturi faster, so your edits
+stay fluid even on modest hardware.
 
 ## Contributing
 
 Issues and pull requests are welcome. Before opening a PR:
 
-- Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and
-  `cargo test --workspace`: the `CI` workflow runs the same three steps on
-  every pull request.
-- Keep unit tests in `crates/<crate>/src/tests/`, not inline (see
-  [Where unit tests live](#where-unit-tests-live)).
-- Write code, comments and commit messages in English; the only Italian in
-  the repository is the `it:` translation in `crates/vv-app/locales/`.
-- Comments explain a non-obvious *why*, not what the code already says.
-- Commit messages use a `type: summary` first line (`feat:`, `fix:`,
-  `refactor:`, `docs:`, `test:`, `style:`, `perf:`, `chore:`, `ci:`), as in
-  the existing history.
+```sh
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+```
 
-The project conventions in full are in [CLAUDE.md](CLAUDE.md) (they apply to
-humans and coding agents alike, see [AGENTS.md](AGENTS.md)); the design is
-described in [ARCHITECTURE.md](ARCHITECTURE.md).
+The `CI` workflow runs the same three steps on every pull request. Unit tests
+live in `crates/<crate>/src/tests/`, not inline, see
+[Where unit tests live](docs/BUILDING.md#where-unit-tests-live). The full
+conventions (for humans and coding agents alike) are in [CLAUDE.md](CLAUDE.md)
+and [AGENTS.md](AGENTS.md); the design is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Licence
 
