@@ -874,7 +874,7 @@ impl Default for TitleBackground {
 impl Default for TitleParams {
     fn default() -> Self {
         Self {
-            content: "Basic Title".into(),
+            content: "Title".into(),
             font_family: String::new(),
             font_weight: 400,
             italic: false,
