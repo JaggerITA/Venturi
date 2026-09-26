@@ -98,6 +98,9 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
                 egui::Color32::WHITE,
             );
         }
+        timeline_ui::Generator::Adjustment => {
+            painter.rect_filled(thumb, 2.0, egui::Color32::from_rgb(150, 150, 165));
+        }
     }
     painter.rect_stroke(
         rect,
@@ -888,6 +891,9 @@ impl VenturiApp {
                 for generator in timeline_ui::Generator::ALL {
                     effect_item(ui, generator);
                 }
+                ui.add_space(8.0);
+                effects_section_header(ui, &t!("effects.effects"));
+                effect_item(ui, timeline_ui::Generator::Adjustment);
                 ui.add_space(8.0);
                 effects_section_header(ui, &t!("effects.filters"));
                 for filter in timeline_ui::ALL_FILTER_KINDS {

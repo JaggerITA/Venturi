@@ -126,6 +126,11 @@ pub enum LayerContent<'a> {
     /// Title: rasterized at the output resolution (see `text`), then
     /// treated like a `Solid` as large as the timeline.
     Text(&'a vv_core::TitleParams),
+    /// Adjustment clip: the stack composed so far, redrawn with the layer's
+    /// transform and filters. It replaces the stack instead of going over
+    /// it: where the transform or the crop leave the frame uncovered there is
+    /// the clear color, as in Resolve. Opacity mixes it with the original.
+    Adjustment,
 }
 
 /// How many filters per layer the uniform can carry (see `filters` in
@@ -217,7 +222,7 @@ struct TransformUniform {
     color: [f32; 4],
     solid: [f32; 4],
     /// x: opacity of the whole layer. y: id of the compositing method
-    /// (`blend_shader_id`). z/w unused.
+    /// (`blend_shader_id`). z: opacity of an adjustment layer, w: 1 if it is one.
     extra: [f32; 4],
     /// Shader ids of the active filters, in order of application (see
     /// `filter_shader_id`); 0 = empty slot. `MAX_LAYER_FILTERS` in two vec4s
@@ -771,8 +776,9 @@ impl Compositor {
                 blend,
             } = layer;
             let blend = *blend;
+            let is_adjustment = matches!(content, LayerContent::Adjustment);
             let backdrop_view = |backdrops: &mut Vec<Option<wgpu::Texture>>| {
-                let texture = (blend != BlendMode::Normal)
+                let texture = (blend != BlendMode::Normal || is_adjustment)
                     .then(|| self.scratch_texture(output.width, output.height));
                 let view = texture.as_ref().map_or_else(
                     || no_backdrop_view.clone(),
@@ -801,7 +807,8 @@ impl Compositor {
                     source_size,
                 } => vec![self.texture_bind_group(
                     &mut planes,
-                    texture,
+                    &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    (texture.width(), texture.height()),
                     transform,
                     output,
                     *source_size,
@@ -809,7 +816,25 @@ impl Compositor {
                     filters,
                     blend,
                     &backdrop_view(&mut backdrops),
+                    None,
                 )],
+                // The copy of the stack is both the source and the backdrop.
+                LayerContent::Adjustment => {
+                    let stack = backdrop_view(&mut backdrops);
+                    vec![self.texture_bind_group(
+                        &mut planes,
+                        &stack,
+                        (output.width, output.height),
+                        transform,
+                        output,
+                        output.timeline_size,
+                        *opacity,
+                        filters,
+                        blend,
+                        &stack,
+                        Some(clear),
+                    )]
+                }
                 // The color comes from the uniform: the planes are only placeholders.
                 LayerContent::Solid(color) => vec![self.layer_bind_group(
                     &mut planes,
@@ -858,7 +883,7 @@ impl Compositor {
                     groups
                 }
             };
-            let pipeline = if blend == BlendMode::Normal {
+            let pipeline = if blend == BlendMode::Normal && !is_adjustment {
                 &self.pipeline
             } else {
                 &self.blend_pipeline
@@ -988,11 +1013,13 @@ impl Compositor {
     /// only asks for a filterable float 2D texture, and `Rgba8Unorm` satisfies
     /// it as much as `R8Unorm` — and the other slots take the 1x1
     /// placeholders, which with `Fill::Rgba` the shader does not sample (except the alpha,
-    /// which must stay opaque).
+    /// which must stay opaque). `adjustment_clear` = draw it as an adjustment
+    /// layer (`LayerContent::Adjustment`) over a timeline with that clear.
     fn texture_bind_group(
         &self,
         planes: &mut Vec<wgpu::Texture>,
-        texture: &wgpu::Texture,
+        rgba_view: &wgpu::TextureView,
+        rgba_size: (u32, u32),
         transform: &Transform,
         output: OutputFrame,
         source_size: (u32, u32),
@@ -1000,24 +1027,21 @@ impl Compositor {
         filters: &[vv_core::FilterKind],
         blend: BlendMode,
         backdrop: &wgpu::TextureView,
+        adjustment_clear: Option<wgpu::Color>,
     ) -> wgpu::BindGroup {
         let u_texture = self.plane_texture(&[128], 1, 1);
         let v_texture = self.plane_texture(&[128], 1, 1);
         let a_texture = self.plane_texture(OPAQUE, 1, 1);
-        let rgba_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let u_view = u_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let a_view = a_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let uniform = TransformUniform::new(
+        let mut uniform = TransformUniform::new(
             transform,
             ColorMatrix::Bt709,
             false,
             fit_factors(
-                (
-                    texture.width().max(1) as f32,
-                    texture.height().max(1) as f32,
-                ),
+                (rgba_size.0.max(1) as f32, rgba_size.1.max(1) as f32),
                 (output.width as f32, output.height as f32),
             ),
             output,
@@ -1027,8 +1051,18 @@ impl Compositor {
             filters,
             blend,
         );
+        if let Some(clear) = adjustment_clear {
+            // The opacity moves from the layer's coverage to the final mix.
+            uniform.extra = [1.0, uniform.extra[1], opacity.clamp(0.0, 1.0), 1.0];
+            uniform.solid = [
+                clear.r as f32,
+                clear.g as f32,
+                clear.b as f32,
+                clear.a as f32,
+            ];
+        }
         let bind_group =
-            self.bind_group_for([&rgba_view, &u_view, &v_view, &a_view, backdrop], &uniform);
+            self.bind_group_for([rgba_view, &u_view, &v_view, &a_view, backdrop], &uniform);
         planes.extend([u_texture, v_texture, a_texture]);
         bind_group
     }

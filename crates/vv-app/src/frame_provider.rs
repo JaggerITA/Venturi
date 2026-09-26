@@ -62,7 +62,7 @@ pub fn clip_source_size(project: &Project, clip: &Clip, timeline_size: (u32, u32
             .get(*id)
             .map(|m| (m.meta.width, m.meta.height))
             .unwrap_or((1, 1)),
-        ClipSource::SolidColor | ClipSource::Text => timeline_size,
+        ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => timeline_size,
     }
 }
 
@@ -107,6 +107,7 @@ pub enum OwnedContent {
     },
     Solid(Rgba),
     Text(TitleParams),
+    Adjustment,
 }
 
 impl OwnedLayer {
@@ -125,6 +126,7 @@ impl OwnedLayer {
             },
             OwnedContent::Solid(color) => vv_render::LayerContent::Solid(*color),
             OwnedContent::Text(title) => vv_render::LayerContent::Text(title),
+            OwnedContent::Adjustment => vv_render::LayerContent::Adjustment,
         };
         vv_render::Layer {
             content,
@@ -149,6 +151,8 @@ impl OwnedLayer {
             ) => Arc::ptr_eq(frame, frame2) && source_size == source_size2,
             (OwnedContent::Solid(color), OwnedContent::Solid(color2)) => color == color2,
             (OwnedContent::Text(title), OwnedContent::Text(title2)) => title == title2,
+            // What it adjusts is the rest of the stack, compared on its own.
+            (OwnedContent::Adjustment, OwnedContent::Adjustment) => true,
             _ => false,
         };
         same_content
@@ -348,6 +352,7 @@ fn build_layer(
                 .map_or(Rgba::BLACK, |k| k.value_at(source_frame)),
         ),
         ClipSource::Text => OwnedContent::Text(clip.effects.title.clone()?),
+        ClipSource::Adjustment => OwnedContent::Adjustment,
         ClipSource::Media(_) => {
             let source_size = clip_source_size(project, clip, timeline_size);
             match content {

@@ -10,7 +10,7 @@
 use super::export::rational_time;
 use crate::FadeEdge;
 use crate::model::{
-    BlendMode, Clip, Ease, FrameIdx, Keyframed, Rational, TrackKind, TransformParam,
+    BlendMode, Clip, ClipSource, Ease, FrameIdx, Keyframed, Rational, TrackKind, TransformParam,
     TransformTracks, Transition,
 };
 use serde_json::{Map, Value, json};
@@ -60,15 +60,46 @@ fn time_warp(clip: &Clip) -> Option<Value> {
     })
 }
 
+/// The parameterless effect that makes a `MissingReference` clip an
+/// adjustment clip for Resolve: it has no other marker (the name can be changed).
+const ADJUSTMENT_EFFECT_TYPE: u64 = 74;
+
+pub(super) fn is_adjustment_clip<'a>(effects: impl IntoIterator<Item = &'a Value>) -> bool {
+    effects
+        .into_iter()
+        .any(|e| e["metadata"]["Resolve_OTIO"]["Type"].as_u64() == Some(ADJUSTMENT_EFFECT_TYPE))
+}
+
+fn adjustment_marker(clip: &Clip) -> Option<Value> {
+    matches!(clip.source, ClipSource::Adjustment).then(|| {
+        json!({
+            "OTIO_SCHEMA": "Effect.1",
+            "name": "",
+            "effect_name": "Resolve Effect",
+            "metadata": {
+                "Resolve_OTIO": {
+                    "Effect Name": "Effect",
+                    "Name": "Effect",
+                    "Type": ADJUSTMENT_EFFECT_TYPE,
+                    "Display Type": 0,
+                    "Enabled": true,
+                    "Parameters": [],
+                }
+            },
+        })
+    })
+}
+
 fn resolve_effects(clip: &Clip, kind: TrackKind, scale: &Scale) -> Vec<Value> {
     match kind {
         TrackKind::Video => [
+            adjustment_marker(clip),
             transform(clip, scale),
             cropping(clip, scale),
             composite(clip),
             video_faders(clip),
         ],
-        TrackKind::Audio => [volume_and_fades(clip), None, None, None],
+        TrackKind::Audio => [volume_and_fades(clip), None, None, None, None],
     }
     .into_iter()
     .flatten()

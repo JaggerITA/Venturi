@@ -4,7 +4,7 @@
 //! along the track. A file exported by Venturi comes back identical thanks
 //! to `metadata.venturi`.
 
-use super::{MeasureTitle, OtioError, generator};
+use super::{MeasureTitle, OtioError, generator, resolve};
 use crate::model::{
     Clip, ClipSource, Ease, EffectStack, FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId,
     MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline, Track, TrackKind,
@@ -349,6 +349,9 @@ impl Importer<'_> {
                     Some((secs, media_fps)),
                 )
             }
+            "MissingReference" if resolve::is_adjustment_clip(children_of(item, "effects")) => {
+                (ClipSource::Adjustment, Rational::one(), 0, None)
+            }
             "GeneratorReference" if reference["generator_kind"] == "Solid Color" => {
                 if effects.color.is_none() {
                     let color = generator::read_solid_color(reference).unwrap_or(Rgba::BLACK);
@@ -496,7 +499,7 @@ impl Importer<'_> {
                 .media_pool
                 .get(*id)
                 .map(|m| (m.meta.width as f32, m.meta.height as f32)),
-            ClipSource::SolidColor | ClipSource::Text => None,
+            ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
         }
     }
 
@@ -570,7 +573,7 @@ impl Importer<'_> {
                     .media_pool
                     .get(id)
                     .map(|m| (m.meta.width, m.meta.height)),
-                ClipSource::SolidColor | ClipSource::Text => None,
+                ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
             })
     }
 
@@ -631,7 +634,7 @@ fn resolve_parameter(
         ("Composite", "opacity") => track(Opacity, 1.0),
         ("Composite", "composite mode") => match parameter["Parameter Value"]
             .as_u64()
-            .and_then(super::resolve::blend_mode)
+            .and_then(resolve::blend_mode)
         {
             Some(blend) => {
                 effects.blend_mode = blend;

@@ -506,3 +506,30 @@ fn rename_timeline_renames_pool_item_and_timeline() {
     let timeline = project.media_pool[media_id].compound.unwrap();
     assert_eq!(project.timelines[timeline].name, "Edit");
 }
+
+#[test]
+fn transitions_do_not_apply_to_adjustment_clips() {
+    let transition = Transition {
+        kind: TransitionKind::Push,
+        duration: 10,
+        direction: PushDirection::Right,
+        ease: Ease::InOut,
+        curve: 0.5,
+    };
+    let mut adjustment = clip_at(10, 10, 2);
+    adjustment.source = ClipSource::Adjustment;
+    adjustment.effects.transition_out = Some(transition.clone());
+    let mut track = Track::new(TrackKind::Video);
+    track.clips = vec![clip_at(0, 10, 1), adjustment];
+    track.crossings = vec![CrossTransition {
+        left_clip: ClipId(1),
+        right_clip: ClipId(2),
+        transition,
+    }];
+
+    assert!(track.crossing_at(10).is_none());
+    assert_eq!(
+        track.clips[1].transition_offset_at(18, (1920.0, 1080.0), [1.0, 1.0]),
+        [0.0, 0.0]
+    );
+}

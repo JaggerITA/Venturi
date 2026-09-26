@@ -65,7 +65,7 @@ struct Track {
 
 struct Clip {
     id: ClipId,
-    source: ClipSource,               // Media(MediaId) | SolidColor | Text
+    source: ClipSource,               // Media(MediaId) | SolidColor | Text | Adjustment
     source_offset: FrameIdx,          // start in the media, in Timeline frames
     timeline_start: FrameIdx,         // in Timeline frames
     timeline_len: FrameIdx,           // in Timeline frames
@@ -166,7 +166,10 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    (`Compositor::render_layers`): the bars of the upper layer come out with
    alpha 0 and let the one below show. SolidColor and Text are layers like
    any other: the shader uses the layer colour (for text, with the glyph
-   coverage rasterised by `vv-render/src/text.rs` in the Y plane).
+   coverage rasterised by `vv-render/src/text.rs` in the Y plane). An
+   Adjustment layer copies the stack composed so far and redraws it with its
+   own transform/filters, replacing it (clear colour where uncovered, as in
+   Resolve) and mixing by opacity (`LayerContent::Adjustment`).
 5. Preview: composes at the resolution of the decoded frame widened to the
    timeline aspect (`vv_render::fit_output_size`), so the bars already show
    while editing without upscaling the content;

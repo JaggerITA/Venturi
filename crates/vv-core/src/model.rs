@@ -901,6 +901,8 @@ pub enum ClipSource {
     SolidColor,
     /// Parameters in `EffectStack::title`.
     Text,
+    /// No content: its effects apply to the composite of the tracks below.
+    Adjustment,
 }
 
 /// Bounds of `gain_db`: shared between the properties panel slider and the
@@ -1274,6 +1276,10 @@ impl Clip {
     }
 
     /// First source frame shown.
+    pub fn is_adjustment(&self) -> bool {
+        matches!(self.source, ClipSource::Adjustment)
+    }
+
     pub fn source_in(&self) -> FrameIdx {
         self.rate.unscale_round(self.source_offset)
     }
@@ -1377,6 +1383,9 @@ impl Clip {
         let len = self.timeline_len.max(1);
         let pos = timeline_frame - self.timeline_start;
         let mut offset = [0.0f32; 2];
+        if self.is_adjustment() {
+            return offset;
+        }
         if let Some(t) = &self.effects.transition_in {
             let d = t.duration.clamp(1, len);
             if pos >= 0 && pos < d {
@@ -1513,7 +1522,11 @@ impl Track {
         self.crossings.iter().find_map(|c| {
             let left = self.clip(c.left_clip)?;
             let right = self.clip(c.right_clip)?;
-            if left.timeline_end() != right.timeline_start {
+            // An adjustment half would adjust a stack already holding the other half.
+            if left.timeline_end() != right.timeline_start
+                || left.is_adjustment()
+                || right.is_adjustment()
+            {
                 return None;
             }
             c.window(left, right)

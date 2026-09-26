@@ -1439,6 +1439,9 @@ impl VenturiApp {
                 timeline_ui::Generator::Text => {
                     self.insert_text_clip(timeline_id, video_track, start)
                 }
+                timeline_ui::Generator::Adjustment => {
+                    self.insert_adjustment_clip(timeline_id, video_track, start)
+                }
             }
         }
         self.history
@@ -1504,6 +1507,29 @@ impl VenturiApp {
             vv_core::Rational::one(),
         );
         clip.effects.title = Some(vv_core::TitleParams::default());
+        self.insert_clips_overwriting(
+            timeline_id,
+            vec![(track_index, clip, None)],
+            vv_core::CommandLabel::InsertClips,
+        );
+    }
+
+    fn insert_adjustment_clip(
+        &mut self,
+        timeline_id: TimelineId,
+        track_index: usize,
+        start: FrameIdx,
+    ) {
+        let len =
+            timeline_ui::Generator::Adjustment.default_len(self.project.timelines[timeline_id].fps);
+        let clip = vv_core::Clip::from_source_range(
+            self.project.alloc_clip_id(),
+            vv_core::ClipSource::Adjustment,
+            0,
+            len,
+            start,
+            vv_core::Rational::one(),
+        );
         self.insert_clips_overwriting(
             timeline_id,
             vec![(track_index, clip, None)],
@@ -2318,7 +2344,9 @@ impl VenturiApp {
             .clip(track_index, clip_id)
             .is_some_and(|c| match &c.source {
                 vv_core::ClipSource::Media(id) => !self.project.media_pool.contains_key(*id),
-                vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => false,
+                vv_core::ClipSource::SolidColor
+                | vv_core::ClipSource::Text
+                | vv_core::ClipSource::Adjustment => false,
             })
     }
 
@@ -2429,7 +2457,9 @@ impl VenturiApp {
                 vv_core::ClipSource::Media(media_id) => {
                     !self.project.would_create_a_cycle(*media_id, timeline_id)
                 }
-                vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => true,
+                vv_core::ClipSource::SolidColor
+                | vv_core::ClipSource::Text
+                | vv_core::ClipSource::Adjustment => true,
             })
             .cloned()
             .collect();
@@ -2470,7 +2500,9 @@ impl VenturiApp {
                             .map_or(clip.rate, |item| {
                                 vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
                             }),
-                        vv_core::ClipSource::SolidColor | vv_core::ClipSource::Text => clip.rate,
+                        vv_core::ClipSource::SolidColor
+                        | vv_core::ClipSource::Text
+                        | vv_core::ClipSource::Adjustment => clip.rate,
                     };
                     clip.retime(entry.timeline_fps, timeline_fps, rate);
                 }

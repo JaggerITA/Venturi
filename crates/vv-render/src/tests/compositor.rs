@@ -1233,3 +1233,182 @@ fn the_first_layer_can_be_blended_over_the_clear() {
     // Screen over black (the clear) leaves the color as it is.
     assert_close_rgba(out.as_chunks::<4>().0[0], [255, 0, 0, 255]);
 }
+
+fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::FilterKind]) -> Layer<'_> {
+    Layer {
+        content: LayerContent::Adjustment,
+        transform,
+        opacity,
+        filters,
+        blend: BlendMode::Normal,
+    }
+}
+
+const GRAYSCALE: &[vv_core::FilterKind] = &[vv_core::FilterKind::Grayscale];
+
+#[test]
+fn an_adjustment_filters_the_layers_below_but_not_those_above() {
+    let compositor = Compositor::new_headless();
+    let out = compositor.render_layers(
+        &[
+            Layer::new(LayerContent::Solid(RED), Transform::default()),
+            adjustment(Transform::default(), 1.0, GRAYSCALE),
+            Layer::new(
+                LayerContent::Solid(BLUE),
+                Transform {
+                    crop: [8.0, 0.0, 0.0, 0.0],
+                    ..Transform::default()
+                },
+            ),
+        ],
+        OutputFrame::exact(16, 16),
+    );
+    let pixels = out.as_chunks::<4>().0;
+    let left = pixels[16 * 8 + 2];
+    assert_eq!(left[0], left[1], "grey: R=G=B");
+    assert_eq!(left[1], left[2]);
+    assert!(left[0] > 0 && left[0] < 255);
+    assert_close_rgba(pixels[16 * 8 + 12], [0, 0, 255, 255]);
+}
+
+#[test]
+fn an_adjustment_opacity_mixes_the_processed_stack_with_the_original() {
+    let compositor = Compositor::new_headless();
+    let render = |opacity| {
+        let out = compositor.render_layers(
+            &[
+                Layer::new(LayerContent::Solid(RED), Transform::default()),
+                adjustment(Transform::default(), opacity, GRAYSCALE),
+            ],
+            OutputFrame::exact(4, 4),
+        );
+        out.as_chunks::<4>().0[5]
+    };
+    let grey = render(1.0);
+    let half = render(0.5);
+    assert_close_rgba(render(0.0), [255, 0, 0, 255]);
+    assert_close_rgba(
+        half,
+        [
+            ((255 + grey[0] as u32) / 2) as u8,
+            grey[1] / 2,
+            grey[2] / 2,
+            255,
+        ],
+    );
+}
+
+/// As in Resolve: what the transform uncovers is the timeline background,
+/// not the unprocessed stack.
+#[test]
+fn an_adjustment_zoomed_out_shows_black_around_the_stack() {
+    let compositor = Compositor::new_headless();
+    let out = compositor.render_layers(
+        &[
+            Layer::new(LayerContent::Solid(RED), Transform::default()),
+            adjustment(
+                Transform {
+                    zoom: [0.5, 0.5],
+                    ..Transform::default()
+                },
+                1.0,
+                &[],
+            ),
+        ],
+        OutputFrame::exact(16, 16),
+    );
+    let pixels = out.as_chunks::<4>().0;
+    assert_close_rgba(pixels[0], [0, 0, 0, 255]);
+    assert_close_rgba(pixels[16 * 8 + 8], [255, 0, 0, 255]);
+}
+
+#[test]
+fn an_adjustment_crop_leaves_black_where_it_cuts() {
+    let compositor = Compositor::new_headless();
+    let out = compositor.render_layers(
+        &[
+            Layer::new(LayerContent::Solid(RED), Transform::default()),
+            adjustment(
+                Transform {
+                    crop: [0.0, 0.0, 8.0, 0.0],
+                    ..Transform::default()
+                },
+                1.0,
+                &[],
+            ),
+        ],
+        OutputFrame::scaled(8, 8, (16, 16)),
+    );
+    let pixels = out.as_chunks::<4>().0;
+    assert_close_rgba(pixels[8 * 4 + 1], [255, 0, 0, 255]);
+    assert_close_rgba(pixels[8 * 4 + 6], [0, 0, 0, 255]);
+}
+
+#[test]
+fn an_adjustment_moves_the_whole_stack_below() {
+    let compositor = Compositor::new_headless();
+    let out = compositor.render_layers(
+        &[
+            Layer::new(
+                LayerContent::Solid(RED),
+                Transform {
+                    crop: [0.0, 0.0, 8.0, 0.0],
+                    ..Transform::default()
+                },
+            ),
+            adjustment(
+                Transform {
+                    position: [8.0, 0.0],
+                    ..Transform::default()
+                },
+                1.0,
+                &[],
+            ),
+        ],
+        OutputFrame::exact(16, 16),
+    );
+    let pixels = out.as_chunks::<4>().0;
+    assert_close_rgba(pixels[16 * 8 + 4], [0, 0, 0, 255]);
+    assert_close_rgba(pixels[16 * 8 + 12], [255, 0, 0, 255]);
+}
+
+#[test]
+fn an_adjustment_blend_mode_combines_the_processed_stack_with_the_original() {
+    let compositor = Compositor::new_headless();
+    let grey = vv_core::Rgba {
+        r: 0.5,
+        g: 0.5,
+        b: 0.5,
+        a: 1.0,
+    };
+    let out = compositor.render_layers(
+        &[
+            Layer::new(LayerContent::Solid(grey), Transform::default()),
+            Layer {
+                blend: BlendMode::Multiply,
+                ..adjustment(Transform::default(), 1.0, &[])
+            },
+        ],
+        OutputFrame::exact(4, 4),
+    );
+    assert_close_rgba(out.as_chunks::<4>().0[0], [64, 64, 64, 255]);
+}
+
+/// Inside a compound clip there may be nothing below: the adjustment must not
+/// turn the transparency into black.
+#[test]
+fn an_adjustment_over_nothing_stays_transparent_in_a_transparent_render() {
+    let compositor = Compositor::new_headless();
+    let out = compositor.render_layers_rgba_transparent(
+        &[adjustment(
+            Transform {
+                zoom: [0.5, 0.5],
+                ..Transform::default()
+            },
+            1.0,
+            GRAYSCALE,
+        )],
+        OutputFrame::exact(8, 8),
+    );
+    assert!(out.iter().all(|&b| b == 0));
+}

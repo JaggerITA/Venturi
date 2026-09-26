@@ -1220,6 +1220,9 @@ impl VenturiApp {
                                     t!("generator.solid_color").into_owned()
                                 }
                                 vv_core::ClipSource::Text => t!("generator.text").into_owned(),
+                                vv_core::ClipSource::Adjustment => {
+                                    t!("generator.adjustment").into_owned()
+                                }
                             },
                             clip.timeline_len,
                         ),

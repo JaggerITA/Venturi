@@ -244,6 +244,10 @@ generator.text:
   en: "Text"
   it: "Text"
 
+generator.adjustment:
+  en: "Adjustment Clip"
+  it: "Clip di regolazione"
+
 props.applies_to_all:
   en: "Changes apply to all %{count} clips in this tab."
   it: "Modifiche applicate a tutte le %{count} clip di questa scheda."

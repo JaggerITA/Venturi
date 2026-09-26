@@ -18,11 +18,12 @@ struct TransformUniform {
     // w: 0 video, 1 solid color, 2 solid color with coverage in the Y plane
     // (text), 3 premultiplied RGBA texture in place of the planes.
     color: vec4<f32>,
-    // RGBA of the solid color layer, in place of the Y/U/V planes.
+    // RGBA of the solid color layer, in place of the Y/U/V planes. Adjustment
+    // layer: the clear color of the timeline.
     solid: vec4<f32>,
     // x: opacity of the whole layer (clip fades and clip
     // opacity). y: id of the compositing method (see `blend_shader_id`).
-    // z/w unused.
+    // z: opacity of an adjustment layer (`x` is then 1). w: 1 if it is one.
     extra: vec4<f32>,
     // Shader ids of the clip's active filters, in order of application
     // (0 = empty slot); see `filter_shader_id` in compositor.rs, the only
@@ -273,6 +274,9 @@ fn blend_channel(id: i32, cb: f32, cs: f32) -> f32 {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = shade(in);
     let blend_id = i32(transform.extra.y);
+    if (transform.extra.w > 0.5) {
+        return adjusted(in, src, blend_id);
+    }
     // Normal: the pipeline's alpha blending takes care of it, the color comes out
     // non-premultiplied.
     if (blend_id == 0) {
@@ -281,6 +285,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The other modes write the already composed result in REPLACE, hence
     // premultiplied like the backdrop they read.
     let dst = textureLoad(backdrop_tex, vec2<i32>(floor(in.clip_position.xy)), 0);
+    return blend_over(blend_id, src, dst);
+}
+
+// Adjustment layer (REPLACE pipeline): `src` is the stack below, transformed and
+// filtered. Uncovered areas take the clear color instead of the original
+// stack, then the result is mixed with the original by the opacity.
+fn adjusted(in: VertexOutput, src: vec4<f32>, blend_id: i32) -> vec4<f32> {
+    let dst = textureLoad(backdrop_tex, vec2<i32>(floor(in.clip_position.xy)), 0);
+    let clear = transform.solid;
+    let processed = vec4<f32>(src.rgb * src.a, src.a) + vec4<f32>(clear.rgb * clear.a, clear.a) * (1.0 - src.a);
+    var composed = processed;
+    if (blend_id != 0) {
+        let rgb = processed.rgb / max(processed.a, 1.0 / 255.0);
+        composed = blend_over(blend_id, vec4<f32>(rgb, processed.a), dst);
+    }
+    return mix(dst, composed, transform.extra.z);
+}
+
+// `src` (not premultiplied) composed onto `dst` (premultiplied) with the
+// method `blend_id`; premultiplied result.
+fn blend_over(blend_id: i32, src: vec4<f32>, dst: vec4<f32>) -> vec4<f32> {
     let dst_rgb = dst.rgb / max(dst.a, 1.0 / 255.0);
     var blended = vec3<f32>(
         blend_channel(blend_id, dst_rgb.r, src.r),

@@ -1429,9 +1429,11 @@ impl MediaDragSet {
 pub enum Generator {
     SolidColor,
     Text,
+    Adjustment,
 }
 
 impl Generator {
+    /// The Effects panel lists `Adjustment` in its own section, as Resolve does.
     pub const ALL: [Generator; 2] = [Generator::SolidColor, Generator::Text];
 
     const DEFAULT_SECS: f64 = 5.0;
@@ -1440,6 +1442,7 @@ impl Generator {
         match self {
             Generator::SolidColor => t!("generator.solid_color"),
             Generator::Text => t!("generator.text"),
+            Generator::Adjustment => t!("generator.adjustment"),
         }
     }
 
@@ -2520,7 +2523,8 @@ pub fn show_timeline(
                         let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
                         let hover_edge = ui
                             .input(|i| i.pointer.hover_pos())
-                            .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px));
+                            .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px))
+                            .filter(|&edge| accepts_transition(&visuals, visual, edge));
                         if resp
                             .dnd_hover_payload::<vv_core::TransitionKind>()
                             .is_some()
@@ -2573,7 +2577,8 @@ pub fn show_timeline(
                         let drop_zone_px = TRANSITION_DROP_ZONE_PX.min(clip_rect.width() / 2.0);
                         let hover_edge = ui
                             .input(|i| i.pointer.hover_pos())
-                            .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px));
+                            .and_then(|pos| transition_drop_edge(pos, clip_rect, drop_zone_px))
+                            .filter(|&edge| accepts_transition(&visuals, visual, edge));
                         if resp.dnd_hover_payload::<vv_core::Transition>().is_some()
                             && let Some(edge) = hover_edge
                         {
@@ -3927,6 +3932,14 @@ fn neighbor_visual<'a, 'b>(
     })
 }
 
+/// Neither the clip nor the neighbor it would cross with may be an
+/// adjustment clip (see `Track::crossing_at`).
+fn accepts_transition(visuals: &[ClipVisual], visual: &ClipVisual, edge: FadeEdge) -> bool {
+    !visual.clip.is_adjustment()
+        && neighbor_visual(visuals, visual.track_index, visual.clip.id, edge)
+            .is_none_or(|n| !n.clip.is_adjustment())
+}
+
 fn has_neighbor(
     visuals: &[ClipVisual],
     track_index: usize,
@@ -5001,6 +5014,10 @@ fn clip_label_and_color(
                 .map_or_else(|| t!("generator.text").into_owned(), str::to_string),
             clip_box_color(egui::Color32::from_rgb(170, 110, 200), clip),
         ),
+        vv_core::ClipSource::Adjustment => (
+            t!("generator.adjustment").into_owned(),
+            clip_box_color(egui::Color32::from_rgb(150, 150, 165), clip),
+        ),
     }
 }
 
@@ -5699,7 +5716,7 @@ fn media_duration_frames(project: &Project, clip: &Clip) -> Option<FrameIdx> {
             .media_pool
             .get(*media_id)
             .map(|item| item.meta.duration_frames),
-        ClipSource::SolidColor | ClipSource::Text => None,
+        ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
     }
 }
 

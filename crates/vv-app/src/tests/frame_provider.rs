@@ -128,6 +128,91 @@ fn an_empty_area_of_a_compound_clip_shows_the_layer_below_it() {
     );
 }
 
+/// An adjustment inside a compound clip only reaches the nested tracks below
+/// it: the empty part of the nested timeline stays transparent, so the outer
+/// layer below shows through unfiltered.
+#[test]
+fn an_adjustment_inside_a_compound_clip_leaves_the_outer_timeline_alone() {
+    let mut project = Project::default();
+    let mut red = solid_clip(1, 0, 10, [1.0, 1.0]);
+    red.effects.color = Some(vv_core::Keyframed::constant(Rgba {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    }));
+    red.effects.transform = TransformTracks::constant(Transform {
+        crop: [0.0, 0.0, 2.0, 0.0],
+        ..Default::default()
+    });
+    let mut adjustment =
+        Clip::from_source_range(ClipId(4), ClipSource::Adjustment, 0, 10, 0, Rational::one());
+    adjustment.effects.filters = vec![vv_core::ClipFilter {
+        kind: vv_core::FilterKind::Grayscale,
+        enabled: true,
+    }];
+    let nested_id = project.timelines.insert(Timeline {
+        name: "Nested".into(),
+        fps: Rational::new(25, 1),
+        resolution: (4, 4),
+        tracks: vec![video_track(vec![red]), video_track(vec![adjustment])],
+    });
+    let compound_media = project
+        .media_pool
+        .insert(compound_media_item(nested_id, (4, 4), 10));
+
+    let mut blue = solid_clip(2, 0, 10, [1.0, 1.0]);
+    blue.effects.color = Some(vv_core::Keyframed::constant(Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    }));
+    let compound_clip = Clip::from_source_range(
+        ClipId(3),
+        ClipSource::Media(compound_media),
+        0,
+        10,
+        0,
+        Rational::one(),
+    );
+    let outer = Timeline {
+        name: "Outer".into(),
+        fps: Rational::new(25, 1),
+        resolution: (4, 4),
+        tracks: vec![video_track(vec![blue]), video_track(vec![compound_clip])],
+    };
+
+    let compositor = vv_render::Compositor::new_headless();
+    let mut inner = NoMediaProvider;
+    let mut provider = GpuCompounds::new(&mut inner, &compositor);
+    let mut layers = Vec::new();
+    for (track_index, clip) in outer.active_video_clips_at(0) {
+        layers.extend(
+            track_layers_at(
+                &project,
+                &outer,
+                track_index,
+                clip,
+                0,
+                outer.resolution,
+                &mut provider,
+            )
+            .unwrap(),
+        );
+    }
+    let render_layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+    let out = compositor
+        .render_layers_rgba_transparent(&render_layers, vv_render::OutputFrame::exact(4, 4));
+    let px = |x: usize, y: usize| &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+    let left = px(0, 1);
+    assert!(
+        left[0] == left[1] && left[1] == left[2] && left[0] > 0,
+        "the nested red, filtered: {left:?}"
+    );
+    assert_eq!(px(3, 1), &[0, 0, 255, 255], "the outer blue, untouched");
+}
+
 /// Until a media inside the nested timeline is ready, the compound clip
 /// produces no layer: better no frame than a half-composed
 /// frame.

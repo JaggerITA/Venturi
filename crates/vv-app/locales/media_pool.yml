@@ -72,6 +72,10 @@ effects.generators:
   en: "Generators"
   it: "Generators"
 
+effects.effects:
+  en: "Effects"
+  it: "Effetti"
+
 effects.filters:
   en: "Filters"
   it: "Filtri"

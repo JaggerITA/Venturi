@@ -141,16 +141,7 @@ fn clip_to_otio(
                     "metadata": {},
                 }),
             ),
-            None => (
-                String::new(),
-                json!({
-                    "OTIO_SCHEMA": "MissingReference.1",
-                    "name": "",
-                    "available_range": null,
-                    "available_image_bounds": null,
-                    "metadata": {},
-                }),
-            ),
+            None => (String::new(), missing_reference()),
         },
         // Resolve names a generator clip after its kind: ours used to carry
         // the colour or the text, which its importer does not expect.
@@ -166,6 +157,7 @@ fn clip_to_otio(
             let title = clip.effects.title.clone().unwrap_or_default();
             ("Text".to_owned(), generator::text(&title, frame, measure))
         }
+        ClipSource::Adjustment => ("Adjustment Clip".to_owned(), missing_reference()),
     };
 
     let media = match &clip.source {
@@ -173,7 +165,7 @@ fn clip_to_otio(
             .media_pool
             .get(*id)
             .map_or(frame, |m| (m.meta.width as f32, m.meta.height as f32)),
-        ClipSource::SolidColor | ClipSource::Text => frame,
+        ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => frame,
     };
     let scale = Scale::new(media, frame);
 
@@ -197,6 +189,16 @@ fn clip_to_otio(
         },
         "media_references": { "DEFAULT_MEDIA": media_reference },
         "active_media_reference_key": "DEFAULT_MEDIA",
+    })
+}
+
+fn missing_reference() -> Value {
+    json!({
+        "OTIO_SCHEMA": "MissingReference.1",
+        "name": "",
+        "available_range": null,
+        "available_image_bounds": null,
+        "metadata": {},
     })
 }
 

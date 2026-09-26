@@ -230,6 +230,98 @@ fn reads_back_the_generators_without_our_metadata() {
     );
 }
 
+/// Resolve marks an adjustment clip only with a parameterless effect of
+/// Type 74 on a `MissingReference`: the name can be anything.
+#[test]
+fn a_resolve_adjustment_clip_is_recognised_by_its_type_74_effect() {
+    let missing = json!({ "OTIO_SCHEMA": "MissingReference.1", "metadata": {} });
+    let marker = json!({
+        "OTIO_SCHEMA": "Effect.1",
+        "effect_name": "Resolve Effect",
+        "metadata": { "Resolve_OTIO": {
+            "Effect Name": "Effect",
+            "Enabled": true,
+            "Parameters": [],
+            "Type": 74,
+        }},
+    });
+    let clip = |name: &str, effects: Value| {
+        json!({
+            "OTIO_SCHEMA": "Clip.2",
+            "name": name,
+            "source_range": range(0.0, 30.0, 30.0),
+            "effects": effects,
+            "media_references": { "DEFAULT_MEDIA": missing.clone() },
+            "active_media_reference_key": "DEFAULT_MEDIA",
+        })
+    };
+    let otio = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "Adjust",
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "kind": "Video",
+                "children": [
+                    clip("Renamed", json!([marker])),
+                    clip("Fusion Composition", json!([])),
+                ],
+            }],
+        },
+    });
+    let mut probe = probe_from(vec![]);
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    assert_eq!(tl.tracks[0].clips.len(), 1);
+    assert!(tl.tracks[0].clips[0].is_adjustment());
+    assert!(matches!(
+        imported.warnings.as_slice(),
+        [OtioWarning::UnsupportedReference { clip, .. }] if clip == "Fusion Composition"
+    ));
+}
+
+/// What we export must read as an adjustment clip without our metadata too,
+/// i.e. as Resolve would see it, with its transform.
+#[test]
+fn an_exported_adjustment_clip_reads_back_without_our_metadata() {
+    let mut project = Project::default();
+    let timeline_id = project.timelines.insert(Timeline {
+        name: "Adjust".into(),
+        fps: Rational::new(30, 1),
+        resolution: (1920, 1080),
+        tracks: vec![Track::new(TrackKind::Video)],
+    });
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Adjustment,
+        0,
+        60,
+        10,
+        Rational::one(),
+    );
+    clip.effects.transform = crate::model::TransformTracks::constant(crate::model::Transform {
+        zoom: [1.5, 1.5],
+        ..Default::default()
+    });
+    project.timelines[timeline_id].tracks[0].clips.push(clip);
+
+    let mut otio = timeline_to_otio(&project, timeline_id, None);
+    for track in otio["tracks"]["children"].as_array_mut().unwrap() {
+        for clip in track["children"].as_array_mut().unwrap() {
+            clip["metadata"]["venturi"] = json!(null);
+        }
+    }
+    let mut probe = probe_from(vec![]);
+    let imported = project_from_otio(&otio, Path::new("/"), &mut probe, None).unwrap();
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    let back = &tl.tracks[0].clips[0];
+    assert!(back.is_adjustment());
+    assert_eq!((back.timeline_start, back.timeline_len), (10, 60));
+    assert_eq!(back.effects.transform.value_at(0).zoom, [1.5, 1.5]);
+}
+
 /// A clip exported by Resolve: the transform lives in `Effect.1` items
 /// with normalized values and keyframes on the frames of the clip.
 #[test]
