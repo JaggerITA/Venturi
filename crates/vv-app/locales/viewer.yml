@@ -65,8 +65,8 @@ transport.play_hint:
   it: "Play/pausa (Spazio) · I/O: punto di inizio/fine"
 
 toolbar.keyframe_editor:
-  en: "Keyframes"
-  it: "Keyframe"
+  en: "Curves"
+  it: "Curve"
 
 viewer.zoom_hint:
   en: "Player zoom · mouse wheel on the player zooms, middle button drags"

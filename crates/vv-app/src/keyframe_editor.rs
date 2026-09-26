@@ -27,8 +27,10 @@ const HANDLE_RADIUS: f32 = 5.0;
 /// The handles sit on the curve, between the points: their hit area is more
 /// generous, or grabbing them with the mouse is a lottery.
 const HANDLE_PICK_RADIUS: f32 = 10.0;
-const PLAYHEAD_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
-const CURVE_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 150, 230);
+const PLAYHEAD_COLOR: egui::Color32 = crate::theme::PLAYHEAD;
+const SELECTED_COLOR: egui::Color32 = crate::theme::ACCENT;
+const CURVE_COLOR: egui::Color32 = egui::Color32::from_gray(200);
+const PRESET_ICON_SIZE: egui::Vec2 = egui::vec2(28.0, 20.0);
 
 /// What the pointer is dragging.
 #[derive(Debug, Clone, Copy)]
@@ -233,6 +235,30 @@ fn preset_label(interpolation: Interpolation) -> String {
     .to_string()
 }
 
+/// Button drawing the easing curve of `preset`, its name in the tooltip.
+fn preset_button(ui: &mut egui::Ui, preset: Interpolation) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(PRESET_ICON_SIZE, egui::Sense::click());
+    let response = response.on_hover_text(preset_label(preset));
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect_filled(rect, 3.0, visuals.weak_bg_fill);
+    let icon = rect.shrink2(egui::vec2(7.0, 5.0));
+    const STEPS: usize = 16;
+    let points = (0..=STEPS)
+        .map(|i| {
+            let t = i as f32 / STEPS as f32;
+            egui::pos2(
+                egui::lerp(icon.left()..=icon.right(), t),
+                egui::lerp(icon.bottom()..=icon.top(), preset.ease(t)),
+            )
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.5, visuals.fg_stroke.color),
+    ));
+    response
+}
+
 /// Mapping between source frames of the clip and x on screen.
 #[derive(Clone, Copy)]
 struct TimeAxis {
@@ -288,7 +314,7 @@ pub(crate) fn show_keyframe_editor(
     project: &Project,
     target: Option<(TimelineId, usize, ClipId)>,
     playhead: FrameIdx,
-    // Zoom locked to proportions in the inspector: here X and Y move
+    // Zoom locked to proportions in the Properties panel: here X and Y move
     // together, otherwise the editor would break the constraint.
     zoom_link: bool,
 ) -> KeyframeEditorResponse {
@@ -476,7 +502,7 @@ fn show_toolbar(
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!state.selection.is_empty(), |ui| {
             for preset in Interpolation::PRESETS {
-                if ui.button(preset_label(preset)).clicked() {
+                if preset_button(ui, preset).clicked() {
                     let picks =
                         with_zoom_link(state.selection.iter().copied().collect(), zoom_link);
                     response
@@ -572,7 +598,7 @@ fn draw_curve(
     let plot = rect.with_min_x(axis.left);
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
-    painter.rect_filled(plot, 0.0, visuals.extreme_bg_color);
+    painter.rect_filled(plot, 0.0, visuals.faint_bg_color);
 
     let frames = frames_of(&clip.effects, row);
     if scalar_value_at(&clip.effects, row, axis.first).is_none() {
@@ -608,7 +634,7 @@ fn draw_curve(
         let py = y(value);
         painter.line_segment(
             [egui::pos2(plot.left(), py), egui::pos2(plot.right(), py)],
-            egui::Stroke::new(1.0, visuals.faint_bg_color),
+            visuals.widgets.noninteractive.bg_stroke,
         );
         painter.text(
             egui::pos2(plot.left() - 6.0, py),
@@ -691,7 +717,11 @@ fn draw_curve(
                 [anchor, pos],
                 egui::Stroke::new(1.0, visuals.weak_text_color()),
             );
-            painter.circle_filled(pos, HANDLE_RADIUS, visuals.weak_text_color());
+            painter.rect_filled(
+                egui::Rect::from_center_size(pos, egui::Vec2::splat(HANDLE_RADIUS * 1.6)),
+                1.0,
+                visuals.weak_text_color(),
+            );
             handles.push(((row, frame), outgoing, pos));
         }
     }
@@ -701,23 +731,7 @@ fn draw_curve(
             continue;
         };
         let selected = state.selection.contains(&(row, frame));
-        painter.circle(
-            pos,
-            POINT_RADIUS,
-            if selected {
-                PLAYHEAD_COLOR
-            } else {
-                visuals.extreme_bg_color
-            },
-            egui::Stroke::new(
-                1.5,
-                if selected {
-                    PLAYHEAD_COLOR
-                } else {
-                    CURVE_COLOR
-                },
-            ),
-        );
+        paint_keyframe_dot(&painter, pos, selected, CURVE_COLOR);
     }
 
     let interaction = ui.interact(
@@ -892,7 +906,7 @@ fn keyframe_value(target: KeyframeTarget, value: f32) -> vv_core::KeyframeValue 
     match target {
         KeyframeTarget::TransformParam(p) => vv_core::KeyframeValue::TransformParam(p, value),
         KeyframeTarget::Gain => vv_core::KeyframeValue::Gain(value),
-        // Without a curve one does not get here; the color is edited from the inspector.
+        // Without a curve one does not get here; the color is edited from the Properties panel.
         KeyframeTarget::Color => vv_core::KeyframeValue::Gain(value),
     }
 }
@@ -927,23 +941,6 @@ fn draw_rows(
             egui::vec2(rect.width(), ROW_HEIGHT),
         )
     };
-    let diamond = |pos: egui::Pos2, selected: bool| {
-        let color = if selected {
-            PLAYHEAD_COLOR
-        } else {
-            visuals.weak_text_color()
-        };
-        egui::Shape::convex_polygon(
-            vec![
-                egui::pos2(pos.x, pos.y - 5.0),
-                egui::pos2(pos.x + 4.0, pos.y),
-                egui::pos2(pos.x, pos.y + 5.0),
-                egui::pos2(pos.x - 4.0, pos.y),
-            ],
-            color,
-            egui::Stroke::NONE,
-        )
-    };
 
     for (i, &row) in rows.iter().enumerate() {
         let r = row_rect(i);
@@ -971,7 +968,12 @@ fn draw_rows(
         );
         for frame in frames_of(&clip.effects, row) {
             let pos = egui::pos2(axis.x(frame), strip.center().y);
-            painter.add(diamond(pos, state.selection.contains(&(row, frame))));
+            paint_keyframe_dot(
+                &painter,
+                pos,
+                state.selection.contains(&(row, frame)),
+                visuals.text_color(),
+            );
         }
     }
 
@@ -1098,3 +1100,18 @@ fn draw_rows(
 #[cfg(test)]
 #[path = "tests/keyframe_editor.rs"]
 mod tests;
+
+/// Keyframe mark: an outline when unselected, filled with the accent when
+/// selected.
+pub(crate) fn paint_keyframe_dot(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    selected: bool,
+    outline: egui::Color32,
+) {
+    if selected {
+        painter.circle_filled(pos, POINT_RADIUS + 0.5, SELECTED_COLOR);
+    } else {
+        painter.circle_stroke(pos, POINT_RADIUS, egui::Stroke::new(1.5, outline));
+    }
+}

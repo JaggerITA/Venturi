@@ -1,8 +1,8 @@
 _version: 2
 
 keyframes.title:
-  en: "Keyframe Editor"
-  it: "Editor di keyframe"
+  en: "Animation Curves"
+  it: "Curve di animazione"
 
 keyframes.no_clip:
   en: "Select a clip to see its keyframes."
@@ -18,23 +18,23 @@ keyframes.no_curve:
 
 keyframes.hold:
   en: "Hold"
-  it: "Hold"
+  it: "Costante"
 
 keyframes.linear:
   en: "Linear"
   it: "Lineare"
 
 keyframes.ease_in_out:
-  en: "Ease In and Out"
-  it: "Ease In and Out"
+  en: "Smooth"
+  it: "Morbida"
 
 keyframes.ease_in:
-  en: "Ease In"
-  it: "Ease In"
+  en: "Smooth start"
+  it: "Partenza morbida"
 
 keyframes.ease_out:
-  en: "Ease Out"
-  it: "Ease Out"
+  en: "Smooth end"
+  it: "Arrivo morbido"
 
 keyframes.bezier:
   en: "Custom curve"
