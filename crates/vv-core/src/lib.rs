@@ -7,7 +7,7 @@ pub use command::{
     AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge, GroupMark, History,
     InsertClip, KeyframePick, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips, MoveClips,
     MoveKeyframes, RemoveKeyframe, RemoveMedia, RemoveTrack, ResetTransformParams, RippleDeleteGap,
-    SetClipAttributes, SetClipColor, SetClipFade, SetClipValue, SetClipsDisabled,
+    SetClipAttributes, SetClipColor, SetClipFade, SetClipSpeed, SetClipValue, SetClipsDisabled,
     SetClipsDisplayColor, SetCrossTransition, SetKeyframeInterpolation, SetMediaPath, SetTrackFlag,
     SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip, UpsertKeyframe, compound_clip_commands,
     cut_overlaps, insert_overwriting, make_room_for_ranges, plan_compound_clip, reset_clip_gain,
@@ -28,3 +28,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/lib_compound_clip.rs"]
 mod compound_clip_tests;
+
+#[cfg(test)]
+#[path = "tests/lib_clip_speed.rs"]
+mod clip_speed_tests;

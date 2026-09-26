@@ -44,6 +44,18 @@ timeline.link_hint:
   en: "Select at least 2 clips to link them"
   it: "Seleziona almeno 2 clip per collegarle"
 
+timeline.retime_controls:
+  en: "Retime Controls"
+  it: "Controlli di velocità"
+
+timeline.change_clip_speed:
+  en: "Change Clip Speed…"
+  it: "Cambia velocità clip…"
+
+timeline.retime_close:
+  en: "Hide the retime controls"
+  it: "Nascondi i controlli di velocità"
+
 timeline.make_compound_clip:
   en: "Compound Clip"
   it: "Compound Clip"
@@ -127,3 +139,31 @@ timeline.color_brown:
 timeline.color_chocolate:
   en: "Chocolate"
   it: "Cioccolato"
+
+speed.title:
+  en: "Change Clip Speed"
+  it: "Cambia velocità clip"
+
+speed.speed:
+  en: "Speed"
+  it: "Velocità"
+
+speed.pitch_correction:
+  en: "Pitch correction"
+  it: "Correzione del tono"
+
+speed.pitch_correction_hint:
+  en: "Keeps the pitch of the audio; without it the pitch follows the speed."
+  it: "Mantiene il tono dell'audio; senza, il tono segue la velocità."
+
+speed.ripple:
+  en: "Ripple sequence"
+  it: "Ripple della sequenza"
+
+speed.ripple_hint:
+  en: "The clip changes length and what follows moves with it; otherwise it keeps its length and shows more or less of the source."
+  it: "La clip cambia lunghezza e ciò che segue si sposta con lei; altrimenti mantiene la lunghezza e mostra più o meno sorgente."
+
+speed.apply:
+  en: "Change"
+  it: "Cambia"

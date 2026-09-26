@@ -412,18 +412,16 @@ fn reads_the_transform_of_a_resolve_clip() {
         meta(Rational::new(24, 1), 2400),
     )]);
     let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
-    assert_eq!(
-        imported.warnings,
-        vec![OtioWarning::SpeedNotApplied {
-            clip: "one".into(),
-            percent: 200
-        }],
-        "speed is kept but not played back"
-    );
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
 
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     let clip = &tl.tracks[0].clips[0];
-    assert_eq!(clip.effects.speed.default, 2.0);
+    assert_eq!(clip.speed, Rational::new(2, 1));
+    assert_eq!(
+        (clip.timeline_len, clip.source_frame_at(99)),
+        (100, 198),
+        "the OTIO duration is timeline time"
+    );
     assert_eq!(clip.effects.transform.flip, [false, true]);
     let t = clip.effects.transform.value_at(0);
     assert_eq!(t.zoom[0], 1.07);
@@ -435,9 +433,9 @@ fn reads_the_transform_of_a_resolve_clip() {
     assert_eq!(clip.effects.blend_mode, BlendMode::Screen);
     assert_eq!(clip.fade_in, 12);
     assert_eq!(
-        clip.effects.transform.value_at(10).anchor[0],
+        clip.effects.transform.value_at(20).anchor[0],
         640.0,
-        "keyframe on the matching source frame"
+        "keyframe at timeline frame 10 is source frame 20 at 2x"
     );
 }
 
@@ -794,4 +792,66 @@ fn media_url_count_counts_each_file_once() {
         }]},
     });
     assert_eq!(media_url_count(&otio), 2);
+}
+
+/// With our metadata the speed comes back exact; without, as Resolve reads
+/// it, from `time_scalar` and a `source_range` starting in media time.
+#[test]
+fn a_clip_speed_round_trips_with_and_without_our_metadata() {
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        path: "/media/b roll.mov".into(),
+        meta: meta(Rational::new(24, 1), 2400),
+        content_hash: 42,
+        compound: None,
+    });
+    let timeline_id = project.timelines.insert(Timeline {
+        name: "Speed".into(),
+        fps: Rational::new(24, 1),
+        resolution: (1280, 720),
+        tracks: vec![Track::new(TrackKind::Video)],
+    });
+    let mut clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media),
+        0,
+        1,
+        12,
+        Rational::one(),
+    );
+    clip.speed = Rational::from_percent(250.0);
+    clip.pitch_correction = true;
+    clip.conform(Rational::one());
+    clip.source_offset = clip.rate.scale_round(100);
+    clip.timeline_len = 40;
+    project.timelines[timeline_id].tracks[0].clips.push(clip);
+    let original = project.timelines[timeline_id].tracks[0].clips[0].clone();
+
+    let import = |otio: &Value| {
+        let mut probe = probe_from(vec![(
+            "/media/b roll.mov",
+            meta(Rational::new(24, 1), 2400),
+        )]);
+        let imported = project_from_otio(otio, Path::new("/"), &mut probe, None).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        let (_, tl) = imported.project.timelines.iter().next().unwrap();
+        tl.tracks[0].clips[0].clone()
+    };
+    let mut otio = timeline_to_otio(&project, timeline_id, None);
+    let ours = import(&otio);
+    assert_eq!(span(&ours), span(&original));
+    assert_eq!(
+        (ours.speed, ours.pitch_correction),
+        (Rational::new(5, 2), true)
+    );
+
+    for track in otio["tracks"]["children"].as_array_mut().unwrap() {
+        for clip in track["children"].as_array_mut().unwrap() {
+            clip["metadata"]["venturi"] = json!(null);
+        }
+    }
+    let foreign = import(&otio);
+    assert_eq!(foreign.speed, Rational::new(5, 2));
+    assert_eq!(foreign.source_in(), original.source_in(), "media time");
+    assert_eq!(span(&foreign), span(&original));
 }

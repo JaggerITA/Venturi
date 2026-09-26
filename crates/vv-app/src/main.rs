@@ -24,6 +24,7 @@ mod proxy_worker;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
+mod speed_dialog;
 mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
@@ -350,6 +351,7 @@ struct VenturiApp {
     export_dialog: Option<export_dialog::ExportDialog>,
     new_timeline_dialog: Option<NewTimelineDialog>,
     paste_attributes: Option<PasteAttributesDialog>,
+    speed_dialog: Option<speed_dialog::SpeedDialog>,
     /// Attributes ticked in the last "paste attributes": proposed again the
     /// next time, as in the other NLEs.
     paste_attributes_selection: std::collections::HashSet<paste_attributes::Attribute>,
@@ -462,6 +464,7 @@ impl Default for VenturiApp {
             export_dialog: None,
             new_timeline_dialog: None,
             paste_attributes: None,
+            speed_dialog: None,
             paste_attributes_selection: Default::default(),
             paste_attributes_keyframe_mode: paste_attributes::KeyframeMode::MaintainTiming,
             last_export_settings: None,
@@ -2499,6 +2502,7 @@ impl VenturiApp {
                             .get(*media_id)
                             .map_or(clip.rate, |item| {
                                 vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
+                                    .divided_by(clip.speed)
                             }),
                         vv_core::ClipSource::SolidColor
                         | vv_core::ClipSource::Text
@@ -3195,6 +3199,10 @@ impl eframe::App for VenturiApp {
             self.open_paste_attributes_dialog();
         }
         self.show_paste_attributes_dialog(ui.ctx());
+        if let Some(targets) = self.timeline_state.speed_dialog_requested.take() {
+            self.open_speed_dialog(targets);
+        }
+        self.show_speed_dialog(ui.ctx());
 
         // Targets of the panel: the selected clips by track kind, in order
         // (track, start). The frame of each is the playhead in its own source

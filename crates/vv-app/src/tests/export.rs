@@ -1131,3 +1131,83 @@ fn export_timeline_writes_only_the_in_out_range() {
     }
     assert!((9..=10).contains(&count), "count={count}");
 }
+
+/// 2 s of a 440 Hz sine at 200%: 1 s on the timeline, at 440 Hz with pitch
+/// correction and at 880 Hz without.
+#[test]
+fn mix_audio_track_plays_a_faster_clip_with_or_without_its_pitch() {
+    let dir = std::env::temp_dir().join("vv-app-export-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("speed_source.wav");
+    vv_media::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2",
+        ],
+        &path,
+    );
+    let mut project = Project::default();
+    let media = project.media_pool.insert(vv_core::MediaItem {
+        path,
+        meta: vv_core::MediaMeta {
+            duration_frames: 50,
+            fps: vv_core::Rational::new(25, 1),
+            width: 0,
+            height: 0,
+            has_video: false,
+            has_audio: true,
+            sample_rate: 48_000,
+            channels: 1,
+            audio_streams: 1,
+        },
+        content_hash: 1,
+        compound: None,
+    });
+    let frequency = |pitch_correction: bool| {
+        let mut clip = Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(media),
+            0,
+            50,
+            0,
+            vv_core::Rational::one(),
+        );
+        clip.speed = vv_core::Rational::new(2, 1);
+        clip.pitch_correction = pitch_correction;
+        clip.conform(vv_core::Rational::one());
+        clip.timeline_len = 25;
+        let tl = timeline_with(vec![Track {
+            kind: TrackKind::Audio,
+            clips: vec![clip],
+            muted: false,
+            solo: false,
+            locked: false,
+            crossings: Vec::new(),
+        }]);
+        let mixed = mix_audio_track(&project, &tl, 0..25).unwrap();
+        // First channel, the middle half second: away from the stretch's edges.
+        let mono: Vec<f32> = mixed
+            .iter()
+            .step_by(PROJECT_CHANNELS as usize)
+            .copied()
+            .collect();
+        let window = &mono[12_000..36_000];
+        let crossings = window
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        crossings as f64 / 2.0 / 0.5
+    };
+    let corrected = frequency(true);
+    let varispeed = frequency(false);
+    assert!(
+        (corrected - 440.0).abs() < 20.0,
+        "pitch kept: {corrected} Hz"
+    );
+    assert!(
+        (varispeed - 880.0).abs() < 20.0,
+        "pitch follows: {varispeed} Hz"
+    );
+}

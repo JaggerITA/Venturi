@@ -60,6 +60,9 @@ impl VenturiApp {
             if pressed(Action::ToggleDisabled) {
                 self.toggle_disabled_selected();
             }
+            if pressed(Action::RetimeControls) {
+                self.toggle_retime_controls();
+            }
             if pressed(Action::Undo) {
                 self.history.undo(&mut self.project);
             }
@@ -367,6 +370,17 @@ impl VenturiApp {
                             ui.close();
                         }
                         ui.label(t!("menu.zoom_hint"));
+                        ui.separator();
+                        if ui
+                            .button(keymap.menu_label(
+                                &t!("timeline.retime_controls"),
+                                Action::RetimeControls,
+                            ))
+                            .clicked()
+                        {
+                            self.toggle_retime_controls();
+                            ui.close();
+                        }
                     })
                     .response,
                 );
@@ -564,6 +578,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::MoveKeyframes => t!("history.move_keyframes"),
         L::SetInterpolation => t!("history.set_interpolation"),
         L::PasteAttributes => t!("history.paste_attributes"),
+        L::ClipSpeed => t!("history.clip_speed"),
     }
 }
 

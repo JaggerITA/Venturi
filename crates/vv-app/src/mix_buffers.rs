@@ -16,6 +16,24 @@ use crate::worker::Worker;
 
 type Key = (PathBuf, usize);
 
+/// Source buffer (by address: the entry keeps it alive), frame range, tempo bits.
+type StretchKey = (usize, u64, u64, u64);
+
+struct StretchJob {
+    key: StretchKey,
+    source: Arc<Vec<f32>>,
+    range: std::ops::Range<u64>,
+    tempo: f64,
+    sample_rate: u32,
+    channels: u16,
+}
+
+enum Stretch {
+    Pending,
+    Ready(Arc<Vec<f32>>),
+    Failed,
+}
+
 struct Ready {
     key: Key,
     buffer: Option<Arc<Vec<f32>>>,
@@ -35,6 +53,13 @@ pub struct MixBufferCache {
     /// Mixdowns of compound clips, with the `content_hash` they were
     /// computed with (see `vv_audio::mixer::compound_mixdown`).
     compound: HashMap<MediaId, (u64, Arc<Vec<f32>>)>,
+    /// Pitch-corrected clip audio (see `AudioSource::stretched`), with the
+    /// source buffer it was made from.
+    stretched: HashMap<StretchKey, (Arc<Vec<f32>>, Stretch)>,
+    /// Keys asked for since the last `sweep_stretched`.
+    stretch_used: HashSet<StretchKey>,
+    stretch_worker: Worker<StretchJob>,
+    stretch_rx: mpsc::Receiver<(StretchKey, Result<Vec<f32>, String>)>,
 }
 
 impl MixBufferCache {
@@ -76,13 +101,39 @@ impl MixBufferCache {
                 }
             }
         });
+        let (stretch_tx, stretch_rx) = mpsc::channel();
+        let stretch_worker = Worker::spawn(move |jobs: mpsc::Receiver<StretchJob>| {
+            for job in jobs {
+                let result = vv_audio::mixer::stretch_range(
+                    &job.source,
+                    job.range,
+                    job.tempo,
+                    job.sample_rate,
+                    job.channels,
+                );
+                if stretch_tx.send((job.key, result)).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             entries: HashMap::new(),
             in_progress: HashSet::new(),
             worker,
             ready_rx,
             compound: HashMap::new(),
+            stretched: HashMap::new(),
+            stretch_used: HashSet::new(),
+            stretch_worker,
+            stretch_rx,
         }
+    }
+
+    /// Drops the stretches no mix asked for since the previous call: to be
+    /// called after rebuilding the snapshot of the whole timeline.
+    pub fn sweep_stretched(&mut self) {
+        let used = std::mem::take(&mut self.stretch_used);
+        self.stretched.retain(|key, _| used.contains(key));
     }
 
     /// Non-blocking: if the buffer is not there it queues its decode (once
@@ -125,6 +176,18 @@ impl MixBufferCache {
                 self.entries.insert(ready.key, ready.buffer);
             }
         }
+        while let Ok((key, result)) = self.stretch_rx.try_recv() {
+            if let Some((_, entry)) = self.stretched.get_mut(&key) {
+                *entry = match result {
+                    Ok(samples) => Stretch::Ready(Arc::new(samples)),
+                    Err(e) => {
+                        eprintln!("[mix_buffers] stretch failed: {e}");
+                        Stretch::Failed
+                    }
+                };
+                changed = true;
+            }
+        }
         changed
     }
 
@@ -157,6 +220,41 @@ impl AudioSource for MixBufferCache {
 
     fn store_compound(&mut self, media_id: MediaId, content_hash: u64, mixdown: Arc<Vec<f32>>) {
         self.compound.insert(media_id, (content_hash, mixdown));
+    }
+
+    fn stretched(
+        &mut self,
+        buffer: &Arc<Vec<f32>>,
+        range: std::ops::Range<u64>,
+        tempo: f64,
+        sample_rate: u32,
+        channels: u16,
+    ) -> ClipAudio {
+        let key = (
+            Arc::as_ptr(buffer) as usize,
+            range.start,
+            range.end,
+            tempo.to_bits(),
+        );
+        self.stretch_used.insert(key);
+        if let Some((_, entry)) = self.stretched.get(&key) {
+            return match entry {
+                Stretch::Pending => ClipAudio::Pending,
+                Stretch::Ready(samples) => ClipAudio::Ready(samples.clone()),
+                Stretch::Failed => ClipAudio::Missing,
+            };
+        }
+        self.stretch_worker.send(StretchJob {
+            key,
+            source: buffer.clone(),
+            range,
+            tempo,
+            sample_rate,
+            channels,
+        });
+        self.stretched
+            .insert(key, (buffer.clone(), Stretch::Pending));
+        ClipAudio::Pending
     }
 }
 

@@ -651,9 +651,12 @@ fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
         start: 0,
         len: 1000,
         source_offset: 0,
+        step: 1.0,
         buffer: Arc::new(Vec::new()),
         gain_db: Keyframed::constant(0.0),
         clip_fps: 10.0,
+        media_offset: 0,
+        media_step: 1.0,
         fade_in,
         fade_out,
     }
@@ -716,4 +719,97 @@ fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
         out[block..].iter().all(|&s| s == 0.5),
         "past the fade-in the gain is unchanged"
     );
+}
+
+/// `b` from source frame 10 at `speed`, `len` timeline frames from 0.
+fn sped_up_clip(media: vv_core::MediaId, speed: Rational, len: FrameIdx) -> Clip {
+    let mut clip = clip_at(media, 0, 0, 1);
+    clip.speed = speed;
+    clip.conform(Rational::one());
+    clip.source_offset = clip.rate.scale_round(10);
+    clip.timeline_len = len;
+    clip
+}
+
+#[test]
+fn a_faster_clip_reads_its_audio_faster_averaging_what_it_skips() {
+    let (project, _, b) = project();
+    let tl = timeline(vec![audio_track(vec![sped_up_clip(
+        b,
+        Rational::new(2, 1),
+        20,
+    )])]);
+    let out = render(&project, &tl, 0, 200);
+    for i in [0usize, 7, 150] {
+        let expected = (100.0 + 2.0 * i as f32 + 0.5) / 1000.0;
+        assert!((out[i] - expected).abs() < 1e-5, "sample {i}: {}", out[i]);
+    }
+}
+
+#[test]
+fn a_slower_clip_interpolates_between_samples() {
+    let (project, _, b) = project();
+    let tl = timeline(vec![audio_track(vec![sped_up_clip(
+        b,
+        Rational::new(1, 2),
+        40,
+    )])]);
+    let out = render(&project, &tl, 0, 400);
+    for i in [0usize, 1, 301] {
+        let expected = (100.0 + i as f32 / 2.0) / 1000.0;
+        assert!((out[i] - expected).abs() < 1e-5, "sample {i}: {}", out[i]);
+    }
+}
+
+/// Hands out a fixed "stretched" buffer and records what it was asked.
+struct FakeStretch {
+    ready: bool,
+    asked: Vec<(std::ops::Range<u64>, f64)>,
+}
+
+impl AudioSource for FakeStretch {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
+    }
+
+    fn stretched(
+        &mut self,
+        _buffer: &Arc<Vec<f32>>,
+        range: std::ops::Range<u64>,
+        tempo: f64,
+        _sample_rate: u32,
+        _channels: u16,
+    ) -> ClipAudio {
+        self.asked.push((range, tempo));
+        if self.ready {
+            ClipAudio::Ready(Arc::new(vec![0.9; 100]))
+        } else {
+            ClipAudio::Pending
+        }
+    }
+}
+
+#[test]
+fn a_pitch_corrected_clip_plays_the_stretch_of_its_source_range_or_nothing() {
+    let (project, _, b) = project();
+    let mut clip = sped_up_clip(b, Rational::new(2, 1), 20);
+    clip.pitch_correction = true;
+    let tl = timeline(vec![audio_track(vec![clip])]);
+
+    let mut source = FakeStretch {
+        ready: true,
+        asked: Vec::new(),
+    };
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    let mut out = vec![0.0; 200];
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(source.asked, [(100..500, 2.0)]);
+    assert_eq!(out[0], 0.9);
+    assert_eq!(out[99], 0.9);
+    assert_eq!(out[100], 0.0, "past the stretched audio");
+
+    source.ready = false;
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    mix_range(&snap, 0, &mut out);
+    assert!(out.iter().all(|&s| s == 0.0), "silent until it is ready");
 }

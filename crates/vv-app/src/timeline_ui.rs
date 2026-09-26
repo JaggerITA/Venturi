@@ -96,6 +96,12 @@ pub struct TimelineState {
     /// The playhead jumped programmatically (e.g. ripple delete): the next
     /// frame brings it into view if it left, without waiting for playback.
     pub reveal_playhead: bool,
+    /// Clips showing the retime bar (Ctrl+R): dragging their right edge
+    /// changes the speed instead of trimming.
+    pub retime_controls: BTreeSet<ClipId>,
+    /// "Change Clip Speed…" asked for these clips: the dialog lives in the
+    /// app, which opens it and clears this.
+    pub speed_dialog_requested: Option<Vec<ClipKey>>,
     /// Where each clip was drawn in the last frame: the tests aim their
     /// synthetic pointer events with it.
     #[cfg(test)]
@@ -130,6 +136,7 @@ enum Gesture {
     /// scroll changes).
     Marquee(MarqueeDrag),
     Trim(TrimState),
+    Retime(RetimeState),
     Fade(EdgeDragState),
     TransitionLength(EdgeDragState),
     CrossingLength(CrossingDragState),
@@ -233,6 +240,37 @@ struct TrimState {
     roll: bool,
 }
 
+/// Dragging the right edge of a clip with the retime bar: `source_in` stays,
+/// the length changes and the speed with it; ripple on release.
+struct RetimeState {
+    clip_id: ClipId,
+    original_len: FrameIdx,
+    original_speed: vv_core::Rational,
+    pitch_correction: bool,
+    accum_px: f32,
+    /// The linked group gets the same speed.
+    group: Vec<ClipKey>,
+}
+
+/// Speed limits of the retime drag and the dialog, in percent.
+pub(crate) const SPEED_PERCENT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=10_000.0;
+
+impl RetimeState {
+    /// The speed for the dragged length, to the hundredth of a percent, and
+    /// the length it gives.
+    fn value(&self, px_per_frame: f32) -> (vv_core::Rational, FrameIdx) {
+        let wanted = (self.original_len as f32 + self.accum_px / px_per_frame)
+            .round()
+            .max(1.0) as f64;
+        let len_at_100 = self.original_len as f64 * self.original_speed.as_percent();
+        let percent =
+            (len_at_100 / wanted).clamp(*SPEED_PERCENT_RANGE.start(), *SPEED_PERCENT_RANGE.end());
+        let speed = vv_core::Rational::from_percent(percent);
+        let len = (len_at_100 / speed.as_percent()).round().max(1.0) as FrameIdx;
+        (speed, len)
+    }
+}
+
 /// What a drag started near the edge of a clip does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EdgeZone {
@@ -330,6 +368,8 @@ impl Default for TimelineState {
             export_marks: crate::transport::MarkRange::default(),
             paste_attributes_requested: false,
             reveal_playhead: false,
+            retime_controls: BTreeSet::new(),
+            speed_dialog_requested: None,
             #[cfg(test)]
             clip_rects: std::collections::HashMap::new(),
         }
@@ -347,6 +387,13 @@ impl TimelineState {
     fn trimming(&self) -> Option<&TrimState> {
         match &self.gesture {
             Some(Gesture::Trim(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    fn retiming(&self) -> Option<&RetimeState> {
+        match &self.gesture {
+            Some(Gesture::Retime(r)) => Some(r),
             _ => None,
         }
     }
@@ -437,6 +484,8 @@ impl TimelineState {
         self.row_height = value.clamp(ROW_HEIGHT, MAX_ROW_HEIGHT);
     }
 }
+
+const RETIME_BAR_HEIGHT: f32 = 14.0;
 
 /// Zoom factor per step of `zoom_in`/`zoom_out`.
 const ZOOM_STEP: f32 = 1.25;
@@ -538,6 +587,12 @@ enum PendingAction {
     MakeCompound(Vec<ClipKey>),
     /// Timeline color of the listed clips; `None` goes back to the default one.
     SetDisplayColor(Vec<ClipKey>, Option<vv_core::ClipColor>),
+    /// Constant speed of the listed clips (see `vv_core::SetClipSpeed`).
+    SetSpeed {
+        clips: Vec<ClipKey>,
+        speed: vv_core::Rational,
+        pitch_correction: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -2422,6 +2477,7 @@ pub fn show_timeline(
                         is_trimming_this,
                         trimmed_primary_new_value,
                         dragged_primary_new_start,
+                        px_per_frame,
                     );
 
                     let x = origin.x + display_start as f32 * px_per_frame;
@@ -2477,6 +2533,9 @@ pub fn show_timeline(
                         .selected
                         .contains(&(visual.track_index, visual.clip.id));
                     paint_clip_box(&painter, clip_rect, visual, is_selected);
+
+                    let retime_bar_shown = state.retime_controls.contains(&visual.clip.id)
+                        && matches!(visual.clip.source, ClipSource::Media(_));
 
                     // Filter dragged from the Effects panel: only video clips,
                     // not locked, accept it (no empty spaces or new
@@ -2648,7 +2707,47 @@ pub fn show_timeline(
                     let is_proxy_backed = proxy_ranges.iter().any(|&(s, e)| {
                         s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
                     });
-                    paint_clip_overlay(&painter, clip_rect, visual, is_proxy_backed);
+                    let top_inset = if retime_bar_shown {
+                        retime_bar_height(clip_rect)
+                    } else {
+                        0.0
+                    };
+                    paint_clip_overlay(&painter, clip_rect, visual, is_proxy_backed, top_inset);
+                    if retime_bar_shown {
+                        let group: Vec<ClipKey> = expand_to_linked_groups(
+                            &visuals,
+                            [(visual.track_index, visual.clip.id)],
+                        )
+                        .into_iter()
+                        .collect();
+                        let dragged = state
+                            .retiming()
+                            .filter(|r| r.group.contains(&(visual.track_index, visual.clip.id)))
+                            .map(|r| r.value(px_per_frame).0);
+                        match retime_bar(
+                            ui,
+                            &painter,
+                            clip_rect,
+                            id,
+                            dragged.unwrap_or(visual.clip.speed),
+                            !visual.locked,
+                        ) {
+                            Some(RetimeBarAction::Close) => {
+                                state.retime_controls.remove(&visual.clip.id);
+                            }
+                            Some(RetimeBarAction::Percent(percent)) => {
+                                pending = Some(PendingAction::SetSpeed {
+                                    clips: group,
+                                    speed: vv_core::Rational::from_percent(percent),
+                                    pitch_correction: visual.clip.pitch_correction,
+                                });
+                            }
+                            Some(RetimeBarAction::Dialog) => {
+                                state.speed_dialog_requested = Some(group);
+                            }
+                            None => {}
+                        }
+                    }
 
                     // Volume line: a thin horizontal line draggable
                     // vertically, centered at 0 dB (see `gain_offset`). Only
@@ -2681,7 +2780,10 @@ pub fn show_timeline(
                     };
                     let fade_in_dragging = fading_edge(FadeEdge::In);
                     let fade_out_dragging = fading_edge(FadeEdge::Out);
-                    let show_fades = !visual.locked && clip_rect.width() >= MIN_FADE_CLIP_WIDTH_PX;
+                    // Their handles would sit on the retime bar.
+                    let show_fades = !visual.locked
+                        && !retime_bar_shown
+                        && clip_rect.width() >= MIN_FADE_CLIP_WIDTH_PX;
                     let fade_in_x = clip_rect.left()
                         + (fade_in_preview as f32 * px_per_frame).min(clip_rect.width());
                     let fade_out_x = clip_rect.right()
@@ -2914,6 +3016,11 @@ pub fn show_timeline(
                                 None => match fade_zone {
                                     Some(edge) => begin_fade_drag(state, visual, edge),
                                     None => match press_pos.and_then(edge_at) {
+                                        Some(zone)
+                                            if zone.edge() == TrimEdge::End && retime_bar_shown =>
+                                        {
+                                            begin_retime(state, &visuals, visual)
+                                        }
                                         Some(zone) => {
                                             begin_trim(state, &visuals, project, visual, zone)
                                         }
@@ -2954,6 +3061,9 @@ pub fn show_timeline(
                             }
                             Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => {
                                 t.accum_px += delta.x
+                            }
+                            Some(Gesture::Retime(r)) if r.clip_id == visual.clip.id => {
+                                r.accum_px += delta.x
                             }
                             Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => {
                                 d.accum_px += delta.x
@@ -3007,6 +3117,13 @@ pub fn show_timeline(
                                     new_value: volume_drag_value(d, clip_rect.height() / 2.0),
                                 });
                                 volume_drag_group = Some(d.group);
+                            }
+                            Some(Gesture::Retime(r)) if r.clip_id == visual.clip.id => {
+                                pending = Some(PendingAction::SetSpeed {
+                                    clips: r.group.clone(),
+                                    speed: r.value(px_per_frame).0,
+                                    pitch_correction: r.pitch_correction,
+                                });
                             }
                             Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => {
                                 pending = Some(finish_trim(
@@ -3120,6 +3237,45 @@ pub fn show_timeline(
                                 }
                             }
                         });
+                        if matches!(visual.clip.source, ClipSource::Media(_)) {
+                            ui.separator();
+                            let key = (visual.track_index, visual.clip.id);
+                            let targets = || -> Vec<ClipKey> {
+                                let base = if state.selected.contains(&key) {
+                                    state.selected.clone()
+                                } else {
+                                    BTreeSet::from([key])
+                                };
+                                expand_to_linked_groups(&visuals, base)
+                                    .into_iter()
+                                    .filter(|&(track, id)| {
+                                        visuals.iter().any(|v| {
+                                            v.track_index == track
+                                                && v.clip.id == id
+                                                && matches!(v.clip.source, ClipSource::Media(_))
+                                        })
+                                    })
+                                    .collect()
+                            };
+                            let mut shown = state.retime_controls.contains(&visual.clip.id);
+                            if ui
+                                .checkbox(&mut shown, t!("timeline.retime_controls"))
+                                .clicked()
+                            {
+                                for (_, id) in targets() {
+                                    if shown {
+                                        state.retime_controls.insert(id);
+                                    } else {
+                                        state.retime_controls.remove(&id);
+                                    }
+                                }
+                                ui.close();
+                            }
+                            if ui.button(t!("timeline.change_clip_speed")).clicked() {
+                                state.speed_dialog_requested = Some(targets());
+                                ui.close();
+                            }
+                        }
                         ui.separator();
                         if ui.button(t!("timeline.make_compound_clip")).clicked() {
                             // A right-click on an unselected clip acts only
@@ -3169,6 +3325,11 @@ pub fn show_timeline(
                 }
                 if let Some((pos, cursor)) = edge_cursor {
                     paint_edge_cursor(ui.ctx(), pos, cursor);
+                }
+                if let Some(r) = state.retiming()
+                    && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                {
+                    paint_pointer_overlay(ui.ctx(), pos, format_speed(r.value(px_per_frame).0));
                 }
 
                 paint_playhead(
@@ -3231,7 +3392,18 @@ fn display_range(
     is_trimming_this: bool,
     trimmed_primary_new_value: Option<FrameIdx>,
     dragged_primary_new_start: Option<FrameIdx>,
+    px_per_frame: f32,
 ) -> (FrameIdx, FrameIdx) {
+    if let Some(r) = state.retiming()
+        && r.group.contains(&(visual.track_index, visual.clip.id))
+    {
+        let (_, len) = r.value(px_per_frame);
+        let scaled = visual.clip.timeline_len as f64 * len as f64 / r.original_len.max(1) as f64;
+        return (
+            visual.clip.timeline_start,
+            (scaled.round() as FrameIdx).max(1),
+        );
+    }
     if is_trimming_this
         && let (Some(t), Some(primary_value)) = (state.trimming(), trimmed_primary_new_value)
     {
@@ -3354,7 +3526,10 @@ fn paint_clip_overlay(
     clip_rect: egui::Rect,
     visual: &ClipVisual,
     is_proxy_backed: bool,
+    top_inset: f32,
 ) {
+    let veil_rect = clip_rect;
+    let clip_rect = clip_rect.with_min_y(clip_rect.top() + top_inset);
     let label_offset_y = if is_proxy_backed {
         paint_proxy_strip(painter, clip_rect);
         2.0 + PROXY_STRIP_HEIGHT
@@ -3395,7 +3570,7 @@ fn paint_clip_overlay(
     }
     if visual.locked {
         painter.rect_filled(
-            clip_rect,
+            veil_rect,
             4.0,
             egui::Color32::from_rgba_unmultiplied(70, 70, 70, 140),
         );
@@ -3442,11 +3617,14 @@ fn paint_fade_wedge(
 /// layer as the trim cursor. General behavior, not only
 /// for the fades: any draggable end shows it.
 fn paint_duration_overlay(ctx: &egui::Context, pos: egui::Pos2, frames: FrameIdx, fps: f64) {
+    paint_pointer_overlay(ctx, pos, format!("+{}", format_duration(frames, fps)));
+}
+
+fn paint_pointer_overlay(ctx: &egui::Context, pos: egui::Pos2, text: String) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Tooltip,
         egui::Id::new("timeline_duration_overlay"),
     ));
-    let text = format!("+{}", format_duration(frames, fps));
     let text_pos = pos + egui::vec2(12.0, 14.0);
     let galley =
         painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::WHITE);
@@ -3462,6 +3640,105 @@ fn format_duration(frames: FrameIdx, fps: f64) -> String {
     let frames = frames.max(0);
     let (secs, f) = (frames / nominal, frames % nominal);
     format!("{secs}:{f:02}")
+}
+
+fn begin_retime(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVisual) {
+    state.gesture = Some(Gesture::Retime(RetimeState {
+        clip_id: visual.clip.id,
+        original_len: visual.clip.timeline_len,
+        original_speed: visual.clip.speed,
+        pitch_correction: visual.clip.pitch_correction,
+        accum_px: 0.0,
+        group: expand_to_linked_groups(visuals, [(visual.track_index, visual.clip.id)])
+            .into_iter()
+            .collect(),
+    }));
+}
+
+enum RetimeBarAction {
+    Close,
+    Percent(f64),
+    Dialog,
+}
+
+fn retime_bar_height(clip_rect: egui::Rect) -> f32 {
+    RETIME_BAR_HEIGHT.min(clip_rect.height() / 2.0)
+}
+
+/// Presets of the speed menu of the retime bar, in percent.
+const SPEED_PRESETS: [f64; 10] = [
+    10.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0, 200.0, 400.0, 1000.0,
+];
+
+fn format_speed(speed: vv_core::Rational) -> String {
+    let percent = speed.as_percent();
+    if (percent - percent.round()).abs() < 0.005 {
+        format!("{percent:.0}%")
+    } else {
+        format!("{percent:.2}%")
+    }
+}
+
+/// The bar on top of a clip with its retime controls shown: the speed, with
+/// the presets menu, and `×` to hide it.
+fn retime_bar(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    id: egui::Id,
+    speed: vv_core::Rational,
+    interactive: bool,
+) -> Option<RetimeBarAction> {
+    let height = retime_bar_height(clip_rect);
+    let bar = egui::Rect::from_min_size(clip_rect.min, egui::vec2(clip_rect.width(), height));
+    painter.rect_filled(bar, 2.0, egui::Color32::from_black_alpha(170));
+    let font = egui::FontId::proportional(11.0);
+    let galley = painter.layout_no_wrap(
+        format!("{} ⏷", format_speed(speed)),
+        font.clone(),
+        egui::Color32::WHITE,
+    );
+    let menu_rect = egui::Rect::from_min_size(bar.min, egui::vec2(galley.size().x + 8.0, height))
+        .intersect(bar);
+    let close_rect = egui::Rect::from_min_size(
+        egui::pos2(bar.right() - height, bar.top()),
+        egui::vec2(height, height),
+    );
+    painter.with_clip_rect(bar).galley(
+        bar.min + egui::vec2(4.0, (height - galley.size().y) / 2.0),
+        galley,
+        egui::Color32::WHITE,
+    );
+    if bar.width() >= menu_rect.width() + close_rect.width() {
+        painter.text(
+            close_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            font,
+            egui::Color32::WHITE,
+        );
+    }
+    if !interactive {
+        return None;
+    }
+    let mut action = None;
+    let close = ui.interact(close_rect, id.with("retime_close"), egui::Sense::click());
+    if close.on_hover_text(t!("timeline.retime_close")).clicked() {
+        action = Some(RetimeBarAction::Close);
+    }
+    let menu = ui.interact(menu_rect, id.with("retime_menu"), egui::Sense::click());
+    egui::Popup::menu(&menu).show(|ui| {
+        for percent in SPEED_PRESETS {
+            if ui.button(format!("{percent:.0}%")).clicked() {
+                action = Some(RetimeBarAction::Percent(percent));
+            }
+        }
+        ui.separator();
+        if ui.button(t!("timeline.change_clip_speed")).clicked() {
+            action = Some(RetimeBarAction::Dialog);
+        }
+    });
+    action
 }
 
 /// Starts the trim of `visual` from the edge zone `zone`, with the clips
@@ -4876,6 +5153,22 @@ fn apply_pending_action(
                 )),
             );
         }
+        PendingAction::SetSpeed {
+            clips,
+            speed,
+            pitch_correction,
+        } => {
+            history.do_command(
+                project,
+                Box::new(vv_core::SetClipSpeed::new(
+                    timeline_id,
+                    clips,
+                    speed,
+                    pitch_correction,
+                    true,
+                )),
+            );
+        }
     }
 }
 
@@ -4994,7 +5287,10 @@ fn clip_label_and_color(
             if offline {
                 return (t!("timeline.media_offline").into_owned(), OFFLINE_COLOR);
             }
-            let label = media_labels(*media_id);
+            let mut label = media_labels(*media_id);
+            if !clip.speed.is_one() {
+                label = format!("{label} ({})", format_speed(clip.speed));
+            }
             let color = if track.kind == TrackKind::Video {
                 egui::Color32::from_rgb(90, 140, 200)
             } else {

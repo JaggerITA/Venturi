@@ -258,3 +258,76 @@ fn a_linked_clip_drawn_after_the_dragged_one_does_not_flash_back_on_release() {
     assert_eq!(h.clip(1, ClipId(2)).timeline_start, 50);
     assert_eq!(h.release_rects[&ClipId(2)].left(), h.rect(ClipId(2)).left());
 }
+
+/// A video track with a 25 fps media clip of 100 frames at 0 and a solid
+/// right after it.
+fn media_harness() -> Harness {
+    let mut h = Harness::new(vec![track(TrackKind::Video, Vec::new())]);
+    let media = h.project.media_pool.insert(vv_core::MediaItem {
+        path: "a.mp4".into(),
+        meta: vv_core::MediaMeta {
+            duration_frames: 1000,
+            fps: Rational::new(25, 1),
+            width: 1920,
+            height: 1080,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+        },
+        content_hash: 1,
+        compound: None,
+    });
+    let tracks = &mut h.project.timelines[h.timeline_id].tracks;
+    tracks[0].clips = vec![
+        Clip::from_source_range(
+            ClipId(1),
+            ClipSource::Media(media),
+            0,
+            100,
+            0,
+            Rational::one(),
+        ),
+        solid(2, 100, 20),
+    ];
+    h.frame(Vec::new());
+    h
+}
+
+#[test]
+fn with_the_retime_bar_the_right_edge_changes_the_speed() {
+    let mut h = media_harness();
+    h.state.retime_controls.insert(ClipId(1));
+    h.frame(Vec::new());
+    let rect = h.rect(ClipId(1));
+    h.drag(
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 8.0),
+        egui::vec2(-50.0 * PX_PER_FRAME, 0.0),
+    );
+    let clip = h.clip(0, ClipId(1));
+    assert_eq!((clip.speed, clip.timeline_len), (Rational::new(2, 1), 50));
+    assert_eq!(clip.source_in(), 0);
+    assert_eq!(h.clip(0, ClipId(2)).timeline_start, 50, "rippled");
+    assert!(h.no_gesture());
+}
+
+#[test]
+fn the_retime_bar_closes_with_its_x() {
+    let mut h = media_harness();
+    h.state.retime_controls.insert(ClipId(1));
+    h.frame(Vec::new());
+    let rect = h.rect(ClipId(1));
+    let x = egui::pos2(rect.right() - 7.0, rect.top() + 7.0);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: x,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.frame(vec![egui::Event::PointerMoved(x)]);
+    h.frame(vec![button(true)]);
+    h.frame(vec![button(false)]);
+    assert!(h.state.retime_controls.is_empty());
+    assert_eq!(h.clip(0, ClipId(1)).speed, Rational::one());
+}

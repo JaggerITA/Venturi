@@ -290,3 +290,41 @@ fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
     let full = 120 * 48_000 * 2;
     assert!((0..3).all(|stream| cache.get_or_request(&path, stream).unwrap().len() < full));
 }
+
+#[test]
+fn a_stretch_is_computed_in_background_and_dropped_once_unused() {
+    let mut cache = MixBufferCache::spawn(48_000, 1);
+    let sine: Arc<Vec<f32>> = Arc::new(
+        (0..96_000)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5)
+            .collect(),
+    );
+    let ask = |cache: &mut MixBufferCache| cache.stretched(&sine, 0..48_000, 2.0, 48_000, 1);
+    assert!(matches!(ask(&mut cache), ClipAudio::Pending));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let stretched = loop {
+        cache.poll();
+        match ask(&mut cache) {
+            ClipAudio::Ready(samples) => break samples,
+            ClipAudio::Pending => {}
+            _ => panic!("the stretch failed"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stretch never arrived"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let secs = stretched.len() as f64 / 48_000.0;
+    assert!((secs - 0.5).abs() < 0.05, "1 s at 2x lasts {secs} s");
+
+    cache.sweep_stretched();
+    assert!(matches!(ask(&mut cache), ClipAudio::Ready(_)), "still used");
+    cache.sweep_stretched();
+    cache.sweep_stretched();
+    assert!(
+        matches!(ask(&mut cache), ClipAudio::Pending),
+        "dropped when unused"
+    );
+}

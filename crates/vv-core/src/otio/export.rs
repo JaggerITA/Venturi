@@ -172,7 +172,16 @@ fn clip_to_otio(
     json!({
         "OTIO_SCHEMA": "Clip.2",
         "name": name,
-        "source_range": time_range(clip.source_offset, clip.timeline_len, fps),
+        // OTIO's start is in media time, the duration in timeline time.
+        "source_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": fps.as_f64(),
+                "value": clip.source_offset as f64 * clip.speed.as_f64(),
+            },
+            "duration": rational_time(clip.timeline_len, fps),
+        },
         "effects": resolve::clip_effects(clip, kind, &scale),
         "markers": [],
         "enabled": !clip.disabled,
@@ -185,6 +194,8 @@ fn clip_to_otio(
                 "fade_in": clip.fade_in,
                 "fade_out": clip.fade_out,
                 "display_color": clip.display_color,
+                "speed": clip.speed,
+                "pitch_correction": clip.pitch_correction,
             }
         },
         "media_references": { "DEFAULT_MEDIA": media_reference },

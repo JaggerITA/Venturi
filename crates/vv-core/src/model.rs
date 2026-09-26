@@ -68,8 +68,31 @@ impl Rational {
     /// a timeline at `timeline_fps`, reduced to lowest terms (see
     /// `Clip::rate`).
     pub fn conform_rate(timeline_fps: Rational, media_fps: Rational) -> Self {
-        let mut num = timeline_fps.num as i64 * media_fps.den as i64;
-        let mut den = timeline_fps.den as i64 * media_fps.num as i64;
+        Self::reduced(
+            timeline_fps.num as i64 * media_fps.den as i64,
+            timeline_fps.den as i64 * media_fps.num as i64,
+        )
+    }
+
+    /// `self / other`, reduced (see `reduced`).
+    pub fn divided_by(self, other: Rational) -> Self {
+        Self::reduced(
+            self.num as i64 * other.den as i64,
+            self.den as i64 * other.num as i64,
+        )
+    }
+
+    /// A clip speed from a percentage, to the hundredth of a percent.
+    pub fn from_percent(percent: f64) -> Self {
+        Self::reduced((percent * 100.0).round() as i64, 10_000)
+    }
+
+    pub fn as_percent(self) -> f64 {
+        self.as_f64() * 100.0
+    }
+
+    /// `num/den` in lowest terms; `1/1` if not positive.
+    fn reduced(mut num: i64, mut den: i64) -> Self {
         if num <= 0 || den <= 0 {
             return Self::one();
         }
@@ -1072,7 +1095,6 @@ impl BlendMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectStack {
     pub transform: TransformTracks,
-    pub speed: Keyframed<f32>,
     pub gain_db: Keyframed<f32>,
     pub color: Option<Keyframed<Rgba>>,
     #[serde(default)]
@@ -1094,7 +1116,6 @@ impl Default for EffectStack {
     fn default() -> Self {
         Self {
             transform: TransformTracks::default(),
-            speed: Keyframed::constant(1.0),
             gain_db: Keyframed::constant(0.0),
             color: None,
             title: None,
@@ -1127,7 +1148,6 @@ impl EffectStack {
         for p in TransformParam::ALL {
             f(self.transform.track_mut(p));
         }
-        f(&mut self.speed);
         f(&mut self.gain_db);
     }
 
@@ -1136,8 +1156,6 @@ impl EffectStack {
     /// count: it is the content of the clip, not an effect.
     pub fn is_pristine(&self) -> bool {
         self.transform.is_pristine()
-            && self.speed.is_constant()
-            && self.speed.default == 1.0
             && self.gain_db.is_constant()
             && self.gain_db.default == 0.0
             && self.color.is_none()
@@ -1227,9 +1245,18 @@ pub struct Clip {
     /// `vv_media::audio_streams`).
     #[serde(default)]
     pub audio_stream_index: usize,
-    /// Timeline frames per source frame (`Rational::conform_rate`).
+    /// Timeline frames per source frame: `Rational::conform_rate` divided
+    /// by `speed` (see `Clip::conform`).
     #[serde(default = "Rational::one")]
     pub rate: Rational,
+    /// Source time per timeline time: `2/1` plays the media twice as fast.
+    /// Only on `Media` clips.
+    #[serde(default = "Rational::one")]
+    pub speed: Rational,
+    /// Audio of a clip with `speed != 1`: pitch preserved (time-stretch)
+    /// instead of following the speed.
+    #[serde(default)]
+    pub pitch_correction: bool,
     /// Excluded from compositing and mixing, but stays on the timeline.
     #[serde(default)]
     pub disabled: bool,
@@ -1268,6 +1295,8 @@ impl Clip {
             linked_group: None,
             audio_stream_index: 0,
             rate,
+            speed: Rational::one(),
+            pitch_correction: false,
             disabled: false,
             fade_in: 0,
             fade_out: 0,
@@ -1275,11 +1304,17 @@ impl Clip {
         }
     }
 
-    /// First source frame shown.
     pub fn is_adjustment(&self) -> bool {
         matches!(self.source, ClipSource::Adjustment)
     }
 
+    /// `rate` for `conform_rate` (timeline fps against media fps) at this
+    /// clip's `speed`.
+    pub fn conform(&mut self, conform_rate: Rational) {
+        self.rate = conform_rate.divided_by(self.speed);
+    }
+
+    /// First source frame shown.
     pub fn source_in(&self) -> FrameIdx {
         self.rate.unscale_round(self.source_offset)
     }
@@ -1323,7 +1358,8 @@ impl Clip {
     /// Seconds from the start of the media at `timeline_frame`, without going through the
     /// source frames: the audio follows the cut to the sample.
     pub fn media_secs_at(&self, timeline_frame: FrameIdx, timeline_fps: f64) -> f64 {
-        (timeline_frame - self.timeline_start + self.source_offset) as f64 / timeline_fps
+        (timeline_frame - self.timeline_start + self.source_offset) as f64 * self.speed.as_f64()
+            / timeline_fps
     }
 
     /// Moves the clip from a timeline at `from` fps to one at `to` fps,
@@ -2026,7 +2062,7 @@ impl Project {
                     continue;
                 };
                 if let Some(item) = media_pool.get(*media_id) {
-                    clip.rate = Rational::conform_rate(timeline_fps, item.meta.fps);
+                    clip.conform(Rational::conform_rate(timeline_fps, item.meta.fps));
                 }
             }
         }

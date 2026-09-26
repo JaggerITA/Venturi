@@ -73,11 +73,12 @@ struct Clip {
     linked_group: Option<LinkGroupId>, // video + audio of the same import
     audio_stream_index: usize,         // which audio stream of the media
     rate: Rational,                    // Timeline frames per source frame
+    speed: Rational,                   // constant clip speed, 2/1 = 200%
+    pitch_correction: bool,            // audio time-stretched, not varispeed
 }
 
 struct EffectStack {
     transform: TransformTracks,  // one Keyframed<f32> per parameter + flip
-    speed: Keyframed<f32>,            // in the model, not applied yet
     gain_db: Keyframed<f32>,
     color: Option<Keyframed<Rgba>>,   // SolidColor and Text
     title: Option<TitleParams>,       // Text only
@@ -100,6 +101,13 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
   skips a frame when needed (59.94 on 60: one duplicated every ~17 s)
   instead of drifting out of sync with the audio, which always plays at real
   speed.
+- **Clip speed** folds into the same mapping: `rate = conform / speed`, so
+  every consumer of `rate` (preview, export, trims, `render_ahead`) follows
+  it with no special case. `SetClipSpeed` keeps `source_in` and ripples by
+  the change of length. Audio: varispeed in `mix_range` (interpolated read),
+  or with `pitch_correction` the clip's source range stretched with
+  `rubberband` (background worker in the preview, silent until ready;
+  synchronous on export). See plans/CLIP_SPEED.md.
 - A clip's range is `source_offset` + `timeline_len`, both in Timeline
   frames (like OTIO's `source_range`); `source_in()`/`source_out()` are
   derived from them. Splits and trims land exactly on the chosen position
@@ -309,7 +317,7 @@ Done:
   non-file references) is reported.
 
 Not yet:
-- Per-clip speed change (`EffectStack::speed`) and time remap.
+- Speed ramps (keyframed speed), reverse and freeze frame.
 - Per-clip opacity/blend.
 
 ## Environment setup

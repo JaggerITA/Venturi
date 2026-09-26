@@ -55,6 +55,7 @@ pub enum CommandLabel {
     MoveKeyframes,
     SetInterpolation,
     PasteAttributes,
+    ClipSpeed,
 }
 
 /// Several commands in a single history step.
@@ -573,6 +574,139 @@ impl Command for RippleDeleteGap {
         }
         for track in &mut tl.tracks {
             resort(track);
+        }
+    }
+}
+
+/// Constant speed of `Media` clips (the caller passes whole linked groups):
+/// `source_in` and `timeline_start` stay put. With `ripple` the length
+/// follows the speed and whatever starts at or after the old end moves by the
+/// difference on all the unlocked tracks, as `RippleDeleteGap` does; without,
+/// the clip keeps its length, capped at the end of the media.
+#[derive(Debug)]
+pub struct SetClipSpeed {
+    pub timeline: TimelineId,
+    pub clips: Vec<(usize, ClipId)>,
+    pub speed: Rational,
+    pub pitch_correction: bool,
+    pub ripple: bool,
+    before: Vec<Track>,
+}
+
+impl SetClipSpeed {
+    pub fn new(
+        timeline: TimelineId,
+        clips: Vec<(usize, ClipId)>,
+        speed: Rational,
+        pitch_correction: bool,
+        ripple: bool,
+    ) -> Self {
+        Self {
+            timeline,
+            clips,
+            speed,
+            pitch_correction,
+            ripple,
+            before: Vec::new(),
+        }
+    }
+}
+
+impl Command for SetClipSpeed {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::ClipSpeed
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let media_pool = &project.media_pool;
+        let tl = &mut project.timelines[self.timeline];
+        self.before = tl.tracks.clone();
+        let mut pending: Vec<(usize, ClipId)> = self
+            .clips
+            .iter()
+            .copied()
+            .filter(|&(track, id)| {
+                tl.clip(track, id)
+                    .is_some_and(|c| matches!(c.source, ClipSource::Media(_)))
+            })
+            .collect();
+        // Leftmost first: every ripple moves the ends of the ones after it.
+        while !pending.is_empty() {
+            let end_of =
+                |&(track, id): &(usize, ClipId)| tl.clip(track, id).unwrap().timeline_end();
+            let old_end = pending.iter().map(end_of).min().unwrap();
+            let (batch, rest): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|key| end_of(key) == old_end);
+            pending = rest;
+            let mut new_end = FrameIdx::MIN;
+            for &(track, id) in &batch {
+                let clip = tl.tracks[track].clip_mut(id).unwrap();
+                let ClipSource::Media(media_id) = clip.source else {
+                    continue;
+                };
+                let Some(media) = media_pool.get(media_id) else {
+                    continue;
+                };
+                let (source_in, source_out) = (clip.source_in(), clip.source_out());
+                clip.speed = self.speed;
+                clip.pitch_correction = self.pitch_correction;
+                clip.conform(Rational::conform_rate(tl.fps, media.meta.fps));
+                clip.source_offset = clip.rate.scale_round(source_in);
+                let len = if self.ripple {
+                    clip.rate.scale_round(source_out) - clip.source_offset
+                } else {
+                    let available =
+                        clip.rate.scale_round(media.meta.duration_frames) - clip.source_offset;
+                    clip.timeline_len.min(available)
+                };
+                clip.timeline_len = len.max(1);
+                clip.fade_in = clip.fade_in.min(clip.timeline_len);
+                clip.fade_out = clip.fade_out.min(clip.timeline_len);
+                new_end = new_end.max(clip.timeline_end());
+            }
+            if self.ripple && new_end != FrameIdx::MIN {
+                ripple_from(&mut tl.tracks, old_end, new_end - old_end);
+            }
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        project.timelines[self.timeline].tracks = self.before.clone();
+    }
+}
+
+/// Moves by `delta` whatever starts at `from` or later, on the unlocked
+/// tracks. Backwards it stops where a clip that stays (it starts before
+/// `from`) would be overlapped.
+fn ripple_from(tracks: &mut [Track], from: FrameIdx, delta: FrameIdx) {
+    let moves = |c: &Clip| c.timeline_start >= from;
+    let unlocked = || tracks.iter().filter(|t| !t.locked);
+    let room = unlocked()
+        .filter_map(|t| {
+            let first_moved = t
+                .clips
+                .iter()
+                .filter(|c| moves(c))
+                .map(|c| c.timeline_start)
+                .min()?;
+            let staying_end = t
+                .clips
+                .iter()
+                .filter(|c| !moves(c))
+                .map(Clip::timeline_end)
+                .max()
+                .unwrap_or(0);
+            Some(first_moved - staying_end)
+        })
+        .min()
+        .unwrap_or(FrameIdx::MAX);
+    let delta = delta.max(-room.max(0));
+    if delta == 0 {
+        return;
+    }
+    for track in tracks.iter_mut().filter(|t| !t.locked) {
+        for clip in track.clips.iter_mut().filter(|c| moves(c)) {
+            clip.timeline_start += delta;
         }
     }
 }

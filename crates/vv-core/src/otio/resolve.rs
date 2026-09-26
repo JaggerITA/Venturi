@@ -48,13 +48,12 @@ pub(super) fn clip_effects(clip: &Clip, kind: TrackKind, scale: &Scale) -> Vec<V
 /// The only effect of Resolve's that is not in its own namespace: the speed
 /// travels in the standard schema, first in the list like it writes it.
 fn time_warp(clip: &Clip) -> Option<Value> {
-    let scalar = clip.effects.speed.default;
-    (clip.effects.speed.is_constant() && scalar != 1.0 && scalar > 0.0).then(|| {
+    (!clip.speed.is_one()).then(|| {
         json!({
             "OTIO_SCHEMA": "LinearTimeWarp.1",
             "name": "",
             "effect_name": "",
-            "time_scalar": scalar,
+            "time_scalar": clip.speed.as_f64(),
             "metadata": {},
         })
     })

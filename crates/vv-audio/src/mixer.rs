@@ -19,10 +19,17 @@ pub struct MixClip {
     pub len: u64,
     /// Audio frame of `buffer` corresponding to `start`.
     pub source_offset: u64,
+    /// Frames of `buffer` per timeline frame: the clip speed (varispeed),
+    /// 1 when `buffer` is already stretched.
+    pub step: f64,
     /// Interleaved at the snapshot's `sample_rate`/`channels`.
     pub buffer: Arc<Vec<f32>>,
     pub gain_db: Keyframed<f32>,
     pub clip_fps: f64,
+    /// Audio frame of the media at `start` and media frames per timeline
+    /// frame: where the gain keyframes are read, even from a stretched copy.
+    pub media_offset: u64,
+    pub media_step: f64,
     /// Fades, in timeline audio frames from the start/end of
     /// `len` (see `Clip::fade_multiplier_at`, same semantics on samples).
     pub fade_in: u64,
@@ -81,6 +88,34 @@ pub trait AudioSource {
     }
 
     fn store_compound(&mut self, _media_id: MediaId, _content_hash: u64, _mixdown: Arc<Vec<f32>>) {}
+
+    /// Frames `range` of `buffer` time-stretched by `tempo`, pitch
+    /// preserved. Synchronous here; the preview answers `Pending` while it
+    /// works in the background.
+    fn stretched(
+        &mut self,
+        buffer: &Arc<Vec<f32>>,
+        range: std::ops::Range<u64>,
+        tempo: f64,
+        sample_rate: u32,
+        channels: u16,
+    ) -> ClipAudio {
+        stretch_range(buffer, range, tempo, sample_rate, channels)
+            .map_or(ClipAudio::Missing, |b| ClipAudio::Ready(Arc::new(b)))
+    }
+}
+
+pub fn stretch_range(
+    buffer: &[f32],
+    range: std::ops::Range<u64>,
+    tempo: f64,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Vec<f32>, String> {
+    let ch = channels.max(1) as usize;
+    let end = (range.end as usize * ch).min(buffer.len());
+    let start = (range.start as usize * ch).min(end);
+    crate::stretch_samples(&buffer[start..end], sample_rate, channels, tempo)
 }
 
 /// `None` is `Missing`; no compound cache.
@@ -124,8 +159,14 @@ fn collect_clips(
             } else {
                 source.file(&item.path, clip.audio_stream_index)
             };
+            let pitch_corrected = clip.pitch_correction && !clip.speed.is_one();
             let buffer = match audio {
                 ClipAudio::Ready(buffer) => buffer,
+                // Stretching half a buffer would have to be redone anyway.
+                ClipAudio::Partial(_) if pitch_corrected => {
+                    readiness = Readiness::Pending;
+                    continue;
+                }
                 ClipAudio::Partial(buffer) => {
                     readiness = readiness.max(Readiness::Partial);
                     buffer
@@ -137,9 +178,34 @@ fn collect_clips(
                 ClipAudio::Missing => continue,
             };
             let clip_fps = item.meta.fps.as_f64().max(1e-9);
-            if let Some(mix_clip) = mix_clip_from(clip, fps, clip_fps, sample_rate, ch, buffer) {
-                clips.push(mix_clip);
+            let Some(mut mix_clip) = mix_clip_from(clip, fps, clip_fps, sample_rate, ch, buffer)
+            else {
+                continue;
+            };
+            if pitch_corrected {
+                let range = mix_clip.source_offset
+                    ..mix_clip.source_offset + (mix_clip.len as f64 * mix_clip.step).ceil() as u64;
+                match source.stretched(
+                    &mix_clip.buffer,
+                    range,
+                    mix_clip.step,
+                    sample_rate,
+                    channels,
+                ) {
+                    ClipAudio::Ready(stretched) => {
+                        mix_clip.len = mix_clip.len.min(stretched.len() as u64 / ch);
+                        mix_clip.buffer = stretched;
+                        mix_clip.source_offset = 0;
+                        mix_clip.step = 1.0;
+                    }
+                    ClipAudio::Pending => {
+                        readiness = Readiness::Pending;
+                        continue;
+                    }
+                    ClipAudio::Partial(_) | ClipAudio::Missing => continue,
+                }
             }
+            clips.push(mix_clip);
         }
     }
     let snapshot = MixSnapshot {
@@ -224,8 +290,11 @@ fn mix_clip_from(
         sample_rate,
     )
     .min(buffer_frames);
+    let step = clip.speed.as_f64();
+    // The last frame read is interpolated with the one after it.
+    let readable = ((buffer_frames - source_offset) as f64 / step).floor() as u64;
     let len = seconds_to_frames(clip.timeline_len as f64 / timeline_fps, sample_rate)
-        .min(buffer_frames - source_offset);
+        .min(readable.saturating_sub(u64::from(step != 1.0)));
     if len == 0 {
         return None;
     }
@@ -235,9 +304,12 @@ fn mix_clip_from(
         start: timeline_frame_to_sample(clip.timeline_start, timeline_fps, sample_rate),
         len,
         source_offset,
+        step,
         buffer,
         gain_db: clip.effects.gain_db.clone(),
         clip_fps,
+        media_offset: source_offset,
+        media_step: step,
         fade_in,
         fade_out,
     })
@@ -276,16 +348,46 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
             let gain = block_gain_linear(clip, block, snapshot.sample_rate)
                 * fade_multiplier(clip, in_clip);
 
-            let src = ((clip.source_offset + in_clip) as usize) * ch;
             let dst = ((f - start) as usize) * ch;
-            let count = ((block_end - f) as usize * ch).min(clip.buffer.len().saturating_sub(src));
-            for (d, s) in out[dst..dst + count]
-                .iter_mut()
-                .zip(&clip.buffer[src..src + count])
-            {
-                *d += s * gain;
+            if clip.step == 1.0 {
+                let src = ((clip.source_offset + in_clip) as usize) * ch;
+                let count =
+                    ((block_end - f) as usize * ch).min(clip.buffer.len().saturating_sub(src));
+                for (d, s) in out[dst..dst + count]
+                    .iter_mut()
+                    .zip(&clip.buffer[src..src + count])
+                {
+                    *d += s * gain;
+                }
+            } else {
+                let frames = &mut out[dst..dst + (block_end - f) as usize * ch];
+                for (i, frame) in frames.chunks_exact_mut(ch).enumerate() {
+                    let pos = clip.source_offset as f64 + (in_clip + i as u64) as f64 * clip.step;
+                    add_resampled(&clip.buffer, ch, pos, clip.step, gain, frame);
+                }
             }
             f = block_end;
+        }
+    }
+}
+
+/// Varispeed read of the frame at fractional position `pos`: linear
+/// interpolation slowing down; speeding up, the average of the `step`
+/// frames skipped over, a crude low-pass against aliasing.
+fn add_resampled(buffer: &[f32], ch: usize, pos: f64, step: f64, gain: f32, out: &mut [f32]) {
+    let frames = buffer.len() / ch;
+    let at = |frame: usize, c: usize| buffer[frame.min(frames - 1) * ch + c];
+    let i = pos as usize;
+    if step < 1.0 {
+        let t = (pos - i as f64) as f32;
+        for (c, o) in out.iter_mut().enumerate() {
+            *o += (at(i, c) + (at(i + 1, c) - at(i, c)) * t) * gain;
+        }
+    } else {
+        let n = (step as usize).max(1);
+        for (c, o) in out.iter_mut().enumerate() {
+            let sum: f32 = (i..i + n).map(|frame| at(frame, c)).sum();
+            *o += sum / n as f32 * gain;
         }
     }
 }
@@ -313,7 +415,9 @@ fn block_gain_linear(clip: &MixClip, block: u64, sample_rate: u32) -> f32 {
     }
     // The gain keyframes live in *source* frames: the frame covering
     // this instant of the media.
-    let media_secs = (clip.source_offset + block * GAIN_BLOCK_FRAMES) as f64 / sample_rate as f64;
+    let media_frame =
+        clip.media_offset as f64 + (block * GAIN_BLOCK_FRAMES) as f64 * clip.media_step;
+    let media_secs = media_frame / sample_rate as f64;
     let source_frame = (media_secs * clip.clip_fps).floor() as FrameIdx;
     db_to_linear(clip.gain_db.value_at(source_frame))
 }

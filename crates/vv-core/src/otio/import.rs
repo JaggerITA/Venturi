@@ -316,6 +316,10 @@ impl Importer<'_> {
             venturi["fade_in"].as_i64().unwrap_or(0) as FrameIdx,
             venturi["fade_out"].as_i64().unwrap_or(0) as FrameIdx,
         );
+        let speed = match serde_json::from_value::<Rational>(venturi["speed"].clone()) {
+            Ok(speed) => speed,
+            Err(_) => self.time_warp(item, name),
+        };
         // Seconds into the media at the start of the clip and the media fps, to
         // translate the effect keyframes of other editors.
         let (source, rate, source_offset, media_start) = match schema(reference) {
@@ -332,7 +336,7 @@ impl Importer<'_> {
                     return (duration, None);
                 }
                 let media_fps = meta.fps;
-                let rate = Rational::conform_rate(fps, media_fps);
+                let rate = Rational::conform_rate(fps, media_fps).divided_by(speed);
                 let available_start =
                     time_range(&reference["available_range"]).map_or(0.0, |(start, _)| start);
                 let secs = source_start - available_start;
@@ -340,7 +344,7 @@ impl Importer<'_> {
                 let offset = if (source_frame - source_frame.round()).abs() < 1e-6 {
                     rate.scale_round(source_frame.round() as FrameIdx)
                 } else {
-                    to_frames(secs, fps)
+                    to_frames(secs / speed.as_f64(), fps)
                 };
                 (
                     ClipSource::Media(media_id),
@@ -389,20 +393,12 @@ impl Importer<'_> {
                     .unwrap_or(fps.as_f64()),
                 display: (media.0 * fit, media.1 * fit),
                 media,
+                speed: speed.as_f64(),
             };
             for effect in children_of(item, "effects") {
                 self.effect(effect, &mut effects, &mut fades, &context);
             }
         }
-        // The speed survives in the project but nothing plays it back yet:
-        // the clip would show its first frames at 1x.
-        if !effects.speed.is_constant() || effects.speed.default != 1.0 {
-            self.warn(OtioWarning::SpeedNotApplied {
-                clip: name.to_owned(),
-                percent: (effects.speed.default * 100.0).round() as i64,
-            });
-        }
-
         let group_key = venturi["linked_group"]
             .as_u64()
             .map(GroupKey::Venturi)
@@ -417,6 +413,11 @@ impl Importer<'_> {
             .as_u64()
             .or_else(|| resolve_source_track(resolve))
             .unwrap_or(0) as usize;
+        let speed = if matches!(source, ClipSource::Media(_)) {
+            speed
+        } else {
+            Rational::one()
+        };
         let clip = Clip {
             id: self.project.alloc_clip_id(),
             source,
@@ -427,12 +428,34 @@ impl Importer<'_> {
             linked_group,
             audio_stream_index,
             rate,
+            speed,
+            pitch_correction: venturi["pitch_correction"].as_bool().unwrap_or(false),
             disabled: false,
             fade_in: fades.0.clamp(0, timeline_len),
             fade_out: fades.1.clamp(0, timeline_len),
             display_color: serde_json::from_value(venturi["display_color"].clone()).unwrap_or(None),
         };
         (duration, Some((clip, is_foreign)))
+    }
+
+    /// The clip speed from a `LinearTimeWarp`. Freeze frames (`time_scalar`
+    /// 0, also their own `FreezeFrame` schema) and reverse play at 100%, with
+    /// a warning.
+    fn time_warp(&mut self, item: &Value, name: &str) -> Rational {
+        let Some(scalar) = children_of(item, "effects")
+            .filter(|e| is_time_warp(e))
+            .find_map(|e| e["time_scalar"].as_f64())
+        else {
+            return Rational::one();
+        };
+        if scalar > 0.0 {
+            return Rational::from_percent(scalar * 100.0);
+        }
+        self.warn(OtioWarning::SpeedNotApplied {
+            clip: name.to_owned(),
+            percent: (scalar * 100.0).round() as i64,
+        });
+        Rational::one()
     }
 
     /// Brings into `effects` and `fades` what it knows how to translate; the
@@ -445,10 +468,8 @@ impl Importer<'_> {
         fades: &mut (FrameIdx, FrameIdx),
         context: &ResolveContext,
     ) {
-        if schema(effect) == "LinearTimeWarp" {
-            if let Some(scalar) = effect["time_scalar"].as_f64() {
-                effects.speed = Keyframed::constant(scalar as f32);
-            }
+        // Read beforehand by `time_warp`.
+        if is_time_warp(effect) {
             return;
         }
         let resolve = &effect["metadata"]["Resolve_OTIO"];
@@ -591,6 +612,7 @@ struct ResolveContext {
     rate: f64,
     display: (f32, f32),
     media: (f32, f32),
+    speed: f64,
 }
 
 /// `true` if the parameter was translated. The `multiplier` is the inverse
@@ -732,7 +754,7 @@ fn resolve_keyframes<'v>(
         .iter()
         .filter_map(|(frame, keyframe)| {
             let frame = frame.parse::<f64>().ok()?;
-            let secs = start_secs + frame / context.rate;
+            let secs = start_secs + frame / context.rate * context.speed;
             Some((
                 (secs * media_fps.as_f64()).round() as FrameIdx,
                 &keyframe["Value"],
@@ -810,6 +832,10 @@ fn collect_timelines<'v>(value: &'v Value, out: &mut Vec<&'v Value>) {
 }
 
 /// The schema name without the version (`"Clip.2"` → `"Clip"`).
+fn is_time_warp(effect: &Value) -> bool {
+    matches!(schema(effect), "LinearTimeWarp" | "FreezeFrame")
+}
+
 fn schema(value: &Value) -> &str {
     let full = value["OTIO_SCHEMA"].as_str().unwrap_or("");
     full.split('.').next().unwrap_or(full)

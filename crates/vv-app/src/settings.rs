@@ -32,6 +32,7 @@ pub enum Action {
     RippleDelete,
     Split,
     ToggleDisabled,
+    RetimeControls,
     SelectAll,
     SelectFromPlayhead,
     OpenProject,
@@ -44,7 +45,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 29] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -64,6 +65,7 @@ impl Action {
         Action::RippleDelete,
         Action::Split,
         Action::ToggleDisabled,
+        Action::RetimeControls,
         Action::SelectAll,
         Action::SelectFromPlayhead,
         Action::OpenProject,
@@ -97,6 +99,7 @@ impl Action {
             Action::RippleDelete => "ripple_delete",
             Action::Split => "split",
             Action::ToggleDisabled => "toggle_disabled",
+            Action::RetimeControls => "retime_controls",
             Action::SelectAll => "select_all",
             Action::SelectFromPlayhead => "select_from_playhead",
             Action::OpenProject => "open_project",
@@ -134,6 +137,7 @@ impl Action {
             | Action::RippleDelete
             | Action::Split
             | Action::ToggleDisabled
+            | Action::RetimeControls
             | Action::SelectAll
             | Action::SelectFromPlayhead => t!("action_category.edit"),
             Action::OpenProject
@@ -181,6 +185,7 @@ impl Action {
             Action::RippleDelete => vec![plain(Key::IntlBackslash)],
             Action::Split => vec![plain(Key::T)],
             Action::ToggleDisabled => vec![plain(Key::D)],
+            Action::RetimeControls => vec![ctrl(Key::R)],
             Action::SelectAll => vec![ctrl(Key::A)],
             Action::SelectFromPlayhead => vec![Shortcut {
                 alt: true,

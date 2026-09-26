@@ -101,8 +101,8 @@ otio.effect_partly_ignored:
   it: "effetto \"%{effect}\" importato solo in parte su %{clips} clip"
 
 otio.speed_not_applied:
-  en: "speed %{percent}% of clip \"%{clip}\" kept but not played back"
-  it: "velocità %{percent}% della clip \"%{clip}\" conservata ma non riprodotta"
+  en: "speed %{percent}% of clip \"%{clip}\" (freeze frame or reverse) not supported: plays at 100%"
+  it: "velocità %{percent}% della clip \"%{clip}\" (fermo immagine o inversa) non supportata: riprodotta al 100%"
 
 otio.unsupported_in_stack:
   en: "%{schema} is not supported at track level"

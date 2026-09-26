@@ -40,6 +40,10 @@ history.paste_attributes:
   en: "Paste attributes"
   it: "Incolla attributi"
 
+history.clip_speed:
+  en: "Clip speed"
+  it: "Velocità clip"
+
 history.duplicate_clips:
   en: "Duplicate clips"
   it: "Duplica clip"

@@ -168,6 +168,9 @@ action.split:
 action.toggle_disabled:
   en: Disable/enable clip
   it: Disattiva/attiva clip
+action.retime_controls:
+  en: Retime controls
+  it: Controlli di velocità
 action.select_all:
   en: Select all clips
   it: Seleziona tutte le clip

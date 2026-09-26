@@ -138,7 +138,7 @@ fn exports_the_transform_as_resolve_effects() {
     t.track_mut(TransformParam::CropTop).default = 108.0;
     t.track_mut(TransformParam::Opacity).default = 80.0;
     t.flip = [true, false];
-    clip.effects.speed = Keyframed::constant(1.705_748_4);
+    clip.speed = Rational::from_percent(170.57);
     clip.effects.blend_mode = BlendMode::Screen;
     clip.fade_in = 12;
     project.timelines[timeline_id].tracks[0].clips.push(clip);
@@ -215,7 +215,7 @@ fn exports_the_transform_as_resolve_effects() {
     assert_eq!(warp["OTIO_SCHEMA"], "LinearTimeWarp.1");
     assert_eq!(
         (warp["time_scalar"].as_f64().unwrap() * 1e6).round() / 1e6,
-        1.705748
+        1.7057
     );
 }
 

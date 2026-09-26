@@ -117,6 +117,7 @@ impl TimelineAudio {
             channels,
             &mut self.buffers,
         ));
+        self.buffers.sweep_stretched();
         self.publish();
     }
 
@@ -139,9 +140,12 @@ impl TimelineAudio {
                 start: 0,
                 len: buffer.len() as u64 / channels.max(1) as u64,
                 source_offset: 0,
+                step: 1.0,
                 buffer,
                 gain_db: Keyframed::constant(0.0),
                 clip_fps: fps,
+                media_offset: 0,
+                media_step: 1.0,
                 fade_in: 0,
                 fade_out: 0,
             })
