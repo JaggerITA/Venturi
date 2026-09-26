@@ -40,9 +40,6 @@ keyframes.bezier:
   en: "Custom curve"
   it: "Curva personalizzata"
 
-keyframes.selection_hint:
-  en: "Click or drag a box to select keyframes; drag them to move them in time."
-  it: "Clicca o trascina un riquadro per selezionare i keyframe; trascinali per spostarli nel tempo."
 
 keyframes.gain:
   en: "Gain"

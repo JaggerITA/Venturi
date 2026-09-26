@@ -514,9 +514,6 @@ fn show_toolbar(
                 }
             }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.weak(t!("keyframes.selection_hint"));
-        });
     });
 }
 
