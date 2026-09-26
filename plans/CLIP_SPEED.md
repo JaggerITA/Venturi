@@ -7,9 +7,9 @@ the timeline changes (`len = len_at_100% / speed`). Constant speed only:
 no ramps, no reverse, no freeze frame (OTIO `FreezeFrame` stays a warning).
 
 Decisions (agreed with the user):
-- **Audio**: varispeed by default (pitch follows the speed, as Resolve
-  without "Pitch Correction"); a per-clip `pitch_correction` flag uses the
-  rubberband stretch instead (same pipeline as the "a" key).
+- **Audio**: pitch preserved by default (`pitch_correction`, rubberband
+  stretch, same pipeline as the "a" key); turned off per clip it becomes
+  varispeed (pitch follows the speed).
 - **Length** (`vv_core::SpeedFit`):
   - retime bar (edge drag and presets): exactly like a trim of the end —
     lengthening overwrites what follows, shortening leaves a gap, snapping

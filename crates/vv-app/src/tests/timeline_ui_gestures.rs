@@ -358,3 +358,76 @@ fn the_retime_bar_closes_with_its_x() {
     assert!(h.state.retime_controls.is_empty());
     assert_eq!(h.clip(0, ClipId(1)).speed, Rational::one());
 }
+
+/// Reported bug: an already retimed clip stopped a few frames short of
+/// where the edge was released.
+#[test]
+fn a_retimed_clip_ends_exactly_where_its_edge_is_released() {
+    for frames in [3, 7, 13, 20, 31, -9, -17] {
+        let mut h = media_harness();
+        {
+            let clip = h.project.timelines[h.timeline_id].tracks[0]
+                .clip_mut(ClipId(1))
+                .unwrap();
+            clip.set_speed(Rational::from_percent(198.97), Rational::one());
+        }
+        let tracks = &mut h.project.timelines[h.timeline_id].tracks;
+        tracks[0].clips.retain(|c| c.id == ClipId(1));
+        h.state.retime_controls.insert(ClipId(1));
+        h.frame(Vec::new());
+        let original_end = h.clip(0, ClipId(1)).timeline_end();
+        let rect = h.rect(ClipId(1));
+        h.drag(
+            egui::pos2(rect.right() - 2.0, rect.bottom() - 8.0),
+            egui::vec2(frames as f32 * PX_PER_FRAME, 0.0),
+        );
+        assert_eq!(
+            h.clip(0, ClipId(1)).timeline_end(),
+            original_end + frames,
+            "dragged by {frames} frames"
+        );
+    }
+}
+
+/// As above with a conformed clip (60 fps media on the 25 fps timeline)
+/// starting deep into its source.
+#[test]
+fn a_conformed_retimed_clip_ends_exactly_where_its_edge_is_released() {
+    for frames in [3, 7, 13, 20, 31, -9, -17] {
+        let mut h = media_harness();
+        let conform = Rational::conform_rate(Rational::new(25, 1), Rational::new(60, 1));
+        {
+            let media = match h.clip(0, ClipId(1)).source {
+                ClipSource::Media(id) => id,
+                _ => unreachable!(),
+            };
+            let item = &mut h.project.media_pool[media];
+            item.meta.fps = Rational::new(60, 1);
+            item.meta.duration_frames = 40_000;
+            let tracks = &mut h.project.timelines[h.timeline_id].tracks;
+            let mut clip = Clip::from_source_range(
+                ClipId(1),
+                ClipSource::Media(media),
+                20_011,
+                20_251,
+                0,
+                conform,
+            );
+            clip.set_speed(Rational::from_percent(198.97), conform);
+            tracks[0].clips = vec![clip];
+        }
+        h.state.retime_controls.insert(ClipId(1));
+        h.frame(Vec::new());
+        let original_end = h.clip(0, ClipId(1)).timeline_end();
+        let rect = h.rect(ClipId(1));
+        h.drag(
+            egui::pos2(rect.right() - 2.0, rect.bottom() - 8.0),
+            egui::vec2(frames as f32 * PX_PER_FRAME, 0.0),
+        );
+        assert_eq!(
+            h.clip(0, ClipId(1)).timeline_end(),
+            original_end + frames,
+            "dragged by {frames} frames"
+        );
+    }
+}

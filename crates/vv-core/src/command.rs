@@ -591,6 +591,10 @@ pub enum SpeedFit {
     /// The length follows the speed and nothing else moves: the caller frees
     /// the stretch gained first (`make_room_for_ranges`), as for a trim.
     Resize,
+    /// Like `Resize`, but the clips ending at `from` end exactly at `to`
+    /// (a dragged edge), within the media: the length recomputed from the
+    /// source range could miss it by the rounding.
+    ResizeTo { from: FrameIdx, to: FrameIdx },
 }
 
 /// Constant speed of `Media` clips (the caller passes whole linked groups):
@@ -659,13 +663,20 @@ impl Command for SetClipSpeed {
                 let Some(media) = media_pool.get(media_id) else {
                     continue;
                 };
-                let old_len = clip.timeline_len;
+                let (old_len, old_end) = (clip.timeline_len, clip.timeline_end());
                 clip.pitch_correction = self.pitch_correction;
                 clip.set_speed(self.speed, Rational::conform_rate(tl.fps, media.meta.fps));
-                if self.fit == SpeedFit::KeepLength {
+                let wanted_len = match self.fit {
+                    SpeedFit::KeepLength => Some(old_len),
+                    SpeedFit::ResizeTo { from, to } if from == old_end => {
+                        Some(to - clip.timeline_start)
+                    }
+                    _ => None,
+                };
+                if let Some(len) = wanted_len {
                     let available =
                         clip.rate.scale_round(media.meta.duration_frames) - clip.source_offset;
-                    clip.timeline_len = old_len.min(available).max(1);
+                    clip.timeline_len = len.min(available).max(1);
                     clip.fade_in = clip.fade_in.min(clip.timeline_len);
                     clip.fade_out = clip.fade_out.min(clip.timeline_len);
                 }

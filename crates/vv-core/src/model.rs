@@ -1255,7 +1255,7 @@ pub struct Clip {
     pub speed: Rational,
     /// Audio of a clip with `speed != 1`: pitch preserved (time-stretch)
     /// instead of following the speed.
-    #[serde(default)]
+    #[serde(default = "pitch_correction_default")]
     pub pitch_correction: bool,
     /// Excluded from compositing and mixing, but stays on the timeline.
     #[serde(default)]
@@ -1271,6 +1271,10 @@ pub struct Clip {
     /// Hand-picked timeline color; `None` = the one derived from the source kind.
     #[serde(default)]
     pub display_color: Option<ClipColor>,
+}
+
+fn pitch_correction_default() -> bool {
+    true
 }
 
 impl Clip {
@@ -1296,7 +1300,7 @@ impl Clip {
             audio_stream_index: 0,
             rate,
             speed: Rational::one(),
-            pitch_correction: false,
+            pitch_correction: pitch_correction_default(),
             disabled: false,
             fade_in: 0,
             fade_out: 0,

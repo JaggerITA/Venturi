@@ -246,7 +246,9 @@ struct RetimeState {
     clip_id: ClipId,
     start: FrameIdx,
     original_len: FrameIdx,
-    original_speed: vv_core::Rational,
+    /// Length of the source range at 100%, exact: the speed for a dragged
+    /// length is this over it, not a correction of the current (rounded) one.
+    len_at_100: FrameIdx,
     pitch_correction: bool,
     accum_px: f32,
     /// The linked group gets the same speed.
@@ -259,8 +261,8 @@ pub(crate) const SPEED_PERCENT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=10_0
 impl RetimeState {
     /// Lengths reachable within `SPEED_PERCENT_RANGE`.
     fn len_range(&self) -> (FrameIdx, FrameIdx) {
-        let len_at_100 = self.original_len as f64 * self.original_speed.as_percent() / 100.0;
-        let len = |percent: f64| (len_at_100 * 100.0 / percent).round().max(1.0) as FrameIdx;
+        let len =
+            |percent: f64| (self.len_at_100 as f64 * 100.0 / percent).round().max(1.0) as FrameIdx;
         (
             len(*SPEED_PERCENT_RANGE.end()),
             len(*SPEED_PERCENT_RANGE.start()),
@@ -268,10 +270,8 @@ impl RetimeState {
     }
 
     fn speed_for(&self, len: FrameIdx) -> vv_core::Rational {
-        self.original_speed.divided_by(vv_core::Rational::new(
-            len.max(1) as i32,
-            self.original_len.max(1) as i32,
-        ))
+        vv_core::Rational::new(self.len_at_100.max(1) as i32, 1)
+            .divided_by(vv_core::Rational::new(len.max(1) as i32, 1))
     }
 }
 
@@ -596,6 +596,8 @@ enum PendingAction {
         clips: Vec<ClipKey>,
         speed: vv_core::Rational,
         pitch_correction: bool,
+        /// A dragged end: from the old end to the released one, exactly.
+        resize_to: Option<(FrameIdx, FrameIdx)>,
     },
 }
 
@@ -2762,6 +2764,7 @@ pub fn show_timeline(
                                     clips: group,
                                     speed: vv_core::Rational::from_percent(percent),
                                     pitch_correction: visual.clip.pitch_correction,
+                                    resize_to: None,
                                 });
                             }
                             Some(RetimeBarAction::Dialog) => {
@@ -2953,7 +2956,12 @@ pub fn show_timeline(
                         && let Some(pos) = resp.hover_pos()
                         && let Some(zone) = edge_at(pos)
                     {
-                        edge_cursor = Some((pos, EdgeCursor::from_zone(zone)));
+                        let cursor = if retime_bar_shown && zone.edge() == TrimEdge::End {
+                            EdgeCursor::Retime
+                        } else {
+                            EdgeCursor::from_zone(zone)
+                        };
+                        edge_cursor = Some((pos, cursor));
                     } else if idle_hover
                         && !visual.locked
                         && let Some(pos) = resp.hover_pos()
@@ -3041,7 +3049,13 @@ pub fn show_timeline(
                                         Some(zone)
                                             if zone.edge() == TrimEdge::End && retime_bar_shown =>
                                         {
-                                            begin_retime(state, &visuals, visual)
+                                            begin_retime(
+                                                state,
+                                                &visuals,
+                                                project,
+                                                timeline_fps,
+                                                visual,
+                                            )
                                         }
                                         Some(zone) => {
                                             begin_trim(state, &visuals, project, visual, zone)
@@ -3141,10 +3155,12 @@ pub fn show_timeline(
                                 volume_drag_group = Some(d.group);
                             }
                             Some(Gesture::Retime(r)) if r.clip_id == visual.clip.id => {
+                                let len = retimed_new_len.unwrap_or(r.original_len);
                                 pending = Some(PendingAction::SetSpeed {
                                     clips: r.group.clone(),
-                                    speed: r.speed_for(retimed_new_len.unwrap_or(r.original_len)),
+                                    speed: r.speed_for(len),
                                     pitch_correction: r.pitch_correction,
+                                    resize_to: Some((r.start + r.original_len, r.start + len)),
                                 });
                             }
                             Some(Gesture::Trim(t)) if t.clip_id == visual.clip.id => {
@@ -3344,6 +3360,11 @@ pub fn show_timeline(
                         (false, TrimEdge::End) => EdgeCursor::TrimEnd,
                     };
                     edge_cursor = Some((pos, cursor));
+                }
+                if state.retiming().is_some()
+                    && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+                {
+                    edge_cursor = Some((pos, EdgeCursor::Retime));
                 }
                 if let Some((pos, cursor)) = edge_cursor {
                     paint_edge_cursor(ui.ctx(), pos, cursor);
@@ -3663,12 +3684,26 @@ fn format_duration(frames: FrameIdx, fps: f64) -> String {
     format!("{secs}:{f:02}")
 }
 
-fn begin_retime(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVisual) {
+fn begin_retime(
+    state: &mut TimelineState,
+    visuals: &[ClipVisual],
+    project: &Project,
+    timeline_fps: vv_core::Rational,
+    visual: &ClipVisual,
+) {
+    let clip = &visual.clip;
+    let conform = match clip.source {
+        ClipSource::Media(id) => project.media_pool.get(id).map(|m| m.meta.fps),
+        _ => None,
+    }
+    .map_or(vv_core::Rational::one(), |fps| {
+        vv_core::Rational::conform_rate(timeline_fps, fps)
+    });
     state.gesture = Some(Gesture::Retime(RetimeState {
-        clip_id: visual.clip.id,
-        start: visual.clip.timeline_start,
-        original_len: visual.clip.timeline_len,
-        original_speed: visual.clip.speed,
+        clip_id: clip.id,
+        start: clip.timeline_start,
+        original_len: clip.timeline_len,
+        len_at_100: conform.scale_round(clip.source_out()) - conform.scale_round(clip.source_in()),
         pitch_correction: visual.clip.pitch_correction,
         accum_px: 0.0,
         group: expand_to_linked_groups(visuals, [(visual.track_index, visual.clip.id)])
@@ -3757,7 +3792,6 @@ fn retime_bar(
     if show_close
         && ui
             .interact(close_rect, id.with("retime_close"), egui::Sense::click())
-            .on_hover_text(t!("timeline.retime_close"))
             .clicked()
     {
         action = Some(RetimeBarAction::Close);
@@ -5195,6 +5229,7 @@ fn apply_pending_action(
             clips,
             speed,
             pitch_correction,
+            resize_to,
         } => {
             let tl = &project.timelines[timeline_id];
             let overwritten: Vec<(usize, FrameIdx, FrameIdx)> = clips
@@ -5205,12 +5240,18 @@ fn apply_pending_action(
                         return None;
                     };
                     let media = project.media_pool.get(media_id)?;
-                    let mut retimed = clip.clone();
-                    retimed.set_speed(
-                        speed,
-                        vv_core::Rational::conform_rate(tl.fps, media.meta.fps),
-                    );
-                    grown_range(clip, track_index, TrimEdge::End, retimed.timeline_end())
+                    let new_end = match resize_to {
+                        Some((from, to)) if from == clip.timeline_end() => to,
+                        _ => {
+                            let mut retimed = clip.clone();
+                            retimed.set_speed(
+                                speed,
+                                vv_core::Rational::conform_rate(tl.fps, media.meta.fps),
+                            );
+                            retimed.timeline_end()
+                        }
+                    };
+                    grown_range(clip, track_index, TrimEdge::End, new_end)
                 })
                 .collect();
             let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
@@ -5226,7 +5267,10 @@ fn apply_pending_action(
                 clips,
                 speed,
                 pitch_correction,
-                vv_core::SpeedFit::Resize,
+                match resize_to {
+                    Some((from, to)) => vv_core::SpeedFit::ResizeTo { from, to },
+                    None => vv_core::SpeedFit::Resize,
+                },
             )));
             history.do_command(
                 project,
@@ -5980,6 +6024,8 @@ enum EdgeCursor {
     TrimStart,
     TrimEnd,
     Roll,
+    /// End of a clip with the retime bar: it changes the speed, not the trim.
+    Retime,
 }
 
 impl EdgeCursor {
@@ -6001,6 +6047,10 @@ fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
         egui::Order::Tooltip,
         egui::Id::new("timeline_edge_cursor"),
     ));
+    if cursor == EdgeCursor::Retime {
+        paint_retime_cursor(&painter, pos);
+        return;
+    }
     const HALF_H: f32 = 8.0;
     const TICK: f32 = 4.0;
     let bracket = |x: f32, towards: f32| {
@@ -6032,6 +6082,7 @@ fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
             vec![bracket(pos.x - 2.0, -1.0), bracket(pos.x + 2.0, 1.0)],
             vec![arrow(pos.x - 10.0, -1.0), arrow(pos.x + 10.0, 1.0)],
         ),
+        EdgeCursor::Retime => unreachable!("drawn by paint_retime_cursor"),
     };
     for points in &brackets {
         painter.line(points.clone(), egui::Stroke::new(4.0, egui::Color32::BLACK));
@@ -6046,6 +6097,61 @@ fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
             egui::Stroke::new(1.0, egui::Color32::BLACK),
         ));
     }
+}
+
+/// A white double arrow with "%" over it: unlike the brackets of the trim and
+/// the black system arrow of the fades.
+fn paint_retime_cursor(painter: &egui::Painter, pos: egui::Pos2) {
+    const HALF_W: f32 = 11.0;
+    let outline = egui::Stroke::new(1.0, egui::Color32::BLACK);
+    painter.line_segment(
+        [
+            pos - egui::vec2(HALF_W - 4.0, 0.0),
+            pos + egui::vec2(HALF_W - 4.0, 0.0),
+        ],
+        egui::Stroke::new(5.0, egui::Color32::BLACK),
+    );
+    painter.line_segment(
+        [
+            pos - egui::vec2(HALF_W - 4.0, 0.0),
+            pos + egui::vec2(HALF_W - 4.0, 0.0),
+        ],
+        egui::Stroke::new(3.0, egui::Color32::WHITE),
+    );
+    for dir in [-1.0f32, 1.0] {
+        let tip = pos.x + dir * HALF_W;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(tip, pos.y),
+                egui::pos2(tip - dir * 6.0, pos.y - 5.5),
+                egui::pos2(tip - dir * 6.0, pos.y + 5.5),
+            ],
+            egui::Color32::WHITE,
+            outline,
+        ));
+    }
+    let label = pos - egui::vec2(0.0, 10.0);
+    for offset in [
+        egui::vec2(-1.0, 0.0),
+        egui::vec2(1.0, 0.0),
+        egui::vec2(0.0, -1.0),
+        egui::vec2(0.0, 1.0),
+    ] {
+        painter.text(
+            label + offset,
+            egui::Align2::CENTER_BOTTOM,
+            "%",
+            egui::FontId::proportional(11.0),
+            egui::Color32::BLACK,
+        );
+    }
+    painter.text(
+        label,
+        egui::Align2::CENTER_BOTTOM,
+        "%",
+        egui::FontId::proportional(11.0),
+        egui::Color32::WHITE,
+    );
 }
 
 /// The neighbors do not limit the trim (they get overwritten on release): only the

@@ -429,7 +429,7 @@ impl Importer<'_> {
             audio_stream_index,
             rate,
             speed,
-            pitch_correction: venturi["pitch_correction"].as_bool().unwrap_or(false),
+            pitch_correction: venturi["pitch_correction"].as_bool().unwrap_or(true),
             disabled: false,
             fade_in: fades.0.clamp(0, timeline_len),
             fade_out: fades.1.clamp(0, timeline_len),

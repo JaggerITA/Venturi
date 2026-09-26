@@ -52,10 +52,6 @@ timeline.change_clip_speed:
   en: "Change Clip Speed…"
   it: "Cambia velocità clip…"
 
-timeline.retime_close:
-  en: "Hide the retime controls"
-  it: "Nascondi i controlli di velocità"
-
 timeline.make_compound_clip:
   en: "Compound Clip"
   it: "Compound Clip"
