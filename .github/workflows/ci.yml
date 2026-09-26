@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    # Same distro and packages as container/Containerfile: Fedora's FFmpeg
+    # (RPM Fusion) is the one the project is developed against.
+    container: fedora:44
+    steps:
+      - name: Install dependencies
+        run: |
+          dnf install -y \
+            https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
+          dnf install -y \
+            rust cargo clippy rustfmt git \
+            ffmpeg ffmpeg-devel \
+            clang clang-devel \
+            wayland-devel libxkbcommon-devel libxkbcommon-x11 libX11-devel \
+            vulkan-loader-devel mesa-vulkan-drivers \
+            alsa-lib-devel
+          # No sound card on the runner: a null device keeps cpal happy.
+          printf 'pcm.!default {\n  type null\n}\nctl.!default {\n  type null\n}\n' \
+            > /etc/asound.conf
+
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Single-threaded via .cargo/config.toml; the GPU tests run on
+      # lavapipe (software Vulkan, part of mesa-vulkan-drivers).
+      - name: Test
+        run: cargo test --workspace
