@@ -25,7 +25,7 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 | Undo/redo | command pattern (invertible commands) | light, unbounded history, consistent with a data-oriented architecture |
 | Frame rate | per Timeline (not per Project): a Project holds N Timelines, each with its own fps | as in Resolve: Project = container, Timeline = sequence with its own fps |
 | Ripple delete | global across all tracks (closes the gap everywhere, keeps A/V sync) | explicit choice for synchronised multi-track editing |
-| Keyframes | on every transform parameter (crop/zoom/gain/color) | explicitly requested |
+| Keyframes | on every transform parameter (crop/zoom/gain/color) | a design requirement from the start |
 | Cache | RAM frame cache with a global budget, eviction by distance from the playhead + all-intra proxies generated in the background | best perf/UX compromise on long-GOP x264 |
 | Target resolution | 1080p primarily | sizes the default cache budgets |
 | Waveform | yes, in the timeline | useful for cutting on speech pauses |

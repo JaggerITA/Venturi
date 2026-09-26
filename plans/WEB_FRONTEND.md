@@ -2,14 +2,14 @@
 
 Design document for decoupling editing from egui and enabling a web client
 (e.g. a tablet on the local network) that drives a headless backend running
-on a desktop PC. Written to be used as a starting point in a separate
-chat/session — it does not touch the ongoing work on the native egui
-frontend, which stays the "main" client until further notice.
+on a desktop PC. Written as a starting point for separate work — it does
+not touch the ongoing work on the native egui frontend, which stays the
+"main" client until further notice.
 
-It comes from an exploratory question by the user ("what if the frontend
-were web-based? can I mount it on a tablet connected to the backend on a
-desktop PC?"), not from an already decided requirement: before implementing,
-check that the stage 1 choices (see below) are still the desired ones.
+It comes from an exploratory question ("what if the frontend were
+web-based? could it run on a tablet connected to the backend on a desktop
+PC?"), not from an already decided requirement: before implementing, check
+that the stage 1 choices (see below) are still the desired ones.
 
 ## Why it is feasible without rewriting the backend
 
@@ -172,7 +172,7 @@ complexity trade-off.
 Do not start stage 3 before verifying that stage 2 is really insufficient
 in real use: that is where complexity rises faster than added value.
 
-## Open decisions (to settle in the separate chat)
+## Open decisions (to settle before starting)
 
 - Web client framework: vanilla TS + canvas is closest to the "no needless
   overhead" style of the rest of the project; React/Svelte are fine if UI

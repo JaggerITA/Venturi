@@ -60,8 +60,8 @@ enabled — Fedora's own system build of FFmpeg does not include libx264 for
 licensing reasons, but this project needs it both for decoding common H.264
 sources and for export/proxies.
 
-On Debian/Ubuntu the equivalents (not verified in this session, only
-translated from the Fedora packages above):
+On Debian/Ubuntu the equivalents (translated from the Fedora packages
+above, less regularly tested):
 
 ```sh
 sudo apt install \
@@ -249,8 +249,8 @@ cargo fmt --check
 
 [`container/`](container/README.md) contains a Podman environment to
 build/run/screenshot vv-app without a real graphical session (Xvfb + software
-Vulkan) — useful for checking the UI in isolation, or from an agent without
-access to the user's display.
+Vulkan) — useful for checking the UI in isolation, or from a machine without a
+display.
 
 ## Licence
 
