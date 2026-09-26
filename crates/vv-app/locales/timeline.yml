@@ -45,20 +45,20 @@ timeline.link_hint:
   it: "Seleziona almeno 2 clip per collegarle"
 
 timeline.retime_controls:
-  en: "Retime Controls"
-  it: "Controlli di velocità"
+  en: "Speed handles"
+  it: "Maniglie velocità"
 
 timeline.change_clip_speed:
-  en: "Change Clip Speed…"
-  it: "Cambia velocità clip…"
+  en: "Clip speed…"
+  it: "Velocità clip…"
 
 timeline.make_compound_clip:
   en: "Compound Clip"
   it: "Compound Clip"
 
 timeline.paste_attributes:
-  en: "Paste attributes..."
-  it: "Incolla attributi..."
+  en: "Paste properties..."
+  it: "Incolla proprietà..."
 
 timeline.media_offline:
   en: "⚠ Media offline"
@@ -121,29 +121,29 @@ timeline.color_gray:
   it: "Grigio"
 
 speed.title:
-  en: "Change Clip Speed"
-  it: "Cambia velocità clip"
+  en: "Clip Speed"
+  it: "Velocità clip"
 
 speed.speed:
   en: "Speed"
   it: "Velocità"
 
 speed.pitch_correction:
-  en: "Pitch correction"
-  it: "Correzione del tono"
+  en: "Keep pitch"
+  it: "Mantieni intonazione"
 
 speed.pitch_correction_hint:
   en: "Keeps the pitch of the audio; without it the pitch follows the speed."
-  it: "Mantiene il tono dell'audio; senza, il tono segue la velocità."
+  it: "Mantiene l'intonazione dell'audio; senza, segue la velocità."
 
 speed.ripple:
-  en: "Ripple sequence"
-  it: "Ripple della sequenza"
+  en: "Push following clips"
+  it: "Sposta le clip successive"
 
 speed.ripple_hint:
   en: "The clip changes length and what follows moves with it; otherwise it keeps its length and shows more or less of the source."
   it: "La clip cambia lunghezza e ciò che segue si sposta con lei; altrimenti mantiene la lunghezza e mostra più o meno sorgente."
 
 speed.apply:
-  en: "Change"
-  it: "Cambia"
+  en: "Apply"
+  it: "Applica"

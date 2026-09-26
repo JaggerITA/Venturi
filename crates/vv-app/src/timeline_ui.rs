@@ -3721,7 +3721,7 @@ fn format_speed(speed: vv_core::Rational) -> String {
     }
 }
 
-/// The bar on top of a clip with its retime controls shown: the speed, with
+/// The bar on top of a clip with its speed handles shown: the speed, with
 /// the presets menu, and `×` to hide it.
 fn retime_bar(
     ui: &egui::Ui,
@@ -3733,7 +3733,7 @@ fn retime_bar(
 ) -> Option<RetimeBarAction> {
     let height = retime_bar_height(clip_rect);
     let bar = egui::Rect::from_min_size(clip_rect.min, egui::vec2(clip_rect.width(), height));
-    painter.rect_filled(bar, 2.0, egui::Color32::from_black_alpha(170));
+    painter.rect_filled(bar, 2.0, crate::theme::ACCENT_FILL);
     let font = egui::FontId::proportional(11.0);
     let galley = painter.layout_no_wrap(
         format!("{} ⏷", format_speed(speed)),

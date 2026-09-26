@@ -23,36 +23,83 @@ pub(crate) enum Attribute {
     Volume,
 }
 
+/// The dialog's sections, in the order and with the names of the
+/// Properties panel.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AttributeGroup {
-    Clip,
-    Video,
+pub(crate) enum Section {
+    Transform,
+    Crop,
+    Blending,
+    Filters,
+    Transitions,
     Audio,
+    Clip,
+}
+
+impl Section {
+    const ALL: [Section; 7] = [
+        Section::Transform,
+        Section::Crop,
+        Section::Blending,
+        Section::Filters,
+        Section::Transitions,
+        Section::Audio,
+        Section::Clip,
+    ];
+
+    fn title(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Section::Transform => t!("props.transform"),
+            Section::Crop => t!("props.cropping"),
+            Section::Blending => t!("props.composite"),
+            Section::Filters => t!("props.filters"),
+            Section::Transitions => t!("props.transition"),
+            Section::Audio => t!("props.tab_audio"),
+            Section::Clip => t!("paste_attr.clip"),
+        }
+    }
+
+    /// The kind of clip the section applies to; `None` = any.
+    fn kind(self) -> Option<TrackKind> {
+        match self {
+            Section::Clip => None,
+            Section::Audio => Some(TrackKind::Audio),
+            _ => Some(TrackKind::Video),
+        }
+    }
 }
 
 impl Attribute {
     const ALL: [Attribute; 14] = [
-        Attribute::Fades,
-        Attribute::Speed,
-        Attribute::BlendMode,
-        Attribute::Opacity,
+        Attribute::Zoom,
         Attribute::Position,
         Attribute::Rotation,
         Attribute::AnchorPoint,
-        Attribute::Zoom,
+        Attribute::Flip,
         Attribute::Crop,
         Attribute::CropSoftness,
-        Attribute::Flip,
+        Attribute::BlendMode,
+        Attribute::Opacity,
         Attribute::Filters,
         Attribute::Transitions,
         Attribute::Volume,
+        Attribute::Fades,
+        Attribute::Speed,
     ];
 
-    fn group(self) -> AttributeGroup {
+    fn section(self) -> Section {
         match self {
-            Attribute::Fades | Attribute::Speed => AttributeGroup::Clip,
-            Attribute::Volume => AttributeGroup::Audio,
-            _ => AttributeGroup::Video,
+            Attribute::Zoom
+            | Attribute::Position
+            | Attribute::Rotation
+            | Attribute::AnchorPoint
+            | Attribute::Flip => Section::Transform,
+            Attribute::Crop | Attribute::CropSoftness => Section::Crop,
+            Attribute::BlendMode | Attribute::Opacity => Section::Blending,
+            Attribute::Filters => Section::Filters,
+            Attribute::Transitions => Section::Transitions,
+            Attribute::Volume => Section::Audio,
+            Attribute::Fades | Attribute::Speed => Section::Clip,
         }
     }
 
@@ -60,18 +107,18 @@ impl Attribute {
         match self {
             Attribute::Fades => t!("paste_attr.fades"),
             Attribute::Speed => t!("paste_attr.speed"),
-            Attribute::BlendMode => t!("paste_attr.blend_mode"),
-            Attribute::Opacity => t!("paste_attr.opacity"),
-            Attribute::Position => t!("paste_attr.position"),
-            Attribute::Rotation => t!("paste_attr.rotation"),
-            Attribute::AnchorPoint => t!("paste_attr.anchor_point"),
-            Attribute::Zoom => t!("paste_attr.zoom"),
-            Attribute::Crop => t!("paste_attr.crop"),
-            Attribute::CropSoftness => t!("paste_attr.crop_softness"),
-            Attribute::Flip => t!("paste_attr.flip"),
-            Attribute::Filters => t!("paste_attr.filters"),
-            Attribute::Transitions => t!("paste_attr.transitions"),
-            Attribute::Volume => t!("paste_attr.volume"),
+            Attribute::BlendMode => t!("props.composite_mode"),
+            Attribute::Opacity => t!("props.opacity"),
+            Attribute::Position => t!("props.position"),
+            Attribute::Rotation => t!("props.rotation"),
+            Attribute::AnchorPoint => t!("props.anchor_point"),
+            Attribute::Zoom => t!("props.zoom"),
+            Attribute::Crop => t!("paste_attr.crop_edges"),
+            Attribute::CropSoftness => t!("props.softness"),
+            Attribute::Flip => t!("props.flip"),
+            Attribute::Filters => t!("props.filters"),
+            Attribute::Transitions => t!("props.transition"),
+            Attribute::Volume => t!("props.volume"),
         }
     }
 
@@ -127,14 +174,14 @@ impl PasteAttributesDialog {
         }
     }
 
-    /// A group is shown only if some target can receive it.
-    fn group_applies(&self, group: AttributeGroup) -> bool {
-        match group {
-            AttributeGroup::Clip => !self.targets.is_empty(),
-            AttributeGroup::Video => {
+    /// A section is shown only if some target can receive it.
+    fn section_applies(&self, section: Section) -> bool {
+        match section.kind() {
+            None => !self.targets.is_empty(),
+            Some(TrackKind::Video) => {
                 self.video_targets > 0 && self.has_source_for(TrackKind::Video)
             }
-            AttributeGroup::Audio => {
+            Some(TrackKind::Audio) => {
                 self.audio_targets > 0 && self.has_source_for(TrackKind::Audio)
             }
         }
@@ -233,53 +280,24 @@ impl VenturiApp {
             .resizable(false)
             .default_width(420.0)
             .show(ctx, |ui| {
-                egui::Grid::new("paste_attributes_header")
-                    .num_columns(2)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label(t!("paste_attr.from"));
-                        ui.label(&dialog.source_name);
-                        ui.end_row();
-                        ui.label(t!("paste_attr.to"));
-                        ui.label(t!(
-                            "paste_attr.target_count",
-                            video = dialog.video_targets,
-                            audio = dialog.audio_targets
-                        ));
-                        ui.end_row();
-                    });
-                ui.separator();
+                ui.label(t!(
+                    "paste_attr.context",
+                    source = dialog.source_name,
+                    count = dialog.targets.len()
+                ));
 
-                ui.label(egui::RichText::new(t!("paste_attr.keyframes")).strong());
-                ui.horizontal(|ui| {
-                    ui.radio_value(
-                        &mut dialog.keyframe_mode,
-                        KeyframeMode::MaintainTiming,
-                        t!("paste_attr.maintain_timing"),
-                    );
-                    ui.radio_value(
-                        &mut dialog.keyframe_mode,
-                        KeyframeMode::StretchToFit,
-                        t!("paste_attr.stretch_to_fit"),
-                    );
-                });
-
-                for (group, title) in [
-                    (AttributeGroup::Clip, t!("paste_attr.clip_attributes")),
-                    (AttributeGroup::Video, t!("paste_attr.video_attributes")),
-                    (AttributeGroup::Audio, t!("paste_attr.audio_attributes")),
-                ] {
-                    if !dialog.group_applies(group) {
+                for section in Section::ALL {
+                    if !dialog.section_applies(section) {
                         continue;
                     }
                     let members: Vec<Attribute> = Attribute::ALL
                         .into_iter()
-                        .filter(|a| a.group() == group)
+                        .filter(|a| a.section() == section)
                         .collect();
                     ui.separator();
                     let mut all = members.iter().all(|a| dialog.selected.contains(a));
                     if ui
-                        .checkbox(&mut all, egui::RichText::new(title).strong())
+                        .checkbox(&mut all, egui::RichText::new(section.title()).strong())
                         .changed()
                     {
                         for attribute in &members {
@@ -290,11 +308,12 @@ impl VenturiApp {
                             }
                         }
                     }
-                    egui::Grid::new(("paste_attributes_group", group as usize))
-                        .num_columns(3)
-                        .spacing([12.0, 4.0])
-                        .show(ui, |ui| {
-                            for (i, attribute) in members.iter().enumerate() {
+                    if members.len() < 2 {
+                        continue;
+                    }
+                    ui.indent(("paste_attributes_section", section as usize), |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for attribute in &members {
                                 let mut on = dialog.selected.contains(attribute);
                                 if ui.checkbox(&mut on, attribute.label()).changed() {
                                     if on {
@@ -303,12 +322,23 @@ impl VenturiApp {
                                         dialog.selected.remove(attribute);
                                     }
                                 }
-                                if i % 3 == 2 {
-                                    ui.end_row();
-                                }
                             }
                         });
+                    });
                 }
+
+                ui.separator();
+                ui.label(egui::RichText::new(t!("paste_attr.keyframes")).strong());
+                ui.radio_value(
+                    &mut dialog.keyframe_mode,
+                    KeyframeMode::MaintainTiming,
+                    t!("paste_attr.maintain_timing"),
+                );
+                ui.radio_value(
+                    &mut dialog.keyframe_mode,
+                    KeyframeMode::StretchToFit,
+                    t!("paste_attr.stretch_to_fit"),
+                );
 
                 ui.separator();
                 ui.horizontal(|ui| {

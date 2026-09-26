@@ -1,4 +1,4 @@
-//! Clip speed: "Change Clip Speed…" dialog and the Ctrl+R retime controls.
+//! Clip speed: its dialog and the Ctrl+R speed handles.
 
 use super::*;
 use timeline_ui::SPEED_PERCENT_RANGE;
@@ -77,6 +77,14 @@ impl VenturiApp {
                             .max_decimals(2)
                             .suffix("%"),
                     );
+                    for preset in [50.0, 100.0, 200.0] {
+                        if ui
+                            .selectable_label(dialog.percent == preset, format!("{preset:.0}%"))
+                            .clicked()
+                        {
+                            dialog.percent = preset;
+                        }
+                    }
                 });
                 ui.checkbox(&mut dialog.pitch_correction, t!("speed.pitch_correction"))
                     .on_hover_text(t!("speed.pitch_correction_hint"));

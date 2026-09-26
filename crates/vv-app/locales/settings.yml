@@ -154,8 +154,8 @@ action.paste:
   en: Paste
   it: Incolla
 action.paste_attributes:
-  en: Paste attributes
-  it: Incolla attributi
+  en: Paste properties
+  it: Incolla proprietà
 action.delete:
   en: Delete
   it: Elimina
@@ -169,8 +169,8 @@ action.toggle_disabled:
   en: Disable/enable clip
   it: Disattiva/attiva clip
 action.retime_controls:
-  en: Retime controls
-  it: Controlli di velocità
+  en: Speed handles
+  it: Maniglie velocità
 action.select_all:
   en: Select all clips
   it: Seleziona tutte le clip

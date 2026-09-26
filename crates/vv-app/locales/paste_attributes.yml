@@ -1,44 +1,28 @@
 _version: 2
 
 paste_attr.title:
-  en: "Paste Attributes"
-  it: "Incolla attributi"
+  en: "Paste Properties"
+  it: "Incolla proprietà"
 
-paste_attr.from:
-  en: "From"
-  it: "Da"
-
-paste_attr.to:
-  en: "To"
-  it: "A"
-
-paste_attr.target_count:
-  en: "%{video} video and %{audio} audio clips"
-  it: "%{video} clip video e %{audio} audio"
+paste_attr.context:
+  en: "From %{source} onto %{count} clips"
+  it: "Da %{source} a %{count} clip"
 
 paste_attr.keyframes:
   en: "Keyframes"
   it: "Keyframe"
 
 paste_attr.maintain_timing:
-  en: "Maintain Timing"
-  it: "Mantieni il timing"
+  en: "Keep original timing"
+  it: "Mantieni i tempi originali"
 
 paste_attr.stretch_to_fit:
-  en: "Stretch to Fit"
-  it: "Adatta alla durata"
+  en: "Fit to clip length"
+  it: "Adatta alla durata della clip"
 
-paste_attr.clip_attributes:
-  en: "Clip Attributes"
-  it: "Attributi clip"
-
-paste_attr.video_attributes:
-  en: "Video Attributes"
-  it: "Attributi video"
-
-paste_attr.audio_attributes:
-  en: "Audio Attributes"
-  it: "Attributi audio"
+paste_attr.clip:
+  en: "Clip"
+  it: "Clip"
 
 paste_attr.apply:
   en: "Apply"
@@ -52,50 +36,6 @@ paste_attr.speed:
   en: "Speed"
   it: "Velocità"
 
-paste_attr.blend_mode:
-  en: "Composition Mode"
-  it: "Modo di composizione"
-
-paste_attr.opacity:
-  en: "Opacity"
-  it: "Opacità"
-
-paste_attr.position:
-  en: "Position"
-  it: "Posizione"
-
-paste_attr.rotation:
-  en: "Rotation Angle"
-  it: "Rotazione"
-
-paste_attr.anchor_point:
-  en: "Anchor Point"
-  it: "Punto di ancoraggio"
-
-paste_attr.zoom:
-  en: "Zoom"
-  it: "Zoom"
-
-paste_attr.crop:
-  en: "Crop"
-  it: "Ritaglio"
-
-paste_attr.crop_softness:
-  en: "Softness"
-  it: "Sfumatura"
-
-paste_attr.flip:
-  en: "Flip"
-  it: "Ribaltamento"
-
-paste_attr.filters:
-  en: "Filters"
-  it: "Filtri"
-
-paste_attr.transitions:
-  en: "Transitions"
-  it: "Transizioni"
-
-paste_attr.volume:
-  en: "Volume"
-  it: "Volume"
+paste_attr.crop_edges:
+  en: "Edges"
+  it: "Lati"
