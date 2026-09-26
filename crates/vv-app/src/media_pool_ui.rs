@@ -869,12 +869,12 @@ impl VenturiApp {
                     ui.painter().rect_filled(
                         rect,
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                        crate::theme::ACCENT_TRANSLUCENT,
                     );
                     ui.painter().rect_stroke(
                         rect,
                         0.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                        egui::Stroke::new(1.0, crate::theme::ACCENT),
                         egui::StrokeKind::Inside,
                     );
                 }

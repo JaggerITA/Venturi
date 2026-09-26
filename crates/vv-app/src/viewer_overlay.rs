@@ -274,7 +274,7 @@ pub fn show(
     }
 
     let painter = ui.painter().with_clip_rect(area);
-    let accent = egui::Color32::from_rgb(70, 130, 240);
+    let accent = crate::theme::ACCENT;
     let line = egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 232, 245));
     let mut outline = corners.to_vec();
     outline.push(corners[0]);

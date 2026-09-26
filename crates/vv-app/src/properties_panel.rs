@@ -13,7 +13,6 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
         (PropertiesTab::Selection, t!("props.tab_selection")),
     ];
     const TAB_HEIGHT: f32 = 26.0;
-    const UNDERLINE: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for (tab, label) in tabs {
@@ -46,7 +45,7 @@ pub(crate) fn properties_tab_bar(ui: &mut egui::Ui, current: &mut PropertiesTab)
                 let y = rect.bottom() - 1.0;
                 ui.painter().line_segment(
                     [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(2.0, UNDERLINE),
+                    egui::Stroke::new(2.0, crate::theme::ACCENT),
                 );
             }
         }
@@ -476,7 +475,7 @@ pub(crate) fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response 
     let t = ui.ctx().animate_bool(response.id, *on);
     let painter = ui.painter();
     let track = if *on {
-        egui::Color32::from_rgb(200, 60, 60)
+        crate::theme::ACCENT
     } else {
         ui.visuals().widgets.inactive.bg_fill
     };
@@ -985,8 +984,8 @@ pub(crate) fn keyframe_arrow(
 /// Size of the keyframe diamond.
 pub(crate) const KEYFRAME_DIAMOND_SIZE: egui::Vec2 = egui::Vec2::new(20.0, 20.0);
 
-/// The red of the diamond when the playhead is on a keyframe.
-pub(crate) const KEYFRAME_HERE_COLOR: egui::Color32 = egui::Color32::from_rgb(225, 70, 70);
+/// The color of the diamond when the playhead is on a keyframe.
+pub(crate) const KEYFRAME_HERE_COLOR: egui::Color32 = crate::theme::ACCENT;
 
 /// The clip a panel command acts on: timeline, track, id.
 pub(crate) type ClipRef = (TimelineId, usize, ClipId);

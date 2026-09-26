@@ -123,17 +123,12 @@ pub fn show_transport(
         ));
     }
 
-    let playhead_color = egui::Color32::from_rgb(220, 50, 50);
-    let px = x_of(playhead);
-    painter.vline(
-        px,
-        rect.top() + 2.0..=track.bottom() + 4.0,
-        egui::Stroke::new(2.0, playhead_color),
-    );
-    painter.rect_filled(
-        egui::Rect::from_center_size(egui::pos2(px, rect.top() + 6.0), egui::vec2(10.0, 10.0)),
-        2.0,
-        playhead_color,
+    crate::theme::paint_playhead(
+        &painter,
+        x_of(playhead),
+        rect.top() + 2.0,
+        track.top(),
+        track.bottom() + 4.0,
     );
 
     ui.vertical_centered(|ui| {

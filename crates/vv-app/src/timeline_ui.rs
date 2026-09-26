@@ -992,7 +992,7 @@ fn draw_track_headers(
                 }
             }
             TrackKind::Audio => {
-                let solo_color = egui::Color32::from_rgb(215, 170, 40);
+                let solo_color = crate::theme::ACCENT;
                 if toggle(66.0, "solo_track", &t!("timeline.solo"), &|p, r| {
                     paint_letter_button(p, r, "S", flags.solo.then_some(solo_color))
                 }) {
@@ -1002,7 +1002,7 @@ fn draw_track_headers(
                         !flags.solo,
                     ));
                 }
-                let mute_color = egui::Color32::from_rgb(200, 60, 60);
+                let mute_color = egui::Color32::from_rgb(120, 150, 190);
                 if toggle(90.0, "mute_track", &t!("timeline.mute"), &|p, r| {
                     paint_letter_button(p, r, "M", flags.muted.then_some(mute_color))
                 }) {
@@ -1167,7 +1167,7 @@ fn paint_lock_icon(painter: &egui::Painter, rect: egui::Rect, locked: bool) {
     painter.add(egui::Shape::line(points, egui::Stroke::new(1.6, color)));
 }
 
-/// Film strip; crossed out in red if the track is disabled.
+/// Film strip; crossed out if the track is disabled.
 fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
     let color = egui::Color32::from_gray(if enabled { 200 } else { 100 });
     let film = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 11.0));
@@ -1193,7 +1193,7 @@ fn paint_film_icon(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
                 film.left_bottom() + egui::vec2(-1.0, 1.0),
                 film.right_top() + egui::vec2(1.0, -1.0),
             ],
-            egui::Stroke::new(1.6, egui::Color32::from_rgb(220, 70, 70)),
+            egui::Stroke::new(1.6, crate::theme::ACCENT),
         );
     }
 }
@@ -2260,12 +2260,12 @@ pub fn show_timeline(
                     painter.rect_filled(
                         marquee_rect,
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                        crate::theme::ACCENT_TRANSLUCENT,
                     );
                     painter.rect_stroke(
                         marquee_rect,
                         0.0,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                        egui::Stroke::new(1.0, crate::theme::ACCENT),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -4824,27 +4824,14 @@ fn show_ruler(
     }
 }
 
-/// Playhead line plus a triangular head in the ruler.
 fn paint_playhead(painter: &egui::Painter, origin: egui::Pos2, x_offset: f32, visual_height: f32) {
-    let px = origin.x + x_offset;
-    let playhead_color = egui::Color32::from_rgb(220, 50, 50);
-    painter.line_segment(
-        [
-            egui::pos2(px, origin.y),
-            egui::pos2(px, origin.y + visual_height),
-        ],
-        egui::Stroke::new(2.0, playhead_color),
+    crate::theme::paint_playhead(
+        painter,
+        origin.x + x_offset,
+        origin.y,
+        origin.y + RULER_HEIGHT,
+        origin.y + visual_height,
     );
-    const PLAYHEAD_HEAD_HALF_WIDTH: f32 = 6.0;
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(px - PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-            egui::pos2(px + PLAYHEAD_HEAD_HALF_WIDTH, origin.y),
-            egui::pos2(px, origin.y + RULER_HEIGHT),
-        ],
-        playhead_color,
-        egui::Stroke::NONE,
-    ));
 }
 
 fn apply_pending_action(
@@ -5518,13 +5505,13 @@ fn clip_color_label(color: vv_core::ClipColor) -> Cow<'static, str> {
 
 const DISABLED_BADGE_SIZE: f32 = 12.0;
 
-/// Small red crossed-out square in front of the name of a disabled clip.
+/// Small crossed-out square in front of the name of a disabled clip.
 fn paint_disabled_badge(painter: &egui::Painter, top_left: egui::Pos2) {
     let rect = egui::Rect::from_min_size(
         top_left + egui::vec2(0.0, 1.0),
         egui::vec2(DISABLED_BADGE_SIZE, DISABLED_BADGE_SIZE),
     );
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(200, 60, 60));
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(60));
     let inner = rect.shrink(3.0);
     painter.line_segment(
         [inner.left_bottom(), inner.right_top()],

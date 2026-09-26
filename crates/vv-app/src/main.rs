@@ -25,6 +25,7 @@ mod render_ahead;
 mod settings;
 mod settings_dialog;
 mod speed_dialog;
+mod theme;
 mod thumbnail_worker;
 mod timeline_audio;
 mod timeline_ui;
@@ -2029,7 +2030,7 @@ impl VenturiApp {
                         egui::Align2::CENTER_CENTER,
                         t!("viewer.media_offline"),
                         egui::FontId::proportional(24.0),
-                        egui::Color32::from_rgb(230, 70, 70),
+                        theme::ERROR,
                     );
                 }
 
@@ -3592,7 +3593,7 @@ impl eframe::App for VenturiApp {
                 Some(ViewerFrameKind::Offline) => {
                     ui.centered_and_justified(|ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(230, 70, 70),
+                            theme::ERROR,
                             egui::RichText::new(t!("viewer.media_offline")).size(24.0),
                         );
                     });
@@ -3771,6 +3772,7 @@ fn main() -> eframe::Result<()> {
                 o.input_options.zoom_modifier = egui::Modifiers::ALT;
                 o.input_options.horizontal_scroll_modifier = egui::Modifiers::CTRL;
             });
+            theme::apply(&cc.egui_ctx);
             let mut app = VenturiApp::default();
             app.settings_path = settings::Settings::default_path();
             if let Some(path) = &app.settings_path {
