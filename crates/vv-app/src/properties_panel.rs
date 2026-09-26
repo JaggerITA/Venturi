@@ -198,7 +198,8 @@ pub(crate) fn text_align_button(
     response
 }
 
-/// Title tab: edits `title` in place, `true` if anything changed.
+/// Text section of a text clip, which folds as a whole: edits `title` in
+/// place, `true` if anything changed.
 pub(crate) fn title_editor(
     ui: &mut egui::Ui,
     title: &mut vv_core::TitleParams,
@@ -276,10 +277,8 @@ pub(crate) fn title_editor(
             title.font_weight = defaults.font_weight;
             title.italic = defaults.italic;
         }
-    }
 
-    let (open, _) = section_header(ui, &t!("props.appearance"), false);
-    if open {
+        subsection_title(ui, &t!("props.appearance"));
         if color_row(ui, &t!("props.color"), &mut title.color).reset {
             title.color = defaults.color;
         }
@@ -387,10 +386,8 @@ pub(crate) fn title_editor(
         if row.reset {
             title.align = defaults.align;
         }
-    }
 
-    let (open, _) = section_header(ui, &t!("props.placement"), false);
-    if open {
+        subsection_title(ui, &t!("props.placement"));
         let row = param_row(ui, &t!("props.anchor"), None, |ui| {
             let mut changed = false;
             for (anchor, text, hint) in [
@@ -441,105 +438,111 @@ pub(crate) fn title_editor(
         if row.reset {
             title.position = defaults.position;
         }
-    }
 
-    ui.add_space(8.0);
-    let shadow = &mut title.shadow;
-    if title_section_header(ui, &t!("props.drop_shadow"), &mut shadow.enabled) {
-        *shadow = vv_core::TitleShadow {
-            enabled: shadow.enabled,
-            ..Default::default()
-        };
-    }
-    if shadow.enabled {
-        let d = vv_core::TitleShadow::default();
-        if color_row(ui, &t!("props.color"), &mut shadow.color).reset {
-            shadow.color = d.color;
+        ui.add_space(8.0);
+        let shadow = &mut title.shadow;
+        if title_section_header(ui, &t!("props.drop_shadow"), &mut shadow.enabled) {
+            *shadow = vv_core::TitleShadow {
+                enabled: shadow.enabled,
+                ..Default::default()
+            };
         }
-        let row = param_row(ui, &t!("props.offset"), None, |ui| {
-            axis_field(ui, "X", &mut shadow.offset[0], 0.5, 1, -frame_w..=frame_w)
-                | axis_field(ui, "Y", &mut shadow.offset[1], 0.5, 1, -frame_h..=frame_h)
-        });
-        if row.reset {
-            shadow.offset = d.offset;
-        }
-        for (label, value, default, range) in [
-            (t!("props.blur"), &mut shadow.blur, d.blur, 0.0..=200.0),
-            (
-                t!("props.opacity"),
-                &mut shadow.opacity,
-                d.opacity,
-                0.0..=100.0,
-            ),
-        ] {
-            if param_row(ui, &label, None, |ui| {
-                slider_field(ui, value, range, 0.5, 0)
-            })
-            .reset
-            {
-                *value = default;
+        if shadow.enabled {
+            let d = vv_core::TitleShadow::default();
+            if color_row(ui, &t!("props.color"), &mut shadow.color).reset {
+                shadow.color = d.color;
             }
-        }
-    }
-
-    ui.add_space(8.0);
-    let bg = &mut title.background;
-    if title_section_header(ui, &t!("props.background"), &mut bg.enabled) {
-        *bg = vv_core::TitleBackground {
-            enabled: bg.enabled,
-            ..Default::default()
-        };
-    }
-    if bg.enabled {
-        let d = vv_core::TitleBackground::default();
-        if color_row(ui, &t!("props.color"), &mut bg.color).reset {
-            bg.color = d.color;
-        }
-        if color_row(ui, &t!("props.outline_color"), &mut bg.outline_color).reset {
-            bg.outline_color = d.outline_color;
-        }
-        for (label, value, default, range, decimals) in [
-            (
-                t!("props.outline_width"),
-                &mut bg.outline_width,
-                d.outline_width,
-                0.0..=100.0,
-                0,
-            ),
-            (t!("props.width"), &mut bg.width, d.width, 0.0..=1.0, 3),
-            (t!("props.height"), &mut bg.height, d.height, 0.0..=1.0, 3),
-            (
-                t!("props.corner_radius"),
-                &mut bg.corner_radius,
-                d.corner_radius,
-                0.0..=0.5,
-                3,
-            ),
-        ] {
-            let speed = if decimals == 0 { 0.5 } else { 0.005 };
-            let row = param_row(ui, &label, None, |ui| {
-                slider_field(ui, value, range, speed, decimals)
+            let row = param_row(ui, &t!("props.offset"), None, |ui| {
+                axis_field(ui, "X", &mut shadow.offset[0], 0.5, 1, -frame_w..=frame_w)
+                    | axis_field(ui, "Y", &mut shadow.offset[1], 0.5, 1, -frame_h..=frame_h)
             });
             if row.reset {
-                *value = default;
+                shadow.offset = d.offset;
+            }
+            for (label, value, default, range) in [
+                (t!("props.blur"), &mut shadow.blur, d.blur, 0.0..=200.0),
+                (
+                    t!("props.opacity"),
+                    &mut shadow.opacity,
+                    d.opacity,
+                    0.0..=100.0,
+                ),
+            ] {
+                if param_row(ui, &label, None, |ui| {
+                    slider_field(ui, value, range, 0.5, 0)
+                })
+                .reset
+                {
+                    *value = default;
+                }
             }
         }
-        let row = param_row(ui, &t!("props.center"), None, |ui| {
-            axis_field(ui, "X", &mut bg.center[0], 1.0, 1, -frame_w..=frame_w)
-                | axis_field(ui, "Y", &mut bg.center[1], 1.0, 1, -frame_h..=frame_h)
-        });
-        if row.reset {
-            bg.center = d.center;
+
+        ui.add_space(8.0);
+        let bg = &mut title.background;
+        if title_section_header(ui, &t!("props.background"), &mut bg.enabled) {
+            *bg = vv_core::TitleBackground {
+                enabled: bg.enabled,
+                ..Default::default()
+            };
         }
-        let row = param_row(ui, &t!("props.opacity"), None, |ui| {
-            slider_field(ui, &mut bg.opacity, 0.0..=100.0, 0.5, 0)
-        });
-        if row.reset {
-            bg.opacity = d.opacity;
+        if bg.enabled {
+            let d = vv_core::TitleBackground::default();
+            if color_row(ui, &t!("props.color"), &mut bg.color).reset {
+                bg.color = d.color;
+            }
+            if color_row(ui, &t!("props.outline_color"), &mut bg.outline_color).reset {
+                bg.outline_color = d.outline_color;
+            }
+            for (label, value, default, range, decimals) in [
+                (
+                    t!("props.outline_width"),
+                    &mut bg.outline_width,
+                    d.outline_width,
+                    0.0..=100.0,
+                    0,
+                ),
+                (t!("props.width"), &mut bg.width, d.width, 0.0..=1.0, 3),
+                (t!("props.height"), &mut bg.height, d.height, 0.0..=1.0, 3),
+                (
+                    t!("props.corner_radius"),
+                    &mut bg.corner_radius,
+                    d.corner_radius,
+                    0.0..=0.5,
+                    3,
+                ),
+            ] {
+                let speed = if decimals == 0 { 0.5 } else { 0.005 };
+                let row = param_row(ui, &label, None, |ui| {
+                    slider_field(ui, value, range, speed, decimals)
+                });
+                if row.reset {
+                    *value = default;
+                }
+            }
+            let row = param_row(ui, &t!("props.center"), None, |ui| {
+                axis_field(ui, "X", &mut bg.center[0], 1.0, 1, -frame_w..=frame_w)
+                    | axis_field(ui, "Y", &mut bg.center[1], 1.0, 1, -frame_h..=frame_h)
+            });
+            if row.reset {
+                bg.center = d.center;
+            }
+            let row = param_row(ui, &t!("props.opacity"), None, |ui| {
+                slider_field(ui, &mut bg.opacity, 0.0..=100.0, 0.5, 0)
+            });
+            if row.reset {
+                bg.opacity = d.opacity;
+            }
         }
     }
 
     *title != before
+}
+
+/// Plain title of a group of rows inside a section: it does not fold.
+fn subsection_title(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(title).strong());
 }
 
 pub(crate) fn color_row(ui: &mut egui::Ui, label: &str, color: &mut vv_core::Rgba) -> RowResponse {
