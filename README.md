@@ -31,6 +31,9 @@ editing, keyframes on every parameter, transitions, compound clips, ripple
 delete. No node editor, no grading suite, no node-based compositor. Cutting
 is where the time goes, so that is the part that has to be perfect.
 
+**NOTE: Venturi is alpha software and is considered unstable, especially the save format. Please use at your own risk.**
+
+
 ## Features
 
 - **Fast playback and scrubbing.** Timeline-wide frame cache, optional
