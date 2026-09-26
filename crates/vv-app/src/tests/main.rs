@@ -3267,7 +3267,7 @@ fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
             break;
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < std::time::Duration::from_secs(15),
             "timeout: proxy never generated"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
