@@ -209,6 +209,9 @@ struct VolumeDragState {
     group: vv_core::GroupMark,
 }
 
+/// (clip_id, track_index, offset, edge) of a clip trimmed along with the primary one.
+type TrimFollower = (ClipId, usize, FrameIdx, TrimEdge);
+
 /// Trim of an edge, separate from an actual drag.
 struct TrimState {
     clip_id: ClipId,
@@ -223,9 +226,9 @@ struct TrimState {
     /// `combined_trim_range`).
     min_value: FrameIdx,
     max_value: FrameIdx,
-    /// (clip_id, track_index, offset, edge) of the other clips trimmed together;
-    /// in a roll, the neighbor too, with the opposite edge.
-    followers: Vec<(ClipId, usize, FrameIdx, TrimEdge)>,
+    /// The other clips trimmed together; in a roll, the neighbor too, with
+    /// the opposite edge.
+    followers: Vec<TrimFollower>,
     /// Roll edit between two adjacent clips (for the cursor only).
     roll: bool,
 }
@@ -4291,13 +4294,13 @@ fn sync_timeline_scroll(
     // Zoom changed in this frame: the saved scroll of the
     // ScrollArea (same id) is corrected before the `show`, so the playhead stays still on
     // screen.
-    if state.pixels_per_sec != state.last_rendered_pps {
-        if let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id) {
-            let playhead_secs = state.playhead as f64 / fps;
-            scroll_state.offset.x +=
-                (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
-            scroll_state.store(ctx, scroll_id);
-        }
+    if state.pixels_per_sec != state.last_rendered_pps
+        && let Some(mut scroll_state) = egui::containers::scroll_area::State::load(ctx, scroll_id)
+    {
+        let playhead_secs = state.playhead as f64 / fps;
+        scroll_state.offset.x +=
+            (playhead_secs as f32) * (state.pixels_per_sec - state.last_rendered_pps);
+        scroll_state.store(ctx, scroll_id);
     }
     state.last_rendered_pps = state.pixels_per_sec;
 
@@ -4411,7 +4414,7 @@ fn show_ruler(
         state.playhead = snap_frame(
             raw_frame,
             0,
-            &visuals,
+            visuals,
             &[],
             &[],
             px_per_frame,
@@ -4422,7 +4425,7 @@ fn show_ruler(
     // Only the visible ticks: a long timeline zoomed to the frame would have
     // thousands of them off screen.
     let visible_x = ui.clip_rect().intersect(ruler_rect);
-    draw_ruler_ticks(&painter, origin, visible_x, state.pixels_per_sec, fps);
+    draw_ruler_ticks(painter, origin, visible_x, state.pixels_per_sec, fps);
 
     // Below the playhead line, so it stays visible.
     const BUFFERED_STRIP_HEIGHT: f32 = 4.0;
@@ -5496,7 +5499,7 @@ fn combined_trim_range(
     primary: ClipKey,
     edge: TrimEdge,
     others: &[(ClipKey, TrimEdge)],
-) -> (FrameIdx, FrameIdx, Vec<(ClipId, usize, FrameIdx, TrimEdge)>) {
+) -> (FrameIdx, FrameIdx, Vec<TrimFollower>) {
     let find = |(track, id): ClipKey| {
         visuals
             .iter()

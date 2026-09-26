@@ -26,7 +26,7 @@ pub fn stretch_samples(
     channels: u16,
     tempo: f64,
 ) -> Result<Vec<f32>, String> {
-    if !(tempo > 0.0) {
+    if tempo.is_nan() || tempo <= 0.0 {
         return Err(format!("invalid stretch tempo: {tempo}"));
     }
     ensure_init();

@@ -3722,7 +3722,7 @@ fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it(
                 "-pix_fmt",
                 "yuv420p",
             ],
-            &path,
+            path,
         );
     }
 

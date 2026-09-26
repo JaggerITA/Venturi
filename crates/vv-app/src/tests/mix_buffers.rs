@@ -83,7 +83,7 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
     });
 
     let mut cache = MixBufferCache::spawn(48_000, 1);
-    let mut mixdown = |cache: &mut MixBufferCache| {
+    let mixdown = |cache: &mut MixBufferCache| {
         vv_audio::mixer::compound_mixdown(&project, compound_media, 48_000, 1, cache)
     };
     assert!(

@@ -620,7 +620,7 @@ fn css(style: &str, property: &str) -> Option<String> {
         .map(|value| value.trim().to_owned())
 }
 
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<String> {
+fn attribute(tag: &str, name: &str) -> Option<String> {
     let rest = tag.split(&format!("{name}=\"")).nth(1)?;
     Some(rest.split('"').next()?.to_owned())
 }

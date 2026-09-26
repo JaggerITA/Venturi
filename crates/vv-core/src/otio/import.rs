@@ -686,7 +686,7 @@ fn resolve_point(
             track.default = value as f32 * multiplier[i];
         }
         for (frame, value) in resolve_keyframes(parameter, context) {
-            let Some(value) = axis(&value, i) else {
+            let Some(value) = axis(value, i) else {
                 continue;
             };
             track.upsert(frame, value as f32 * multiplier[i], Interpolation::Linear);

@@ -2805,7 +2805,8 @@ fn compose_compound_waveform(
             };
             let first = bin_of(clip.timeline_start).min(num_peaks);
             let last = (bin_of(clip.timeline_end()) + 1).min(num_peaks);
-            for bin in first..last {
+            for (offset, peak) in peaks[first..last].iter_mut().enumerate() {
+                let bin = first + offset;
                 let secs = (bin as f64 + 0.5) / num_peaks as f64 * duration_secs;
                 let frame = (secs * fps) as FrameIdx;
                 if !clip.contains(frame) {
@@ -2818,7 +2819,7 @@ fn compose_compound_waveform(
                 let source_frame = (source_secs * source.meta.fps.as_f64()) as FrameIdx;
                 let gain =
                     vv_audio::mixer::db_to_linear(clip.effects.gain_db.value_at(source_frame));
-                peaks[bin] = peaks[bin].max(source_wf.peaks[source_bin] * gain);
+                *peak = peak.max(source_wf.peaks[source_bin] * gain);
             }
         }
     }

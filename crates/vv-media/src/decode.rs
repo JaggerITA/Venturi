@@ -124,7 +124,6 @@ impl Decoder {
         decoder_ctx.set_threading(ffmpeg::threading::Config {
             kind: ffmpeg::threading::Type::Frame,
             count: 0,
-            ..Default::default()
         });
         let decoder = decoder_ctx.video()?;
 

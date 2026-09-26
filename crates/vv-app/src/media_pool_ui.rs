@@ -146,12 +146,7 @@ pub(crate) fn filter_item(ui: &mut egui::Ui, filter: vv_core::FilterKind) {
     painter.rect_filled(rect, 3.0, bg);
     let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
     painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
-    timeline_ui::paint_gear_icon(
-        &painter,
-        thumb.center(),
-        11.0,
-        egui::Color32::from_gray(220),
-    );
+    timeline_ui::paint_gear_icon(painter, thumb.center(), 11.0, egui::Color32::from_gray(220));
     painter.rect_stroke(
         rect,
         3.0,
@@ -200,7 +195,7 @@ pub(crate) fn transition_item(ui: &mut egui::Ui, kind: vv_core::TransitionKind) 
     let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(54.0, rect.height())).shrink(1.0);
     painter.rect_filled(thumb, 2.0, egui::Color32::from_gray(40));
     timeline_ui::paint_bracket_icon(
-        &painter,
+        painter,
         thumb.center(),
         thumb.height() * 0.6,
         vv_core::FadeEdge::Out,

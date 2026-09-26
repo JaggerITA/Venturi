@@ -1755,9 +1755,9 @@ impl VenturiApp {
                                                     };
                                                     // Only the clicked axis.
                                                     let mut flip = effects.transform.flip;
-                                                    for axis in 0..2 {
+                                                    for (axis, value) in flip.iter_mut().enumerate() {
                                                         if transform.flip[axis] != info.transform.flip[axis] {
-                                                            flip[axis] = transform.flip[axis];
+                                                            *value = transform.flip[axis];
                                                         }
                                                     }
                                                     pending_effects.push(set_flip((t.timeline, t.track_index, t.clip_id), flip));

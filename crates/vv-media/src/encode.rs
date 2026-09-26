@@ -443,9 +443,9 @@ fn write_audio_chunk(
     );
     src.set_rate(audio.rate);
     {
-        let data = src.data_mut(0);
-        for (bytes, &sample) in data.chunks_exact_mut(4).zip(samples.iter()) {
-            bytes.copy_from_slice(&sample.to_ne_bytes());
+        let (chunks, _) = src.data_mut(0).as_chunks_mut::<4>();
+        for (bytes, &sample) in chunks.iter_mut().zip(samples.iter()) {
+            *bytes = sample.to_ne_bytes();
         }
     }
 

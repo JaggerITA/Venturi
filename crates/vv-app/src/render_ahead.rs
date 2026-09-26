@@ -415,7 +415,6 @@ enum Positioned {
 /// from the nearest to the playhead and, at equal position, from the highest track.
 /// Real media only: a compound clip is not decoded, it is walked
 /// into (at any nesting depth).
-
 fn collect_media_segments(
     project: &Project,
     timeline: &Timeline,

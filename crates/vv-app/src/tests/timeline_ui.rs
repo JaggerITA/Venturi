@@ -1061,7 +1061,7 @@ fn drag_set_segments_are_queued_one_after_the_other() {
 #[test]
 fn single_trim_range_start_is_not_clamped_by_the_previous_neighbor() {
     let project = Project::default();
-    let visuals = vec![
+    let visuals = [
         visual(0, 1, 0, 5), // ends at 5
         media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
     ];
@@ -1075,7 +1075,7 @@ fn single_trim_range_start_is_clamped_by_source_in() {
     // No neighbor, but source_in=3: one cannot go back past
     // the start of the source, so timeline_start cannot go
     // below 10-3=7.
-    let visuals = vec![media_clip_visual(
+    let visuals = [media_clip_visual(
         0,
         1,
         10,
@@ -1094,7 +1094,7 @@ fn single_trim_range_start_is_clamped_by_source_in() {
 #[test]
 fn single_trim_range_end_is_not_clamped_by_the_next_neighbor() {
     let project = Project::default();
-    let visuals = vec![
+    let visuals = [
         visual(0, 1, 0, 10),  // being trimmed: [0,10)
         visual(0, 2, 15, 10), // following neighbor: it can be overwritten
     ];
@@ -1107,7 +1107,7 @@ fn single_trim_range_end_is_clamped_by_media_duration() {
     let (project, media_id) = project_with_media(25);
     // source_out starts at 20 on a media 25 frames long: the end cannot
     // be extended past timeline_start + (25 - source_in) = 25.
-    let visuals = vec![media_clip_visual(0, 1, 0, 0, 20, media_id)];
+    let visuals = [media_clip_visual(0, 1, 0, 0, 20, media_id)];
     let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, 25);
 }
@@ -1119,7 +1119,7 @@ fn single_trim_range_end_is_clamped_by_media_duration() {
 #[test]
 fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
     let (project, media_id) = project_with_media(4000);
-    let mut visuals = vec![media_clip_visual(0, 1, 3000, 2000, 2400, media_id)];
+    let mut visuals = [media_clip_visual(0, 1, 3000, 2000, 2400, media_id)];
     visuals[0].clip = std::borrow::Cow::Owned(Clip::from_source_range(
         visuals[0].clip.id,
         visuals[0].clip.source.clone(),
@@ -1148,7 +1148,7 @@ fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
 #[test]
 fn single_trim_range_end_is_unbounded_for_solid_color() {
     let project = Project::default();
-    let visuals = vec![visual(0, 1, 0, 10)];
+    let visuals = [visual(0, 1, 0, 10)];
     let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, FrameIdx::MAX);
 }

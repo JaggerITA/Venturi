@@ -128,7 +128,7 @@ fn the_frames_filling_a_hole_share_one_allocation() {
     }
     let distinct = frames
         .iter()
-        .map(|f| Arc::as_ptr(f))
+        .map(Arc::as_ptr)
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(
         distinct.len(),

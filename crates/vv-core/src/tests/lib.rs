@@ -1870,7 +1870,7 @@ fn set_clip_fade_is_undoable_and_clamped_to_clip_length() {
             999,
         )),
     );
-    fn find<'p>(p: &'p Project, timeline: TimelineId, id: ClipId) -> &'p Clip {
+    fn find(p: &Project, timeline: TimelineId, id: ClipId) -> &Clip {
         p.timelines[timeline].clip(0, id).unwrap()
     }
     assert_eq!(find(&project, timeline, id).fade_in, 4);
@@ -1937,7 +1937,7 @@ fn set_clip_transition_is_undoable() {
             Some(transition.clone()),
         )),
     );
-    fn find<'p>(p: &'p Project, timeline: TimelineId, id: ClipId) -> &'p Clip {
+    fn find(p: &Project, timeline: TimelineId, id: ClipId) -> &Clip {
         p.timelines[timeline].clip(0, id).unwrap()
     }
     assert_eq!(

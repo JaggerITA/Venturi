@@ -13,6 +13,12 @@ edition = "2024"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 
+[workspace.lints.clippy]
+# Wide UI/compositor signatures and step-by-step Default setups are
+# deliberate here; the rest of clippy is enforced by CI.
+too_many_arguments = "allow"
+field_reassign_with_default = "allow"
+
 [profile.dev]
 opt-level = 1
 

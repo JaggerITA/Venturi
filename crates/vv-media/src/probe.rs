@@ -67,8 +67,8 @@ fn measured_peak_fps(path: &Path) -> Option<Rational> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    static CACHE: OnceLock<Mutex<HashMap<(std::path::PathBuf, u64, i64), Option<Rational>>>> =
-        OnceLock::new();
+    type Key = (std::path::PathBuf, u64, i64);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Option<Rational>>>> = OnceLock::new();
     let meta = std::fs::metadata(path).ok()?;
     let key = (
         path.to_path_buf(),
@@ -271,7 +271,6 @@ fn decode_from(path: &Path, from_secs: f64) -> Option<f64> {
     context.set_threading(ffmpeg::threading::Config {
         kind: ffmpeg::threading::Type::Frame,
         count: 0,
-        ..Default::default()
     });
     let mut decoder = context.video().ok()?;
     let ts = (from_secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
