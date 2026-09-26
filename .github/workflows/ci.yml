@@ -23,7 +23,7 @@ jobs:
             wayland-devel libxkbcommon-devel libxkbcommon-x11 libX11-devel \
             vulkan-loader-devel mesa-vulkan-drivers \
             alsa-lib-devel \
-            pulseaudio alsa-plugins-pulseaudio
+            pulseaudio pulseaudio-utils alsa-plugins-pulseaudio
           # No sound card on the runner. ALSA's null PCM never blocks, so the
           # cpal callback spins and the audio clock runs thousands of times
           # too fast, breaking the playback tests: a PulseAudio null sink
@@ -31,11 +31,20 @@ jobs:
           printf 'pcm.!default {\n  type pulse\n}\nctl.!default {\n  type pulse\n}\n' \
             > /etc/asound.conf
 
+      # No default.pa (its modules want udev/D-Bus) and no cookie in $HOME,
+      # which is not writable on the runner.
       - name: Start audio sink
         run: |
-          mkdir -p /run/user/0
-          XDG_RUNTIME_DIR=/run/user/0 pulseaudio -D --exit-idle-time=-1 \
-            --load="module-null-sink sink_name=ci"
+          mkdir -p /run/user/0 /tmp/pulse-home
+          HOME=/tmp/pulse-home nohup pulseaudio -n --daemonize=no --exit-idle-time=-1 \
+            --disable-shm --log-target=stderr \
+            --load="module-native-protocol-unix" \
+            --load="module-null-sink sink_name=ci" \
+            > /tmp/pulseaudio.log 2>&1 &
+          for _ in $(seq 1 50); do pactl info >/dev/null 2>&1 && exit 0; sleep 0.1; done
+          cat /tmp/pulseaudio.log; exit 1
+        env:
+          XDG_RUNTIME_DIR: /run/user/0
 
       - uses: actions/checkout@v4
 
