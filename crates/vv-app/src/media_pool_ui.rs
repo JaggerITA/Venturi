@@ -583,6 +583,11 @@ impl VenturiApp {
                 self.start_folder_rename(folder);
                 ui.close();
             }
+            if ui.button(t!("pool.relink_folder")).clicked() {
+                self.relink_folder_dialog(folder);
+                ui.close();
+            }
+            ui.separator();
             if ui
                 .button(t!("pool.delete_folder"))
                 .on_hover_text(t!("pool.delete_folder_hint"))

@@ -1164,6 +1164,14 @@ impl VenturiApp {
         self.spawn_file_dialog(DialogKind::RelinkMedia(targets), |dlg| dlg.pick_folder());
     }
 
+    pub(crate) fn relink_folder_dialog(&mut self, folder: vv_core::FolderId) {
+        let targets = self.project.media_in_folder(folder);
+        if targets.is_empty() {
+            return;
+        }
+        self.spawn_file_dialog(DialogKind::RelinkMedia(targets), |dlg| dlg.pick_folder());
+    }
+
     /// Relinks the media of `targets` that no longer exist at their path to
     /// a file with the same name under `base_dir`. The ones not found are
     /// offered to the forced relink.

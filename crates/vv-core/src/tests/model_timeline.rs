@@ -626,6 +626,35 @@ fn deleting_a_folder_moves_its_content_to_the_parent() {
 }
 
 #[test]
+fn media_in_folder_includes_the_subfolders() {
+    let mut project = Project::default();
+    let outer = project.folders.insert(MediaFolder {
+        name: "outer".into(),
+        parent: None,
+    });
+    let inner = project.folders.insert(MediaFolder {
+        name: "inner".into(),
+        parent: Some(outer),
+    });
+    let in_outer = project.media_pool.insert(MediaItem {
+        folder: Some(outer),
+        ..media_item("/a.mp4")
+    });
+    let in_inner = project.media_pool.insert(MediaItem {
+        folder: Some(inner),
+        ..media_item("/b.mp4")
+    });
+    project.media_pool.insert(media_item("/root.mp4"));
+
+    let mut media = project.media_in_folder(outer);
+    media.sort();
+    let mut expected = vec![in_outer, in_inner];
+    expected.sort();
+    assert_eq!(media, expected);
+    assert_eq!(project.media_in_folder(inner), vec![in_inner]);
+}
+
+#[test]
 fn a_folder_cannot_move_into_itself_or_its_descendants() {
     let mut project = Project::default();
     let outer = project.folders.insert(MediaFolder {

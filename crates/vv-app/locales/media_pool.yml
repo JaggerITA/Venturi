@@ -64,6 +64,10 @@ pool.relink_one:
   en: "Relink clip..."
   it: "Relink clip..."
 
+pool.relink_folder:
+  en: "Relink clips in folder..."
+  it: "Relink clip nella cartella..."
+
 pool.items:
   en: "%{count} items"
   it: "%{count} elementi"

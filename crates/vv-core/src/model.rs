@@ -2185,6 +2185,25 @@ impl Project {
         }
     }
 
+    /// The media of `folder` and of its subfolders.
+    pub fn media_in_folder(&self, folder: FolderId) -> Vec<MediaId> {
+        let mut folders = vec![folder];
+        let mut i = 0;
+        while let Some(&current) = folders.get(i) {
+            for (id, f) in &self.folders {
+                if f.parent == Some(current) && !folders.contains(&id) {
+                    folders.push(id);
+                }
+            }
+            i += 1;
+        }
+        self.media_pool
+            .iter()
+            .filter(|(_, item)| item.folder.is_some_and(|f| folders.contains(&f)))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     /// Refused (`false`) if `parent` is `folder` itself or inside it.
     pub fn move_folder(&mut self, folder: FolderId, parent: Option<FolderId>) -> bool {
         let mut ancestor = parent;
