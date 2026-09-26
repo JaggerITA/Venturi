@@ -129,7 +129,7 @@ pub enum LayerContent<'a> {
     /// Adjustment clip: the stack composed so far, redrawn with the layer's
     /// transform and filters. It replaces the stack instead of going over
     /// it: where the transform or the crop leave the frame uncovered there is
-    /// the clear color, as in Resolve. Opacity mixes it with the original.
+    /// the clear color. Opacity mixes it with the original.
     Adjustment,
 }
 

@@ -428,8 +428,8 @@ pub(crate) fn title_editor(
             title.anchor = defaults.anchor;
         }
 
-        // Shown from the bottom-left corner, as in the reference
-        // (960x540 = center of a 1080p frame); saved from the center.
+        // Shown from the bottom-left corner (960x540 = center of a 1080p
+        // frame); saved from the center.
         let row = param_row(ui, &t!("props.position"), None, |ui| {
             let mut x = title.position[0] + frame_w / 2.0;
             let mut y = title.position[1] + frame_h / 2.0;

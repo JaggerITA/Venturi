@@ -6,7 +6,7 @@
 
 **A Linux-first, performance-oriented video editor written in Rust.**
 
-Inspired by DaVinci Resolve's edit page, with full timeline interoperability via OpenTimelineIO.
+A cutting-focused editor, with timelines that travel to and from other NLEs via OpenTimelineIO.
 
 [![CI](https://github.com/morrolinux/VenturiVideo/actions/workflows/ci.yml/badge.svg)](https://github.com/morrolinux/VenturiVideo/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/morrolinux/VenturiVideo?label=release)](https://github.com/morrolinux/VenturiVideo/releases/latest)
@@ -19,33 +19,32 @@ Inspired by DaVinci Resolve's edit page, with full timeline interoperability via
 [Architecture](ARCHITECTURE.md) •
 [Contributing](#contributing)
 
-<img src="media/venturi.png" alt="Venturi editing a multi-track timeline, with the keyframe editor and settings open" width="100%">
+<img src="media/venturi.png" alt="Venturi editing a multi-track timeline, with the animation curves and settings open" width="100%">
 
 </div>
 
 ---
 
-Venturi does little, and does it well. It is an "edit page only" NLE:
+Venturi does little, and does it well. It is a cutting-only NLE:
 multi-track cutting, the transforms and tools you actually reach for while
 editing, keyframes on every parameter, transitions, compound clips, ripple
-delete. No node editor, no colour page, no Fusion-style compositor. The edit
-page is where the time goes, so that is the part that has to be perfect.
+delete. No node editor, no grading suite, no node-based compositor. Cutting
+is where the time goes, so that is the part that has to be perfect.
 
 ## Features
 
 - **Fast playback and scrubbing.** Timeline-wide frame cache, optional
   background proxies, playback up to 8x with pitch-preserved audio.
 - **Professional timeline workflow.** Track scrubbing with audio, ripple
-  delete, compound clips, copy/paste attributes, magnet snapping, unlimited
+  delete, compound clips, copy/paste properties, magnet snapping, unlimited
   undo with a jumpable history.
 - **Keyframes done right.** Every parameter is keyframable: crop, zoom,
-  rotation, position, speed, opacity, audio gain. A dedicated keyframe editor
+  rotation, position, speed, opacity, audio gain. A dedicated curve editor
   with custom curves.
 - **Titles, solid colours, filters, transitions.** Applied straight from the
   timeline, no node graph to wire up.
-- **DaVinci Resolve interoperability.** Timelines move in both directions
-  through OpenTimelineIO, and the edit workflow is modelled on Resolve's edit
-  page so the habits carry over.
+- **Interoperability.** Timelines move in both directions through
+  OpenTimelineIO, tested with DaVinci Resolve: cut here, grade there.
 - **Linux first.** Developed and tested on Linux, not ported to it. Also runs
   on Apple Silicon Macs, and possibly Windows.
 
@@ -91,3 +90,6 @@ and [AGENTS.md](AGENTS.md); the design is in [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Licence
 
 GPL-3.0-or-later, see [LICENSE](LICENSE).
+
+DaVinci Resolve is a trademark of Blackmagic Design Pty Ltd. Venturi is an
+independent project, not affiliated with or endorsed by Blackmagic Design.

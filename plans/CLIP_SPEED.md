@@ -1,4 +1,4 @@
-# CLIP_SPEED — constant clip speed, Resolve-style
+# CLIP_SPEED — constant clip speed
 
 **Status:** implemented (all steps in §5).
 
@@ -14,11 +14,11 @@ Decisions (agreed with the user):
   - retime bar (edge drag and presets): exactly like a trim of the end —
     lengthening overwrites what follows, shortening leaves a gap, snapping
     included (`Resize` + `make_room_for_ranges`);
-  - "Change Clip Speed…" dialog: "Ripple sequence" (default) shifts every
+  - "Clip speed…" dialog: "Push following clips" (default) shifts every
     clip starting at or after the old end on all unlocked tracks (same rule
     as `RippleDeleteGap`, keeps A/V sync); off, the clip keeps its length
     and shows more/less of the source, clamped to the media;
-  - paste attributes ("Speed", with the pitch correction): ripple, so
+  - paste properties ("Speed", with the pitch correction): ripple, so
     adjacent pasted clips never overwrite each other.
 - The speed of the retime bar sits at the center of the visible part of the
   clip.
@@ -57,13 +57,13 @@ Decisions (agreed with the user):
 
 ## 3. UI
 
-- **Retime controls** (Ctrl+R, `Action::RetimeControls`, also in the clip
-  context menu): a bar on top of the selected clips with the speed
+- **Speed handles** (Ctrl+R, `Action::RetimeControls`, also in the clip
+  context menu): a bar in the accent colour on top of the selected clips with the speed
   (`100% ▾`, presets menu) and `×` to close. While shown, dragging the right
   edge of the clip changes speed instead of trimming: the linked group
   follows, ripple on release.
-- **Change Clip Speed…** in the context menu: a dialog with the percentage,
-  "Pitch correction" and "Ripple sequence" (on by default).
+- **Clip speed…** in the context menu: a dialog with the percentage and
+  presets, "Keep pitch" and "Push following clips" (on by default).
 - The clip label shows the speed when it is not 100%.
 
 ## 4. OTIO

@@ -915,7 +915,7 @@ fn draw_track_headers(
     let text_color = ui.visuals().text_color();
 
     // Timestamp of the playhead position in HH:MM:SS:FF format, in the
-    // ruler row (as in DaVinci Resolve).
+    // ruler row.
     let playhead_secs = playhead as f64 / fps;
     ui.painter().text(
         egui::pos2(

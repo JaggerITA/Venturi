@@ -22,7 +22,7 @@ Tauri), compatible with winit on macOS, as a
    `ctx.request_repaint()`, otherwise with an idle UI the click stays queued.
 3. **State synced every frame** (cheap): `set_enabled` on conditional items
    (Export, Copy/Cut with a selection, Paste with a clipboard…),
-   `set_checked` on the `CheckMenuItem`s (Inspector, Audiometer, Scrub audio,
+   `set_checked` on the `CheckMenuItem`s (Properties, Audiometer, Scrub audio,
    Selection follows playhead, Use proxy).
 4. **Dynamic submenus** (recent projects, undo history): rebuilt when they
    change. The whole menu is rebuilt on a language change.

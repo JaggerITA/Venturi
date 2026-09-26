@@ -1,6 +1,6 @@
 # Venturi — architecture
 
-A DaVinci Resolve-style "edit page only" video editor: multi-track cutting,
+A cutting-only video editor: multi-track cutting,
 basic transforms (solid color, text, crop, zoom, speed, audio gain),
 ripple/normal delete. No node editor, no color correction.
 
@@ -23,7 +23,7 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 | Audio time-stretch | libavfilter's `rubberband` filter (the system ffmpeg is already built with `--enable-librubberband`) | pitch preserved, no extra bindings to write |
 | Project persistence | RON, human-readable | debuggable, diffable with git |
 | Undo/redo | command pattern (invertible commands) | light, unbounded history, consistent with a data-oriented architecture |
-| Frame rate | per Timeline (not per Project): a Project holds N Timelines, each with its own fps | as in Resolve: Project = container, Timeline = sequence with its own fps |
+| Frame rate | per Timeline (not per Project): a Project holds N Timelines, each with its own fps | Project = container, Timeline = sequence with its own fps; also how OTIO files from other NLEs are organised |
 | Ripple delete | global across all tracks (closes the gap everywhere, keeps A/V sync) | explicit choice for synchronised multi-track editing |
 | Keyframes | on every transform parameter (crop/zoom/gain/color) | a design requirement from the start |
 | Cache | RAM frame cache with a global budget, eviction by distance from the playhead + all-intra proxies generated in the background | best perf/UX compromise on long-GOP x264 |
@@ -176,8 +176,8 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    any other: the shader uses the layer colour (for text, with the glyph
    coverage rasterised by `vv-render/src/text.rs` in the Y plane). An
    Adjustment layer copies the stack composed so far and redraws it with its
-   own transform/filters, replacing it (clear colour where uncovered, as in
-   Resolve) and mixing by opacity (`LayerContent::Adjustment`).
+   own transform/filters, replacing it (clear colour where uncovered, which
+   keeps OTIO round trips rendering the same) and mixing by opacity (`LayerContent::Adjustment`).
 5. Preview: composes at the resolution of the decoded frame widened to the
    timeline aspect (`vv_render::fit_output_size`), so the bars already show
    while editing without upscaling the content;

@@ -1298,8 +1298,8 @@ fn an_adjustment_opacity_mixes_the_processed_stack_with_the_original() {
     );
 }
 
-/// As in Resolve: what the transform uncovers is the timeline background,
-/// not the unprocessed stack.
+/// What the transform uncovers is the timeline background, not the
+/// unprocessed stack.
 #[test]
 fn an_adjustment_zoomed_out_shows_black_around_the_stack() {
     let compositor = Compositor::new_headless();

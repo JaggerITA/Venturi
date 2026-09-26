@@ -1,9 +1,9 @@
-# ADJUSTMENT_CLIPS — plan for Resolve-style adjustment clips
+# ADJUSTMENT_CLIPS — plan for adjustment clips (effect layers)
 
 An adjustment clip is a clip with no content of its own that sits on a video
 track: its effects (filters, transform, crop, opacity, composite mode) apply
 to **the composite of every track below it**, for the frames it covers.
-Resolve: Effects Library → Toolbox → Effects → "Adjustment Clip".
+Called "Effect Layer" in the UI.
 
 **Status:** implemented (all steps in §7).
 
@@ -14,7 +14,8 @@ an `UnsupportedReference` warning on purpose.
 
 ## 1. Semantics
 
-Resolve's model, which we copy:
+The same rendering as Resolve's adjustment clips, so OTIO round trips look
+the same:
 
 - It only sees what is **below** it on the timeline (lower track index in
   compositing order); tracks above are unaffected.
@@ -108,11 +109,10 @@ crop → only the uncropped region changes; over a transparent stack
 ## 5. UI
 
 - **Effects panel** (`media_pool_ui::effect_item`, `timeline_ui::Generator`):
-  new `Generator::Adjustment`, in its own "Effects" section (Resolve's
-  Toolbox), draggable onto a video track like Solid/Text, default length
+  new `Generator::Adjustment`, listed with the generators, draggable onto a video track like Solid/Text, default length
   like Text. `insert_adjustment_clip` in `main.rs`, same
   shape as `insert_text_clip`.
-- **Timeline** (`timeline_ui.rs` ≈4990, ≈5700): label "Adjustment Clip",
+- **Timeline** (`timeline_ui.rs` ≈4990, ≈5700): label "Effect Layer",
   its own default body colour (distinct from generators and media), no
   filmstrip.
 - **Properties panel**: Video tab with Transform, Cropping, Composite mode,
@@ -122,7 +122,7 @@ crop → only the uncropped region changes; over a transparent stack
 - **Viewer overlay**: the transform gizmo works on the timeline-sized frame,
   as for Solid/Text — to be checked, no changes expected.
 - **Selection follows playhead**: an adjustment on the top track becomes the
-  active clip. It is what Resolve does; keep it.
+  active clip; keep it.
 - Paste attributes, copy/paste, split, trim, ripple, link groups: generic
   on `Clip`, only the `ClipSource` matches in `main.rs`/`paste_attributes.rs`
   (offline check → `false`, retime → keep `rate`, cycle check → `true`,
