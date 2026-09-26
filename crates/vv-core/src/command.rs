@@ -3,8 +3,9 @@
 
 use crate::model::{
     Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack,
-    FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem, Project, Rational, Rgba,
-    Timeline, TimelineId, TitleParams, Track, TrackKind, Transform, TransformParam, Transition,
+    FrameIdx, Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem, MediaMeta, Project,
+    Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind, Transform, TransformParam,
+    Transition,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -2017,16 +2018,27 @@ pub struct SetMediaPath {
     media: MediaId,
     new_path: PathBuf,
     new_content_hash: u64,
-    old: RefCell<Option<(PathBuf, u64)>>,
+    /// `None` keeps the current one.
+    new_meta: Option<MediaMeta>,
+    old: RefCell<Option<(PathBuf, u64, MediaMeta)>>,
+    /// Clips whose conform rate changed with the new fps.
+    old_rates: RefCell<Vec<(TimelineId, usize, ClipId, Rational)>>,
 }
 
 impl SetMediaPath {
-    pub fn new(media: MediaId, new_path: PathBuf, new_content_hash: u64) -> Self {
+    pub fn new(
+        media: MediaId,
+        new_path: PathBuf,
+        new_content_hash: u64,
+        new_meta: Option<MediaMeta>,
+    ) -> Self {
         Self {
             media,
             new_path,
             new_content_hash,
+            new_meta,
             old: RefCell::new(None),
+            old_rates: RefCell::new(Vec::new()),
         }
     }
 }
@@ -2040,18 +2052,43 @@ impl Command for SetMediaPath {
         let Some(item) = project.media_pool.get_mut(self.media) else {
             return;
         };
-        *self.old.borrow_mut() = Some((item.path.clone(), item.content_hash));
+        *self.old.borrow_mut() = Some((item.path.clone(), item.content_hash, item.meta.clone()));
         item.path = self.new_path.clone();
         item.content_hash = self.new_content_hash;
+        let Some(meta) = &self.new_meta else {
+            return;
+        };
+        item.meta = meta.clone();
+        let mut old_rates = self.old_rates.borrow_mut();
+        old_rates.clear();
+        for (timeline_id, timeline) in project.timelines.iter_mut() {
+            let rate = Rational::conform_rate(timeline.fps, meta.fps);
+            for (track_index, track) in timeline.tracks.iter_mut().enumerate() {
+                for clip in &mut track.clips {
+                    if matches!(clip.source, ClipSource::Media(id) if id == self.media)
+                        && clip.rate != rate
+                    {
+                        old_rates.push((timeline_id, track_index, clip.id, clip.rate));
+                        clip.rate = rate;
+                    }
+                }
+            }
+        }
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some((path, hash)) = self.old.borrow_mut().take() else {
+        let Some((path, hash, meta)) = self.old.borrow_mut().take() else {
             return;
         };
         if let Some(item) = project.media_pool.get_mut(self.media) {
             item.path = path;
             item.content_hash = hash;
+            item.meta = meta;
+        }
+        for (timeline_id, track_index, clip_id, rate) in self.old_rates.borrow_mut().drain(..) {
+            if let Some(clip) = project.timelines[timeline_id].clip_mut(track_index, clip_id) {
+                clip.rate = rate;
+            }
         }
     }
 }
