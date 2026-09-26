@@ -23,6 +23,7 @@ mod paste_attributes;
 mod project_io;
 mod properties_panel;
 mod proxy_worker;
+mod relink_job;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
@@ -380,6 +381,7 @@ struct VenturiApp {
     relink_message: Option<String>,
     /// Base folder and media the last relink could not find by name.
     forced_relink_offer: Option<(PathBuf, Vec<MediaId>)>,
+    relink_job: Option<relink_job::RelinkJob>,
     forced_relink: Option<forced_relink_dialog::ForcedRelinkDialog>,
     /// Kept across dialogs within the session.
     forced_relink_criteria: forced_relink::Criteria,
@@ -479,6 +481,7 @@ impl Default for VenturiApp {
             project_error: None,
             relink_message: None,
             forced_relink_offer: None,
+            relink_job: None,
             forced_relink: None,
             forced_relink_criteria: Default::default(),
             pending_dialog: None,
@@ -3216,6 +3219,7 @@ impl eframe::App for VenturiApp {
         self.poll_dropped_files(&ui.ctx().clone());
         self.poll_pending_import(&ui.ctx().clone());
         self.poll_pending_otio_import(&ui.ctx().clone());
+        self.poll_relink_job(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
         if self
             .thumbnail_worker
@@ -3295,6 +3299,7 @@ impl eframe::App for VenturiApp {
         self.show_import_warnings(ui);
         self.show_otio_import_progress(ui);
         self.show_otio_merge_dialog(ui);
+        self.show_relink_progress(ui);
         self.show_relink_message(ui);
         self.show_forced_relink_dialog(ui.ctx());
         self.show_unsaved_changes_dialog(ui);

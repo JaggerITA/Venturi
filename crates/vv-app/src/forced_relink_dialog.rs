@@ -147,12 +147,7 @@ impl VenturiApp {
                     return;
                 };
                 let relinks = chosen_relinks(&dialog.references, rows);
-                let relinked = self.apply_relinks(relinks);
-                self.relink_message = Some(if relinked == 0 {
-                    t!("project.relink_none").into_owned()
-                } else {
-                    t!("project.relink_done", count = relinked).into_owned()
-                });
+                self.apply_relinks(relinks);
             }
         }
     }

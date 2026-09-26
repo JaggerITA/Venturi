@@ -4,6 +4,14 @@ relink.title:
   en: "Relink media"
   it: "Relink media"
 
+relink.scanning:
+  en: "Scanning the folder…"
+  it: "Scansione della cartella…"
+
+relink.progress:
+  en: "Media %{done}/%{total}"
+  it: "Media %{done}/%{total}"
+
 relink.force_button:
   en: "Force relink..."
   it: "Relink forzato..."

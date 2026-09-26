@@ -1173,83 +1173,140 @@ impl VenturiApp {
     }
 
     /// Relinks the media of `targets` that no longer exist at their path to
-    /// a file with the same name under `base_dir`. The ones not found are
-    /// offered to the forced relink.
+    /// a file with the same name under `base_dir`, in the background. The
+    /// ones not found are offered to the forced relink.
     pub(crate) fn relink_media(&mut self, base_dir: &Path, targets: &[MediaId]) {
-        let mut index: Option<HashMap<std::ffi::OsString, PathBuf>> = None;
-        let mut found: Vec<(MediaId, PathBuf, Option<vv_core::MediaMeta>)> = Vec::new();
-        let mut failed: Vec<MediaId> = Vec::new();
-        for &media_id in targets {
-            let Some(item) = self.project.media_pool.get(media_id) else {
-                continue;
-            };
-            if item.compound.is_some() || item.path.exists() {
-                continue;
-            }
-            let Some(file_name) = item.path.file_name() else {
-                failed.push(media_id);
-                continue;
-            };
-            match index
-                .get_or_insert_with(|| index_media_by_filename(base_dir))
-                .get(file_name)
-            {
-                Some(path) => found.push((media_id, path.clone(), None)),
-                None => failed.push(media_id),
-            }
-        }
-        let relinked = self.apply_relinks(found);
-        self.relink_message = Some(if relinked == 0 {
-            t!("project.relink_none").into_owned()
-        } else if failed.is_empty() {
-            t!("project.relink_done", count = relinked).into_owned()
-        } else {
-            t!(
-                "project.relink_partial",
-                count = relinked,
-                missing = failed.len()
-            )
-            .into_owned()
+        let targets = targets
+            .iter()
+            .filter_map(|&id| {
+                let item = self.project.media_pool.get(id)?;
+                item.compound.is_none().then(|| (id, item.path.clone()))
+            })
+            .collect();
+        self.start_relink(relink_job::RelinkRequest::ByName {
+            base_dir: base_dir.to_path_buf(),
+            targets,
         });
-        self.forced_relink_offer = (!failed.is_empty()).then(|| (base_dir.to_path_buf(), failed));
     }
 
-    /// Points each media at its new file in a single undo step. `None` meta
-    /// is probed here: an offline media imported from OTIO only has a
-    /// guessed one.
+    /// Points each media at its new file, probing it in the background
+    /// when `meta` is `None` (an offline media imported from OTIO only has
+    /// a guessed one).
     pub(crate) fn apply_relinks(
         &mut self,
         relinks: Vec<(MediaId, PathBuf, Option<vv_core::MediaMeta>)>,
-    ) -> usize {
-        if relinks.is_empty() {
-            return 0;
+    ) {
+        self.start_relink(relink_job::RelinkRequest::Chosen(relinks));
+    }
+
+    fn start_relink(&mut self, request: relink_job::RelinkRequest) {
+        if self.relink_job.is_none() {
+            self.relink_job = Some(relink_job::spawn(request));
         }
-        let media_ids: Vec<MediaId> = relinks.iter().map(|(id, ..)| *id).collect();
-        let commands: Vec<Box<dyn vv_core::Command>> = relinks
+    }
+
+    pub(crate) fn poll_relink_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.relink_job else {
+            return;
+        };
+        if !job.handle.is_finished() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        }
+        let Some(job) = self.relink_job.take() else {
+            return;
+        };
+        match job.handle.join() {
+            Ok(Some(outcome)) => self.finish_relink(outcome),
+            Ok(None) => {}
+            Err(_) => self.relink_message = Some(t!("project.relink_none").into_owned()),
+        }
+    }
+
+    /// All the relinks in a single undo step.
+    fn finish_relink(&mut self, outcome: relink_job::RelinkOutcome) {
+        // Media deleted while the job was running are skipped.
+        let relinks: Vec<_> = outcome
+            .relinks
             .into_iter()
-            .map(|(media_id, path, meta)| {
-                let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-                let meta = meta.or_else(|| vv_media::probe_media(&path).ok());
-                Box::new(vv_core::SetMediaPath::new(
-                    media_id,
-                    path,
-                    content_hash,
-                    meta,
-                )) as Box<dyn vv_core::Command>
-            })
+            .filter(|r| self.project.media_pool.contains_key(r.media_id))
             .collect();
-        self.history.do_command(
-            &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(
-                vv_core::CommandLabel::RelinkMedia,
-                commands,
-            )),
-        );
-        self.unsaved_media = true;
-        for &media_id in &media_ids {
-            self.enqueue_media_background_jobs(media_id);
+        let media_ids: Vec<MediaId> = relinks.iter().map(|r| r.media_id).collect();
+        if !relinks.is_empty() {
+            let commands: Vec<Box<dyn vv_core::Command>> = relinks
+                .into_iter()
+                .map(|r| {
+                    Box::new(vv_core::SetMediaPath::new(
+                        r.media_id,
+                        r.path,
+                        r.content_hash,
+                        r.meta,
+                    )) as Box<dyn vv_core::Command>
+                })
+                .collect();
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::CompositeCommand::new(
+                    vv_core::CommandLabel::RelinkMedia,
+                    commands,
+                )),
+            );
+            self.unsaved_media = true;
+            for &media_id in &media_ids {
+                self.enqueue_media_background_jobs(media_id);
+            }
         }
-        media_ids.len()
+        let relinked = media_ids.len();
+        self.relink_message = Some(match (&outcome.not_found, relinked) {
+            (_, 0) => t!("project.relink_none").into_owned(),
+            (None, _) => t!("project.relink_done", count = relinked).into_owned(),
+            (Some((_, missing)), _) => t!(
+                "project.relink_partial",
+                count = relinked,
+                missing = missing.len()
+            )
+            .into_owned(),
+        });
+        self.forced_relink_offer = outcome.not_found;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_relink(&mut self) {
+        let ctx = egui::Context::default();
+        while self.relink_job.is_some() {
+            self.poll_relink_job(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    pub(crate) fn show_relink_progress(&mut self, ui: &mut egui::Ui) {
+        let Some(job) = &self.relink_job else {
+            return;
+        };
+        let total = job.progress.total.load(Ordering::Relaxed);
+        let done = job.progress.done.load(Ordering::Relaxed).min(total);
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("relink_progress")).show(ui.ctx(), |ui| {
+            ui.heading(t!("relink.title"));
+            ui.add_space(8.0);
+            let bar = if total == 0 {
+                egui::ProgressBar::new(0.0)
+                    .animate(true)
+                    .text(t!("relink.scanning"))
+            } else {
+                egui::ProgressBar::new(done as f32 / total as f32).text(t!(
+                    "relink.progress",
+                    done = done,
+                    total = total
+                ))
+            };
+            ui.add(bar.desired_width(320.0));
+            ui.add_space(8.0);
+            cancel = ui.button(t!("common.cancel")).clicked();
+        });
+        if cancel {
+            job.progress.cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 

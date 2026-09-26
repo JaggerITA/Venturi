@@ -826,6 +826,7 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
         folder: None,
     });
     app.relink_media(&dir, &[offline, unresolvable, already_ok]);
+    app.wait_for_relink();
 
     assert_eq!(app.project.media_pool[offline].path, found_path);
     assert_ne!(
@@ -897,6 +898,7 @@ fn media_not_found_by_name_can_be_force_relinked() {
         folder: None,
     });
     app.relink_media(&dir, &[found, lost]);
+    app.wait_for_relink();
     assert_eq!(app.forced_relink_offer, Some((dir.clone(), vec![lost])));
 
     let references = vec![forced_relink::Reference {
@@ -924,7 +926,8 @@ fn media_not_found_by_name_can_be_force_relinked() {
         .iter()
         .map(|m| (lost, m.path.clone(), m.meta.clone()))
         .collect();
-    assert_eq!(app.apply_relinks(relinks), 1);
+    app.apply_relinks(relinks);
+    app.wait_for_relink();
     assert_eq!(app.project.media_pool[lost].path, converted);
 
     app.history.undo(&mut app.project);
@@ -983,6 +986,7 @@ fn relink_media_with_a_selection_only_touches_the_selected_media() {
         folder: None,
     });
     app.relink_media(&dir, &[selected]);
+    app.wait_for_relink();
 
     assert_eq!(app.project.media_pool[selected].path, found_path);
     assert_eq!(
@@ -4083,6 +4087,7 @@ fn import_otio_from_adds_a_timeline_and_reports_skipped_clips() {
         .unwrap();
     assert_eq!(app.project.media_pool[offline].meta.width, 0);
     app.relink_media(&found_dir, &[offline]);
+    app.wait_for_relink();
     let meta = &app.project.media_pool[offline].meta;
     assert_eq!((meta.width, meta.height), (320, 240));
 }
