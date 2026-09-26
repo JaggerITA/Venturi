@@ -28,12 +28,14 @@ fn a_finished_search_turns_into_rows_preselected_where_something_matched() {
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let ghost = app.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/ghost.mov".into(),
         meta,
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     app.open_forced_relink(dir.clone(), &[rana, ghost]);
     let dialog = app.forced_relink.as_mut().unwrap();

@@ -609,6 +609,7 @@ impl Importer<'_> {
             meta,
             content_hash,
             compound: None,
+            folder: None,
         });
         if offline {
             self.offline.insert(media);

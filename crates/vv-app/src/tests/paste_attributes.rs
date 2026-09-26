@@ -249,6 +249,7 @@ fn pasting_the_speed_retimes_the_target() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let media_clip = |app: &mut VenturiApp, start| {
         let mut clip = Clip::from_source_range(

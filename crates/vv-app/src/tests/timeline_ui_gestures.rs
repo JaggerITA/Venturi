@@ -334,6 +334,7 @@ fn media_harness() -> Harness {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let tracks = &mut h.project.timelines[h.timeline_id].tracks;
     tracks[0].clips = vec![

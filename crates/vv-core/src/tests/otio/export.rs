@@ -19,6 +19,7 @@ fn project() -> (Project, TimelineId, MediaId) {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let timeline = project.timelines.insert(Timeline {
         name: "Timeline 1".into(),
@@ -347,6 +348,7 @@ fn normalizes_the_position_on_the_clip_not_on_the_frame() {
         },
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(Timeline {
         name: "Vertical".into(),

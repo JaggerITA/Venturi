@@ -239,6 +239,7 @@ fn a_compound_clip_has_no_layer_until_its_nested_media_is_ready() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let nested_id = project.timelines.insert(Timeline {
         name: "Nested".into(),
@@ -325,6 +326,7 @@ fn compound_media_item(
         },
         content_hash: 1,
         compound: Some(nested),
+        folder: None,
     }
 }
 

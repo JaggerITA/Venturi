@@ -127,6 +127,7 @@ fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
         },
         content_hash: 1,
         compound: Some(nested_id),
+        folder: None,
     });
     let compound_clip = Clip::from_source_range(
         ClipId(2),
@@ -205,6 +206,7 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
         },
         content_hash: 1,
         compound: Some(nested_id),
+        folder: None,
     });
     let compound_clip = Clip::from_source_range(
         ClipId(2),
@@ -277,6 +279,7 @@ fn render_video_frame_lets_the_track_below_show_through_a_transparent_png() {
         meta,
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let png_clip = Clip::from_source_range(
         ClipId(2),
@@ -366,6 +369,7 @@ fn render_video_frame_fails_loudly_when_the_clip_references_a_missing_media() {
             },
             content_hash: 0,
             compound: None,
+            folder: None,
         })
     };
     let project = Project::default();
@@ -496,6 +500,7 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let real_clip = Clip::from_source_range(
         ClipId(100),
@@ -535,6 +540,7 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
         },
         content_hash: 2,
         compound: Some(nested_id),
+        folder: None,
     });
     // At 25 (1s after the start): silence before, sine wave during.
     let compound_clip = Clip::from_source_range(
@@ -693,6 +699,7 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     const FLASH_FRAME: FrameIdx = 20;
     let beep_clip = Clip::from_source_range(
@@ -1176,6 +1183,7 @@ fn mix_audio_track_plays_a_faster_clip_with_or_without_its_pitch() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let frequency = |pitch_correction: bool| {
         let mut clip = Clip::from_source_range(

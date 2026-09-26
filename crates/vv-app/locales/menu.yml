@@ -29,8 +29,8 @@ menu.import_otio:
   it: "Importa OTIO..."
 
 menu.import_otio_hint:
-  en: "Opens an OpenTimelineIO timeline as a new project"
-  it: "Apre una timeline OpenTimelineIO come nuovo progetto"
+  en: "Adds the timelines of an OpenTimelineIO file to the project"
+  it: "Aggiunge al progetto le timeline di un file OpenTimelineIO"
 
 menu.export:
   en: "Export..."

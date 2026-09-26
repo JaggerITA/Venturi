@@ -21,6 +21,7 @@ fn ids(n: usize) -> Vec<MediaId> {
                 },
                 content_hash: 0,
                 compound: None,
+                folder: None,
             })
         })
         .collect()
@@ -193,4 +194,75 @@ fn shift_click_without_anchor_selects_only_the_clicked_one() {
     let mut state = MediaPoolState::default();
     state.click(order[2], shift(), &order);
     assert_eq!(state.selected, BTreeSet::from([order[2]]));
+}
+
+fn folder_ids(n: usize) -> Vec<FolderId> {
+    let mut project = vv_core::Project::default();
+    (0..n)
+        .map(|_| {
+            project.folders.insert(vv_core::MediaFolder {
+                name: String::new(),
+                parent: None,
+            })
+        })
+        .collect()
+}
+
+fn describe(rows: &[PoolRow<&str>], names: &[(FolderId, &str)]) -> Vec<String> {
+    rows.iter()
+        .map(|row| match row {
+            PoolRow::Folder { id, depth } => {
+                let name = names.iter().find(|(f, _)| f == id).unwrap().1;
+                format!("{depth}:[{name}]")
+            }
+            PoolRow::Item { item, depth } => format!("{depth}:{item}"),
+        })
+        .collect()
+}
+
+#[test]
+fn tree_rows_list_folders_first_and_hide_collapsed_content() {
+    let f = folder_ids(3);
+    let folders = [
+        (f[0], "b-footage", None),
+        (f[1], "a-audio", None),
+        (f[2], "day1", Some(f[0])),
+    ];
+    let names: Vec<(FolderId, &str)> = folders.iter().map(|(id, n, _)| (*id, *n)).collect();
+    let items = vec![
+        ("root.mp4", None),
+        ("clip.mp4", Some(f[2])),
+        ("music.wav", Some(f[1])),
+        ("take.mp4", Some(f[0])),
+    ];
+
+    let collapsed = tree_rows(&folders, items.clone(), &HashSet::new());
+    assert_eq!(
+        describe(&collapsed, &names),
+        ["0:[a-audio]", "0:[b-footage]", "0:root.mp4"]
+    );
+
+    let expanded = tree_rows(&folders, items, &HashSet::from([f[0], f[2]]));
+    assert_eq!(
+        describe(&expanded, &names),
+        [
+            "0:[a-audio]",
+            "0:[b-footage]",
+            "1:[day1]",
+            "2:clip.mp4",
+            "1:take.mp4",
+            "0:root.mp4"
+        ]
+    );
+}
+
+#[test]
+fn tree_rows_put_items_of_a_missing_folder_at_the_root() {
+    let f = folder_ids(2);
+    let folders = [(f[0], "kept", None)];
+    let rows = tree_rows(&folders, vec![("orphan.mp4", Some(f[1]))], &HashSet::new());
+    assert_eq!(
+        describe(&rows, &[(f[0], "kept")]),
+        ["0:[kept]", "0:orphan.mp4"]
+    );
 }

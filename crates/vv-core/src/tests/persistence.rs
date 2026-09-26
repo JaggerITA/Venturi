@@ -27,6 +27,7 @@ fn save_then_load_round_trips_a_project_with_clips_and_keyframes() {
         },
         content_hash: 42,
         compound: None,
+        folder: None,
     });
 
     let clip_id = project.alloc_clip_id();
@@ -133,4 +134,42 @@ fn timelines_saved_without_markers_load_with_none() {
     let timeline: Timeline = ron::from_str(text).unwrap();
     assert_eq!(timeline.markers[0].color, Marker::default_color());
     assert_eq!(timeline.markers[0].duration, 0);
+}
+
+#[test]
+fn media_folders_survive_save_and_load() {
+    let mut project = Project::default();
+    let outer = project.folders.insert(MediaFolder {
+        name: "Footage".into(),
+        parent: None,
+    });
+    let inner = project.folders.insert(MediaFolder {
+        name: "Day 1".into(),
+        parent: Some(outer),
+    });
+    let media = project.media_pool.insert(MediaItem {
+        path: "/tmp/a.mp4".into(),
+        meta: MediaMeta {
+            duration_frames: 10,
+            fps: Rational::new(25, 1),
+            width: 64,
+            height: 48,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 1,
+        compound: None,
+        folder: Some(inner),
+    });
+    let path = std::env::temp_dir().join("vv-core-folders-test.vvproj");
+    save_project(&project, &path).unwrap();
+    let loaded = load_project(&path).unwrap();
+
+    assert_eq!(loaded.folders[inner].name, "Day 1");
+    assert_eq!(loaded.folders[inner].parent, Some(outer));
+    assert_eq!(loaded.media_pool[media].folder, Some(inner));
 }

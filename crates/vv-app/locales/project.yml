@@ -60,6 +60,22 @@ project.otio_import_progress:
   en: "Media %{done}/%{total}"
   it: "Media %{done}/%{total}"
 
+project.otio_media_exist:
+  en: "Media already in the project"
+  it: "Media già presenti nel progetto"
+
+project.otio_media_exist_detail:
+  en: "%{count} media of the OTIO file have the same name as media already in the project."
+  it: "%{count} media del file OTIO hanno lo stesso nome di media già presenti nel progetto."
+
+project.otio_import_into_folder:
+  en: "Import into folder \"%{folder}\""
+  it: "Importa nella cartella \"%{folder}\""
+
+project.otio_use_existing:
+  en: "Use the existing media"
+  it: "Usa i media esistenti"
+
 project.copy_all:
   en: "Copy all"
   it: "Copia tutto"

@@ -4,11 +4,6 @@ use super::*;
 
 impl VenturiApp {
     pub(crate) fn handle_shortcuts(&mut self, ui: &mut egui::Ui) {
-        // The modal blocks the pointer, not the keyboard: edits now would be
-        // lost when the imported project replaces this one.
-        if self.pending_otio_import.is_some() {
-            return;
-        }
         // Copy/paste are handled outside `ui.input`: `ctx.copy_text` takes
         // the same lock and would deadlock inside it.
         let mut clipboard_events: Vec<egui::Event> = Vec::new();
@@ -209,7 +204,7 @@ impl VenturiApp {
                             .on_hover_text(t!("menu.import_otio_hint"))
                             .clicked()
                         {
-                            self.request_project_switch(ProjectSwitch::ImportOtio);
+                            self.import_otio_dialog();
                             ui.close();
                         }
                         ui.separator();

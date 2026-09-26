@@ -9,7 +9,6 @@ use std::sync::atomic::AtomicUsize;
 pub(crate) enum ProjectSwitch {
     Open,
     OpenRecent(PathBuf),
-    ImportOtio,
     Quit,
 }
 
@@ -46,9 +45,19 @@ pub(crate) struct PendingImport {
 /// OTIO import running on a thread: probing every media of a large
 /// timeline takes long enough for the desktop to flag the window as hung.
 pub(crate) struct PendingOtioImport {
+    pub(crate) name: String,
     pub(crate) probed: Arc<AtomicUsize>,
     pub(crate) total: Arc<AtomicUsize>,
     pub(crate) handle: std::thread::JoinHandle<Result<vv_core::OtioImport, String>>,
+}
+
+/// An OTIO import whose media partly share a file name with media already
+/// in the pool: waiting for the user to choose whether to reuse them.
+pub(crate) struct PendingOtioMerge {
+    pub(crate) imported: vv_core::OtioImport,
+    pub(crate) name: String,
+    /// Imported media → the pool media with the same file name.
+    pub(crate) matches: HashMap<MediaId, MediaId>,
 }
 
 pub(crate) struct PendingDialog {
@@ -224,6 +233,7 @@ impl VenturiApp {
             meta,
             content_hash,
             compound: None,
+            folder: None,
         });
         self.unsaved_media = true;
         self.enqueue_media_background_jobs(media_id);
@@ -492,7 +502,6 @@ impl VenturiApp {
         match switch {
             ProjectSwitch::Open => self.open_project_dialog(),
             ProjectSwitch::OpenRecent(path) => self.load_project_from(path),
-            ProjectSwitch::ImportOtio => self.import_otio_dialog(),
             ProjectSwitch::Quit => self.quit_confirmed = true,
         }
     }
@@ -568,13 +577,15 @@ impl VenturiApp {
         });
     }
 
-    /// Like "Open project", but from an `.otio`: Ctrl+S will ask where to
-    /// save instead of overwriting the imported file. What was not
-    /// imported ends up in `import_warnings`.
+    /// Adds the timelines of an `.otio` to the project, named after the
+    /// file. What was not imported ends up in `import_warnings`.
     pub(crate) fn import_otio_from(&mut self, path: &Path) {
-        if self.pending_otio_import.is_some() {
+        if self.pending_otio_import.is_some() || self.pending_otio_merge.is_some() {
             return;
         }
+        let name = path
+            .file_stem()
+            .map_or_else(|| "OTIO".into(), |s| s.to_string_lossy().into_owned());
         let probed = Arc::new(AtomicUsize::new(0));
         let total = Arc::new(AtomicUsize::new(0));
         let path = path.to_path_buf();
@@ -600,6 +611,7 @@ impl VenturiApp {
             }
         });
         self.pending_otio_import = Some(PendingOtioImport {
+            name,
             probed,
             total,
             handle,
@@ -619,8 +631,17 @@ impl VenturiApp {
         };
         match pending.handle.join() {
             Ok(Ok(imported)) => {
-                self.replace_project(imported.project, None);
-                self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
+                let matches = self.media_with_same_name(&imported.project);
+                let merge = PendingOtioMerge {
+                    imported,
+                    name: pending.name,
+                    matches,
+                };
+                if merge.matches.is_empty() {
+                    self.merge_otio_import(merge, false);
+                } else {
+                    self.pending_otio_merge = Some(merge);
+                }
             }
             Ok(Err(e)) => {
                 self.project_error = Some(t!("project.otio_import_failed", error = e).into_owned())
@@ -629,6 +650,114 @@ impl VenturiApp {
                 self.project_error =
                     Some(t!("project.otio_import_failed", error = "panic").into_owned())
             }
+        }
+    }
+
+    fn media_with_same_name(&self, imported: &vv_core::Project) -> HashMap<MediaId, MediaId> {
+        let existing: HashMap<String, MediaId> = self
+            .project
+            .media_pool
+            .iter()
+            .filter(|(_, item)| item.compound.is_none())
+            .map(|(id, item)| (file_label(&item.path), id))
+            .collect();
+        imported
+            .media_pool
+            .iter()
+            .filter(|(_, item)| item.compound.is_none())
+            .filter_map(|(id, item)| Some((id, *existing.get(&file_label(&item.path))?)))
+            .collect()
+    }
+
+    /// The new media go in a folder named after the file, the timelines at
+    /// the root of the pool; the first one is opened.
+    pub(crate) fn merge_otio_import(&mut self, merge: PendingOtioMerge, reuse_existing: bool) {
+        let PendingOtioMerge {
+            imported,
+            name,
+            matches,
+        } = merge;
+        let mut project = imported.project;
+        let single = project.timelines.len() == 1;
+        for timeline in project.timelines.values_mut() {
+            timeline.name = if single {
+                name.clone()
+            } else {
+                format!("{name} - {}", timeline.name)
+            };
+        }
+        let reuse = if reuse_existing {
+            // The dialog is not modal for the keyboard: a match may have been deleted.
+            matches
+                .into_iter()
+                .filter(|(_, existing)| self.project.media_pool.contains_key(*existing))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let folder = (project.media_pool.len() > reuse.len()).then(|| {
+            self.project.folders.insert(vv_core::MediaFolder {
+                name: name.clone(),
+                parent: None,
+            })
+        });
+        let before: std::collections::HashSet<MediaId> = self.project.media_pool.keys().collect();
+        let timelines = self.project.absorb(project, &reuse, folder);
+        let added: Vec<MediaId> = self
+            .project
+            .media_pool
+            .keys()
+            .filter(|id| !before.contains(id))
+            .collect();
+        for media_id in added {
+            self.enqueue_media_background_jobs(media_id);
+        }
+        if let Some(folder) = folder {
+            self.media_pool_state.expanded.insert(folder);
+        }
+        self.unsaved_media = true;
+        self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
+        if let Some(&timeline_id) = timelines.first() {
+            self.open_timeline(timeline_id);
+            self.spawn_render_ahead_if_needed(timeline_id);
+        }
+    }
+
+    pub(crate) fn show_otio_merge_dialog(&mut self, ui: &mut egui::Ui) {
+        let Some(merge) = &self.pending_otio_merge else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::new("otio_merge")).show(ui.ctx(), |ui| {
+            ui.heading(t!("project.otio_media_exist"));
+            ui.label(t!(
+                "project.otio_media_exist_detail",
+                count = merge.matches.len()
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(t!("project.otio_import_into_folder", folder = merge.name))
+                    .clicked()
+                {
+                    choice = Some(Some(false));
+                }
+                if ui.button(t!("project.otio_use_existing")).clicked() {
+                    choice = Some(Some(true));
+                }
+                if ui.button(t!("common.cancel")).clicked() {
+                    choice = Some(None);
+                }
+            });
+        });
+        if choice.is_none() && modal.should_close() {
+            choice = Some(None);
+        }
+        if let Some(choice) = choice
+            && let Some(merge) = self.pending_otio_merge.take()
+            && let Some(reuse_existing) = choice
+        {
+            self.merge_otio_import(merge, reuse_existing);
         }
     }
 
@@ -641,8 +770,6 @@ impl VenturiApp {
         }
     }
 
-    /// Modal: the old project is about to be replaced, editing it now
-    /// would be lost.
     pub(crate) fn show_otio_import_progress(&mut self, ui: &mut egui::Ui) {
         let Some(pending) = &self.pending_otio_import else {
             return;
@@ -692,8 +819,7 @@ impl VenturiApp {
         }
     }
 
-    /// `path` is the file Ctrl+S will save to: `None` for a project not
-    /// coming from a `.vvproj` (OTIO import).
+    /// `path` is the file Ctrl+S will save to: `None` for a new project.
     pub(crate) fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
         self.timeline_id = project.timelines.keys().next();
         self.project = project;

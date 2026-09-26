@@ -353,6 +353,7 @@ fn refresh_clip_rates_conforms_a_clip_loaded_without_a_rate() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let mut clip = media_clip_at(Rational::one(), 0, 1000, 0);
     clip.source = ClipSource::Media(media_id);
@@ -473,6 +474,7 @@ fn project_with_timeline_item() -> (Project, MediaId) {
         },
         content_hash: 0,
         compound: Some(timeline),
+        folder: None,
     });
     project.sync_compound_meta(media_id);
     (project, media_id)
@@ -516,6 +518,130 @@ fn rename_timeline_renames_pool_item_and_timeline() {
     );
     let timeline = project.media_pool[media_id].compound.unwrap();
     assert_eq!(project.timelines[timeline].name, "Edit");
+}
+
+fn media_item(path: &str) -> MediaItem {
+    let (project, timeline_item) = project_with_timeline_item();
+    MediaItem {
+        path: path.into(),
+        compound: None,
+        ..project.media_pool[timeline_item].clone()
+    }
+}
+
+/// What an OTIO import produces: media and a timeline using them, with
+/// ids that collide with the destination's.
+fn imported_project() -> (Project, MediaId, MediaId) {
+    let (mut project, timeline_item) = project_with_timeline_item();
+    project.media_pool.remove(timeline_item);
+    let a = project.media_pool.insert(media_item("/otio/a.mp4"));
+    let b = project.media_pool.insert(media_item("/otio/b.mp4"));
+    let timeline = project.timelines.values_mut().next().unwrap();
+    timeline.tracks[0].clips[0].source = ClipSource::Media(a);
+    timeline.tracks[0].clips[1].source = ClipSource::Media(b);
+    (project, a, b)
+}
+
+#[test]
+fn absorb_adds_media_to_the_folder_and_a_timeline_item_at_the_root() {
+    let (mut project, existing_item) = project_with_timeline_item();
+    let existing_tl = project.media_pool[existing_item].compound.unwrap();
+    let existing_ids: Vec<ClipId> = project.timelines[existing_tl].tracks[0]
+        .clips
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    let folder = project.folders.insert(MediaFolder {
+        name: "otio".into(),
+        parent: None,
+    });
+    let (imported, ..) = imported_project();
+
+    let timelines = project.absorb(imported, &Default::default(), Some(folder));
+
+    assert_eq!(timelines.len(), 1);
+    assert_eq!(project.timelines.len(), 2, "the existing timeline is kept");
+    let new_tl = &project.timelines[timelines[0]];
+    let track = &new_tl.tracks[0];
+    for clip in &track.clips {
+        assert!(!existing_ids.contains(&clip.id), "clip ids stay unique");
+        let ClipSource::Media(media) = clip.source else {
+            panic!("media clip expected");
+        };
+        assert_eq!(project.media_pool[media].folder, Some(folder));
+    }
+    assert_eq!(track.crossings[0].left_clip, track.clips[0].id);
+    let item = project
+        .media_pool
+        .values()
+        .find(|m| m.compound == Some(timelines[0]))
+        .expect("timeline item");
+    assert_eq!(item.folder, None);
+    assert_eq!(item.meta.duration_frames, 20);
+}
+
+#[test]
+fn absorb_reuses_the_mapped_media() {
+    let (mut project, _) = project_with_timeline_item();
+    let existing = project.media_pool.insert(media_item("/mine/a.mp4"));
+    let (imported, a, _) = imported_project();
+    let pool_before = project.media_pool.len();
+
+    let timelines = project.absorb(imported, &[(a, existing)].into(), None);
+
+    assert_eq!(
+        project.media_pool.len(),
+        pool_before + 2,
+        "b.mp4 and the timeline item"
+    );
+    let clips = &project.timelines[timelines[0]].tracks[0].clips;
+    assert!(matches!(clips[0].source, ClipSource::Media(m) if m == existing));
+}
+
+#[test]
+fn deleting_a_folder_moves_its_content_to_the_parent() {
+    let mut project = Project::default();
+    let outer = project.folders.insert(MediaFolder {
+        name: "outer".into(),
+        parent: None,
+    });
+    let inner = project.folders.insert(MediaFolder {
+        name: "inner".into(),
+        parent: Some(outer),
+    });
+    let nested = project.folders.insert(MediaFolder {
+        name: "nested".into(),
+        parent: Some(inner),
+    });
+    let media = project.media_pool.insert(MediaItem {
+        folder: Some(inner),
+        ..media_item("/a.mp4")
+    });
+
+    project.delete_folder(inner);
+
+    assert!(!project.folders.contains_key(inner));
+    assert_eq!(project.folders[nested].parent, Some(outer));
+    assert_eq!(project.media_pool[media].folder, Some(outer));
+}
+
+#[test]
+fn a_folder_cannot_move_into_itself_or_its_descendants() {
+    let mut project = Project::default();
+    let outer = project.folders.insert(MediaFolder {
+        name: "outer".into(),
+        parent: None,
+    });
+    let inner = project.folders.insert(MediaFolder {
+        name: "inner".into(),
+        parent: Some(outer),
+    });
+
+    assert!(!project.move_folder(outer, Some(outer)));
+    assert!(!project.move_folder(outer, Some(inner)));
+    assert!(project.move_folder(inner, None));
+    assert!(project.move_folder(outer, Some(inner)));
+    assert_eq!(project.folders[outer].parent, Some(inner));
 }
 
 #[test]

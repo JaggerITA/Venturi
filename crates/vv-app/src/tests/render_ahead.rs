@@ -68,6 +68,7 @@ fn walk_and_fill_decodes_a_stretched_image_clip_past_its_only_real_frame() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     // 60 frames (2.4s at 25fps): within `DEFAULT_LOOKAHEAD_SECS`
     // (3s), otherwise the last frame would stay outside the window
@@ -169,6 +170,7 @@ fn dummy_media_item() -> MediaItem {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     }
 }
 
@@ -461,6 +463,7 @@ fn project_with_compound_clip() -> (Project, Timeline, MediaId, MediaId) {
         },
         content_hash: 1,
         compound: Some(nested),
+        folder: None,
     });
     let root = timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -517,6 +520,7 @@ fn collect_media_segments_stops_at_a_cyclic_compound_clip_instead_of_overflowing
         },
         content_hash: 1,
         compound: Some(timeline_id),
+        folder: None,
     });
     // The timeline references itself through its own entry in the pool.
     project.timelines[timeline_id].tracks.push(Track {
@@ -707,6 +711,7 @@ fn render_ahead_buffers_across_a_straight_cut_between_two_different_media() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let media_b = project.media_pool.insert(MediaItem {
         path: path_b,
@@ -724,6 +729,7 @@ fn render_ahead_buffers_across_a_straight_cut_between_two_different_media() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -799,6 +805,7 @@ fn render_ahead_keeps_both_sides_of_a_crossing_readable_through_the_whole_window
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     };
     let media_a = project.media_pool.insert(item(path_a));
     let media_b = project.media_pool.insert(item(path_b));
@@ -913,6 +920,7 @@ fn render_ahead_does_not_loop_when_the_playhead_sits_still_just_before_a_cut() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     // Cut at timeline_start=50 between two *contiguous* pieces of the
     // same file (a plain split, not a trim with a hole in between):
@@ -1287,6 +1295,7 @@ fn walk_and_fill_reports_caught_up_when_the_whole_window_fits_the_budget() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1348,6 +1357,7 @@ fn walk_and_fill_decodes_the_behind_window_on_a_fresh_area() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1435,6 +1445,7 @@ fn walk_and_fill_decodes_the_behind_window_nearest_frames_first_under_a_tight_bu
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1522,6 +1533,7 @@ fn walk_and_fill_does_not_reseek_an_already_complete_behind_window_when_idle() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1620,6 +1632,7 @@ fn walk_and_fill_buffers_only_a_minimal_margin_when_configured_to_zero_seconds()
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1704,6 +1717,7 @@ fn walk_and_fill_prioritizes_frames_near_the_playhead_when_the_budget_is_too_sma
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1775,6 +1789,7 @@ fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_d
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -1856,6 +1871,7 @@ fn walk_and_fill_does_not_invalidate_one_segment_while_processing_another_segmen
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     // Cut at timeline_start=60 between two pieces of the same file:
     // the first uses source [0,60), the second restarts from a
@@ -1947,6 +1963,7 @@ fn walk_and_fill_does_not_let_one_segment_of_a_media_evict_another_via_capacity_
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     // Same cut as the previous test: [0,60) then [200,300).
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
@@ -2085,6 +2102,7 @@ fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_bud
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let media_b = project.media_pool.insert(MediaItem {
         path: path_b,
@@ -2102,6 +2120,7 @@ fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_bud
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2204,6 +2223,7 @@ fn render_ahead_catches_up_after_a_large_backward_seek() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2292,6 +2312,7 @@ fn render_ahead_catches_up_after_a_backward_seek_beyond_the_retention_window() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2392,6 +2413,7 @@ fn render_ahead_reacts_to_each_target_change_faster_than_the_old_poll_interval()
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2467,6 +2489,7 @@ fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum()
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2590,6 +2613,7 @@ fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backw
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2703,6 +2727,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -2813,6 +2838,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     // `fill_segments` does not need a timeline: it already works at
     // the level of a resolved segment.
@@ -2890,6 +2916,7 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
 
     let caches = SharedFrameCache::new();
@@ -2968,6 +2995,7 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
 
     let caches = SharedFrameCache::new();
@@ -3063,6 +3091,7 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,
@@ -3173,6 +3202,7 @@ fn single_media_project(path: std::path::PathBuf) -> (Project, MediaId, Timeline
             file: Default::default(),
         },
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(timeline_with(vec![Track {
         kind: TrackKind::Video,

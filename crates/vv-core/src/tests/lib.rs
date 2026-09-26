@@ -40,6 +40,7 @@ fn insert_media(project: &mut Project) -> MediaId {
         },
         content_hash: 7,
         compound: None,
+        folder: None,
     })
 }
 

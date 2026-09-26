@@ -60,6 +60,7 @@ fn insert_compound_media(project: &mut Project, plan: &CompoundPlan) -> MediaId 
         },
         content_hash,
         compound: Some(nested),
+        folder: None,
     })
 }
 
@@ -228,6 +229,7 @@ fn compound_media_for(project: &mut Project, nested: TimelineId) -> MediaId {
         },
         content_hash: 1,
         compound: Some(nested),
+        folder: None,
     })
 }
 

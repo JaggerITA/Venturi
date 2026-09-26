@@ -4,8 +4,8 @@
 //! as a pure function (testable without `egui::Ui`); the panel drawing stays
 //! in `main.rs`.
 
-use std::collections::BTreeSet;
-use vv_core::MediaId;
+use std::collections::{BTreeSet, HashSet};
+use vv_core::{FolderId, MediaId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SortKey {
@@ -45,10 +45,17 @@ pub struct MediaPoolState {
     /// becomes a rename unless a double click follows (the "slow double
     /// click").
     pub rename_pending: Option<(MediaId, f64)>,
+    pub expanded: HashSet<FolderId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RenameTarget {
+    Media(MediaId),
+    Folder(FolderId),
 }
 
 pub struct Rename {
-    pub media_id: MediaId,
+    pub target: RenameTarget,
     pub text: String,
     /// Set until the text field has been shown once: it then takes focus
     /// with the whole name selected.
@@ -111,6 +118,84 @@ pub fn sort_items<T>(
         };
         if sort.ascending { ord } else { ord.reverse() }
     });
+}
+
+/// Drag payload of a folder row.
+pub struct FolderDrag(pub FolderId);
+
+pub enum PoolRow<T> {
+    Folder { id: FolderId, depth: usize },
+    Item { item: T, depth: usize },
+}
+
+/// The pool as drawn: at each level the folders (by name) and then the
+/// items, in the order given; the content of collapsed folders is left out.
+/// A missing parent folder counts as the root.
+pub fn tree_rows<T>(
+    folders: &[(FolderId, &str, Option<FolderId>)],
+    items: Vec<(T, Option<FolderId>)>,
+    expanded: &HashSet<FolderId>,
+) -> Vec<PoolRow<T>> {
+    let exists =
+        |folder: Option<FolderId>| folder.filter(|f| folders.iter().any(|(id, ..)| id == f));
+    let mut sorted: Vec<_> = folders.to_vec();
+    sorted.sort_by(|a, b| natural_cmp(a.1, b.1));
+    let mut items: Vec<(Option<T>, Option<FolderId>)> = items
+        .into_iter()
+        .map(|(item, folder)| (Some(item), exists(folder)))
+        .collect();
+    let mut rows = Vec::new();
+    let mut visited = HashSet::new();
+    push_level(
+        None,
+        0,
+        &sorted,
+        &mut items,
+        expanded,
+        &mut visited,
+        &mut rows,
+        &exists,
+    );
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_level<T>(
+    parent: Option<FolderId>,
+    depth: usize,
+    folders: &[(FolderId, &str, Option<FolderId>)],
+    items: &mut [(Option<T>, Option<FolderId>)],
+    expanded: &HashSet<FolderId>,
+    visited: &mut HashSet<FolderId>,
+    rows: &mut Vec<PoolRow<T>>,
+    exists: &dyn Fn(Option<FolderId>) -> Option<FolderId>,
+) {
+    for &(id, _, folder_parent) in folders {
+        // `visited`: a corrupted file with a parent cycle must not recurse forever.
+        if exists(folder_parent) != parent || !visited.insert(id) {
+            continue;
+        }
+        rows.push(PoolRow::Folder { id, depth });
+        if expanded.contains(&id) {
+            push_level(
+                Some(id),
+                depth + 1,
+                folders,
+                items,
+                expanded,
+                visited,
+                rows,
+                exists,
+            );
+        }
+    }
+    for (item, folder) in items.iter_mut() {
+        if *folder == parent
+            && let Some(item) = item.take()
+        {
+            rows.push(PoolRow::Item { item, depth });
+        }
+    }
 }
 
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {

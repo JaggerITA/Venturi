@@ -1041,6 +1041,7 @@ fn project_with_media(duration_frames: FrameIdx) -> (Project, vv_core::MediaId) 
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     });
     (project, media_id)
 }
@@ -1064,6 +1065,7 @@ fn drag_set_segments_are_queued_one_after_the_other() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let fps = vv_core::Rational::new(25, 1);
     let set = MediaDragSet {

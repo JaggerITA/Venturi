@@ -168,6 +168,22 @@ pool.rename:
   en: "Rename"
   it: "Rinomina"
 
+pool.new_folder:
+  en: "New folder"
+  it: "Nuova cartella"
+
+pool.new_folder_name:
+  en: "New folder"
+  it: "Nuova cartella"
+
+pool.delete_folder:
+  en: "Delete folder"
+  it: "Elimina cartella"
+
+pool.delete_folder_hint:
+  en: "Its content moves up one level, nothing is removed from the project"
+  it: "Il contenuto sale di un livello, nulla viene rimosso dal progetto"
+
 pool.copy_suffix:
   en: "copy"
   it: "copia"

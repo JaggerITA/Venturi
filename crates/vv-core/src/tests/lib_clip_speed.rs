@@ -26,6 +26,7 @@ fn setup(kinds: &[TrackKind]) -> (Project, TimelineId, MediaId) {
         },
         content_hash: 7,
         compound: None,
+        folder: None,
     });
     (project, timeline, media)
 }

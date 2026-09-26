@@ -348,6 +348,20 @@ fn rename_field(ui: &mut egui::Ui, rename: &mut media_pool::Rename) -> Option<Op
     }
 }
 
+/// Horizontal step per folder level.
+const FOLDER_INDENT: f32 = 14.0;
+
+fn indented<R>(ui: &mut egui::Ui, depth: usize, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if depth == 0 {
+        return add(ui);
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * FOLDER_INDENT);
+        ui.vertical(add).inner
+    })
+    .inner
+}
+
 /// Thumbnail of a timeline in the pool: a film strip.
 fn paint_film_icon(
     painter: &egui::Painter,
@@ -391,9 +405,193 @@ impl VenturiApp {
             return;
         };
         self.media_pool_state.renaming = Some(media_pool::Rename {
-            media_id,
+            target: media_pool::RenameTarget::Media(media_id),
             text: file_label(&item.path),
             just_started: true,
+        });
+    }
+
+    fn start_folder_rename(&mut self, folder: FolderId) {
+        let Some(f) = self.project.folders.get(folder) else {
+            return;
+        };
+        self.media_pool_state.renaming = Some(media_pool::Rename {
+            target: media_pool::RenameTarget::Folder(folder),
+            text: f.name.clone(),
+            just_started: true,
+        });
+    }
+
+    /// Created expanded (with its parent), with its name ready to edit.
+    fn new_folder(&mut self, parent: Option<FolderId>) {
+        let base = t!("pool.new_folder_name").into_owned();
+        let taken: std::collections::HashSet<&str> = self
+            .project
+            .folders
+            .values()
+            .filter(|f| f.parent == parent)
+            .map(|f| f.name.as_str())
+            .collect();
+        let name = std::iter::once(base.clone())
+            .chain((2..).map(|n| format!("{base} {n}")))
+            .find(|name| !taken.contains(name.as_str()))
+            .expect("infinite candidates");
+        let folder = self
+            .project
+            .folders
+            .insert(vv_core::MediaFolder { name, parent });
+        self.media_pool_state.expanded.extend(parent);
+        self.unsaved_media = true;
+        self.start_folder_rename(folder);
+    }
+
+    fn move_media_to_folder(&mut self, media: &[MediaId], folder: Option<FolderId>) {
+        for &id in media {
+            if let Some(item) = self.project.media_pool.get_mut(id)
+                && item.folder != folder
+            {
+                item.folder = folder;
+                self.unsaved_media = true;
+            }
+        }
+    }
+
+    /// Drops onto the pool: media or a folder dragged into `folder`.
+    fn accept_pool_drop(&mut self, resp: &egui::Response, folder: Option<FolderId>) {
+        if let Some(set) = resp.dnd_release_payload::<timeline_ui::MediaDragSet>() {
+            let media: Vec<MediaId> = set.items.iter().map(|d| d.media_id).collect();
+            self.move_media_to_folder(&media, folder);
+        } else if let Some(dragged) = resp.dnd_release_payload::<media_pool::FolderDrag>()
+            && self.project.move_folder(dragged.0, folder)
+        {
+            self.media_pool_state.expanded.extend(folder);
+            self.unsaved_media = true;
+        }
+    }
+
+    fn folder_row(&mut self, ui: &mut egui::Ui, folder: FolderId) {
+        let Some(name) = self.project.folders.get(folder).map(|f| f.name.clone()) else {
+            return;
+        };
+        let expanded = self.media_pool_state.expanded.contains(&folder);
+        let height = 24.0;
+        let rect = ui
+            .allocate_exact_size(
+                egui::vec2(ui.available_width(), height),
+                egui::Sense::hover(),
+            )
+            .0;
+        let renaming = self
+            .media_pool_state
+            .renaming
+            .as_mut()
+            .filter(|r| r.target == media_pool::RenameTarget::Folder(folder));
+        let is_renaming = renaming.is_some();
+        let sense = if is_renaming {
+            egui::Sense::hover()
+        } else {
+            egui::Sense::click_and_drag()
+        };
+        let resp = ui.interact(rect, ui.id().with(("media_pool_folder", folder)), sense);
+        let drop_hover = resp
+            .dnd_hover_payload::<timeline_ui::MediaDragSet>()
+            .is_some()
+            || resp
+                .dnd_hover_payload::<media_pool::FolderDrag>()
+                .is_some_and(|d| d.0 != folder);
+        let visuals = ui.visuals();
+        if drop_hover {
+            ui.painter()
+                .rect_filled(rect, 3.0, crate::theme::ACCENT_TRANSLUCENT);
+        } else if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
+        }
+        let color = visuals.text_color();
+        let arrow = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 8.0, rect.center().y),
+            egui::vec2(8.0, 8.0),
+        );
+        let points = if expanded {
+            vec![arrow.left_top(), arrow.right_top(), arrow.center_bottom()]
+        } else {
+            vec![arrow.left_top(), arrow.right_center(), arrow.left_bottom()]
+        };
+        ui.painter().add(egui::Shape::convex_polygon(
+            points,
+            color,
+            egui::Stroke::NONE,
+        ));
+        let icon = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 18.0, rect.center().y - 5.0),
+            egui::vec2(15.0, 11.0),
+        );
+        let icon_color = visuals.weak_text_color();
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(icon.left_top() - egui::vec2(0.0, 2.0), egui::vec2(6.0, 3.0)),
+            1.0,
+            icon_color,
+        );
+        ui.painter().rect_filled(icon, 1.5, icon_color);
+        let text_rect = rect.with_min_x(rect.left() + 38.0);
+        match renaming {
+            Some(rename) => {
+                let done = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+                        rename_field(ui, rename)
+                    })
+                    .inner;
+                if let Some(new_name) = done {
+                    self.media_pool_state.renaming = None;
+                    if let Some(name) = new_name
+                        && let Some(f) = self.project.folders.get_mut(folder)
+                        && f.name != name
+                    {
+                        f.name = name;
+                        self.unsaved_media = true;
+                    }
+                }
+            }
+            None => {
+                ui.painter().text(
+                    text_rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    &name,
+                    egui::FontId::proportional(14.0),
+                    color,
+                );
+            }
+        }
+        if resp.clicked() {
+            if expanded {
+                self.media_pool_state.expanded.remove(&folder);
+            } else {
+                self.media_pool_state.expanded.insert(folder);
+            }
+        }
+        resp.dnd_set_drag_payload(media_pool::FolderDrag(folder));
+        if resp.dragged() {
+            show_drag_ghost(ui, resp.id, &name);
+        }
+        self.accept_pool_drop(&resp, Some(folder));
+        resp.context_menu(|ui| {
+            if ui.button(t!("pool.new_folder")).clicked() {
+                self.new_folder(Some(folder));
+                ui.close();
+            }
+            if ui.button(t!("pool.rename")).clicked() {
+                self.start_folder_rename(folder);
+                ui.close();
+            }
+            if ui
+                .button(t!("pool.delete_folder"))
+                .on_hover_text(t!("pool.delete_folder_hint"))
+                .clicked()
+            {
+                self.project.delete_folder(folder);
+                self.unsaved_media = true;
+                ui.close();
+            }
         });
     }
 
@@ -474,7 +672,7 @@ impl VenturiApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let items: Vec<(MediaId, String, vv_core::MediaMeta, u64, bool)> = self
+                let mut items: Vec<(MediaId, String, vv_core::MediaMeta, u64, bool)> = self
                     .project
                     .media_pool
                     .iter()
@@ -488,17 +686,38 @@ impl VenturiApp {
                         )
                     })
                     .collect();
-                let mut items = items;
                 media_pool::sort_items(
                     &mut items,
                     self.media_pool_state.sort,
                     |(_, label, ..)| label.as_str(),
                     |(_, _, meta, ..)| meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9),
                 );
-                let order: Vec<MediaId> = items.iter().map(|(id, ..)| *id).collect();
-                let drags: Vec<timeline_ui::MediaDrag> = items
+                let folders: Vec<(FolderId, &str, Option<FolderId>)> = self
+                    .project
+                    .folders
                     .iter()
-                    .map(|(id, _, meta, ..)| timeline_ui::MediaDrag::whole(*id, meta))
+                    .map(|(id, f)| (id, f.name.as_str(), f.parent))
+                    .collect();
+                let items = items
+                    .into_iter()
+                    .map(|item| {
+                        let folder = self.project.media_pool[item.0].folder;
+                        (item, folder)
+                    })
+                    .collect();
+                let rows = media_pool::tree_rows(&folders, items, &self.media_pool_state.expanded);
+                let order: Vec<MediaId> = rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        media_pool::PoolRow::Item { item, .. } => Some(item.0),
+                        media_pool::PoolRow::Folder { .. } => None,
+                    })
+                    .collect();
+                let drags: Vec<timeline_ui::MediaDrag> = order
+                    .iter()
+                    .map(|id| {
+                        timeline_ui::MediaDrag::whole(*id, &self.project.media_pool[*id].meta)
+                    })
                     .collect();
                 // Interacted with before the items: in egui the last one wins, so a click
                 // on an item does not start the selection rectangle. The clip rect
@@ -510,9 +729,13 @@ impl VenturiApp {
                     egui::Sense::click_and_drag(),
                 );
                 bg.context_menu(|ui| {
+                    if ui.button(t!("pool.new_folder")).clicked() {
+                        self.new_folder(None);
+                        ui.close();
+                    }
                     ui.menu_button(t!("pool.timelines"), |ui| {
                         if ui.button(t!("menu.import_otio")).clicked() {
-                            self.request_project_switch(ProjectSwitch::ImportOtio);
+                            self.import_otio_dialog();
                             ui.close();
                         }
                         if ui.button(t!("pool.new_timeline")).clicked() {
@@ -528,7 +751,18 @@ impl VenturiApp {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(SIDE_PAD, 0))
                     .show(ui, |ui| {
-                        for (id, label, meta, content_hash, is_timeline) in items {
+                        for row in rows {
+                            let ((id, label, meta, content_hash, is_timeline), depth, folder) =
+                                match row {
+                                    media_pool::PoolRow::Folder { id, depth } => {
+                                        indented(ui, depth, |ui| self.folder_row(ui, id));
+                                        continue;
+                                    }
+                                    media_pool::PoolRow::Item { item, depth } => {
+                                        let folder = self.project.media_pool[item.0].folder;
+                                        (item, depth, folder)
+                                    }
+                                };
                             let proxy_state = self
                                 .proxy_worker
                                 .as_ref()
@@ -542,12 +776,12 @@ impl VenturiApp {
                                 .media_pool_state
                                 .renaming
                                 .as_mut()
-                                .filter(|r| r.media_id == id);
+                                .filter(|r| r.target == media_pool::RenameTarget::Media(id));
                             let is_renaming = renaming.is_some();
                             let mut rename_done = None;
                             let mut label_rect = egui::Rect::NOTHING;
-                            let group_resp = ui
-                                .group(|ui| {
+                            let group_resp = indented(ui, depth, |ui| {
+                                ui.group(|ui| {
                                     ui.set_min_width(ui.available_width());
                                     ui.horizontal(|ui| {
                                         let thumb_size = egui::vec2(64.0, 36.0);
@@ -684,7 +918,8 @@ impl VenturiApp {
                                         );
                                     });
                                 })
-                                .response;
+                                .response
+                            });
                             if proxy_state == Some(proxy_worker::ProxyState::Ready) {
                                 let rect = group_resp.rect.shrink(1.0);
                                 ui.painter().rect_filled(
@@ -804,6 +1039,7 @@ impl VenturiApp {
                             };
                             let dragged_count = payload.items.len();
                             resp.dnd_set_drag_payload(payload);
+                            self.accept_pool_drop(&resp, folder);
                             if resp.double_clicked() {
                                 self.media_pool_state.rename_pending = None;
                                 // A compound clip (or a project timeline, see
@@ -826,6 +1062,7 @@ impl VenturiApp {
                         }
                     });
                 ui.add_space(BOTTOM_PAD);
+                self.accept_pool_drop(&bg, None);
                 if let Some((id, clicked_at)) = self.media_pool_state.rename_pending {
                     let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
                     let elapsed = ui.input(|i| i.time) - clicked_at;

@@ -52,7 +52,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use timeline_audio::TimelineAudio;
-use vv_core::{ClipId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
+use vv_core::{ClipId, FolderId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 /// ~6 s of margin at 1080p, ~1.5 s at 4K.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
@@ -233,6 +233,7 @@ struct VenturiApp {
     /// Probing of the files of a multiple import, in progress in the background.
     pending_import: Option<project_io::PendingImport>,
     pending_otio_import: Option<project_io::PendingOtioImport>,
+    pending_otio_merge: Option<project_io::PendingOtioMerge>,
     /// Files chosen while an import was already in progress: they start afterwards.
     import_queue: Vec<PathBuf>,
 
@@ -418,6 +419,7 @@ impl Default for VenturiApp {
             import_warnings: Vec::new(),
             pending_import: None,
             pending_otio_import: None,
+            pending_otio_merge: None,
             import_queue: Vec::new(),
             preview_meta: None,
             preview_error: None,
@@ -1162,9 +1164,8 @@ impl VenturiApp {
             tracks.push(Track::new(TrackKind::Video));
         }
         tracks.push(Track::new(TrackKind::Audio));
-        let name: String = "Timeline 1".into();
         let id = self.project.timelines.insert(vv_core::Timeline {
-            name: name.clone(),
+            name: "Timeline 1".into(),
             fps,
             resolution,
             tracks,
@@ -1177,24 +1178,7 @@ impl VenturiApp {
         // pool exactly like a compound clip, draggable elsewhere.
         // Any initial `meta`, `sync_root_timeline_media` corrects it
         // immediately on the first round (called by `update`).
-        let media_id = self.project.media_pool.insert(vv_core::MediaItem {
-            path: name.into(),
-            meta: vv_core::MediaMeta {
-                duration_frames: 0,
-                fps,
-                width: resolution.0,
-                height: resolution.1,
-                has_video: include_video_track,
-                has_audio: true,
-                sample_rate: 48_000,
-                channels: 2,
-                audio_streams: 1,
-                file: Default::default(),
-            },
-            content_hash: 0,
-            compound: Some(id),
-        });
-        self.project.sync_compound_meta(media_id);
+        self.project.insert_timeline_item(id, None);
         id
     }
 
@@ -1207,30 +1191,13 @@ impl VenturiApp {
         resolution: (u32, u32),
     ) -> TimelineId {
         let id = self.project.timelines.insert(vv_core::Timeline {
-            name: name.clone(),
+            name,
             fps,
             resolution,
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
             markers: Vec::new(),
         });
-        let media_id = self.project.media_pool.insert(vv_core::MediaItem {
-            path: name.into(),
-            meta: vv_core::MediaMeta {
-                duration_frames: 0,
-                fps,
-                width: resolution.0,
-                height: resolution.1,
-                has_video: true,
-                has_audio: true,
-                sample_rate: 48_000,
-                channels: 2,
-                audio_streams: 1,
-                file: Default::default(),
-            },
-            content_hash: 0,
-            compound: Some(id),
-        });
-        self.project.sync_compound_meta(media_id);
+        self.project.insert_timeline_item(id, None);
         // Creating a timeline does not go through the history (like a media
         // import): without this, Ctrl+S would not be offered.
         self.unsaved_media = true;
@@ -3327,6 +3294,7 @@ impl eframe::App for VenturiApp {
         self.show_export_progress(ui);
         self.show_import_warnings(ui);
         self.show_otio_import_progress(ui);
+        self.show_otio_merge_dialog(ui);
         self.show_relink_message(ui);
         self.show_forced_relink_dialog(ui.ctx());
         self.show_unsaved_changes_dialog(ui);

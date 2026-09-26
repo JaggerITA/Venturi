@@ -19,6 +19,7 @@ fn two_media_ids() -> (MediaId, MediaId) {
         },
         content_hash: 0,
         compound: None,
+        folder: None,
     };
     let a = project.media_pool.insert(item(320, 240));
     let b = project.media_pool.insert(item(320, 240));

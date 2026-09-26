@@ -5358,6 +5358,7 @@ fn make_compound_clip(
         },
         content_hash,
         compound: Some(nested_id),
+        folder: None,
     });
     let commands = vv_core::compound_clip_commands(project, timeline_id, &clips, &plan, media_id);
     history.do_command(

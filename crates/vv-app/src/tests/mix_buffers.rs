@@ -44,6 +44,7 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let real_clip = vv_core::Clip::from_source_range(
         vv_core::ClipId(1),
@@ -83,6 +84,7 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
         },
         content_hash: 2,
         compound: Some(nested_id),
+        folder: None,
     });
 
     let mut cache = MixBufferCache::spawn(48_000, 1);

@@ -9,6 +9,15 @@ use std::path::PathBuf;
 new_key_type! {
     pub struct MediaId;
     pub struct TimelineId;
+    pub struct FolderId;
+}
+
+/// A folder of the media pool: only a way to group the items, it has no
+/// effect on rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaFolder {
+    pub name: String,
+    pub parent: Option<FolderId>,
 }
 
 /// Id of a group of linked clips: a counter, membership is only
@@ -267,6 +276,9 @@ pub struct MediaItem {
     /// treat it like any other media.
     #[serde(default)]
     pub compound: Option<TimelineId>,
+    /// `None`, or a folder no longer in `Project::folders`: the pool root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<FolderId>,
 }
 
 /// Nesting limit for whoever walks into compound clips: a safety net
@@ -1962,6 +1974,8 @@ fn visible_clip_at(track: &Track, frame: FrameIdx) -> Option<&Clip> {
 pub struct Project {
     pub media_pool: SlotMap<MediaId, MediaItem>,
     pub timelines: SlotMap<TimelineId, Timeline>,
+    #[serde(default)]
+    pub folders: SlotMap<FolderId, MediaFolder>,
     next_clip_id: u64,
     #[serde(default)]
     next_link_group_id: u64,
@@ -2022,12 +2036,24 @@ impl Project {
     }
 
     /// Copy of the timeline of `source` (a compound pool item) as a new
-    /// pool item called `name`. Clip and link group ids are reallocated:
-    /// they are unique project-wide.
+    /// pool item called `name`.
     pub fn duplicate_timeline(&mut self, source: MediaId, name: String) -> Option<MediaId> {
         let timeline_id = self.media_pool.get(source)?.compound?;
         let mut timeline = self.timelines.get(timeline_id)?.clone();
         timeline.name = name.clone();
+        self.reallocate_clip_ids(&mut timeline);
+        let new_timeline = self.timelines.insert(timeline);
+        let mut item = self.media_pool[source].clone();
+        item.path = name.into();
+        item.compound = Some(new_timeline);
+        let media_id = self.media_pool.insert(item);
+        self.sync_compound_meta(media_id);
+        Some(media_id)
+    }
+
+    /// Clip and link group ids are unique project-wide: a timeline coming
+    /// from elsewhere needs fresh ones.
+    fn reallocate_clip_ids(&mut self, timeline: &mut Timeline) {
         let mut groups = std::collections::HashMap::new();
         for track in &mut timeline.tracks {
             let mut clip_ids = std::collections::HashMap::new();
@@ -2056,13 +2082,126 @@ impl Project {
                 }
             });
         }
-        let new_timeline = self.timelines.insert(timeline);
-        let mut item = self.media_pool[source].clone();
-        item.path = name.into();
-        item.compound = Some(new_timeline);
-        let media_id = self.media_pool.insert(item);
+    }
+
+    /// The media pool entry of `timeline_id`, named after the timeline.
+    pub fn insert_timeline_item(
+        &mut self,
+        timeline_id: TimelineId,
+        folder: Option<FolderId>,
+    ) -> MediaId {
+        let timeline = &self.timelines[timeline_id];
+        let media_id = self.media_pool.insert(MediaItem {
+            path: timeline.name.clone().into(),
+            meta: MediaMeta {
+                duration_frames: 0,
+                fps: timeline.fps,
+                width: timeline.resolution.0,
+                height: timeline.resolution.1,
+                has_video: true,
+                has_audio: true,
+                sample_rate: 48_000,
+                channels: 2,
+                audio_streams: 1,
+                file: Default::default(),
+            },
+            content_hash: 0,
+            compound: Some(timeline_id),
+            folder,
+        });
         self.sync_compound_meta(media_id);
-        Some(media_id)
+        media_id
+    }
+
+    /// Moves the media and timelines of `other` into this project, its pool
+    /// items in `folder` (the folders of `other` are not carried over). A
+    /// media of `other` found in `reuse` is replaced by the one of this
+    /// project it maps to. A timeline without a pool item gets one at the
+    /// root. Returns the new timelines, in `other`'s order.
+    pub fn absorb(
+        &mut self,
+        other: Project,
+        reuse: &std::collections::HashMap<MediaId, MediaId>,
+        folder: Option<FolderId>,
+    ) -> Vec<TimelineId> {
+        let mut media_ids = reuse.clone();
+        let mut added = Vec::new();
+        for (id, mut item) in other.media_pool {
+            if media_ids.contains_key(&id) {
+                continue;
+            }
+            item.folder = folder;
+            let new_id = self.media_pool.insert(item);
+            media_ids.insert(id, new_id);
+            added.push(new_id);
+        }
+        let mut timeline_ids = std::collections::HashMap::new();
+        let mut timelines = Vec::new();
+        for (id, mut timeline) in other.timelines {
+            self.reallocate_clip_ids(&mut timeline);
+            for clip in timeline.tracks.iter_mut().flat_map(|t| &mut t.clips) {
+                if let ClipSource::Media(media) = &mut clip.source
+                    && let Some(&new_media) = media_ids.get(media)
+                {
+                    *media = new_media;
+                }
+            }
+            let new_id = self.timelines.insert(timeline);
+            timeline_ids.insert(id, new_id);
+            timelines.push(new_id);
+        }
+        for &media_id in &added {
+            let item = &mut self.media_pool[media_id];
+            item.compound = item.compound.and_then(|t| timeline_ids.get(&t).copied());
+        }
+        for &timeline_id in &timelines {
+            match added
+                .iter()
+                .find(|&&m| self.media_pool[m].compound == Some(timeline_id))
+            {
+                Some(&media_id) => self.sync_compound_meta(media_id),
+                None => {
+                    self.insert_timeline_item(timeline_id, None);
+                }
+            }
+        }
+        timelines
+    }
+
+    /// Moves `folder`'s content to its parent, then removes it.
+    pub fn delete_folder(&mut self, folder: FolderId) {
+        let Some(removed) = self.folders.remove(folder) else {
+            return;
+        };
+        for item in self.media_pool.values_mut() {
+            if item.folder == Some(folder) {
+                item.folder = removed.parent;
+            }
+        }
+        for child in self.folders.values_mut() {
+            if child.parent == Some(folder) {
+                child.parent = removed.parent;
+            }
+        }
+    }
+
+    /// Refused (`false`) if `parent` is `folder` itself or inside it.
+    pub fn move_folder(&mut self, folder: FolderId, parent: Option<FolderId>) -> bool {
+        let mut ancestor = parent;
+        for _ in 0..=self.folders.len() {
+            match ancestor {
+                Some(f) if f == folder => return false,
+                Some(f) => ancestor = self.folders.get(f).and_then(|f| f.parent),
+                None => break,
+            }
+        }
+        match self.folders.get_mut(folder) {
+            Some(f) => {
+                f.parent = parent;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Renames a compound pool item together with its timeline.

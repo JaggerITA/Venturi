@@ -36,12 +36,14 @@ fn project() -> (Project, vv_core::MediaId, vv_core::MediaId) {
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let b = project.media_pool.insert(MediaItem {
         path: PathBuf::from("b.wav"),
         meta,
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     (project, a, b)
 }
@@ -181,6 +183,7 @@ fn project_with_compound() -> (Project, vv_core::MediaId) {
         meta: project.media_pool[a].meta.clone(),
         content_hash: 10,
         compound: Some(nested),
+        folder: None,
     });
     (project, compound)
 }
@@ -326,6 +329,7 @@ fn a_conformed_clip_lasts_as_long_as_its_audio_and_does_not_drift() {
         },
         content_hash: 7,
         compound: None,
+        folder: None,
     });
     let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
     let clip = Clip::from_source_range(
@@ -386,6 +390,7 @@ fn splitting_a_conformed_clip_mid_source_frame_keeps_every_sample() {
         },
         content_hash: 7,
         compound: None,
+        folder: None,
     });
     let rate = Rational::conform_rate(Rational::new(10, 1), Rational::new(10_000, 1001));
     let clip = Clip::from_source_range(ClipId(1), ClipSource::Media(media), 0, 1000, 0, rate);

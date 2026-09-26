@@ -93,6 +93,7 @@ fn insert_compound_media(app: &mut VenturiApp, nested_id: TimelineId) -> MediaId
         },
         content_hash: 1,
         compound: Some(nested_id),
+        folder: None,
     })
 }
 
@@ -188,6 +189,7 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
         },
         content_hash: 7,
         compound: None,
+        folder: None,
     });
     let nested_id = app.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
@@ -461,6 +463,7 @@ fn app_with_media_at(
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let timeline_id = app.project.timelines.insert(vv_core::Timeline {
         name: "T".into(),
@@ -490,6 +493,7 @@ fn hd_media(app: &mut VenturiApp, hash: u64, (w, h): (u32, u32)) -> MediaId {
         },
         content_hash: hash,
         compound: None,
+        folder: None,
     })
 }
 
@@ -582,6 +586,7 @@ fn dropping_several_media_appends_them_in_pool_order() {
         },
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     let timeline_id = app.timeline_id.unwrap();
     let drag = |app: &VenturiApp, id: MediaId| {
@@ -631,6 +636,7 @@ fn dropping_several_media_is_a_single_undo_step() {
         },
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     let timeline_id = app.timeline_id.unwrap();
     let tracks_before = app.project.timelines[timeline_id].tracks.len();
@@ -688,6 +694,7 @@ fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
         },
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     let timeline_id = app.timeline_id.unwrap();
     let tracks_before = app.project.timelines[timeline_id].tracks.len();
@@ -760,6 +767,7 @@ fn select_all_media_selects_every_media_in_the_pool() {
         },
         content_hash: 2,
         compound: None,
+        folder: None,
     });
 
     app.select_all_media();
@@ -801,18 +809,21 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let unresolvable = app.project.media_pool.insert(vv_core::MediaItem {
         path: "/other/nonexistent/path/ghost.mp4".into(),
         meta: meta.clone(),
         content_hash: 3,
         compound: None,
+        folder: None,
     });
     let already_ok = app.project.media_pool.insert(vv_core::MediaItem {
         path: already_ok_path.clone(),
         meta,
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     app.relink_media(&dir, &[offline, unresolvable, already_ok]);
 
@@ -875,6 +886,7 @@ fn media_not_found_by_name_can_be_force_relinked() {
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     meta.file.size_bytes = Some(1);
     let lost = app.project.media_pool.insert(vv_core::MediaItem {
@@ -882,6 +894,7 @@ fn media_not_found_by_name_can_be_force_relinked() {
         meta,
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     app.relink_media(&dir, &[found, lost]);
     assert_eq!(app.forced_relink_offer, Some((dir.clone(), vec![lost])));
@@ -960,12 +973,14 @@ fn relink_media_with_a_selection_only_touches_the_selected_media() {
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let not_selected = app.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/b.mp4".into(),
         meta,
         content_hash: 2,
         compound: None,
+        folder: None,
     });
     app.relink_media(&dir, &[selected]);
 
@@ -3962,7 +3977,7 @@ fn export_otio_to_writes_the_file_and_reports_failures() {
 }
 
 #[test]
-fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
+fn import_otio_from_adds_a_timeline_and_reports_skipped_clips() {
     let dir = std::env::temp_dir().join("vv-app-otio-import-test");
     std::fs::create_dir_all(&dir).unwrap();
     let media = dir.join("clip.mp4");
@@ -4007,14 +4022,41 @@ fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
     std::fs::write(&otio_path, otio.to_string()).unwrap();
 
     let mut app = VenturiApp::default();
+    make_timeline_with_clip(&mut app, 0, 0, 10);
+    let old_timeline = app.timeline_id.unwrap();
     app.current_project_path = Some(dir.join("old.vvproj"));
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
 
     assert!(app.project_error.is_none(), "{:?}", app.project_error);
-    assert_eq!(app.current_project_path, None);
-    let timeline = &app.project.timelines[app.timeline_id.unwrap()];
-    assert_eq!(timeline.name, "Importata");
+    assert!(
+        app.pending_otio_merge.is_none(),
+        "no media with the same name"
+    );
+    assert_eq!(app.current_project_path, Some(dir.join("old.vvproj")));
+    assert!(app.has_unsaved_changes());
+    assert!(app.project.timelines.contains_key(old_timeline));
+    let timeline_id = app.timeline_id.unwrap();
+    assert_ne!(timeline_id, old_timeline, "the imported one is opened");
+    let timeline = &app.project.timelines[timeline_id];
+    assert_eq!(timeline.name, "timeline", "named after the file");
+    let timeline_item = app
+        .project
+        .media_pool
+        .values()
+        .find(|m| m.compound == Some(timeline_id))
+        .expect("the timeline shows up in the pool");
+    assert_eq!(timeline_item.folder, None);
+    let (folder_id, folder) = app.project.folders.iter().next().unwrap();
+    assert_eq!(folder.name, "timeline");
+    let otio_media: Vec<_> = app
+        .project
+        .media_pool
+        .values()
+        .filter(|m| m.path.starts_with(&dir))
+        .collect();
+    assert_eq!(otio_media.len(), 2);
+    assert!(otio_media.iter().all(|m| m.folder == Some(folder_id)));
     let clips = &timeline.tracks[0].clips;
     assert_eq!(clips.len(), 2, "the missing one is kept offline");
     let clip = &clips[0];
@@ -4045,6 +4087,70 @@ fn import_otio_from_replaces_the_project_and_reports_skipped_clips() {
     assert_eq!((meta.width, meta.height), (320, 240));
 }
 
+/// Importing twice: the second time the media names match and the user
+/// chooses between reusing them and a new folder.
+#[test]
+fn otio_media_already_in_the_pool_wait_for_the_reuse_choice() {
+    let dir = std::env::temp_dir().join("vv-app-otio-reuse-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let otio = serde_json::json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "Edit",
+        "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [{
+            "OTIO_SCHEMA": "Track.1",
+            "kind": "Video",
+            "children": [{
+                "OTIO_SCHEMA": "Clip.1",
+                "name": "a",
+                "source_range": {
+                    "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 25.0 },
+                    "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 10.0, "rate": 25.0 },
+                },
+                "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "a.mp4" },
+            }],
+        }]},
+    });
+    let otio_path = dir.join("edit.otio");
+    std::fs::write(&otio_path, otio.to_string()).unwrap();
+    let mut app = VenturiApp::default();
+    app.import_otio_from(&otio_path);
+    app.wait_for_otio_import();
+    let first_media = app
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, m)| m.compound.is_none())
+        .map(|(id, _)| id)
+        .unwrap();
+    let pool_len = app.project.media_pool.len();
+
+    app.import_otio_from(&otio_path);
+    app.wait_for_otio_import();
+    let merge = app
+        .pending_otio_merge
+        .take()
+        .expect("a.mp4 is already there");
+    assert_eq!(merge.matches.len(), 1);
+    app.merge_otio_import(merge, true);
+
+    assert_eq!(
+        app.project.media_pool.len(),
+        pool_len + 1,
+        "only the timeline item"
+    );
+    assert_eq!(app.project.folders.len(), 1, "no folder for nothing");
+    let clip = &app.project.timelines[app.timeline_id.unwrap()].tracks[0].clips[0];
+    assert!(matches!(clip.source, vv_core::ClipSource::Media(m) if m == first_media));
+
+    app.import_otio_from(&otio_path);
+    app.wait_for_otio_import();
+    let merge = app.pending_otio_merge.take().unwrap();
+    app.merge_otio_import(merge, false);
+    assert_eq!(app.project.media_pool.len(), pool_len + 3);
+    assert_eq!(app.project.folders.len(), 2);
+}
+
 #[test]
 fn unsaved_changes_follow_edits_and_saves() {
     let mut app = VenturiApp::default();
@@ -4069,8 +4175,8 @@ fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure
     let clip_id = make_timeline_with_clip(&mut app, 0, 0, 10);
     let timeline_id = app.timeline_id.unwrap();
 
-    app.request_project_switch(ProjectSwitch::ImportOtio);
-    assert_eq!(app.pending_project_switch, Some(ProjectSwitch::ImportOtio));
+    app.request_project_switch(ProjectSwitch::Open);
+    assert_eq!(app.pending_project_switch, Some(ProjectSwitch::Open));
     app.resolve_unsaved_changes(UnsavedChoice::Cancel);
     assert_eq!(app.pending_project_switch, None);
 
@@ -4124,6 +4230,7 @@ fn opening_a_project_regenerates_missing_waveforms() {
         meta: vv_media::probe(&media).unwrap(),
         content_hash,
         compound: None,
+        folder: None,
     });
     let project_path = dir.join("p.vvproj");
     vv_core::save_project(&project, &project_path).unwrap();
@@ -4309,6 +4416,7 @@ fn dropping_audio_only_media_creates_no_video_track() {
         },
         content_hash: 1,
         compound: None,
+        folder: None,
     });
     let meta = app.project.media_pool[media_id].meta.clone();
 

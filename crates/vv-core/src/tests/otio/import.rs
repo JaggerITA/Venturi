@@ -48,6 +48,7 @@ fn a_venturi_export_imports_back_unchanged() {
         meta: media_meta.clone(),
         content_hash: 42,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(Timeline {
         name: "Montaggio".into(),
@@ -757,6 +758,7 @@ fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
         meta: audio_only_meta(),
         content_hash: 42,
         compound: None,
+        folder: None,
     });
     let fps = Rational::new(25, 1);
     let timeline_id = project.timelines.insert(Timeline {
@@ -872,6 +874,7 @@ fn a_clip_speed_round_trips_with_and_without_our_metadata() {
         meta: meta(Rational::new(24, 1), 2400),
         content_hash: 42,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(Timeline {
         name: "Speed".into(),
@@ -933,6 +936,7 @@ fn an_unknown_clip_color_imports_as_no_color() {
         meta: meta(Rational::new(24, 1), 240),
         content_hash: 42,
         compound: None,
+        folder: None,
     });
     let timeline_id = project.timelines.insert(Timeline {
         name: "Colors".into(),
