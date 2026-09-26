@@ -244,6 +244,7 @@ struct TrimState {
 /// the length changes and the speed with it; ripple on release.
 struct RetimeState {
     clip_id: ClipId,
+    start: FrameIdx,
     original_len: FrameIdx,
     original_speed: vv_core::Rational,
     pitch_correction: bool,
@@ -256,18 +257,21 @@ struct RetimeState {
 pub(crate) const SPEED_PERCENT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=10_000.0;
 
 impl RetimeState {
-    /// The speed for the dragged length, to the hundredth of a percent, and
-    /// the length it gives.
-    fn value(&self, px_per_frame: f32) -> (vv_core::Rational, FrameIdx) {
-        let wanted = (self.original_len as f32 + self.accum_px / px_per_frame)
-            .round()
-            .max(1.0) as f64;
-        let len_at_100 = self.original_len as f64 * self.original_speed.as_percent();
-        let percent =
-            (len_at_100 / wanted).clamp(*SPEED_PERCENT_RANGE.start(), *SPEED_PERCENT_RANGE.end());
-        let speed = vv_core::Rational::from_percent(percent);
-        let len = (len_at_100 / speed.as_percent()).round().max(1.0) as FrameIdx;
-        (speed, len)
+    /// Lengths reachable within `SPEED_PERCENT_RANGE`.
+    fn len_range(&self) -> (FrameIdx, FrameIdx) {
+        let len_at_100 = self.original_len as f64 * self.original_speed.as_percent() / 100.0;
+        let len = |percent: f64| (len_at_100 * 100.0 / percent).round().max(1.0) as FrameIdx;
+        (
+            len(*SPEED_PERCENT_RANGE.end()),
+            len(*SPEED_PERCENT_RANGE.start()),
+        )
+    }
+
+    fn speed_for(&self, len: FrameIdx) -> vv_core::Rational {
+        self.original_speed.divided_by(vv_core::Rational::new(
+            len.max(1) as i32,
+            self.original_len.max(1) as i32,
+        ))
     }
 }
 
@@ -2391,6 +2395,23 @@ pub fn show_timeline(
                     snapped.clamp(t.min_value, t.max_value)
                 });
 
+                // The retimed end snaps like a trimmed one.
+                let retimed_new_len = state.retiming().map(|r| {
+                    let raw = (r.start + r.original_len) as f32 + r.accum_px / px_per_frame;
+                    let exclude: Vec<ClipId> = r.group.iter().map(|&(_, id)| id).collect();
+                    let snapped = snap_frame(
+                        raw.round() as FrameIdx,
+                        0,
+                        &visuals,
+                        &exclude,
+                        &[state.playhead],
+                        px_per_frame,
+                        snapping_enabled,
+                    );
+                    let (min_len, max_len) = r.len_range();
+                    (snapped - r.start).clamp(min_len, max_len)
+                });
+
                 // The gesture is cleared only after the loop: the clips of the group
                 // drawn after the primary would go back for one frame to the initial
                 // position.
@@ -2477,7 +2498,7 @@ pub fn show_timeline(
                         is_trimming_this,
                         trimmed_primary_new_value,
                         dragged_primary_new_start,
-                        px_per_frame,
+                        retimed_new_len,
                     );
 
                     let x = origin.x + display_start as f32 * px_per_frame;
@@ -2723,7 +2744,8 @@ pub fn show_timeline(
                         let dragged = state
                             .retiming()
                             .filter(|r| r.group.contains(&(visual.track_index, visual.clip.id)))
-                            .map(|r| r.value(px_per_frame).0);
+                            .zip(retimed_new_len)
+                            .map(|(r, len)| r.speed_for(len));
                         match retime_bar(
                             ui,
                             &painter,
@@ -3121,7 +3143,7 @@ pub fn show_timeline(
                             Some(Gesture::Retime(r)) if r.clip_id == visual.clip.id => {
                                 pending = Some(PendingAction::SetSpeed {
                                     clips: r.group.clone(),
-                                    speed: r.value(px_per_frame).0,
+                                    speed: r.speed_for(retimed_new_len.unwrap_or(r.original_len)),
                                     pitch_correction: r.pitch_correction,
                                 });
                             }
@@ -3326,10 +3348,10 @@ pub fn show_timeline(
                 if let Some((pos, cursor)) = edge_cursor {
                     paint_edge_cursor(ui.ctx(), pos, cursor);
                 }
-                if let Some(r) = state.retiming()
+                if let (Some(r), Some(len)) = (state.retiming(), retimed_new_len)
                     && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
                 {
-                    paint_pointer_overlay(ui.ctx(), pos, format_speed(r.value(px_per_frame).0));
+                    paint_pointer_overlay(ui.ctx(), pos, format_speed(r.speed_for(len)));
                 }
 
                 paint_playhead(
@@ -3392,12 +3414,11 @@ fn display_range(
     is_trimming_this: bool,
     trimmed_primary_new_value: Option<FrameIdx>,
     dragged_primary_new_start: Option<FrameIdx>,
-    px_per_frame: f32,
+    retimed_new_len: Option<FrameIdx>,
 ) -> (FrameIdx, FrameIdx) {
-    if let Some(r) = state.retiming()
+    if let (Some(r), Some(len)) = (state.retiming(), retimed_new_len)
         && r.group.contains(&(visual.track_index, visual.clip.id))
     {
-        let (_, len) = r.value(px_per_frame);
         let scaled = visual.clip.timeline_len as f64 * len as f64 / r.original_len.max(1) as f64;
         return (
             visual.clip.timeline_start,
@@ -3645,6 +3666,7 @@ fn format_duration(frames: FrameIdx, fps: f64) -> String {
 fn begin_retime(state: &mut TimelineState, visuals: &[ClipVisual], visual: &ClipVisual) {
     state.gesture = Some(Gesture::Retime(RetimeState {
         clip_id: visual.clip.id,
+        start: visual.clip.timeline_start,
         original_len: visual.clip.timeline_len,
         original_speed: visual.clip.speed,
         pitch_correction: visual.clip.pitch_correction,
@@ -3698,18 +3720,28 @@ fn retime_bar(
         font.clone(),
         egui::Color32::WHITE,
     );
-    let menu_rect = egui::Rect::from_min_size(bar.min, egui::vec2(galley.size().x + 8.0, height))
-        .intersect(bar);
+    // Centered on the visible part of the clip, however long or zoomed in.
+    let visible = bar.intersect(painter.clip_rect());
+    if visible.width() <= 0.0 {
+        return None;
+    }
+    let menu_width = (galley.size().x + 8.0).min(visible.width());
+    let menu_left = (visible.center().x - menu_width / 2.0).max(visible.left());
+    let menu_rect = egui::Rect::from_min_size(
+        egui::pos2(menu_left, bar.top()),
+        egui::vec2(menu_width, height),
+    );
     let close_rect = egui::Rect::from_min_size(
-        egui::pos2(bar.right() - height, bar.top()),
+        egui::pos2(visible.right() - height, bar.top()),
         egui::vec2(height, height),
     );
-    painter.with_clip_rect(bar).galley(
-        bar.min + egui::vec2(4.0, (height - galley.size().y) / 2.0),
+    painter.with_clip_rect(visible).galley(
+        menu_rect.min + egui::vec2(4.0, (height - galley.size().y) / 2.0),
         galley,
         egui::Color32::WHITE,
     );
-    if bar.width() >= menu_rect.width() + close_rect.width() {
+    let show_close = visible.width() >= menu_width + 2.0 * close_rect.width();
+    if show_close {
         painter.text(
             close_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -3722,8 +3754,12 @@ fn retime_bar(
         return None;
     }
     let mut action = None;
-    let close = ui.interact(close_rect, id.with("retime_close"), egui::Sense::click());
-    if close.on_hover_text(t!("timeline.retime_close")).clicked() {
+    if show_close
+        && ui
+            .interact(close_rect, id.with("retime_close"), egui::Sense::click())
+            .on_hover_text(t!("timeline.retime_close"))
+            .clicked()
+    {
         action = Some(RetimeBarAction::Close);
     }
     let menu = ui.interact(menu_rect, id.with("retime_menu"), egui::Sense::click());
@@ -5153,19 +5189,50 @@ fn apply_pending_action(
                 )),
             );
         }
+        // As a trim: the stretch gained overwrites what was there, a shorter
+        // clip leaves a gap.
         PendingAction::SetSpeed {
             clips,
             speed,
             pitch_correction,
         } => {
+            let tl = &project.timelines[timeline_id];
+            let overwritten: Vec<(usize, FrameIdx, FrameIdx)> = clips
+                .iter()
+                .filter_map(|&(track_index, clip_id)| {
+                    let clip = tl.clip(track_index, clip_id)?;
+                    let ClipSource::Media(media_id) = clip.source else {
+                        return None;
+                    };
+                    let media = project.media_pool.get(media_id)?;
+                    let mut retimed = clip.clone();
+                    retimed.set_speed(
+                        speed,
+                        vv_core::Rational::conform_rate(tl.fps, media.meta.fps),
+                    );
+                    grown_range(clip, track_index, TrimEdge::End, retimed.timeline_end())
+                })
+                .collect();
+            let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
+            vv_core::make_room_for_ranges(
+                project,
+                timeline_id,
+                &overwritten,
+                &clips,
+                &mut commands,
+            );
+            commands.push(Box::new(vv_core::SetClipSpeed::new(
+                timeline_id,
+                clips,
+                speed,
+                pitch_correction,
+                vv_core::SpeedFit::Resize,
+            )));
             history.do_command(
                 project,
-                Box::new(vv_core::SetClipSpeed::new(
-                    timeline_id,
-                    clips,
-                    speed,
-                    pitch_correction,
-                    true,
+                Box::new(vv_core::CompositeCommand::new(
+                    vv_core::CommandLabel::ClipSpeed,
+                    commands,
                 )),
             );
         }

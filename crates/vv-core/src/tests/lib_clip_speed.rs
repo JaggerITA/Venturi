@@ -69,7 +69,7 @@ fn doubling_the_speed_halves_the_clip_and_ripples_every_track() {
             vec![(0, a)],
             Rational::new(2, 1),
             false,
-            true,
+            SpeedFit::Ripple,
         )),
     );
 
@@ -102,7 +102,7 @@ fn slowing_down_lengthens_the_clip_and_pushes_what_follows() {
             vec![(0, a)],
             Rational::from_percent(50.0),
             false,
-            true,
+            SpeedFit::Ripple,
         )),
     );
     assert_eq!(span(&project, tl, 0, a), (10, 80));
@@ -134,7 +134,7 @@ fn the_backward_ripple_never_overlaps_a_clip_that_stays() {
             vec![(0, a)],
             Rational::new(4, 1),
             false,
-            true,
+            SpeedFit::Ripple,
         )),
     );
     assert_eq!(span(&project, tl, 0, a), (0, 25));
@@ -159,7 +159,7 @@ fn without_ripple_the_clip_keeps_its_length_within_the_media() {
             vec![(0, a)],
             Rational::new(2, 1),
             true,
-            false,
+            SpeedFit::KeepLength,
         )),
     );
     let clip = project.timelines[tl].clip(0, a).unwrap();
@@ -187,7 +187,7 @@ fn a_linked_group_ripples_once() {
             vec![(0, v), (1, a)],
             Rational::new(2, 1),
             false,
-            true,
+            SpeedFit::Ripple,
         )),
     );
     assert_eq!(span(&project, tl, 0, v), (0, 50));
@@ -207,7 +207,7 @@ fn media_seconds_follow_the_speed() {
             vec![(0, a)],
             Rational::new(2, 1),
             false,
-            true,
+            SpeedFit::Ripple,
         )),
     );
     let clip = project.timelines[tl].clip(0, a).unwrap();
@@ -228,7 +228,7 @@ fn refreshing_the_rates_keeps_the_speed() {
             vec![(0, a)],
             Rational::new(2, 1),
             false,
-            true,
+            SpeedFit::Ripple,
         )),
     );
     project.refresh_clip_rates();
@@ -236,4 +236,25 @@ fn refreshing_the_rates_keeps_the_speed() {
         project.timelines[tl].clip(0, a).unwrap().rate,
         Rational::new(1, 2)
     );
+}
+
+/// As a trim: the length follows the speed and nothing else moves.
+#[test]
+fn resize_changes_only_the_clip() {
+    let (mut project, tl, media) = setup(&[TrackKind::Video]);
+    let a = add(&mut project, tl, 0, media, (0, 100), 0);
+    let b = add(&mut project, tl, 0, media, (0, 10), 150);
+    let mut history = History::default();
+    history.do_command(
+        &mut project,
+        Box::new(SetClipSpeed::new(
+            tl,
+            vec![(0, a)],
+            Rational::new(2, 1),
+            false,
+            SpeedFit::Resize,
+        )),
+    );
+    assert_eq!(span(&project, tl, 0, a), (0, 50));
+    assert_eq!(span(&project, tl, 0, b), (150, 10));
 }

@@ -220,3 +220,90 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
     app.history.undo(&mut app.project);
     assert_eq!(zoom_of(&app, target_id), 1.0, "a single undo step");
 }
+
+/// The speed goes with the attributes: the target keeps its source range
+/// and changes length, what follows it moves.
+#[test]
+fn pasting_the_speed_retimes_the_target() {
+    let mut app = VenturiApp::default();
+    let timeline_id = app.ensure_timeline();
+    let track_index = app.project.timelines[timeline_id]
+        .tracks_of_kind(TrackKind::Video)
+        .next()
+        .map(|(i, _)| i)
+        .unwrap();
+    let fps = app.project.timelines[timeline_id].fps;
+    let media = app.project.media_pool.insert(vv_core::MediaItem {
+        path: "a.mp4".into(),
+        meta: vv_core::MediaMeta {
+            duration_frames: 1000,
+            fps,
+            width: 1920,
+            height: 1080,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+        },
+        content_hash: 1,
+        compound: None,
+    });
+    let media_clip = |app: &mut VenturiApp, start| {
+        let mut clip = Clip::from_source_range(
+            app.project.alloc_clip_id(),
+            ClipSource::Media(media),
+            0,
+            100,
+            start,
+            Rational::one(),
+        );
+        clip.timeline_start = start;
+        clip
+    };
+    let mut source = media_clip(&mut app, 0);
+    source.set_speed(Rational::new(2, 1), Rational::one());
+    source.pitch_correction = true;
+    let target = media_clip(&mut app, 100);
+    let (source_id, target_id) = (source.id, target.id);
+    let mut after = clip(0, 0, 10);
+    after.id = app.project.alloc_clip_id();
+    after.timeline_start = 200;
+    let after_id = after.id;
+    let track = &mut app.project.timelines[timeline_id].tracks[track_index];
+    track.insert_sorted(source);
+    track.insert_sorted(target);
+    track.insert_sorted(after);
+
+    app.timeline_state.selected.insert((track_index, source_id));
+    app.copy_selected_clips();
+    app.timeline_state.set_selection(
+        std::collections::BTreeSet::from([(track_index, target_id)]),
+        None,
+    );
+    app.paste_attributes_selection = HashSet::from([Attribute::Speed]);
+    app.open_paste_attributes_dialog();
+    let dialog = app.paste_attributes.take().expect("the dialog opens");
+    app.apply_paste_attributes(&dialog);
+
+    let tl = &app.project.timelines[timeline_id];
+    let pasted = tl.clip(track_index, target_id).unwrap();
+    assert_eq!(
+        (pasted.speed, pasted.pitch_correction),
+        (Rational::new(2, 1), true)
+    );
+    assert_eq!((pasted.timeline_start, pasted.timeline_len), (100, 50));
+    assert_eq!(tl.clip(track_index, after_id).unwrap().timeline_start, 150);
+
+    app.history.undo(&mut app.project);
+    let tl = &app.project.timelines[timeline_id];
+    assert_eq!(
+        tl.clip(track_index, target_id).unwrap().speed,
+        Rational::one()
+    );
+    assert_eq!(
+        tl.clip(track_index, after_id).unwrap().timeline_start,
+        200,
+        "a single undo step"
+    );
+}

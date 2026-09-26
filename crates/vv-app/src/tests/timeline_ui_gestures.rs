@@ -308,8 +308,35 @@ fn with_the_retime_bar_the_right_edge_changes_the_speed() {
     let clip = h.clip(0, ClipId(1));
     assert_eq!((clip.speed, clip.timeline_len), (Rational::new(2, 1), 50));
     assert_eq!(clip.source_in(), 0);
-    assert_eq!(h.clip(0, ClipId(2)).timeline_start, 50, "rippled");
+    assert_eq!(
+        h.clip(0, ClipId(2)).timeline_start,
+        100,
+        "a gap, as for a trim"
+    );
     assert!(h.no_gesture());
+}
+
+/// Lengthening over the next clip cuts it, as a trim does.
+#[test]
+fn slowing_down_with_the_retime_bar_overwrites_the_next_clip() {
+    let mut h = media_harness();
+    h.state.retime_controls.insert(ClipId(1));
+    h.frame(Vec::new());
+    let rect = h.rect(ClipId(1));
+    h.drag(
+        egui::pos2(rect.right() - 2.0, rect.bottom() - 8.0),
+        egui::vec2(10.0 * PX_PER_FRAME, 0.0),
+    );
+    let clip = h.clip(0, ClipId(1));
+    assert_eq!(
+        (clip.speed, clip.timeline_len),
+        (Rational::new(10, 11), 110)
+    );
+    let next = h.clip(0, ClipId(2));
+    assert_eq!((next.timeline_start, next.timeline_len), (110, 10));
+    h.history.undo(&mut h.project);
+    assert_eq!(h.clip(0, ClipId(2)).timeline_start, 100, "one undo step");
+    assert_eq!(h.clip(0, ClipId(1)).timeline_len, 100);
 }
 
 #[test]

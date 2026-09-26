@@ -10,10 +10,18 @@ Decisions (agreed with the user):
 - **Audio**: varispeed by default (pitch follows the speed, as Resolve
   without "Pitch Correction"); a per-clip `pitch_correction` flag uses the
   rubberband stretch instead (same pipeline as the "a" key).
-- **Ripple**: a length change shifts every clip starting at or after the old
-  end, on all unlocked tracks (same rule as `RippleDeleteGap`: keeps A/V
-  sync). The % dialog can turn it off: then the clip keeps its length and
-  shows more/less of the source, clamped to the media.
+- **Length** (`vv_core::SpeedFit`):
+  - retime bar (edge drag and presets): exactly like a trim of the end —
+    lengthening overwrites what follows, shortening leaves a gap, snapping
+    included (`Resize` + `make_room_for_ranges`);
+  - "Change Clip Speed…" dialog: "Ripple sequence" (default) shifts every
+    clip starting at or after the old end on all unlocked tracks (same rule
+    as `RippleDeleteGap`, keeps A/V sync); off, the clip keeps its length
+    and shows more/less of the source, clamped to the media;
+  - paste attributes ("Speed", with the pitch correction): ripple, so
+    adjacent pasted clips never overwrite each other.
+- The speed of the retime bar sits at the center of the visible part of the
+  clip.
 
 ---
 

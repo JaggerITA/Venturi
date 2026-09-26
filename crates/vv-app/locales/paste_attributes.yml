@@ -48,6 +48,10 @@ paste_attr.fades:
   en: "Fades"
   it: "Dissolvenze"
 
+paste_attr.speed:
+  en: "Speed"
+  it: "Velocità"
+
 paste_attr.blend_mode:
   en: "Composition Mode"
   it: "Modo di composizione"

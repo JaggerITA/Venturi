@@ -578,18 +578,30 @@ impl Command for RippleDeleteGap {
     }
 }
 
+/// What a speed change does to the length of the clip and to its neighbours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeedFit {
+    /// The length follows the speed; whatever starts at or after the old end
+    /// moves by the difference on all the unlocked tracks, as
+    /// `RippleDeleteGap` does.
+    Ripple,
+    /// The clip keeps its length (capped at the end of the media) and shows
+    /// more or less of the source.
+    KeepLength,
+    /// The length follows the speed and nothing else moves: the caller frees
+    /// the stretch gained first (`make_room_for_ranges`), as for a trim.
+    Resize,
+}
+
 /// Constant speed of `Media` clips (the caller passes whole linked groups):
-/// `source_in` and `timeline_start` stay put. With `ripple` the length
-/// follows the speed and whatever starts at or after the old end moves by the
-/// difference on all the unlocked tracks, as `RippleDeleteGap` does; without,
-/// the clip keeps its length, capped at the end of the media.
+/// `source_in` and `timeline_start` stay put, see `SpeedFit` for the rest.
 #[derive(Debug)]
 pub struct SetClipSpeed {
     pub timeline: TimelineId,
     pub clips: Vec<(usize, ClipId)>,
     pub speed: Rational,
     pub pitch_correction: bool,
-    pub ripple: bool,
+    pub fit: SpeedFit,
     before: Vec<Track>,
 }
 
@@ -599,14 +611,14 @@ impl SetClipSpeed {
         clips: Vec<(usize, ClipId)>,
         speed: Rational,
         pitch_correction: bool,
-        ripple: bool,
+        fit: SpeedFit,
     ) -> Self {
         Self {
             timeline,
             clips,
             speed,
             pitch_correction,
-            ripple,
+            fit,
             before: Vec::new(),
         }
     }
@@ -647,24 +659,19 @@ impl Command for SetClipSpeed {
                 let Some(media) = media_pool.get(media_id) else {
                     continue;
                 };
-                let (source_in, source_out) = (clip.source_in(), clip.source_out());
-                clip.speed = self.speed;
+                let old_len = clip.timeline_len;
                 clip.pitch_correction = self.pitch_correction;
-                clip.conform(Rational::conform_rate(tl.fps, media.meta.fps));
-                clip.source_offset = clip.rate.scale_round(source_in);
-                let len = if self.ripple {
-                    clip.rate.scale_round(source_out) - clip.source_offset
-                } else {
+                clip.set_speed(self.speed, Rational::conform_rate(tl.fps, media.meta.fps));
+                if self.fit == SpeedFit::KeepLength {
                     let available =
                         clip.rate.scale_round(media.meta.duration_frames) - clip.source_offset;
-                    clip.timeline_len.min(available)
-                };
-                clip.timeline_len = len.max(1);
-                clip.fade_in = clip.fade_in.min(clip.timeline_len);
-                clip.fade_out = clip.fade_out.min(clip.timeline_len);
+                    clip.timeline_len = old_len.min(available).max(1);
+                    clip.fade_in = clip.fade_in.min(clip.timeline_len);
+                    clip.fade_out = clip.fade_out.min(clip.timeline_len);
+                }
                 new_end = new_end.max(clip.timeline_end());
             }
-            if self.ripple && new_end != FrameIdx::MIN {
+            if self.fit == SpeedFit::Ripple && new_end != FrameIdx::MIN {
                 ripple_from(&mut tl.tracks, old_end, new_end - old_end);
             }
         }

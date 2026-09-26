@@ -8,6 +8,7 @@ use vv_core::{Clip, ClipAttributes, FrameIdx, Keyframed, TransformParam};
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Attribute {
     Fades,
+    Speed,
     BlendMode,
     Opacity,
     Position,
@@ -30,8 +31,9 @@ pub(crate) enum AttributeGroup {
 }
 
 impl Attribute {
-    const ALL: [Attribute; 13] = [
+    const ALL: [Attribute; 14] = [
         Attribute::Fades,
+        Attribute::Speed,
         Attribute::BlendMode,
         Attribute::Opacity,
         Attribute::Position,
@@ -48,7 +50,7 @@ impl Attribute {
 
     fn group(self) -> AttributeGroup {
         match self {
-            Attribute::Fades => AttributeGroup::Clip,
+            Attribute::Fades | Attribute::Speed => AttributeGroup::Clip,
             Attribute::Volume => AttributeGroup::Audio,
             _ => AttributeGroup::Video,
         }
@@ -57,6 +59,7 @@ impl Attribute {
     fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
             Attribute::Fades => t!("paste_attr.fades"),
+            Attribute::Speed => t!("paste_attr.speed"),
             Attribute::BlendMode => t!("paste_attr.blend_mode"),
             Attribute::Opacity => t!("paste_attr.opacity"),
             Attribute::Position => t!("paste_attr.position"),
@@ -343,6 +346,7 @@ impl VenturiApp {
             return;
         };
         let mut commands: Vec<(usize, ClipId, ClipAttributes)> = Vec::new();
+        let mut speeds: SpeedTargets = Vec::new();
         {
             let tl = &self.project.timelines[timeline_id];
             for &(track_index, clip_id) in &dialog.targets {
@@ -369,6 +373,17 @@ impl VenturiApp {
                     clip_id,
                     merged_attributes(source, target, &dialog.selected, dialog.keyframe_mode),
                 ));
+                if dialog.selected.contains(&Attribute::Speed)
+                    && matches!(target.source, vv_core::ClipSource::Media(_))
+                    && (target.speed, target.pitch_correction)
+                        != (source.speed, source.pitch_correction)
+                {
+                    let key = (source.speed, source.pitch_correction);
+                    match speeds.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, clips)) => clips.push((track_index, clip_id)),
+                        None => speeds.push((key, vec![(track_index, clip_id)])),
+                    }
+                }
             }
         }
         if commands.is_empty() {
@@ -386,10 +401,27 @@ impl VenturiApp {
                 )),
             );
         }
+        // Ripple: several pasted clips can be adjacent, and each one's new
+        // length must not overwrite the next.
+        for ((speed, pitch_correction), clips) in speeds {
+            self.history.do_command(
+                &mut self.project,
+                Box::new(vv_core::SetClipSpeed::new(
+                    timeline_id,
+                    clips,
+                    speed,
+                    pitch_correction,
+                    vv_core::SpeedFit::Ripple,
+                )),
+            );
+        }
         self.history
             .end_group_as(mark, vv_core::CommandLabel::PasteAttributes);
     }
 }
+
+/// Targets grouped by the speed (and pitch correction) they get.
+type SpeedTargets = Vec<((vv_core::Rational, bool), Vec<(usize, ClipId)>)>;
 
 /// The attributes of `target` with the ones selected replaced by those of
 /// `source`. Durations (fades, transitions) are clamped to the target clip,

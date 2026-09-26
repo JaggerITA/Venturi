@@ -1314,6 +1314,18 @@ impl Clip {
         self.rate = conform_rate.divided_by(self.speed);
     }
 
+    /// New `speed` keeping `source_in` and `timeline_start`: the length
+    /// follows it.
+    pub fn set_speed(&mut self, speed: Rational, conform_rate: Rational) {
+        let (source_in, source_out) = (self.source_in(), self.source_out());
+        self.speed = speed;
+        self.conform(conform_rate);
+        self.source_offset = self.rate.scale_round(source_in);
+        self.timeline_len = (self.rate.scale_round(source_out) - self.source_offset).max(1);
+        self.fade_in = self.fade_in.min(self.timeline_len);
+        self.fade_out = self.fade_out.min(self.timeline_len);
+    }
+
     /// First source frame shown.
     pub fn source_in(&self) -> FrameIdx {
         self.rate.unscale_round(self.source_offset)

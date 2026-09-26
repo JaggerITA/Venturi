@@ -112,7 +112,11 @@ impl VenturiApp {
                 dialog.targets,
                 vv_core::Rational::from_percent(dialog.percent),
                 dialog.pitch_correction,
-                dialog.ripple,
+                if dialog.ripple {
+                    vv_core::SpeedFit::Ripple
+                } else {
+                    vv_core::SpeedFit::KeepLength
+                },
             )),
         );
     }
