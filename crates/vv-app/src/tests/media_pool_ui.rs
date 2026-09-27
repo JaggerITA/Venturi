@@ -1,7 +1,8 @@
 use super::*;
 
 fn timeline_item(app: &VenturiApp, timeline_id: vv_core::TimelineId) -> MediaId {
-    app.project
+    app.session
+        .project
         .media_pool
         .iter()
         .find(|(_, item)| item.compound == Some(timeline_id))
@@ -16,7 +17,7 @@ fn duplicating_a_timeline_twice_numbers_the_copies() {
     let source = timeline_item(&app, timeline_id);
     let base = format!(
         "{} {}",
-        file_label(&app.project.media_pool[source].path),
+        file_label(&app.session.project.media_pool[source].path),
         t!("pool.copy_suffix")
     );
 
@@ -24,6 +25,7 @@ fn duplicating_a_timeline_twice_numbers_the_copies() {
     app.duplicate_timeline(source);
 
     let mut names: Vec<String> = app
+        .session
         .project
         .media_pool
         .values()
@@ -32,7 +34,7 @@ fn duplicating_a_timeline_twice_numbers_the_copies() {
         .collect();
     names.sort();
     assert_eq!(names[1..], [base.clone(), format!("{base} 2")]);
-    assert_eq!(app.project.timelines.len(), 3);
+    assert_eq!(app.session.project.timelines.len(), 3);
     assert!(app.has_unsaved_changes());
 }
 
@@ -41,13 +43,13 @@ fn renaming_to_the_same_name_changes_nothing() {
     let mut app = VenturiApp::default();
     let timeline_id = app.ensure_timeline();
     let item = timeline_item(&app, timeline_id);
-    app.unsaved_media = false;
-    let name = file_label(&app.project.media_pool[item].path);
+    app.session.mark_saved();
+    let name = file_label(&app.session.project.media_pool[item].path);
     app.rename_timeline(item, name);
-    assert!(!app.unsaved_media);
+    assert!(!app.session.has_unsaved_changes());
     app.rename_timeline(item, "Edit".into());
-    assert_eq!(app.project.timelines[timeline_id].name, "Edit");
-    assert!(app.unsaved_media);
+    assert_eq!(app.session.project.timelines[timeline_id].name, "Edit");
+    assert!(app.session.has_unsaved_changes());
 }
 
 fn column_input(events: Vec<egui::Event>) -> egui::RawInput {

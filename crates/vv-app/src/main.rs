@@ -195,8 +195,7 @@ enum ViewerFrameKind {
 }
 
 struct VenturiApp {
-    project: vv_core::Project,
-    history: vv_core::History,
+    session: vv_session::Session,
     timeline_id: Option<TimelineId>,
     /// The timelines "above" `timeline_id`, from the root down, when one has
     /// entered a compound clip with a double click (see
@@ -288,8 +287,6 @@ struct VenturiApp {
     render_ahead: Option<render_ahead::RenderAhead>,
     /// `history.generation()` at the last update of `render_ahead`.
     render_ahead_generation: u64,
-    /// `history.generation()` at the last `sync_root_timeline_media`.
-    root_timeline_media_generation: u64,
 
     /// Mixer of the audio tracks and playback clock of the timeline.
     /// `None` until needed (in the tests it opens only if used).
@@ -334,16 +331,9 @@ struct VenturiApp {
     /// Proposed again at the next export of the session.
     last_export_settings: Option<export::ExportSettings>,
 
-    /// `None` until saved: "Save" behaves like "Save as".
-    current_project_path: Option<PathBuf>,
     /// Last title sent to the compositor: the command is sent only when it changes.
     window_title: String,
     about_icon: Option<egui::TextureHandle>,
-    /// `history.generation()` at the last save or open.
-    saved_generation: u64,
-    /// Media imported after the last save: the media pool changes
-    /// without going through the history.
-    unsaved_media: bool,
     /// Open, import or exit waiting for the answer to "save the
     /// changes?".
     pending_project_switch: Option<ProjectSwitch>,
@@ -389,8 +379,7 @@ struct VenturiApp {
 impl Default for VenturiApp {
     fn default() -> Self {
         Self {
-            project: vv_core::Project::default(),
-            history: vv_core::History::default(),
+            session: vv_session::Session::default(),
             timeline_id: None,
             timeline_stack: Vec::new(),
             timeline_state: timeline_ui::TimelineState::default(),
@@ -429,7 +418,6 @@ impl Default for VenturiApp {
             browse_audio_streams: 0,
             render_ahead: None,
             render_ahead_generation: 0,
-            root_timeline_media_generation: 0,
             timeline_audio: None,
             playback_speed: 1.0,
             selection_follows_playhead: true,
@@ -449,11 +437,8 @@ impl Default for VenturiApp {
             paste_attributes_selection: Default::default(),
             paste_attributes_keyframe_mode: paste_attributes::KeyframeMode::MaintainTiming,
             last_export_settings: None,
-            current_project_path: None,
             window_title: String::new(),
             about_icon: None,
-            saved_generation: 0,
-            unsaved_media: false,
             pending_project_switch: None,
             quit_confirmed: false,
             project_error: None,
@@ -541,7 +526,7 @@ impl VenturiApp {
     /// timeline: it shows the first frame from a dedicated decode-ahead.
     fn preview_media(&mut self, media_id: MediaId) {
         self.browsing_render_ahead = None;
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.session.project.media_pool.get(media_id) else {
             return;
         };
         let (path, meta) = (item.path.clone(), item.meta.clone());
@@ -573,7 +558,7 @@ impl VenturiApp {
         &self,
         media_id: MediaId,
     ) -> (render_ahead::RenderAhead, MediaId) {
-        let item = self.project.media_pool[media_id].clone();
+        let item = self.session.project.media_pool[media_id].clone();
         let meta = item.meta.clone();
         let mut project = vv_core::Project::default();
         let preview_media = project.media_pool.insert(item);
@@ -616,7 +601,7 @@ impl VenturiApp {
     /// with its track — the one the viewer shows.
     fn active_video_clip_at(&self, frame: FrameIdx) -> Option<(usize, ClipId)> {
         let timeline_id = self.timeline_id?;
-        self.project.timelines[timeline_id]
+        self.session.project.timelines[timeline_id]
             .active_video_clip_at(frame)
             .map(|(t, c)| (t, c.id))
     }
@@ -634,14 +619,15 @@ impl VenturiApp {
         };
         let mut selected = BTreeSet::from([(track_index, clip_id)]);
         if let Some(timeline_id) = self.timeline_id {
-            selected
-                .extend(self.project.timelines[timeline_id].linked_members(track_index, clip_id));
+            selected.extend(
+                self.session.project.timelines[timeline_id].linked_members(track_index, clip_id),
+            );
         }
         self.timeline_state
             .set_selection(selected, Some((track_index, clip_id)));
         if let Some(timeline_id) = self.timeline_id {
             self.timeline_state
-                .drop_locked(&self.project.timelines[timeline_id]);
+                .drop_locked(&self.session.project.timelines[timeline_id]);
         }
     }
 
@@ -660,7 +646,10 @@ impl VenturiApp {
             && (force_seek || !self.is_timeline_playing())
             && let Some(audio) = &mut self.timeline_audio
         {
-            audio.seek_frame(playhead, self.project.timelines[timeline_id].fps.as_f64());
+            audio.seek_frame(
+                playhead,
+                self.session.project.timelines[timeline_id].fps.as_f64(),
+            );
         }
         self.last_synced_playhead = playhead;
     }
@@ -681,11 +670,15 @@ impl VenturiApp {
             return;
         };
         if let Some(media_id) = self.browsing_media {
-            if let Some(item) = self.project.media_pool.get(media_id) {
+            if let Some(item) = self.session.project.media_pool.get(media_id) {
                 audio.sync_media(&item.path, self.browse_audio_streams, fps);
             }
         } else if let Some(timeline_id) = self.timeline_id {
-            audio.sync(&self.project, timeline_id, self.history.generation());
+            audio.sync(
+                &self.session.project,
+                timeline_id,
+                self.session.history.generation(),
+            );
         }
     }
 
@@ -766,7 +759,7 @@ impl VenturiApp {
             let total = self.browse_total_frames();
             (&mut self.browse_marks, self.browse_playhead, total)
         } else if let Some(timeline_id) = self.timeline_id {
-            let total = self.project.timelines[timeline_id].total_frames();
+            let total = self.session.project.timelines[timeline_id].total_frames();
             let state = &mut self.timeline_state;
             (&mut state.export_marks, state.playhead, total)
         } else {
@@ -805,7 +798,7 @@ impl VenturiApp {
             });
         }
         let hold = self.arrow_hold.as_ref().expect("set above");
-        let fps = self.project.timelines[timeline_id].fps.as_f64();
+        let fps = self.session.project.timelines[timeline_id].fps.as_f64();
         let target = arrow_hold_target(hold, time - hold.pressed_at, fps);
         if target != self.timeline_state.playhead {
             self.timeline_state.playhead = target;
@@ -823,7 +816,7 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let fps = self.project.timelines[timeline_id].fps.as_f64();
+        let fps = self.session.project.timelines[timeline_id].fps.as_f64();
         let playhead = self.timeline_state.playhead;
         self.timeline_audio();
         self.sync_timeline_audio();
@@ -850,7 +843,7 @@ impl VenturiApp {
             self.reset_playback_speed_to_normal();
             return;
         }
-        let timeline = &self.project.timelines[timeline_id];
+        let timeline = &self.session.project.timelines[timeline_id];
         let (fps, end) = (timeline.fps.as_f64(), timeline.total_frames());
         let playhead = self.timeline_state.playhead;
         if playhead >= end {
@@ -874,7 +867,7 @@ impl VenturiApp {
         if !self.is_timeline_playing() {
             return;
         }
-        let timeline = &self.project.timelines[timeline_id];
+        let timeline = &self.session.project.timelines[timeline_id];
         let (fps, end) = (timeline.fps.as_f64(), timeline.total_frames());
         let mut frame = self.timeline_audio().position_frame(fps);
         if frame >= end {
@@ -945,9 +938,10 @@ impl VenturiApp {
         cached: &mut HashMap<MediaId, Vec<(FrameIdx, FrameIdx)>>,
         depth: u32,
     ) -> Vec<(FrameIdx, FrameIdx)> {
-        let (Some(render_ahead), Some(timeline)) =
-            (&self.render_ahead, self.project.timelines.get(timeline_id))
-        else {
+        let (Some(render_ahead), Some(timeline)) = (
+            &self.render_ahead,
+            self.session.project.timelines.get(timeline_id),
+        ) else {
             return Vec::new();
         };
         let clips: Vec<(MediaId, &vv_core::Clip)> = timeline
@@ -961,6 +955,7 @@ impl VenturiApp {
         for (media_id, clip) in clips {
             if !cached.contains_key(&media_id) {
                 let nested = self
+                    .session
                     .project
                     .media_pool
                     .get(media_id)
@@ -989,15 +984,20 @@ impl VenturiApp {
         let Some(proxy_worker) = &self.proxy_worker else {
             return Vec::new();
         };
-        self.project.timelines[timeline_id]
+        self.session.project.timelines[timeline_id]
             .visible_video_clips()
             .filter(|(_, clip)| {
                 let vv_core::ClipSource::Media(media_id) = &clip.source else {
                     return false;
                 };
-                self.project.media_pool.get(*media_id).is_some_and(|item| {
-                    proxy_worker.state(item.content_hash) == Some(proxy_worker::ProxyState::Ready)
-                })
+                self.session
+                    .project
+                    .media_pool
+                    .get(*media_id)
+                    .is_some_and(|item| {
+                        proxy_worker.state(item.content_hash)
+                            == Some(proxy_worker::ProxyState::Ready)
+                    })
             })
             .map(|(_, clip)| (clip.timeline_start, clip.timeline_end() - 1))
             .collect()
@@ -1023,12 +1023,14 @@ impl VenturiApp {
             return;
         };
         let mut compounds: Vec<vv_core::MediaId> = Vec::new();
-        for (_, track) in self.project.timelines[timeline_id].tracks_of_kind(TrackKind::Audio) {
+        for (_, track) in
+            self.session.project.timelines[timeline_id].tracks_of_kind(TrackKind::Audio)
+        {
             for clip in &track.clips {
                 let vv_core::ClipSource::Media(media_id) = &clip.source else {
                     continue;
                 };
-                let Some(item) = self.project.media_pool.get(*media_id) else {
+                let Some(item) = self.session.project.media_pool.get(*media_id) else {
                     continue;
                 };
                 let key = (item.content_hash, clip.audio_stream_index);
@@ -1064,7 +1066,7 @@ impl VenturiApp {
         if depth >= vv_core::MAX_COMPOUND_DEPTH {
             return;
         }
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.session.project.media_pool.get(media_id) else {
             return;
         };
         let (Some(nested_id), key) = (item.compound, (item.content_hash, 0)) else {
@@ -1073,7 +1075,7 @@ impl VenturiApp {
         if self.waveform_cache.contains_key(&key) {
             return;
         }
-        let sources: Vec<(vv_core::MediaId, usize)> = self.project.timelines[nested_id]
+        let sources: Vec<(vv_core::MediaId, usize)> = self.session.project.timelines[nested_id]
             .tracks_of_kind(TrackKind::Audio)
             .flat_map(|(_, track)| track.clips.iter())
             .filter_map(|clip| match clip.source {
@@ -1082,7 +1084,7 @@ impl VenturiApp {
             })
             .collect();
         for (source_id, stream) in sources {
-            let Some(source) = self.project.media_pool.get(source_id) else {
+            let Some(source) = self.session.project.media_pool.get(source_id) else {
                 continue;
             };
             if source.compound.is_some() {
@@ -1105,7 +1107,7 @@ impl VenturiApp {
             }
         }
         let Some((waveform, complete)) =
-            compose_compound_waveform(&self.project, &self.waveform_cache, media_id)
+            compose_compound_waveform(&self.session.project, &self.waveform_cache, media_id)
         else {
             return;
         };
@@ -1145,7 +1147,7 @@ impl VenturiApp {
             tracks.push(Track::new(TrackKind::Video));
         }
         tracks.push(Track::new(TrackKind::Audio));
-        let id = self.project.timelines.insert(vv_core::Timeline {
+        let id = self.session.project.timelines.insert(vv_core::Timeline {
             name: "Timeline 1".into(),
             fps,
             resolution,
@@ -1159,7 +1161,7 @@ impl VenturiApp {
         // pool exactly like a compound clip, draggable elsewhere.
         // Any initial `meta`, `sync_root_timeline_media` corrects it
         // immediately on the first round (called by `update`).
-        self.project.insert_timeline_item(id, None);
+        self.session.project.insert_timeline_item(id, None);
         id
     }
 
@@ -1171,17 +1173,17 @@ impl VenturiApp {
         fps: vv_core::Rational,
         resolution: (u32, u32),
     ) -> TimelineId {
-        let id = self.project.timelines.insert(vv_core::Timeline {
+        let id = self.session.project.timelines.insert(vv_core::Timeline {
             name,
             fps,
             resolution,
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
             markers: Vec::new(),
         });
-        self.project.insert_timeline_item(id, None);
+        self.session.project.insert_timeline_item(id, None);
         // Creating a timeline does not go through the history (like a media
         // import): without this, Ctrl+S would not be offered.
-        self.unsaved_media = true;
+        self.session.mark_unsaved();
         id
     }
 
@@ -1201,14 +1203,14 @@ impl VenturiApp {
     fn spawn_render_ahead_if_needed(&mut self, timeline_id: TimelineId) {
         if self.render_ahead.is_none() {
             self.render_ahead = Some(render_ahead::RenderAhead::spawn(
-                self.project.clone(),
+                self.session.project.clone(),
                 timeline_id,
                 self.settings.cache_budget_bytes,
                 self.settings.proxy(),
                 self.settings.lookahead_secs,
                 self.settings.behind_secs,
             ));
-            self.render_ahead_generation = self.history.generation();
+            self.render_ahead_generation = self.session.history.generation();
         }
     }
 
@@ -1256,8 +1258,8 @@ impl VenturiApp {
         self.timeline_state.clipboard = clipboard;
         self.active_clip = None;
         if let Some(render_ahead) = &self.render_ahead {
-            render_ahead.update_project(&self.project, timeline_id);
-            self.render_ahead_generation = self.history.generation();
+            render_ahead.update_project(&self.session.project, timeline_id);
+            self.render_ahead_generation = self.session.history.generation();
         }
     }
 
@@ -1265,12 +1267,13 @@ impl VenturiApp {
     /// of its entry in the media pool (see `MediaItem::compound`), which is
     /// what the user sees elsewhere (e.g. "Compound Clip 2").
     fn timeline_display_name(&self, id: TimelineId) -> String {
-        self.project
+        self.session
+            .project
             .media_pool
             .values()
             .find(|m| m.compound == Some(id))
             .map(|m| file_label(&m.path))
-            .unwrap_or_else(|| self.project.timelines[id].name.clone())
+            .unwrap_or_else(|| self.session.project.timelines[id].name.clone())
     }
 
     /// Sends `render_ahead` a copy of the project only when the history has
@@ -1282,9 +1285,9 @@ impl VenturiApp {
         let Some(render_ahead) = &self.render_ahead else {
             return;
         };
-        let generation = self.history.generation();
+        let generation = self.session.history.generation();
         if generation != self.render_ahead_generation {
-            render_ahead.update_project(&self.project, timeline_id);
+            render_ahead.update_project(&self.session.project, timeline_id);
             self.render_ahead_generation = generation;
         }
         // At speeds >1x the playhead advances faster in real time: more margin
@@ -1296,29 +1299,10 @@ impl VenturiApp {
         render_ahead.set_target(self.timeline_state.playhead);
     }
 
-    /// The media pool entry of the project timeline (see
-    /// `ensure_timeline_with`) always reflects its real content, not
-    /// just the one at creation time: duration, presence of
-    /// video/audio can change on every modification.
     fn sync_root_timeline_media(&mut self) {
-        let Some(timeline_id) = self.timeline_id else {
-            return;
-        };
-        let generation = self.history.generation();
-        if generation == self.root_timeline_media_generation {
-            return;
+        if let Some(timeline_id) = self.timeline_id {
+            self.session.sync_timeline_media(timeline_id);
         }
-        self.root_timeline_media_generation = generation;
-        let Some(media_id) = self
-            .project
-            .media_pool
-            .iter()
-            .find(|(_, item)| item.compound == Some(timeline_id))
-            .map(|(id, _)| id)
-        else {
-            return;
-        };
-        self.project.sync_compound_meta(media_id);
     }
 
     /// Prefetch window that actually fits the cache budget: `lookahead_secs`
@@ -1328,7 +1312,7 @@ impl VenturiApp {
     /// of the window and leaves holes on one of the tracks, i.e. black flashes
     /// during playback.
     fn effective_window_secs(&self, timeline_id: TimelineId) -> (f64, f64) {
-        let timeline = &self.project.timelines[timeline_id];
+        let timeline = &self.session.project.timelines[timeline_id];
         let fps = timeline.fps.as_f64().max(1e-9);
         let wanted_ahead = self.settings.lookahead_secs * self.playback_speed;
         let playhead = self.timeline_state.playhead;
@@ -1354,7 +1338,7 @@ impl VenturiApp {
     /// the cache. Source resolution, not the timeline one: the cache holds
     /// decoded frames, before any scaling.
     fn window_frame_bytes(&self, timeline_id: TimelineId, from: FrameIdx, to: FrameIdx) -> usize {
-        let timeline = &self.project.timelines[timeline_id];
+        let timeline = &self.session.project.timelines[timeline_id];
         let mut seen = std::collections::HashSet::new();
         let mut bytes = 0;
         for (_, clip) in timeline.visible_video_clips() {
@@ -1367,7 +1351,7 @@ impl VenturiApp {
             if !seen.insert(media_id) {
                 continue;
             }
-            if let Some(item) = self.project.media_pool.get(media_id) {
+            if let Some(item) = self.session.project.media_pool.get(media_id) {
                 bytes += vv_media::yuv420_frame_bytes(item.meta.width, item.meta.height);
             }
         }
@@ -1383,7 +1367,7 @@ impl VenturiApp {
         target: timeline_ui::MediaDropTarget,
     ) {
         let timeline_id = self.ensure_timeline();
-        let group = self.history.begin_group();
+        let group = self.session.history.begin_group();
         if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, true, false) {
             // A generator always has video: `resolve_drop_tracks` with
             // `any_video: true` always resolves to `Some`.
@@ -1391,15 +1375,16 @@ impl VenturiApp {
                 .video
                 .expect("generator: video track always resolved");
             vv_core::edit::insert_generator(
-                &mut self.project,
-                &mut self.history,
+                &mut self.session.project,
+                &mut self.session.history,
                 timeline_id,
                 generator,
                 video_track,
                 start,
             );
         }
-        self.history
+        self.session
+            .history
             .end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
@@ -1426,8 +1411,8 @@ impl VenturiApp {
         label: vv_core::CommandLabel,
     ) {
         vv_core::edit::insert_clips(
-            &mut self.project,
-            &mut self.history,
+            &mut self.session.project,
+            &mut self.session.history,
             timeline_id,
             clips,
             label,
@@ -1499,7 +1484,7 @@ impl VenturiApp {
     /// that does not decode): the layer is dropped instead of freezing the
     /// preview. During a crossing transition both halves must be ready.
     fn timeline_video_layers(&mut self) -> Option<Vec<frame_provider::OwnedLayer>> {
-        let timeline = &self.project.timelines[self.timeline_id?];
+        let timeline = &self.session.project.timelines[self.timeline_id?];
         let still_filling = self
             .render_ahead
             .as_ref()
@@ -1516,7 +1501,7 @@ impl VenturiApp {
             };
             let mut provider = frame_provider::GpuCompounds::new(render_ahead, &self.compositor);
             let track_layers = frame_provider::track_layers_at(
-                &self.project,
+                &self.session.project,
                 timeline,
                 track_index,
                 clip,
@@ -1549,7 +1534,7 @@ impl VenturiApp {
     fn active_clip_effects(&self) -> Option<&vv_core::EffectStack> {
         let (track_index, clip_id) = self.active_clip?;
         let timeline_id = self.timeline_id?;
-        self.project.timelines[timeline_id]
+        self.session.project.timelines[timeline_id]
             .clip(track_index, clip_id)
             .map(|c| &c.effects)
     }
@@ -1565,7 +1550,7 @@ impl VenturiApp {
     /// Appends the media to the video track (and the audio clips alongside).
     #[cfg(test)]
     fn add_media_to_timeline(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.session.project.media_pool.get(media_id) else {
             return;
         };
         let meta = item.meta.clone();
@@ -1573,13 +1558,17 @@ impl VenturiApp {
         // pool), it is created on the fly inheriting fps/resolution from this
         // media.
         let timeline_id = self.ensure_timeline_for(&meta);
-        if self.project.would_create_a_cycle(media_id, timeline_id) {
+        if self
+            .session
+            .project
+            .would_create_a_cycle(media_id, timeline_id)
+        {
             return;
         }
-        let video_track = self.project.timelines[timeline_id]
+        let video_track = self.session.project.timelines[timeline_id]
             .first_track_index(TrackKind::Video)
             .unwrap_or(0);
-        let video_start = track_end(&self.project, timeline_id, video_track);
+        let video_start = track_end(&self.session.project, timeline_id, video_track);
         self.insert_media_clip(
             timeline_id,
             timeline_ui::MediaDrag::whole(media_id, &meta),
@@ -1617,7 +1606,7 @@ impl VenturiApp {
             .iter()
             .filter(|d| d.source_len() > 0)
             .filter_map(|d| {
-                let item = self.project.media_pool.get(d.media_id)?;
+                let item = self.session.project.media_pool.get(d.media_id)?;
                 Some((*d, item.meta.clone()))
             })
             .collect();
@@ -1636,7 +1625,12 @@ impl VenturiApp {
         // `Project::would_create_a_cycle`.
         let drops: Vec<(timeline_ui::MediaDrag, vv_core::MediaMeta)> = drops
             .into_iter()
-            .filter(|(d, _)| !self.project.would_create_a_cycle(d.media_id, timeline_id))
+            .filter(|(d, _)| {
+                !self
+                    .session
+                    .project
+                    .would_create_a_cycle(d.media_id, timeline_id)
+            })
             .collect();
         if drops.is_empty() {
             return;
@@ -1645,21 +1639,22 @@ impl VenturiApp {
         let any_audio = drops.iter().any(|(d, meta)| d.takes_audio(meta));
         // One drop = one Ctrl+Z, even if inside there are N clips (one
         // per audio stream of each media) plus the tracks created on the fly.
-        let group = self.history.begin_group();
+        let group = self.session.history.begin_group();
         let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_video, any_audio)
         else {
-            self.history.end_group(group);
+            self.session.history.end_group(group);
             return;
         };
 
-        let timeline_fps = self.project.timelines[timeline_id].fps;
+        let timeline_fps = self.session.project.timelines[timeline_id].fps;
         let mut cursor = start;
         for (drag, meta) in &drops {
             self.insert_media_clip(timeline_id, *drag, meta, cursor, tracks);
             let rate = vv_core::Rational::conform_rate(timeline_fps, meta.fps);
             cursor += drag.timeline_len(rate);
         }
-        self.history
+        self.session
+            .history
             .end_group_as(group, vv_core::CommandLabel::InsertClips);
     }
 
@@ -1677,25 +1672,25 @@ impl VenturiApp {
         } else {
             Some(match target {
                 timeline_ui::MediaDropTarget::NewVideoTrack => timeline_ui::add_track(
-                    &mut self.project,
-                    &mut self.history,
+                    &mut self.session.project,
+                    &mut self.session.history,
                     timeline_id,
                     TrackKind::Video,
                 ),
                 timeline_ui::MediaDropTarget::Track(track) => {
-                    if self.project.timelines[timeline_id].is_locked(track) {
+                    if self.session.project.timelines[timeline_id].is_locked(track) {
                         return None;
                     }
                     track
                 }
-                _ => match self.project.timelines[timeline_id]
+                _ => match self.session.project.timelines[timeline_id]
                     .first_unlocked_track_index(TrackKind::Video)
                 {
                     Some(track) => track,
                     // No free video track: one is created.
                     None => timeline_ui::add_track(
-                        &mut self.project,
-                        &mut self.history,
+                        &mut self.session.project,
+                        &mut self.session.history,
                         timeline_id,
                         TrackKind::Video,
                     ),
@@ -1704,8 +1699,8 @@ impl VenturiApp {
         };
         let extra_audio = if target == timeline_ui::MediaDropTarget::NewAudioTrack && any_audio {
             Some(timeline_ui::add_track(
-                &mut self.project,
-                &mut self.history,
+                &mut self.session.project,
+                &mut self.session.history,
                 timeline_id,
                 TrackKind::Audio,
             ))
@@ -1724,8 +1719,8 @@ impl VenturiApp {
         tracks: TargetTracks,
     ) {
         vv_core::edit::insert_media(
-            &mut self.project,
-            &mut self.history,
+            &mut self.session.project,
+            &mut self.session.history,
             timeline_id,
             vv_core::edit::MediaInsert {
                 media_id: drag.media_id,
@@ -1794,7 +1789,7 @@ impl VenturiApp {
         } else {
             let total = self
                 .timeline_id
-                .map_or(0, |id| self.project.timelines[id].total_frames());
+                .map_or(0, |id| self.session.project.timelines[id].total_frames());
             (
                 total,
                 self.timeline_state.playhead,
@@ -1954,7 +1949,7 @@ impl VenturiApp {
             return;
         };
         let playhead = self.timeline_state.playhead;
-        let under_playhead = self.project.timelines[timeline_id]
+        let under_playhead = self.session.project.timelines[timeline_id]
             .clip(target.track_index, target.clip_id)
             .is_some_and(|c| c.contains(playhead));
         let Some(info) = self
@@ -1977,7 +1972,7 @@ impl VenturiApp {
         };
         push_param_changes(
             pending,
-            Some(&self.project.timelines[timeline_id]),
+            Some(&self.session.project.timelines[timeline_id]),
             video_targets,
             &vv_core::TransformParam::ALL,
             &new,
@@ -1990,7 +1985,7 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let tl = &self.project.timelines[timeline_id];
+        let tl = &self.session.project.timelines[timeline_id];
         let selected: Vec<(usize, ClipId)> = self
             .timeline_state
             .selected
@@ -2004,8 +1999,8 @@ impl VenturiApp {
         let all_disabled = selected.iter().all(|&(track_index, clip_id)| {
             tl.clip(track_index, clip_id).is_some_and(|c| c.disabled)
         });
-        self.history.do_command(
-            &mut self.project,
+        self.session.history.do_command(
+            &mut self.session.project,
             Box::new(vv_core::SetClipsDisabled::new(
                 timeline_id,
                 selected,
@@ -2021,7 +2016,7 @@ impl VenturiApp {
 
     /// Ctrl+A with the media pool focused: selects all the media of the pool.
     fn select_all_media(&mut self) {
-        let ids: Vec<MediaId> = self.project.media_pool.keys().collect();
+        let ids: Vec<MediaId> = self.session.project.media_pool.keys().collect();
         self.media_pool_state.select_only(ids);
     }
 
@@ -2037,7 +2032,7 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let selected: BTreeSet<(usize, ClipId)> = self.project.timelines[timeline_id]
+        let selected: BTreeSet<(usize, ClipId)> = self.session.project.timelines[timeline_id]
             .tracks
             .iter()
             .enumerate()
@@ -2065,8 +2060,10 @@ impl VenturiApp {
             return;
         };
         if let Some(sel) = self.timeline_state.selected_transition {
-            let cmd = set_transition_command(&self.project, timeline_id, sel, None);
-            self.history.do_command(&mut self.project, cmd);
+            let cmd = set_transition_command(&self.session.project, timeline_id, sel, None);
+            self.session
+                .history
+                .do_command(&mut self.session.project, cmd);
             self.timeline_state.selected_transition = None;
             return;
         }
@@ -2074,7 +2071,12 @@ impl VenturiApp {
             return;
         }
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
-        vv_core::edit::delete_clips(&mut self.project, &mut self.history, timeline_id, &selected);
+        vv_core::edit::delete_clips(
+            &mut self.session.project,
+            &mut self.session.history,
+            timeline_id,
+            &selected,
+        );
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
     }
@@ -2099,8 +2101,8 @@ impl VenturiApp {
         {
             self.stop_browsing();
         }
-        self.history.do_command(
-            &mut self.project,
+        self.session.history.do_command(
+            &mut self.session.project,
             Box::new(vv_core::CompositeCommand::new(
                 vv_core::CommandLabel::RemoveMedia,
                 commands,
@@ -2116,7 +2118,7 @@ impl VenturiApp {
     fn leave_removed_timelines(&mut self) {
         while self
             .timeline_id
-            .is_some_and(|id| !self.project.timelines.contains_key(id))
+            .is_some_and(|id| !self.session.project.timelines.contains_key(id))
         {
             match self.timeline_stack.pop() {
                 Some(parent) => self.switch_to_timeline(parent),
@@ -2140,10 +2142,12 @@ impl VenturiApp {
         else {
             return false;
         };
-        self.project.timelines[timeline_id]
+        self.session.project.timelines[timeline_id]
             .clip(track_index, clip_id)
             .is_some_and(|c| match &c.source {
-                vv_core::ClipSource::Media(id) => !self.project.media_pool.contains_key(*id),
+                vv_core::ClipSource::Media(id) => {
+                    !self.session.project.media_pool.contains_key(*id)
+                }
                 vv_core::ClipSource::SolidColor
                 | vv_core::ClipSource::Text
                 | vv_core::ClipSource::Adjustment => false,
@@ -2187,7 +2191,7 @@ impl VenturiApp {
             return;
         }
 
-        let tl = &self.project.timelines[timeline_id];
+        let tl = &self.session.project.timelines[timeline_id];
         // The groups are remapped onto local tags: the paste needs new groups.
         let mut collected: Vec<(Option<vv_core::LinkGroupId>, timeline_ui::ClipboardEntry)> = self
             .timeline_state
@@ -2254,9 +2258,10 @@ impl VenturiApp {
             // `Project::would_create_a_cycle`, the same check as the drop
             // from the media pool.
             .filter(|e| match &e.clip.source {
-                vv_core::ClipSource::Media(media_id) => {
-                    !self.project.would_create_a_cycle(*media_id, timeline_id)
-                }
+                vv_core::ClipSource::Media(media_id) => !self
+                    .session
+                    .project
+                    .would_create_a_cycle(*media_id, timeline_id),
                 vv_core::ClipSource::SolidColor
                 | vv_core::ClipSource::Text
                 | vv_core::ClipSource::Adjustment => true,
@@ -2267,10 +2272,10 @@ impl VenturiApp {
             return;
         }
 
-        let mark = self.history.begin_group();
+        let mark = self.session.history.begin_group();
         self.add_tracks_for_clipboard(timeline_id, &entries);
 
-        let tl = &self.project.timelines[timeline_id];
+        let tl = &self.session.project.timelines[timeline_id];
         let entries: Vec<(usize, timeline_ui::ClipboardEntry)> = entries
             .into_iter()
             .filter_map(|e| {
@@ -2279,28 +2284,29 @@ impl VenturiApp {
             })
             .collect();
         if entries.is_empty() {
-            self.history.end_group(mark);
+            self.session.history.end_group(mark);
             return;
         }
 
-        let timeline_fps = self.project.timelines[timeline_id].fps;
+        let timeline_fps = self.session.project.timelines[timeline_id].fps;
         let clips: Vec<(usize, vv_core::Clip, Option<u64>)> = entries
             .iter()
             .map(|(track_index, entry)| {
                 let mut clip = entry.clip.clone();
-                clip.id = self.project.alloc_clip_id();
+                clip.id = self.session.project.alloc_clip_id();
                 clip.timeline_start = entry.relative_start;
                 clip.linked_group = None;
                 if entry.timeline_fps != timeline_fps {
                     let rate = match &clip.source {
-                        vv_core::ClipSource::Media(media_id) => self
-                            .project
-                            .media_pool
-                            .get(*media_id)
-                            .map_or(clip.rate, |item| {
-                                vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
-                                    .divided_by(clip.speed)
-                            }),
+                        vv_core::ClipSource::Media(media_id) => {
+                            self.session.project.media_pool.get(*media_id).map_or(
+                                clip.rate,
+                                |item| {
+                                    vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
+                                        .divided_by(clip.speed)
+                                },
+                            )
+                        }
                         vv_core::ClipSource::SolidColor
                         | vv_core::ClipSource::Text
                         | vv_core::ClipSource::Adjustment => clip.rate,
@@ -2317,7 +2323,8 @@ impl VenturiApp {
             .collect();
         let end = clips.iter().map(|(_, clip, _)| clip.timeline_end()).max();
         self.insert_clips_overwriting(timeline_id, clips, vv_core::CommandLabel::PasteClips);
-        self.history
+        self.session
+            .history
             .end_group_as(mark, vv_core::CommandLabel::PasteClips);
         let anchor = new_selection.iter().next().copied();
         self.timeline_state.set_selection(new_selection, anchor);
@@ -2342,12 +2349,12 @@ impl VenturiApp {
                 .map(|e| e.track_number)
                 .max()
                 .unwrap_or(0);
-            let existing = self.project.timelines[timeline_id]
+            let existing = self.session.project.timelines[timeline_id]
                 .tracks_of_kind(kind)
                 .count();
             for _ in existing..wanted {
-                self.history.do_command(
-                    &mut self.project,
+                self.session.history.do_command(
+                    &mut self.session.project,
                     Box::new(vv_core::AddTrack::new(timeline_id, kind)),
                 );
             }
@@ -2363,15 +2370,15 @@ impl VenturiApp {
         if self.timeline_state.selected.is_empty() {
             // No clip selected: the selected gap is closed, if there is one.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
-                let mark = self.history.begin_group();
+                let mark = self.session.history.begin_group();
                 vv_core::edit::ripple_delete_gap(
-                    &mut self.project,
-                    &mut self.history,
+                    &mut self.session.project,
+                    &mut self.session.history,
                     timeline_id,
                     gap_start,
                     gap_end,
                 );
-                self.history.end_group(mark);
+                self.session.history.end_group(mark);
                 self.move_playhead_to_closed_gap(timeline_id, gap_start);
                 self.timeline_state.clear_selection();
                 self.sync_selection_to_playhead();
@@ -2380,14 +2387,14 @@ impl VenturiApp {
         }
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
 
-        let mark = self.history.begin_group();
+        let mark = self.session.history.begin_group();
         let leftmost_removed = vv_core::edit::ripple_delete_clips(
-            &mut self.project,
-            &mut self.history,
+            &mut self.session.project,
+            &mut self.session.history,
             timeline_id,
             &selected,
         );
-        self.history.end_group(mark);
+        self.session.history.end_group(mark);
         if let Some(position) = leftmost_removed {
             self.move_playhead_to_closed_gap(timeline_id, position);
         }
@@ -2402,7 +2409,7 @@ impl VenturiApp {
         timeline_id: vv_core::TimelineId,
         position: FrameIdx,
     ) {
-        let landed = self.project.timelines[timeline_id]
+        let landed = self.session.project.timelines[timeline_id]
             .tracks
             .iter()
             .any(|t| t.clips.iter().any(|c| c.timeline_start == position));
@@ -2419,8 +2426,8 @@ impl VenturiApp {
     fn add_marker_at_playhead(&mut self) {
         if let Some(timeline_id) = self.timeline_id {
             timeline_ui::add_marker_at_playhead(
-                &mut self.project,
-                &mut self.history,
+                &mut self.session.project,
+                &mut self.session.history,
                 timeline_id,
                 self.timeline_state.playhead,
             );
@@ -2434,8 +2441,8 @@ impl VenturiApp {
         let playhead = self.timeline_state.playhead;
         let selected = &self.timeline_state.selected;
         let targets = vv_core::edit::split_clips(
-            &mut self.project,
-            &mut self.history,
+            &mut self.session.project,
+            &mut self.session.history,
             timeline_id,
             playhead,
             (!selected.is_empty()).then_some(selected),
@@ -2447,14 +2454,15 @@ impl VenturiApp {
             && let Some((video_track, video_clip_id)) = targets
                 .iter()
                 .filter(|(track_index, _)| {
-                    self.project.timelines[timeline_id].tracks[*track_index].kind
+                    self.session.project.timelines[timeline_id].tracks[*track_index].kind
                         == TrackKind::Video
                 })
                 .max_by_key(|(track_index, _)| *track_index)
         {
             let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
             selected.extend(
-                self.project.timelines[timeline_id].linked_members(*video_track, *video_clip_id),
+                self.session.project.timelines[timeline_id]
+                    .linked_members(*video_track, *video_clip_id),
             );
             self.timeline_state
                 .set_selection(selected, Some((*video_track, *video_clip_id)));
@@ -3005,7 +3013,7 @@ impl eframe::App for VenturiApp {
         let mut video_targets: Vec<PanelTarget> = Vec::new();
         let mut audio_targets: Vec<PanelTarget> = Vec::new();
         if let Some(timeline_id) = self.timeline_id {
-            let tl = &self.project.timelines[timeline_id];
+            let tl = &self.session.project.timelines[timeline_id];
             for &(track_index, clip_id) in &self.timeline_state.selected {
                 let Some(track) = tl.tracks.get(track_index) else {
                     continue;
@@ -3138,6 +3146,7 @@ impl eframe::App for VenturiApp {
                         }
                     }
                     let labels: HashMap<MediaId, String> = self
+                        .session
                         .project
                         .media_pool
                         .iter()
@@ -3161,8 +3170,8 @@ impl eframe::App for VenturiApp {
                     let is_playing = self.is_timeline_playing();
                     let (drop, enter_compound) = timeline_ui::show_timeline(
                         ui,
-                        &mut self.project,
-                        &mut self.history,
+                        &mut self.session.project,
+                        &mut self.session.history,
                         timeline_id,
                         &|id| labels.get(&id).cloned().unwrap_or_default(),
                         &mut self.timeline_state,
@@ -3242,7 +3251,7 @@ impl eframe::App for VenturiApp {
                 ui.ctx(),
                 &mut self.settings.panels.keyframe_editor_open,
                 &mut self.keyframe_editor,
-                &self.project,
+                &self.session.project,
                 target,
                 self.timeline_state.playhead,
                 self.zoom_link,
@@ -3339,7 +3348,7 @@ impl eframe::App for VenturiApp {
                     .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)));
                 let timeline_size = self
                     .timeline_id
-                    .map(|id| self.project.timelines[id].resolution);
+                    .map(|id| self.session.project.timelines[id].resolution);
                 // With SolidColor clips only it composes at the resolution
                 // of the timeline.
                 let composite_size = video_size.or(timeline_size.filter(|_| !layers.is_empty()));
@@ -3461,7 +3470,7 @@ impl eframe::App for VenturiApp {
                         },
                     ));
                     if resp.dragged()
-                        && let Some(item) = self.project.media_pool.get(media_id)
+                        && let Some(item) = self.session.project.media_pool.get(media_id)
                     {
                         let name = file_label(&item.path);
                         let ghost = match streams {

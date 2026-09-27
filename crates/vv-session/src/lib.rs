@@ -6,4 +6,7 @@ pub mod forced_relink;
 pub mod frame_provider;
 pub mod import_worker;
 pub mod relink_job;
+mod session;
 pub mod worker;
+
+pub use session::Session;

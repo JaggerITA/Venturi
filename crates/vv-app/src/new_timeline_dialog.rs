@@ -172,13 +172,13 @@ impl VenturiApp {
     pub(crate) fn open_new_timeline_dialog(&mut self) {
         let (fps, resolution) = match self.timeline_id {
             Some(id) => {
-                let tl = &self.project.timelines[id];
+                let tl = &self.session.project.timelines[id];
                 (tl.fps, tl.resolution)
             }
             None => (vv_core::Rational::new(25, 1), (1920, 1080)),
         };
         self.new_timeline_dialog = Some(NewTimelineDialog::new(
-            self.project.alloc_timeline_name(),
+            self.session.project.alloc_timeline_name(),
             fps,
             resolution,
         ));

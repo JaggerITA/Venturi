@@ -14,7 +14,7 @@ impl VenturiApp {
         let typing = ui.ctx().egui_wants_keyboard_input();
         if let Some(timeline_id) = self.timeline_id {
             self.timeline_state
-                .drop_locked(&self.project.timelines[timeline_id]);
+                .drop_locked(&self.session.project.timelines[timeline_id]);
         }
         let capturing_shortcut = self
             .settings_dialog
@@ -59,10 +59,10 @@ impl VenturiApp {
                 self.toggle_retime_controls();
             }
             if pressed(Action::Undo) {
-                self.history.undo(&mut self.project);
+                self.session.history.undo(&mut self.session.project);
             }
             if pressed(Action::Redo) {
-                self.history.redo(&mut self.project);
+                self.session.history.redo(&mut self.session.project);
             }
             if pressed(Action::TogglePlayback) {
                 self.toggle_playback();
@@ -247,14 +247,14 @@ impl VenturiApp {
                             .button(keymap.menu_label(&t!("menu.undo"), Action::Undo))
                             .clicked()
                         {
-                            self.history.undo(&mut self.project);
+                            self.session.history.undo(&mut self.session.project);
                             ui.close();
                         }
                         if ui
                             .button(keymap.menu_label(&t!("menu.redo"), Action::Redo))
                             .clicked()
                         {
-                            self.history.redo(&mut self.project);
+                            self.session.history.redo(&mut self.session.project);
                             ui.close();
                         }
                         self.undo_history_menu(ui);
@@ -523,8 +523,8 @@ impl VenturiApp {
     /// As in Blender: newest first, the dot on the current state and one
     /// click to jump to any point, forwards or backwards.
     fn undo_history_menu(&mut self, ui: &mut egui::Ui) {
-        let labels: Vec<vv_core::CommandLabel> = self.history.labels().collect();
-        let current = self.history.position();
+        let labels: Vec<vv_core::CommandLabel> = self.session.history.labels().collect();
+        let current = self.session.history.position();
         let mut jump = None;
         ui.add_enabled_ui(!labels.is_empty(), |ui| {
             ui.menu_button(t!("menu.undo_history"), |ui| {
@@ -544,7 +544,9 @@ impl VenturiApp {
             });
         });
         if let Some(position) = jump {
-            self.history.go_to(&mut self.project, position);
+            self.session
+                .history
+                .go_to(&mut self.session.project, position);
             ui.close();
         }
     }

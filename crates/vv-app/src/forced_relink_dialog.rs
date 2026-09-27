@@ -40,7 +40,7 @@ impl VenturiApp {
         let references: Vec<Reference> = media
             .iter()
             .filter_map(|&media_id| {
-                let item = self.project.media_pool.get(media_id)?;
+                let item = self.session.project.media_pool.get(media_id)?;
                 let waveform = item
                     .meta
                     .has_audio

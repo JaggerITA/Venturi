@@ -41,6 +41,7 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
         .timeline_id
         .expect("import should have created the timeline");
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -52,10 +53,10 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
     let output_path = dir.join("out.mp4");
     let progress = Mutex::new(ExportProgress::default());
     let cancel = AtomicBool::new(false);
-    let total = app.project.timelines[timeline_id].total_frames();
+    let total = app.session.project.timelines[timeline_id].total_frames();
     let settings = ExportSettings::new(output_path.clone());
     export_timeline(
-        &app.project,
+        &app.session.project,
         timeline_id,
         &settings,
         0..total,
@@ -118,23 +119,24 @@ fn export_timeline_covers_a_stretched_image_clip_past_its_only_real_frame() {
         .timeline_id
         .expect("import should have created the timeline");
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
         .find(|(_, item)| item.compound.is_none())
         .map(|(id, _)| id)
         .expect("imported media expected in the pool");
-    assert!(app.project.media_pool[media_id].meta.is_image());
+    assert!(app.session.project.media_pool[media_id].meta.is_image());
     app.add_media_to_timeline(media_id);
 
     let output_path = dir.join("out.mp4");
     let progress = Mutex::new(ExportProgress::default());
     let cancel = AtomicBool::new(false);
-    let total = app.project.timelines[timeline_id].total_frames();
+    let total = app.session.project.timelines[timeline_id].total_frames();
     assert_eq!(total, 5 * 25, "5 s by default at 25 fps");
     let settings = ExportSettings::new(output_path.clone());
     export_timeline(
-        &app.project,
+        &app.session.project,
         timeline_id,
         &settings,
         0..total,
@@ -221,10 +223,11 @@ fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
         .timeline_id
         .expect("import should have created the timeline");
     assert_eq!(
-        app.project.timelines[timeline_id].fps,
+        app.session.project.timelines[timeline_id].fps,
         vv_core::Rational::new(25, 1)
     );
     let first = app
+        .session
         .project
         .media_pool
         .iter()
@@ -235,6 +238,7 @@ fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
 
     app.import_media(sine_23976);
     let second = app
+        .session
         .project
         .media_pool
         .iter()
@@ -242,17 +246,17 @@ fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
         .map(|(id, _)| id)
         .find(|id| *id != first)
         .expect("second media expected in the pool");
-    let second_start = app.project.timelines[timeline_id].total_frames();
+    let second_start = app.session.project.timelines[timeline_id].total_frames();
     app.add_media_to_timeline(second);
 
-    let conformed = app.project.timelines[timeline_id]
+    let conformed = app.session.project.timelines[timeline_id]
         .tracks
         .iter()
         .flat_map(|t| t.clips.iter())
         .find(|c| c.timeline_start == second_start)
         .expect("conformed clip expected");
     assert_ne!(conformed.rate, vv_core::Rational::one());
-    let total = app.project.timelines[timeline_id].total_frames();
+    let total = app.session.project.timelines[timeline_id].total_frames();
     // 1 s at 25 fps + 2 s conformed to 25 fps, within one frame of
     // rounding on the duration reported by ffmpeg.
     assert!((74..=76).contains(&total), "total={total}");
@@ -260,7 +264,7 @@ fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
     let output_path = dir.join("out.mp4");
     let progress = Mutex::new(ExportProgress::default());
     export_timeline(
-        &app.project,
+        &app.session.project,
         timeline_id,
         &ExportSettings::new(output_path.clone()),
         0..total,
@@ -334,6 +338,7 @@ fn export_timeline_scales_the_output_and_can_drop_the_audio() {
     let mut app = crate::VenturiApp::default();
     app.import_media(source_path);
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -342,13 +347,13 @@ fn export_timeline_scales_the_output_and_can_drop_the_audio() {
         .unwrap();
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
-    let total = app.project.timelines[timeline_id].total_frames();
+    let total = app.session.project.timelines[timeline_id].total_frames();
 
     let mut settings = ExportSettings::new(dir.join("out.mp4"));
     settings.scale_percent = 50;
     settings.audio = None;
     export_timeline(
-        &app.project,
+        &app.session.project,
         timeline_id,
         &settings,
         0..total,
@@ -384,6 +389,7 @@ fn export_timeline_writes_only_the_in_out_range() {
     let mut app = crate::VenturiApp::default();
     app.import_media(source_path);
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -396,7 +402,7 @@ fn export_timeline_writes_only_the_in_out_range() {
     let output_path = dir.join("out.mp4");
     let progress = Mutex::new(ExportProgress::default());
     export_timeline(
-        &app.project,
+        &app.session.project,
         timeline_id,
         &ExportSettings::new(output_path.clone()),
         5..15,

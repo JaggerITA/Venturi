@@ -186,7 +186,8 @@ impl VenturiApp {
     /// canonicalized so that symlinks and `..` do not import a duplicate.
     pub(crate) fn media_with_path(&self, path: &Path) -> Option<MediaId> {
         let target = canonical_path(path);
-        self.project
+        self.session
+            .project
             .media_pool
             .iter()
             .find(|(_, item)| item.compound.is_none() && canonical_path(&item.path) == target)
@@ -197,6 +198,7 @@ impl VenturiApp {
     /// batch itself.
     fn without_media_already_in_pool(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
         let mut seen: std::collections::HashSet<PathBuf> = self
+            .session
             .project
             .media_pool
             .iter()
@@ -225,14 +227,14 @@ impl VenturiApp {
         // `0` only if the file vanished in the meantime: at worst a proxy is
         // regenerated.
         let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-        let media_id = self.project.media_pool.insert(vv_core::MediaItem {
+        let media_id = self.session.project.media_pool.insert(vv_core::MediaItem {
             path,
             meta,
             content_hash,
             compound: None,
             folder: None,
         });
-        self.unsaved_media = true;
+        self.session.mark_unsaved();
         self.enqueue_media_background_jobs(media_id);
         media_id
     }
@@ -241,7 +243,7 @@ impl VenturiApp {
     /// imported or from an opened project: what is already in the on-disk
     /// cache is skipped by the workers.
     pub(crate) fn enqueue_media_background_jobs(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.session.project.media_pool.get(media_id) else {
             return;
         };
         // A compound clip has no file on disk to proxy/thumbnail/
@@ -408,7 +410,7 @@ impl VenturiApp {
     /// Saves to the current file (`current_project_path`), or as a "save as"
     /// if the project has not been saved/opened yet.
     pub(crate) fn save_project(&mut self) {
-        match self.current_project_path.clone() {
+        match self.session.path().map(Path::to_path_buf) {
             Some(path) => self.save_project_to(&path),
             None => self.save_project_as(),
         }
@@ -426,11 +428,9 @@ impl VenturiApp {
     }
 
     pub(crate) fn save_project_to(&mut self, path: &Path) {
-        match vv_core::save_project(&self.project, path) {
+        match self.session.save_to(path) {
             Ok(()) => {
-                self.current_project_path = Some(path.to_path_buf());
                 self.project_error = None;
-                self.mark_saved();
                 self.remember_recent_project(path.to_path_buf());
             }
             Err(e) => self.project_error = Some(t!("project.save_failed", error = e).into_owned()),
@@ -441,7 +441,7 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let file_name = format!("{}.otio", self.project.timelines[timeline_id].name);
+        let file_name = format!("{}.otio", self.session.project.timelines[timeline_id].name);
         self.spawn_file_dialog(DialogKind::ExportOtio(timeline_id), move |dlg| {
             dlg.set_file_name(file_name)
                 .add_filter("OpenTimelineIO", &["otio"])
@@ -451,24 +451,20 @@ impl VenturiApp {
 
     pub(crate) fn export_otio_to(&mut self, timeline_id: TimelineId, path: &Path) {
         let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
-        self.project_error = vv_core::export_otio(&self.project, timeline_id, path, Some(&measure))
-            .err()
-            .map(|e| t!("project.otio_export_failed", error = e).into_owned());
-    }
-
-    pub(crate) fn mark_saved(&mut self) {
-        self.saved_generation = self.history.generation();
-        self.unsaved_media = false;
+        self.project_error =
+            vv_core::export_otio(&self.session.project, timeline_id, path, Some(&measure))
+                .err()
+                .map(|e| t!("project.otio_export_failed", error = e).into_owned());
     }
 
     pub(crate) fn has_unsaved_changes(&self) -> bool {
-        self.unsaved_media || self.history.generation() != self.saved_generation
+        self.session.has_unsaved_changes()
     }
 
     /// Name of the current project, without extension.
     pub(crate) fn project_label(&self) -> String {
-        self.current_project_path
-            .as_ref()
+        self.session
+            .path()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| t!("project.untitled").into_owned())
@@ -652,6 +648,7 @@ impl VenturiApp {
 
     fn media_with_same_name(&self, imported: &vv_core::Project) -> HashMap<MediaId, MediaId> {
         let existing: HashMap<String, MediaId> = self
+            .session
             .project
             .media_pool
             .iter()
@@ -687,20 +684,22 @@ impl VenturiApp {
             // The dialog is not modal for the keyboard: a match may have been deleted.
             matches
                 .into_iter()
-                .filter(|(_, existing)| self.project.media_pool.contains_key(*existing))
+                .filter(|(_, existing)| self.session.project.media_pool.contains_key(*existing))
                 .collect()
         } else {
             HashMap::new()
         };
         let folder = (project.media_pool.len() > reuse.len()).then(|| {
-            self.project.folders.insert(vv_core::MediaFolder {
+            self.session.project.folders.insert(vv_core::MediaFolder {
                 name: name.clone(),
                 parent: None,
             })
         });
-        let before: std::collections::HashSet<MediaId> = self.project.media_pool.keys().collect();
-        let timelines = self.project.absorb(project, &reuse, folder);
+        let before: std::collections::HashSet<MediaId> =
+            self.session.project.media_pool.keys().collect();
+        let timelines = self.session.project.absorb(project, &reuse, folder);
         let added: Vec<MediaId> = self
+            .session
             .project
             .media_pool
             .keys()
@@ -712,7 +711,7 @@ impl VenturiApp {
         if let Some(folder) = folder {
             self.media_pool_state.expanded.insert(folder);
         }
-        self.unsaved_media = true;
+        self.session.mark_unsaved();
         self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
         if let Some(&timeline_id) = timelines.first() {
             self.open_timeline(timeline_id);
@@ -819,8 +818,7 @@ impl VenturiApp {
     /// `path` is the file Ctrl+S will save to: `None` for a new project.
     pub(crate) fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
         self.timeline_id = project.timelines.keys().next();
-        self.project = project;
-        self.history = vv_core::History::default();
+        self.session.replace_project(project, path);
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();
         self.preview_meta = None;
@@ -837,38 +835,21 @@ impl VenturiApp {
         self.reset_playback_speed_to_normal();
         if let Some(fps) = self
             .timeline_id
-            .map(|id| self.project.timelines[id].fps.as_f64())
+            .map(|id| self.session.project.timelines[id].fps.as_f64())
         {
             self.timeline_audio().seek_frame(0, fps);
         }
-        self.current_project_path = path;
         self.project_error = None;
-        self.mark_saved();
         // Project replaced outside the history: `sync_render_ahead` would not
         // notice.
         if let Some(timeline_id) = self.timeline_id {
             self.spawn_render_ahead_if_needed(timeline_id);
             if let Some(render_ahead) = &self.render_ahead {
-                render_ahead.update_project(&self.project, timeline_id);
+                render_ahead.update_project(&self.session.project, timeline_id);
             }
         }
-        self.render_ahead_generation = self.history.generation();
-        for item in self.project.media_pool.values_mut() {
-            // Projects saved before `MediaMeta::audio_streams`.
-            if item.compound.is_none() && item.meta.has_audio && item.meta.audio_streams == 0 {
-                item.meta.audio_streams =
-                    vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
-            }
-            // Projects saved before `MediaMeta::file`: record it while the
-            // file is still reachable.
-            if item.compound.is_none()
-                && item.meta.file == vv_core::MediaFileInfo::default()
-                && let Ok(file) = vv_media::probe_file_info(&item.path)
-            {
-                item.meta.file = file;
-            }
-        }
-        let media_ids: Vec<MediaId> = self.project.media_pool.keys().collect();
+        self.render_ahead_generation = self.session.history.generation();
+        let media_ids: Vec<MediaId> = self.session.project.media_pool.keys().collect();
         for media_id in media_ids {
             self.enqueue_media_background_jobs(media_id);
         }
@@ -883,7 +864,7 @@ impl VenturiApp {
         }
         let settings = self.last_export_settings.clone().unwrap_or_else(|| {
             export::ExportSettings::preferred(export_dialog::default_output_path(
-                self.current_project_path.as_deref(),
+                self.session.path(),
             ))
         });
         self.export_dialog = Some(export_dialog::ExportDialog::new(settings));
@@ -893,7 +874,7 @@ impl VenturiApp {
         let (Some(dialog), Some(timeline_id)) = (&mut self.export_dialog, self.timeline_id) else {
             return;
         };
-        let timeline = &self.project.timelines[timeline_id];
+        let timeline = &self.session.project.timelines[timeline_id];
         let total_frames = timeline.total_frames();
         let marks = &self.timeline_state.export_marks;
         let info = export_dialog::TimelineInfo {
@@ -926,7 +907,7 @@ impl VenturiApp {
     ) {
         self.pause_proxies_for_export();
 
-        let project = self.project.clone();
+        let project = self.session.project.clone();
         let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
 
@@ -1102,6 +1083,7 @@ impl VenturiApp {
             return;
         };
         let media: Vec<(PathBuf, u64, u64)> = self
+            .session
             .project
             .media_pool
             .iter()
@@ -1162,7 +1144,7 @@ impl VenturiApp {
     }
 
     pub(crate) fn relink_folder_dialog(&mut self, folder: vv_core::FolderId) {
-        let targets = self.project.media_in_folder(folder);
+        let targets = self.session.project.media_in_folder(folder);
         if targets.is_empty() {
             return;
         }
@@ -1176,7 +1158,7 @@ impl VenturiApp {
         let targets = targets
             .iter()
             .filter_map(|&id| {
-                let item = self.project.media_pool.get(id)?;
+                let item = self.session.project.media_pool.get(id)?;
                 item.compound.is_none().then(|| (id, item.path.clone()))
             })
             .collect();
@@ -1226,7 +1208,7 @@ impl VenturiApp {
         let relinks: Vec<_> = outcome
             .relinks
             .into_iter()
-            .filter(|r| self.project.media_pool.contains_key(r.media_id))
+            .filter(|r| self.session.project.media_pool.contains_key(r.media_id))
             .collect();
         let media_ids: Vec<MediaId> = relinks.iter().map(|r| r.media_id).collect();
         if !relinks.is_empty() {
@@ -1241,14 +1223,14 @@ impl VenturiApp {
                     )) as Box<dyn vv_core::Command>
                 })
                 .collect();
-            self.history.do_command(
-                &mut self.project,
+            self.session.history.do_command(
+                &mut self.session.project,
                 Box::new(vv_core::CompositeCommand::new(
                     vv_core::CommandLabel::RelinkMedia,
                     commands,
                 )),
             );
-            self.unsaved_media = true;
+            self.session.mark_unsaved();
             for &media_id in &media_ids {
                 self.enqueue_media_background_jobs(media_id);
             }

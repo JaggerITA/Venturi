@@ -17,7 +17,7 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let tl = &self.project.timelines[timeline_id];
+        let tl = &self.session.project.timelines[timeline_id];
         let ids: Vec<ClipId> = self
             .timeline_state
             .selected
@@ -44,7 +44,7 @@ impl VenturiApp {
         };
         let Some(first) = targets
             .iter()
-            .find_map(|&(track, id)| self.project.timelines[timeline_id].clip(track, id))
+            .find_map(|&(track, id)| self.session.project.timelines[timeline_id].clip(track, id))
         else {
             return;
         };
@@ -113,8 +113,8 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        self.history.do_command(
-            &mut self.project,
+        self.session.history.do_command(
+            &mut self.session.project,
             Box::new(vv_core::SetClipSpeed::new(
                 timeline_id,
                 dialog.targets,

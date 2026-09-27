@@ -152,7 +152,7 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 1. A frame's layers are the clips active on each video track, bottom to top
    (`Timeline::active_video_clips_at`); each one's source frame comes from
    `Clip::source_frame_at`, obtained through `FrameProvider`
-   (`vv-app/src/frame_provider.rs`): from the `RenderAhead` cache in
+   (`vv-session/src/frame_provider.rs`): from the `RenderAhead` cache in
    preview, streamed in export.
 2. Upload of the YUV planes, conversion to RGB in the shader
    (`vv-render/src/shaders/transform.wgsl`, BT.601/709/2020 matrix and range
@@ -236,7 +236,9 @@ resync). Several commands in a single step: `CompositeCommand`. Commands:
 `RelinkMedia`; a clip's static values (transform parameters, flip, gain,
 title) go through `SetClipValue` (`set_clip_*`). `insert_overwriting` clears
 the space under the inserted clips (paste, duplicate, drop from the media
-pool).
+pool). `vv-core/src/edit.rs` builds the editing operations (split, delete,
+ripple, `delete_ranges`, insert) on explicit targets; the UI maps selection
+and playhead onto them and owns the undo grouping.
 
 ## Threading
 
@@ -262,7 +264,8 @@ venturi/
     vv-media/    # probe, decode, frame cache, proxy, waveform, encode
     vv-render/   # wgpu compositor, wgsl shaders, text
     vv-audio/    # mixer, resample, time-stretch, cpal output
-    vv-app/      # egui UI (timeline, viewer, panels), playback, export
+    vv-session/  # UI-free application core: export, import/relink workers
+    vv-app/      # egui UI (timeline, viewer, panels), playback
 ```
 
 ## Feature status

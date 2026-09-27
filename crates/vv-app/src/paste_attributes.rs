@@ -198,7 +198,7 @@ impl VenturiApp {
         if self.timeline_state.clipboard.is_empty() || self.timeline_state.selected.is_empty() {
             return;
         }
-        let tl = &self.project.timelines[timeline_id];
+        let tl = &self.session.project.timelines[timeline_id];
         let source_of = |kind: TrackKind| {
             self.timeline_state
                 .clipboard
@@ -250,6 +250,7 @@ impl VenturiApp {
     fn clip_display_name(&self, clip: &Clip) -> String {
         match &clip.source {
             vv_core::ClipSource::Media(media_id) => self
+                .session
                 .project
                 .media_pool
                 .get(*media_id)
@@ -378,7 +379,7 @@ impl VenturiApp {
         let mut commands: Vec<(usize, ClipId, ClipAttributes)> = Vec::new();
         let mut speeds: SpeedTargets = Vec::new();
         {
-            let tl = &self.project.timelines[timeline_id];
+            let tl = &self.session.project.timelines[timeline_id];
             for &(track_index, clip_id) in &dialog.targets {
                 let (Some(track), Some(target)) =
                     (tl.tracks.get(track_index), tl.clip(track_index, clip_id))
@@ -419,10 +420,10 @@ impl VenturiApp {
         if commands.is_empty() {
             return;
         }
-        let mark = self.history.begin_group();
+        let mark = self.session.history.begin_group();
         for (track_index, clip_id, attributes) in commands {
-            self.history.do_command(
-                &mut self.project,
+            self.session.history.do_command(
+                &mut self.session.project,
                 Box::new(vv_core::SetClipAttributes::new(
                     timeline_id,
                     track_index,
@@ -434,8 +435,8 @@ impl VenturiApp {
         // Ripple: several pasted clips can be adjacent, and each one's new
         // length must not overwrite the next.
         for ((speed, pitch_correction), clips) in speeds {
-            self.history.do_command(
-                &mut self.project,
+            self.session.history.do_command(
+                &mut self.session.project,
                 Box::new(vv_core::SetClipSpeed::new(
                     timeline_id,
                     clips,
@@ -445,7 +446,8 @@ impl VenturiApp {
                 )),
             );
         }
-        self.history
+        self.session
+            .history
             .end_group_as(mark, vv_core::CommandLabel::PasteAttributes);
     }
 }

@@ -174,14 +174,14 @@ fn fades_and_transitions_are_clamped_to_the_target_length() {
 fn applying_the_dialog_writes_a_single_undoable_step() {
     let mut app = VenturiApp::default();
     let timeline_id = app.ensure_timeline();
-    let track_index = app.project.timelines[timeline_id]
+    let track_index = app.session.project.timelines[timeline_id]
         .tracks_of_kind(TrackKind::Video)
         .next()
         .map(|(i, _)| i)
         .expect("the timeline is created with a video track");
 
     let mut source = clip(0, 0, 20);
-    source.id = app.project.alloc_clip_id();
+    source.id = app.session.project.alloc_clip_id();
     source
         .effects
         .transform
@@ -189,10 +189,10 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
         .default = 2.0;
     let source_id = source.id;
     let mut target = clip(0, 0, 20);
-    target.id = app.project.alloc_clip_id();
+    target.id = app.session.project.alloc_clip_id();
     target.timeline_start = 40;
     let target_id = target.id;
-    let track = &mut app.project.timelines[timeline_id].tracks[track_index];
+    let track = &mut app.session.project.timelines[timeline_id].tracks[track_index];
     track.insert_sorted(source);
     track.insert_sorted(target);
 
@@ -208,7 +208,7 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
     app.apply_paste_attributes(&dialog);
 
     let zoom_of = |app: &VenturiApp, id| {
-        app.project.timelines[timeline_id]
+        app.session.project.timelines[timeline_id]
             .clip(track_index, id)
             .unwrap()
             .effects
@@ -217,7 +217,7 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
             .default
     };
     assert_eq!(zoom_of(&app, target_id), 2.0);
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(zoom_of(&app, target_id), 1.0, "a single undo step");
 }
 
@@ -227,13 +227,13 @@ fn applying_the_dialog_writes_a_single_undoable_step() {
 fn pasting_the_speed_retimes_the_target() {
     let mut app = VenturiApp::default();
     let timeline_id = app.ensure_timeline();
-    let track_index = app.project.timelines[timeline_id]
+    let track_index = app.session.project.timelines[timeline_id]
         .tracks_of_kind(TrackKind::Video)
         .next()
         .map(|(i, _)| i)
         .unwrap();
-    let fps = app.project.timelines[timeline_id].fps;
-    let media = app.project.media_pool.insert(vv_core::MediaItem {
+    let fps = app.session.project.timelines[timeline_id].fps;
+    let media = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "a.mp4".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 1000,
@@ -253,7 +253,7 @@ fn pasting_the_speed_retimes_the_target() {
     });
     let media_clip = |app: &mut VenturiApp, start| {
         let mut clip = Clip::from_source_range(
-            app.project.alloc_clip_id(),
+            app.session.project.alloc_clip_id(),
             ClipSource::Media(media),
             0,
             100,
@@ -269,10 +269,10 @@ fn pasting_the_speed_retimes_the_target() {
     let target = media_clip(&mut app, 100);
     let (source_id, target_id) = (source.id, target.id);
     let mut after = clip(0, 0, 10);
-    after.id = app.project.alloc_clip_id();
+    after.id = app.session.project.alloc_clip_id();
     after.timeline_start = 200;
     let after_id = after.id;
-    let track = &mut app.project.timelines[timeline_id].tracks[track_index];
+    let track = &mut app.session.project.timelines[timeline_id].tracks[track_index];
     track.insert_sorted(source);
     track.insert_sorted(target);
     track.insert_sorted(after);
@@ -288,7 +288,7 @@ fn pasting_the_speed_retimes_the_target() {
     let dialog = app.paste_attributes.take().expect("the dialog opens");
     app.apply_paste_attributes(&dialog);
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     let pasted = tl.clip(track_index, target_id).unwrap();
     assert_eq!(
         (pasted.speed, pasted.pitch_correction),
@@ -297,8 +297,8 @@ fn pasting_the_speed_retimes_the_target() {
     assert_eq!((pasted.timeline_start, pasted.timeline_len), (100, 50));
     assert_eq!(tl.clip(track_index, after_id).unwrap().timeline_start, 150);
 
-    app.history.undo(&mut app.project);
-    let tl = &app.project.timelines[timeline_id];
+    app.session.history.undo(&mut app.session.project);
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(
         tl.clip(track_index, target_id).unwrap().speed,
         Rational::one()

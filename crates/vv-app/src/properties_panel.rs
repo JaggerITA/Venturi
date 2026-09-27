@@ -1305,12 +1305,13 @@ impl VenturiApp {
                 ui.end_row();
                 for (kind, target) in rows {
                     let clip = self.timeline_id.and_then(|tid| {
-                        self.project.timelines[tid].clip(target.track_index, target.clip_id)
+                        self.session.project.timelines[tid].clip(target.track_index, target.clip_id)
                     });
                     let (name, len) = match clip {
                         Some(clip) => (
                             match &clip.source {
                                 vv_core::ClipSource::Media(id) => self
+                                    .session
                                     .project
                                     .media_pool
                                     .get(*id)
@@ -1343,14 +1344,19 @@ impl VenturiApp {
     /// evaluated at its `source_frame`.
     pub(crate) fn clip_panel_info(&self, target: PanelTarget) -> Option<ClipPanelInfo> {
         let timeline_id = self.timeline_id?;
-        let timeline_size = self.project.timelines[timeline_id].resolution;
-        let clip = self.project.timelines[timeline_id].clip(target.track_index, target.clip_id)?;
+        let timeline_size = self.session.project.timelines[timeline_id].resolution;
+        let clip =
+            self.session.project.timelines[timeline_id].clip(target.track_index, target.clip_id)?;
         let frame = target.source_frame;
         // A keyframe outside the trim would take the playhead outside the clip.
         let in_clip = |f: &FrameIdx| (clip.source_in()..clip.source_out()).contains(f);
         Some(ClipPanelInfo {
             is_solid_color: target.is_solid_color,
-            source_size: frame_provider::clip_source_size(&self.project, clip, timeline_size),
+            source_size: frame_provider::clip_source_size(
+                &self.session.project,
+                clip,
+                timeline_size,
+            ),
             timeline_size,
             params: vv_core::TransformParam::ALL
                 .iter()
@@ -1401,7 +1407,7 @@ impl VenturiApp {
     ) {
         if !commands.is_empty() {
             if pointer_down && self.edit_drag_group.is_none() {
-                self.edit_drag_group = Some(self.history.begin_group());
+                self.edit_drag_group = Some(self.session.history.begin_group());
             }
             let cmd = if commands.len() == 1 {
                 commands.remove(0)
@@ -1411,10 +1417,12 @@ impl VenturiApp {
                     commands,
                 ))
             };
-            self.history.do_command(&mut self.project, cmd);
+            self.session
+                .history
+                .do_command(&mut self.session.project, cmd);
         }
         if !pointer_down && let Some(mark) = self.edit_drag_group.take() {
-            self.history.end_group(mark);
+            self.session.history.end_group(mark);
         }
     }
 
@@ -1430,7 +1438,7 @@ impl VenturiApp {
         let Some(timeline_id) = self.timeline_id else {
             return;
         };
-        let tl = &self.project.timelines[timeline_id];
+        let tl = &self.session.project.timelines[timeline_id];
         // `before`/`max_duration` tell the two cases apart only here: from here
         // down the controls are identical, and the saving/removal at the
         // bottom picks the right command itself based on `sel`.
@@ -1537,7 +1545,7 @@ impl VenturiApp {
 
         if transition != before {
             pending.push(set_transition_command(
-                &self.project,
+                &self.session.project,
                 timeline_id,
                 sel,
                 Some(transition),
@@ -1547,7 +1555,7 @@ impl VenturiApp {
         ui.add_space(8.0);
         if ui.button(t!("props.remove_transition")).clicked() {
             pending.push(set_transition_command(
-                &self.project,
+                &self.session.project,
                 timeline_id,
                 sel,
                 None,
@@ -1631,7 +1639,7 @@ impl VenturiApp {
                                             let before = info.title.clone().unwrap_or_default();
                                             let mut title = before.clone();
                                             if title_editor(ui, &mut title, timeline_size, &mut self.fonts) {
-                                                let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                 for t in targets.iter().filter(|t| t.is_text) {
                                                     let Some(current) = tl
                                                         .and_then(|tl| tl.tracks.get(t.track_index))
@@ -1829,7 +1837,7 @@ impl VenturiApp {
                                                 x || y
                                             });
                                             if flip_row.changed {
-                                                let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                 for t in targets {
                                                     let Some(effects) = target_effects(tl, t) else {
                                                         continue;
@@ -1961,7 +1969,7 @@ impl VenturiApp {
                                             rows.push((opacity_params, row));
                                             }
 
-                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                            let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                             for (params, row) in &rows {
                                                 if row.changed {
                                                     push_param_changes(
@@ -2003,7 +2011,7 @@ impl VenturiApp {
                                                     pending_playhead = self
                                                         .timeline_id
                                                         .and_then(|tid| {
-                                                            self.project.timelines[tid]
+                                                            self.session.project.timelines[tid]
                                                                 .clip(primary.track_index, primary.clip_id)
                                                         })
                                                         .map(|c| c.timeline_frame_at(source_frame));
@@ -2035,7 +2043,7 @@ impl VenturiApp {
                                                         enabled = true;
                                                     }
                                                     if reset || enabled != filter.enabled {
-                                                        let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                        let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                         for t in targets {
                                                             let Some(effects) = target_effects(tl, t) else {
                                                                 continue;
@@ -2066,7 +2074,7 @@ impl VenturiApp {
                                                     ui.label(egui::RichText::new(t!("props.color")).strong());
                                                     if keyframe_button(ui, color_kf_here).clicked()
                                                     {
-                                                        let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                        let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                         for t in &solid {
                                                             let own = target_effects(tl, t)
                                                                 .and_then(|e| e.color.as_ref())
@@ -2085,7 +2093,7 @@ impl VenturiApp {
                                                     .changed()
                                                 {
                                                     color = rgba.into();
-                                                    let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                                    let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                     for t in &solid {
                                                         let constant = target_effects(tl, t)
                                                             .is_none_or(|e| e.color.as_ref().is_none_or(|k| k.is_constant()));
@@ -2117,7 +2125,7 @@ impl VenturiApp {
                                                     )
                                                 },
                                             );
-                                            let tl = self.timeline_id.map(|id| &self.project.timelines[id]);
+                                            let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                             if row.changed {
                                                 for t in targets {
                                                     let constant = target_effects(tl, t)
@@ -2150,7 +2158,7 @@ impl VenturiApp {
                                                 pending_playhead = self
                                                     .timeline_id
                                                     .and_then(|tid| {
-                                                        self.project.timelines[tid]
+                                                        self.session.project.timelines[tid]
                                                             .clip(primary.track_index, primary.clip_id)
                                                     })
                                                     .map(|c| c.timeline_frame_at(source_frame));
@@ -2168,7 +2176,7 @@ impl VenturiApp {
                             }
                             }
                         } else if let Some(timeline_id) = self.timeline_id {
-                            let tl = &self.project.timelines[timeline_id];
+                            let tl = &self.session.project.timelines[timeline_id];
                             ui.heading(t!("props.timeline"));
                             ui.label(tl.name.clone());
                             ui.label(format!(

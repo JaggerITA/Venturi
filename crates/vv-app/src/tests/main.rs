@@ -5,16 +5,17 @@ fn a_new_timeline_becomes_current_and_shows_up_in_the_media_pool() {
     let mut app = VenturiApp::default();
     let first = app.ensure_timeline();
     let second = app.create_timeline(
-        app.project.alloc_timeline_name(),
+        app.session.project.alloc_timeline_name(),
         vv_core::Rational::new(30, 1),
         (1280, 720),
     );
     assert_ne!(first, second);
-    assert_eq!(app.project.timelines[second].name, "Timeline 2");
+    assert_eq!(app.session.project.timelines[second].name, "Timeline 2");
     app.open_timeline(second);
     assert_eq!(app.timeline_id, Some(second));
     assert!(app.timeline_stack.is_empty());
     let pool_entry = app
+        .session
         .project
         .media_pool
         .values()
@@ -30,7 +31,7 @@ fn switching_between_project_timelines_does_not_nest_them() {
     let mut app = VenturiApp::default();
     let first = app.ensure_timeline();
     let second = app.create_timeline(
-        app.project.alloc_timeline_name(),
+        app.session.project.alloc_timeline_name(),
         vv_core::Rational::new(30, 1),
         (1280, 720),
     );
@@ -47,7 +48,7 @@ fn make_timeline_with_clip(
     len: FrameIdx,
 ) -> vv_core::ClipId {
     if app.timeline_id.is_none() {
-        let id = app.project.timelines.insert(vv_core::Timeline {
+        let id = app.session.project.timelines.insert(vv_core::Timeline {
             name: "T".into(),
             fps: vv_core::Rational::new(25, 1),
             resolution: (1920, 1080),
@@ -56,7 +57,7 @@ fn make_timeline_with_clip(
         });
         app.timeline_id = Some(id);
     }
-    let clip_id = app.project.alloc_clip_id();
+    let clip_id = app.session.project.alloc_clip_id();
     let clip = vv_core::Clip::from_source_range(
         clip_id,
         vv_core::ClipSource::SolidColor,
@@ -65,8 +66,8 @@ fn make_timeline_with_clip(
         start,
         vv_core::Rational::one(),
     );
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::InsertClip {
             timeline: app.timeline_id.unwrap(),
             track_index,
@@ -77,7 +78,7 @@ fn make_timeline_with_clip(
 }
 
 fn insert_compound_media(app: &mut VenturiApp, nested_id: TimelineId) -> MediaId {
-    app.project.media_pool.insert(vv_core::MediaItem {
+    app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 10,
@@ -104,7 +105,7 @@ fn insert_compound_media(app: &mut VenturiApp, nested_id: TimelineId) -> MediaId
 fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -114,7 +115,7 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
     insert_compound_media(&mut app, nested_id);
     app.enter_compound_timeline(nested_id);
     for track_index in 0..2 {
-        let clip_id = app.project.alloc_clip_id();
+        let clip_id = app.session.project.alloc_clip_id();
         let clip = vv_core::Clip::from_source_range(
             clip_id,
             vv_core::ClipSource::SolidColor,
@@ -123,7 +124,7 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
             0,
             vv_core::Rational::one(),
         );
-        app.project.timelines[nested_id].tracks[track_index].insert_sorted(clip);
+        app.session.project.timelines[nested_id].tracks[track_index].insert_sorted(clip);
         app.timeline_state.selected.insert((track_index, clip_id));
     }
     app.copy_selected_clips();
@@ -132,7 +133,7 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
     app.timeline_state.playhead = 0;
     app.paste_clipboard_at_playhead();
 
-    let tl = &app.project.timelines[root_id];
+    let tl = &app.session.project.timelines[root_id];
     let video_tracks: Vec<usize> = tl
         .tracks_of_kind(TrackKind::Video)
         .map(|(i, _)| i)
@@ -150,7 +151,7 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
 fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -165,7 +166,7 @@ fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() 
 
     assert_eq!(app.timeline_id, Some(root_id));
     assert!(app.timeline_stack.is_empty());
-    assert!(!app.project.timelines.contains_key(nested_id));
+    assert!(!app.session.project.timelines.contains_key(nested_id));
 }
 
 /// A compound clip has no file to decode: the peaks are
@@ -173,7 +174,7 @@ fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() 
 #[test]
 fn a_compound_waveform_is_composed_from_the_nested_clips() {
     let mut app = VenturiApp::default();
-    let source = app.project.media_pool.insert(vv_core::MediaItem {
+    let source = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "a.wav".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 50,
@@ -191,7 +192,7 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
         compound: None,
         folder: None,
     });
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -199,17 +200,19 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
         markers: Vec::new(),
     });
     let clip = vv_core::Clip::from_source_range(
-        app.project.alloc_clip_id(),
+        app.session.project.alloc_clip_id(),
         vv_core::ClipSource::Media(source),
         0,
         25,
         0,
         vv_core::Rational::one(),
     );
-    app.project.timelines[nested_id].tracks[0].insert_sorted(clip);
+    app.session.project.timelines[nested_id].tracks[0].insert_sorted(clip);
     let compound = insert_compound_media(&mut app, nested_id);
-    app.project.media_pool[compound].meta.has_audio = true;
-    app.project.media_pool[compound].meta.duration_frames = 50;
+    app.session.project.media_pool[compound].meta.has_audio = true;
+    app.session.project.media_pool[compound]
+        .meta
+        .duration_frames = 50;
 
     app.waveform_cache.insert(
         (7, 0),
@@ -219,7 +222,7 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
         },
     );
     let (waveform, complete) =
-        compose_compound_waveform(&app.project, &app.waveform_cache, compound).unwrap();
+        compose_compound_waveform(&app.session.project, &app.waveform_cache, compound).unwrap();
 
     assert!(complete);
     assert_eq!(waveform.audio_duration_secs, 2.0);
@@ -238,7 +241,7 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
 fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_ui_state() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -286,7 +289,7 @@ fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op(
     assert_eq!(app.timeline_id, Some(root_id));
     assert!(app.timeline_stack.is_empty());
 
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -314,7 +317,7 @@ fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op(
 fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -350,12 +353,16 @@ fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
     app.paste_clipboard_at_playhead();
 
     assert_eq!(
-        app.project.timelines[nested_id].tracks[0].clips.len(),
+        app.session.project.timelines[nested_id].tracks[0]
+            .clips
+            .len(),
         1,
         "pasted into the nested timeline"
     );
     assert!(
-        app.project.timelines[root_id].tracks[0].clips.is_empty(),
+        app.session.project.timelines[root_id].tracks[0]
+            .clips
+            .is_empty(),
         "not in the root"
     );
 }
@@ -370,6 +377,7 @@ fn dropping_a_timelines_own_media_into_itself_is_refused() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
     let root_media = app
+        .session
         .project
         .media_pool
         .iter()
@@ -380,7 +388,7 @@ fn dropping_a_timelines_own_media_into_itself_is_refused() {
     app.add_media_to_timeline(root_media);
 
     assert!(
-        app.project.timelines[root_id]
+        app.session.project.timelines[root_id]
             .tracks
             .iter()
             .all(|t| t.clips.is_empty()),
@@ -394,7 +402,7 @@ fn dropping_a_timelines_own_media_into_itself_is_refused() {
 fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
     let mut app = VenturiApp::default();
     let root_id = app.ensure_timeline();
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (1920, 1080),
@@ -403,6 +411,7 @@ fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
     });
     let compound_media = insert_compound_media(&mut app, nested_id);
     let root_media = app
+        .session
         .project
         .media_pool
         .iter()
@@ -411,7 +420,7 @@ fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
         .unwrap();
     // The nested timeline already contains a clip referencing the
     // root of the project.
-    app.project.timelines[nested_id].tracks[0]
+    app.session.project.timelines[nested_id].tracks[0]
         .clips
         .push(vv_core::Clip::from_source_range(
             ClipId(1),
@@ -427,7 +436,9 @@ fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
     app.add_media_to_timeline(compound_media);
 
     assert!(
-        app.project.timelines[root_id].tracks[0].clips.is_empty(),
+        app.session.project.timelines[root_id].tracks[0]
+            .clips
+            .is_empty(),
         "the indirect drop was rejected"
     );
 }
@@ -447,7 +458,7 @@ fn app_with_media_at(
     duration_frames: FrameIdx,
 ) -> (VenturiApp, MediaId) {
     let mut app = VenturiApp::default();
-    let media_id = app.project.media_pool.insert(vv_core::MediaItem {
+    let media_id = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-conform-test.mp4".into(),
         meta: vv_core::MediaMeta {
             duration_frames,
@@ -465,7 +476,7 @@ fn app_with_media_at(
         compound: None,
         folder: None,
     });
-    let timeline_id = app.project.timelines.insert(vv_core::Timeline {
+    let timeline_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "T".into(),
         fps: timeline_fps,
         resolution: (320, 240),
@@ -477,7 +488,7 @@ fn app_with_media_at(
 }
 
 fn hd_media(app: &mut VenturiApp, hash: u64, (w, h): (u32, u32)) -> MediaId {
-    app.project.media_pool.insert(vv_core::MediaItem {
+    app.session.project.media_pool.insert(vv_core::MediaItem {
         path: format!("/tmp/vv-{hash}.mp4").into(),
         meta: vv_core::MediaMeta {
             duration_frames: 100_000,
@@ -520,7 +531,7 @@ fn the_prefetch_window_shrinks_to_what_the_cache_budget_holds() {
     track_a.clips.push(full_track_clip(1, a));
     let mut track_b = Track::new(TrackKind::Video);
     track_b.clips.push(full_track_clip(2, b));
-    let timeline_id = app.project.timelines.insert(vv_core::Timeline {
+    let timeline_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "T".into(),
         fps: vv_core::Rational::new(60, 1),
         resolution: (1920, 1080),
@@ -553,7 +564,7 @@ fn the_prefetch_window_is_not_shrunk_when_the_media_fits_the_budget() {
         10_000,
     );
     let timeline_id = app.timeline_id.unwrap();
-    app.project.timelines[timeline_id].tracks[0]
+    app.session.project.timelines[timeline_id].tracks[0]
         .clips
         .push(full_track_clip(1, media_id));
 
@@ -570,7 +581,7 @@ fn dropping_several_media_appends_them_in_pool_order() {
         vv_core::Rational::new(25, 1),
         50,
     );
-    let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+    let media_b = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-b.mp4".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 30,
@@ -590,7 +601,7 @@ fn dropping_several_media_appends_them_in_pool_order() {
     });
     let timeline_id = app.timeline_id.unwrap();
     let drag = |app: &VenturiApp, id: MediaId| {
-        timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        timeline_ui::MediaDrag::whole(id, &app.session.project.media_pool[id].meta)
     };
     let set = timeline_ui::MediaDragSet {
         items: vec![drag(&app, media_a), drag(&app, media_b)],
@@ -598,7 +609,7 @@ fn dropping_several_media_appends_them_in_pool_order() {
 
     app.add_media_set_to_timeline_at(&set, 100, timeline_ui::MediaDropTarget::Default);
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].timeline_start, 100);
     assert_eq!(clips[0].timeline_len, 50);
@@ -620,7 +631,7 @@ fn dropping_several_media_is_a_single_undo_step() {
         vv_core::Rational::new(25, 1),
         50,
     );
-    let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+    let media_b = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-b.mp4".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 30,
@@ -639,25 +650,25 @@ fn dropping_several_media_is_a_single_undo_step() {
         folder: None,
     });
     let timeline_id = app.timeline_id.unwrap();
-    let tracks_before = app.project.timelines[timeline_id].tracks.len();
+    let tracks_before = app.session.project.timelines[timeline_id].tracks.len();
     let drag = |app: &VenturiApp, id: MediaId| {
-        timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        timeline_ui::MediaDrag::whole(id, &app.session.project.media_pool[id].meta)
     };
     let set = timeline_ui::MediaDragSet {
         items: vec![drag(&app, media_a), drag(&app, media_b)],
     };
 
     app.add_media_set_to_timeline_at(&set, 0, timeline_ui::MediaDropTarget::NewVideoTrack);
-    let clips_after_drop: usize = app.project.timelines[timeline_id]
+    let clips_after_drop: usize = app.session.project.timelines[timeline_id]
         .tracks
         .iter()
         .map(|t| t.clips.len())
         .sum();
     assert!(clips_after_drop >= 3, "video + audio of both media");
 
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert!(
         tl.tracks.iter().all(|t| t.clips.is_empty()),
         "a single Ctrl+Z must remove all the clips of the drop"
@@ -678,7 +689,7 @@ fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
         vv_core::Rational::new(25, 1),
         50,
     );
-    let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+    let media_b = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-b.mp4".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 30,
@@ -697,9 +708,9 @@ fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
         folder: None,
     });
     let timeline_id = app.timeline_id.unwrap();
-    let tracks_before = app.project.timelines[timeline_id].tracks.len();
+    let tracks_before = app.session.project.timelines[timeline_id].tracks.len();
     let drag = |app: &VenturiApp, id: MediaId| {
-        timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta)
+        timeline_ui::MediaDrag::whole(id, &app.session.project.media_pool[id].meta)
     };
     let set = timeline_ui::MediaDragSet {
         items: vec![drag(&app, media_a), drag(&app, media_b)],
@@ -707,7 +718,7 @@ fn dropping_several_media_on_the_new_track_zone_creates_one_track() {
 
     app.add_media_set_to_timeline_at(&set, 0, timeline_ui::MediaDropTarget::NewVideoTrack);
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks.len(), tracks_before + 1);
     assert_eq!(tl.tracks[tracks_before].clips.len(), 2);
 }
@@ -720,24 +731,29 @@ fn deleting_a_media_leaves_its_clip_in_timeline_but_offline() {
         100,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
         0,
         timeline_ui::MediaDropTarget::Default,
     );
-    let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+    let clip_id = app.session.project.timelines[timeline_id].tracks[0].clips[0].id;
     app.active_clip = Some((0, clip_id));
 
     app.media_pool_state.selected = BTreeSet::from([media_id]);
     app.delete_selected_media();
 
-    assert!(app.project.media_pool.is_empty());
-    assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
+    assert!(app.session.project.media_pool.is_empty());
+    assert_eq!(
+        app.session.project.timelines[timeline_id].tracks[0]
+            .clips
+            .len(),
+        1
+    );
     assert!(app.active_clip_media_offline());
     assert!(app.media_pool_state.selected.is_empty());
 
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert!(
         !app.active_clip_media_offline(),
         "undo must reattach the clip to the reinserted media"
@@ -751,7 +767,7 @@ fn select_all_media_selects_every_media_in_the_pool() {
         vv_core::Rational::new(25, 1),
         50,
     );
-    let media_b = app.project.media_pool.insert(vv_core::MediaItem {
+    let media_b = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-b.mp4".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 30,
@@ -804,21 +820,21 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
         audio_streams: 0,
         file: Default::default(),
     };
-    let offline = app.project.media_pool.insert(vv_core::MediaItem {
+    let offline = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/this/path/no/longer/exists/interview.mp4".into(),
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
         folder: None,
     });
-    let unresolvable = app.project.media_pool.insert(vv_core::MediaItem {
+    let unresolvable = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/other/nonexistent/path/ghost.mp4".into(),
         meta: meta.clone(),
         content_hash: 3,
         compound: None,
         folder: None,
     });
-    let already_ok = app.project.media_pool.insert(vv_core::MediaItem {
+    let already_ok = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: already_ok_path.clone(),
         meta,
         content_hash: 2,
@@ -828,29 +844,29 @@ fn relink_media_finds_offline_files_by_name_under_the_base_folder() {
     app.relink_media(&dir, &[offline, unresolvable, already_ok]);
     app.wait_for_relink();
 
-    assert_eq!(app.project.media_pool[offline].path, found_path);
+    assert_eq!(app.session.project.media_pool[offline].path, found_path);
     assert_ne!(
-        app.project.media_pool[offline].content_hash, 1,
+        app.session.project.media_pool[offline].content_hash, 1,
         "the hash must be recomputed on the new path"
     );
     assert_eq!(
-        app.project.media_pool[unresolvable].path,
+        app.session.project.media_pool[unresolvable].path,
         PathBuf::from("/other/nonexistent/path/ghost.mp4"),
         "without a matching file the path stays the old one"
     );
     assert_eq!(
-        app.project.media_pool[already_ok].path, already_ok_path,
+        app.session.project.media_pool[already_ok].path, already_ok_path,
         "a media already reachable at its path must not be touched"
     );
-    assert_eq!(app.project.media_pool[already_ok].content_hash, 2);
+    assert_eq!(app.session.project.media_pool[already_ok].content_hash, 2);
     assert_eq!(
         app.relink_message,
         Some("Relinked 1 media, 1 not found.".to_string())
     );
 
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(
-        app.project.media_pool[offline].path,
+        app.session.project.media_pool[offline].path,
         PathBuf::from("/this/path/no/longer/exists/interview.mp4"),
         "undo must bring the path back to the one before the relink"
     );
@@ -882,7 +898,7 @@ fn media_not_found_by_name_can_be_force_relinked() {
         audio_streams: 0,
         file: Default::default(),
     };
-    let found = app.project.media_pool.insert(vv_core::MediaItem {
+    let found = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/found.mp4".into(),
         meta: meta.clone(),
         content_hash: 1,
@@ -890,7 +906,7 @@ fn media_not_found_by_name_can_be_force_relinked() {
         folder: None,
     });
     meta.file.size_bytes = Some(1);
-    let lost = app.project.media_pool.insert(vv_core::MediaItem {
+    let lost = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/lost.mov".into(),
         meta,
         content_hash: 2,
@@ -903,8 +919,8 @@ fn media_not_found_by_name_can_be_force_relinked() {
 
     let references = vec![forced_relink::Reference {
         media_id: lost,
-        path: app.project.media_pool[lost].path.clone(),
-        meta: app.project.media_pool[lost].meta.clone(),
+        path: app.session.project.media_pool[lost].path.clone(),
+        meta: app.session.project.media_pool[lost].meta.clone(),
         waveform: None,
     }];
     let criteria = forced_relink::Criteria {
@@ -928,15 +944,15 @@ fn media_not_found_by_name_can_be_force_relinked() {
         .collect();
     app.apply_relinks(relinks);
     app.wait_for_relink();
-    assert_eq!(app.project.media_pool[lost].path, converted);
+    assert_eq!(app.session.project.media_pool[lost].path, converted);
 
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(
-        app.project.media_pool[lost].path,
+        app.session.project.media_pool[lost].path,
         PathBuf::from("/missing/lost.mov")
     );
     assert_eq!(
-        app.project.media_pool[found].path,
+        app.session.project.media_pool[found].path,
         dir.join("found.mp4"),
         "the forced relink is its own undo step"
     );
@@ -971,14 +987,14 @@ fn relink_media_with_a_selection_only_touches_the_selected_media() {
         audio_streams: 0,
         file: Default::default(),
     };
-    let selected = app.project.media_pool.insert(vv_core::MediaItem {
+    let selected = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/a.mp4".into(),
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
         folder: None,
     });
-    let not_selected = app.project.media_pool.insert(vv_core::MediaItem {
+    let not_selected = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/b.mp4".into(),
         meta,
         content_hash: 2,
@@ -988,9 +1004,9 @@ fn relink_media_with_a_selection_only_touches_the_selected_media() {
     app.relink_media(&dir, &[selected]);
     app.wait_for_relink();
 
-    assert_eq!(app.project.media_pool[selected].path, found_path);
+    assert_eq!(app.session.project.media_pool[selected].path, found_path);
     assert_eq!(
-        app.project.media_pool[not_selected].path,
+        app.session.project.media_pool[not_selected].path,
         PathBuf::from("/missing/b.mp4"),
         "not selected, it is not relinked even if findable"
     );
@@ -1009,11 +1025,11 @@ fn relink_media_dialog_is_a_no_op_without_a_selection() {
         vv_core::Rational::new(25, 1),
         10,
     );
-    let original_path = app.project.media_pool[media_id].path.clone();
+    let original_path = app.session.project.media_pool[media_id].path.clone();
 
     app.relink_media_dialog();
 
-    assert_eq!(app.project.media_pool[media_id].path, original_path);
+    assert_eq!(app.session.project.media_pool[media_id].path, original_path);
     assert!(app.relink_message.is_none());
 }
 
@@ -1038,7 +1054,7 @@ fn inserting_a_media_at_another_fps_conforms_it_to_the_timeline() {
         3000,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
 
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
@@ -1046,7 +1062,7 @@ fn inserting_a_media_at_another_fps_conforms_it_to_the_timeline() {
         timeline_ui::MediaDropTarget::Default,
     );
 
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert_eq!(clip.rate, vv_core::Rational::new(1001, 1000));
     assert_eq!(clip.source_len(), 3000);
     assert_eq!(clip.timeline_len, 3003, "100,1 s a 30 fps");
@@ -1066,7 +1082,7 @@ fn extending_a_clip_over_its_neighbor_cuts_the_neighbor() {
 
     apply_trim_with_overwrite(&mut app, timeline_id, 0, a, vv_core::TrimEdge::End, 15);
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, a);
     assert_eq!(clips[0].timeline_end(), 15);
@@ -1089,7 +1105,7 @@ fn extending_a_clip_over_a_whole_neighbor_removes_it() {
 
     apply_trim_with_overwrite(&mut app, timeline_id, 0, a, vv_core::TrimEdge::End, 20);
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, a);
     assert_eq!(clips[0].timeline_end(), 20);
@@ -1108,9 +1124,9 @@ fn extending_a_clip_backwards_cuts_the_previous_neighbor() {
     let timeline_id = app.timeline_id.unwrap();
     // b is born with source_in 8: it really has 8 frames of margin to
     // go back over the neighbor.
-    let b = app.project.alloc_clip_id();
-    app.history.do_command(
-        &mut app.project,
+    let b = app.session.project.alloc_clip_id();
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::InsertClip {
             timeline: timeline_id,
             track_index: 0,
@@ -1127,7 +1143,7 @@ fn extending_a_clip_backwards_cuts_the_previous_neighbor() {
 
     apply_trim_with_overwrite(&mut app, timeline_id, 0, b, vv_core::TrimEdge::Start, 6);
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, a);
     assert_eq!(clips[0].timeline_end(), 6);
@@ -1145,7 +1161,7 @@ fn apply_trim_with_overwrite(
     edge: vv_core::TrimEdge,
     new_value: FrameIdx,
 ) {
-    let clip = app.project.timelines[timeline_id].tracks[track_index]
+    let clip = app.session.project.timelines[timeline_id].tracks[track_index]
         .clips
         .iter()
         .find(|c| c.id == clip_id)
@@ -1162,7 +1178,7 @@ fn apply_trim_with_overwrite(
     };
     let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
     vv_core::make_room_for_ranges(
-        &mut app.project,
+        &mut app.session.project,
         timeline_id,
         range.as_slice(),
         &[(track_index, clip_id)],
@@ -1175,8 +1191,8 @@ fn apply_trim_with_overwrite(
         edge,
         new_value,
     )));
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::CompositeCommand::new(
             vv_core::CommandLabel::TrimClips,
             commands,
@@ -1195,20 +1211,20 @@ fn pasting_a_conformed_clip_keeps_its_timeline_duration() {
         3000,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
         0,
         timeline_ui::MediaDropTarget::Default,
     );
-    let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+    let clip_id = app.session.project.timelines[timeline_id].tracks[0].clips[0].id;
 
     app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
     app.copy_selected_clips();
     app.timeline_state.playhead = 5000;
     app.paste_clipboard_at_playhead();
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     let pasted = clips.iter().find(|c| c.timeline_start == 5000).unwrap();
     assert_eq!(pasted.rate, vv_core::Rational::new(1001, 1000));
@@ -1225,17 +1241,17 @@ fn pasting_into_a_timeline_at_another_fps_keeps_the_duration_in_seconds() {
         300,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
         0,
         timeline_ui::MediaDropTarget::Default,
     );
-    let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+    let clip_id = app.session.project.timelines[timeline_id].tracks[0].clips[0].id;
     app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
     app.copy_selected_clips();
 
-    let other = app.project.timelines.insert(vv_core::Timeline {
+    let other = app.session.project.timelines.insert(vv_core::Timeline {
         name: "T25".into(),
         fps: vv_core::Rational::new(25, 1),
         resolution: (320, 240),
@@ -1246,7 +1262,7 @@ fn pasting_into_a_timeline_at_another_fps_keeps_the_duration_in_seconds() {
     app.timeline_state.playhead = 50;
     app.paste_clipboard_at_playhead();
 
-    let pasted = &app.project.timelines[other].tracks[0].clips[0];
+    let pasted = &app.session.project.timelines[other].tracks[0].clips[0];
     assert_eq!(pasted.timeline_start, 50);
     assert_eq!(pasted.timeline_len, 250, "10 secondi a 25 fps");
     assert_eq!(pasted.rate, vv_core::Rational::new(5, 6));
@@ -1264,7 +1280,7 @@ fn overwriting_the_tail_of_a_conformed_clip_trims_it_at_the_right_spot() {
         3000,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
         0,
@@ -1273,17 +1289,19 @@ fn overwriting_the_tail_of_a_conformed_clip_trims_it_at_the_right_spot() {
 
     let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
     vv_core::make_room_for_ranges(
-        &mut app.project,
+        &mut app.session.project,
         timeline_id,
         &[(0, 2000, 4000)],
         &[],
         &mut commands,
     );
     for command in commands {
-        app.history.do_command(&mut app.project, command);
+        app.session
+            .history
+            .do_command(&mut app.session.project, command);
     }
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 1);
     assert_eq!(
         clips[0].timeline_end(),
@@ -1298,8 +1316,8 @@ fn active_video_clip_at_prefers_the_topmost_video_track() {
     let mut app = VenturiApp::default();
     let bottom = make_timeline_with_clip(&mut app, 0, 0, 30);
     let timeline_id = app.timeline_id.unwrap();
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::AddTrack::new(timeline_id, TrackKind::Video)),
     );
     let top = make_timeline_with_clip(&mut app, 2, 10, 10);
@@ -1326,7 +1344,7 @@ fn ripple_delete_selected_shifts_other_tracks_and_selects_clip_under_playhead() 
     // which was already there. Handy to chain several ripple-deletes without
     // having to reclick the next clip every time.
     assert_eq!(app.timeline_state.selected, BTreeSet::from([(0, video_a)]));
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 1);
     assert_eq!(tl.tracks[0].clips[0].id, video_a);
     // The audio clip that started at the same instant moved to 0
@@ -1365,7 +1383,7 @@ fn moving_a_clip_onto_another_cuts_the_one_underneath() {
 
     let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
     vv_core::make_room_for_ranges(
-        &mut app.project,
+        &mut app.session.project,
         timeline_id,
         &[(0, 10, 20)],
         &[(1, moved), (0, moved)],
@@ -1375,15 +1393,15 @@ fn moving_a_clip_onto_another_cuts_the_one_underneath() {
         timeline_id,
         vec![(moved, 1, 0, 10)],
     )));
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::CompositeCommand::new(
             vv_core::CommandLabel::MoveClips,
             commands,
         )),
     );
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, target);
     assert_eq!(
@@ -1414,7 +1432,7 @@ fn ripple_delete_of_two_unlinked_clips_on_the_same_range_closes_it_once() {
     app.timeline_state.selected = BTreeSet::from([(0, video_mid), (1, audio_mid)]);
     app.ripple_delete_selected();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     for track in 0..2 {
         assert_eq!(tl.tracks[track].clips.len(), 2);
         assert_eq!(tl.tracks[track].clips[0].timeline_start, 0);
@@ -1444,7 +1462,7 @@ fn ripple_delete_cuts_a_clip_the_shift_landed_on() {
     app.timeline_state.selected = BTreeSet::from([(0, video)]);
     app.ripple_delete_selected();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert!(tl.tracks[0].clips.is_empty());
     assert_eq!(tl.tracks[1].clips.len(), 2);
     assert_eq!(tl.tracks[1].clips[0].id, audio_long);
@@ -1473,7 +1491,7 @@ fn ripple_delete_selected_moves_playhead_to_the_clip_that_slid_back() {
     app.ripple_delete_selected();
 
     assert_eq!(app.timeline_state.playhead, 10);
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips[1].id, c);
     assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
 }
@@ -1506,7 +1524,7 @@ fn ripple_delete_of_a_gap_moves_playhead_to_the_closed_gap() {
     app.ripple_delete_selected();
 
     assert_eq!(app.timeline_state.playhead, 10);
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips[1].id, c);
     assert_eq!(tl.tracks[0].clips[1].timeline_start, 10);
 }
@@ -1525,7 +1543,7 @@ fn delete_selected_removes_every_selected_clip() {
     app.timeline_state.selected = BTreeSet::from([(0, a), (0, c)]);
     app.delete_selected();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 1);
     assert_eq!(tl.tracks[0].clips[0].id, b);
     assert_eq!(
@@ -1551,7 +1569,7 @@ fn ripple_delete_selected_multiple_clips_closes_every_gap() {
     app.timeline_state.selected = BTreeSet::from([(0, b), (0, d)]);
     app.ripple_delete_selected();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 2);
     assert_eq!(tl.tracks[0].clips[0].id, a);
     assert_eq!(tl.tracks[0].clips[0].timeline_start, 0);
@@ -1562,8 +1580,8 @@ fn ripple_delete_selected_multiple_clips_closes_every_gap() {
     );
 
     // A single undo restores everything: both clips and the original positions.
-    app.history.undo(&mut app.project);
-    let tl = &app.project.timelines[timeline_id];
+    app.session.history.undo(&mut app.session.project);
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 4);
     assert_eq!(tl.tracks[0].clips[2].id, c);
     assert_eq!(tl.tracks[0].clips[2].timeline_start, 20);
@@ -1581,7 +1599,7 @@ fn delete_selected_does_not_shift_other_tracks() {
     app.timeline_state.selected = BTreeSet::from([(0, video_b)]);
     app.delete_selected();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 1);
     assert_eq!(tl.tracks[0].clips[0].id, video_a);
     assert_eq!(tl.tracks[1].clips.len(), 2);
@@ -1621,6 +1639,7 @@ fn loading_a_media_clip_sets_active_clip_and_gain() {
         .timeline_id
         .expect("import should have created the timeline");
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -1629,7 +1648,7 @@ fn loading_a_media_clip_sets_active_clip_and_gain() {
         .expect("imported media expected in the pool");
 
     app.add_media_to_timeline(media_id);
-    let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+    let clip_id = app.session.project.timelines[timeline_id].tracks[0].clips[0].id;
 
     app.timeline_state.selected = BTreeSet::from([(0, clip_id)]);
     app.ensure_active_clip_matches_playhead(false);
@@ -1654,8 +1673,8 @@ fn self_test_set_gain(
     clip_id: vv_core::ClipId,
     db: f32,
 ) {
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::set_clip_gain(
             timeline_id,
             track_index,
@@ -1695,7 +1714,7 @@ fn keyframe_arrows_ignore_keyframes_outside_the_clip() {
     let mut app = VenturiApp::default();
     let id = make_timeline_with_clip(&mut app, 0, 0, 100);
     let timeline_id = app.timeline_id.unwrap();
-    let clip = &mut app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &mut app.session.project.timelines[timeline_id].tracks[0].clips[0];
     clip.source_offset = 50;
     clip.timeline_len = 50;
     let zoom = clip
@@ -1739,15 +1758,15 @@ fn effect_changes_on_several_clips_are_one_undo_step() {
             )
         })
         .collect();
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::CompositeCommand::new(
             vv_core::CommandLabel::Transform,
             commands,
         )),
     );
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert!(
         clips
             .iter()
@@ -1755,8 +1774,8 @@ fn effect_changes_on_several_clips_are_one_undo_step() {
         "the change goes to all selected clips"
     );
 
-    app.history.undo(&mut app.project);
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    app.session.history.undo(&mut app.session.project);
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert!(
         clips
             .iter()
@@ -1783,12 +1802,16 @@ fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_positio
     };
     let targets = [target(first, 0), target(second, 30)];
     let cmd = set_transform_param_default((timeline_id, 0, second), P::PositionX, 50.0);
-    app.history.do_command(&mut app.project, cmd);
+    app.session
+        .history
+        .do_command(&mut app.session.project, cmd);
     // The second has an animated Y: the change goes into a keyframe.
     let cmd = upsert_transform_keyframe((timeline_id, 0, second), 10, P::PositionY, 5.0);
-    app.history.do_command(&mut app.project, cmd);
+    app.session
+        .history
+        .do_command(&mut app.session.project, cmd);
 
-    let before = app.project.timelines[timeline_id].tracks[0].clips[0]
+    let before = app.session.project.timelines[timeline_id].tracks[0].clips[0]
         .effects
         .transform
         .value_at(0);
@@ -1797,7 +1820,7 @@ fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_positio
     let mut pending = Vec::new();
     push_param_changes(
         &mut pending,
-        Some(&app.project.timelines[timeline_id]),
+        Some(&app.session.project.timelines[timeline_id]),
         &targets,
         &[P::PositionX, P::PositionY],
         &after,
@@ -1805,7 +1828,7 @@ fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_positio
     );
     app.apply_effect_changes(pending, false);
 
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips[0].effects.transform.value_at(0).position, [0.0, 80.0]);
     assert_eq!(
         clips[1].effects.transform.value_at(0).position,
@@ -1823,14 +1846,14 @@ fn editing_one_param_on_several_clips_keeps_their_other_values_and_moves_positio
     let mut pending = Vec::new();
     push_param_changes(
         &mut pending,
-        Some(&app.project.timelines[timeline_id]),
+        Some(&app.session.project.timelines[timeline_id]),
         &targets,
         &[P::PositionX, P::PositionY],
         &after,
         &before,
     );
     app.apply_effect_changes(pending, false);
-    let clips = &app.project.timelines[timeline_id].tracks[0].clips;
+    let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(
         clips[0].effects.transform.value_at(0).position,
         [10.0, 80.0]
@@ -1854,7 +1877,7 @@ fn dragging_a_value_is_a_single_undo_step() {
         )]
     };
     let x = |app: &VenturiApp| {
-        app.project.timelines[timeline_id].tracks[0].clips[0]
+        app.session.project.timelines[timeline_id].tracks[0].clips[0]
             .effects
             .transform
             .value_at(0)
@@ -1867,12 +1890,12 @@ fn dragging_a_value_is_a_single_undo_step() {
     app.apply_effect_changes(set_x(4.0), false);
     assert_eq!(x(&app), 4.0);
 
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(x(&app), 0.0, "a single undo for the whole drag");
 
-    app.history.redo(&mut app.project);
+    app.session.history.redo(&mut app.session.project);
     app.apply_effect_changes(set_x(9.0), false);
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(x(&app), 4.0, "without a drag every change stands alone");
 }
 
@@ -1883,9 +1906,11 @@ fn effect_command_upsert_gain_keyframe_applies_correctly() {
     let timeline_id = app.timeline_id.unwrap();
 
     let cmd = upsert_gain_keyframe((timeline_id, 0, clip_id), 5, -9.0);
-    app.history.do_command(&mut app.project, cmd);
+    app.session
+        .history
+        .do_command(&mut app.session.project, cmd);
 
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert_eq!(
         clip.effects.gain_db.keyframe_at(5),
         Some((-9.0, vv_core::Interpolation::Linear))
@@ -1898,8 +1923,8 @@ fn effect_command_remove_transform_keyframe_applies_correctly() {
     let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
     let timeline_id = app.timeline_id.unwrap();
 
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         upsert_transform_keyframe(
             (timeline_id, 0, clip_id),
             3,
@@ -1907,12 +1932,12 @@ fn effect_command_remove_transform_keyframe_applies_correctly() {
             2.5,
         ),
     );
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         remove_transform_keyframe((timeline_id, 0, clip_id), 3, vv_core::TransformParam::ZoomX),
     );
 
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert!(clip.effects.transform.is_constant());
 }
 
@@ -1922,12 +1947,12 @@ fn effect_command_set_defaults_applies_correctly() {
     let clip_id = make_timeline_with_clip(&mut app, 0, 0, 20);
     let timeline_id = app.timeline_id.unwrap();
 
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         set_gain_default((timeline_id, 0, clip_id), -3.0),
     );
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         set_transform_param_default(
             (timeline_id, 0, clip_id),
             vv_core::TransformParam::ZoomX,
@@ -1935,7 +1960,7 @@ fn effect_command_set_defaults_applies_correctly() {
         ),
     );
 
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert_eq!(clip.effects.gain_db.default, -3.0);
     assert_eq!(clip.effects.transform.value_at(0).zoom, [1.5, 1.0]);
 }
@@ -1954,7 +1979,7 @@ fn dropping_solid_color_creates_timeline_and_initialized_color() {
     let timeline_id = app
         .timeline_id
         .expect("a timeline should have been created");
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
     assert!(clip.effects.color.is_some());
     assert_eq!(clip.timeline_len, 125); // 5s at 25fps by default
@@ -1964,7 +1989,7 @@ fn dropping_solid_color_creates_timeline_and_initialized_color() {
 fn dropping_solid_color_on_new_video_track_places_it_at_the_drop_frame() {
     let mut app = VenturiApp::default();
     let timeline_id = app.ensure_timeline();
-    let tracks_before = app.project.timelines[timeline_id].tracks.len();
+    let tracks_before = app.session.project.timelines[timeline_id].tracks.len();
 
     app.add_generator_to_timeline_at(
         timeline_ui::Generator::SolidColor,
@@ -1972,15 +1997,15 @@ fn dropping_solid_color_on_new_video_track_places_it_at_the_drop_frame() {
         timeline_ui::MediaDropTarget::NewVideoTrack,
     );
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks.len(), tracks_before + 1);
     let clip = &tl.tracks[tracks_before].clips[0];
     assert!(matches!(clip.source, vv_core::ClipSource::SolidColor));
     assert_eq!(clip.timeline_start, 50);
     // New track and clip: a single Ctrl+Z.
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(
-        app.project.timelines[timeline_id].tracks.len(),
+        app.session.project.timelines[timeline_id].tracks.len(),
         tracks_before
     );
 }
@@ -1999,16 +2024,16 @@ fn dropping_solid_color_on_a_track_overwrites_what_is_under_it() {
     drop(&mut app, 0); // [0, 125)
     drop(&mut app, 50); // [50, 175): cuts the tail of the first one
 
-    let spans: Vec<(FrameIdx, FrameIdx)> = app.project.timelines[timeline_id].tracks[0]
+    let spans: Vec<(FrameIdx, FrameIdx)> = app.session.project.timelines[timeline_id].tracks[0]
         .clips
         .iter()
         .map(|c| (c.timeline_start, c.timeline_end()))
         .collect();
     assert_eq!(spans, vec![(0, 50), (50, 175)]);
 
-    app.history.undo(&mut app.project);
+    app.session.history.undo(&mut app.session.project);
     assert_eq!(
-        app.project.timelines[timeline_id].tracks[0].clips[0].timeline_end(),
+        app.session.project.timelines[timeline_id].tracks[0].clips[0].timeline_end(),
         125
     );
 }
@@ -2022,7 +2047,7 @@ fn dropping_text_creates_a_text_clip_with_default_title() {
         timeline_ui::MediaDropTarget::Default,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert!(matches!(clip.source, vv_core::ClipSource::Text));
     assert_eq!(clip.timeline_start, 10);
     assert_eq!(clip.effects.title, Some(vv_core::TitleParams::default()));
@@ -2061,7 +2086,7 @@ fn solid_color_clip_under_the_playhead_becomes_the_active_clip() {
         timeline_ui::MediaDropTarget::Default,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+    let clip_id = app.session.project.timelines[timeline_id].tracks[0].clips[0].id;
 
     app.ensure_active_clip_matches_playhead(false);
 
@@ -2077,7 +2102,7 @@ fn effect_command_color_upsert_and_remove_round_trip() {
         timeline_ui::MediaDropTarget::Default,
     );
     let timeline_id = app.timeline_id.unwrap();
-    let clip_id = app.project.timelines[timeline_id].tracks[0].clips[0].id;
+    let clip_id = app.session.project.timelines[timeline_id].tracks[0].clips[0].id;
 
     let red = vv_core::Rgba {
         r: 1.0,
@@ -2085,11 +2110,11 @@ fn effect_command_color_upsert_and_remove_round_trip() {
         b: 0.0,
         a: 1.0,
     };
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         upsert_color_keyframe((timeline_id, 0, clip_id), 10, red),
     );
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert_eq!(
         clip.effects
             .color
@@ -2102,11 +2127,11 @@ fn effect_command_color_upsert_and_remove_round_trip() {
         1.0
     );
 
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         remove_color_keyframe((timeline_id, 0, clip_id), 10),
     );
-    let clip = &app.project.timelines[timeline_id].tracks[0].clips[0];
+    let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
     assert!(clip.effects.color.as_ref().unwrap().is_constant());
 }
 
@@ -2359,6 +2384,7 @@ fn preview_mix_follows_audio_clip_edits() {
     let mut app = VenturiApp::default();
     app.import_media(path);
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -2367,10 +2393,10 @@ fn preview_mix_follows_audio_clip_edits() {
         .0;
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
-    let audio_track = app.project.timelines[timeline_id]
+    let audio_track = app.session.project.timelines[timeline_id]
         .first_track_index(TrackKind::Audio)
         .unwrap();
-    let audio_clip = app.project.timelines[timeline_id].tracks[audio_track].clips[0].id;
+    let audio_clip = app.session.project.timelines[timeline_id].tracks[audio_track].clips[0].id;
 
     app.timeline_audio();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2397,8 +2423,8 @@ fn preview_mix_follows_audio_clip_edits() {
     assert!(peak(&app, 10) > 0.1, "the audio clip must play");
     assert_eq!(peak(&app, 60), 0.0);
 
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::MoveClips::new(
             timeline_id,
             vec![(audio_clip, audio_track, audio_track, 50)],
@@ -2417,9 +2443,9 @@ fn preview_mix_follows_audio_clip_edits() {
     assert!(stretched > 0.1, "stretched={stretched}");
     app.toggle_playback();
 
-    app.project.timelines[timeline_id].tracks[audio_track].muted = true;
-    app.history.do_command(
-        &mut app.project,
+    app.session.project.timelines[timeline_id].tracks[audio_track].muted = true;
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::MoveClips::new(
             timeline_id,
             vec![(audio_clip, audio_track, audio_track, 55)],
@@ -2475,7 +2501,7 @@ fn split_at_playhead_cuts_every_track_without_selection() {
     app.timeline_state.playhead = 8;
     app.split_at_playhead();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 2, "video track cut");
     assert_eq!(
         tl.tracks[1].clips.len(),
@@ -2486,16 +2512,16 @@ fn split_at_playhead_cuts_every_track_without_selection() {
     assert_eq!(tl.tracks[1].clips[0].id, audio_id);
 
     // A single undo cancels both cuts (CompositeCommand).
-    app.history.undo(&mut app.project);
-    let tl = &app.project.timelines[timeline_id];
+    app.session.history.undo(&mut app.session.project);
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 1);
     assert_eq!(tl.tracks[1].clips.len(), 1);
 }
 
 fn lock_track(app: &mut VenturiApp, track_index: usize) {
     let timeline_id = app.timeline_id.unwrap();
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::SetTrackFlag::new(
             timeline_id,
             track_index,
@@ -2515,7 +2541,7 @@ fn locked_tracks_are_not_split_selected_or_pasted_on() {
 
     app.timeline_state.playhead = 8;
     app.split_at_playhead();
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 2);
     assert_eq!(tl.tracks[1].clips.len(), 1, "locked track untouched");
 
@@ -2526,19 +2552,24 @@ fn locked_tracks_are_not_split_selected_or_pasted_on() {
         track_kind: TrackKind::Audio,
         track_number: 1,
         relative_start: 0,
-        clip: app.project.timelines[timeline_id].tracks[0].clips[0].clone(),
+        clip: app.session.project.timelines[timeline_id].tracks[0].clips[0].clone(),
         timeline_fps: vv_core::Rational::new(25, 1),
         link_tag: None,
     }];
     app.timeline_state.playhead = 40;
     app.paste_clipboard_at_playhead();
-    assert_eq!(app.project.timelines[timeline_id].tracks[1].clips.len(), 1);
+    assert_eq!(
+        app.session.project.timelines[timeline_id].tracks[1]
+            .clips
+            .len(),
+        1
+    );
 
     app.timeline_state
         .set_selection(BTreeSet::from([(0, video_id)]), Some((0, video_id)));
     app.ripple_delete_selected();
     assert_eq!(
-        app.project.timelines[timeline_id].tracks[1].clips[0].timeline_start, 0,
+        app.session.project.timelines[timeline_id].tracks[1].clips[0].timeline_start, 0,
         "ripple does not move the locked track"
     );
 }
@@ -2550,7 +2581,7 @@ fn d_disables_the_selection_and_enables_it_again() {
     let b = make_timeline_with_clip(&mut app, 0, 20, 20);
     let timeline_id = app.timeline_id.unwrap();
     let disabled = |app: &VenturiApp| -> Vec<bool> {
-        app.project.timelines[timeline_id].tracks[0]
+        app.session.project.timelines[timeline_id].tracks[0]
             .clips
             .iter()
             .map(|c| c.disabled)
@@ -2581,18 +2612,18 @@ fn dropping_media_skips_locked_tracks() {
     );
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
-    let video = app.project.timelines[timeline_id]
+    let video = app.session.project.timelines[timeline_id]
         .first_track_index(TrackKind::Video)
         .unwrap();
     lock_track(&mut app, video);
 
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
         0,
         timeline_ui::MediaDropTarget::Default,
     );
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(
         tl.tracks[video].clips.len(),
         1,
@@ -2641,7 +2672,7 @@ fn split_at_playhead_cuts_only_selected_clips() {
     app.timeline_state.playhead = 8;
     app.split_at_playhead();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 2, "selected clip cut");
     assert_eq!(tl.tracks[1].clips.len(), 1, "unselected clip untouched");
 }
@@ -2659,8 +2690,8 @@ fn split_at_playhead_keeps_linked_group_on_both_halves() {
     let video_id = make_timeline_with_clip(&mut app, 0, 0, 20);
     let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20);
     let timeline_id = app.timeline_id.unwrap();
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::LinkClips::new(
             timeline_id,
             vec![(0, video_id), (1, audio_id)],
@@ -2670,7 +2701,7 @@ fn split_at_playhead_keeps_linked_group_on_both_halves() {
     app.timeline_state.playhead = 8;
     app.split_at_playhead();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 2);
     assert_eq!(tl.tracks[1].clips.len(), 2);
     let video_left = &tl.tracks[0].clips[0];
@@ -2705,8 +2736,8 @@ fn split_at_playhead_keeps_linked_group_on_both_halves() {
     // A single undo cancels the cut and the relinking of the right
     // halves: the left halves were never touched, they stay in the
     // original group.
-    app.history.undo(&mut app.project);
-    let tl = &app.project.timelines[timeline_id];
+    app.session.history.undo(&mut app.session.project);
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 1);
     assert_eq!(tl.tracks[1].clips.len(), 1);
     assert_eq!(tl.tracks[0].clips[0].linked_group, Some(left_group));
@@ -2755,8 +2786,8 @@ fn delete_selected_removes_every_selected_clip_together() {
     let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
     let timeline_id = app.timeline_id.unwrap();
 
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::LinkClips::new(
             timeline_id,
             vec![(0, video_id), (1, audio_id)],
@@ -2770,14 +2801,14 @@ fn delete_selected_removes_every_selected_clip_together() {
     app.timeline_state.selected = BTreeSet::from([(0, video_id), (1, audio_id)]);
     app.delete_selected();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert!(tl.tracks[0].clips.is_empty());
     assert!(tl.tracks[1].clips.is_empty());
     assert!(app.timeline_state.selected.is_empty());
 
     // A single undo restores both (CompositeCommand).
-    app.history.undo(&mut app.project);
-    let tl = &app.project.timelines[timeline_id];
+    app.session.history.undo(&mut app.session.project);
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 1);
     assert_eq!(tl.tracks[1].clips.len(), 1);
 }
@@ -2820,7 +2851,7 @@ fn copy_then_paste_creates_a_new_clip_at_the_playhead_with_a_new_id() {
     app.timeline_state.playhead = 50;
     app.paste_clipboard_at_playhead();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 2, "the original + the pasted one");
     let pasted = &tl.tracks[0].clips[1];
     assert_ne!(pasted.id, original_id, "a new id, not the same one");
@@ -2843,8 +2874,8 @@ fn copy_then_paste_relinks_a_linked_group_to_each_other_not_to_the_originals() {
     let video_id = make_timeline_with_clip(&mut app, 0, 0, 10);
     let audio_id = make_timeline_with_clip(&mut app, 1, 0, 10);
     let timeline_id = app.timeline_id.unwrap();
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::LinkClips::new(
             timeline_id,
             vec![(0, video_id), (1, audio_id)],
@@ -2863,7 +2894,7 @@ fn copy_then_paste_relinks_a_linked_group_to_each_other_not_to_the_originals() {
     app.timeline_state.playhead = 100;
     app.paste_clipboard_at_playhead();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     let new_video = &tl.tracks[0].clips[1];
     let new_audio = &tl.tracks[1].clips[1];
     let new_group = new_video
@@ -2890,7 +2921,7 @@ fn copy_then_paste_multiple_clips_preserves_their_relative_spacing() {
     app.timeline_state.playhead = 100;
     app.paste_clipboard_at_playhead();
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(tl.tracks[0].clips.len(), 4);
     let pasted: Vec<_> = tl.tracks[0].clips[2..].iter().collect();
     let starts: BTreeSet<FrameIdx> = pasted.iter().map(|c| c.timeline_start).collect();
@@ -2908,7 +2939,12 @@ fn paste_with_an_empty_clipboard_is_a_no_op() {
     assert!(app.timeline_state.clipboard.is_empty());
     app.paste_clipboard_at_playhead();
 
-    assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 1);
+    assert_eq!(
+        app.session.project.timelines[timeline_id].tracks[0]
+            .clips
+            .len(),
+        1
+    );
 }
 
 /// Reported bug: "copy-paste works only from the menu, not from the
@@ -2959,7 +2995,7 @@ fn cut_copies_the_selected_clips_and_removes_them() {
     assert_eq!(app.timeline_state.clipboard.len(), 1);
     let timeline_id = app.timeline_id.unwrap();
     assert!(
-        app.project.timelines[timeline_id].tracks[0]
+        app.session.project.timelines[timeline_id].tracks[0]
             .clips
             .is_empty()
     );
@@ -3005,7 +3041,12 @@ fn handle_clipboard_events_pastes_regardless_of_the_paste_events_payload() {
     output.textures_delta.clear();
 
     let timeline_id = app.timeline_id.unwrap();
-    assert_eq!(app.project.timelines[timeline_id].tracks[0].clips.len(), 2);
+    assert_eq!(
+        app.session.project.timelines[timeline_id].tracks[0]
+            .clips
+            .len(),
+        2
+    );
 }
 
 /// Reported bug: pasting a clip over another covered it only
@@ -3024,7 +3065,7 @@ fn paste_over_an_existing_clip_it_fully_covers_deletes_the_underlying_clip() {
     app.timeline_state.playhead = 0;
     app.paste_clipboard_at_playhead(); // new range [0,10), covers "existing" entirely
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     assert!(
         tl.tracks[0].clips.iter().all(|c| c.id != existing),
         "the fully covered clip should have been removed"
@@ -3048,7 +3089,7 @@ fn paste_overlapping_the_tail_of_an_existing_clip_trims_its_end() {
     app.timeline_state.playhead = 5;
     app.paste_clipboard_at_playhead(); // new range [5,15)
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     let trimmed = tl.tracks[0]
         .clips
         .iter()
@@ -3072,7 +3113,7 @@ fn paste_overlapping_the_head_of_an_existing_clip_trims_its_start() {
     app.timeline_state.playhead = 5;
     app.paste_clipboard_at_playhead(); // new range [5,15)
 
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     let trimmed = tl.tracks[0]
         .clips
         .iter()
@@ -3101,7 +3142,7 @@ fn paste_inside_an_existing_clip_splits_it_in_two() {
     // pasted (at 8), "source" is also still around (at 50, never
     // touched: it is the source of the copy, not overlapping anything).
     // The two expected pieces are exactly at 0 and 13.
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     let mut halves: Vec<_> = tl.tracks[0]
         .clips
         .iter()
@@ -3132,8 +3173,8 @@ fn paste_splitting_a_linked_group_relinks_the_new_halves_to_each_other() {
     let video_id = make_timeline_with_clip(&mut app, 0, 0, 20); // [0,20)
     let audio_id = make_timeline_with_clip(&mut app, 1, 0, 20); // [0,20)
     let timeline_id = app.timeline_id.unwrap();
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::LinkClips::new(
             timeline_id,
             vec![(0, video_id), (1, audio_id)],
@@ -3142,8 +3183,8 @@ fn paste_splitting_a_linked_group_relinks_the_new_halves_to_each_other() {
 
     let src_video = make_timeline_with_clip(&mut app, 0, 100, 5);
     let src_audio = make_timeline_with_clip(&mut app, 1, 100, 5);
-    app.history.do_command(
-        &mut app.project,
+    app.session.history.do_command(
+        &mut app.session.project,
         Box::new(vv_core::LinkClips::new(
             timeline_id,
             vec![(0, src_video), (1, src_audio)],
@@ -3160,7 +3201,7 @@ fn paste_splitting_a_linked_group_relinks_the_new_halves_to_each_other() {
     // Besides the two halves (at 0 and 13), "src_video"/"src_audio"
     // are also still around (at 100, never touched: they are the source
     // of the copy).
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
     let mut video_halves: Vec<_> = tl.tracks[0]
         .clips
         .iter()
@@ -3215,6 +3256,7 @@ fn buffered_timeline_ranges_reports_the_clip_under_the_playheads_decoded_frames(
     let mut app = VenturiApp::default();
     app.import_media(path);
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -3223,7 +3265,7 @@ fn buffered_timeline_ranges_reports_the_clip_under_the_playheads_decoded_frames(
         .0;
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
-    let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
+    let clip = app.session.project.timelines[timeline_id].tracks[0].clips[0].clone();
 
     // Sends `render_ahead` the just inserted clip (in the real app this
     // happens on every UI frame via `sync_render_ahead`).
@@ -3275,6 +3317,7 @@ fn buffered_timeline_ranges_covers_a_compound_clip_through_its_nested_timeline()
     let mut app = VenturiApp::default();
     app.import_media(path);
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -3286,20 +3329,24 @@ fn buffered_timeline_ranges_covers_a_compound_clip_through_its_nested_timeline()
 
     // The imported clip becomes the content of a compound clip, and
     // on the timeline only the latter remains.
-    let inner = app.project.timelines[timeline_id].tracks[0].clips.remove(0);
+    let inner = app.session.project.timelines[timeline_id].tracks[0]
+        .clips
+        .remove(0);
     let len = inner.timeline_len;
-    let nested_id = app.project.timelines.insert(vv_core::Timeline {
+    let nested_id = app.session.project.timelines.insert(vv_core::Timeline {
         name: "Nested".into(),
-        fps: app.project.timelines[timeline_id].fps,
+        fps: app.session.project.timelines[timeline_id].fps,
         resolution: (320, 240),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
     });
-    app.project.timelines[nested_id].tracks[0].insert_sorted(inner);
+    app.session.project.timelines[nested_id].tracks[0].insert_sorted(inner);
     let compound = insert_compound_media(&mut app, nested_id);
-    app.project.media_pool[compound].meta.duration_frames = len;
+    app.session.project.media_pool[compound]
+        .meta
+        .duration_frames = len;
     let compound_clip = vv_core::Clip::from_source_range(
-        app.project.alloc_clip_id(),
+        app.session.project.alloc_clip_id(),
         vv_core::ClipSource::Media(compound),
         0,
         len,
@@ -3307,7 +3354,7 @@ fn buffered_timeline_ranges_covers_a_compound_clip_through_its_nested_timeline()
         vv_core::Rational::one(),
     );
     let (start, end) = (compound_clip.timeline_start, compound_clip.timeline_end());
-    app.project.timelines[timeline_id].tracks[0].insert_sorted(compound_clip);
+    app.session.project.timelines[timeline_id].tracks[0].insert_sorted(compound_clip);
     app.sync_render_ahead();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -3368,6 +3415,7 @@ fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
     app.settings.proxy_enabled = true;
     app.import_media(path); // it also queues the proxy generation
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -3376,7 +3424,7 @@ fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
         .0;
     app.add_media_to_timeline(media_id);
     let timeline_id = app.timeline_id.unwrap();
-    let clip = app.project.timelines[timeline_id].tracks[0].clips[0].clone();
+    let clip = app.session.project.timelines[timeline_id].tracks[0].clips[0].clone();
 
     assert!(
         app.proxy_timeline_ranges().is_empty(),
@@ -3442,7 +3490,8 @@ fn import_media_files_imports_every_file_and_queues_their_proxies() {
 
     // +1: the project timeline shows up in the pool too.
     assert_eq!(
-        app.project
+        app.session
+            .project
             .media_pool
             .values()
             .filter(|m| m.compound.is_none())
@@ -3455,6 +3504,7 @@ fn import_media_files_imports_every_file_and_queues_their_proxies() {
     let worker = app.proxy_worker.as_ref().unwrap();
     assert_eq!(worker.progress().total, 2);
     for item in app
+        .session
         .project
         .media_pool
         .values()
@@ -3495,6 +3545,7 @@ fn imported_media_end_up_selected_in_the_pool() {
     app.wait_for_import();
 
     let imported: BTreeSet<MediaId> = app
+        .session
         .project
         .media_pool
         .iter()
@@ -3512,7 +3563,8 @@ fn importing_an_already_present_path_is_skipped() {
     let mut app = VenturiApp::default();
     app.import_media(path.clone());
     let pool_count = |app: &VenturiApp| {
-        app.project
+        app.session
+            .project
             .media_pool
             .values()
             .filter(|m| m.compound.is_none())
@@ -3520,6 +3572,7 @@ fn importing_an_already_present_path_is_skipped() {
     };
     assert_eq!(pool_count(&app), 1);
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -3576,7 +3629,8 @@ fn dropping_a_file_from_the_file_manager_imports_it_into_the_pool() {
     // +1: the project timeline, created on the fly by the import (see
     // `ensure_timeline_for`), shows up in the pool too.
     assert_eq!(
-        app.project
+        app.session
+            .project
             .media_pool
             .values()
             .filter(|m| m.compound.is_none())
@@ -3584,6 +3638,7 @@ fn dropping_a_file_from_the_file_manager_imports_it_into_the_pool() {
         1
     );
     let item = app
+        .session
         .project
         .media_pool
         .values()
@@ -3772,7 +3827,7 @@ fn in_out_marks_on_the_preview_trim_the_clip_dropped_on_the_timeline() {
         5,
         timeline_ui::MediaDropTarget::Default,
     );
-    let timeline = &app.project.timelines[app.timeline_id.unwrap()];
+    let timeline = &app.session.project.timelines[app.timeline_id.unwrap()];
     let clips: Vec<_> = timeline.tracks.iter().flat_map(|t| &t.clips).collect();
     assert_eq!(clips.len(), 2, "video + audio");
     for clip in clips {
@@ -3790,7 +3845,7 @@ fn video_only_and_audio_only_drags_insert_just_that_stream() {
         (timeline_ui::DragStreams::AudioOnly, TrackKind::Audio),
     ] {
         let (mut app, media_id) = browse_fixture("streams.mp4");
-        let meta = app.project.media_pool[media_id].meta.clone();
+        let meta = app.session.project.media_pool[media_id].meta.clone();
         app.add_media_to_timeline_at(
             timeline_ui::MediaDrag {
                 streams,
@@ -3799,7 +3854,7 @@ fn video_only_and_audio_only_drags_insert_just_that_stream() {
             0,
             timeline_ui::MediaDropTarget::Default,
         );
-        let timeline = &app.project.timelines[app.timeline_id.unwrap()];
+        let timeline = &app.session.project.timelines[app.timeline_id.unwrap()];
         let kinds: Vec<TrackKind> = timeline
             .tracks
             .iter()
@@ -3852,6 +3907,7 @@ fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it(
     app.import_media(path_a);
     app.import_media(path_b);
     let mut media_ids = app
+        .session
         .project
         .media_pool
         .iter()
@@ -3861,8 +3917,9 @@ fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it(
     let media_b = media_ids.next().unwrap();
     drop(media_ids);
 
-    let whole =
-        |app: &VenturiApp, id| timeline_ui::MediaDrag::whole(id, &app.project.media_pool[id].meta);
+    let whole = |app: &VenturiApp, id| {
+        timeline_ui::MediaDrag::whole(id, &app.session.project.media_pool[id].meta)
+    };
     app.add_media_to_timeline_at(
         whole(&app, media_a),
         0,
@@ -3874,7 +3931,7 @@ fn buffered_timeline_ranges_covers_the_next_clip_before_the_playhead_reaches_it(
         timeline_ui::MediaDropTarget::Default,
     ); // [50,75), adjacent
     let timeline_id = app.timeline_id.unwrap();
-    let clip_b = app.project.timelines[timeline_id].tracks[0].clips[1].clone();
+    let clip_b = app.session.project.timelines[timeline_id].tracks[0].clips[1].clone();
 
     // Playhead near the end of the first clip: the lookahead
     // window of `render_ahead` (3s) amply crosses the
@@ -3913,7 +3970,7 @@ fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
 
     app.save_project_to(&path);
     assert!(app.project_error.is_none(), "{:?}", app.project_error);
-    assert_eq!(app.current_project_path, Some(path.clone()));
+    assert_eq!(app.session.path(), Some(path.as_path()));
 
     // A "new" project in memory (another clip, another
     // selection/playhead): loading must replace everything, not
@@ -3924,7 +3981,7 @@ fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
 
     app.load_project_from(path.clone());
     assert!(app.project_error.is_none(), "{:?}", app.project_error);
-    assert_eq!(app.current_project_path, Some(path));
+    assert_eq!(app.session.path(), Some(path.as_path()));
 
     let loaded_timeline_id = app.timeline_id.expect("timeline expected after load");
     assert_eq!(
@@ -3932,7 +3989,7 @@ fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
         "same TimelineId as before: SlotMap round-trips the keys"
     );
     assert_eq!(
-        app.project.timelines[loaded_timeline_id].tracks[0].clips[0].id,
+        app.session.project.timelines[loaded_timeline_id].tracks[0].clips[0].id,
         clip_id
     );
     // UI state of the previous project cleared, not inherited from the
@@ -3954,7 +4011,7 @@ fn load_project_from_a_bad_path_sets_project_error_without_touching_the_current_
     // must not erase unsaved work.
     assert_eq!(app.timeline_id, Some(timeline_id));
     assert_eq!(
-        app.project.timelines[timeline_id].tracks[0].clips[0].id,
+        app.session.project.timelines[timeline_id].tracks[0].clips[0].id,
         clip_id
     );
 }
@@ -4028,7 +4085,7 @@ fn import_otio_from_adds_a_timeline_and_reports_skipped_clips() {
     let mut app = VenturiApp::default();
     make_timeline_with_clip(&mut app, 0, 0, 10);
     let old_timeline = app.timeline_id.unwrap();
-    app.current_project_path = Some(dir.join("old.vvproj"));
+    app.session.set_path(Some(dir.join("old.vvproj")));
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
 
@@ -4037,23 +4094,25 @@ fn import_otio_from_adds_a_timeline_and_reports_skipped_clips() {
         app.pending_otio_merge.is_none(),
         "no media with the same name"
     );
-    assert_eq!(app.current_project_path, Some(dir.join("old.vvproj")));
+    assert_eq!(app.session.path(), Some(dir.join("old.vvproj").as_path()));
     assert!(app.has_unsaved_changes());
-    assert!(app.project.timelines.contains_key(old_timeline));
+    assert!(app.session.project.timelines.contains_key(old_timeline));
     let timeline_id = app.timeline_id.unwrap();
     assert_ne!(timeline_id, old_timeline, "the imported one is opened");
-    let timeline = &app.project.timelines[timeline_id];
+    let timeline = &app.session.project.timelines[timeline_id];
     assert_eq!(timeline.name, "timeline", "named after the file");
     let timeline_item = app
+        .session
         .project
         .media_pool
         .values()
         .find(|m| m.compound == Some(timeline_id))
         .expect("the timeline shows up in the pool");
     assert_eq!(timeline_item.folder, None);
-    let (folder_id, folder) = app.project.folders.iter().next().unwrap();
+    let (folder_id, folder) = app.session.project.folders.iter().next().unwrap();
     assert_eq!(folder.name, "timeline");
     let otio_media: Vec<_> = app
+        .session
         .project
         .media_pool
         .values()
@@ -4079,16 +4138,17 @@ fn import_otio_from_adds_a_timeline_and_reports_skipped_clips() {
     std::fs::create_dir_all(&found_dir).unwrap();
     std::fs::copy(&media, found_dir.join("gone.mp4")).unwrap();
     let offline = app
+        .session
         .project
         .media_pool
         .iter()
         .find(|(_, m)| m.path.ends_with("gone.mp4"))
         .map(|(id, _)| id)
         .unwrap();
-    assert_eq!(app.project.media_pool[offline].meta.width, 0);
+    assert_eq!(app.session.project.media_pool[offline].meta.width, 0);
     app.relink_media(&found_dir, &[offline]);
     app.wait_for_relink();
-    let meta = &app.project.media_pool[offline].meta;
+    let meta = &app.session.project.media_pool[offline].meta;
     assert_eq!((meta.width, meta.height), (320, 240));
 }
 
@@ -4122,13 +4182,14 @@ fn otio_media_already_in_the_pool_wait_for_the_reuse_choice() {
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
     let first_media = app
+        .session
         .project
         .media_pool
         .iter()
         .find(|(_, m)| m.compound.is_none())
         .map(|(id, _)| id)
         .unwrap();
-    let pool_len = app.project.media_pool.len();
+    let pool_len = app.session.project.media_pool.len();
 
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
@@ -4140,20 +4201,24 @@ fn otio_media_already_in_the_pool_wait_for_the_reuse_choice() {
     app.merge_otio_import(merge, true);
 
     assert_eq!(
-        app.project.media_pool.len(),
+        app.session.project.media_pool.len(),
         pool_len + 1,
         "only the timeline item"
     );
-    assert_eq!(app.project.folders.len(), 1, "no folder for nothing");
-    let clip = &app.project.timelines[app.timeline_id.unwrap()].tracks[0].clips[0];
+    assert_eq!(
+        app.session.project.folders.len(),
+        1,
+        "no folder for nothing"
+    );
+    let clip = &app.session.project.timelines[app.timeline_id.unwrap()].tracks[0].clips[0];
     assert!(matches!(clip.source, vv_core::ClipSource::Media(m) if m == first_media));
 
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
     let merge = app.pending_otio_merge.take().unwrap();
     app.merge_otio_import(merge, false);
-    assert_eq!(app.project.media_pool.len(), pool_len + 3);
-    assert_eq!(app.project.folders.len(), 2);
+    assert_eq!(app.session.project.media_pool.len(), pool_len + 3);
+    assert_eq!(app.session.project.folders.len(), 2);
 }
 
 #[test]
@@ -4168,7 +4233,7 @@ fn unsaved_changes_follow_edits_and_saves() {
     app.save_project_to(&dir.join("p.vvproj"));
     assert!(!app.has_unsaved_changes());
 
-    app.unsaved_media = true;
+    app.session.mark_unsaved();
     assert!(app.has_unsaved_changes(), "media imported after saving");
 }
 
@@ -4185,13 +4250,14 @@ fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure
     app.resolve_unsaved_changes(UnsavedChoice::Cancel);
     assert_eq!(app.pending_project_switch, None);
 
-    app.current_project_path = Some(std::env::temp_dir().join("vv-app-nope/dir/p.vvproj"));
+    app.session
+        .set_path(Some(std::env::temp_dir().join("vv-app-nope/dir/p.vvproj")));
     app.request_project_switch(ProjectSwitch::Open);
     app.resolve_unsaved_changes(UnsavedChoice::Save);
     assert!(app.project_error.is_some(), "save failed");
     assert!(app.has_unsaved_changes());
     assert_eq!(
-        app.project.timelines[timeline_id].tracks[0].clips[0].id,
+        app.session.project.timelines[timeline_id].tracks[0].clips[0].id,
         clip_id
     );
 }
@@ -4280,6 +4346,7 @@ fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
     app.wait_for_import();
     assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
     let (media_id, item) = app
+        .session
         .project
         .media_pool
         .iter()
@@ -4293,14 +4360,14 @@ fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
     assert!(app.thumbnails.is_empty());
 
     let timeline_id = app.timeline_id.unwrap();
-    let timeline = &app.project.timelines[timeline_id];
+    let timeline = &app.session.project.timelines[timeline_id];
     assert_eq!(timeline.resolution, (1920, 1080), "default timeline");
     assert!(
         timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
         "an audio-only import must not create any video track, not even an empty one"
     );
     {
-        let timeline = &mut app.project.timelines[timeline_id];
+        let timeline = &mut app.session.project.timelines[timeline_id];
         timeline.tracks.clear();
     }
 
@@ -4310,7 +4377,7 @@ fn an_audio_only_file_imports_and_drops_as_an_audio_clip() {
         10,
         timeline_ui::MediaDropTarget::Default,
     );
-    let timeline = &app.project.timelines[timeline_id];
+    let timeline = &app.session.project.timelines[timeline_id];
     assert!(
         timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
         "the drop must not have created any video track"
@@ -4361,6 +4428,7 @@ fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
     assert!(app.import_warnings.is_empty(), "{:?}", app.import_warnings);
 
     let (media_id, item) = app
+        .session
         .project
         .media_pool
         .iter()
@@ -4382,7 +4450,7 @@ fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
         0,
         timeline_ui::MediaDropTarget::Default,
     );
-    let timeline = &app.project.timelines[timeline_id];
+    let timeline = &app.session.project.timelines[timeline_id];
     let (_, video) = timeline
         .tracks_of_kind(TrackKind::Video)
         .next()
@@ -4405,7 +4473,7 @@ fn an_image_file_imports_and_drops_as_a_five_second_clip_without_audio() {
 #[test]
 fn dropping_audio_only_media_creates_no_video_track() {
     let mut app = VenturiApp::default();
-    let media_id = app.project.media_pool.insert(vv_core::MediaItem {
+    let media_id = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/tmp/vv-audio-only.wav".into(),
         meta: vv_core::MediaMeta {
             duration_frames: 50,
@@ -4423,7 +4491,7 @@ fn dropping_audio_only_media_creates_no_video_track() {
         compound: None,
         folder: None,
     });
-    let meta = app.project.media_pool[media_id].meta.clone();
+    let meta = app.session.project.media_pool[media_id].meta.clone();
 
     app.add_media_to_timeline_at(
         timeline_ui::MediaDrag::whole(media_id, &meta),
@@ -4434,7 +4502,7 @@ fn dropping_audio_only_media_creates_no_video_track() {
     let timeline_id = app
         .timeline_id
         .expect("the drop creates the timeline on the fly");
-    let timeline = &app.project.timelines[timeline_id];
+    let timeline = &app.session.project.timelines[timeline_id];
     assert!(
         timeline.tracks.iter().all(|t| t.kind == TrackKind::Audio),
         "no video track for an audio-only drop on an empty project: {:?}",
@@ -4533,6 +4601,7 @@ fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
     let mut app = VenturiApp::default();
     app.import_media(path.clone());
     let media_id = app
+        .session
         .project
         .media_pool
         .iter()
@@ -4542,7 +4611,7 @@ fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
     app.add_media_to_timeline(media_id);
 
     let timeline_id = app.timeline_id.unwrap();
-    let tl = &app.project.timelines[timeline_id];
+    let tl = &app.session.project.timelines[timeline_id];
 
     assert_eq!(
         tl.tracks.len(),

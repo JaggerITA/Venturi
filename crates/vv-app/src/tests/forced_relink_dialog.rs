@@ -23,14 +23,14 @@ fn a_finished_search_turns_into_rows_preselected_where_something_matched() {
         audio_streams: 0,
         file: Default::default(),
     };
-    let rana = app.project.media_pool.insert(vv_core::MediaItem {
+    let rana = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/rana.mov".into(),
         meta: meta.clone(),
         content_hash: 1,
         compound: None,
         folder: None,
     });
-    let ghost = app.project.media_pool.insert(vv_core::MediaItem {
+    let ghost = app.session.project.media_pool.insert(vv_core::MediaItem {
         path: "/missing/ghost.mov".into(),
         meta,
         content_hash: 2,

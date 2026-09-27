@@ -403,7 +403,7 @@ fn paint_film_icon(
 
 impl VenturiApp {
     fn start_rename(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.session.project.media_pool.get(media_id) else {
             return;
         };
         self.media_pool_state.renaming = Some(media_pool::Rename {
@@ -414,7 +414,7 @@ impl VenturiApp {
     }
 
     fn start_folder_rename(&mut self, folder: FolderId) {
-        let Some(f) = self.project.folders.get(folder) else {
+        let Some(f) = self.session.project.folders.get(folder) else {
             return;
         };
         self.media_pool_state.renaming = Some(media_pool::Rename {
@@ -428,6 +428,7 @@ impl VenturiApp {
     fn new_folder(&mut self, parent: Option<FolderId>) {
         let base = t!("pool.new_folder_name").into_owned();
         let taken: std::collections::HashSet<&str> = self
+            .session
             .project
             .folders
             .values()
@@ -439,21 +440,22 @@ impl VenturiApp {
             .find(|name| !taken.contains(name.as_str()))
             .expect("infinite candidates");
         let folder = self
+            .session
             .project
             .folders
             .insert(vv_core::MediaFolder { name, parent });
         self.media_pool_state.expanded.extend(parent);
-        self.unsaved_media = true;
+        self.session.mark_unsaved();
         self.start_folder_rename(folder);
     }
 
     fn move_media_to_folder(&mut self, media: &[MediaId], folder: Option<FolderId>) {
         for &id in media {
-            if let Some(item) = self.project.media_pool.get_mut(id)
+            if let Some(item) = self.session.project.media_pool.get_mut(id)
                 && item.folder != folder
             {
                 item.folder = folder;
-                self.unsaved_media = true;
+                self.session.mark_unsaved();
             }
         }
     }
@@ -464,15 +466,21 @@ impl VenturiApp {
             let media: Vec<MediaId> = set.items.iter().map(|d| d.media_id).collect();
             self.move_media_to_folder(&media, folder);
         } else if let Some(dragged) = resp.dnd_release_payload::<media_pool::FolderDrag>()
-            && self.project.move_folder(dragged.0, folder)
+            && self.session.project.move_folder(dragged.0, folder)
         {
             self.media_pool_state.expanded.extend(folder);
-            self.unsaved_media = true;
+            self.session.mark_unsaved();
         }
     }
 
     fn folder_row(&mut self, ui: &mut egui::Ui, folder: FolderId) {
-        let Some(name) = self.project.folders.get(folder).map(|f| f.name.clone()) else {
+        let Some(name) = self
+            .session
+            .project
+            .folders
+            .get(folder)
+            .map(|f| f.name.clone())
+        else {
             return;
         };
         let expanded = self.media_pool_state.expanded.contains(&folder);
@@ -546,11 +554,11 @@ impl VenturiApp {
                 if let Some(new_name) = done {
                     self.media_pool_state.renaming = None;
                     if let Some(name) = new_name
-                        && let Some(f) = self.project.folders.get_mut(folder)
+                        && let Some(f) = self.session.project.folders.get_mut(folder)
                         && f.name != name
                     {
                         f.name = name;
-                        self.unsaved_media = true;
+                        self.session.mark_unsaved();
                     }
                 }
             }
@@ -595,8 +603,8 @@ impl VenturiApp {
                 .on_hover_text(t!("pool.delete_folder_hint"))
                 .clicked()
             {
-                self.project.delete_folder(folder);
-                self.unsaved_media = true;
+                self.session.project.delete_folder(folder);
+                self.session.mark_unsaved();
                 ui.close();
             }
         });
@@ -605,24 +613,26 @@ impl VenturiApp {
     /// Not in the history, like creating a timeline.
     fn rename_timeline(&mut self, media_id: MediaId, name: String) {
         let unchanged = self
+            .session
             .project
             .media_pool
             .get(media_id)
             .is_some_and(|item| file_label(&item.path) == name);
         if !unchanged {
-            self.project.rename_timeline(media_id, name);
-            self.unsaved_media = true;
+            self.session.project.rename_timeline(media_id, name);
+            self.session.mark_unsaved();
         }
     }
 
     /// The copy is called "<name> copy", "<name> copy 2", ... and ends up
     /// selected.
     pub(crate) fn duplicate_timeline(&mut self, media_id: MediaId) {
-        let Some(item) = self.project.media_pool.get(media_id) else {
+        let Some(item) = self.session.project.media_pool.get(media_id) else {
             return;
         };
         let base = format!("{} {}", file_label(&item.path), t!("pool.copy_suffix"));
         let taken: std::collections::HashSet<String> = self
+            .session
             .project
             .media_pool
             .values()
@@ -633,8 +643,8 @@ impl VenturiApp {
             .chain((2..).map(|n| format!("{base} {n}")))
             .find(|name| !taken.contains(name))
             .expect("infinite candidates");
-        if let Some(copy) = self.project.duplicate_timeline(media_id, name) {
-            self.unsaved_media = true;
+        if let Some(copy) = self.session.project.duplicate_timeline(media_id, name) {
+            self.session.mark_unsaved();
             self.media_pool_state.select_only([copy]);
         }
     }
@@ -685,6 +695,7 @@ impl VenturiApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let mut items: Vec<(MediaId, String, vv_core::MediaMeta, u64, bool)> = self
+                    .session
                     .project
                     .media_pool
                     .iter()
@@ -705,6 +716,7 @@ impl VenturiApp {
                     |(_, _, meta, ..)| meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9),
                 );
                 let folders: Vec<(FolderId, &str, Option<FolderId>)> = self
+                    .session
                     .project
                     .folders
                     .iter()
@@ -713,7 +725,7 @@ impl VenturiApp {
                 let items = items
                     .into_iter()
                     .map(|item| {
-                        let folder = self.project.media_pool[item.0].folder;
+                        let folder = self.session.project.media_pool[item.0].folder;
                         (item, folder)
                     })
                     .collect();
@@ -728,7 +740,10 @@ impl VenturiApp {
                 let drags: Vec<timeline_ui::MediaDrag> = order
                     .iter()
                     .map(|id| {
-                        timeline_ui::MediaDrag::whole(*id, &self.project.media_pool[*id].meta)
+                        timeline_ui::MediaDrag::whole(
+                            *id,
+                            &self.session.project.media_pool[*id].meta,
+                        )
                     })
                     .collect();
                 // Interacted with before the items: in egui the last one wins, so a click
@@ -771,7 +786,7 @@ impl VenturiApp {
                                         continue;
                                     }
                                     media_pool::PoolRow::Item { item, depth } => {
-                                        let folder = self.project.media_pool[item.0].folder;
+                                        let folder = self.session.project.media_pool[item.0].folder;
                                         (item, depth, folder)
                                     }
                                 };
@@ -1058,7 +1073,13 @@ impl VenturiApp {
                                 // `MediaItem::compound`) opens as a top level timeline:
                                 // from the pool there is no parent to stack in the
                                 // breadcrumb. "Preview" makes no sense for it.
-                                match self.project.media_pool.get(id).and_then(|m| m.compound) {
+                                match self
+                                    .session
+                                    .project
+                                    .media_pool
+                                    .get(id)
+                                    .and_then(|m| m.compound)
+                                {
                                     Some(timeline_id) => self.open_timeline(timeline_id),
                                     None => *preview_action = Some(id),
                                 }
