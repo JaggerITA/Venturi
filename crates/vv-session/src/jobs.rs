@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vv_core::{
-    CommandLabel, CompositeCommand, FolderId, FrameIdx, MediaFolder, MediaId, MediaItem, MediaMeta,
-    OtioImport, OtioWarning, SetMediaPath, TimelineId,
+    AddEntities, Command, CommandLabel, CompositeCommand, FolderId, FrameIdx, JoinableStep,
+    MediaFolder, MediaId, MediaItem, MediaMeta, OtioImport, OtioWarning, SetMediaPath, TimelineId,
 };
 
 use crate::Session;
@@ -101,6 +101,8 @@ pub(crate) struct Jobs {
     events: Vec<SessionEvent>,
     queued_imports: VecDeque<(JobId, Vec<PathBuf>)>,
     import: Option<RunningImport>,
+    /// The undo step of the last import, while it can still grow.
+    import_step: Option<(JobId, JoinableStep)>,
     otio: Option<RunningOtio>,
     otio_merge: Option<(JobId, PendingOtioMerge)>,
     relink: Option<(JobId, relink_job::RelinkJob)>,
@@ -161,6 +163,8 @@ impl Session {
     }
 
     /// Collects what the background work produced since the last call.
+    /// Imports and relinks become history steps: not while the caller has
+    /// an undo group open, or they would end up inside it.
     pub fn tick(&mut self) -> Vec<SessionEvent> {
         self.poll_import();
         self.poll_otio();
@@ -188,20 +192,44 @@ impl Session {
             .map(|(id, _)| id)
     }
 
-    /// Adds an already probed media to the pool.
+    /// Adds an already probed media to the pool, as its own undo step.
     pub fn add_media(&mut self, path: PathBuf, meta: MediaMeta) -> MediaId {
+        let (media_id, add) = self.media_entity(path, meta);
+        self.history.do_command(&mut self.project, Box::new(add));
+        media_id
+    }
+
+    fn media_entity(&mut self, path: PathBuf, meta: MediaMeta) -> (MediaId, AddEntities) {
         // `0` only if the file vanished in the meantime: at worst a proxy is
         // regenerated.
         let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-        let media_id = self.project.media_pool.insert(MediaItem {
-            path,
-            meta,
-            content_hash,
-            compound: None,
-            folder: None,
-        });
-        self.mark_unsaved();
-        media_id
+        let mut add = AddEntities::new(CommandLabel::ImportMedia);
+        let media_id = add.media(
+            &mut self.project,
+            MediaItem {
+                path,
+                meta,
+                content_hash,
+                compound: None,
+                folder: None,
+            },
+        );
+        (media_id, add)
+    }
+
+    /// Applies `cmd` in the undo step of import `job`, so that undoing the
+    /// import undoes it too (e.g. the timeline created for the first media).
+    /// A new step if something else entered the history in between.
+    pub fn join_import(&mut self, job: JobId, cmd: Box<dyn Command>) {
+        let step = self
+            .jobs
+            .import_step
+            .filter(|(step_job, _)| *step_job == job)
+            .map(|(_, step)| step);
+        let step = self
+            .history
+            .join(&mut self.project, step, CommandLabel::ImportMedia, cmd);
+        self.jobs.import_step = Some((job, step));
     }
 
     /// Probes the files on worker threads and adds them to the pool in the
@@ -267,7 +295,8 @@ impl Session {
         for (path, result) in running.worker.drain_ready() {
             match result {
                 Ok(meta) => {
-                    let media_id = self.add_media(path, meta);
+                    let (media_id, add) = self.media_entity(path, meta);
+                    self.join_import(running.job, Box::new(add));
                     running.imported.push(media_id);
                     self.jobs.events.push(SessionEvent::MediaAdded {
                         job: running.job,
@@ -430,21 +459,19 @@ impl Session {
         } else {
             HashMap::new()
         };
+        let mut add = AddEntities::new(CommandLabel::ImportOtio);
         let folder = (project.media_pool.len() > reuse.len()).then(|| {
-            self.project.folders.insert(MediaFolder {
-                name: name.clone(),
-                parent: None,
-            })
+            add.folder(
+                &mut self.project,
+                MediaFolder {
+                    name: name.clone(),
+                    parent: None,
+                },
+            )
         });
-        let before: HashSet<MediaId> = self.project.media_pool.keys().collect();
-        let timelines = self.project.absorb(project, &reuse, folder);
-        let added_media = self
-            .project
-            .media_pool
-            .keys()
-            .filter(|id| !before.contains(id))
-            .collect();
-        self.mark_unsaved();
+        let timelines = vv_core::pool::absorb(&mut self.project, &mut add, project, &reuse, folder);
+        let added_media = add.media_ids().collect();
+        self.history.do_command(&mut self.project, Box::new(add));
         OtioMerged {
             timelines,
             added_media,
@@ -520,7 +547,6 @@ impl Session {
                 &mut self.project,
                 Box::new(CompositeCommand::new(CommandLabel::RelinkMedia, commands)),
             );
-            self.mark_unsaved();
         }
         RelinkEnd::Done {
             relinked,

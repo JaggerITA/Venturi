@@ -396,6 +396,11 @@ impl Default for TimelineState {
 }
 
 impl TimelineState {
+    /// A gesture whose undo group stays open across frames.
+    pub fn holds_undo_group(&self) -> bool {
+        matches!(self.gesture, Some(Gesture::Volume(_)))
+    }
+
     fn moving(&self) -> Option<&DragState> {
         match &self.gesture {
             Some(Gesture::Move(d)) => Some(d),
@@ -5308,10 +5313,8 @@ fn apply_pending_action(
 }
 
 /// Removes `clips` from the timeline (several clips too, video and audio together, on
-/// several tracks) and puts a compound clip in their place: the pool and its
-/// nested timeline stay out of the history like an import (see the docs
-/// of `vv_core::compound_clip_commands`), only the insertion of the resulting
-/// clip is undoable.
+/// several tracks) and puts a compound clip in their place, with its nested
+/// timeline and pool item, as one undo step.
 fn make_compound_clip(
     project: &mut Project,
     history: &mut History,
@@ -5321,31 +5324,7 @@ fn make_compound_clip(
     let Some(plan) = vv_core::plan_compound_clip(project, timeline_id, &clips) else {
         return;
     };
-    let fps = plan.nested_timeline.fps;
-    let resolution = plan.nested_timeline.resolution;
-    let (has_video, has_audio, len) = (plan.has_video, plan.has_audio, plan.len);
-    let nested_id = project.timelines.insert(plan.nested_timeline.clone());
-    let name = project.alloc_compound_name();
-    let content_hash = project.alloc_compound_generation();
-    let media_id = project.media_pool.insert(vv_core::MediaItem {
-        path: name.into(),
-        meta: vv_core::MediaMeta {
-            duration_frames: len,
-            fps,
-            width: resolution.0,
-            height: resolution.1,
-            has_video,
-            has_audio,
-            sample_rate: 48_000,
-            channels: 2,
-            audio_streams: 1,
-            file: Default::default(),
-        },
-        content_hash,
-        compound: Some(nested_id),
-        folder: None,
-    });
-    let commands = vv_core::compound_clip_commands(project, timeline_id, &clips, &plan, media_id);
+    let (_, commands) = vv_core::compound_clip_commands(project, timeline_id, &clips, &plan);
     history.do_command(
         project,
         Box::new(vv_core::CompositeCommand::new(

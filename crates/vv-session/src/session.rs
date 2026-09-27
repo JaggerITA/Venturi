@@ -1,20 +1,19 @@
 use std::path::{Path, PathBuf};
 
-use vv_core::{History, MediaFileInfo, PersistenceError, Project, TimelineId};
+use vv_core::{Command, History, MediaFileInfo, PersistenceError, Project, TimelineId};
 
 use crate::jobs::{Jobs, Waker};
 
 /// An open document: the project, its history and where it is saved.
 /// `project` and `history` are public so callers can borrow them apart;
-/// changes that bypass the history must call `mark_unsaved`.
+/// every change goes through the history, which is what tells a saved
+/// project from a modified one.
 #[derive(Default)]
 pub struct Session {
     pub project: Project,
     pub history: History,
     path: Option<PathBuf>,
     saved_generation: u64,
-    /// The media pool, folders or timeline list changed outside the history.
-    changed_outside_history: bool,
     synced_timeline_generation: u64,
     pub(crate) waker: Waker,
     pub(crate) jobs: Jobs,
@@ -29,17 +28,16 @@ impl Session {
         self.path = path;
     }
 
+    pub fn apply(&mut self, cmd: Box<dyn Command>) {
+        self.history.do_command(&mut self.project, cmd);
+    }
+
     pub fn has_unsaved_changes(&self) -> bool {
-        self.changed_outside_history || self.history.generation() != self.saved_generation
+        self.history.generation() != self.saved_generation
     }
 
     pub fn mark_saved(&mut self) {
         self.saved_generation = self.history.generation();
-        self.changed_outside_history = false;
-    }
-
-    pub fn mark_unsaved(&mut self) {
-        self.changed_outside_history = true;
     }
 
     pub fn save_to(&mut self, path: &Path) -> Result<(), PersistenceError> {

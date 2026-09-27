@@ -1841,6 +1841,23 @@ impl Timeline {
             .unwrap_or(0)
     }
 
+    /// The `meta` of the pool item that uses this timeline as a clip.
+    pub fn compound_meta(&self) -> MediaMeta {
+        let has_clips = |kind| self.tracks_of_kind(kind).any(|(_, t)| !t.clips.is_empty());
+        MediaMeta {
+            duration_frames: self.total_frames(),
+            fps: self.fps,
+            width: self.resolution.0,
+            height: self.resolution.1,
+            has_video: has_clips(TrackKind::Video),
+            has_audio: has_clips(TrackKind::Audio),
+            sample_rate: 48_000,
+            channels: 2,
+            audio_streams: 1,
+            file: Default::default(),
+        }
+    }
+
     /// Track name as in an NLE: V1, V2… A1, A2…, per kind.
     pub fn track_label(&self, track_index: usize) -> String {
         let number = self.track_number(track_index);
@@ -2030,25 +2047,9 @@ impl Project {
         format!("{TIMELINE_NAME_PREFIX}{number}")
     }
 
-    /// Copy of the timeline of `source` (a compound pool item) as a new
-    /// pool item called `name`.
-    pub fn duplicate_timeline(&mut self, source: MediaId, name: String) -> Option<MediaId> {
-        let timeline_id = self.media_pool.get(source)?.compound?;
-        let mut timeline = self.timelines.get(timeline_id)?.clone();
-        timeline.name = name.clone();
-        self.reallocate_clip_ids(&mut timeline);
-        let new_timeline = self.timelines.insert(timeline);
-        let mut item = self.media_pool[source].clone();
-        item.path = name.into();
-        item.compound = Some(new_timeline);
-        let media_id = self.media_pool.insert(item);
-        self.sync_compound_meta(media_id);
-        Some(media_id)
-    }
-
     /// Clip and link group ids are unique project-wide: a timeline coming
     /// from elsewhere needs fresh ones.
-    fn reallocate_clip_ids(&mut self, timeline: &mut Timeline) {
+    pub(crate) fn reallocate_clip_ids(&mut self, timeline: &mut Timeline) {
         let mut groups = std::collections::HashMap::new();
         for track in &mut timeline.tracks {
             let mut clip_ids = std::collections::HashMap::new();
@@ -2085,98 +2086,24 @@ impl Project {
         timeline_id: TimelineId,
         folder: Option<FolderId>,
     ) -> MediaId {
-        let timeline = &self.timelines[timeline_id];
-        let media_id = self.media_pool.insert(MediaItem {
+        let item = self.timeline_item(timeline_id, &self.timelines[timeline_id].clone(), folder);
+        self.media_pool.insert(item)
+    }
+
+    /// The pool item through which `timeline` (under `timeline_id`) is used
+    /// as a clip.
+    pub fn timeline_item(
+        &mut self,
+        timeline_id: TimelineId,
+        timeline: &Timeline,
+        folder: Option<FolderId>,
+    ) -> MediaItem {
+        MediaItem {
             path: timeline.name.clone().into(),
-            meta: MediaMeta {
-                duration_frames: 0,
-                fps: timeline.fps,
-                width: timeline.resolution.0,
-                height: timeline.resolution.1,
-                has_video: true,
-                has_audio: true,
-                sample_rate: 48_000,
-                channels: 2,
-                audio_streams: 1,
-                file: Default::default(),
-            },
-            content_hash: 0,
+            meta: timeline.compound_meta(),
+            content_hash: self.alloc_compound_generation(),
             compound: Some(timeline_id),
             folder,
-        });
-        self.sync_compound_meta(media_id);
-        media_id
-    }
-
-    /// Moves the media and timelines of `other` into this project, its pool
-    /// items in `folder` (the folders of `other` are not carried over). A
-    /// media of `other` found in `reuse` is replaced by the one of this
-    /// project it maps to. A timeline without a pool item gets one at the
-    /// root. Returns the new timelines, in `other`'s order.
-    pub fn absorb(
-        &mut self,
-        other: Project,
-        reuse: &std::collections::HashMap<MediaId, MediaId>,
-        folder: Option<FolderId>,
-    ) -> Vec<TimelineId> {
-        let mut media_ids = reuse.clone();
-        let mut added = Vec::new();
-        for (id, mut item) in other.media_pool {
-            if media_ids.contains_key(&id) {
-                continue;
-            }
-            item.folder = folder;
-            let new_id = self.media_pool.insert(item);
-            media_ids.insert(id, new_id);
-            added.push(new_id);
-        }
-        let mut timeline_ids = std::collections::HashMap::new();
-        let mut timelines = Vec::new();
-        for (id, mut timeline) in other.timelines {
-            self.reallocate_clip_ids(&mut timeline);
-            for clip in timeline.tracks.iter_mut().flat_map(|t| &mut t.clips) {
-                if let ClipSource::Media(media) = &mut clip.source
-                    && let Some(&new_media) = media_ids.get(media)
-                {
-                    *media = new_media;
-                }
-            }
-            let new_id = self.timelines.insert(timeline);
-            timeline_ids.insert(id, new_id);
-            timelines.push(new_id);
-        }
-        for &media_id in &added {
-            let item = &mut self.media_pool[media_id];
-            item.compound = item.compound.and_then(|t| timeline_ids.get(&t).copied());
-        }
-        for &timeline_id in &timelines {
-            match added
-                .iter()
-                .find(|&&m| self.media_pool[m].compound == Some(timeline_id))
-            {
-                Some(&media_id) => self.sync_compound_meta(media_id),
-                None => {
-                    self.insert_timeline_item(timeline_id, None);
-                }
-            }
-        }
-        timelines
-    }
-
-    /// Moves `folder`'s content to its parent, then removes it.
-    pub fn delete_folder(&mut self, folder: FolderId) {
-        let Some(removed) = self.folders.remove(folder) else {
-            return;
-        };
-        for item in self.media_pool.values_mut() {
-            if item.folder == Some(folder) {
-                item.folder = removed.parent;
-            }
-        }
-        for child in self.folders.values_mut() {
-            if child.parent == Some(folder) {
-                child.parent = removed.parent;
-            }
         }
     }
 
@@ -2199,8 +2126,9 @@ impl Project {
             .collect()
     }
 
-    /// Refused (`false`) if `parent` is `folder` itself or inside it.
-    pub fn move_folder(&mut self, folder: FolderId, parent: Option<FolderId>) -> bool {
+    /// `false` if `parent` is `folder` itself or inside it, or if `folder`
+    /// does not exist.
+    pub fn can_move_folder(&self, folder: FolderId, parent: Option<FolderId>) -> bool {
         let mut ancestor = parent;
         for _ in 0..=self.folders.len() {
             match ancestor {
@@ -2209,27 +2137,7 @@ impl Project {
                 None => break,
             }
         }
-        match self.folders.get_mut(folder) {
-            Some(f) => {
-                f.parent = parent;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Renames a compound pool item together with its timeline.
-    pub fn rename_timeline(&mut self, media_id: MediaId, name: String) {
-        let Some(item) = self.media_pool.get_mut(media_id) else {
-            return;
-        };
-        let Some(timeline_id) = item.compound else {
-            return;
-        };
-        item.path = name.clone().into();
-        if let Some(timeline) = self.timelines.get_mut(timeline_id) {
-            timeline.name = name;
-        }
+        self.folders.contains_key(folder)
     }
 
     /// New value for `MediaItem::content_hash` of a compound clip: to be
@@ -2257,24 +2165,7 @@ impl Project {
         let Some(timeline) = self.timelines.get(timeline_id) else {
             return;
         };
-        let has_video = timeline
-            .tracks_of_kind(TrackKind::Video)
-            .any(|(_, t)| !t.clips.is_empty());
-        let has_audio = timeline
-            .tracks_of_kind(TrackKind::Audio)
-            .any(|(_, t)| !t.clips.is_empty());
-        let meta = MediaMeta {
-            duration_frames: timeline.total_frames(),
-            fps: timeline.fps,
-            width: timeline.resolution.0,
-            height: timeline.resolution.1,
-            has_video,
-            has_audio,
-            sample_rate: 48_000,
-            channels: 2,
-            audio_streams: 1,
-            file: Default::default(),
-        };
+        let meta = timeline.compound_meta();
         let generation = self.alloc_compound_generation();
         let item = self.media_pool.get_mut(media_id).expect("checked above");
         item.meta = meta;

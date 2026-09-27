@@ -1541,12 +1541,15 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
     );
     assert_eq!(nested.tracks[1].clips[0].timeline_start, 10);
 
-    // An undo gives back the original clips, but the pool (like an
-    // import) does not go back.
+    // An undo gives back the original clips and takes the compound clip
+    // out of the pool, with its nested timeline.
     history.undo(&mut project);
     assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 1);
     assert_eq!(project.timelines[timeline_id].tracks[0].clips[0].id, v);
-    assert_eq!(project.media_pool.len(), 1);
+    assert!(project.media_pool.is_empty());
+    assert!(!project.timelines.contains_key(nested_id));
+    history.redo(&mut project);
+    assert!(project.timelines.contains_key(nested_id));
 
     // A second compound clip continues the numbering.
     let (v2, a2) = (project.alloc_clip_id(), project.alloc_clip_id());

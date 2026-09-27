@@ -95,12 +95,12 @@ impl VenturiApp {
         use vv_session::{RelinkEnd, SessionEvent as E};
         match event {
             E::ImportStarted { .. } => self.import_warnings.clear(),
-            E::MediaAdded { media_id, .. } => {
+            E::MediaAdded { job, media_id } => {
                 let meta = self.session.project.media_pool[media_id].meta.clone();
                 if meta.has_video {
-                    self.ensure_timeline_for(&meta);
+                    self.ensure_timeline_for(&meta, Some(job));
                 } else {
-                    self.ensure_timeline_audio_only();
+                    self.ensure_timeline_audio_only(Some(job));
                 }
                 self.enqueue_media_background_jobs(media_id);
             }
@@ -162,12 +162,16 @@ impl VenturiApp {
     }
 
     fn insert_media(&mut self, path: PathBuf, meta: vv_core::MediaMeta) -> MediaId {
+        let group = self.session.history.begin_group();
         if meta.has_video {
-            self.ensure_timeline_for(&meta);
+            self.ensure_timeline_for(&meta, None);
         } else {
-            self.ensure_timeline_audio_only();
+            self.ensure_timeline_audio_only(None);
         }
         let media_id = self.session.add_media(path, meta);
+        self.session
+            .history
+            .end_group_as(group, vv_core::CommandLabel::ImportMedia);
         self.enqueue_media_background_jobs(media_id);
         media_id
     }

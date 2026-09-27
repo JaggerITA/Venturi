@@ -162,6 +162,37 @@ Step 3 is the noisiest diff (mechanical renames); step 4 the riskiest
   Groups nest, so an enclosing caller group still yields one step with its
   own label.
 
+## Pool changes through the history
+
+Every change to the project is a history step, so the dirty state is just
+`history.generation() != saved_generation` (`mark_unsaved` is gone).
+
+- **Stable ids** (`vv-core/src/id_map.rs`): `IdMap` replaces `SlotMap` for
+  media, timelines and folders. Ids are never reused and `insert_at` puts an
+  entity back under its id, so redo steps, UI selections and ids given to
+  agents stay valid. `next` is saved: ids of deleted media may still be
+  referenced by offline clips.
+- **Legacy projects**: `vv-core/src/legacy_slotmap.rs` reads the slotmap
+  format (`(idx, version)` → `idx | (version >> 1) << 32`, so a dead key
+  never resolves to the slot's new occupant). Phase-out steps are in its
+  module doc; fixture `tests/fixtures/legacy_slotmap_project.ron`.
+- **Commands** (`vv-core/src/pool.rs`): `AddEntities` (import, OTIO, new and
+  duplicated timelines, compound clips, new folders; ids allocated when the
+  command is built), `RenameTimeline`, `RenameFolder`, `SetMediaFolder`,
+  `MoveFolder`, `DeleteFolder`. `RemoveMedia` no longer remaps clips.
+  A compound clip's nested timeline and pool item are now part of its step.
+- **One step per import**: `History::join` appends to a step while nothing
+  else touched the history since (a `revision` counter bumped by every stack
+  change: do, undo, redo, group close, join). `Session::join_import` keeps
+  the step per job; the app joins the "Timeline 1" it creates on
+  `MediaAdded`. A user edit in between starts a new step.
+- **Undo groups across frames**: `Session::tick` applies imports and
+  relinks as history steps, so the app skips it while the properties panel
+  drag or the volume-line gesture keep a group open.
+- **UI after undo/redo**: `VenturiApp::forget_removed_entities` leaves a
+  removed timeline, stops a removed media's preview, prunes the pool
+  selection/rename/expanded folders.
+
 ### Aligning `mcp_server`
 
 - Export: `mcp_server` already returns `Option` and cancels per job; keep
@@ -171,3 +202,11 @@ Step 3 is the noisiest diff (mechanical renames); step 4 the riskiest
   whether to reset it in `install_project` or to gate the resync on
   `change_mark()` (epoch + generation) like the timeline revisions.
 - `one_step` in `vv-mcp/src/edit_tools.rs` keeps working unchanged.
+- Ids: `vv-mcp/src/ids.rs` goes through `KeyData::from_ffi`; switch to
+  `Id::raw`/`Id::from_raw` (still decimal strings). Ids an agent holds now
+  survive undo/redo.
+- `mark_unsaved` and its counter in `ChangeMark` are gone: a change mark is
+  `(epoch, generation)`. `Session::create_timeline` becomes an
+  `AddEntities::timeline` applied through the history.
+- The import tool keeps using `import_media`; the media join the job's step,
+  not the tool's `one_step`.

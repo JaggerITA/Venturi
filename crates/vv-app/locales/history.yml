@@ -167,3 +167,39 @@ history.move_marker:
 history.delete_marker:
   en: "Delete marker"
   it: "Elimina marker"
+
+history.import_media:
+  en: "Import media"
+  it: "Importa media"
+
+history.import_otio:
+  en: "Import OTIO"
+  it: "Importa OTIO"
+
+history.new_timeline:
+  en: "New timeline"
+  it: "Nuova timeline"
+
+history.duplicate_timeline:
+  en: "Duplicate timeline"
+  it: "Duplica timeline"
+
+history.rename_timeline:
+  en: "Rename timeline"
+  it: "Rinomina timeline"
+
+history.new_folder:
+  en: "New folder"
+  it: "Nuova cartella"
+
+history.rename_folder:
+  en: "Rename folder"
+  it: "Rinomina cartella"
+
+history.move_to_folder:
+  en: "Move to folder"
+  it: "Sposta nella cartella"
+
+history.delete_folder:
+  en: "Delete folder"
+  it: "Elimina cartella"
