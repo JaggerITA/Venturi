@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** in progress on branch `mcp_server` (based on `session_layer`): steps 2-3 done.
+**Status:** in progress on branch `mcp_server` (based on `session_layer`): steps 2-4 done.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -201,7 +201,7 @@ speed ramps, OTIO export, playback control.
 | 1 | `SESSION_LAYER.md` steps 1-4 (edit layer, `vv-session`, jobs + events) | see that plan |
 | 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | 555241f |
 | 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | 5e774af, db8d234 |
-| 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | |
+| 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | 0d2e53c |
 | 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | |
 | 6 | `docs/MCP.md` | |
 
@@ -249,6 +249,29 @@ sits in step 1 (the session refactor); steps 2-6 only add code.
   (`claude-local.sh -p` with `--mcp-config`) importing, building a
   timeline, ripple-deleting a second, adding a title and saving — the saved
   project reopened as expected.
+
+## Step 4 notes
+
+- `render_frame` decodes through the export's `StreamingFrameProvider` and
+  composites with `Compositor::render_layers` (same shaders, read back as
+  RGBA instead of I420). A test checks it returns exactly the asked frame
+  (luma-numbered frames, conformed source offset). One headless compositor
+  is created on first use and shared.
+- `get_audio_levels`: `vv_session::analysis`. A media stream is decoded
+  only up to the end of the range, resampled to 48 kHz; the timeline source
+  uses the export mix (`mix_audio_track`, which still decodes whole files:
+  audit §1.6). Levels floored at -120 dBFS; max 20 000 windows.
+- Heavy calls run on a thread and come back as `Pending::Worker`, which the
+  host polls after every tick; the worker wakes the host through the
+  session waker.
+- `export`/`export_status`/`cancel_export` by job id. `Session::export`
+  now refuses a second concurrent export (before, it silently replaced the
+  running one, whose end was then never reported); a finished export that
+  `tick` has not collected yet is no longer cancellable.
+- Agent test (plain `claude -p` with `--mcp-config`): found the two pauses
+  of a test file with `get_audio_levels`, removed them with one
+  `delete_ranges` ripple call, checked with render_frame and the timeline
+  levels, exported; ffmpeg confirms 3.6 s and no silence left.
 
 ## Open points
 
