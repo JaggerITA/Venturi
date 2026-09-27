@@ -3986,7 +3986,7 @@ fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
     let loaded_timeline_id = app.timeline_id.expect("timeline expected after load");
     assert_eq!(
         loaded_timeline_id, timeline_id,
-        "same TimelineId as before: SlotMap round-trips the keys"
+        "same TimelineId as before: the ids round-trip"
     );
     assert_eq!(
         app.session.project.timelines[loaded_timeline_id].tracks[0].clips[0].id,

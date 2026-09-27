@@ -1,5 +1,7 @@
 pub mod command;
 pub mod edit;
+pub mod id_map;
+mod legacy_slotmap;
 pub mod model;
 pub mod otio;
 pub mod persistence;

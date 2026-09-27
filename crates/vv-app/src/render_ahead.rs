@@ -374,7 +374,7 @@ fn worker_loop(
 
 /// Decoders survive an edit: reopening costs a seek back to a keyframe. A
 /// media gone from `new` or naming another file there loses its decoders and
-/// its frames — `MediaId`s are slotmap keys, reused by a replaced project.
+/// its frames — `MediaId`s restart from 1 in every project.
 fn forget_changed_media(
     old: &Project,
     new: &Project,

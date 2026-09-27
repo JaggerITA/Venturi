@@ -69,13 +69,10 @@ fn remove_media_leaves_its_clips_offline_and_undo_reconnects_them() {
     };
     assert!(project.media_pool.get(dangling).is_none());
 
-    // The undo reinserts with a new slotmap key: the clip must
-    // point to that one, not to the old one.
     history.undo(&mut project);
-    assert_eq!(project.media_pool.len(), 1);
-    let restored = project.media_pool.keys().next().unwrap();
+    assert_eq!(project.media_pool.keys().collect::<Vec<_>>(), vec![media]);
     let clip = &project.timelines[timeline].tracks[0].clips[0];
-    assert!(matches!(clip.source, ClipSource::Media(id) if id == restored));
+    assert!(matches!(clip.source, ClipSource::Media(id) if id == media));
 
     history.redo(&mut project);
     assert!(project.media_pool.is_empty());
@@ -1932,7 +1929,7 @@ fn set_clip_fade_is_undoable_and_clamped_to_clip_length() {
 fn fade_multiplier_ramps_in_then_plateaus_then_ramps_out() {
     let mut clip = Clip::from_source_range(
         ClipId(0),
-        ClipSource::Media(MediaId::default()),
+        ClipSource::Media(MediaId::from_raw(0)),
         0,
         100,
         0,
@@ -2001,7 +1998,7 @@ fn set_clip_transition_is_undoable() {
 fn transition_offset_slides_in_from_the_push_direction_then_settles() {
     let mut clip = Clip::from_source_range(
         ClipId(0),
-        ClipSource::Media(MediaId::default()),
+        ClipSource::Media(MediaId::from_raw(0)),
         0,
         100,
         0,
@@ -2034,7 +2031,7 @@ fn transition_offset_slides_in_from_the_push_direction_then_settles() {
 fn cross_transition_window_straddles_the_cut_and_progresses_from_zero_to_one() {
     let left = Clip::from_source_range(
         ClipId(1),
-        ClipSource::Media(MediaId::default()),
+        ClipSource::Media(MediaId::from_raw(0)),
         0,
         100,
         0,
@@ -2043,7 +2040,7 @@ fn cross_transition_window_straddles_the_cut_and_progresses_from_zero_to_one() {
     // Adjacent: starts exactly where `left` ends (100).
     let right = Clip::from_source_range(
         ClipId(2),
-        ClipSource::Media(MediaId::default()),
+        ClipSource::Media(MediaId::from_raw(0)),
         0,
         100,
         100,

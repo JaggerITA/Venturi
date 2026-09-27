@@ -1,0 +1,667 @@
+(
+    media_pool: [
+        (
+            value: None,
+            version: 0,
+        ),
+        (
+            value: Some((
+                path: "/m/c.mp4",
+                meta: (
+                    duration_frames: 100,
+                    fps: (
+                        num: 25,
+                        den: 1,
+                    ),
+                    width: 64,
+                    height: 48,
+                    has_video: true,
+                    has_audio: false,
+                    sample_rate: 48000,
+                    channels: 2,
+                    audio_streams: 0,
+                    file: (),
+                ),
+                content_hash: 1,
+                compound: None,
+                folder: Some((
+                    idx: 1,
+                    version: 1,
+                )),
+            )),
+            version: 3,
+        ),
+        (
+            value: Some((
+                path: "/m/b.mp4",
+                meta: (
+                    duration_frames: 100,
+                    fps: (
+                        num: 25,
+                        den: 1,
+                    ),
+                    width: 64,
+                    height: 48,
+                    has_video: true,
+                    has_audio: false,
+                    sample_rate: 48000,
+                    channels: 2,
+                    audio_streams: 0,
+                    file: (),
+                ),
+                content_hash: 1,
+                compound: None,
+                folder: Some((
+                    idx: 2,
+                    version: 1,
+                )),
+            )),
+            version: 1,
+        ),
+        (
+            value: Some((
+                path: "Nested",
+                meta: (
+                    duration_frames: 10,
+                    fps: (
+                        num: 25,
+                        den: 1,
+                    ),
+                    width: 64,
+                    height: 48,
+                    has_video: true,
+                    has_audio: false,
+                    sample_rate: 48000,
+                    channels: 2,
+                    audio_streams: 1,
+                    file: (),
+                ),
+                content_hash: 1,
+                compound: Some((
+                    idx: 1,
+                    version: 1,
+                )),
+                folder: Some((
+                    idx: 1,
+                    version: 1,
+                )),
+            )),
+            version: 1,
+        ),
+        (
+            value: Some((
+                path: "Main",
+                meta: (
+                    duration_frames: 40,
+                    fps: (
+                        num: 25,
+                        den: 1,
+                    ),
+                    width: 64,
+                    height: 48,
+                    has_video: true,
+                    has_audio: false,
+                    sample_rate: 48000,
+                    channels: 2,
+                    audio_streams: 1,
+                    file: (),
+                ),
+                content_hash: 2,
+                compound: Some((
+                    idx: 2,
+                    version: 1,
+                )),
+            )),
+            version: 1,
+        ),
+    ],
+    timelines: [
+        (
+            value: None,
+            version: 0,
+        ),
+        (
+            value: Some((
+                name: "Nested",
+                fps: (
+                    num: 25,
+                    den: 1,
+                ),
+                resolution: (64, 48),
+                tracks: [
+                    (
+                        kind: Video,
+                        clips: [
+                            (
+                                id: (0),
+                                source: Media((
+                                    idx: 2,
+                                    version: 1,
+                                )),
+                                source_offset: 0,
+                                timeline_start: 0,
+                                timeline_len: 10,
+                                effects: (
+                                    transform: (
+                                        params: [
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 100.0,
+                                            ),
+                                        ],
+                                        flip: (false, false),
+                                    ),
+                                    gain_db: (
+                                        keyframes: [],
+                                        default: 0.0,
+                                    ),
+                                    color: None,
+                                    title: None,
+                                    filters: [],
+                                    transition_in: None,
+                                    transition_out: None,
+                                    blend_mode: Normal,
+                                ),
+                                linked_group: None,
+                                audio_stream_index: 0,
+                                rate: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                speed: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                pitch_correction: true,
+                                disabled: false,
+                                fade_in: 0,
+                                fade_out: 0,
+                                display_color: None,
+                            ),
+                        ],
+                        muted: false,
+                        solo: false,
+                        locked: false,
+                        crossings: [],
+                    ),
+                ],
+                markers: [],
+            )),
+            version: 1,
+        ),
+        (
+            value: Some((
+                name: "Main",
+                fps: (
+                    num: 25,
+                    den: 1,
+                ),
+                resolution: (64, 48),
+                tracks: [
+                    (
+                        kind: Video,
+                        clips: [
+                            (
+                                id: (1),
+                                source: Media((
+                                    idx: 1,
+                                    version: 1,
+                                )),
+                                source_offset: 0,
+                                timeline_start: 0,
+                                timeline_len: 10,
+                                effects: (
+                                    transform: (
+                                        params: [
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 100.0,
+                                            ),
+                                        ],
+                                        flip: (false, false),
+                                    ),
+                                    gain_db: (
+                                        keyframes: [],
+                                        default: 0.0,
+                                    ),
+                                    color: None,
+                                    title: None,
+                                    filters: [],
+                                    transition_in: None,
+                                    transition_out: None,
+                                    blend_mode: Normal,
+                                ),
+                                linked_group: None,
+                                audio_stream_index: 0,
+                                rate: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                speed: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                pitch_correction: true,
+                                disabled: false,
+                                fade_in: 0,
+                                fade_out: 0,
+                                display_color: None,
+                            ),
+                            (
+                                id: (2),
+                                source: Media((
+                                    idx: 2,
+                                    version: 1,
+                                )),
+                                source_offset: 0,
+                                timeline_start: 10,
+                                timeline_len: 10,
+                                effects: (
+                                    transform: (
+                                        params: [
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 100.0,
+                                            ),
+                                        ],
+                                        flip: (false, false),
+                                    ),
+                                    gain_db: (
+                                        keyframes: [],
+                                        default: 0.0,
+                                    ),
+                                    color: None,
+                                    title: None,
+                                    filters: [],
+                                    transition_in: None,
+                                    transition_out: None,
+                                    blend_mode: Normal,
+                                ),
+                                linked_group: None,
+                                audio_stream_index: 0,
+                                rate: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                speed: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                pitch_correction: true,
+                                disabled: false,
+                                fade_in: 0,
+                                fade_out: 0,
+                                display_color: None,
+                            ),
+                            (
+                                id: (3),
+                                source: Media((
+                                    idx: 1,
+                                    version: 3,
+                                )),
+                                source_offset: 0,
+                                timeline_start: 20,
+                                timeline_len: 10,
+                                effects: (
+                                    transform: (
+                                        params: [
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 100.0,
+                                            ),
+                                        ],
+                                        flip: (false, false),
+                                    ),
+                                    gain_db: (
+                                        keyframes: [],
+                                        default: 0.0,
+                                    ),
+                                    color: None,
+                                    title: None,
+                                    filters: [],
+                                    transition_in: None,
+                                    transition_out: None,
+                                    blend_mode: Normal,
+                                ),
+                                linked_group: None,
+                                audio_stream_index: 0,
+                                rate: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                speed: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                pitch_correction: true,
+                                disabled: false,
+                                fade_in: 0,
+                                fade_out: 0,
+                                display_color: None,
+                            ),
+                            (
+                                id: (4),
+                                source: Media((
+                                    idx: 3,
+                                    version: 1,
+                                )),
+                                source_offset: 0,
+                                timeline_start: 30,
+                                timeline_len: 10,
+                                effects: (
+                                    transform: (
+                                        params: [
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 1.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 0.0,
+                                            ),
+                                            (
+                                                keyframes: [],
+                                                default: 100.0,
+                                            ),
+                                        ],
+                                        flip: (false, false),
+                                    ),
+                                    gain_db: (
+                                        keyframes: [],
+                                        default: 0.0,
+                                    ),
+                                    color: None,
+                                    title: None,
+                                    filters: [],
+                                    transition_in: None,
+                                    transition_out: None,
+                                    blend_mode: Normal,
+                                ),
+                                linked_group: None,
+                                audio_stream_index: 0,
+                                rate: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                speed: (
+                                    num: 1,
+                                    den: 1,
+                                ),
+                                pitch_correction: true,
+                                disabled: false,
+                                fade_in: 0,
+                                fade_out: 0,
+                                display_color: None,
+                            ),
+                        ],
+                        muted: false,
+                        solo: false,
+                        locked: false,
+                        crossings: [],
+                    ),
+                ],
+                markers: [],
+            )),
+            version: 1,
+        ),
+    ],
+    folders: [
+        (
+            value: None,
+            version: 0,
+        ),
+        (
+            value: Some((
+                name: "F1",
+                parent: None,
+            )),
+            version: 1,
+        ),
+        (
+            value: Some((
+                name: "F2",
+                parent: Some((
+                    idx: 1,
+                    version: 1,
+                )),
+            )),
+            version: 1,
+        ),
+    ],
+    next_clip_id: 5,
+    next_link_group_id: 0,
+    next_compound_id: 0,
+    next_compound_generation: 2,
+)

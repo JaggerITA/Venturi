@@ -1,6 +1,5 @@
 use super::*;
 
-/// `MediaId` is a slotmap key, not constructible by hand.
 fn ids(n: usize) -> Vec<MediaId> {
     let mut project = vv_core::Project::default();
     (0..n)

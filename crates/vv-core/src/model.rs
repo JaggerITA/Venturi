@@ -3,14 +3,9 @@
 //! the keyframes, never "baked" into the cached frames (see ARCHITECTURE.md).
 
 use serde::{Deserialize, Serialize};
-use slotmap::{SlotMap, new_key_type};
 use std::path::PathBuf;
 
-new_key_type! {
-    pub struct MediaId;
-    pub struct TimelineId;
-    pub struct FolderId;
-}
+pub use crate::id_map::{FolderId, Id, IdMap, MediaId, TimelineId};
 
 /// A folder of the media pool: only a way to group the items, it has no
 /// effect on rendering.
@@ -1972,10 +1967,10 @@ fn visible_clip_at(track: &Track, frame: FrameIdx) -> Option<&Clip> {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Project {
-    pub media_pool: SlotMap<MediaId, MediaItem>,
-    pub timelines: SlotMap<TimelineId, Timeline>,
+    pub media_pool: IdMap<MediaId, MediaItem>,
+    pub timelines: IdMap<TimelineId, Timeline>,
     #[serde(default)]
-    pub folders: SlotMap<FolderId, MediaFolder>,
+    pub folders: IdMap<FolderId, MediaFolder>,
     next_clip_id: u64,
     #[serde(default)]
     next_link_group_id: u64,

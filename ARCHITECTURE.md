@@ -32,15 +32,18 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 
 ## Data model (data-oriented, no node graph)
 
-`vv-core/src/model.rs`. `MediaItem` and `Timeline` live in `slotmap` arenas
-(O(1) lookup by ID); `Clip`s in a `Vec<Clip>` inside each `Track`, sorted by
+`vv-core/src/model.rs`. `MediaItem`, `Timeline` and `MediaFolder` live in
+`IdMap`s (`vv-core/src/id_map.rs`): ids are never reused, and an undo puts an
+entity back under the id it had, so commands, selections and ids given to
+other programs stay valid. `Clip`s in a `Vec<Clip>` inside each `Track`, sorted by
 time, with a counter-based `ClipId`. A single `Project` struct is the source
 of truth, owned by the UI thread; workers receive copies or snapshots.
 
 ```rust
 struct Project {
-    media_pool: SlotMap<MediaId, MediaItem>,
-    timelines: SlotMap<TimelineId, Timeline>,
+    media_pool: IdMap<MediaId, MediaItem>,
+    timelines: IdMap<TimelineId, Timeline>,
+    folders: IdMap<FolderId, MediaFolder>,
     // + counters for ClipId and LinkGroupId
 }
 

@@ -43,7 +43,7 @@ fn the_delete_key_is_the_editors_only_with_a_selection_and_the_last_click() {
 #[test]
 fn removing_the_selection_empties_it_and_follows_the_zoom_link() {
     let mut state = KeyframeEditorState::default();
-    state.clip = Some((TimelineId::default(), 0, ClipId(1)));
+    state.clip = Some((<TimelineId as vv_core::Id>::from_raw(0), 0, ClipId(1)));
     state.selection.insert(zoom(TransformParam::ZoomX, 7));
     assert_eq!(state.remove_selected(true).len(), 2, "the Y twin too");
     assert!(state.selection.is_empty());

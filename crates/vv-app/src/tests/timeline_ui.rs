@@ -1092,7 +1092,14 @@ fn single_trim_range_start_is_not_clamped_by_the_previous_neighbor() {
     let project = Project::default();
     let visuals = [
         visual(0, 1, 0, 5), // ends at 5
-        media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
+        media_clip_visual(
+            0,
+            2,
+            10,
+            8,
+            20,
+            <vv_core::MediaId as vv_core::Id>::from_raw(0),
+        ),
     ];
     let (min_value, _) = single_trim_range(&project, &visuals[1].clip, TrimEdge::Start);
     assert_eq!(min_value, 2, "10 - source_in 8, not the neighbour's edge");
@@ -1110,7 +1117,7 @@ fn single_trim_range_start_is_clamped_by_source_in() {
         10,
         3,
         20,
-        vv_core::MediaId::default(),
+        <vv_core::MediaId as vv_core::Id>::from_raw(0),
     )];
     let (min_value, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
     assert_eq!(min_value, 7);

@@ -7,7 +7,7 @@ use crate::model::{
     MediaMeta, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind,
     Transform, TransformParam, Transition,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
@@ -2197,24 +2197,20 @@ impl Command for RemoveKeyframe {
     }
 }
 
-/// Removes a media from the pool; its clips stay offline. `slotmap` does not
-/// reinsert with the same key: the undo rewrites the clips with the new id,
-/// hence `Cell`/`RefCell` (`undo` takes `&self`). For a compound clip
-/// the nested timeline disappears too, otherwise it would stay orphaned in the
-/// project (and its name taken, see `alloc_compound_name`).
+/// Removes a media from the pool; its clips stay offline. For a compound
+/// clip the nested timeline disappears too, otherwise it would stay orphaned
+/// in the project (and its name taken, see `alloc_compound_name`).
 #[derive(Debug)]
 pub struct RemoveMedia {
-    media: Cell<MediaId>,
-    removed: RefCell<Option<MediaItem>>,
-    nested: RefCell<Option<Timeline>>,
+    media: MediaId,
+    removed: RefCell<Option<(MediaItem, Option<Timeline>)>>,
 }
 
 impl RemoveMedia {
     pub fn new(media: MediaId) -> Self {
         Self {
-            media: Cell::new(media),
+            media,
             removed: RefCell::new(None),
-            nested: RefCell::new(None),
         }
     }
 }
@@ -2225,32 +2221,21 @@ impl Command for RemoveMedia {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let removed = project.media_pool.remove(self.media.get());
-        if let Some(nested_id) = removed.as_ref().and_then(|item| item.compound) {
-            *self.nested.borrow_mut() = project.timelines.remove(nested_id);
-        }
-        *self.removed.borrow_mut() = removed;
+        let Some(item) = project.media_pool.remove(self.media) else {
+            return;
+        };
+        let nested = item.compound.and_then(|id| project.timelines.remove(id));
+        *self.removed.borrow_mut() = Some((item, nested));
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(mut item) = self.removed.borrow_mut().take() else {
+        let Some((item, nested)) = self.removed.borrow_mut().take() else {
             return;
         };
-        if let Some(nested) = self.nested.borrow_mut().take() {
-            item.compound = Some(project.timelines.insert(nested));
+        if let (Some(id), Some(nested)) = (item.compound, nested) {
+            project.timelines.insert_at(id, nested);
         }
-        let old = self.media.get();
-        let new = project.media_pool.insert(item);
-        self.media.set(new);
-        for timeline in project.timelines.values_mut() {
-            for track in &mut timeline.tracks {
-                for clip in &mut track.clips {
-                    if matches!(clip.source, ClipSource::Media(id) if id == old) {
-                        clip.source = ClipSource::Media(new);
-                    }
-                }
-            }
-        }
+        project.media_pool.insert_at(self.media, item);
     }
 }
 
