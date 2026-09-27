@@ -18,7 +18,10 @@ only `source_in`/`source_out` are frames of the media. Tracks are named V1, V2..
 and A1, A2... Every editing call is one undo step (`undo` reverts it); locked tracks \
 are never touched. A typical session: import_media, create_timeline with from_media, \
 insert_clip, then edit and save_project. To cut pauses or bad takes, delete_ranges \
-with ripple keeps audio and video in sync.";
+with ripple keeps audio and video in sync. \
+Every result describing a timeline carries its `revision`; pass it back as `if_revision` \
+when editing, so an edit computed on a timeline that changed meanwhile (the user may be \
+editing it too) is refused instead of landing in the wrong place.";
 
 type ToolReturn = Result<CallToolResult, ErrorData>;
 

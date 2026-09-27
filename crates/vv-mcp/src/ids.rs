@@ -98,3 +98,21 @@ pub(crate) fn marker_id(
         .map(|_| marker)
         .ok_or_else(|| ToolError(format!("no marker \"{id}\" in this timeline")))
 }
+
+pub(crate) fn check_revision(
+    project: &Project,
+    timeline: TimelineId,
+    expected: Option<&str>,
+) -> Result<(), ToolError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let current = crate::json::timeline_revision(project, timeline);
+    if expected.trim() != current {
+        return Err(ToolError(format!(
+            "the timeline changed since you read it (revision {expected}, now {current}): \
+             read it again with get_timeline before editing"
+        )));
+    }
+    Ok(())
+}

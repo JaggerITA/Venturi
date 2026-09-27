@@ -15,6 +15,7 @@ fn solid(session: &mut Session, timeline: &str, at: i64, duration: i64) -> Strin
         session,
         ToolCall::AddSolidColor(AddSolidColorArgs {
             timeline_id: timeline.into(),
+            if_revision: None,
             at,
             duration: Some(duration),
             track: None,
@@ -49,6 +50,7 @@ fn lock(session: &mut Session, timeline: &str, track: &str) {
         session,
         ToolCall::SetTrack(SetTrackArgs {
             timeline_id: timeline.into(),
+            if_revision: None,
             track: track.into(),
             muted: None,
             solo: None,
@@ -60,6 +62,7 @@ fn lock(session: &mut Session, timeline: &str, track: &str) {
 fn insert(timeline: &str, media: &str) -> InsertClipArgs {
     InsertClipArgs {
         timeline_id: timeline.into(),
+        if_revision: None,
         media_id: media.into(),
         at: 0,
         source_in: None,
@@ -81,6 +84,7 @@ fn every_edit_is_one_undo_step_and_a_failed_one_leaves_none() {
         &mut session,
         ToolCall::AddTitle(AddTitleArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             text: "Hi".into(),
             at: 0,
             duration: None,
@@ -94,6 +98,7 @@ fn every_edit_is_one_undo_step_and_a_failed_one_leaves_none() {
 
     let bad = ToolCall::Split(SplitArgs {
         timeline_id: timeline.clone(),
+        if_revision: None,
         frame: 1000,
         clip_ids: None,
     });
@@ -168,12 +173,14 @@ fn locked_tracks_refuse_edits() {
     lock(&mut session, &timeline, "V1");
     let delete = ToolCall::DeleteClips(DeleteClipsArgs {
         timeline_id: timeline.clone(),
+        if_revision: None,
         clip_ids: vec![clip],
         ripple: false,
     });
     assert_eq!(error(&mut session, delete), "track V1 is locked");
     let title = ToolCall::AddTitle(AddTitleArgs {
         timeline_id: timeline.clone(),
+        if_revision: None,
         text: "x".into(),
         at: 0,
         duration: None,
@@ -195,6 +202,7 @@ fn split_reports_both_halves() {
         &mut session,
         ToolCall::Split(SplitArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             frame: 20,
             clip_ids: Some(vec![clip.clone()]),
         }),
@@ -214,12 +222,14 @@ fn delete_ranges_rejects_tracks_with_ripple_and_lifts_on_named_tracks() {
         &mut session,
         ToolCall::AddTrack(AddTrackArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             kind: TrackKindArg::Video,
         }),
     );
     let ranges = |ripple, tracks: Option<Vec<String>>| {
         ToolCall::DeleteRanges(DeleteRangesArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             ranges: vec![[10, 20]],
             ripple,
             tracks,
@@ -231,6 +241,7 @@ fn delete_ranges_rejects_tracks_with_ripple_and_lifts_on_named_tracks() {
             &mut session,
             ToolCall::DeleteRanges(DeleteRangesArgs {
                 timeline_id: timeline.clone(),
+                if_revision: None,
                 ranges: vec![[20, 10]],
                 ripple: false,
                 tracks: None,
@@ -256,6 +267,7 @@ fn move_and_trim_validate_their_targets() {
 
     let wrong_kind = ToolCall::MoveClips(MoveClipsArgs {
         timeline_id: timeline.clone(),
+        if_revision: None,
         moves: vec![ClipMove {
             clip_id: a.clone(),
             start: 0,
@@ -271,6 +283,7 @@ fn move_and_trim_validate_their_targets() {
         &mut session,
         ToolCall::MoveClips(MoveClipsArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             moves: vec![ClipMove {
                 clip_id: a.clone(),
                 start: 30,
@@ -283,6 +296,7 @@ fn move_and_trim_validate_their_targets() {
     let trim = |clip: &str, edge, frame| {
         ToolCall::TrimClip(TrimClipArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             clip_id: clip.into(),
             edge,
             frame,
@@ -303,6 +317,7 @@ fn set_clip_properties_checks_ranges_and_applies_everything() {
     let clip = solid(&mut session, &timeline, 0, 50);
     let props = |opacity, fade_in| SetClipPropertiesArgs {
         timeline_id: timeline.clone(),
+        if_revision: None,
         clip_ids: vec![clip.clone()],
         opacity,
         position: Some([10.0, -5.0]),
@@ -355,6 +370,7 @@ fn links_and_markers() {
     let b = solid(&mut session, &timeline, 50, 50);
     let clips = ToolCall::LinkClips(ClipsArgs {
         timeline_id: timeline.clone(),
+        if_revision: None,
         clip_ids: vec![a.clone(), b.clone()],
     });
     let linked = ok(&mut session, clips);
@@ -362,6 +378,7 @@ fn links_and_markers() {
     let unlink = || {
         ToolCall::UnlinkClips(ClipsArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             clip_ids: vec![a.clone()],
         })
     };
@@ -376,6 +393,7 @@ fn links_and_markers() {
         &mut session,
         ToolCall::AddMarker(AddMarkerArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             at: 12,
             duration: None,
             note: Some("check".into()),
@@ -385,10 +403,11 @@ fn links_and_markers() {
         .as_str()
         .unwrap()
         .to_owned();
-    let edited = ok(
+    let mut edited = ok(
         &mut session,
         ToolCall::EditMarker(EditMarkerArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             marker_id: marker.clone(),
             at: Some(20),
             duration: Some(5),
@@ -396,6 +415,8 @@ fn links_and_markers() {
             color: None,
         }),
     );
+    assert!(edited["revision"].is_string());
+    edited.as_object_mut().unwrap().remove("revision");
     assert_eq!(
         edited,
         json!({ "id": marker, "start": 20, "duration": 5, "note": "check", "color": "yellow" })
@@ -404,6 +425,7 @@ fn links_and_markers() {
         &mut session,
         ToolCall::DeleteMarker(MarkerArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             marker_id: marker.clone(),
         }),
     );
@@ -445,6 +467,7 @@ fn clip_colors_are_set_read_and_cleared() {
     let color = |clip_ids: Vec<String>, color| {
         ToolCall::SetClipColor(SetClipColorArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             clip_ids,
             color,
         })
@@ -489,6 +512,7 @@ fn markers_carry_a_color_and_are_listed() {
     let add = |at, color| {
         ToolCall::AddMarker(AddMarkerArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             at,
             duration: None,
             note: None,
@@ -502,6 +526,7 @@ fn markers_carry_a_color_and_are_listed() {
         &mut session,
         ToolCall::EditMarker(EditMarkerArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             marker_id: first["id"].as_str().unwrap().into(),
             at: None,
             duration: None,
@@ -531,4 +556,52 @@ fn markers_carry_a_color_and_are_listed() {
         })
         .collect();
     assert_eq!(summary, [(10, "red", "retake"), (40, "cyan", "")]);
+}
+
+#[test]
+fn edits_are_refused_when_the_timeline_changed_since_the_agent_read_it() {
+    let mut session = Session::default();
+    let timeline = with_timeline(&mut session);
+    let other = with_timeline(&mut session);
+    let clip = solid(&mut session, &timeline, 0, 50);
+    let read = ok(
+        &mut session,
+        ToolCall::GetTimeline(TimelineArgs {
+            timeline_id: timeline.clone(),
+        }),
+    )["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let split_at = |frame, if_revision: &str| {
+        ToolCall::Split(SplitArgs {
+            timeline_id: timeline.clone(),
+            if_revision: Some(if_revision.to_owned()),
+            frame,
+            clip_ids: None,
+        })
+    };
+
+    // Edits elsewhere do not count.
+    solid(&mut session, &other, 0, 50);
+    let result = ok(&mut session, split_at(20, &read));
+    let after_split = result["revision"].as_str().unwrap().to_owned();
+    assert_ne!(after_split, read);
+
+    // The user edits this timeline: the agent's stale revision is refused.
+    ok(
+        &mut session,
+        ToolCall::SetClipColor(SetClipColorArgs {
+            timeline_id: timeline.clone(),
+            if_revision: None,
+            clip_ids: vec![clip],
+            color: ClipColorArg::Red,
+        }),
+    );
+    let refused = error(&mut session, split_at(10, &after_split));
+    assert!(
+        refused.starts_with("the timeline changed since you read it"),
+        "{refused}"
+    );
+    assert_eq!(spans(&mut session, &timeline, 0), [(0, 20), (20, 50)]);
 }

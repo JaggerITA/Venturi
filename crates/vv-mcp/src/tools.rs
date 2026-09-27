@@ -123,6 +123,10 @@ pub struct ClipArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct ClipsArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub clip_ids: Vec<String>,
 }
 
@@ -147,12 +151,20 @@ pub enum TrackKindArg {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct AddTrackArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub kind: TrackKindArg,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct SetTrackArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// Track name as in `get_timeline`: "V1", "A2", ...
     pub track: String,
     #[serde(default)]
@@ -171,6 +183,10 @@ fn yes() -> bool {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct InsertClipArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub media_id: String,
     /// Timeline frame where the clip starts. What is already there is
     /// overwritten (shortened, split or removed).
@@ -201,6 +217,10 @@ pub struct InsertClipArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct SplitArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// Timeline frame of the cut: the right halves start here.
     pub frame: i64,
     /// Only these clips; default every clip of the unlocked tracks crossing
@@ -212,6 +232,10 @@ pub struct SplitArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct DeleteClipsArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub clip_ids: Vec<String>,
     /// Close the gaps, shifting everything after them on every unlocked
     /// track (their linked clips are deleted too). Default false.
@@ -222,6 +246,10 @@ pub struct DeleteClipsArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct DeleteRangesArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// `[start, end)` timeline frame ranges; clips crossing an edge are cut
     /// there. Overlapping or touching ranges are merged.
     pub ranges: Vec<[i64; 2]>,
@@ -248,6 +276,10 @@ pub struct ClipMove {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct MoveClipsArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// The moved clips overwrite what is at their destination. Linked clips
     /// are not moved along: list them too.
     pub moves: Vec<ClipMove>,
@@ -263,6 +295,10 @@ pub enum EdgeArg {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct TrimClipArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub clip_id: String,
     pub edge: EdgeArg,
     /// New timeline frame of that edge (`end` is exclusive). Growing over
@@ -273,6 +309,10 @@ pub struct TrimClipArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct SetClipPropertiesArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub clip_ids: Vec<String>,
     /// Percent, 0-100.
     #[serde(default)]
@@ -307,6 +347,10 @@ pub struct SetClipPropertiesArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct AddTitleArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub text: String,
     /// Timeline start frame; what is there on the track is overwritten.
     pub at: i64,
@@ -330,6 +374,10 @@ pub struct AddTitleArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct AddSolidColorArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// Timeline start frame; what is there on the track is overwritten.
     pub at: i64,
     /// In timeline frames. Default 5 s.
@@ -346,6 +394,10 @@ pub struct AddSolidColorArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct AddAdjustmentClipArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// Timeline start frame; what is there on the track is overwritten.
     pub at: i64,
     /// In timeline frames. Default 5 s.
@@ -397,6 +449,10 @@ pub enum ClipColorArg {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct SetClipColorArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub clip_ids: Vec<String>,
     /// How the clips look on the timeline, to tag them (e.g. takes to
     /// review). It does not change the picture.
@@ -406,6 +462,10 @@ pub struct SetClipColorArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct AddMarkerArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     /// Timeline frame.
     pub at: i64,
     /// In timeline frames; 0 (default) marks a single frame.
@@ -421,6 +481,10 @@ pub struct AddMarkerArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct EditMarkerArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub marker_id: String,
     #[serde(default)]
     pub at: Option<i64>,
@@ -435,6 +499,10 @@ pub struct EditMarkerArgs {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct MarkerArgs {
     pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
     pub marker_id: String,
 }
 

@@ -64,6 +64,7 @@ fn insert(session: &mut Session, timeline: &str, media: &str, source_in: i64) {
         session,
         ToolCall::InsertClip(InsertClipArgs {
             timeline_id: timeline.into(),
+            if_revision: None,
             media_id: media.into(),
             at: 0,
             source_in: Some(source_in),
@@ -206,6 +207,7 @@ fn export_runs_in_the_background_and_reports_its_state() {
         &mut session,
         ToolCall::AddSolidColor(AddSolidColorArgs {
             timeline_id: timeline.clone(),
+            if_revision: None,
             at: 0,
             duration: Some(10),
             track: None,

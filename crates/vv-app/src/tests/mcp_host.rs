@@ -37,6 +37,7 @@ fn call_and_wait(app: &mut VenturiApp, handle: &McpHandle, call: ToolCall) -> To
 fn opacity(timeline_id: TimelineId, clip: ClipId, value: f32) -> ToolCall {
     ToolCall::SetClipProperties(SetClipPropertiesArgs {
         timeline_id: timeline_id_string(timeline_id),
+        if_revision: None,
         clip_ids: vec![clip.0.to_string()],
         opacity: Some(value),
         position: None,

@@ -120,11 +120,22 @@ pub(crate) fn media_json(project: &Project, id: MediaId) -> Value {
     value
 }
 
+/// Changes whenever anything in the timeline does: a fingerprint of its
+/// content, not a counter, so edits to other timelines leave it alone.
+pub(crate) fn timeline_revision(project: &Project, id: TimelineId) -> String {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(&project.timelines[id]).unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 pub(crate) fn timeline_json(project: &Project, id: TimelineId) -> Value {
     let timeline = &project.timelines[id];
     let length = timeline.total_frames();
     json!({
         "id": key_to_string(id),
+        "revision": timeline_revision(project, id),
         "name": timeline.name,
         "fps": fps_json(timeline.fps),
         "resolution": [timeline.resolution.0, timeline.resolution.1],
