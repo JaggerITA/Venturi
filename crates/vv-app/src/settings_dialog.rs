@@ -44,6 +44,8 @@ struct Capture {
 }
 
 pub struct SettingsDialog {
+    /// MCP is on for this run whatever the setting (`--mcp`).
+    pub mcp_forced: bool,
     section: Section,
     capture: Option<Capture>,
     notice: Option<String>,
@@ -57,6 +59,7 @@ pub struct SettingsDialogResponse {
 impl SettingsDialog {
     pub fn new(section: Section) -> Self {
         Self {
+            mcp_forced: false,
             section,
             capture: None,
             notice: None,
@@ -96,7 +99,7 @@ impl SettingsDialog {
                             response.changed |= playback_section(ui, settings);
                         }
                         Section::Integrations => {
-                            response.changed |= integrations_section(ui, settings);
+                            response.changed |= integrations_section(ui, settings, self.mcp_forced);
                         }
                         Section::Shortcuts => {
                             response.changed |= self.shortcuts_section(ui, &mut settings.keymap);
@@ -261,16 +264,24 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     changed
 }
 
-fn integrations_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
+fn integrations_section(ui: &mut egui::Ui, settings: &mut Settings, forced: bool) -> bool {
     let changed = ui
         .checkbox(&mut settings.mcp_enabled, t!("settings.mcp_enabled"))
         .changed();
+    if forced && !settings.mcp_enabled {
+        ui.label(egui::RichText::new(t!("settings.mcp_forced")).color(crate::theme::ACCENT));
+    }
     ui.add_space(4.0);
     ui.label(egui::RichText::new(t!("settings.mcp_enabled_hint")).weak());
     // Inside an AppImage, `current_exe` is the temporary mount.
     let exe = std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_exe().ok());
+        .or_else(|| std::env::current_exe().ok())
+        .map(|exe| {
+            // Linux marks a binary replaced while running.
+            let path = exe.display().to_string();
+            PathBuf::from(path.strip_suffix(" (deleted)").unwrap_or(&path))
+        });
     let command = format!(
         "{} mcp --attach",
         exe.map_or_else(|| "vv-app".into(), |exe| exe.display().to_string())

@@ -1728,7 +1728,9 @@ impl VenturiApp {
     /// Transform handles of the first selected video clip, if it is under
     /// the playhead and the viewer shows the timeline stopped.
     fn open_settings(&mut self, section: settings_dialog::Section) {
-        self.settings_dialog = Some(settings_dialog::SettingsDialog::new(section));
+        let mut dialog = settings_dialog::SettingsDialog::new(section);
+        dialog.mcp_forced = self.mcp_forced;
+        self.settings_dialog = Some(dialog);
     }
 
     fn show_settings_dialog(&mut self, ctx: &egui::Context) {
