@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** planned, not started. `SESSION_LAYER.md` is done (branch `session_layer`); see its deviations.
+**Status:** in progress on branch `mcp_server` (based on `session_layer`): step 2 done.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -199,7 +199,7 @@ speed ramps, OTIO export, playback control.
 | # | Step | Commit |
 |---|------|--------|
 | 1 | `SESSION_LAYER.md` steps 1-4 (edit layer, `vv-session`, jobs + events) | see that plan |
-| 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | |
+| 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | 555241f |
 | 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | |
 | 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | |
 | 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | |
@@ -207,6 +207,25 @@ speed ramps, OTIO export, playback control.
 
 Each step builds and passes `timeout 300 cargo test` on its own. The risk
 sits in step 1 (the session refactor); steps 2-6 only add code.
+
+## Step 2 notes
+
+- No `McpHost` trait: a concrete channel (`vv_mcp::channel(notify)` →
+  `McpHandle` for the transport, `McpInbox` for the owner of the
+  `Session`) serves both hosts; `notify` is the GUI's repaint request.
+  The inbox's session waker holds the sender weakly, so dropping the last
+  handle still ends `run_headless`.
+- `run_headless` lives in vv-mcp; the `vv-app mcp` subcommand that starts it
+  comes with the stdio transport in step 3 (without a transport nobody could
+  talk to it).
+- `Session` is not `Send` (`History` holds `Box<dyn Command>`): the host
+  owns it on its thread, the tokio runtime of step 3 goes on another one.
+- First tools, enough to exercise immediate and deferred calls:
+  `get_project`, `new_project`, `open_project`, `save_project`,
+  `import_media` (answers when the import job ends, listing media already
+  in the pool too), `create_timeline`, `undo`, `redo`.
+- `undo`/`redo` do not resync timeline pool entries (which timeline a step
+  touched is unknown); only matters once compound clips are exposed (v2).
 
 ## Open points
 
