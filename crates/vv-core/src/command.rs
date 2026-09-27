@@ -181,7 +181,10 @@ impl History {
     fn close_group(&mut self, mark: GroupMark, label: Option<CommandLabel>) {
         self.revision += 1;
         let commands = self.undo_stack.split_off(mark.0.min(self.undo_stack.len()));
-        if commands.len() > 1 {
+        // A single step is wrapped only to rename it: it may be the one an
+        // edit operation already grouped.
+        let renames = |label: CommandLabel| commands[0].label() != label;
+        if commands.len() > 1 || (commands.len() == 1 && label.is_some_and(renames)) {
             let label = label.unwrap_or_else(|| commands[0].label());
             self.undo_stack
                 .push(Box::new(CompositeCommand::new(label, commands)));

@@ -161,3 +161,20 @@ fn a_joinable_step_never_absorbs_a_plain_composite() {
 
     assert_eq!(history.position(), 2);
 }
+
+#[test]
+fn an_explicit_label_renames_a_group_of_one_step() {
+    let (mut project, tl) = project();
+    let mut history = History::default();
+
+    let mark = history.begin_group();
+    history.do_command(&mut project, add_track(tl));
+    history.end_group_as(mark, CommandLabel::InsertClips);
+
+    assert_eq!(
+        history.labels().collect::<Vec<_>>(),
+        vec![CommandLabel::InsertClips]
+    );
+    history.undo(&mut project);
+    assert_eq!(tracks(&project, tl), 1);
+}
