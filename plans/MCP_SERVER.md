@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** in progress on branch `mcp_server` (based on `session_layer`): step 2 done.
+**Status:** in progress on branch `mcp_server` (based on `session_layer`): steps 2-3 done.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -200,7 +200,7 @@ speed ramps, OTIO export, playback control.
 |---|------|--------|
 | 1 | `SESSION_LAYER.md` steps 1-4 (edit layer, `vv-session`, jobs + events) | see that plan |
 | 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | 555241f |
-| 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | |
+| 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | 5e774af, db8d234 |
 | 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | |
 | 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | |
 | 6 | `docs/MCP.md` | |
@@ -226,6 +226,29 @@ sits in step 1 (the session refactor); steps 2-6 only add code.
   in the pool too), `create_timeline`, `undo`, `redo`.
 - `undo`/`redo` do not resync timeline pool entries (which timeline a step
   touched is unknown); only matters once compound clips are exposed (v2).
+
+## Step 3 notes
+
+- `vv-app mcp [project.vvproj]` serves 28 tools over stdio (rmcp 3.4.1,
+  tokio current-thread runtime on its own thread). Claude Code:
+  `claude mcp add venturi -- /path/to/vv-app mcp`.
+- Tracks are addressed by the names the user sees (`V1`, `A2`), clips by id
+  alone (the track is looked up). Every editing tool validates all its
+  arguments before touching the project and runs as one undo step; if it
+  still fails midway, what it applied is undone.
+- `vv_core::edit` gained `move_clips`, `trim_range`/`grown_range`/`trim_clip`
+  (moved out of `timeline_ui`, which now uses them) and `split_clips`
+  returns the right halves.
+- Not done from the v1 list, left for later: `set_active_timeline` (a GUI
+  notion, goes with `get_state` in step 5); the `folder` argument of
+  `import_media`; `insert_clip` insert (ripple) mode — only overwrite, a
+  ripple insert needs a new command; `set_transition`; speed, blend mode and
+  filters in `set_clip_properties`.
+- Tested end to end: a scripted JSON-RPC client over the real binary's
+  stdio, an in-process rmcp client test, and Claude Code itself
+  (`claude-local.sh -p` with `--mcp-config`) importing, building a
+  timeline, ripple-deleting a second, adding a title and saving — the saved
+  project reopened as expected.
 
 ## Open points
 
