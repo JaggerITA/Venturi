@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** in progress on branch `mcp_server` (based on `session_layer`): done (steps 1-6), not merged.
+**Status:** done on branch `mcp_server` (based on `session_layer`), not merged.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
