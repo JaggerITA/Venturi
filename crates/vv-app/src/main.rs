@@ -3536,9 +3536,14 @@ fn app_icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if first.as_deref() == Some("mcp") {
+        run_mcp_server(args.next().map(PathBuf::from));
+    }
     // Optional argument: path of a video to import immediately at startup
     // (handy for debugging/smoke tests, as well as for command-line use).
-    let startup_path = std::env::args().nth(1).map(PathBuf::from);
+    let startup_path = first.map(PathBuf::from);
     std::thread::spawn(vv_render::text::warm_up);
     // The first NVENC check initializes CUDA: better not in the UI.
     std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
@@ -3598,6 +3603,25 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// `vv-app mcp [project.vvproj]`: an MCP server on stdin/stdout, no window.
+/// Stdout carries the protocol: nothing else may print there.
+fn run_mcp_server(project: Option<PathBuf>) -> ! {
+    let mut session = vv_session::Session::default();
+    if let Some(path) = project
+        && let Err(e) = session.open(&path)
+    {
+        eprintln!("cannot open {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    match vv_mcp::serve_headless_stdio(session) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("MCP server: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]

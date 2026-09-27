@@ -3,12 +3,16 @@
 //! transport only sends it `ToolCall`s through a `McpHandle`.
 
 mod dispatch;
+mod edit_tools;
 mod host;
 mod ids;
+mod json;
+mod server;
 mod tools;
 
 pub use dispatch::{Dispatch, Pending, dispatch};
 pub use host::{
     Disconnected, McpHandle, McpInbox, McpRequest, PendingCalls, channel, run_headless,
 };
+pub use server::{VenturiServer, serve_headless_stdio, serve_stdio};
 pub use tools::*;

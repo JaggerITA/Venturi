@@ -107,7 +107,7 @@ impl PendingCalls {
         self.0.push((pending, reply));
     }
 
-    pub fn resolve(&mut self, session: &Session, event: &vv_session::SessionEvent) {
+    pub fn resolve(&mut self, session: &mut Session, event: &vv_session::SessionEvent) {
         let mut index = 0;
         while index < self.0.len() {
             match self.0[index].0.resolve(session, event) {
@@ -138,7 +138,7 @@ pub fn run_headless(mut session: Session, inbox: McpInbox) -> Session {
             Err(Disconnected) => return session,
         }
         for event in session.tick() {
-            pending.resolve(&session, &event);
+            pending.resolve(&mut session, &event);
         }
     }
 }

@@ -2,7 +2,7 @@ use super::*;
 use std::path::Path;
 use vv_core::edit;
 
-fn test_dir(name: &str) -> PathBuf {
+pub(crate) fn test_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vv-mcp-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -34,18 +34,18 @@ pub(crate) fn clip_file(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-fn handled(session: &mut Session, call: ToolCall) -> ToolResult {
+pub(crate) fn handled(session: &mut Session, call: ToolCall) -> ToolResult {
     match dispatch(session, call) {
         Dispatch::Handled(result) => result,
         Dispatch::Deferred(_) => panic!("expected an immediate result"),
     }
 }
 
-fn ok(session: &mut Session, call: ToolCall) -> Value {
+pub(crate) fn ok(session: &mut Session, call: ToolCall) -> Value {
     handled(session, call).unwrap().value
 }
 
-fn error(session: &mut Session, call: ToolCall) -> String {
+pub(crate) fn error(session: &mut Session, call: ToolCall) -> String {
     handled(session, call).unwrap_err().0
 }
 
@@ -66,7 +66,7 @@ fn run_deferred(session: &mut Session, call: ToolCall) -> ToolResult {
     }
 }
 
-fn import(session: &mut Session, paths: &[&Path]) -> Value {
+pub(crate) fn import(session: &mut Session, paths: &[&Path]) -> Value {
     let args = ImportMediaArgs {
         paths: paths.iter().map(|p| p.display().to_string()).collect(),
     };
@@ -75,7 +75,7 @@ fn import(session: &mut Session, paths: &[&Path]) -> Value {
         .value
 }
 
-fn create(name: &str) -> CreateTimelineArgs {
+pub(crate) fn create(name: &str) -> CreateTimelineArgs {
     CreateTimelineArgs {
         name: name.into(),
         from_media: None,

@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use vv_core::{MediaId, MediaItem, Project, Rational, Timeline, TimelineId, Track, TrackKind};
-use vv_session::{JobId, Session, SessionEvent};
+use vv_core::{Rational, Timeline, Track, TrackKind};
+use vv_session::{JobId, OtioMerged, Session, SessionEvent};
 
+use crate::edit_tools;
 use crate::ids::{self, key_to_string};
+use crate::json::*;
 use crate::tools::*;
 
 pub enum Dispatch {
@@ -15,11 +17,18 @@ pub enum Dispatch {
 }
 
 pub enum Pending {
-    Import { job: JobId, paths: Vec<PathBuf> },
+    Import {
+        job: JobId,
+        paths: Vec<PathBuf>,
+    },
+    Otio {
+        job: JobId,
+        reuse_existing_media: bool,
+    },
 }
 
 impl Pending {
-    pub fn resolve(&self, session: &Session, event: &SessionEvent) -> Option<ToolResult> {
+    pub fn resolve(&self, session: &mut Session, event: &SessionEvent) -> Option<ToolResult> {
         match (self, event) {
             (
                 Pending::Import { job, paths },
@@ -40,21 +49,60 @@ impl Pending {
                     json!({ "media": media, "errors": errors }),
                 )))
             }
+            (Pending::Otio { job, .. }, SessionEvent::OtioImported { job: done, result })
+                if job == done =>
+            {
+                Some(Ok(ToolOutput::json(otio_json(session, result))))
+            }
+            (
+                Pending::Otio {
+                    job,
+                    reuse_existing_media,
+                },
+                SessionEvent::OtioNeedsDecision { job: waiting },
+            ) if job == waiting => {
+                let result = session.finish_otio_import(Some(*reuse_existing_media))?;
+                Some(Ok(ToolOutput::json(otio_json(session, &result))))
+            }
+            (Pending::Otio { job, .. }, SessionEvent::OtioFailed { job: failed, error })
+                if job == failed =>
+            {
+                Some(Err(ToolError(format!("OTIO import failed: {error}"))))
+            }
             _ => None,
         }
     }
 }
 
 pub fn dispatch(session: &mut Session, call: ToolCall) -> Dispatch {
-    if let ToolCall::ImportMedia(args) = call {
-        return import_media(session, args);
+    match call {
+        ToolCall::ImportMedia(args) => import_media(session, args),
+        ToolCall::ImportOtio(args) => import_otio(session, args),
+        call => Dispatch::Handled(run(session, call)),
     }
-    Dispatch::Handled(run(session, call))
 }
 
 fn run(session: &mut Session, call: ToolCall) -> ToolResult {
     match call {
         ToolCall::GetProject => Ok(ToolOutput::json(project_json(session))),
+        ToolCall::GetTimeline(args) => {
+            let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
+            Ok(ToolOutput::json(timeline_detail_json(
+                &session.project,
+                timeline,
+            )))
+        }
+        ToolCall::GetClip(args) => {
+            let project = &session.project;
+            let timeline = ids::timeline_id(project, &args.timeline_id)?;
+            let (track, id) = ids::clip_ref(project, timeline, &args.clip_id)?;
+            let clip = project.timelines[timeline]
+                .clip(track, id)
+                .expect("found above");
+            Ok(ToolOutput::json(clip_detail_json(
+                project, timeline, track, clip,
+            )))
+        }
         ToolCall::NewProject => {
             session.new_project();
             Ok(ToolOutput::json(project_json(session)))
@@ -79,6 +127,23 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
             Ok(ToolOutput::json(json!({ "path": path })))
         }
         ToolCall::CreateTimeline(args) => create_timeline(session, args),
+        ToolCall::AddTrack(args) => edit_tools::add_track(session, args),
+        ToolCall::SetTrack(args) => edit_tools::set_track(session, args),
+        ToolCall::InsertClip(args) => edit_tools::insert_clip(session, args),
+        ToolCall::Split(args) => edit_tools::split(session, args),
+        ToolCall::DeleteClips(args) => edit_tools::delete_clips(session, args),
+        ToolCall::DeleteRanges(args) => edit_tools::delete_ranges(session, args),
+        ToolCall::MoveClips(args) => edit_tools::move_clips(session, args),
+        ToolCall::TrimClip(args) => edit_tools::trim_clip(session, args),
+        ToolCall::SetClipProperties(args) => edit_tools::set_clip_properties(session, args),
+        ToolCall::AddTitle(args) => edit_tools::add_title(session, args),
+        ToolCall::AddSolidColor(args) => edit_tools::add_solid_color(session, args),
+        ToolCall::AddAdjustmentClip(args) => edit_tools::add_adjustment_clip(session, args),
+        ToolCall::LinkClips(args) => edit_tools::link_clips(session, args),
+        ToolCall::UnlinkClips(args) => edit_tools::unlink_clips(session, args),
+        ToolCall::AddMarker(args) => edit_tools::add_marker(session, args),
+        ToolCall::EditMarker(args) => edit_tools::edit_marker(session, args),
+        ToolCall::DeleteMarker(args) => edit_tools::delete_marker(session, args),
         ToolCall::Undo => {
             let position = session.history.position();
             let Some(label) = position
@@ -98,7 +163,9 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
             session.history.redo(&mut session.project);
             Ok(ToolOutput::json(json!({ "redone": format!("{label:?}") })))
         }
-        ToolCall::ImportMedia(_) => Err(ToolError("import_media is deferred".into())),
+        ToolCall::ImportMedia(_) | ToolCall::ImportOtio(_) => {
+            Err(ToolError("deferred call run as immediate".into()))
+        }
     }
 }
 
@@ -109,6 +176,28 @@ fn import_media(session: &mut Session, args: ImportMediaArgs) -> Dispatch {
     let paths: Vec<PathBuf> = args.paths.iter().map(PathBuf::from).collect();
     let job = session.import_media(paths.clone());
     Dispatch::Deferred(Pending::Import { job, paths })
+}
+
+fn import_otio(session: &mut Session, args: ImportOtioArgs) -> Dispatch {
+    match session.import_otio(Path::new(&args.path)) {
+        Some(job) => Dispatch::Deferred(Pending::Otio {
+            job,
+            reuse_existing_media: args.reuse_existing_media,
+        }),
+        None => Dispatch::Handled(Err(ToolError(
+            "another OTIO import is still running".into(),
+        ))),
+    }
+}
+
+fn otio_json(session: &Session, result: &OtioMerged) -> Value {
+    let project = &session.project;
+    json!({
+        "timelines": result.timelines.iter().map(|&id| timeline_json(project, id)).collect::<Vec<_>>(),
+        "added_media": result.added_media.iter().map(|&id| media_json(project, id)).collect::<Vec<_>>(),
+        "folder": result.folder.map(key_to_string),
+        "warnings": result.warnings.iter().map(|w| format!("{w:?}")).collect::<Vec<_>>(),
+    })
 }
 
 fn create_timeline(session: &mut Session, args: CreateTimelineArgs) -> ToolResult {
@@ -141,78 +230,6 @@ fn create_timeline(session: &mut Session, args: CreateTimelineArgs) -> ToolResul
         markers: Vec::new(),
     });
     Ok(ToolOutput::json(timeline_json(&session.project, id)))
-}
-
-fn fps_json(fps: Rational) -> Value {
-    json!({ "num": fps.num, "den": fps.den, "value": fps.as_f64() })
-}
-
-fn project_json(session: &Session) -> Value {
-    let project = &session.project;
-    json!({
-        "path": session.path(),
-        "unsaved": session.has_unsaved_changes(),
-        "media": project.media_pool.keys().map(|id| media_json(project, id)).collect::<Vec<_>>(),
-        "timelines": project.timelines.keys().map(|id| timeline_json(project, id)).collect::<Vec<_>>(),
-        "folders": project.folders.iter().map(|(id, folder)| json!({
-            "id": key_to_string(id),
-            "name": folder.name,
-            "parent": folder.parent.map(key_to_string),
-        })).collect::<Vec<_>>(),
-    })
-}
-
-fn media_kind(item: &MediaItem) -> &'static str {
-    if item.compound.is_some() {
-        "timeline"
-    } else if item.meta.is_image() {
-        "image"
-    } else if item.meta.has_video {
-        "video"
-    } else {
-        "audio"
-    }
-}
-
-fn media_json(project: &Project, id: MediaId) -> Value {
-    let item = &project.media_pool[id];
-    let meta = &item.meta;
-    let mut value = json!({
-        "id": key_to_string(id),
-        "name": vv_session::file_label(&item.path),
-        "kind": media_kind(item),
-        "fps": fps_json(meta.fps),
-        "duration_frames": meta.duration_frames,
-        "duration_secs": meta.duration_frames as f64 / meta.fps.as_f64().max(1e-9),
-        "audio_streams": if meta.has_audio { meta.audio_stream_count() } else { 0 },
-        "folder": item.folder.map(key_to_string),
-    });
-    match item.compound {
-        Some(timeline) => value["timeline_id"] = json!(key_to_string(timeline)),
-        None => {
-            value["path"] = json!(item.path);
-            value["offline"] = json!(!item.path.exists());
-        }
-    }
-    if meta.has_video {
-        value["resolution"] = json!([meta.width, meta.height]);
-    }
-    value
-}
-
-fn timeline_json(project: &Project, id: TimelineId) -> Value {
-    let timeline = &project.timelines[id];
-    let length = timeline.total_frames();
-    json!({
-        "id": key_to_string(id),
-        "name": timeline.name,
-        "fps": fps_json(timeline.fps),
-        "resolution": [timeline.resolution.0, timeline.resolution.1],
-        "length_frames": length,
-        "length_secs": length as f64 / timeline.fps.as_f64().max(1e-9),
-        "video_tracks": timeline.tracks_of_kind(TrackKind::Video).count(),
-        "audio_tracks": timeline.tracks_of_kind(TrackKind::Audio).count(),
-    })
 }
 
 #[cfg(test)]
