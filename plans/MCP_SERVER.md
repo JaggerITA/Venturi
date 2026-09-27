@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** planned, not started. Depends on `SESSION_LAYER.md` (steps 1-4).
+**Status:** planned, not started. `SESSION_LAYER.md` is done (branch `session_layer`); see its deviations.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -71,6 +71,9 @@ This plan assumes its steps 1-4 are done.
     into the user's undo step;
   - a modal in the way (`pending_project_switch`, unsaved-changes dialog):
     the call fails with a "busy" error instead of waiting forever.
+- After an edit tool, the dispatcher calls
+  `Session::sync_timeline_media(timeline)` so the timeline's pool entry
+  follows (the GUI does it only for the open timeline).
 - Heavy work never runs on the owner thread: `render_frame`,
   `get_audio_levels` and `export` take a project snapshot (the same
   `project.clone()` export already does) and reply from a worker thread.

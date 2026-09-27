@@ -1,6 +1,6 @@
 # SESSION_LAYER — separate the application core from the egui shell
 
-**Status:** approved 2026-09-27, in progress on branch `session_layer`. Prerequisite of `MCP_SERVER.md`.
+**Status:** done on branch `session_layer` (2026-09-27), not merged. Prerequisite of `MCP_SERVER.md`.
 
 ## Problem
 
@@ -102,12 +102,12 @@ no behaviour change.
 
 | # | Step | Commit |
 |---|------|--------|
-| 1 | `vv_core::edit`: split/delete/ripple/insert with explicit targets + `delete_ranges`; `VenturiApp` methods become wrappers; tests in `vv-core/src/tests/edit.rs` | |
-| 2 | Create `vv-session`; move the egui-free modules (`export`, `frame_provider`, `import_worker`, `relink_job`, `forced_relink` logic, `worker`, `index_media_by_filename`); typed export errors | |
-| 3 | `Session` with project/history/path/saved state; `VenturiApp` holds it (mechanical `self.project` → `self.session.project`); fix-ups into `tick` | |
-| 4 | Jobs + waker + `tick() -> Vec<SessionEvent>`: import, OTIO import, relink, export; the app's pollers become event handlers | |
-| 5 | Open/save/new project into `Session` (the unsaved-changes dialog stays UI) | |
-| 6 | Session tests in `vv-session/src/tests/` driving import → edit → save → export without egui | |
+| 1 | `vv_core::edit`: split/delete/ripple/insert with explicit targets + `delete_ranges`; `VenturiApp` methods become wrappers; tests in `vv-core/src/tests/edit.rs` | 70dd5e2 |
+| 2 | Create `vv-session`; move the egui-free modules (`export`, `frame_provider`, `import_worker`, `relink_job`, `forced_relink` logic, `worker`, `index_media_by_filename`); typed export errors | e7ed796 |
+| 3 | `Session` with project/history/path/saved state; `VenturiApp` holds it (mechanical `self.project` → `self.session.project`); fix-ups into `tick` | 6d89309 | |
+| 4 | Jobs + waker + `tick() -> Vec<SessionEvent>`: import, OTIO import, relink, export; the app's pollers become event handlers | fa5cddc |
+| 5 | Open/save/new project into `Session` (the unsaved-changes dialog stays UI) | 05044e2 |
+| 6 | Session tests in `vv-session/src/tests/` driving import → edit → save → export without egui | 05044e2 |
 
 Step 3 is the noisiest diff (mechanical renames); step 4 the riskiest
 (ordering of the pollers inside `ui()`).
@@ -129,3 +129,24 @@ Step 3 is the noisiest diff (mechanical renames); step 4 the riskiest
 - `project` and `history` are public fields (keeps disjoint borrows such as
   `show_timeline(&mut s.project, &mut s.history, …)`); path, saved state,
   jobs are private, since the dirty-flag invariants live there.
+
+## Deviations from the design above
+
+- `delete_clips` skips locked tracks (the old Del did not; ripple delete
+  already did).
+- The timeline media resync is `Session::sync_timeline_media(timeline_id)`,
+  generation-gated, not part of `tick`: which timeline was edited is the
+  host's knowledge (the GUI passes the open one every frame, a headless host
+  passes the timeline it just edited).
+- Imports are one job per `import_media` call, run in order (before: paths
+  chosen during an import were merged into one follow-up batch). A media
+  imported in the background now enters the pool before the timeline the
+  app creates for it (`MediaAdded` arrives after the insertion); the pool
+  UI is sorted, so only `media_pool.iter()` order changes.
+- The OTIO reuse-media decision: `OtioNeedsDecision` event, then
+  `otio_awaiting_decision()` / `finish_otio_import(Option<bool>)`.
+- `FrameProvider` errors are `ExportError` too (a missing media has to stay
+  typed to be translated).
+- The five export tests that build their timeline through `VenturiApp`
+  stayed in vv-app (`tests/main_export.rs`); the session has its own
+  end-to-end test.
