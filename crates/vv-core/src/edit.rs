@@ -1,7 +1,6 @@
 //! Editing operations on explicit targets. Selection and playhead belong to
-//! the caller, and so does the undo grouping: an operation may push several
-//! history steps (tracks created on the fly, overlap fix-ups), which the
-//! caller wraps in `History::begin_group`/`end_group`.
+//! the caller. Each operation is at most one undo step; a caller combining
+//! several wraps them in `History::begin_group`/`end_group` (groups nest).
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -229,11 +228,13 @@ pub fn ripple_delete_clips(
             end - start,
         )));
     }
+    let mark = history.begin_group();
     history.do_command(
         project,
         Box::new(CompositeCommand::new(CommandLabel::RippleDelete, commands)),
     );
     cut_overlaps(project, history, timeline_id);
+    history.end_group(mark);
     merged.first().map(|&(start, _)| start)
 }
 
@@ -245,11 +246,13 @@ pub fn ripple_delete_gap(
     start: FrameIdx,
     end: FrameIdx,
 ) {
+    let mark = history.begin_group();
     history.do_command(
         project,
         Box::new(RippleDeleteGap::new(timeline_id, start, end - start)),
     );
     cut_overlaps(project, history, timeline_id);
+    history.end_group(mark);
 }
 
 /// How `delete_ranges` treats the removed material.
@@ -279,6 +282,7 @@ pub fn delete_ranges(
         } => tracks.contains(&track_index),
     };
     let merged = merge_ranges(ranges.iter().copied().filter(|&(s, e)| e > s));
+    let mark = history.begin_group();
     // Last to first, so rippling one range does not move the earlier ones.
     for &(start, end) in merged.iter().rev() {
         for edge in [end, start] {
@@ -305,6 +309,7 @@ pub fn delete_ranges(
             ripple_delete_gap(project, history, timeline_id, start, end);
         }
     }
+    history.end_group(mark);
 }
 
 fn merge_ranges(ranges: impl Iterator<Item = (FrameIdx, FrameIdx)>) -> Vec<(FrameIdx, FrameIdx)> {
@@ -357,6 +362,7 @@ pub fn insert_media(
     tracks: TargetTracks,
 ) -> Option<Vec<ClipRef>> {
     let meta = project.media_pool.get(insert.media_id)?.meta.clone();
+    let mark = history.begin_group();
     let tl = &project.timelines[timeline_id];
     let rate = Rational::conform_rate(tl.fps, meta.fps);
     let has_audio_tracks = tl.first_track_index(TrackKind::Audio).is_some();
@@ -420,6 +426,7 @@ pub fn insert_media(
         new_clips,
         CommandLabel::InsertClips,
     );
+    history.end_group(mark);
     Some(refs)
 }
 

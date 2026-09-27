@@ -199,7 +199,6 @@ fn import_edit_and_export_without_a_ui() {
     };
     let timeline = add_timeline(&mut session);
     insert_whole(&mut session, timeline, media, 0);
-    let mark = session.history.begin_group();
     edit::delete_ranges(
         &mut session.project,
         &mut session.history,
@@ -207,7 +206,6 @@ fn import_edit_and_export_without_a_ui() {
         &[(10, 20), (30, 40)],
         &RangeDelete::Ripple,
     );
-    session.history.end_group(mark);
     session.sync_timeline_media(timeline);
     let total = session.project.timelines[timeline].total_frames();
     assert_eq!(total, 30);
@@ -220,7 +218,9 @@ fn import_edit_and_export_without_a_ui() {
     assert_eq!(item.meta.duration_frames, 30);
 
     let output = dir.join("out.mp4");
-    let (job, progress) = session.export(timeline, ExportSettings::new(output.clone()), 0..total);
+    let (job, progress) = session
+        .export(timeline, ExportSettings::new(output.clone()), 0..total)
+        .unwrap();
     let events = run_jobs(&mut session);
 
     assert!(matches!(
@@ -230,6 +230,36 @@ fn import_edit_and_export_without_a_ui() {
     assert!(progress.lock().unwrap().done);
     let frames = vv_media::probe(&output).unwrap().duration_frames;
     assert!((29..=30).contains(&frames), "frames={frames}");
+}
+
+#[test]
+fn a_new_project_resyncs_its_timeline_media_from_the_first_edit() {
+    let mut session = Session::default();
+    let insert_solid = |session: &mut Session, timeline| {
+        edit::insert_generator(
+            &mut session.project,
+            &mut session.history,
+            timeline,
+            edit::Generator::SolidColor,
+            0,
+            0,
+        );
+        session.sync_timeline_media(timeline);
+    };
+    let timeline = add_timeline(&mut session);
+    insert_solid(&mut session, timeline);
+
+    session.new_project();
+    let timeline = add_timeline(&mut session);
+    insert_solid(&mut session, timeline);
+
+    let item = session
+        .project
+        .media_pool
+        .values()
+        .find(|item| item.compound == Some(timeline))
+        .unwrap();
+    assert_eq!(item.meta.duration_frames, 125);
 }
 
 #[test]
@@ -245,7 +275,9 @@ fn a_cancelled_export_reports_it() {
         0,
         0,
     );
-    let (_, progress) = session.export(timeline, ExportSettings::new(dir.join("out.mp4")), 0..125);
+    let settings = ExportSettings::new(dir.join("out.mp4"));
+    let (_, progress) = session.export(timeline, settings.clone(), 0..125).unwrap();
+    assert!(session.export(timeline, settings, 0..125).is_none());
     session.cancel_export();
     let events = run_jobs(&mut session);
 

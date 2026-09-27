@@ -711,8 +711,10 @@ impl VenturiApp {
         settings: export::ExportSettings,
         range: std::ops::Range<FrameIdx>,
     ) {
+        let Some((_, progress)) = self.session.export(timeline_id, settings, range) else {
+            return;
+        };
         self.pause_proxies_for_export();
-        let (_, progress) = self.session.export(timeline_id, settings, range);
         self.export = Some(ExportUiState { progress });
     }
 

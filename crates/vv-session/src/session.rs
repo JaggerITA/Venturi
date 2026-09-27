@@ -64,6 +64,8 @@ impl Session {
     pub fn replace_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.project = project;
         self.history = History::default();
+        // The new history counts from 0 again.
+        self.synced_timeline_generation = self.history.generation();
         self.path = path;
         self.mark_saved();
         for item in self.project.media_pool.values_mut() {

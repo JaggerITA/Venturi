@@ -529,13 +529,17 @@ impl Session {
     }
 
     /// Exports a snapshot of the project on a thread: editing can go on.
-    /// The progress stays readable after the end.
+    /// The progress stays readable after the end. `None` while another
+    /// export is running.
     pub fn export(
         &mut self,
         timeline_id: TimelineId,
         settings: ExportSettings,
         range: std::ops::Range<FrameIdx>,
-    ) -> (JobId, Arc<Mutex<ExportProgress>>) {
+    ) -> Option<(JobId, Arc<Mutex<ExportProgress>>)> {
+        if self.jobs.export.is_some() {
+            return None;
+        }
         let job = self.jobs.alloc();
         let project = self.project.clone();
         let progress = Arc::new(Mutex::new(ExportProgress::default()));
@@ -567,7 +571,7 @@ impl Session {
             cancel,
             handle,
         });
-        (job, progress)
+        Some((job, progress))
     }
 
     pub fn cancel_export(&self) {

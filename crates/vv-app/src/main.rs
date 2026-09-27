@@ -2358,7 +2358,6 @@ impl VenturiApp {
         if self.timeline_state.selected.is_empty() {
             // No clip selected: the selected gap is closed, if there is one.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
-                let mark = self.session.history.begin_group();
                 vv_core::edit::ripple_delete_gap(
                     &mut self.session.project,
                     &mut self.session.history,
@@ -2366,7 +2365,6 @@ impl VenturiApp {
                     gap_start,
                     gap_end,
                 );
-                self.session.history.end_group(mark);
                 self.move_playhead_to_closed_gap(timeline_id, gap_start);
                 self.timeline_state.clear_selection();
                 self.sync_selection_to_playhead();
@@ -2375,14 +2373,12 @@ impl VenturiApp {
         }
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
 
-        let mark = self.session.history.begin_group();
         let leftmost_removed = vv_core::edit::ripple_delete_clips(
             &mut self.session.project,
             &mut self.session.history,
             timeline_id,
             &selected,
         );
-        self.session.history.end_group(mark);
         if let Some(position) = leftmost_removed {
             self.move_playhead_to_closed_gap(timeline_id, position);
         }

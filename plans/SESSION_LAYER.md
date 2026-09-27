@@ -104,7 +104,7 @@ no behaviour change.
 |---|------|--------|
 | 1 | `vv_core::edit`: split/delete/ripple/insert with explicit targets + `delete_ranges`; `VenturiApp` methods become wrappers; tests in `vv-core/src/tests/edit.rs` | 70dd5e2 |
 | 2 | Create `vv-session`; move the egui-free modules (`export`, `frame_provider`, `import_worker`, `relink_job`, `forced_relink` logic, `worker`, `index_media_by_filename`); typed export errors | e7ed796 |
-| 3 | `Session` with project/history/path/saved state; `VenturiApp` holds it (mechanical `self.project` → `self.session.project`); fix-ups into `tick` | 6d89309 | |
+| 3 | `Session` with project/history/path/saved state; `VenturiApp` holds it (mechanical `self.project` → `self.session.project`); fix-ups into `tick` | 6d89309 |
 | 4 | Jobs + waker + `tick() -> Vec<SessionEvent>`: import, OTIO import, relink, export; the app's pollers become event handlers | fa5cddc |
 | 5 | Open/save/new project into `Session` (the unsaved-changes dialog stays UI) | 05044e2 |
 | 6 | Session tests in `vv-session/src/tests/` driving import → edit → save → export without egui | 05044e2 |
@@ -150,3 +150,24 @@ Step 3 is the noisiest diff (mechanical renames); step 4 the riskiest
 - The five export tests that build their timeline through `VenturiApp`
   stayed in vv-app (`tests/main_export.rs`); the session has its own
   end-to-end test.
+
+## Review fixes
+
+- `Session::export` returns `None` while an export is running (it used to
+  replace it, detaching the thread and losing its `ExportFinished`).
+- `replace_project` resets `synced_timeline_generation`: the new history
+  counts from 0, so the first edits after open/new skipped the resync.
+- `vv_core::edit` operations are one undo step each (`delete_ranges`,
+  `ripple_delete_*`, `insert_media` with new tracks group internally).
+  Groups nest, so an enclosing caller group still yields one step with its
+  own label.
+
+### Aligning `mcp_server`
+
+- Export: `mcp_server` already returns `Option` and cancels per job; keep
+  its version.
+- Resync: `mcp_server` moved the reset point to `install_project` and added
+  `epoch`, but does not reset `synced_timeline_generation`. Decide there
+  whether to reset it in `install_project` or to gate the resync on
+  `change_mark()` (epoch + generation) like the timeline revisions.
+- `one_step` in `vv-mcp/src/edit_tools.rs` keeps working unchanged.
