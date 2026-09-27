@@ -14,8 +14,9 @@ mod tools;
 
 pub use dispatch::{Dispatch, Pending, dispatch};
 pub use host::{
-    Disconnected, McpHandle, McpInbox, McpRequest, PendingCalls, channel, run_headless,
+    Disconnected, McpHandle, McpInbox, McpRequest, PendingCalls, Reply, channel, run_headless,
 };
+pub use ids::timeline_id as parse_timeline_id;
 pub use json::{GuiState, state_json};
 pub use media_tools::encode_png;
 pub use server::{VenturiServer, serve_headless_stdio, serve_stdio};

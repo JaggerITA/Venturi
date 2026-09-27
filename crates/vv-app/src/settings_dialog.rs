@@ -1,6 +1,7 @@
 //! File → Settings window.
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use vv_media::proxy::ProxyQuality;
 
@@ -12,16 +13,23 @@ use crate::settings::{Action, Keymap, Settings, Shortcut};
 pub enum Section {
     General,
     Playback,
+    Integrations,
     Shortcuts,
 }
 
 impl Section {
-    const ALL: [Section; 3] = [Section::General, Section::Playback, Section::Shortcuts];
+    const ALL: [Section; 4] = [
+        Section::General,
+        Section::Playback,
+        Section::Integrations,
+        Section::Shortcuts,
+    ];
 
     fn title(self) -> Cow<'static, str> {
         match self {
             Section::General => t!("settings.section_general"),
             Section::Playback => t!("settings.section_playback"),
+            Section::Integrations => t!("settings.section_integrations"),
             Section::Shortcuts => t!("settings.section_shortcuts"),
         }
     }
@@ -86,6 +94,9 @@ impl SettingsDialog {
                         }
                         Section::Playback => {
                             response.changed |= playback_section(ui, settings);
+                        }
+                        Section::Integrations => {
+                            response.changed |= integrations_section(ui, settings);
                         }
                         Section::Shortcuts => {
                             response.changed |= self.shortcuts_section(ui, &mut settings.keymap);
@@ -247,6 +258,28 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             t!("settings.kinetic_scroll_media_pool"),
         )
         .changed();
+    changed
+}
+
+fn integrations_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
+    let changed = ui
+        .checkbox(&mut settings.mcp_enabled, t!("settings.mcp_enabled"))
+        .changed();
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(t!("settings.mcp_enabled_hint")).weak());
+    // Inside an AppImage, `current_exe` is the temporary mount.
+    let exe = std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    let command = format!(
+        "{} mcp --attach",
+        exe.map_or_else(|| "vv-app".into(), |exe| exe.display().to_string())
+    );
+    ui.add(
+        egui::TextEdit::singleline(&mut command.as_str())
+            .code_editor()
+            .desired_width(f32::INFINITY),
+    );
     changed
 }
 

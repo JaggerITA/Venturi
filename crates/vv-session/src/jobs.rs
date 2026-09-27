@@ -599,6 +599,10 @@ impl Session {
         self.jobs.export.is_some()
     }
 
+    pub fn running_export(&self) -> Option<JobId> {
+        self.jobs.export.as_ref().map(|running| running.job)
+    }
+
     pub fn export_progress(&self, job: JobId) -> Option<Arc<Mutex<ExportProgress>>> {
         self.jobs.export_progress.get(&job).cloned()
     }

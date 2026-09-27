@@ -505,6 +505,8 @@ pub struct Settings {
     /// Recently opened projects, most recent first.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
+    /// Serve MCP on a local socket for `vv-app mcp --attach`.
+    pub mcp_enabled: bool,
 }
 
 impl Default for Settings {
@@ -521,6 +523,7 @@ impl Default for Settings {
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
+            mcp_enabled: false,
         }
     }
 }
@@ -564,6 +567,8 @@ struct SettingsFile {
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
     panels: PanelLayoutFile,
+    #[serde(default)]
+    mcp_enabled: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -628,6 +633,7 @@ impl Settings {
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
         settings.recent_projects = file.recent_projects;
+        settings.mcp_enabled = file.mcp_enabled.unwrap_or(false);
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
             media_pool_open: file
@@ -705,6 +711,7 @@ impl Settings {
                 inspector_width: Some(self.panels.inspector_width),
                 timeline_height: Some(self.panels.timeline_height),
             },
+            mcp_enabled: Some(self.mcp_enabled),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

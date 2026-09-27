@@ -9,6 +9,9 @@ use vv_session::{Session, Waker};
 
 use crate::{Dispatch, Pending, ToolCall, ToolError, ToolResult, dispatch};
 
+/// Where the result of a call goes.
+pub type Reply = oneshot::Sender<ToolResult>;
+
 pub struct McpRequest {
     pub call: ToolCall,
     pub reply: oneshot::Sender<ToolResult>,

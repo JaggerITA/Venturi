@@ -439,6 +439,11 @@ impl TimelineState {
     }
 
     /// Sets selection and anchor from outside (e.g. after a cut).
+    /// A drag on the timeline is in progress.
+    pub fn gesture_active(&self) -> bool {
+        self.gesture.is_some()
+    }
+
     pub fn set_selection(&mut self, selected: BTreeSet<ClipKey>, anchor: Option<ClipKey>) {
         self.selected = selected;
         self.selection_anchor = anchor;

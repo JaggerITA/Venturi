@@ -26,7 +26,7 @@ pub(crate) fn media_id(project: &Project, id: &str) -> Result<MediaId, ToolError
         .ok_or_else(|| ToolError(format!("unknown media id \"{id}\"")))
 }
 
-pub(crate) fn timeline_id(project: &Project, id: &str) -> Result<TimelineId, ToolError> {
+pub fn timeline_id(project: &Project, id: &str) -> Result<TimelineId, ToolError> {
     let key: TimelineId = KeyData::from_ffi(parse_u64(id, "timeline")?).into();
     project
         .timelines
