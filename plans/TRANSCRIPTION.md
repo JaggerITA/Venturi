@@ -74,20 +74,42 @@ Known differences to handle:
   }
   ```
 
-- **Cache** by `(content_hash, stream, language)` in
+- **Only what is needed.** A timeline often uses seconds of an hour-long
+  recording; cloud services bill per audio minute and local ones cost time.
+  So a transcription covers **ranges** of the media, not necessarily all of
+  it:
+  - `transcribe(media_id, ranges?)`: the given media ranges; none = the
+    whole media (what the UI's *Transcribe* does);
+  - `transcribe(timeline_id)`: every media range the timeline uses (from the
+    clips' `source_in`/`source_out`, all tracks, nested compound clips
+    included), merged, per media.
+  Each range is widened by a margin (about 2 s each side, clamped to the
+  media) so words at the clip edges are not cut and Whisper has context.
+- **Cache by intervals** per `(content_hash, stream, language)` in
   `$XDG_CACHE_HOME/venturi/transcripts/` (same scheme as waveforms and
-  proxies): each file is transcribed once, whatever project it is in, and a
-  relink to the same content keeps it.
+  proxies): the file lists the covered intervals and their segments/words.
+  A request transcribes only the parts not covered yet; a clip lengthened
+  later costs only its new part. Each file is transcribed at most once per
+  part, whatever project uses it, and a relink to the same content keeps it.
+- **Joining** a new interval to cached ones (and chunks of a long request,
+  which is the same problem): the pieces overlap by the margin; words in the
+  overlap are taken from the piece where they sit farther from the edge, so
+  a word cut by one piece's boundary comes from the other. Segments crossing
+  a join are split at word boundaries when word times exist, otherwise kept
+  from the piece that contains their midpoint.
 
 ### MCP (`vv-mcp`)
 
 A transcription can take minutes and MCP clients time out on long calls, so
 it follows the export pattern:
-- `transcribe(media_id, stream?, language?)` returns the cached transcript
-  at once if there is one, or starts a job and returns `{job_id}`.
-- `get_transcript(media_id, stream?)` returns the transcript, its progress,
-  or "not transcribed yet". With `words` when available. Times in media
-  frames, plus seconds for readability.
+- `transcribe(media_id, stream?, language?, ranges?)` or
+  `transcribe(timeline_id, language?)` returns at once if the cache already
+  covers what is asked, otherwise starts a job for the missing parts and
+  returns `{job_id}`.
+- `get_transcript(media_id, stream?, range?)` returns the transcript of the
+  covered intervals within `range` (listing them, so the agent sees what is
+  missing), its progress, or "not transcribed yet". With `words` when
+  available. Times in media frames, plus seconds for readability.
 - Not configured: a clear error ("transcription is not set up in Venturi:
   Settings > Integrations, or transcribe the file with your own tools").
 - In attach mode the job shows in the UI like an import.
@@ -148,3 +170,10 @@ container, so no key is needed.
 6. **Timeline transcript** (the mix, not one media): useful for checking the
    result after cuts. It can be derived from the media transcripts and the
    clips' source ranges without sending audio again; later.
+7. **Margin** around used ranges: 2 s proposed; configurable only if it
+   proves wrong.
+8. **Until this exists**, agents transcribe with their own tools; `docs/MCP.md`
+   tells them to send only the used ranges (see "Transcribing" there). A
+   small read-only MCP tool returning those ranges per media (merged, with
+   margin; the inverse of `media_ranges_on_timeline`) would save them the
+   arithmetic, and the same function serves `transcribe(timeline_id)`.

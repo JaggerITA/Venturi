@@ -195,9 +195,32 @@ second from `talk.mp4` (25 fps):
 7. `export({"timeline_id": "<id>", "path": "/home/me/talk_cut.mp4"})`, then
    `export_status` until the state is `done`.
 
-When the pauses depend on the words, e.g. repeated takes, the agent can
-transcribe the audio with its own tools and cut by timestamps the same way.
-Seconds × fps gives the frame.
+When the pauses depend on the words, e.g. repeated takes, the agent
+transcribes the audio and cuts by timestamps the same way (see below).
+
+## Transcribing
+
+Venturi does not transcribe yet, so an agent that needs the words (repeated
+takes, cutting by script) runs a speech-to-text tool of its own, such as
+whisper.cpp or faster-whisper. To keep that fast and cheap:
+
+- **Install it once**, not in a throwaway environment for every session:
+  e.g. `pipx install faster-whisper` or the distribution's whisper.cpp
+  package.
+- **Transcribe only what the timeline uses.** A timeline often takes a few
+  seconds out of a long recording. `get_timeline` gives each clip's media
+  and `source_in`/`source_out` (media frames): merge the ranges per media,
+  widen each by about 2 seconds on both sides (clamped to the media) so the
+  words at the edges are not cut, and extract just those pieces, e.g.
+  `ffmpeg -ss <start s> -to <end s> -i media.mp4 -map 0:a:<stream> -ac 1 -ar 16000 piece.wav`
+  (seconds = frame ÷ the media's fps, from `get_project`).
+- **Keep the times in the media's frames**: add each piece's start back to
+  the word times, then frame = seconds × media fps. Cut with
+  `delete_ranges` and `media_id`, which takes exactly those frames and finds
+  them on the timeline, even after earlier cuts.
+- **Keep the transcript** of a media for the rest of the session instead of
+  transcribing it again after every edit: the media's frames do not change
+  when the timeline does.
 
 ## Limits
 
