@@ -204,16 +204,31 @@ Venturi does not transcribe yet, so an agent that needs the words (repeated
 takes, cutting by script) runs a speech-to-text tool of its own, such as
 whisper.cpp or faster-whisper. To keep that fast and cheap:
 
-- **Install it once**, not in a throwaway environment for every session:
-  e.g. `pipx install faster-whisper` or the distribution's whisper.cpp
-  package.
+- **Install it once**, not in a throwaway environment for every session.
+  The repository has one ready in `container/whisper/` (faster-whisper,
+  CPU, word timestamps), built once and reused:
+
+  ```sh
+  mkdir -p ~/.cache/whisper-models   # model cache, downloaded on first use
+  cd container/whisper
+  MEDIA_DIR=/path/to/media podman compose run --rm whisper piece.wav --language it
+  ```
+
+  The file path is relative to `MEDIA_DIR`; `--stream N` picks an audio
+  stream of a video, `--model` the Whisper model (default `medium`, about
+  1.5 GB). It writes `piece.wav.transcript.json` next to the input:
+  `segments` with `start`/`end`/`text` in seconds and `words` as
+  `{s, e, w}`. A whisper.cpp or `pipx install faster-whisper` already on the
+  system works as well.
 - **Transcribe only what the timeline uses.** A timeline often takes a few
   seconds out of a long recording. `get_timeline` gives each clip's media
   and `source_in`/`source_out` (media frames): merge the ranges per media,
   widen each by about 2 seconds on both sides (clamped to the media) so the
-  words at the edges are not cut, and extract just those pieces, e.g.
+  words at the edges are not cut, and extract just those pieces into
+  `MEDIA_DIR`, e.g.
   `ffmpeg -ss <start s> -to <end s> -i media.mp4 -map 0:a:<stream> -ac 1 -ar 16000 piece.wav`
-  (seconds = frame ÷ the media's fps, from `get_project`).
+  (seconds = frame ÷ the media's fps, from `get_project`). Transcribe the
+  pieces, not the whole file.
 - **Keep the times in the media's frames**: add each piece's start back to
   the word times, then frame = seconds × media fps. Cut with
   `delete_ranges` and `media_id`, which takes exactly those frames and finds
