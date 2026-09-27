@@ -5,7 +5,7 @@ use crate::{RelinkEnd, SessionEvent, Waker};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use vv_core::edit::{self, MediaInsert, RangeDelete, TargetTracks};
-use vv_core::{FrameIdx, MediaId, Rational, Timeline, Track, TrackKind};
+use vv_core::{AddEntities, CommandLabel, FrameIdx, MediaId, Rational, Timeline, Track, TrackKind};
 
 fn test_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vv-session-{name}"));
@@ -53,15 +53,22 @@ fn run_jobs(session: &mut Session) -> Vec<SessionEvent> {
     }
 }
 
-fn add_timeline(session: &mut Session) -> TimelineId {
-    let id = session.project.timelines.insert(Timeline {
+fn timeline() -> Timeline {
+    Timeline {
         name: "Timeline 1".into(),
         fps: Rational::new(25, 1),
         resolution: (64, 48),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
-    });
-    session.project.insert_timeline_item(id, None);
+    }
+}
+
+fn add_timeline(session: &mut Session) -> TimelineId {
+    let mut add = AddEntities::new(CommandLabel::NewTimeline);
+    let (id, _) = add.timeline(&mut session.project, timeline(), None);
+    session
+        .history
+        .do_command(&mut session.project, Box::new(add));
     id
 }
 
@@ -131,6 +138,59 @@ fn import_adds_the_media_in_order_and_reports_the_failures() {
 }
 
 #[test]
+fn an_import_is_one_undo_step_with_what_the_host_joins_to_it() {
+    let dir = test_dir("import-undo");
+    let files = vec![clip_file(&dir, "a.mp4"), clip_file(&dir, "b.mp4")];
+    let mut session = Session::default();
+    let job = session.import_media(files);
+    let events = run_jobs(&mut session);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, SessionEvent::MediaAdded { .. }))
+    );
+
+    let mut add = AddEntities::new(CommandLabel::NewTimeline);
+    let (timeline, _) = add.timeline(&mut session.project, timeline(), None);
+    session.join_import(job, Box::new(add));
+    let media: Vec<MediaId> = session.project.media_pool.keys().collect();
+
+    assert_eq!(
+        session.history.labels().collect::<Vec<_>>(),
+        vec![CommandLabel::ImportMedia]
+    );
+    session.history.undo(&mut session.project);
+    assert!(session.project.media_pool.is_empty());
+    assert!(session.project.timelines.is_empty());
+    session.history.redo(&mut session.project);
+    assert_eq!(session.project.media_pool.keys().collect::<Vec<_>>(), media);
+    assert!(session.project.timelines.contains_key(timeline));
+}
+
+#[test]
+fn an_edit_or_another_import_in_between_starts_a_new_step() {
+    let mut session = Session::default();
+    let new_timeline = |session: &mut Session| {
+        let mut add = AddEntities::new(CommandLabel::NewTimeline);
+        add.timeline(&mut session.project, timeline(), None);
+        Box::new(add)
+    };
+
+    let add = new_timeline(&mut session);
+    session.join_import(1, add);
+    let add = new_timeline(&mut session);
+    session.history.do_command(&mut session.project, add);
+    let add = new_timeline(&mut session);
+    session.join_import(1, add);
+    let add = new_timeline(&mut session);
+    session.join_import(2, add);
+    let add = new_timeline(&mut session);
+    session.join_import(1, add);
+
+    assert_eq!(session.history.position(), 5);
+}
+
+#[test]
 fn importing_media_already_in_the_pool_finishes_without_starting() {
     let dir = test_dir("reimport");
     let a = clip_file(&dir, "a.mp4");
@@ -155,7 +215,6 @@ fn saving_and_opening_follow_the_unsaved_state() {
     let mut session = Session::default();
     assert!(!session.has_unsaved_changes());
     let timeline = add_timeline(&mut session);
-    session.mark_unsaved();
     edit::insert_generator(
         &mut session.project,
         &mut session.history,
@@ -200,7 +259,6 @@ fn import_edit_and_export_without_a_ui() {
     };
     let timeline = add_timeline(&mut session);
     insert_whole(&mut session, timeline, media, 0);
-    let mark = session.history.begin_group();
     edit::delete_ranges(
         &mut session.project,
         &mut session.history,
@@ -208,7 +266,6 @@ fn import_edit_and_export_without_a_ui() {
         &[(10, 20), (30, 40)],
         &RangeDelete::Ripple,
     );
-    session.history.end_group(mark);
     session.sync_timeline_media(timeline);
     let total = session.project.timelines[timeline].total_frames();
     assert_eq!(total, 30);
@@ -233,6 +290,37 @@ fn import_edit_and_export_without_a_ui() {
     assert!(progress.lock().unwrap().done);
     let frames = vv_media::probe(&output).unwrap().duration_frames;
     assert!((29..=30).contains(&frames), "frames={frames}");
+}
+
+#[test]
+fn a_new_project_resyncs_its_timeline_media_from_the_first_edit() {
+    let mut session = Session::default();
+    let insert_solid = |session: &mut Session, timeline| {
+        edit::insert_generator(
+            &mut session.project,
+            &mut session.history,
+            timeline,
+            edit::Generator::SolidColor,
+            0,
+            0,
+            None,
+        );
+        session.sync_timeline_media(timeline);
+    };
+    let timeline = add_timeline(&mut session);
+    insert_solid(&mut session, timeline);
+
+    session.new_project();
+    let timeline = add_timeline(&mut session);
+    insert_solid(&mut session, timeline);
+
+    let item = session
+        .project
+        .media_pool
+        .values()
+        .find(|item| item.compound == Some(timeline))
+        .unwrap();
+    assert_eq!(item.meta.duration_frames, 125);
 }
 
 #[test]
@@ -402,11 +490,16 @@ fn timeline_revisions_follow_edits_undo_and_outside_changes() {
         "undo restores it"
     );
 
-    session.project.timelines[timeline].name = "Renamed".into();
-    session.mark_unsaved();
-    assert_ne!(
-        session.timeline_revision(timeline),
-        first,
-        "outside the history"
-    );
+    let item = session
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound == Some(timeline))
+        .map(|(id, _)| id)
+        .unwrap();
+    session.apply(Box::new(vv_core::RenameTimeline::new(
+        item,
+        "Renamed".into(),
+    )));
+    assert_ne!(session.timeline_revision(timeline), first, "renamed");
 }

@@ -104,7 +104,7 @@ no behaviour change.
 |---|------|--------|
 | 1 | `vv_core::edit`: split/delete/ripple/insert with explicit targets + `delete_ranges`; `VenturiApp` methods become wrappers; tests in `vv-core/src/tests/edit.rs` | 70dd5e2 |
 | 2 | Create `vv-session`; move the egui-free modules (`export`, `frame_provider`, `import_worker`, `relink_job`, `forced_relink` logic, `worker`, `index_media_by_filename`); typed export errors | e7ed796 |
-| 3 | `Session` with project/history/path/saved state; `VenturiApp` holds it (mechanical `self.project` → `self.session.project`); fix-ups into `tick` | 6d89309 | |
+| 3 | `Session` with project/history/path/saved state; `VenturiApp` holds it (mechanical `self.project` → `self.session.project`); fix-ups into `tick` | 6d89309 |
 | 4 | Jobs + waker + `tick() -> Vec<SessionEvent>`: import, OTIO import, relink, export; the app's pollers become event handlers | fa5cddc |
 | 5 | Open/save/new project into `Session` (the unsaved-changes dialog stays UI) | 05044e2 |
 | 6 | Session tests in `vv-session/src/tests/` driving import → edit → save → export without egui | 05044e2 |
@@ -150,3 +150,62 @@ Step 3 is the noisiest diff (mechanical renames); step 4 the riskiest
 - The five export tests that build their timeline through `VenturiApp`
   stayed in vv-app (`tests/main_export.rs`); the session has its own
   end-to-end test.
+
+## Review fixes
+
+- `Session::export` returns `None` while an export is running (it used to
+  replace it, detaching the thread and losing its `ExportFinished`).
+- `replace_project` resets `synced_timeline_generation`: the new history
+  counts from 0, so the first edits after open/new skipped the resync.
+- `vv_core::edit` operations are one undo step each (`delete_ranges`,
+  `ripple_delete_*`, `insert_media` with new tracks group internally).
+  Groups nest, so an enclosing caller group still yields one step with its
+  own label.
+
+## Pool changes through the history
+
+Every change to the project is a history step, so the dirty state is just
+`history.generation() != saved_generation` (`mark_unsaved` is gone).
+
+- **Stable ids** (`vv-core/src/id_map.rs`): `IdMap` replaces `SlotMap` for
+  media, timelines and folders. Ids are never reused and `insert_at` puts an
+  entity back under its id, so redo steps, UI selections and ids given to
+  agents stay valid. `next` is saved: ids of deleted media may still be
+  referenced by offline clips.
+- **Legacy projects**: `vv-core/src/legacy_slotmap.rs` reads the slotmap
+  format (`(idx, version)` → `idx | (version >> 1) << 32`, so a dead key
+  never resolves to the slot's new occupant). Phase-out steps are in its
+  module doc; fixture `tests/fixtures/legacy_slotmap_project.ron`.
+- **Commands** (`vv-core/src/pool.rs`): `AddEntities` (import, OTIO, new and
+  duplicated timelines, compound clips, new folders; ids allocated when the
+  command is built), `RenameTimeline`, `RenameFolder`, `SetMediaFolder`,
+  `MoveFolder`, `DeleteFolder`. `RemoveMedia` no longer remaps clips.
+  A compound clip's nested timeline and pool item are now part of its step.
+- **One step per import**: `History::join` appends to a step while nothing
+  else touched the history since (a `revision` counter bumped by every stack
+  change: do, undo, redo, group close, join). `Session::join_import` keeps
+  the step per job; the app joins the "Timeline 1" it creates on
+  `MediaAdded`. A user edit in between starts a new step.
+- **Undo groups across frames**: `Session::tick` applies imports and
+  relinks as history steps, so the app skips it while the properties panel
+  drag or the volume-line gesture keep a group open.
+- **UI after undo/redo**: `VenturiApp::forget_removed_entities` leaves a
+  removed timeline, stops a removed media's preview, prunes the pool
+  selection/rename/expanded folders.
+
+### Aligning `mcp_server` (done in the merge of master into `mcp_server`)
+
+- Export: kept `mcp_server`'s version (`Option`, cancel per job, a
+  message when an export is already running).
+- Resync: the reset landed in `install_project`.
+- `ChangeMark` is `(epoch, generation)`; `Session::create_timeline` is an
+  `AddEntities` step, so the MCP `create_timeline` is undoable.
+- Ids: `vv-mcp/src/ids.rs` uses `Id::raw`/`Id::from_raw`; `slotmap` is gone
+  from every crate but the legacy reader.
+- The MCP host thread no longer ticks mid-gesture (same reason as the UI).
+- `edit::delete_media_ranges` groups its per-track lifts.
+- `History::close_group` renames a single-step group too: once edit
+  operations group themselves, a tool's `one_step` could hold just one
+  step and lost its label.
+- The import tool keeps using `import_media`; the media join the job's step,
+  not the tool's `one_step`.

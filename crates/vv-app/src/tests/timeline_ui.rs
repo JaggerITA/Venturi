@@ -1092,7 +1092,14 @@ fn single_trim_range_start_is_not_clamped_by_the_previous_neighbor() {
     let project = Project::default();
     let visuals = [
         visual(0, 1, 0, 5), // ends at 5
-        media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
+        media_clip_visual(
+            0,
+            2,
+            10,
+            8,
+            20,
+            <vv_core::MediaId as vv_core::Id>::from_raw(0),
+        ),
     ];
     let (min_value, _) = vv_core::edit::trim_range(&project, &visuals[1].clip, TrimEdge::Start);
     assert_eq!(min_value, 2, "10 - source_in 8, not the neighbour's edge");
@@ -1110,7 +1117,7 @@ fn single_trim_range_start_is_clamped_by_source_in() {
         10,
         3,
         20,
-        vv_core::MediaId::default(),
+        <vv_core::MediaId as vv_core::Id>::from_raw(0),
     )];
     let (min_value, max_value) =
         vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::Start);
@@ -1535,12 +1542,15 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
     );
     assert_eq!(nested.tracks[1].clips[0].timeline_start, 10);
 
-    // An undo gives back the original clips, but the pool (like an
-    // import) does not go back.
+    // An undo gives back the original clips and takes the compound clip
+    // out of the pool, with its nested timeline.
     history.undo(&mut project);
     assert_eq!(project.timelines[timeline_id].tracks[0].clips.len(), 1);
     assert_eq!(project.timelines[timeline_id].tracks[0].clips[0].id, v);
-    assert_eq!(project.media_pool.len(), 1);
+    assert!(project.media_pool.is_empty());
+    assert!(!project.timelines.contains_key(nested_id));
+    history.redo(&mut project);
+    assert!(project.timelines.contains_key(nested_id));
 
     // A second compound clip continues the numbering.
     let (v2, a2) = (project.alloc_clip_id(), project.alloc_clip_id());

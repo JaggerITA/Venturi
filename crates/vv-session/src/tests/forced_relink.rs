@@ -24,7 +24,7 @@ fn meta(duration_frames: i64, width: u32, height: u32) -> MediaMeta {
 
 fn reference(path: &str, meta: MediaMeta) -> Reference {
     Reference {
-        media_id: MediaId::default(),
+        media_id: <MediaId as vv_core::Id>::from_raw(0),
         path: path.into(),
         meta,
         waveform: None,

@@ -39,8 +39,8 @@ fn call_hidden(
 }
 
 fn timeline_id_string(id: TimelineId) -> String {
-    use slotmap::Key;
-    id.data().as_ffi().to_string()
+    use vv_core::Id;
+    id.raw().to_string()
 }
 
 fn opacity(timeline_id: TimelineId, clip: ClipId, value: f32) -> ToolCall {

@@ -3986,7 +3986,7 @@ fn save_project_to_then_load_project_from_round_trips_and_resets_ui_state() {
     let loaded_timeline_id = app.timeline_id.expect("timeline expected after load");
     assert_eq!(
         loaded_timeline_id, timeline_id,
-        "same TimelineId as before: SlotMap round-trips the keys"
+        "same TimelineId as before: the ids round-trip"
     );
     assert_eq!(
         app.session.project.timelines[loaded_timeline_id].tracks[0].clips[0].id,
@@ -4233,8 +4233,8 @@ fn unsaved_changes_follow_edits_and_saves() {
     app.save_project_to(&dir.join("p.vvproj"));
     assert!(!app.has_unsaved_changes());
 
-    app.session.mark_unsaved();
-    assert!(app.has_unsaved_changes(), "media imported after saving");
+    app.create_timeline("Other".into(), vv_core::Rational::new(25, 1), (64, 48));
+    assert!(app.has_unsaved_changes(), "timeline created after saving");
 }
 
 /// With unsaved changes, opening waits for the answer; "Cancel"
@@ -4641,4 +4641,43 @@ fn add_media_to_timeline_creates_one_audio_clip_per_audio_stream() {
         Some(group),
         "the second audio stream is part of the same group too"
     );
+}
+
+#[test]
+fn undoing_an_import_removes_its_media_and_the_timeline_it_created() {
+    let paths = vec![make_wav("undo-a.wav"), make_wav("undo-b.wav")];
+    let mut app = VenturiApp::default();
+    app.import_media_files(paths);
+    app.wait_for_import();
+    let media: Vec<MediaId> = app.session.project.media_pool.keys().collect();
+    let timeline_id = app.timeline_id.expect("created by the import");
+    assert_eq!(app.session.history.position(), 1);
+
+    app.undo();
+    assert!(app.session.project.media_pool.is_empty());
+    assert!(app.session.project.timelines.is_empty());
+    assert_eq!(app.timeline_id, None);
+    assert!(app.media_pool_state.selected.is_empty());
+    assert_eq!(app.browsing_media, None);
+
+    app.redo();
+    assert_eq!(
+        app.session.project.media_pool.keys().collect::<Vec<_>>(),
+        media
+    );
+    assert!(app.session.project.timelines.contains_key(timeline_id));
+}
+
+#[test]
+fn a_single_file_import_and_its_timeline_are_one_undo_step() {
+    let mut app = VenturiApp::default();
+    app.import_media(make_wav("undo-single.wav"));
+    assert!(app.timeline_id.is_some());
+
+    assert_eq!(
+        app.session.history.labels().collect::<Vec<_>>(),
+        vec![vv_core::CommandLabel::ImportMedia]
+    );
+    app.undo();
+    assert!(app.session.project.timelines.is_empty());
 }

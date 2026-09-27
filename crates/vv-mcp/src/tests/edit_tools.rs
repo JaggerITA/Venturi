@@ -455,7 +455,7 @@ fn unknown_ids_are_reported() {
     });
     assert_eq!(error(&mut session, call), "unknown timeline id \"7\"");
     assert!(matches!(
-        dispatch(&mut session, ToolCall::Undo),
+        dispatch(&mut Session::default(), ToolCall::Undo),
         crate::Dispatch::Handled(Err(_))
     ));
 }

@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use vv_core::{History, MediaFileInfo, PersistenceError, Project, Timeline, TimelineId};
+use vv_core::{
+    AddEntities, Command, CommandLabel, History, MediaFileInfo, PersistenceError, Project,
+    Timeline, TimelineId,
+};
 
 use std::collections::HashMap;
 
@@ -8,21 +11,17 @@ use crate::jobs::{Jobs, Waker};
 
 /// An open document: the project, its history and where it is saved.
 /// `project` and `history` are public so callers can borrow them apart;
-/// changes that bypass the history must call `mark_unsaved`.
+/// every change goes through the history, which is what tells a saved
+/// project from a modified one.
 #[derive(Default)]
 pub struct Session {
     pub project: Project,
     pub history: History,
     path: Option<PathBuf>,
     saved_generation: u64,
-    /// The media pool, folders or timeline list changed outside the history.
-    changed_outside_history: bool,
     synced_timeline_generation: u64,
     /// Bumped whenever the project is replaced.
     epoch: u64,
-    /// Bumped by every `mark_unsaved`: with the history generation, it tells
-    /// whether anything changed.
-    outside_changes: u64,
     /// `timeline_revision` per timeline, with the state it was computed at.
     revisions: std::sync::Mutex<HashMap<TimelineId, (ChangeMark, String)>>,
     pub(crate) waker: Waker,
@@ -34,7 +33,6 @@ pub struct Session {
 pub struct ChangeMark {
     epoch: u64,
     generation: u64,
-    outside_changes: u64,
 }
 
 impl Session {
@@ -46,25 +44,22 @@ impl Session {
         self.path = path;
     }
 
+    pub fn apply(&mut self, cmd: Box<dyn Command>) {
+        self.history.do_command(&mut self.project, cmd);
+    }
+
     pub fn has_unsaved_changes(&self) -> bool {
-        self.changed_outside_history || self.history.generation() != self.saved_generation
+        self.history.generation() != self.saved_generation
     }
 
     pub fn mark_saved(&mut self) {
         self.saved_generation = self.history.generation();
-        self.changed_outside_history = false;
-    }
-
-    pub fn mark_unsaved(&mut self) {
-        self.changed_outside_history = true;
-        self.outside_changes += 1;
     }
 
     pub fn change_mark(&self) -> ChangeMark {
         ChangeMark {
             epoch: self.epoch,
             generation: self.history.generation(),
-            outside_changes: self.outside_changes,
         }
     }
 
@@ -138,6 +133,8 @@ impl Session {
     pub fn install_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.project = project;
         self.history = History::default();
+        // The new history counts from 0 again.
+        self.synced_timeline_generation = self.history.generation();
         self.path = path;
         self.epoch += 1;
         self.mark_saved();
@@ -146,10 +143,9 @@ impl Session {
     /// Adds a timeline and its media pool entry, through which it can be
     /// used as a clip in other timelines.
     pub fn create_timeline(&mut self, timeline: Timeline) -> TimelineId {
-        let id = self.project.timelines.insert(timeline);
-        self.project.insert_timeline_item(id, None);
-        // Not through the history, like a media import.
-        self.mark_unsaved();
+        let mut add = AddEntities::new(CommandLabel::NewTimeline);
+        let (id, _) = add.timeline(&mut self.project, timeline, None);
+        self.apply(Box::new(add));
         id
     }
 

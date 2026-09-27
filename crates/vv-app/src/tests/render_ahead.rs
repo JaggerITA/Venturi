@@ -150,8 +150,7 @@ fn make_test_clip_with_short_gop(
     path
 }
 
-/// Two distinct `MediaId`s (slotmap keys, not generatable by hand):
-/// enough for the pure tests of `collect_media_segments`, which do not
+/// Enough for the pure tests of `collect_media_segments`, which do not
 /// need a real `MediaItem` behind them.
 fn dummy_media_item() -> MediaItem {
     MediaItem {
@@ -3225,8 +3224,7 @@ fn wait_caught_up(render_ahead: &RenderAhead) {
     }
 }
 
-/// `MediaId`s are slotmap keys: the first media of any project gets the
-/// same one. Opening another project must not show the old one's frames.
+/// The first media of any project gets the same `MediaId`. Opening another project must not show the old one's frames.
 #[test]
 fn a_replaced_project_never_shows_the_previous_projects_frames() {
     let dir = "vv-app-render-ahead-replace-test";

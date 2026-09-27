@@ -7,12 +7,12 @@ use crate::model::{
     MediaMeta, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind,
     Transform, TransformParam, Transition,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 /// `Send`: an editor serving MCP runs commands from another thread too.
-pub trait Command: std::fmt::Debug + Send {
+pub trait Command: std::fmt::Debug + Send + std::any::Any {
     fn apply(&mut self, project: &mut Project);
     fn undo(&self, project: &mut Project);
     fn label(&self) -> CommandLabel;
@@ -62,6 +62,15 @@ pub enum CommandLabel {
     EditMarker,
     MoveMarker,
     DeleteMarker,
+    ImportMedia,
+    ImportOtio,
+    NewTimeline,
+    DuplicateTimeline,
+    RenameTimeline,
+    NewFolder,
+    RenameFolder,
+    MoveToFolder,
+    DeleteFolder,
 }
 
 /// Several commands in a single history step.
@@ -99,11 +108,18 @@ impl Command for CompositeCommand {
 #[derive(Debug, Clone, Copy)]
 pub struct GroupMark(usize);
 
+/// A history step that later commands can join, see `History::join`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinableStep(u64);
+
 #[derive(Default)]
 pub struct History {
     undo_stack: Vec<Box<dyn Command>>,
     redo_stack: Vec<Box<dyn Command>>,
     generation: u64,
+    /// Bumped by every change to the stacks: a `JoinableStep` is valid
+    /// only while it is unchanged.
+    revision: u64,
 }
 
 impl History {
@@ -112,6 +128,38 @@ impl History {
         self.undo_stack.push(cmd);
         self.redo_stack.clear();
         self.generation += 1;
+        self.revision += 1;
+    }
+
+    /// Applies `cmd` as part of `step` if nothing else touched the history
+    /// since `step` was returned; otherwise as a new step named `label`.
+    /// Returns the step to join next. For work that lands piece by piece
+    /// but is undone as one (an import).
+    pub fn join(
+        &mut self,
+        project: &mut Project,
+        step: Option<JoinableStep>,
+        label: CommandLabel,
+        mut cmd: Box<dyn Command>,
+    ) -> JoinableStep {
+        cmd.apply(project);
+        self.generation += 1;
+        let top = (step == Some(JoinableStep(self.revision)))
+            .then(|| self.undo_stack.last_mut())
+            .flatten()
+            .and_then(|top| {
+                (top.as_mut() as &mut dyn std::any::Any).downcast_mut::<CompositeCommand>()
+            });
+        match top {
+            Some(composite) => composite.commands.push(cmd),
+            None => {
+                self.undo_stack
+                    .push(Box::new(CompositeCommand::new(label, vec![cmd])));
+                self.redo_stack.clear();
+            }
+        }
+        self.revision += 1;
+        JoinableStep(self.revision)
     }
 
     /// From here to `end_group` the commands become a single undo step: for
@@ -132,8 +180,12 @@ impl History {
     }
 
     fn close_group(&mut self, mark: GroupMark, label: Option<CommandLabel>) {
+        self.revision += 1;
         let commands = self.undo_stack.split_off(mark.0.min(self.undo_stack.len()));
-        if commands.len() > 1 {
+        // A single step is wrapped only to rename it: it may be the one an
+        // edit operation already grouped.
+        let renames = |label: CommandLabel| commands[0].label() != label;
+        if commands.len() > 1 || (commands.len() == 1 && label.is_some_and(renames)) {
             let label = label.unwrap_or_else(|| commands[0].label());
             self.undo_stack
                 .push(Box::new(CompositeCommand::new(label, commands)));
@@ -147,6 +199,7 @@ impl History {
             cmd.undo(project);
             self.redo_stack.push(cmd);
             self.generation += 1;
+            self.revision += 1;
         }
     }
 
@@ -155,6 +208,7 @@ impl History {
             cmd.apply(project);
             self.undo_stack.push(cmd);
             self.generation += 1;
+            self.revision += 1;
         }
     }
 
@@ -1336,7 +1390,7 @@ impl<T> std::fmt::Debug for SetClipValue<T> {
     }
 }
 
-impl<T: Clone + Send> Command for SetClipValue<T> {
+impl<T: Clone + Send + 'static> Command for SetClipValue<T> {
     fn label(&self) -> CommandLabel {
         self.label
     }
@@ -2198,24 +2252,20 @@ impl Command for RemoveKeyframe {
     }
 }
 
-/// Removes a media from the pool; its clips stay offline. `slotmap` does not
-/// reinsert with the same key: the undo rewrites the clips with the new id,
-/// hence `Cell`/`RefCell` (`undo` takes `&self`). For a compound clip
-/// the nested timeline disappears too, otherwise it would stay orphaned in the
-/// project (and its name taken, see `alloc_compound_name`).
+/// Removes a media from the pool; its clips stay offline. For a compound
+/// clip the nested timeline disappears too, otherwise it would stay orphaned
+/// in the project (and its name taken, see `alloc_compound_name`).
 #[derive(Debug)]
 pub struct RemoveMedia {
-    media: Cell<MediaId>,
-    removed: RefCell<Option<MediaItem>>,
-    nested: RefCell<Option<Timeline>>,
+    media: MediaId,
+    removed: RefCell<Option<(MediaItem, Option<Timeline>)>>,
 }
 
 impl RemoveMedia {
     pub fn new(media: MediaId) -> Self {
         Self {
-            media: Cell::new(media),
+            media,
             removed: RefCell::new(None),
-            nested: RefCell::new(None),
         }
     }
 }
@@ -2226,32 +2276,21 @@ impl Command for RemoveMedia {
     }
 
     fn apply(&mut self, project: &mut Project) {
-        let removed = project.media_pool.remove(self.media.get());
-        if let Some(nested_id) = removed.as_ref().and_then(|item| item.compound) {
-            *self.nested.borrow_mut() = project.timelines.remove(nested_id);
-        }
-        *self.removed.borrow_mut() = removed;
+        let Some(item) = project.media_pool.remove(self.media) else {
+            return;
+        };
+        let nested = item.compound.and_then(|id| project.timelines.remove(id));
+        *self.removed.borrow_mut() = Some((item, nested));
     }
 
     fn undo(&self, project: &mut Project) {
-        let Some(mut item) = self.removed.borrow_mut().take() else {
+        let Some((item, nested)) = self.removed.borrow_mut().take() else {
             return;
         };
-        if let Some(nested) = self.nested.borrow_mut().take() {
-            item.compound = Some(project.timelines.insert(nested));
+        if let (Some(id), Some(nested)) = (item.compound, nested) {
+            project.timelines.insert_at(id, nested);
         }
-        let old = self.media.get();
-        let new = project.media_pool.insert(item);
-        self.media.set(new);
-        for timeline in project.timelines.values_mut() {
-            for track in &mut timeline.tracks {
-                for clip in &mut track.clips {
-                    if matches!(clip.source, ClipSource::Media(id) if id == old) {
-                        clip.source = ClipSource::Media(new);
-                    }
-                }
-            }
-        }
+        project.media_pool.insert_at(self.media, item);
     }
 }
 
@@ -2679,28 +2718,42 @@ pub fn plan_compound_clip(
 }
 
 /// Commands (to be sent to the history as a single group, e.g. inside a
-/// `CompositeCommand`) that remove `clips` from the outer timeline and
-/// put in their place the resulting clip — or the two, video and audio,
-/// linked — pointing at `media_id`. `plan` is the one from `plan_compound_clip`
-/// for the same `clips`; `media_id` has already been inserted into the pool by the
-/// caller (with `MediaItem::compound` pointing at the nested timeline,
-/// already inserted too). The pool and the nested timeline stay out
-/// of the history, like an import: `RemoveMedia` is the only command
-/// touching `media_pool`, an undo here does not delete them, exactly like an
-/// undo after a trim does not un-import the media that just arrived.
+/// `CompositeCommand`) that add the nested timeline of `plan` and its pool
+/// item, remove `clips` from the outer timeline and put in their place the
+/// resulting clip — or the two, video and audio, linked. `plan` is the one
+/// from `plan_compound_clip` for the same `clips`. Returns the new pool item
+/// too.
 pub fn compound_clip_commands(
     project: &mut Project,
     timeline_id: TimelineId,
     clips: &[(usize, ClipId)],
     plan: &CompoundPlan,
-    media_id: MediaId,
-) -> Vec<Box<dyn Command>> {
-    let mut commands: Vec<Box<dyn Command>> = clips
-        .iter()
-        .map(|&(track_index, clip_id)| {
-            Box::new(LiftDelete::new(timeline_id, track_index, clip_id)) as Box<dyn Command>
-        })
-        .collect();
+) -> (MediaId, Vec<Box<dyn Command>>) {
+    let mut add = crate::AddEntities::new(CommandLabel::MakeCompoundClip);
+    let nested = add.bare_timeline(project, plan.nested_timeline.clone());
+    let item = MediaItem {
+        path: project.alloc_compound_name().into(),
+        meta: MediaMeta {
+            duration_frames: plan.len,
+            fps: plan.nested_timeline.fps,
+            width: plan.nested_timeline.resolution.0,
+            height: plan.nested_timeline.resolution.1,
+            has_video: plan.has_video,
+            has_audio: plan.has_audio,
+            sample_rate: 48_000,
+            channels: 2,
+            audio_streams: 1,
+            file: Default::default(),
+        },
+        content_hash: project.alloc_compound_generation(),
+        compound: Some(nested),
+        folder: None,
+    };
+    let media_id = add.media(project, item);
+    let mut commands: Vec<Box<dyn Command>> = vec![Box::new(add)];
+    commands.extend(clips.iter().map(|&(track_index, clip_id)| {
+        Box::new(LiftDelete::new(timeline_id, track_index, clip_id)) as Box<dyn Command>
+    }));
 
     let mut new_members = Vec::new();
     let mut push_clip =
@@ -2729,5 +2782,9 @@ pub fn compound_clip_commands(
     if new_members.len() >= 2 {
         commands.push(Box::new(LinkClips::new(timeline_id, new_members)));
     }
-    commands
+    (media_id, commands)
 }
+
+#[cfg(test)]
+#[path = "tests/command.rs"]
+mod tests;

@@ -187,13 +187,13 @@ fn delete_ranges_ripple_merges_ranges_and_keeps_av_in_sync() {
 }
 
 #[test]
-fn delete_ranges_is_one_undo_step_when_grouped() {
+fn delete_ranges_is_one_undo_step() {
     let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
     let mut history = History::default();
     linked_av(&mut project, &mut history, tl);
     let before = snapshot(&project, tl);
+    let position = history.position();
 
-    let mark = history.begin_group();
     delete_ranges(
         &mut project,
         &mut history,
@@ -201,10 +201,57 @@ fn delete_ranges_is_one_undo_step_when_grouped() {
         &[(10, 20), (50, 60)],
         &RangeDelete::Ripple,
     );
-    history.end_group(mark);
+    assert_eq!(history.position(), position + 1);
     history.undo(&mut project);
 
     assert_eq!(snapshot(&project, tl), before);
+}
+
+#[test]
+fn insert_media_creating_tracks_is_one_undo_step() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+    let mut history = History::default();
+    let media = media(&mut project, 3);
+    let insert = MediaInsert {
+        media_id: media,
+        source_in: 0,
+        source_out: 50,
+        video: true,
+        audio: true,
+    };
+    let tracks = TargetTracks {
+        video: Some(0),
+        extra_audio: None,
+    };
+
+    insert_media(&mut project, &mut history, tl, insert, 0, tracks).unwrap();
+    assert_eq!(history.position(), 1);
+    history.undo(&mut project);
+
+    assert_eq!(project.timelines[tl].tracks.len(), 2);
+    assert!(spans(&project, tl, 0).is_empty());
+}
+
+#[test]
+fn an_enclosing_group_keeps_its_label_and_stays_one_step() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+    let mut history = History::default();
+    linked_av(&mut project, &mut history, tl);
+    let position = history.position();
+
+    let mark = history.begin_group();
+    split_clips(&mut project, &mut history, tl, 50, None);
+    delete_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        &[(10, 20), (70, 80)],
+        &RangeDelete::Ripple,
+    );
+    history.end_group_as(mark, CommandLabel::RippleDelete);
+
+    assert_eq!(history.position(), position + 1);
+    assert_eq!(history.labels().last(), Some(CommandLabel::RippleDelete));
 }
 
 #[test]
@@ -477,6 +524,30 @@ fn lifting_media_ranges_leaves_other_material_at_the_same_time() {
 
     assert_eq!(spans(&project, tl, 0), [(0, 10, 0), (20, 100, 20)]);
     assert_eq!(spans(&project, tl, 1), [(0, 100, 0)]);
+}
+
+#[test]
+fn lifting_media_ranges_on_several_tracks_is_one_undo_step() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+    let mut history = History::default();
+    let media = media(&mut project, 1);
+    place(&mut project, &mut history, tl, media, (0, 100), 0, true);
+    let before = snapshot(&project, tl);
+    let position = history.position();
+
+    delete_media_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        media,
+        &[(10, 20)],
+        &RangeDelete::Lift { tracks: None },
+    );
+    assert_eq!(spans(&project, tl, 1), [(0, 10, 0), (20, 100, 20)]);
+    assert_eq!(history.position(), position + 1);
+    history.undo(&mut project);
+
+    assert_eq!(snapshot(&project, tl), before);
 }
 
 #[test]

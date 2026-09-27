@@ -59,10 +59,10 @@ impl VenturiApp {
                 self.toggle_retime_controls();
             }
             if pressed(Action::Undo) {
-                self.session.history.undo(&mut self.session.project);
+                self.undo();
             }
             if pressed(Action::Redo) {
-                self.session.history.redo(&mut self.session.project);
+                self.redo();
             }
             if pressed(Action::TogglePlayback) {
                 self.toggle_playback();
@@ -247,14 +247,14 @@ impl VenturiApp {
                             .button(keymap.menu_label(&t!("menu.undo"), Action::Undo))
                             .clicked()
                         {
-                            self.session.history.undo(&mut self.session.project);
+                            self.undo();
                             ui.close();
                         }
                         if ui
                             .button(keymap.menu_label(&t!("menu.redo"), Action::Redo))
                             .clicked()
                         {
-                            self.session.history.redo(&mut self.session.project);
+                            self.redo();
                             ui.close();
                         }
                         self.undo_history_menu(ui);
@@ -544,9 +544,7 @@ impl VenturiApp {
             });
         });
         if let Some(position) = jump {
-            self.session
-                .history
-                .go_to(&mut self.session.project, position);
+            self.go_to_history(position);
             ui.close();
         }
     }
@@ -596,6 +594,15 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::EditMarker => t!("history.edit_marker"),
         L::MoveMarker => t!("history.move_marker"),
         L::DeleteMarker => t!("history.delete_marker"),
+        L::ImportMedia => t!("history.import_media"),
+        L::ImportOtio => t!("history.import_otio"),
+        L::NewTimeline => t!("history.new_timeline"),
+        L::DuplicateTimeline => t!("history.duplicate_timeline"),
+        L::RenameTimeline => t!("history.rename_timeline"),
+        L::NewFolder => t!("history.new_folder"),
+        L::RenameFolder => t!("history.rename_folder"),
+        L::MoveToFolder => t!("history.move_to_folder"),
+        L::DeleteFolder => t!("history.delete_folder"),
     }
 }
 

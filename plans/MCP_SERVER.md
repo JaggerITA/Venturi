@@ -93,8 +93,8 @@ This plan assumes its steps 1-4 are done.
   send an `McpRequest` and await the reply; schemas via `schemars`.
 - Same server code for both transports: stdio (headless) and one socket
   connection (attach). The tokio runtime lives on its own thread.
-- **Ids**: strings. `MediaId`/`TimelineId`/`FolderId` via
-  `KeyData::as_ffi` (u64 would overflow JS-safe integers),
+- **Ids**: strings. `MediaId`/`TimelineId`/`FolderId` via `Id::raw`
+  (u64 would overflow JS-safe integers; stable across undo/redo),
   `ClipId`/`MarkerId`/`LinkGroupId` from their `u64`. Clips are addressed
   by `(timeline_id, clip_id)`; the track index is looked up, since it can
   change under the agent's feet in attach mode.

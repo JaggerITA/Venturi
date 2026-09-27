@@ -439,24 +439,31 @@ impl VenturiApp {
             .chain((2..).map(|n| format!("{base} {n}")))
             .find(|name| !taken.contains(name.as_str()))
             .expect("infinite candidates");
-        let folder = self
-            .session
-            .project
-            .folders
-            .insert(vv_core::MediaFolder { name, parent });
+        let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::NewFolder);
+        let folder = add.folder(
+            &mut self.session.project,
+            vv_core::MediaFolder { name, parent },
+        );
+        self.session.apply(Box::new(add));
         self.media_pool_state.expanded.extend(parent);
-        self.session.mark_unsaved();
         self.start_folder_rename(folder);
     }
 
     fn move_media_to_folder(&mut self, media: &[MediaId], folder: Option<FolderId>) {
-        for &id in media {
-            if let Some(item) = self.session.project.media_pool.get_mut(id)
-                && item.folder != folder
-            {
-                item.folder = folder;
-                self.session.mark_unsaved();
-            }
+        let media: Vec<MediaId> = media
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.session
+                    .project
+                    .media_pool
+                    .get(id)
+                    .is_some_and(|item| item.folder != folder)
+            })
+            .collect();
+        if !media.is_empty() {
+            self.session
+                .apply(Box::new(vv_core::SetMediaFolder::new(media, folder)));
         }
     }
 
@@ -466,10 +473,12 @@ impl VenturiApp {
             let media: Vec<MediaId> = set.items.iter().map(|d| d.media_id).collect();
             self.move_media_to_folder(&media, folder);
         } else if let Some(dragged) = resp.dnd_release_payload::<media_pool::FolderDrag>()
-            && self.session.project.move_folder(dragged.0, folder)
+            && self.session.project.can_move_folder(dragged.0, folder)
+            && self.session.project.folders[dragged.0].parent != folder
         {
+            self.session
+                .apply(Box::new(vv_core::MoveFolder::new(dragged.0, folder)));
             self.media_pool_state.expanded.extend(folder);
-            self.session.mark_unsaved();
         }
     }
 
@@ -554,11 +563,15 @@ impl VenturiApp {
                 if let Some(new_name) = done {
                     self.media_pool_state.renaming = None;
                     if let Some(name) = new_name
-                        && let Some(f) = self.session.project.folders.get_mut(folder)
-                        && f.name != name
+                        && self
+                            .session
+                            .project
+                            .folders
+                            .get(folder)
+                            .is_some_and(|f| f.name != name)
                     {
-                        f.name = name;
-                        self.session.mark_unsaved();
+                        self.session
+                            .apply(Box::new(vv_core::RenameFolder::new(folder, name)));
                     }
                 }
             }
@@ -603,14 +616,13 @@ impl VenturiApp {
                 .on_hover_text(t!("pool.delete_folder_hint"))
                 .clicked()
             {
-                self.session.project.delete_folder(folder);
-                self.session.mark_unsaved();
+                self.session
+                    .apply(Box::new(vv_core::DeleteFolder::new(folder)));
                 ui.close();
             }
         });
     }
 
-    /// Not in the history, like creating a timeline.
     fn rename_timeline(&mut self, media_id: MediaId, name: String) {
         let unchanged = self
             .session
@@ -619,8 +631,8 @@ impl VenturiApp {
             .get(media_id)
             .is_some_and(|item| file_label(&item.path) == name);
         if !unchanged {
-            self.session.project.rename_timeline(media_id, name);
-            self.session.mark_unsaved();
+            self.session
+                .apply(Box::new(vv_core::RenameTimeline::new(media_id, name)));
         }
     }
 
@@ -643,8 +655,10 @@ impl VenturiApp {
             .chain((2..).map(|n| format!("{base} {n}")))
             .find(|name| !taken.contains(name))
             .expect("infinite candidates");
-        if let Some(copy) = self.session.project.duplicate_timeline(media_id, name) {
-            self.session.mark_unsaved();
+        if let Some((copy, add)) =
+            vv_core::pool::duplicate_timeline(&mut self.session.project, media_id, name)
+        {
+            self.session.apply(Box::new(add));
             self.media_pool_state.select_only([copy]);
         }
     }

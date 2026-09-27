@@ -1,5 +1,4 @@
-//! Saving and loading the project in RON. `SlotMap` keys survive the
-//! round-trip intact.
+//! Saving and loading the project in RON.
 
 use crate::model::Project;
 use std::path::Path;

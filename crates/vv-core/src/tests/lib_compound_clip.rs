@@ -170,8 +170,7 @@ fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores
     let selection = vec![(0, video_id), (1, audio_id)];
 
     let plan = plan_compound_clip(&project, timeline, &selection).unwrap();
-    let media_id = insert_compound_media(&mut project, &plan);
-    let commands = compound_clip_commands(&mut project, timeline, &selection, &plan, media_id);
+    let (media_id, commands) = compound_clip_commands(&mut project, timeline, &selection, &plan);
 
     let mut history = History::default();
     history.do_command(
@@ -196,7 +195,6 @@ fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores
         .expect("video linked to the audio");
     assert_eq!(audio_track.clips[0].linked_group, Some(group));
 
-    // The pool and the nested timeline stay out of the history.
     assert_eq!(project.media_pool.len(), 1);
     assert_eq!(project.timelines.len(), 2);
 
@@ -208,8 +206,15 @@ fn compound_clip_commands_replace_selection_with_linked_result_and_undo_restores
         10
     );
     assert_eq!(project.timelines[timeline].tracks[1].clips[0].id, audio_id);
-    // Undo does not un-import the compound clip from the pool, like an import.
-    assert_eq!(project.media_pool.len(), 1);
+    assert!(project.media_pool.is_empty());
+    assert_eq!(project.timelines.len(), 1, "the nested timeline goes too");
+
+    history.redo(&mut project);
+    let nested = project.media_pool[media_id].compound.unwrap();
+    assert_eq!(
+        project.timelines[nested].tracks.len(),
+        plan.nested_timeline.tracks.len()
+    );
 }
 
 fn compound_media_for(project: &mut Project, nested: TimelineId) -> MediaId {

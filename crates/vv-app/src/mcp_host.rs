@@ -203,7 +203,9 @@ fn host_loop(shared: &Shared, inbox: &vv_mcp::McpInbox, ctx: &egui::Context) {
                 pending.resolve(session, event);
             }
             // Only for the calls waiting on jobs: otherwise the UI ticks.
-            if !pending.is_empty() {
+            // Not mid-gesture: the imports it applies would land in the
+            // gesture's undo group.
+            if !pending.is_empty() && !shared.ui().mid_gesture {
                 let ticked = session.tick();
                 for event in &ticked {
                     pending.resolve(session, event);

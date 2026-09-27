@@ -75,6 +75,21 @@ pub struct Rename {
 }
 
 impl MediaPoolState {
+    /// Drops what refers to media or folders no longer in `project`.
+    pub fn forget_removed(&mut self, project: &vv_core::Project) {
+        let media_exists = |id: MediaId| project.media_pool.contains_key(id);
+        self.selected.retain(|&id| media_exists(id));
+        self.anchor = self.anchor.filter(|&id| media_exists(id));
+        self.rename_pending = self.rename_pending.filter(|&(id, _)| media_exists(id));
+        if self.renaming.as_ref().is_some_and(|r| match r.target {
+            RenameTarget::Media(id) => !media_exists(id),
+            RenameTarget::Folder(id) => !project.folders.contains_key(id),
+        }) {
+            self.renaming = None;
+        }
+        self.expanded.retain(|&id| project.folders.contains_key(id));
+    }
+
     /// `order` is the order the items are drawn in the panel: that is what
     /// defines the range of a shift+click.
     pub fn click(&mut self, clicked: MediaId, modifiers: egui::Modifiers, order: &[MediaId]) {

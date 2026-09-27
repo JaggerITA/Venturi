@@ -1117,26 +1117,33 @@ impl VenturiApp {
     }
 
     fn ensure_timeline(&mut self) -> TimelineId {
-        self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), true)
+        self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), true, None)
     }
 
     /// Like `ensure_timeline`, but a new timeline takes fps and resolution
     /// from `meta` (media with video only).
-    fn ensure_timeline_for(&mut self, meta: &vv_core::MediaMeta) -> TimelineId {
-        self.ensure_timeline_with(meta.fps, (meta.width, meta.height), true)
+    fn ensure_timeline_for(
+        &mut self,
+        meta: &vv_core::MediaMeta,
+        import: Option<vv_session::JobId>,
+    ) -> TimelineId {
+        self.ensure_timeline_with(meta.fps, (meta.width, meta.height), true, import)
     }
 
     /// Like `ensure_timeline`, but without a video track: a drop of audio only must
     /// not create an empty one.
-    fn ensure_timeline_audio_only(&mut self) -> TimelineId {
-        self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), false)
+    fn ensure_timeline_audio_only(&mut self, import: Option<vv_session::JobId>) -> TimelineId {
+        self.ensure_timeline_with(vv_core::Rational::new(25, 1), (1920, 1080), false, import)
     }
 
+    /// A new timeline is part of the undo step of `import`, if given, else
+    /// a step of its own (or of the caller's group).
     fn ensure_timeline_with(
         &mut self,
         fps: vv_core::Rational,
         resolution: (u32, u32),
         include_video_track: bool,
+        import: Option<vv_session::JobId>,
     ) -> TimelineId {
         if let Some(id) = self.timeline_id {
             return id;
@@ -1146,21 +1153,21 @@ impl VenturiApp {
             tracks.push(Track::new(TrackKind::Video));
         }
         tracks.push(Track::new(TrackKind::Audio));
-        let id = self.session.project.timelines.insert(vv_core::Timeline {
+        let timeline = vv_core::Timeline {
             name: "Timeline 1".into(),
             fps,
             resolution,
             tracks,
             markers: Vec::new(),
-        });
+        };
+        let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::NewTimeline);
+        let (id, _) = add.timeline(&mut self.session.project, timeline, None);
+        match import {
+            Some(job) => self.session.join_import(job, Box::new(add)),
+            None => self.session.apply(Box::new(add)),
+        }
         self.timeline_id = Some(id);
         self.spawn_render_ahead_if_needed(id);
-        // The project timeline is to all effects a timeline like
-        // the others (see the docs of `MediaItem::compound`): it shows up in the media
-        // pool exactly like a compound clip, draggable elsewhere.
-        // Any initial `meta`, `sync_root_timeline_media` corrects it
-        // immediately on the first round (called by `update`).
-        self.session.project.insert_timeline_item(id, None);
         id
     }
 
@@ -1360,8 +1367,8 @@ impl VenturiApp {
         start: FrameIdx,
         target: timeline_ui::MediaDropTarget,
     ) {
-        let timeline_id = self.ensure_timeline();
         let group = self.session.history.begin_group();
+        let timeline_id = self.ensure_timeline();
         if let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, true, false) {
             // A generator always has video: `resolve_drop_tracks` with
             // `any_video: true` always resolves to `Some`.
@@ -1552,7 +1559,7 @@ impl VenturiApp {
         // If a timeline does not exist yet (e.g. first drag&drop from the media
         // pool), it is created on the fly inheriting fps/resolution from this
         // media.
-        let timeline_id = self.ensure_timeline_for(&meta);
+        let timeline_id = self.ensure_timeline_for(&meta, None);
         if self
             .session
             .project
@@ -1608,11 +1615,15 @@ impl VenturiApp {
         if drops.is_empty() {
             return;
         }
+        // One drop = one Ctrl+Z, even if inside there are N clips (one
+        // per audio stream of each media) plus the timeline and the tracks
+        // created on the fly.
+        let group = self.session.history.begin_group();
         // fps and resolution from the first *video* media of the set: an audio at the
         // head has no resolution to give the timeline.
         let timeline_id = match drops.iter().find(|(d, meta)| d.takes_video(meta)) {
-            Some((_, video_meta)) => self.ensure_timeline_for(video_meta),
-            None => self.ensure_timeline_audio_only(),
+            Some((_, video_meta)) => self.ensure_timeline_for(video_meta, None),
+            None => self.ensure_timeline_audio_only(None),
         };
         // A drop that would close a cycle (a timeline imported inside
         // itself, directly or through one of its compound clips) is
@@ -1628,13 +1639,11 @@ impl VenturiApp {
             })
             .collect();
         if drops.is_empty() {
+            self.session.history.end_group(group);
             return;
         }
         let any_video = drops.iter().any(|(d, meta)| d.takes_video(meta));
         let any_audio = drops.iter().any(|(d, meta)| d.takes_audio(meta));
-        // One drop = one Ctrl+Z, even if inside there are N clips (one
-        // per audio stream of each media) plus the tracks created on the fly.
-        let group = self.session.history.begin_group();
         let Some(tracks) = self.resolve_drop_tracks(timeline_id, target, any_video, any_audio)
         else {
             self.session.history.end_group(group);
@@ -2112,6 +2121,37 @@ impl VenturiApp {
         self.leave_removed_timelines();
     }
 
+    pub(crate) fn undo(&mut self) {
+        self.session.history.undo(&mut self.session.project);
+        self.forget_removed_entities();
+    }
+
+    pub(crate) fn redo(&mut self) {
+        self.session.history.redo(&mut self.session.project);
+        self.forget_removed_entities();
+    }
+
+    pub(crate) fn go_to_history(&mut self, position: usize) {
+        self.session
+            .history
+            .go_to(&mut self.session.project, position);
+        self.forget_removed_entities();
+    }
+
+    /// Drops the UI's references to timelines, media and folders gone from
+    /// the project, e.g. by undoing the import or the timeline that
+    /// created them.
+    fn forget_removed_entities(&mut self) {
+        if self
+            .browsing_media
+            .is_some_and(|id| !self.session.project.media_pool.contains_key(id))
+        {
+            self.stop_browsing();
+        }
+        self.leave_removed_timelines();
+        self.media_pool_state.forget_removed(&self.session.project);
+    }
+
     /// Deleting a compound clip deletes its nested timeline
     /// (`vv_core::RemoveMedia`): if it was being edited, one goes back up to the
     /// upper level that still exists.
@@ -2370,7 +2410,6 @@ impl VenturiApp {
         if self.timeline_state.selected.is_empty() {
             // No clip selected: the selected gap is closed, if there is one.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
-                let mark = self.session.history.begin_group();
                 vv_core::edit::ripple_delete_gap(
                     &mut self.session.project,
                     &mut self.session.history,
@@ -2378,7 +2417,6 @@ impl VenturiApp {
                     gap_start,
                     gap_end,
                 );
-                self.session.history.end_group(mark);
                 self.move_playhead_to_closed_gap(timeline_id, gap_start);
                 self.timeline_state.clear_selection();
                 self.sync_selection_to_playhead();
@@ -2387,14 +2425,12 @@ impl VenturiApp {
         }
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
 
-        let mark = self.session.history.begin_group();
         let leftmost_removed = vv_core::edit::ripple_delete_clips(
             &mut self.session.project,
             &mut self.session.history,
             timeline_id,
             &selected,
         );
-        self.session.history.end_group(mark);
         if let Some(position) = leftmost_removed {
             self.move_playhead_to_closed_gap(timeline_id, position);
         }
@@ -2959,7 +2995,10 @@ impl VenturiApp {
         self.handle_close_request(&ui.ctx().clone());
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
-        self.poll_session(&ui.ctx().clone());
+        // What the session applies would land inside the open group.
+        if self.edit_drag_group.is_none() && !self.timeline_state.holds_undo_group() {
+            self.poll_session(&ui.ctx().clone());
+        }
         let screenshots: Vec<std::sync::Arc<egui::ColorImage>> = ui.ctx().input(|i| {
             i.raw
                 .events

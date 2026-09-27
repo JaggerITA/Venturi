@@ -1,14 +1,14 @@
-//! Ids as the agent sees them: decimal strings. Slotmap keys go through
-//! their FFI form, whose u64 would not survive a JSON number in JS clients.
+//! Ids as the agent sees them: decimal strings, since a u64 would not
+//! survive a JSON number in JS clients.
 
-use slotmap::{Key, KeyData};
+use vv_core::Id;
 use vv_core::edit::ClipRef;
 use vv_core::{ClipId, MarkerId, MediaId, Project, TimelineId, TrackKind};
 
 use crate::ToolError;
 
-pub(crate) fn key_to_string(key: impl Key) -> String {
-    key.data().as_ffi().to_string()
+pub(crate) fn key_to_string(key: impl Id) -> String {
+    key.raw().to_string()
 }
 
 fn parse_u64(id: &str, what: &str) -> Result<u64, ToolError> {
@@ -18,7 +18,7 @@ fn parse_u64(id: &str, what: &str) -> Result<u64, ToolError> {
 }
 
 pub(crate) fn media_id(project: &Project, id: &str) -> Result<MediaId, ToolError> {
-    let key: MediaId = KeyData::from_ffi(parse_u64(id, "media")?).into();
+    let key = MediaId::from_raw(parse_u64(id, "media")?);
     project
         .media_pool
         .contains_key(key)
@@ -27,7 +27,7 @@ pub(crate) fn media_id(project: &Project, id: &str) -> Result<MediaId, ToolError
 }
 
 pub fn timeline_id(project: &Project, id: &str) -> Result<TimelineId, ToolError> {
-    let key: TimelineId = KeyData::from_ffi(parse_u64(id, "timeline")?).into();
+    let key = TimelineId::from_raw(parse_u64(id, "timeline")?);
     project
         .timelines
         .contains_key(key)

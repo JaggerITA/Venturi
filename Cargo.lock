@@ -3339,7 +3339,6 @@ version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
 dependencies = [
- "serde",
  "version_check",
 ]
 
@@ -3908,7 +3907,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vv-app"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3919,7 +3918,6 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
- "slotmap",
  "smithay-client-toolkit 0.20.0",
  "sys-locale",
  "tokio",
@@ -3935,7 +3933,7 @@ dependencies = [
 
 [[package]]
 name = "vv-audio"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "ffmpeg-next",
@@ -3944,18 +3942,17 @@ dependencies = [
 
 [[package]]
 name = "vv-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ron",
  "serde",
  "serde_json",
- "slotmap",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "vv-mcp"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "png",
@@ -3963,7 +3960,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "slotmap",
  "tokio",
  "vv-core",
  "vv-media",
@@ -3973,7 +3969,7 @@ dependencies = [
 
 [[package]]
 name = "vv-media"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ffmpeg-next",
  "thiserror 2.0.20",
@@ -3982,7 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "vv-render"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -3993,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "vv-session"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "vv-audio",
