@@ -59,6 +59,9 @@ attaching yet.
 
 While attached, the agent shares the window with you:
 
+- It keeps working while the window is hidden or on another workspace;
+  the window catches up when you come back. Only `screenshot_ui` needs the
+  window to be drawn.
 - Its edits wait while you are in the middle of a gesture (dragging a clip,
   a slider, a handle in the viewer). They never merge into your undo step:
   each agent call is a step of its own in **Edit > Undo History**.

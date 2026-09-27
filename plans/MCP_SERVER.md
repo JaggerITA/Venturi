@@ -307,7 +307,7 @@ sits in step 1 (the session refactor); steps 2-6 only add code.
   indicator visible), undo/redo.
 - Not done: Windows named pipe (#15), Flatpak socket path (#1).
 
-## Step 7 (proposed, to confirm): calls answered without UI frames
+## Step 7: calls answered without UI frames (done: f7ec2be, 272e227)
 
 **Problem.** In the editor the calls are handled inside `ui()`. On Wayland a
 window that is hidden or on another workspace gets no frame callbacks, so
@@ -353,6 +353,23 @@ runs, so the calls must be answered without frames.
 - Tests: the host thread answers calls with no UI frame at all (hidden
   window), holds edits while a published gesture is on, and a UI frame
   after agent edits reconciles (render-ahead generation, replaced project).
+
+Implementation notes (step 7):
+- The slot exists only while MCP is on; with it off, nothing changes.
+- The UI publishes gesture/dialog/state in `mcp_checkin`, catches up in
+  `mcp_checkout` (events, epoch, timeline to show, export window).
+- Whoever ticks the session forwards the events to the other side
+  (`events_for_host` / `events_for_ui`, `SessionEvent: Clone`).
+- Timeline revisions are cached in the session by `ChangeMark` (epoch,
+  history generation, outside-history changes).
+- `save_project` writes a copy and `open_project` reads (and completes the
+  legacy media of) the file before taking the session, so the UI is not
+  held during the I/O.
+- Verified: unit tests answer calls with no UI frame at all; in the
+  container, Claude Code drove the drawn window, and raw calls (including an
+  undo) were answered with the X11 window unmapped, the UI catching up when
+  mapped again. The Wayland hidden-window case itself is to be confirmed on
+  a real session.
 
 ## Open points
 
