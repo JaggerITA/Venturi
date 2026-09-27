@@ -107,6 +107,20 @@ impl PendingCalls {
         self.0.push((pending, reply));
     }
 
+    /// Replies to the `Worker` calls that finished.
+    pub fn poll(&mut self) {
+        let mut index = 0;
+        while index < self.0.len() {
+            match self.0[index].0.poll() {
+                Some(result) => {
+                    let (_, reply) = self.0.swap_remove(index);
+                    let _ = reply.send(result);
+                }
+                None => index += 1,
+            }
+        }
+    }
+
     pub fn resolve(&mut self, session: &mut Session, event: &vv_session::SessionEvent) {
         let mut index = 0;
         while index < self.0.len() {
@@ -140,6 +154,7 @@ pub fn run_headless(mut session: Session, inbox: McpInbox) -> Session {
         for event in session.tick() {
             pending.resolve(&mut session, &event);
         }
+        pending.poll();
     }
 }
 

@@ -1252,14 +1252,17 @@ impl<'a> YuvFrame<'a> {
     }
 }
 
-#[cfg(test)]
 impl Compositor {
-    /// Composes the stack in alpha-over and reads the result in RGBA.
+    /// Composes the stack in alpha-over on opaque black and reads the result
+    /// in RGBA8.
     pub fn render_layers(&self, layers: &[Layer], output: OutputFrame) -> Vec<u8> {
         let output_texture = self.render_layers_to_texture(layers, output);
         self.read_rgba_texture(&output_texture, output.width, output.height)
     }
+}
 
+#[cfg(test)]
+impl Compositor {
     /// A single frame with `transform`, read in RGBA8.
     pub fn render_frame(
         &self,

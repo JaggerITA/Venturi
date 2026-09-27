@@ -105,6 +105,8 @@ pub(crate) struct Jobs {
     otio_merge: Option<(JobId, PendingOtioMerge)>,
     relink: Option<(JobId, relink_job::RelinkJob)>,
     export: Option<RunningExport>,
+    /// Every export of the session, readable after it ended.
+    export_progress: HashMap<JobId, Arc<Mutex<ExportProgress>>>,
 }
 
 struct RunningImport {
@@ -158,6 +160,11 @@ pub fn file_label(path: &Path) -> String {
 impl Session {
     pub fn set_waker(&mut self, waker: Waker) {
         self.waker = waker;
+    }
+
+    /// For work the host runs on its own threads.
+    pub fn waker(&self) -> Waker {
+        self.waker.clone()
     }
 
     /// Collects what the background work produced since the last call.
@@ -529,13 +536,17 @@ impl Session {
     }
 
     /// Exports a snapshot of the project on a thread: editing can go on.
-    /// The progress stays readable after the end.
+    /// The progress stays readable after the end. `None` while another
+    /// export is running.
     pub fn export(
         &mut self,
         timeline_id: TimelineId,
         settings: ExportSettings,
         range: std::ops::Range<FrameIdx>,
-    ) -> (JobId, Arc<Mutex<ExportProgress>>) {
+    ) -> Option<(JobId, Arc<Mutex<ExportProgress>>)> {
+        if self.jobs.export.is_some() {
+            return None;
+        }
         let job = self.jobs.alloc();
         let project = self.project.clone();
         let progress = Arc::new(Mutex::new(ExportProgress::default()));
@@ -567,12 +578,30 @@ impl Session {
             cancel,
             handle,
         });
-        (job, progress)
+        self.jobs.export_progress.insert(job, progress.clone());
+        Some((job, progress))
     }
 
-    pub fn cancel_export(&self) {
-        if let Some(running) = &self.jobs.export {
-            running.cancel.store(true, Ordering::Relaxed);
+    pub fn is_exporting(&self) -> bool {
+        self.jobs.export.is_some()
+    }
+
+    pub fn export_progress(&self, job: JobId) -> Option<Arc<Mutex<ExportProgress>>> {
+        self.jobs.export_progress.get(&job).cloned()
+    }
+
+    /// `false` if `job` is not the running export.
+    pub fn cancel_export(&self, job: JobId) -> bool {
+        // Done but not collected by `tick` yet: nothing left to cancel.
+        let done = self
+            .export_progress(job)
+            .is_some_and(|p| p.lock().unwrap().done);
+        match &self.jobs.export {
+            Some(running) if running.job == job && !done => {
+                running.cancel.store(true, Ordering::Relaxed);
+                true
+            }
+            _ => false,
         }
     }
 

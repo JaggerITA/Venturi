@@ -32,6 +32,11 @@ pub enum ToolCall {
     AddMarker(AddMarkerArgs),
     EditMarker(EditMarkerArgs),
     DeleteMarker(MarkerArgs),
+    RenderFrame(RenderFrameArgs),
+    GetAudioLevels(AudioLevelsArgs),
+    Export(ExportArgs),
+    ExportStatus(JobArgs),
+    CancelExport(JobArgs),
     Undo,
     Redo,
 }
@@ -377,3 +382,56 @@ impl std::fmt::Display for ToolError {
 }
 
 pub type ToolResult = Result<ToolOutput, ToolError>;
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct RenderFrameArgs {
+    pub timeline_id: String,
+    /// Timeline frame.
+    pub frame: i64,
+    /// Width of the image in pixels, at most the timeline's; the height
+    /// keeps the aspect ratio. Default 960.
+    #[serde(default)]
+    pub max_width: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct AudioLevelsArgs {
+    /// Measure a media file (its frames and fps)...
+    #[serde(default)]
+    pub media_id: Option<String>,
+    /// ...which of its audio streams, default 0...
+    #[serde(default)]
+    pub stream: Option<usize>,
+    /// ...or what a timeline plays, all audible tracks mixed (its frames).
+    #[serde(default)]
+    pub timeline_id: Option<String>,
+    /// First frame measured.
+    pub start: i64,
+    /// Frame after the last one measured.
+    pub end: i64,
+    /// Frames per measurement window, default 1. At most 20000 windows per
+    /// call.
+    #[serde(default)]
+    pub window: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct ExportArgs {
+    pub timeline_id: String,
+    /// Output file, e.g. `/home/me/out.mp4` (H.264 + AAC).
+    pub path: String,
+    /// `[start, end)` timeline frames; default the whole timeline.
+    #[serde(default)]
+    pub range: Option<[i64; 2]>,
+    /// Output size as a percentage of the timeline resolution, default 100.
+    #[serde(default)]
+    pub scale_percent: Option<u32>,
+    /// Include the audio. Default true.
+    #[serde(default = "yes")]
+    pub audio: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct JobArgs {
+    pub job_id: String,
+}

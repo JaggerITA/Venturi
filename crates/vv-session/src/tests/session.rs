@@ -221,7 +221,9 @@ fn import_edit_and_export_without_a_ui() {
     assert_eq!(item.meta.duration_frames, 30);
 
     let output = dir.join("out.mp4");
-    let (job, progress) = session.export(timeline, ExportSettings::new(output.clone()), 0..total);
+    let (job, progress) = session
+        .export(timeline, ExportSettings::new(output.clone()), 0..total)
+        .unwrap();
     let events = run_jobs(&mut session);
 
     assert!(matches!(
@@ -247,8 +249,16 @@ fn a_cancelled_export_reports_it() {
         0,
         None,
     );
-    let (_, progress) = session.export(timeline, ExportSettings::new(dir.join("out.mp4")), 0..125);
-    session.cancel_export();
+    let (job, progress) = session
+        .export(timeline, ExportSettings::new(dir.join("out.mp4")), 0..125)
+        .unwrap();
+    assert!(
+        session
+            .export(timeline, ExportSettings::new(dir.join("other.mp4")), 0..125)
+            .is_none(),
+        "one export at a time"
+    );
+    assert!(session.cancel_export(job));
     let events = run_jobs(&mut session);
 
     // A very fast machine may finish before seeing the flag.

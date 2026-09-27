@@ -3931,6 +3931,7 @@ name = "vv-mcp"
 version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
+ "png",
  "rmcp",
  "schemars",
  "serde",
@@ -3939,6 +3940,7 @@ dependencies = [
  "tokio",
  "vv-core",
  "vv-media",
+ "vv-render",
  "vv-session",
 ]
 

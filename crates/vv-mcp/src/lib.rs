@@ -7,6 +7,7 @@ mod edit_tools;
 mod host;
 mod ids;
 mod json;
+mod media_tools;
 mod server;
 mod tools;
 

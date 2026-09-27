@@ -41,6 +41,7 @@ pub(crate) struct PendingDialog {
 /// The export window: open from the start of an export until closed, so the
 /// outcome stays readable after the job is over.
 pub(crate) struct ExportUiState {
+    pub(crate) job: vv_session::JobId,
     pub(crate) progress: Arc<Mutex<export::ExportProgress>>,
 }
 
@@ -712,8 +713,13 @@ impl VenturiApp {
         range: std::ops::Range<FrameIdx>,
     ) {
         self.pause_proxies_for_export();
-        let (_, progress) = self.session.export(timeline_id, settings, range);
-        self.export = Some(ExportUiState { progress });
+        match self.session.export(timeline_id, settings, range) {
+            Some((job, progress)) => self.export = Some(ExportUiState { job, progress }),
+            None => {
+                self.resume_proxies_after_export();
+                self.project_error = Some(t!("export.already_running").into_owned());
+            }
+        }
     }
 
     pub(crate) fn show_import_warnings(&mut self, ui: &mut egui::Ui) {
@@ -822,7 +828,7 @@ impl VenturiApp {
                 }
                 ui.horizontal(|ui| {
                     if !done && ui.button(t!("common.cancel")).clicked() {
-                        self.session.cancel_export();
+                        self.session.cancel_export(state.job);
                     }
                     if done && ui.button(t!("common.close")).clicked() {
                         should_close = true;

@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 use vv_core::{Rational, Timeline, Track, TrackKind};
 use vv_session::{JobId, OtioMerged, Session, SessionEvent};
 
-use crate::edit_tools;
 use crate::ids::{self, key_to_string};
 use crate::json::*;
 use crate::tools::*;
+use crate::{edit_tools, media_tools};
 
 pub enum Dispatch {
     Handled(ToolResult),
@@ -25,9 +25,25 @@ pub enum Pending {
         job: JobId,
         reuse_existing_media: bool,
     },
+    /// Work on a thread of its own: the host checks it with `poll`.
+    Worker(std::sync::mpsc::Receiver<ToolResult>),
 }
 
 impl Pending {
+    /// The result of a `Worker`, once there.
+    pub fn poll(&self) -> Option<ToolResult> {
+        let Pending::Worker(result) = self else {
+            return None;
+        };
+        match result.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err(ToolError("the work failed unexpectedly".into())))
+            }
+        }
+    }
+
     pub fn resolve(&self, session: &mut Session, event: &SessionEvent) -> Option<ToolResult> {
         match (self, event) {
             (
@@ -78,6 +94,8 @@ pub fn dispatch(session: &mut Session, call: ToolCall) -> Dispatch {
     match call {
         ToolCall::ImportMedia(args) => import_media(session, args),
         ToolCall::ImportOtio(args) => import_otio(session, args),
+        ToolCall::RenderFrame(args) => media_tools::render_frame(session, args),
+        ToolCall::GetAudioLevels(args) => media_tools::audio_levels(session, args),
         call => Dispatch::Handled(run(session, call)),
     }
 }
@@ -144,6 +162,9 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
         ToolCall::AddMarker(args) => edit_tools::add_marker(session, args),
         ToolCall::EditMarker(args) => edit_tools::edit_marker(session, args),
         ToolCall::DeleteMarker(args) => edit_tools::delete_marker(session, args),
+        ToolCall::Export(args) => media_tools::export(session, args),
+        ToolCall::ExportStatus(args) => media_tools::export_status(session, args),
+        ToolCall::CancelExport(args) => media_tools::cancel_export(session, args),
         ToolCall::Undo => {
             let position = session.history.position();
             let Some(label) = position
@@ -163,9 +184,10 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
             session.history.redo(&mut session.project);
             Ok(ToolOutput::json(json!({ "redone": format!("{label:?}") })))
         }
-        ToolCall::ImportMedia(_) | ToolCall::ImportOtio(_) => {
-            Err(ToolError("deferred call run as immediate".into()))
-        }
+        ToolCall::ImportMedia(_)
+        | ToolCall::ImportOtio(_)
+        | ToolCall::RenderFrame(_)
+        | ToolCall::GetAudioLevels(_) => Err(ToolError("deferred call run as immediate".into())),
     }
 }
 

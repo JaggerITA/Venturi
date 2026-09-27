@@ -50,7 +50,7 @@ pub(crate) fn error(session: &mut Session, call: ToolCall) -> String {
 }
 
 /// Runs a deferred call to completion, as a host does.
-fn run_deferred(session: &mut Session, call: ToolCall) -> ToolResult {
+pub(crate) fn run_deferred(session: &mut Session, call: ToolCall) -> ToolResult {
     let Dispatch::Deferred(pending) = dispatch(session, call) else {
         panic!("expected a deferred call");
     };
@@ -60,6 +60,9 @@ fn run_deferred(session: &mut Session, call: ToolCall) -> ToolResult {
             if let Some(result) = pending.resolve(session, &event) {
                 return result;
             }
+        }
+        if let Some(result) = pending.poll() {
+            return result;
         }
         assert!(std::time::Instant::now() < deadline, "never resolved");
         std::thread::sleep(std::time::Duration::from_millis(5));

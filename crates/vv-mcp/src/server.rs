@@ -234,6 +234,39 @@ impl VenturiServer {
     }
 
     #[tool(
+        description = "Renders one timeline frame as a PNG image, decoded exactly (not from a preview cache) and composited as the export does. Use it to check an edit visually."
+    )]
+    async fn render_frame(&self, Parameters(args): Parameters<RenderFrameArgs>) -> ToolReturn {
+        self.call(ToolCall::RenderFrame(args)).await
+    }
+
+    #[tool(
+        description = "Audio loudness per window of frames: RMS and peak in dBFS (floored at -120, digital silence), from the decoded samples. Of one stream of a media (media frames) or of the timeline mix (timeline frames). Thresholds are yours: e.g. RMS below -45 dB for 10+ consecutive frames is usually a pause."
+    )]
+    async fn get_audio_levels(&self, Parameters(args): Parameters<AudioLevelsArgs>) -> ToolReturn {
+        self.call(ToolCall::GetAudioLevels(args)).await
+    }
+
+    #[tool(
+        description = "Starts exporting a timeline (or a range of it) to a video file in the background; returns a job id. Edits made afterwards do not affect it. One export at a time."
+    )]
+    async fn export(&self, Parameters(args): Parameters<ExportArgs>) -> ToolReturn {
+        self.call(ToolCall::Export(args)).await
+    }
+
+    #[tool(
+        description = "Progress of an export: state running/done/failed/cancelled, frames written of the total, elapsed time, error."
+    )]
+    async fn export_status(&self, Parameters(args): Parameters<JobArgs>) -> ToolReturn {
+        self.call(ToolCall::ExportStatus(args)).await
+    }
+
+    #[tool(description = "Stops a running export; the partial file is left as is.")]
+    async fn cancel_export(&self, Parameters(args): Parameters<JobArgs>) -> ToolReturn {
+        self.call(ToolCall::CancelExport(args)).await
+    }
+
+    #[tool(
         description = "Undoes the last step: one editing call, or one action of the user in the editor."
     )]
     async fn undo(&self) -> ToolReturn {
