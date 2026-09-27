@@ -1501,33 +1501,13 @@ impl MediaDragSet {
     }
 }
 
-/// Effects of the Effects panel: they generate a clip without a source media.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Generator {
-    SolidColor,
-    Text,
-    Adjustment,
-}
+pub use vv_core::edit::{Generator, add_track};
 
-impl Generator {
-    pub const ALL: [Generator; 3] = [
-        Generator::SolidColor,
-        Generator::Text,
-        Generator::Adjustment,
-    ];
-
-    const DEFAULT_SECS: f64 = 5.0;
-
-    pub fn label(self) -> std::borrow::Cow<'static, str> {
-        match self {
-            Generator::SolidColor => t!("generator.solid_color"),
-            Generator::Text => t!("generator.text"),
-            Generator::Adjustment => t!("generator.adjustment"),
-        }
-    }
-
-    pub fn default_len(self, timeline_fps: vv_core::Rational) -> FrameIdx {
-        (timeline_fps.as_f64() * Self::DEFAULT_SECS).round() as FrameIdx
+pub fn generator_label(generator: Generator) -> std::borrow::Cow<'static, str> {
+    match generator {
+        Generator::SolidColor => t!("generator.solid_color"),
+        Generator::Text => t!("generator.text"),
+        Generator::Adjustment => t!("generator.adjustment"),
     }
 }
 
@@ -2089,7 +2069,7 @@ pub fn show_timeline(
                     && !drag_set_segments(project, timeline_fps, &drag).is_empty()
                 {
                     let frame = drop_frame(&drag, pos);
-                    // The tracks where `insert_media_clip` puts video and audio.
+                    // The tracks where `vv_core::edit::insert_media` puts video and audio.
                     let first_row = |kind| {
                         (0..track_count)
                             .find(|&t| track_kinds[t] == kind && !track_locked(t))
@@ -5373,18 +5353,6 @@ fn make_compound_clip(
             commands,
         )),
     );
-}
-
-/// Appends a track and returns its index.
-pub fn add_track(
-    project: &mut Project,
-    history: &mut History,
-    timeline_id: TimelineId,
-    kind: TrackKind,
-) -> usize {
-    let index = project.timelines[timeline_id].tracks.len();
-    history.do_command(project, Box::new(vv_core::AddTrack::new(timeline_id, kind)));
-    index
 }
 
 /// Inserts a copy of every clip of `moves` at the destination,

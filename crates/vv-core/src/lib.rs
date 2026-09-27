@@ -1,4 +1,5 @@
 pub mod command;
+pub mod edit;
 pub mod model;
 pub mod otio;
 pub mod persistence;

@@ -1387,7 +1387,7 @@ impl VenturiApp {
                 .color
                 .as_ref()
                 .map(|k| k.value_at(frame))
-                .unwrap_or(DEFAULT_SOLID_COLOR),
+                .unwrap_or(vv_core::edit::DEFAULT_SOLID_COLOR),
             title: clip.effects.title.clone(),
             filters: clip.effects.filters.clone(),
             blend_mode: clip.effects.blend_mode,

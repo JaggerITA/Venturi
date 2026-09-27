@@ -65,7 +65,9 @@ pub(crate) fn effects_section_header(ui: &mut egui::Ui, title: &str) {
 pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    let id = ui.id().with(("effect_item", generator.label()));
+    let id = ui
+        .id()
+        .with(("effect_item", timeline_ui::generator_label(generator)));
     let resp = ui
         .interact(rect, id, egui::Sense::click_and_drag())
         .on_hover_text(t!("pool.drag_to_timeline"));
@@ -111,13 +113,13 @@ pub(crate) fn effect_item(ui: &mut egui::Ui, generator: timeline_ui::Generator) 
     painter.text(
         egui::pos2(thumb.right() + 14.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
-        generator.label(),
+        timeline_ui::generator_label(generator),
         egui::FontId::proportional(13.0),
         visuals.text_color(),
     );
     resp.dnd_set_drag_payload(generator);
     if resp.dragged() {
-        show_drag_ghost(ui, id, &generator.label());
+        show_drag_ghost(ui, id, &timeline_ui::generator_label(generator));
     }
 }
 

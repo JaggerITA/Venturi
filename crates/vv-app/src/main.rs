@@ -53,6 +53,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use timeline_audio::TimelineAudio;
+use vv_core::edit::TargetTracks;
 use vv_core::{ClipId, FolderId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
 
 /// ~6 s of margin at 1080p, ~1.5 s at 4K.
@@ -60,14 +61,6 @@ const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
 
 /// Floor of the shrunk lookahead: below this playback stutters anyway.
 const MIN_LOOKAHEAD_SECS: f64 = 0.5;
-
-/// Color of a freshly created Solid Color clip.
-const DEFAULT_SOLID_COLOR: vv_core::Rgba = vv_core::Rgba {
-    r: 1.0,
-    g: 1.0,
-    b: 0.0,
-    a: 1.0,
-};
 
 /// After how long (s) an arrow held down stops doing the single
 /// step and starts scrolling at `ARROW_HOLD_SPEED`.
@@ -197,16 +190,6 @@ struct ClipPanelInfo {
     /// panel; then one per filter, in order of application.
     filters: Vec<vv_core::ClipFilter>,
     blend_mode: vv_core::BlendMode,
-}
-
-/// Where the clips of a drop from the media pool land, resolved once for
-/// the whole drop (see `resolve_drop_tracks`): `extra_audio` is the audio
-/// track created on the fly, which takes precedence over the existing ones.
-#[derive(Debug, Clone, Copy)]
-struct DropTracks {
-    /// `None` if there is no video in the drop: no video track to create.
-    video: Option<usize>,
-    extra_audio: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1412,17 +1395,14 @@ impl VenturiApp {
             let video_track = tracks
                 .video
                 .expect("generator: video track always resolved");
-            match generator {
-                timeline_ui::Generator::SolidColor => {
-                    self.insert_solid_color_clip(timeline_id, video_track, start)
-                }
-                timeline_ui::Generator::Text => {
-                    self.insert_text_clip(timeline_id, video_track, start)
-                }
-                timeline_ui::Generator::Adjustment => {
-                    self.insert_adjustment_clip(timeline_id, video_track, start)
-                }
-            }
+            vv_core::edit::insert_generator(
+                &mut self.project,
+                &mut self.history,
+                timeline_id,
+                generator,
+                video_track,
+                start,
+            );
         }
         self.history
             .end_group_as(group, vv_core::CommandLabel::InsertClips);
@@ -1444,91 +1424,18 @@ impl VenturiApp {
         }
     }
 
-    /// The initial color is mid grey, editable right away from the properties
-    /// panel once selected.
-    fn insert_solid_color_clip(
-        &mut self,
-        timeline_id: TimelineId,
-        track_index: usize,
-        start: FrameIdx,
-    ) {
-        let default_len =
-            timeline_ui::Generator::SolidColor.default_len(self.project.timelines[timeline_id].fps);
-
-        let effects = vv_core::EffectStack {
-            color: Some(vv_core::Keyframed::constant(DEFAULT_SOLID_COLOR)),
-            ..Default::default()
-        };
-
-        let mut clip = vv_core::Clip::from_source_range(
-            self.project.alloc_clip_id(),
-            vv_core::ClipSource::SolidColor,
-            0,
-            default_len,
-            start,
-            vv_core::Rational::one(),
-        );
-        clip.effects = effects;
-        self.insert_clips_overwriting(
-            timeline_id,
-            vec![(track_index, clip, None)],
-            vv_core::CommandLabel::InsertClips,
-        );
-    }
-
-    fn insert_text_clip(&mut self, timeline_id: TimelineId, track_index: usize, start: FrameIdx) {
-        let len = timeline_ui::Generator::Text.default_len(self.project.timelines[timeline_id].fps);
-        let mut clip = vv_core::Clip::from_source_range(
-            self.project.alloc_clip_id(),
-            vv_core::ClipSource::Text,
-            0,
-            len,
-            start,
-            vv_core::Rational::one(),
-        );
-        clip.effects.title = Some(vv_core::TitleParams::default());
-        self.insert_clips_overwriting(
-            timeline_id,
-            vec![(track_index, clip, None)],
-            vv_core::CommandLabel::InsertClips,
-        );
-    }
-
-    fn insert_adjustment_clip(
-        &mut self,
-        timeline_id: TimelineId,
-        track_index: usize,
-        start: FrameIdx,
-    ) {
-        let len =
-            timeline_ui::Generator::Adjustment.default_len(self.project.timelines[timeline_id].fps);
-        let clip = vv_core::Clip::from_source_range(
-            self.project.alloc_clip_id(),
-            vv_core::ClipSource::Adjustment,
-            0,
-            len,
-            start,
-            vv_core::Rational::one(),
-        );
-        self.insert_clips_overwriting(
-            timeline_id,
-            vec![(track_index, clip, None)],
-            vv_core::CommandLabel::InsertClips,
-        );
-    }
-
-    /// As in a real NLE, the clips already present under the new ones are
-    /// shortened, split or removed instead of staying overlapped.
     fn insert_clips_overwriting(
         &mut self,
         timeline_id: TimelineId,
         clips: Vec<(usize, vv_core::Clip, Option<u64>)>,
         label: vv_core::CommandLabel,
     ) {
-        let commands = vv_core::insert_overwriting(&mut self.project, timeline_id, clips);
-        self.history.do_command(
+        vv_core::edit::insert_clips(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(label, commands)),
+            &mut self.history,
+            timeline_id,
+            clips,
+            label,
         );
     }
 
@@ -1683,7 +1590,7 @@ impl VenturiApp {
             timeline_ui::MediaDrag::whole(media_id, &meta),
             &meta,
             video_start,
-            DropTracks {
+            TargetTracks {
                 video: Some(video_track),
                 extra_audio: None,
             },
@@ -1769,7 +1676,7 @@ impl VenturiApp {
         target: timeline_ui::MediaDropTarget,
         any_video: bool,
         any_audio: bool,
-    ) -> Option<DropTracks> {
+    ) -> Option<TargetTracks> {
         let video = if !any_video {
             None
         } else {
@@ -1810,98 +1717,31 @@ impl VenturiApp {
         } else {
             None
         };
-        Some(DropTracks { video, extra_audio })
+        Some(TargetTracks { video, extra_audio })
     }
 
-    /// Inserts the video clip and one audio clip per stream at `start`, all
-    /// in the same linked group; creates the missing audio tracks.
     fn insert_media_clip(
         &mut self,
         timeline_id: TimelineId,
         drag: timeline_ui::MediaDrag,
         meta: &vv_core::MediaMeta,
         start: FrameIdx,
-        tracks: DropTracks,
+        tracks: TargetTracks,
     ) {
-        let media_id = drag.media_id;
-        let rate =
-            vv_core::Rational::conform_rate(self.project.timelines[timeline_id].fps, meta.fps);
-        let has_audio_tracks = self.project.timelines[timeline_id]
-            .first_track_index(TrackKind::Audio)
-            .is_some();
-        let mut audio_track_indices: Vec<usize> = self.project.timelines[timeline_id]
-            .tracks_of_kind(TrackKind::Audio)
-            .filter(|(_, t)| !t.locked)
-            .map(|(i, _)| i)
-            .collect();
-
-        // At the head: the first stream must land on the track just
-        // created for this drop, not on an already existing one.
-        if let Some(extra) = tracks.extra_audio {
-            audio_track_indices.retain(|i| *i != extra);
-            audio_track_indices.insert(0, extra);
-        }
-
-        // Without an audio track the audio of a video is discarded, but a media or an
-        // audio-only drag creates one. If they are all locked, new ones are created.
-        let takes_video = drag.takes_video(meta);
-        let num_audio_streams = if !drag.takes_audio(meta) {
-            0
-        } else if has_audio_tracks || !takes_video {
-            meta.audio_stream_count()
-        } else {
-            0
-        };
-
-        while audio_track_indices.len() < num_audio_streams {
-            audio_track_indices.push(timeline_ui::add_track(
-                &mut self.project,
-                &mut self.history,
-                timeline_id,
-                TrackKind::Audio,
-            ));
-        }
-
-        let audio_clip_ids: Vec<ClipId> = (0..num_audio_streams)
-            .map(|_| self.project.alloc_clip_id())
-            .collect();
-
-        let mut new_clips: Vec<(usize, vv_core::Clip, Option<u64>)> = Vec::new();
-        if takes_video {
-            let video_clip = vv_core::Clip::from_source_range(
-                self.project.alloc_clip_id(),
-                vv_core::ClipSource::Media(media_id),
-                drag.source_in,
-                drag.source_out,
-                start,
-                rate,
-            );
-            // `tracks.video` is certainly `Some`: `resolve_drop_tracks`
-            // resolves it only if at least one media of the drop has video, and this
-            // is one of those.
-            new_clips.push((
-                tracks.video.expect("drop with video but no track resolved"),
-                video_clip,
-                Some(0),
-            ));
-        }
-        for (stream_index, (&track_index, &clip_id)) in audio_track_indices
-            .iter()
-            .zip(audio_clip_ids.iter())
-            .enumerate()
-        {
-            let mut audio_clip = vv_core::Clip::from_source_range(
-                clip_id,
-                vv_core::ClipSource::Media(media_id),
-                drag.source_in,
-                drag.source_out,
-                start,
-                rate,
-            );
-            audio_clip.audio_stream_index = stream_index;
-            new_clips.push((track_index, audio_clip, Some(0)));
-        }
-        self.insert_clips_overwriting(timeline_id, new_clips, vv_core::CommandLabel::InsertClips);
+        vv_core::edit::insert_media(
+            &mut self.project,
+            &mut self.history,
+            timeline_id,
+            vv_core::edit::MediaInsert {
+                media_id: drag.media_id,
+                source_in: drag.source_in,
+                source_out: drag.source_out,
+                video: drag.takes_video(meta),
+                audio: drag.takes_audio(meta),
+            },
+            start,
+            tracks,
+        );
     }
 
     /// Transform handles of the first selected video clip, if it is under
@@ -2238,23 +2078,8 @@ impl VenturiApp {
         if self.timeline_state.selected.is_empty() {
             return;
         }
-        let commands: Vec<Box<dyn vv_core::Command>> = self
-            .timeline_state
-            .selected
-            .iter()
-            .copied()
-            .map(|(track_index, clip_id)| {
-                Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id))
-                    as Box<dyn vv_core::Command>
-            })
-            .collect();
-        self.history.do_command(
-            &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(
-                vv_core::CommandLabel::DeleteClips,
-                commands,
-            )),
-        );
+        let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
+        vv_core::edit::delete_clips(&mut self.project, &mut self.history, timeline_id, &selected);
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
     }
@@ -2544,15 +2369,13 @@ impl VenturiApp {
             // No clip selected: the selected gap is closed, if there is one.
             if let Some((_, gap_start, gap_end)) = self.timeline_state.selected_gap {
                 let mark = self.history.begin_group();
-                self.history.do_command(
+                vv_core::edit::ripple_delete_gap(
                     &mut self.project,
-                    Box::new(vv_core::RippleDeleteGap::new(
-                        timeline_id,
-                        gap_start,
-                        gap_end - gap_start,
-                    )),
+                    &mut self.history,
+                    timeline_id,
+                    gap_start,
+                    gap_end,
                 );
-                self.cut_remaining_overlaps(timeline_id);
                 self.history.end_group(mark);
                 self.move_playhead_to_closed_gap(timeline_id, gap_start);
                 self.timeline_state.clear_selection();
@@ -2562,97 +2385,19 @@ impl VenturiApp {
         }
         let selected: Vec<(usize, ClipId)> = self.timeline_state.selected.iter().copied().collect();
 
-        let mut processed: BTreeSet<(usize, ClipId)> = BTreeSet::new();
-        let mut removed: Vec<(usize, ClipId, FrameIdx, FrameIdx)> = Vec::new();
-        for &(track_index, clip_id) in &selected {
-            for (member_track, member_id) in std::iter::once((track_index, clip_id))
-                .chain(self.project.timelines[timeline_id].linked_members(track_index, clip_id))
-            {
-                if self.project.timelines[timeline_id].is_locked(member_track)
-                    || !processed.insert((member_track, member_id))
-                {
-                    continue;
-                }
-                let Some(clip) = self.project.timelines[timeline_id].clip(member_track, member_id)
-                else {
-                    continue;
-                };
-                removed.push((
-                    member_track,
-                    member_id,
-                    clip.timeline_start,
-                    clip.timeline_end(),
-                ));
-            }
-        }
-
-        // Holes merged when they overlap: closing them once per clip
-        // would make the rest go back twice as far.
-        let mut gaps: Vec<(FrameIdx, FrameIdx)> = removed
-            .iter()
-            .map(|&(_, _, start, end)| (start, end))
-            .collect();
-        gaps.sort();
-        let mut merged: Vec<(FrameIdx, FrameIdx)> = Vec::new();
-        for (start, end) in gaps {
-            match merged.last_mut() {
-                Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
-                _ => merged.push((start, end)),
-            }
-        }
-        let leftmost_removed = merged.first().map(|&(start, _)| start);
-
-        let mut commands: Vec<Box<dyn vv_core::Command>> = removed
-            .iter()
-            .map(|&(track_index, clip_id, _, _)| {
-                Box::new(vv_core::LiftDelete::new(timeline_id, track_index, clip_id))
-                    as Box<dyn vv_core::Command>
-            })
-            .collect();
-        // From right to left: closing a hole moves what comes
-        // after it, not what comes before it, so the holes still to
-        // close stay where we measured them.
-        for &(start, end) in merged.iter().rev() {
-            commands.push(Box::new(vv_core::RippleDeleteGap::new(
-                timeline_id,
-                start,
-                end - start,
-            )));
-        }
-
         let mark = self.history.begin_group();
-        self.history.do_command(
+        let leftmost_removed = vv_core::edit::ripple_delete_clips(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(
-                vv_core::CommandLabel::RippleDelete,
-                commands,
-            )),
+            &mut self.history,
+            timeline_id,
+            &selected,
         );
-        self.cut_remaining_overlaps(timeline_id);
         self.history.end_group(mark);
         if let Some(position) = leftmost_removed {
             self.move_playhead_to_closed_gap(timeline_id, position);
         }
         self.timeline_state.clear_selection();
         self.sync_selection_to_playhead();
-    }
-
-    /// After a bulk move, cuts the overlaps that may have
-    /// remained (see `vv_core::cut_overlaps`): the clip starting later
-    /// always wins, the one that just arrived there.
-    fn cut_remaining_overlaps(&mut self, timeline_id: TimelineId) {
-        let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-        vv_core::cut_overlaps(&mut self.project, timeline_id, &mut commands);
-        if commands.is_empty() {
-            return;
-        }
-        self.history.do_command(
-            &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(
-                vv_core::CommandLabel::TrimClips,
-                commands,
-            )),
-        );
     }
 
     /// Brings the playhead where the clip that slid in to close the hole now starts;
@@ -2693,78 +2438,24 @@ impl VenturiApp {
         };
         let playhead = self.timeline_state.playhead;
         let selected = &self.timeline_state.selected;
-        let targets: Vec<(usize, ClipId, Option<vv_core::LinkGroupId>)> = self.project.timelines
-            [timeline_id]
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, track)| !track.locked)
-            .flat_map(|(track_index, track)| {
-                track
-                    .clips
-                    .iter()
-                    .filter(move |c| playhead > c.timeline_start && playhead < c.timeline_end())
-                    .filter(move |c| selected.is_empty() || selected.contains(&(track_index, c.id)))
-                    .map(move |c| (track_index, c.id, c.linked_group))
-            })
-            .collect();
-        if targets.is_empty() {
-            return;
-        }
-
-        // Id of the right half pre-allocated for every target, so it can
-        // be used right away for the relinking commands.
-        let new_ids: std::collections::HashMap<ClipId, ClipId> = targets
-            .iter()
-            .map(|(_, id, _)| (*id, self.project.alloc_clip_id()))
-            .collect();
-
-        let mut commands: Vec<Box<dyn vv_core::Command>> = targets
-            .iter()
-            .map(|(track_index, clip_id, _)| {
-                Box::new(
-                    vv_core::SplitClip::new(timeline_id, *track_index, *clip_id, playhead)
-                        .with_new_clip_id(new_ids[clip_id]),
-                ) as Box<dyn vv_core::Command>
-            })
-            .collect();
-
-        let mut right_halves_by_group: std::collections::HashMap<
-            vv_core::LinkGroupId,
-            Vec<(usize, ClipId)>,
-        > = std::collections::HashMap::new();
-        for (track_index, clip_id, group) in &targets {
-            if let Some(g) = group {
-                right_halves_by_group
-                    .entry(*g)
-                    .or_default()
-                    .push((*track_index, new_ids[clip_id]));
-            }
-        }
-        for right_halves in right_halves_by_group.into_values() {
-            if right_halves.len() >= 2 {
-                commands.push(Box::new(vv_core::LinkClips::new(timeline_id, right_halves)));
-            }
-        }
-
-        self.history.do_command(
+        let targets = vv_core::edit::split_clips(
             &mut self.project,
-            Box::new(vv_core::CompositeCommand::new(
-                vv_core::CommandLabel::SplitClips,
-                commands,
-            )),
+            &mut self.history,
+            timeline_id,
+            playhead,
+            (!selected.is_empty()).then_some(selected),
         );
 
         // Selects the *left* half (the one under the playhead would be the
         // right one): after a cut one usually works on what comes before.
         if self.selection_follows_playhead
-            && let Some((video_track, video_clip_id, _)) = targets
+            && let Some((video_track, video_clip_id)) = targets
                 .iter()
-                .filter(|(track_index, _, _)| {
+                .filter(|(track_index, _)| {
                     self.project.timelines[timeline_id].tracks[*track_index].kind
                         == TrackKind::Video
                 })
-                .max_by_key(|(track_index, _, _)| *track_index)
+                .max_by_key(|(track_index, _)| *track_index)
         {
             let mut selected = BTreeSet::from([(*video_track, *video_clip_id)]);
             selected.extend(

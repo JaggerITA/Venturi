@@ -1,0 +1,465 @@
+//! Editing operations on explicit targets. Selection and playhead belong to
+//! the caller, and so does the undo grouping: an operation may push several
+//! history steps (tracks created on the fly, overlap fix-ups), which the
+//! caller wraps in `History::begin_group`/`end_group`.
+
+use std::collections::{BTreeSet, HashMap};
+
+use crate::{
+    AddTrack, Clip, ClipId, ClipSource, Command, CommandLabel, CompositeCommand, EffectStack,
+    FrameIdx, History, Keyframed, LiftDelete, LinkClips, LinkGroupId, MediaId, Project, Rational,
+    Rgba, RippleDeleteGap, SplitClip, TimelineId, TitleParams, TrackKind,
+};
+
+pub type ClipRef = (usize, ClipId);
+
+pub const DEFAULT_SOLID_COLOR: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 0.0,
+    a: 1.0,
+};
+
+/// Clips generated without a source media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Generator {
+    SolidColor,
+    Text,
+    Adjustment,
+}
+
+impl Generator {
+    pub const ALL: [Generator; 3] = [
+        Generator::SolidColor,
+        Generator::Text,
+        Generator::Adjustment,
+    ];
+
+    const DEFAULT_SECS: f64 = 5.0;
+
+    pub fn default_len(self, timeline_fps: Rational) -> FrameIdx {
+        (timeline_fps.as_f64() * Self::DEFAULT_SECS).round() as FrameIdx
+    }
+}
+
+/// Where an insertion puts its clips. `extra_audio` is a track created for
+/// this insertion: the first audio stream goes there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetTracks {
+    pub video: Option<usize>,
+    pub extra_audio: Option<usize>,
+}
+
+/// A portion of a media to put on a timeline, in media frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaInsert {
+    pub media_id: MediaId,
+    pub source_in: FrameIdx,
+    pub source_out: FrameIdx,
+    pub video: bool,
+    pub audio: bool,
+}
+
+/// Appends a track and returns its index.
+pub fn add_track(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    kind: TrackKind,
+) -> usize {
+    let index = project.timelines[timeline_id].tracks.len();
+    history.do_command(project, Box::new(AddTrack::new(timeline_id, kind)));
+    index
+}
+
+/// Splits at `frame` the clips of the unlocked tracks strictly covering it,
+/// restricted to `only` when given. The right halves of a link group are
+/// linked to each other. Returns the split clips (now the left halves).
+pub fn split_clips(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    frame: FrameIdx,
+    only: Option<&BTreeSet<ClipRef>>,
+) -> Vec<ClipRef> {
+    split_where(project, history, timeline_id, frame, |track_index, clip| {
+        only.is_none_or(|only| only.contains(&(track_index, clip.id)))
+    })
+}
+
+fn split_where(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    frame: FrameIdx,
+    keep: impl Fn(usize, &Clip) -> bool,
+) -> Vec<ClipRef> {
+    let targets: Vec<(usize, ClipId, Option<LinkGroupId>)> = project.timelines[timeline_id]
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| !track.locked)
+        .flat_map(|(track_index, track)| {
+            track
+                .clips
+                .iter()
+                .filter(move |c| frame > c.timeline_start && frame < c.timeline_end())
+                .map(move |c| (track_index, c))
+        })
+        .filter(|&(track_index, c)| keep(track_index, c))
+        .map(|(track_index, c)| (track_index, c.id, c.linked_group))
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+
+    // Pre-allocated so the relinking commands can name the right halves.
+    let new_ids: HashMap<ClipId, ClipId> = targets
+        .iter()
+        .map(|(_, id, _)| (*id, project.alloc_clip_id()))
+        .collect();
+
+    let mut commands: Vec<Box<dyn Command>> = targets
+        .iter()
+        .map(|(track_index, clip_id, _)| {
+            Box::new(
+                SplitClip::new(timeline_id, *track_index, *clip_id, frame)
+                    .with_new_clip_id(new_ids[clip_id]),
+            ) as Box<dyn Command>
+        })
+        .collect();
+
+    let mut right_halves_by_group: HashMap<LinkGroupId, Vec<ClipRef>> = HashMap::new();
+    for (track_index, clip_id, group) in &targets {
+        if let Some(g) = group {
+            right_halves_by_group
+                .entry(*g)
+                .or_default()
+                .push((*track_index, new_ids[clip_id]));
+        }
+    }
+    for right_halves in right_halves_by_group.into_values() {
+        if right_halves.len() >= 2 {
+            commands.push(Box::new(LinkClips::new(timeline_id, right_halves)));
+        }
+    }
+
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::SplitClips, commands)),
+    );
+    targets
+        .into_iter()
+        .map(|(track_index, clip_id, _)| (track_index, clip_id))
+        .collect()
+}
+
+/// Removes `clips`, leaving gaps. Clips on locked tracks are kept.
+pub fn delete_clips(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    clips: &[ClipRef],
+) {
+    let tl = &project.timelines[timeline_id];
+    let commands: Vec<Box<dyn Command>> = clips
+        .iter()
+        .filter(|&&(track_index, clip_id)| {
+            !tl.is_locked(track_index) && tl.clip(track_index, clip_id).is_some()
+        })
+        .map(|&(track_index, clip_id)| {
+            Box::new(LiftDelete::new(timeline_id, track_index, clip_id)) as Box<dyn Command>
+        })
+        .collect();
+    if commands.is_empty() {
+        return;
+    }
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::DeleteClips, commands)),
+    );
+}
+
+/// Removes `clips` and their link groups, then closes the holes on every
+/// unlocked track. Returns where the leftmost hole was.
+pub fn ripple_delete_clips(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    clips: &[ClipRef],
+) -> Option<FrameIdx> {
+    let tl = &project.timelines[timeline_id];
+    let mut processed: BTreeSet<ClipRef> = BTreeSet::new();
+    let mut removed: Vec<(usize, ClipId, FrameIdx, FrameIdx)> = Vec::new();
+    for &(track_index, clip_id) in clips {
+        for (member_track, member_id) in
+            std::iter::once((track_index, clip_id)).chain(tl.linked_members(track_index, clip_id))
+        {
+            if tl.is_locked(member_track) || !processed.insert((member_track, member_id)) {
+                continue;
+            }
+            let Some(clip) = tl.clip(member_track, member_id) else {
+                continue;
+            };
+            removed.push((
+                member_track,
+                member_id,
+                clip.timeline_start,
+                clip.timeline_end(),
+            ));
+        }
+    }
+    if removed.is_empty() {
+        return None;
+    }
+    // Closing overlapping holes one per clip would shift the rest twice.
+    let merged = merge_ranges(removed.iter().map(|&(_, _, start, end)| (start, end)));
+
+    let mut commands: Vec<Box<dyn Command>> = removed
+        .iter()
+        .map(|&(track_index, clip_id, _, _)| {
+            Box::new(LiftDelete::new(timeline_id, track_index, clip_id)) as Box<dyn Command>
+        })
+        .collect();
+    // Right to left: closing a hole only moves what comes after it.
+    for &(start, end) in merged.iter().rev() {
+        commands.push(Box::new(RippleDeleteGap::new(
+            timeline_id,
+            start,
+            end - start,
+        )));
+    }
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::RippleDelete, commands)),
+    );
+    cut_overlaps(project, history, timeline_id);
+    merged.first().map(|&(start, _)| start)
+}
+
+/// Closes the empty interval `[start, end)` on every unlocked track.
+pub fn ripple_delete_gap(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    start: FrameIdx,
+    end: FrameIdx,
+) {
+    history.do_command(
+        project,
+        Box::new(RippleDeleteGap::new(timeline_id, start, end - start)),
+    );
+    cut_overlaps(project, history, timeline_id);
+}
+
+/// How `delete_ranges` treats the removed material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeDelete {
+    /// Closes the gaps. Acts on every unlocked track: closing a gap shifts
+    /// them all, so leaving material on some would make it overlap.
+    Ripple,
+    /// Leaves gaps, on the given tracks (all unlocked ones with `None`).
+    Lift { tracks: Option<Vec<usize>> },
+}
+
+/// Removes the timeline intervals `[start, end)`: clips crossing an edge
+/// are split there, the pieces inside are removed. Overlapping or touching
+/// ranges are merged first.
+pub fn delete_ranges(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    ranges: &[(FrameIdx, FrameIdx)],
+    mode: &RangeDelete,
+) {
+    let on_track = |track_index: usize| match mode {
+        RangeDelete::Ripple | RangeDelete::Lift { tracks: None } => true,
+        RangeDelete::Lift {
+            tracks: Some(tracks),
+        } => tracks.contains(&track_index),
+    };
+    let merged = merge_ranges(ranges.iter().copied().filter(|&(s, e)| e > s));
+    // Last to first, so rippling one range does not move the earlier ones.
+    for &(start, end) in merged.iter().rev() {
+        for edge in [end, start] {
+            split_where(project, history, timeline_id, edge, |track_index, _| {
+                on_track(track_index)
+            });
+        }
+        let tl = &project.timelines[timeline_id];
+        let inside: Vec<ClipRef> = tl
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|&(track_index, track)| !track.locked && on_track(track_index))
+            .flat_map(|(track_index, track)| {
+                track
+                    .clips
+                    .iter()
+                    .filter(|c| c.timeline_start >= start && c.timeline_end() <= end)
+                    .map(move |c| (track_index, c.id))
+            })
+            .collect();
+        delete_clips(project, history, timeline_id, &inside);
+        if *mode == RangeDelete::Ripple {
+            ripple_delete_gap(project, history, timeline_id, start, end);
+        }
+    }
+}
+
+fn merge_ranges(ranges: impl Iterator<Item = (FrameIdx, FrameIdx)>) -> Vec<(FrameIdx, FrameIdx)> {
+    let mut ranges: Vec<(FrameIdx, FrameIdx)> = ranges.collect();
+    ranges.sort();
+    let mut merged: Vec<(FrameIdx, FrameIdx)> = Vec::new();
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Cuts the overlaps left by a bulk move (see `crate::cut_overlaps`).
+pub fn cut_overlaps(project: &mut Project, history: &mut History, timeline_id: TimelineId) {
+    let mut commands: Vec<Box<dyn Command>> = Vec::new();
+    crate::cut_overlaps(project, timeline_id, &mut commands);
+    if commands.is_empty() {
+        return;
+    }
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::TrimClips, commands)),
+    );
+}
+
+/// Inserts `clips` (track, clip, link key) overwriting what is underneath.
+pub fn insert_clips<K: PartialEq>(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    clips: Vec<(usize, Clip, Option<K>)>,
+    label: CommandLabel,
+) {
+    let commands = crate::insert_overwriting(project, timeline_id, clips);
+    history.do_command(project, Box::new(CompositeCommand::new(label, commands)));
+}
+
+/// Inserts the video clip and one audio clip per stream at `start`, all in
+/// one link group, creating the audio tracks that are missing. Returns the
+/// new clips, or `None` for an unknown media.
+pub fn insert_media(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    insert: MediaInsert,
+    start: FrameIdx,
+    tracks: TargetTracks,
+) -> Option<Vec<ClipRef>> {
+    let meta = project.media_pool.get(insert.media_id)?.meta.clone();
+    let tl = &project.timelines[timeline_id];
+    let rate = Rational::conform_rate(tl.fps, meta.fps);
+    let has_audio_tracks = tl.first_track_index(TrackKind::Audio).is_some();
+    let mut audio_track_indices: Vec<usize> = tl
+        .tracks_of_kind(TrackKind::Audio)
+        .filter(|(_, t)| !t.locked)
+        .map(|(i, _)| i)
+        .collect();
+    if let Some(extra) = tracks.extra_audio {
+        audio_track_indices.retain(|i| *i != extra);
+        audio_track_indices.insert(0, extra);
+    }
+
+    // Without audio tracks the audio of a video is dropped, but an
+    // audio-only insertion creates them.
+    let takes_video = insert.video && meta.has_video;
+    let num_audio_streams = if !(insert.audio && meta.has_audio) {
+        0
+    } else if has_audio_tracks || !takes_video {
+        meta.audio_stream_count()
+    } else {
+        0
+    };
+    while audio_track_indices.len() < num_audio_streams {
+        audio_track_indices.push(add_track(project, history, timeline_id, TrackKind::Audio));
+    }
+
+    let audio_clip_ids: Vec<ClipId> = (0..num_audio_streams)
+        .map(|_| project.alloc_clip_id())
+        .collect();
+    let video_id = takes_video.then(|| project.alloc_clip_id());
+    let new_clip = |id| {
+        Clip::from_source_range(
+            id,
+            ClipSource::Media(insert.media_id),
+            insert.source_in,
+            insert.source_out,
+            start,
+            rate,
+        )
+    };
+    let mut new_clips: Vec<(usize, Clip, Option<u64>)> = Vec::new();
+    if let (Some(id), Some(video_track)) = (video_id, tracks.video) {
+        new_clips.push((video_track, new_clip(id), Some(0)));
+    }
+    for (stream_index, (&track_index, &clip_id)) in
+        audio_track_indices.iter().zip(&audio_clip_ids).enumerate()
+    {
+        let mut audio_clip = new_clip(clip_id);
+        audio_clip.audio_stream_index = stream_index;
+        new_clips.push((track_index, audio_clip, Some(0)));
+    }
+    let refs = new_clips
+        .iter()
+        .map(|(track, clip, _)| (*track, clip.id))
+        .collect();
+    insert_clips(
+        project,
+        history,
+        timeline_id,
+        new_clips,
+        CommandLabel::InsertClips,
+    );
+    Some(refs)
+}
+
+/// Inserts a generator clip of its default length. Returns its id.
+pub fn insert_generator(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    generator: Generator,
+    track_index: usize,
+    start: FrameIdx,
+) -> ClipId {
+    let len = generator.default_len(project.timelines[timeline_id].fps);
+    let source = match generator {
+        Generator::SolidColor => ClipSource::SolidColor,
+        Generator::Text => ClipSource::Text,
+        Generator::Adjustment => ClipSource::Adjustment,
+    };
+    let id = project.alloc_clip_id();
+    let mut clip = Clip::from_source_range(id, source, 0, len, start, Rational::one());
+    match generator {
+        Generator::SolidColor => {
+            clip.effects = EffectStack {
+                color: Some(Keyframed::constant(DEFAULT_SOLID_COLOR)),
+                ..Default::default()
+            }
+        }
+        Generator::Text => clip.effects.title = Some(TitleParams::default()),
+        Generator::Adjustment => {}
+    }
+    insert_clips(
+        project,
+        history,
+        timeline_id,
+        vec![(track_index, clip, None::<u64>)],
+        CommandLabel::InsertClips,
+    );
+    id
+}
+
+#[cfg(test)]
+#[path = "tests/edit.rs"]
+mod tests;
