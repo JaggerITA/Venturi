@@ -65,7 +65,7 @@ fn column_input(events: Vec<egui::Event>) -> egui::RawInput {
 fn left_column_split_follows_the_drag_and_keeps_both_panes_visible() {
     let ctx = egui::Context::default();
     let mut fraction = 0.5;
-    let mut split = |events, fraction: &mut f32| {
+    let split = |events, fraction: &mut f32| {
         let mut rects = None;
         ctx.run_ui(column_input(events), |ui| {
             rects = Some(split_left_column(ui, fraction));
