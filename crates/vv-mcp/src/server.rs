@@ -21,7 +21,12 @@ insert_clip, then edit and save_project. To cut pauses or bad takes, delete_rang
 with ripple keeps audio and video in sync. \
 Every result describing a timeline carries its `revision`; pass it back as `if_revision` \
 when editing, so an edit computed on a timeline that changed meanwhile (the user may be \
-editing it too) is refused instead of landing in the wrong place.";
+editing it too) is refused instead of landing in the wrong place. \
+Venturi does not transcribe. To cut by words (repeated takes, a script), use a \
+speech-to-text tool installed once (Venturi's repository has one in container/whisper/), \
+transcribe only the media ranges the timeline uses (clips' source_in/source_out, about \
+2 s of margin each side), not whole files, keep the times as media frames and cut with \
+delete_ranges and media_id. Details in docs/MCP.md, section Transcribing.";
 
 type ToolReturn = Result<CallToolResult, ErrorData>;
 
