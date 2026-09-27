@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use vv_core::{History, MediaFileInfo, PersistenceError, Project, TimelineId};
+use vv_core::{History, MediaFileInfo, PersistenceError, Project, Timeline, TimelineId};
 
 use crate::jobs::{Jobs, Waker};
 
@@ -83,6 +83,16 @@ impl Session {
                 item.meta.file = file;
             }
         }
+    }
+
+    /// Adds a timeline and its media pool entry, through which it can be
+    /// used as a clip in other timelines.
+    pub fn create_timeline(&mut self, timeline: Timeline) -> TimelineId {
+        let id = self.project.timelines.insert(timeline);
+        self.project.insert_timeline_item(id, None);
+        // Not through the history, like a media import.
+        self.mark_unsaved();
+        id
     }
 
     /// Keeps the media pool entry of `timeline_id` (its duration, video and

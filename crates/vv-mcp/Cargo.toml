@@ -1,0 +1,19 @@
+[package]
+name = "vv-mcp"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+slotmap = "1.1.1"
+tokio = { version = "1", features = ["sync"] }
+vv-core = { path = "../vv-core" }
+vv-session = { path = "../vv-session" }
+
+[dev-dependencies]
+vv-media = { path = "../vv-media" }

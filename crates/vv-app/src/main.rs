@@ -1161,18 +1161,13 @@ impl VenturiApp {
         fps: vv_core::Rational,
         resolution: (u32, u32),
     ) -> TimelineId {
-        let id = self.session.project.timelines.insert(vv_core::Timeline {
+        self.session.create_timeline(vv_core::Timeline {
             name,
             fps,
             resolution,
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
             markers: Vec::new(),
-        });
-        self.session.project.insert_timeline_item(id, None);
-        // Creating a timeline does not go through the history (like a media
-        // import): without this, Ctrl+S would not be offered.
-        self.session.mark_unsaved();
-        id
+        })
     }
 
     /// Opens a timeline as the top level one: the breadcrumb of the compound
