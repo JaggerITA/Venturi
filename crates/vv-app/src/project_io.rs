@@ -603,10 +603,10 @@ impl VenturiApp {
 
     /// Replaces the project and resets the UI state tied to the old one.
     pub(crate) fn load_project_from(&mut self, path: PathBuf) {
-        match vv_core::load_project(&path) {
-            Ok(project) => {
-                self.remember_recent_project(path.clone());
-                self.replace_project(project, Some(path));
+        match self.session.open(&path) {
+            Ok(()) => {
+                self.remember_recent_project(path);
+                self.reset_for_replaced_project();
             }
             Err(e) => self.project_error = Some(t!("project.open_failed", error = e).into_owned()),
         }
@@ -621,10 +621,10 @@ impl VenturiApp {
         }
     }
 
-    /// `path` is the file Ctrl+S will save to: `None` for a new project.
-    pub(crate) fn replace_project(&mut self, project: vv_core::Project, path: Option<PathBuf>) {
-        self.timeline_id = project.timelines.keys().next();
-        self.session.replace_project(project, path);
+    /// After the session switched project: the UI state tied to the old
+    /// one goes, the first timeline opens.
+    fn reset_for_replaced_project(&mut self) {
+        self.timeline_id = self.session.project.timelines.keys().next();
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();
         self.preview_meta = None;

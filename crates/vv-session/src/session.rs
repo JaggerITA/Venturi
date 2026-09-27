@@ -49,6 +49,16 @@ impl Session {
         Ok(())
     }
 
+    pub fn open(&mut self, path: &Path) -> Result<(), PersistenceError> {
+        let project = vv_core::load_project(path)?;
+        self.replace_project(project, Some(path.to_path_buf()));
+        Ok(())
+    }
+
+    pub fn new_project(&mut self) {
+        self.replace_project(Project::default(), None);
+    }
+
     /// Starts over on `project` (opened from `path`, or new): empty history,
     /// nothing unsaved. Fills in the media fields older projects lack.
     pub fn replace_project(&mut self, project: Project, path: Option<PathBuf>) {
@@ -96,3 +106,7 @@ impl Session {
         self.project.sync_compound_meta(media_id);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/session.rs"]
+mod tests;
