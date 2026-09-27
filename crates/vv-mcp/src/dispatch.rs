@@ -168,6 +168,8 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
         ToolCall::AddMarker(args) => edit_tools::add_marker(session, args),
         ToolCall::EditMarker(args) => edit_tools::edit_marker(session, args),
         ToolCall::DeleteMarker(args) => edit_tools::delete_marker(session, args),
+        ToolCall::GetMarkers(args) => edit_tools::get_markers(session, args),
+        ToolCall::SetClipColor(args) => edit_tools::set_clip_color(session, args),
         ToolCall::Export(args) => media_tools::export(session, args),
         ToolCall::ExportStatus(args) => media_tools::export_status(session, args),
         ToolCall::CancelExport(args) => media_tools::cancel_export(session, args),

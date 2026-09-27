@@ -2,7 +2,10 @@
 //! integers of the timeline (or, for `source_*`, of the media).
 
 use serde_json::{Value, json};
-use vv_core::{Clip, ClipSource, MediaId, MediaItem, Project, Rational, TimelineId, TrackKind};
+use vv_core::{
+    Clip, ClipColor, ClipSource, Marker, MediaId, MediaItem, Project, Rational, TimelineId,
+    TrackKind,
+};
 use vv_session::Session;
 
 use crate::ids::key_to_string;
@@ -30,6 +33,33 @@ pub fn state_json(session: &Session, state: &GuiState) -> Value {
         "previewed_media": state.previewed_media.map(key_to_string),
         "project_path": session.path(),
         "unsaved": session.has_unsaved_changes(),
+    })
+}
+
+pub(crate) fn color_name(color: ClipColor) -> &'static str {
+    match color {
+        ClipColor::Red => "red",
+        ClipColor::Orange => "orange",
+        ClipColor::Yellow => "yellow",
+        ClipColor::Green => "green",
+        ClipColor::Cyan => "cyan",
+        ClipColor::Blue => "blue",
+        ClipColor::Indigo => "indigo",
+        ClipColor::Purple => "purple",
+        ClipColor::Magenta => "magenta",
+        ClipColor::Rose => "rose",
+        ClipColor::Slate => "slate",
+        ClipColor::Gray => "gray",
+    }
+}
+
+pub(crate) fn marker_json(marker: &Marker) -> Value {
+    json!({
+        "id": marker.id.0.to_string(),
+        "start": marker.start,
+        "duration": marker.duration,
+        "note": marker.note,
+        "color": color_name(marker.color),
     })
 }
 
@@ -133,18 +163,7 @@ pub(crate) fn timeline_detail_json(project: &Project, id: TimelineId) -> Value {
             })
         })
         .collect();
-    value["markers"] = timeline
-        .markers
-        .iter()
-        .map(|m| {
-            json!({
-                "id": m.id.0.to_string(),
-                "start": m.start,
-                "duration": m.duration,
-                "note": m.note,
-            })
-        })
-        .collect();
+    value["markers"] = timeline.markers.iter().map(marker_json).collect();
     value
 }
 
@@ -164,6 +183,7 @@ pub(crate) fn clip_json(
         "disabled": clip.disabled,
         "fade_in": clip.fade_in,
         "fade_out": clip.fade_out,
+        "clip_color": clip.display_color.map(color_name),
         "effects": effect_names(clip),
     });
     value["source"] = match &clip.source {

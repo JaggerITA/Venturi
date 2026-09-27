@@ -312,7 +312,7 @@ fn set_clip_properties_checks_ranges_and_applies_everything() {
         disabled: Some(true),
         fade_in,
         fade_out: None,
-        color: Some([0.0, 0.0, 1.0, 1.0]),
+        fill_color: Some([0.0, 0.0, 1.0, 1.0]),
     };
     assert_eq!(
         error(
@@ -379,6 +379,7 @@ fn links_and_markers() {
             at: 12,
             duration: None,
             note: Some("check".into()),
+            color: None,
         }),
     )["id"]
         .as_str()
@@ -392,11 +393,12 @@ fn links_and_markers() {
             at: Some(20),
             duration: Some(5),
             note: None,
+            color: None,
         }),
     );
     assert_eq!(
         edited,
-        json!({ "id": marker, "start": 20, "duration": 5, "note": "check" })
+        json!({ "id": marker, "start": 20, "duration": 5, "note": "check", "color": "yellow" })
     );
     ok(
         &mut session,
@@ -432,4 +434,101 @@ fn unknown_ids_are_reported() {
         dispatch(&mut session, ToolCall::Undo),
         crate::Dispatch::Handled(Err(_))
     ));
+}
+
+#[test]
+fn clip_colors_are_set_read_and_cleared() {
+    let mut session = Session::default();
+    let timeline = with_timeline(&mut session);
+    let a = solid(&mut session, &timeline, 0, 50);
+    let b = solid(&mut session, &timeline, 50, 50);
+    let color = |clip_ids: Vec<String>, color| {
+        ToolCall::SetClipColor(SetClipColorArgs {
+            timeline_id: timeline.clone(),
+            clip_ids,
+            color,
+        })
+    };
+
+    let result = ok(
+        &mut session,
+        color(vec![a.clone(), b.clone()], ClipColorArg::Purple),
+    );
+    assert_eq!(result["clips"][0]["clip_color"], "purple");
+    assert_eq!(
+        tracks(&mut session, &timeline)[0]["clips"][1]["clip_color"],
+        "purple"
+    );
+    assert_eq!(
+        ok(&mut session, ToolCall::Undo)["undone"],
+        "ClipDisplayColor"
+    );
+    ok(&mut session, ToolCall::Redo);
+
+    ok(&mut session, color(vec![a.clone()], ClipColorArg::None));
+    let clip = ok(
+        &mut session,
+        ToolCall::GetClip(ClipArgs {
+            timeline_id: timeline.clone(),
+            clip_id: a,
+        }),
+    );
+    assert!(clip["clip_color"].is_null(), "back to the default color");
+
+    lock(&mut session, &timeline, "V1");
+    assert_eq!(
+        error(&mut session, color(vec![b], ClipColorArg::Red)),
+        "track V1 is locked"
+    );
+}
+
+#[test]
+fn markers_carry_a_color_and_are_listed() {
+    let mut session = Session::default();
+    let timeline = with_timeline(&mut session);
+    let add = |at, color| {
+        ToolCall::AddMarker(AddMarkerArgs {
+            timeline_id: timeline.clone(),
+            at,
+            duration: None,
+            note: None,
+            color,
+        })
+    };
+    let first = ok(&mut session, add(10, None));
+    assert_eq!(first["color"], "yellow", "the UI's default");
+    ok(&mut session, add(40, Some(PaletteColor::Cyan)));
+    ok(
+        &mut session,
+        ToolCall::EditMarker(EditMarkerArgs {
+            timeline_id: timeline.clone(),
+            marker_id: first["id"].as_str().unwrap().into(),
+            at: None,
+            duration: None,
+            note: Some("retake".into()),
+            color: Some(PaletteColor::Red),
+        }),
+    );
+
+    let markers = ok(
+        &mut session,
+        ToolCall::GetMarkers(TimelineArgs {
+            timeline_id: timeline.clone(),
+        }),
+    )["markers"]
+        .clone();
+
+    let summary: Vec<(i64, &str, &str)> = markers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["start"].as_i64().unwrap(),
+                m["color"].as_str().unwrap(),
+                m["note"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(summary, [(10, "red", "retake"), (40, "cyan", "")]);
 }

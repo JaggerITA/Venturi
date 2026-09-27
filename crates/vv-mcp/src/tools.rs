@@ -32,6 +32,8 @@ pub enum ToolCall {
     AddMarker(AddMarkerArgs),
     EditMarker(EditMarkerArgs),
     DeleteMarker(MarkerArgs),
+    GetMarkers(TimelineArgs),
+    SetClipColor(SetClipColorArgs),
     RenderFrame(RenderFrameArgs),
     GetAudioLevels(AudioLevelsArgs),
     Export(ExportArgs),
@@ -73,6 +75,8 @@ impl ToolCall {
             ToolCall::AddMarker(_) => "add_marker",
             ToolCall::EditMarker(_) => "edit_marker",
             ToolCall::DeleteMarker(_) => "delete_marker",
+            ToolCall::GetMarkers(_) => "get_markers",
+            ToolCall::SetClipColor(_) => "set_clip_color",
             ToolCall::RenderFrame(_) => "render_frame",
             ToolCall::GetAudioLevels(_) => "get_audio_levels",
             ToolCall::Export(_) => "export",
@@ -94,6 +98,7 @@ impl ToolCall {
             ToolCall::GetProject
                 | ToolCall::GetTimeline(_)
                 | ToolCall::GetClip(_)
+                | ToolCall::GetMarkers(_)
                 | ToolCall::RenderFrame(_)
                 | ToolCall::GetAudioLevels(_)
                 | ToolCall::ExportStatus(_)
@@ -293,9 +298,10 @@ pub struct SetClipPropertiesArgs {
     /// Fade out length, in timeline frames.
     #[serde(default)]
     pub fade_out: Option<i64>,
-    /// `[r, g, b, a]` in 0-1: the color of a solid color clip.
+    /// `[r, g, b, a]` in 0-1: the fill of a solid color clip. Not the clip's
+    /// color on the timeline: that is `set_clip_color`.
     #[serde(default)]
-    pub color: Option<[f32; 4]>,
+    pub fill_color: Option<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
@@ -350,6 +356,53 @@ pub struct AddAdjustmentClipArgs {
     pub track: Option<String>,
 }
 
+/// The editor's palette for clips and markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PaletteColor {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Indigo,
+    Purple,
+    Magenta,
+    Rose,
+    Slate,
+    Gray,
+}
+
+/// A clip's color on the timeline: a palette color, or `none` for the
+/// default one of its kind (blue video, green audio...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipColorArg {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Indigo,
+    Purple,
+    Magenta,
+    Rose,
+    Slate,
+    Gray,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct SetClipColorArgs {
+    pub timeline_id: String,
+    pub clip_ids: Vec<String>,
+    /// How the clips look on the timeline, to tag them (e.g. takes to
+    /// review). It does not change the picture.
+    pub color: ClipColorArg,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 pub struct AddMarkerArgs {
     pub timeline_id: String,
@@ -360,6 +413,9 @@ pub struct AddMarkerArgs {
     pub duration: Option<i64>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Default yellow.
+    #[serde(default)]
+    pub color: Option<PaletteColor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
@@ -372,6 +428,8 @@ pub struct EditMarkerArgs {
     pub duration: Option<i64>,
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default)]
+    pub color: Option<PaletteColor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]

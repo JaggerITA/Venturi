@@ -173,7 +173,7 @@ impl VenturiServer {
     }
 
     #[tool(
-        description = "Sets static values on clips: opacity, position, scale, rotation, gain, fades, enabled state, solid color. Parameters with keyframes keep following them (reported as warnings)."
+        description = "Sets static values on clips: opacity, position, scale, rotation, gain, fades, enabled state, fill of solid color clips. Parameters with keyframes keep following them (reported as warnings)."
     )]
     async fn set_clip_properties(
         &self,
@@ -217,13 +217,25 @@ impl VenturiServer {
     }
 
     #[tool(
-        description = "Adds a marker on the timeline ruler, on one frame or over a range, with an optional note."
+        description = "Adds a marker on the timeline ruler, on one frame or over a range, with an optional note and color (default yellow)."
     )]
     async fn add_marker(&self, Parameters(args): Parameters<AddMarkerArgs>) -> ToolReturn {
         self.call(ToolCall::AddMarker(args)).await
     }
 
-    #[tool(description = "Changes a marker's position, duration or note.")]
+    #[tool(description = "The markers of a timeline: id, start frame, duration, note, color.")]
+    async fn get_markers(&self, Parameters(args): Parameters<TimelineArgs>) -> ToolReturn {
+        self.call(ToolCall::GetMarkers(args)).await
+    }
+
+    #[tool(
+        description = "Colors clips on the timeline with a palette color (or `none` for their default), e.g. to tag takes. It does not change the picture. `get_timeline` and `get_clip` report it as `clip_color`."
+    )]
+    async fn set_clip_color(&self, Parameters(args): Parameters<SetClipColorArgs>) -> ToolReturn {
+        self.call(ToolCall::SetClipColor(args)).await
+    }
+
+    #[tool(description = "Changes a marker's position, duration, note or color.")]
     async fn edit_marker(&self, Parameters(args): Parameters<EditMarkerArgs>) -> ToolReturn {
         self.call(ToolCall::EditMarker(args)).await
     }

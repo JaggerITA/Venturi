@@ -6,14 +6,14 @@ use std::collections::{BTreeSet, HashSet};
 use serde_json::{Value, json};
 use vv_core::edit::{self, ClipRef, Generator, MediaInsert, RangeDelete, TargetTracks};
 use vv_core::{
-    ClipSource, CommandLabel, FadeEdge, FrameIdx, LinkClips, Marker, Project, Rgba, SetClipColor,
-    SetClipFade, SetClipsDisabled, SetMarker, SetTrackFlag, TimelineId, TrackFlag, TrackKind,
-    TransformParam, TrimEdge, UnlinkClip,
+    ClipColor, ClipSource, CommandLabel, FadeEdge, FrameIdx, LinkClips, Marker, Project, Rgba,
+    SetClipColor, SetClipFade, SetClipsDisabled, SetClipsDisplayColor, SetMarker, SetTrackFlag,
+    TimelineId, TrackFlag, TrackKind, TransformParam, TrimEdge, UnlinkClip,
 };
 use vv_session::Session;
 
 use crate::ids;
-use crate::json::{clip_json, timeline_json, track_name};
+use crate::json::{clip_json, marker_json, timeline_json, track_name};
 use crate::tools::*;
 
 type Result<T> = std::result::Result<T, ToolError>;
@@ -447,14 +447,14 @@ pub(crate) fn set_clip_properties(
                 ));
             }
         }
-        if args.color.is_some() && !matches!(clip.source, ClipSource::SolidColor) {
+        if args.fill_color.is_some() && !matches!(clip.source, ClipSource::SolidColor) {
             return fail(format!("clip {} is not a solid color clip", id.0));
         }
     }
     if args.opacity.is_some_and(|o| !(0.0..=100.0).contains(&o)) {
         return fail("opacity goes from 0 to 100");
     }
-    let color = args.color.map(rgba).transpose()?;
+    let color = args.fill_color.map(rgba).transpose()?;
     let mut params = Vec::new();
     if let Some(o) = args.opacity {
         params.push((TransformParam::Opacity, o));
@@ -700,13 +700,73 @@ pub(crate) fn unlink_clips(session: &mut Session, args: ClipsArgs) -> ToolResult
     })
 }
 
-fn marker_json(marker: &Marker) -> Value {
-    json!({
-        "id": marker.id.0.to_string(),
-        "start": marker.start,
-        "duration": marker.duration,
-        "note": marker.note,
+fn palette(color: PaletteColor) -> ClipColor {
+    match color {
+        PaletteColor::Red => ClipColor::Red,
+        PaletteColor::Orange => ClipColor::Orange,
+        PaletteColor::Yellow => ClipColor::Yellow,
+        PaletteColor::Green => ClipColor::Green,
+        PaletteColor::Cyan => ClipColor::Cyan,
+        PaletteColor::Blue => ClipColor::Blue,
+        PaletteColor::Indigo => ClipColor::Indigo,
+        PaletteColor::Purple => ClipColor::Purple,
+        PaletteColor::Magenta => ClipColor::Magenta,
+        PaletteColor::Rose => ClipColor::Rose,
+        PaletteColor::Slate => ClipColor::Slate,
+        PaletteColor::Gray => ClipColor::Gray,
+    }
+}
+
+fn clip_color(color: ClipColorArg) -> Option<ClipColor> {
+    Some(match color {
+        ClipColorArg::Red => ClipColor::Red,
+        ClipColorArg::Orange => ClipColor::Orange,
+        ClipColorArg::Yellow => ClipColor::Yellow,
+        ClipColorArg::Green => ClipColor::Green,
+        ClipColorArg::Cyan => ClipColor::Cyan,
+        ClipColorArg::Blue => ClipColor::Blue,
+        ClipColorArg::Indigo => ClipColor::Indigo,
+        ClipColorArg::Purple => ClipColor::Purple,
+        ClipColorArg::Magenta => ClipColor::Magenta,
+        ClipColorArg::Rose => ClipColor::Rose,
+        ClipColorArg::Slate => ClipColor::Slate,
+        ClipColorArg::Gray => ClipColor::Gray,
+        ClipColorArg::None => return None,
     })
+}
+
+pub(crate) fn set_clip_color(session: &mut Session, args: SetClipColorArgs) -> ToolResult {
+    let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
+    let refs = ids::clip_refs(&session.project, timeline, &args.clip_ids)?;
+    for &(track, _) in &refs {
+        ensure_unlocked(&session.project, timeline, track)?;
+    }
+    one_step(
+        session,
+        timeline,
+        Some(CommandLabel::ClipDisplayColor),
+        |s| {
+            s.history.do_command(
+                &mut s.project,
+                Box::new(SetClipsDisplayColor::new(
+                    timeline,
+                    refs.clone(),
+                    clip_color(args.color),
+                )),
+            );
+            Ok(json!({ "clips": clips_json(&s.project, timeline, &refs) }))
+        },
+    )
+}
+
+pub(crate) fn get_markers(session: &Session, args: TimelineArgs) -> ToolResult {
+    let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
+    let markers: Vec<Value> = session.project.timelines[timeline]
+        .markers
+        .iter()
+        .map(marker_json)
+        .collect();
+    Ok(ToolOutput::json(json!({ "markers": markers })))
 }
 
 fn check_marker_span(start: FrameIdx, duration: FrameIdx) -> Result<()> {
@@ -725,7 +785,7 @@ pub(crate) fn add_marker(session: &mut Session, args: AddMarkerArgs) -> ToolResu
         start: args.at,
         duration,
         note: args.note.unwrap_or_default(),
-        color: Marker::default_color(),
+        color: args.color.map_or_else(Marker::default_color, palette),
     };
     one_step(session, timeline, None, |s| {
         let value = marker_json(&marker);
@@ -750,6 +810,9 @@ pub(crate) fn edit_marker(session: &mut Session, args: EditMarkerArgs) -> ToolRe
     }
     if let Some(note) = args.note {
         marker.note = note;
+    }
+    if let Some(color) = args.color {
+        marker.color = palette(color);
     }
     check_marker_span(marker.start, marker.duration)?;
     one_step(session, timeline, None, |s| {

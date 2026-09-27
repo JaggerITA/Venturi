@@ -79,6 +79,9 @@ While attached, the agent shares the window with you:
   `get_audio_levels` on a media are frames of the media. Ranges are
   `[start, end)`: the end is excluded.
 - **Tracks are named** as in the UI: `V1`, `V2`… and `A1`, `A2`….
+- **Colors** of clips and markers are the editor's palette: `red`, `orange`,
+  `yellow`, `green`, `cyan`, `blue`, `indigo`, `purple`, `magenta`, `rose`,
+  `slate`, `gray`.
 - **One call, one undo step.** `undo` reverts the last step, whoever made it.
   A call that fails leaves nothing behind.
 - **Locked tracks** are never changed; a call that would change one fails.
@@ -94,6 +97,7 @@ While attached, the agent shares the window with you:
 | `get_project` | Media pool (id, kind, fps, duration in frames and seconds, resolution, audio streams, offline flag), timelines, folders, file path, unsaved flag |
 | `get_timeline(timeline_id)` | Tracks with their clips (start, end, source media and in/out, link group, fades, effects set) and markers |
 | `get_clip(timeline_id, clip_id)` | One clip with all its effect values, keyframes included |
+| `get_markers(timeline_id)` | The markers: id, start, duration, note, color |
 
 ### Project
 
@@ -119,12 +123,13 @@ Every call below is one undo step.
 | `delete_ranges(timeline_id, ranges, ripple?, tracks?)` | Removes `[start, end)` ranges, cutting clips at the edges. With `ripple`, every unlocked track closes up, so audio and video stay in sync |
 | `move_clips(timeline_id, moves)` | `moves`: `{clip_id, start, track?}`. Overwrites what is at the destination; linked clips must be listed too |
 | `trim_clip(timeline_id, clip_id, edge, frame)` | `edge` is `start` or `end`; the error names the allowed range |
-| `set_clip_properties(timeline_id, clip_ids, …)` | Static values: `opacity` (0-100), `position` and `scale` (`[x, y]`), `rotation` (degrees), `gain_db`, `disabled`, `fade_in`/`fade_out` (frames), `color` (solid color clips). Values with keyframes keep following them; a warning says so |
+| `set_clip_properties(timeline_id, clip_ids, …)` | Static values: `opacity` (0-100), `position` and `scale` (`[x, y]`), `rotation` (degrees), `gain_db`, `disabled`, `fade_in`/`fade_out` (frames), `fill_color` (solid color clips). Values with keyframes keep following them; a warning says so |
 | `add_title(timeline_id, text, at, duration?, track?, size?, color?, position?)` | |
 | `add_solid_color(timeline_id, at, duration?, track?, color?)` | |
 | `add_adjustment_clip(timeline_id, at, duration?, track?)` | |
 | `link_clips`, `unlink_clips(timeline_id, clip_ids)` | Unlinking dissolves the whole group |
-| `add_marker(timeline_id, at, duration?, note?)`, `edit_marker`, `delete_marker` | |
+| `set_clip_color(timeline_id, clip_ids, color)` | The clips' color on the timeline, to tag them (e.g. takes to review): a palette color or `none` for the default. Reported as `clip_color` |
+| `add_marker(timeline_id, at, duration?, note?, color?)`, `edit_marker`, `delete_marker` | Marker color from the palette, default yellow |
 | `undo`, `redo` | Return the name of the step |
 
 ### Seeing and hearing
