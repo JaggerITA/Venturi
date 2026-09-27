@@ -3624,6 +3624,7 @@ dependencies = [
 name = "vv-session"
 version = "0.2.1"
 dependencies = [
+ "serde_json",
  "vv-audio",
  "vv-core",
  "vv-media",
