@@ -243,6 +243,8 @@ fn delete_ranges_rejects_tracks_with_ripple_and_lifts_on_named_tracks() {
     assert_eq!(spans(&mut session, &timeline, 0), [(0, 100)]);
     ok(&mut session, ranges(true, None));
     assert_eq!(spans(&mut session, &timeline, 0), [(0, 10), (10, 90)]);
+    // Named after the tool, not after the split it starts with.
+    assert_eq!(ok(&mut session, ToolCall::Undo)["undone"], "RippleDelete");
 }
 
 #[test]

@@ -206,13 +206,30 @@ pub fn bridge_stdio(pid: Option<u32>) -> std::io::Result<()> {
     let stream = std::os::unix::net::UnixStream::connect(&path)?;
     let mut to_socket = stream.try_clone()?;
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut to_socket);
+        let _ = pump(&mut std::io::stdin().lock(), &mut to_socket);
         let _ = to_socket.shutdown(std::net::Shutdown::Write);
     });
     let mut from_socket = stream;
-    let mut stdout = std::io::stdout().lock();
-    std::io::copy(&mut from_socket, &mut stdout)?;
-    Ok(())
+    pump(&mut from_socket, &mut std::io::stdout().lock())
+}
+
+/// Forwards each read as soon as it arrives. Not `io::copy`: between two
+/// file descriptors it may use `splice`, which held the replies back when
+/// stdout was a pipe to `podman exec`.
+#[cfg(unix)]
+fn pump(from: &mut impl std::io::Read, to: &mut impl std::io::Write) -> std::io::Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match from.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                to.write_all(&buffer[..n])?;
+                to.flush()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(not(unix))]

@@ -6,9 +6,9 @@ use std::collections::{BTreeSet, HashSet};
 use serde_json::{Value, json};
 use vv_core::edit::{self, ClipRef, Generator, MediaInsert, RangeDelete, TargetTracks};
 use vv_core::{
-    ClipSource, FadeEdge, FrameIdx, LinkClips, Marker, Project, Rgba, SetClipColor, SetClipFade,
-    SetClipsDisabled, SetMarker, SetTrackFlag, TimelineId, TrackFlag, TrackKind, TransformParam,
-    TrimEdge, UnlinkClip,
+    ClipSource, CommandLabel, FadeEdge, FrameIdx, LinkClips, Marker, Project, Rgba, SetClipColor,
+    SetClipFade, SetClipsDisabled, SetMarker, SetTrackFlag, TimelineId, TrackFlag, TrackKind,
+    TransformParam, TrimEdge, UnlinkClip,
 };
 use vv_session::Session;
 
@@ -22,17 +22,22 @@ fn fail<T>(message: impl Into<String>) -> Result<T> {
     Err(ToolError(message.into()))
 }
 
-/// `apply` runs as one undo step. It should not fail once it started
-/// changing things; if it does, what it applied is undone.
+/// `apply` runs as one undo step, named `label` (or after its first
+/// command). It should not fail once it started changing things; if it
+/// does, what it applied is undone.
 fn one_step(
     session: &mut Session,
     timeline: TimelineId,
+    label: Option<CommandLabel>,
     apply: impl FnOnce(&mut Session) -> Result<Value>,
 ) -> ToolResult {
     let before = session.history.position();
     let mark = session.history.begin_group();
     let result = apply(session);
-    session.history.end_group(mark);
+    match label {
+        Some(label) => session.history.end_group_as(mark, label),
+        None => session.history.end_group(mark),
+    }
     match result {
         Ok(value) => {
             session.sync_timeline_media(timeline);
@@ -104,7 +109,7 @@ pub(crate) fn add_track(session: &mut Session, args: AddTrackArgs) -> ToolResult
         TrackKindArg::Video => TrackKind::Video,
         TrackKindArg::Audio => TrackKind::Audio,
     };
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::AddTrack), |s| {
         let index = edit::add_track(&mut s.project, &mut s.history, timeline, kind);
         Ok(json!({ "track": track_name(&s.project, timeline, index) }))
     })
@@ -113,7 +118,7 @@ pub(crate) fn add_track(session: &mut Session, args: AddTrackArgs) -> ToolResult
 pub(crate) fn set_track(session: &mut Session, args: SetTrackArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
     let index = ids::track_index(&session.project, timeline, &args.track)?;
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, None, |s| {
         for (flag, value) in [
             (TrackFlag::Muted, args.muted),
             (TrackFlag::Solo, args.solo),
@@ -186,7 +191,7 @@ pub(crate) fn insert_clip(session: &mut Session, args: InsertClipArgs) -> ToolRe
         }
         _ => None,
     };
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::InsertClips), |s| {
         let tl = &s.project.timelines[timeline];
         let video_track = match (
             video,
@@ -248,7 +253,7 @@ pub(crate) fn split(session: &mut Session, args: SplitArgs) -> ToolResult {
         ),
         None => None,
     };
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::SplitClips), |s| {
         let pieces = edit::split_clips(
             &mut s.project,
             &mut s.history,
@@ -282,14 +287,23 @@ pub(crate) fn delete_clips(session: &mut Session, args: DeleteClipsArgs) -> Tool
     for &(track, _) in &refs {
         ensure_unlocked(&session.project, timeline, track)?;
     }
-    one_step(session, timeline, |s| {
-        if args.ripple {
-            edit::ripple_delete_clips(&mut s.project, &mut s.history, timeline, &refs);
+    one_step(
+        session,
+        timeline,
+        Some(if args.ripple {
+            CommandLabel::RippleDelete
         } else {
-            edit::delete_clips(&mut s.project, &mut s.history, timeline, &refs);
-        }
-        Ok(json!({ "timeline": timeline_json(&s.project, timeline) }))
-    })
+            CommandLabel::DeleteClips
+        }),
+        |s| {
+            if args.ripple {
+                edit::ripple_delete_clips(&mut s.project, &mut s.history, timeline, &refs);
+            } else {
+                edit::delete_clips(&mut s.project, &mut s.history, timeline, &refs);
+            }
+            Ok(json!({ "timeline": timeline_json(&s.project, timeline) }))
+        },
+    )
 }
 
 pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> ToolResult {
@@ -322,10 +336,19 @@ pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> To
         }
     };
     let ranges: Vec<(FrameIdx, FrameIdx)> = args.ranges.iter().map(|&[s, e]| (s, e)).collect();
-    one_step(session, timeline, |s| {
-        edit::delete_ranges(&mut s.project, &mut s.history, timeline, &ranges, &mode);
-        Ok(json!({ "timeline": timeline_json(&s.project, timeline) }))
-    })
+    one_step(
+        session,
+        timeline,
+        Some(if args.ripple {
+            CommandLabel::RippleDelete
+        } else {
+            CommandLabel::DeleteClips
+        }),
+        |s| {
+            edit::delete_ranges(&mut s.project, &mut s.history, timeline, &ranges, &mode);
+            Ok(json!({ "timeline": timeline_json(&s.project, timeline) }))
+        },
+    )
 }
 
 pub(crate) fn move_clips(session: &mut Session, args: MoveClipsArgs) -> ToolResult {
@@ -359,7 +382,7 @@ pub(crate) fn move_clips(session: &mut Session, args: MoveClipsArgs) -> ToolResu
         moves.push((clip_id, from, to, m.start));
     }
     let refs: Vec<ClipRef> = moves.iter().map(|&(id, _, to, _)| (to, id)).collect();
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::MoveClips), |s| {
         edit::move_clips(&mut s.project, &mut s.history, timeline, moves);
         Ok(json!({ "clips": clips_json(&s.project, timeline, &refs) }))
     })
@@ -392,7 +415,7 @@ pub(crate) fn trim_clip(session: &mut Session, args: TrimClipArgs) -> ToolResult
             }
         ));
     }
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::TrimClips), |s| {
         edit::trim_clip(
             &mut s.project,
             &mut s.history,
@@ -466,7 +489,7 @@ pub(crate) fn set_clip_properties(
             ));
         }
     }
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, None, |s| {
         let do_command = |s: &mut Session, cmd: Box<dyn vv_core::Command>| {
             s.history.do_command(&mut s.project, cmd)
         };
@@ -543,7 +566,7 @@ fn add_generator(
         return fail("the duration must be at least one frame");
     }
     let track = generator_track(&session.project, timeline, track)?;
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::InsertClips), |s| {
         let track = match track
             .or_else(|| s.project.timelines[timeline].first_unlocked_track_index(TrackKind::Video))
         {
@@ -640,7 +663,7 @@ pub(crate) fn link_clips(session: &mut Session, args: ClipsArgs) -> ToolResult {
     if refs.len() < 2 {
         return fail("linking needs at least two clips");
     }
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::LinkClips), |s| {
         s.history.do_command(
             &mut s.project,
             Box::new(LinkClips::new(timeline, refs.clone())),
@@ -666,7 +689,7 @@ pub(crate) fn unlink_clips(session: &mut Session, args: ClipsArgs) -> ToolResult
     if targets.is_empty() {
         return fail("none of these clips is linked");
     }
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, Some(CommandLabel::UnlinkClips), |s| {
         for (track, id) in targets {
             s.history.do_command(
                 &mut s.project,
@@ -704,7 +727,7 @@ pub(crate) fn add_marker(session: &mut Session, args: AddMarkerArgs) -> ToolResu
         note: args.note.unwrap_or_default(),
         color: Marker::default_color(),
     };
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, None, |s| {
         let value = marker_json(&marker);
         s.history
             .do_command(&mut s.project, Box::new(SetMarker::add(timeline, marker)));
@@ -729,7 +752,7 @@ pub(crate) fn edit_marker(session: &mut Session, args: EditMarkerArgs) -> ToolRe
         marker.note = note;
     }
     check_marker_span(marker.start, marker.duration)?;
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, None, |s| {
         let value = marker_json(&marker);
         s.history
             .do_command(&mut s.project, Box::new(SetMarker::edit(timeline, marker)));
@@ -740,7 +763,7 @@ pub(crate) fn edit_marker(session: &mut Session, args: EditMarkerArgs) -> ToolRe
 pub(crate) fn delete_marker(session: &mut Session, args: MarkerArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
     let id = ids::marker_id(&session.project, timeline, &args.marker_id)?;
-    one_step(session, timeline, |s| {
+    one_step(session, timeline, None, |s| {
         s.history
             .do_command(&mut s.project, Box::new(SetMarker::remove(timeline, id)));
         Ok(json!({ "deleted": args.marker_id }))
