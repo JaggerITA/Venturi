@@ -1,0 +1,193 @@
+# Driving Venturi from an AI agent (MCP)
+
+Venturi speaks the [Model Context Protocol](https://modelcontextprotocol.io):
+an agent such as Claude Code can import media, build and cut timelines, add
+titles, look at frames, measure audio and export, through the same editing
+code the UI uses. It works in two ways:
+
+- **Headless**: `vv-app mcp` runs without a window. The agent has a project
+  of its own.
+- **Attached**: the agent works in the Venturi window you have open, on the
+  project you are editing. You see every change, and you can undo it.
+
+Both speak MCP over stdin/stdout, so any MCP client can use them.
+
+## Setup
+
+The commands below use `vv-app`, the binary built from source. With a
+release, use the AppImage itself (`/path/to/Venturi-x86_64.AppImage mcp`) or,
+on macOS, `/Applications/Venturi.app/Contents/MacOS/vv-app mcp`.
+
+### Headless
+
+```sh
+claude mcp add venturi -- /path/to/vv-app mcp
+```
+
+To start from an existing project, add its path:
+`vv-app mcp /path/to/project.vvproj`. The agent saves with `save_project`.
+Nothing is saved automatically.
+
+In other MCP clients, the server entry looks like this:
+
+```json
+{ "mcpServers": { "venturi": { "command": "/path/to/vv-app", "args": ["mcp"] } } }
+```
+
+### Attached to the editor window
+
+1. In Venturi, turn on **Settings > Integrations > Let AI agents work in this
+   window (MCP)**. It stays on across restarts. To turn it on for one run
+   only, start Venturi with `--mcp`. The Integrations section shows the
+   exact command to use.
+2. Register the command:
+
+   ```sh
+   claude mcp add venturi -- /path/to/vv-app mcp --attach
+   ```
+
+`--attach` connects to the Venturi window that is running. With several
+windows open, pick one with `--pid <process id>`; the error message lists the
+candidates. While a client is connected, the toolbar shows an orange
+**● MCP**. Its tooltip shows the last tool the agent called.
+
+The window listens on a Unix socket,
+`$XDG_RUNTIME_DIR/venturi/mcp-<pid>.sock` (in the temporary folder when
+`XDG_RUNTIME_DIR` is not set), that only your user can open.
+Venturi opens no network port. Windows and the Flatpak build do not support
+attaching yet.
+
+While attached, the agent shares the window with you:
+
+- Its edits wait while you are in the middle of a gesture (dragging a clip,
+  a slider, a handle in the viewer). They never merge into your undo step:
+  each agent call is a step of its own in **Edit > Undo History**.
+- While a dialog is waiting for your answer (unsaved changes, reusing OTIO
+  media, forced relink), the agent's edits are refused. Reading still works.
+- `new_project` and `open_project` are refused if the open project has
+  unsaved changes.
+- Media the agent imports do not change your selection or the viewer. A
+  timeline it imports is not opened. Its exports appear in the usual
+  progress window.
+
+## Conventions
+
+- **Ids are strings**: media, timelines, clips, markers, export jobs. Take
+  them from the results; don't build them yourself.
+- **Frames are integers.** Positions and lengths are frames of the timeline
+  (its fps is in `get_timeline`). Only `source_in`/`source_out` and
+  `get_audio_levels` on a media are frames of the media. Ranges are
+  `[start, end)`: the end is excluded.
+- **Tracks are named** as in the UI: `V1`, `V2`… and `A1`, `A2`….
+- **One call, one undo step.** `undo` reverts the last step, whoever made it.
+  A call that fails leaves nothing behind.
+- **Locked tracks** are never changed; a call that would change one fails.
+- Failures come back as tool errors with a plain message, e.g.
+  `track V1 is locked` or `no clip "12" in this timeline`.
+
+## Tools
+
+### Reading
+
+| Tool | What it returns |
+|---|---|
+| `get_project` | Media pool (id, kind, fps, duration in frames and seconds, resolution, audio streams, offline flag), timelines, folders, file path, unsaved flag |
+| `get_timeline(timeline_id)` | Tracks with their clips (start, end, source media and in/out, link group, fades, effects set) and markers |
+| `get_clip(timeline_id, clip_id)` | One clip with all its effect values, keyframes included |
+
+### Project
+
+| Tool | Notes |
+|---|---|
+| `new_project`, `open_project(path)` | Replace the open project |
+| `save_project(path?)` | Without `path`, saves to the current file |
+| `import_media(paths)` | Answers once every file is probed, with ids and metadata; files already in the pool are reported with their existing ids |
+| `import_otio(path, reuse_existing_media?)` | Timelines from an OpenTimelineIO file (e.g. from DaVinci Resolve) |
+| `create_timeline(name, from_media?, fps?, resolution?)` | Tracks V1 and A1. Format taken from `from_media`, or given; default 25 fps, 1920×1080 |
+| `add_track(timeline_id, kind)` | `video` or `audio`; returns the new track's name |
+| `set_track(timeline_id, track, muted?, solo?, locked?)` | |
+
+### Editing
+
+Every call below is one undo step.
+
+| Tool | Notes |
+|---|---|
+| `insert_clip(timeline_id, media_id, at, source_in?, source_out?, video_track?, audio_track?, video?, audio?)` | Overwrites what is at `at`. Puts the video on the timeline plus one linked audio clip per audio stream; audio tracks are created as needed |
+| `split(timeline_id, frame, clip_ids?)` | Returns the left and right id of each cut clip |
+| `delete_clips(timeline_id, clip_ids, ripple?)` | With `ripple`, the gaps close and linked clips go too |
+| `delete_ranges(timeline_id, ranges, ripple?, tracks?)` | Removes `[start, end)` ranges, cutting clips at the edges. With `ripple`, every unlocked track closes up, so audio and video stay in sync |
+| `move_clips(timeline_id, moves)` | `moves`: `{clip_id, start, track?}`. Overwrites what is at the destination; linked clips must be listed too |
+| `trim_clip(timeline_id, clip_id, edge, frame)` | `edge` is `start` or `end`; the error names the allowed range |
+| `set_clip_properties(timeline_id, clip_ids, …)` | Static values: `opacity` (0-100), `position` and `scale` (`[x, y]`), `rotation` (degrees), `gain_db`, `disabled`, `fade_in`/`fade_out` (frames), `color` (solid color clips). Values with keyframes keep following them; a warning says so |
+| `add_title(timeline_id, text, at, duration?, track?, size?, color?, position?)` | |
+| `add_solid_color(timeline_id, at, duration?, track?, color?)` | |
+| `add_adjustment_clip(timeline_id, at, duration?, track?)` | |
+| `link_clips`, `unlink_clips(timeline_id, clip_ids)` | Unlinking dissolves the whole group |
+| `add_marker(timeline_id, at, duration?, note?)`, `edit_marker`, `delete_marker` | |
+| `undo`, `redo` | Return the name of the step |
+
+### Seeing and hearing
+
+| Tool | Notes |
+|---|---|
+| `render_frame(timeline_id, frame, max_width?)` | A PNG of one frame (default 960 px wide). The frame is decoded exactly as the export decodes it, never taken from the preview cache |
+| `get_audio_levels(media_id + stream? \| timeline_id, start, end, window?)` | RMS and peak in dBFS per window of `window` frames (default 1). Digital silence reads -120. Measures one audio stream of a media, or everything the timeline plays mixed together. At most 20 000 windows per call |
+
+### Export
+
+| Tool | Notes |
+|---|---|
+| `export(timeline_id, path, range?, scale_percent?, audio?)` | Starts in the background and returns a `job_id`. Edits made afterwards do not affect it. One export at a time |
+| `export_status(job_id)` | `running`, `done`, `failed` or `cancelled`, with frames written of the total |
+| `cancel_export(job_id)` | |
+
+### Editor window only
+
+| Tool | Notes |
+|---|---|
+| `get_state` | The open timeline, the playhead and your selection, so you can tell the agent "cut *this*" |
+| `screenshot_ui` | A PNG of the whole window |
+| `set_active_timeline(timeline_id)` | Shows that timeline in the editor |
+
+## Example: removing the pauses from a recording
+
+What an agent does, step by step, to cut every silence longer than half a
+second from `talk.mp4` (25 fps):
+
+1. `import_media({"paths": ["/home/me/talk.mp4"]})` returns the media id,
+   its fps and its duration.
+2. `create_timeline({"name": "Talk", "from_media": "<media id>"})`, then
+   `insert_clip({"timeline_id": "<id>", "media_id": "<media id>", "at": 0})`.
+   The whole file is placed at frame 0, so a media frame is also a timeline
+   frame.
+3. `get_audio_levels({"media_id": "<media id>", "start": 0, "end": 150})`
+   returns one RMS value per frame:
+
+   ```json
+   { "window_frames": 1, "rms_db": [-21.3, -21.4, …, -120.0, -120.0, …, -21.2], … }
+   ```
+
+4. The agent decides what a pause is, for example RMS below -50 dB for at
+   least 12 frames. It keeps a few frames at each edge so words are not
+   clipped, and turns what is left into ranges, e.g. `[[27, 60], [102, 123]]`.
+5. `delete_ranges({"timeline_id": "<id>", "ranges": [[27, 60], [102, 123]],
+   "ripple": true})` removes both in one undo step, with audio and video
+   still in sync.
+6. `get_audio_levels` on the timeline, and `render_frame` around the cuts,
+   confirm the result. `undo` restores everything if it went wrong.
+7. `export({"timeline_id": "<id>", "path": "/home/me/talk_cut.mp4"})`, then
+   `export_status` until the state is `done`.
+
+When the pauses depend on the words, e.g. repeated takes, the agent can
+transcribe the audio with its own tools and cut by timestamps the same way.
+Seconds × fps gives the frame.
+
+## Limits
+
+- `get_audio_levels` on a timeline decodes the whole audio files involved,
+  so it is slow with long media. On a media it decodes only up to the end of
+  the range, so measure the media when you can.
+- Not available yet: keyframe editing, speed changes, transitions, compound
+  clips, pasting properties, OTIO export, playback control, a ripple
+  (insert) mode for `insert_clip`.
