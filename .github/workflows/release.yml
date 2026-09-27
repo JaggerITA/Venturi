@@ -23,6 +23,10 @@ jobs:
             exit 1
           fi
 
+  # Runs alongside the builds; only publishing waits for it.
+  check:
+    uses: ./.github/workflows/ci.yml
+
   appimage:
     needs: version
     strategy:
@@ -101,7 +105,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [appimage, macos]
+    needs: [check, appimage, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
