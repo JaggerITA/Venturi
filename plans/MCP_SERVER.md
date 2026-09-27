@@ -307,6 +307,53 @@ sits in step 1 (the session refactor); steps 2-6 only add code.
   indicator visible), undo/redo.
 - Not done: Windows named pipe (#15), Flatpak socket path (#1).
 
+## Step 7 (proposed, to confirm): calls answered without UI frames
+
+**Problem.** In the editor the calls are handled inside `ui()`. On Wayland a
+window that is hidden or on another workspace gets no frame callbacks, so
+no frame runs and calls wait until the window is shown (a `get_state` waited
+over 2 minutes). eframe 0.36 has `App::logic()` for hidden windows, but it
+only runs when the platform reports occlusion, and winit does not on
+Wayland ("Wayland: Unsupported"). The user works elsewhere while the agent
+runs, so the calls must be answered without frames.
+
+**Design: the session is checked out, not owned, by the UI.**
+- The `Session` lives in a shared slot (`Mutex<Option<Session>>` + `Condvar`).
+  Every eframe entry point (`logic`, `ui`, `raw_input_hook`, `save`,
+  `on_exit`) checks it out into `VenturiApp::session` at its start and checks
+  it back in at its end, so all the existing `self.session` code stays as it
+  is. Outside those calls the field holds a placeholder (a debug assertion
+  catches any use of it).
+- An **MCP host thread** replaces `poll_mcp`: it drains the inbox, takes the
+  session from the slot, runs the calls, ticks the session, puts it back.
+  With the window drawing, it slips in between two frames (the UI waits for
+  it at most the length of a call); with the window hidden, it just runs.
+- `Session` must be `Send`: `Command: Send` (and `Send + Sync` on the
+  `SetClipValue` accessor closures); everything else in it already is.
+- **What the UI publishes** into the shared host state at the end of each
+  frame: mid-gesture (pointer down / timeline gesture / edit group), a
+  dialog waiting for the user, the `GuiState` for `get_state`. The host
+  thread holds project-changing calls while mid-gesture and refuses them
+  while a dialog waits, as now. With the window hidden, the last published
+  values apply (pointer up, no gesture).
+- **Calls that need the UI:** `get_state` is answered from the published
+  snapshot; `set_active_timeline` is queued and applied at the next frame
+  (answered at once, "shown when the window is drawn"); `screenshot_ui`
+  waits for a drawn frame and fails after ~10 s with "the window is not
+  being drawn (hidden?)".
+- **Session events:** whoever ticks (UI or host thread) first resolves the
+  pending MCP calls (shared), then the UI-side handling (thumbnails,
+  warnings, opening an OTIO timeline for the user's own jobs) runs in the UI
+  at its next frame from a queue.
+- **Changes made while the UI slept** reconcile as today through
+  `History::generation` (render-ahead, audio). A project replaced by the
+  agent bumps a session epoch; the UI calls `reset_for_replaced_project`
+  when it sees it change. An agent export found running shows the progress
+  window.
+- Tests: the host thread answers calls with no UI frame at all (hidden
+  window), holds edits while a published gesture is on, and a UI frame
+  after agent edits reconciles (render-ahead generation, replaced project).
+
 ## Open points
 
 - Socket naming with several GUI instances: `--pid` is the minimal answer;
