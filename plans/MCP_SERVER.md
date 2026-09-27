@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** in progress on branch `mcp_server` (based on `session_layer`): steps 2-4 done.
+**Status:** in progress on branch `mcp_server` (based on `session_layer`): steps 2-5 done.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -202,7 +202,7 @@ speed ramps, OTIO export, playback control.
 | 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | 555241f |
 | 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | 5e774af, db8d234 |
 | 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | 0d2e53c |
-| 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | |
+| 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | 4175889, bbb4ad3, ad835ff, 7407afd |
 | 6 | `docs/MCP.md` | |
 
 Each step builds and passes `timeout 300 cargo test` on its own. The risk
@@ -272,6 +272,40 @@ sits in step 1 (the session refactor); steps 2-6 only add code.
   of a test file with `get_audio_levels`, removed them with one
   `delete_ranges` ripple call, checked with render_frame and the timeline
   levels, exported; ffmpeg confirms 3.6 s and no silence left.
+
+## Step 5 notes
+
+- Settings > Integrations ("Let AI agents work in this window (MCP)", off
+  by default) or `--mcp` for one run. The socket is
+  `$XDG_RUNTIME_DIR/venturi/mcp-<pid>.sock` (fallback
+  `$TMPDIR/venturi-$USER`), dir 0700, socket 0600; sockets nobody answers on
+  are removed when an editor starts or a bridge looks for one. One tokio
+  current-thread runtime per editor serves every connection.
+- `vv-app mcp --attach [--pid N]` pipes stdio to it. It must not use
+  `io::copy`: between two descriptors it may `splice`, and replies stalled
+  when stdout was a pipe to `podman exec` (clients timed out).
+- Editor host (`vv-app/src/mcp_host.rs`): calls that change the project wait
+  while the user has the pointer down / a timeline gesture / an open edit
+  group, so they never merge into the user's undo step; they are refused
+  while the unsaved-changes, OTIO-merge or forced-relink dialog waits;
+  `new_project`/`open_project` are refused over unsaved changes. Agent jobs
+  (imports, OTIO) do not move the user's view or warnings; the agent's
+  export shows in the progress window. `get_state`, `screenshot_ui` (next
+  `Event::Screenshot`) and `set_active_timeline` are answered by the
+  editor; headless they return an error.
+- `Session::finish_otio_import` now reports through `OtioImported` /
+  `OtioCancelled`, so the editor and an agent waiting on the same import
+  both get the outcome.
+- Every MCP edit names its undo step after the tool (a ripple
+  `delete_ranges` was listed as its first command, "SplitClips").
+- Toolbar: an accent "● MCP" while a client is connected, tooltip with the
+  last tool called.
+- Tested: `tests/mcp_host.rs` (8 tests), socket tests, and Claude Code on the
+  host driving the editor in the podman container through
+  `podman exec -i venturi-session vv-app mcp --attach`: import, timeline
+  shown with set_active_timeline, silences removed, screenshot_ui (the
+  indicator visible), undo/redo.
+- Not done: Windows named pipe (#15), Flatpak socket path (#1).
 
 ## Open points
 
