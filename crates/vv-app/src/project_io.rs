@@ -97,7 +97,7 @@ impl VenturiApp {
         }
     }
 
-    fn handle_session_event(&mut self, event: vv_session::SessionEvent) {
+    pub(crate) fn handle_session_event(&mut self, event: vv_session::SessionEvent) {
         use vv_session::{RelinkEnd, SessionEvent as E};
         match event {
             // The agent gets the outcome of its own jobs; the user's view and
@@ -643,6 +643,7 @@ impl VenturiApp {
     /// After the session switched project: the UI state tied to the old
     /// one goes, the first timeline opens.
     pub(crate) fn reset_for_replaced_project(&mut self) {
+        self.seen_epoch = self.session.epoch();
         self.timeline_id = self.session.project.timelines.keys().next();
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();

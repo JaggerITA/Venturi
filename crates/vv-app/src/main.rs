@@ -366,6 +366,9 @@ struct VenturiApp {
     about_open: bool,
     /// Serving MCP to agents (see `mcp_host`); follows the setting.
     mcp: Option<mcp_host::McpHost>,
+    /// `Session::epoch` last caught up with: the agent may replace the
+    /// project while the UI is not drawing.
+    seen_epoch: u64,
     /// `--mcp` on the command line: served whatever the setting says.
     mcp_forced: bool,
     #[cfg(target_os = "linux")]
@@ -449,6 +452,7 @@ impl Default for VenturiApp {
             settings_dialog: None,
             about_open: false,
             mcp: None,
+            seen_epoch: 0,
             mcp_forced: false,
             #[cfg(target_os = "linux")]
             wayland_dnd: None,
@@ -2934,12 +2938,28 @@ impl eframe::App for VenturiApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // With MCP on, the session lives in a slot shared with the agent's
+        // host thread between frames (see `mcp_host`).
+        self.mcp_checkout();
+        self.frame_ui(ui, frame);
+        self.mcp_checkin(&ui.ctx().clone());
+    }
+
+    /// Called by eframe on close and periodically (see
+    /// `auto_save_interval`): the panel layout updated on every frame
+    /// in `ui()` thus ends up on disk without writing it on every resize.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.persist_settings();
+    }
+}
+
+impl VenturiApp {
+    fn frame_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_close_request(&ui.ctx().clone());
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
         self.poll_session(&ui.ctx().clone());
-        self.poll_mcp(&ui.ctx().clone());
         let screenshots: Vec<std::sync::Arc<egui::ColorImage>> = ui.ctx().input(|i| {
             i.raw
                 .events
@@ -3022,7 +3042,7 @@ impl eframe::App for VenturiApp {
                         &t!("menu.inspector"),
                     );
                     if let Some(mcp) = self.mcp.as_ref().filter(|mcp| mcp.clients() > 0) {
-                        agent_indicator(ui, mcp.last_tool);
+                        agent_indicator(ui, mcp.last_tool());
                     }
                 });
             });
@@ -3564,13 +3584,6 @@ impl eframe::App for VenturiApp {
             ui.ctx().request_repaint();
         }
     }
-
-    /// Called by eframe on close and periodically (see
-    /// `auto_save_interval`): the panel layout updated on every frame
-    /// in `ui()` thus ends up on disk without writing it on every resize.
-    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        self.persist_settings();
-    }
 }
 
 fn app_icon() -> Option<egui::IconData> {
@@ -3644,7 +3657,6 @@ fn main() -> eframe::Result<()> {
             }
             app.settings.language.apply();
             app.mcp_forced = mcp_forced;
-            app.apply_mcp_setting(&cc.egui_ctx);
             // Opened immediately: opening the audio stream blocks for hundreds of ms.
             app.timeline_audio = Some(TimelineAudio::new());
             if let Some(render_state) = cc.wgpu_render_state.clone() {
@@ -3661,6 +3673,7 @@ fn main() -> eframe::Result<()> {
             if let Some(path) = startup_path {
                 app.import_media(path);
             }
+            app.apply_mcp_setting(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )

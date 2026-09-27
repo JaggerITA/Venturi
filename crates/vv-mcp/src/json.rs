@@ -71,7 +71,7 @@ pub(crate) fn fps_json(fps: Rational) -> Value {
     json!({ "num": fps.num, "den": fps.den, "value": fps.as_f64() })
 }
 
-pub(crate) fn project_json(session: &Session) -> Value {
+pub fn project_json(session: &Session) -> Value {
     let project = &session.project;
     json!({
         "path": session.path(),

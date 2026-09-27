@@ -39,6 +39,7 @@ impl Default for Waker {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum SessionEvent {
     ImportStarted {
         job: JobId,
@@ -81,6 +82,7 @@ pub enum SessionEvent {
     },
 }
 
+#[derive(Debug, Clone)]
 pub struct OtioMerged {
     /// The first one is the natural one to open.
     pub timelines: Vec<TimelineId>,
@@ -89,6 +91,7 @@ pub struct OtioMerged {
     pub warnings: Vec<OtioWarning>,
 }
 
+#[derive(Debug, Clone)]
 pub enum RelinkEnd {
     Done {
         relinked: Vec<MediaId>,

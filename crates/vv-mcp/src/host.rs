@@ -110,6 +110,10 @@ pub fn channel(notify: impl Fn() + Send + Sync + 'static) -> (McpHandle, McpInbo
 pub struct PendingCalls(Vec<(Pending, oneshot::Sender<ToolResult>)>);
 
 impl PendingCalls {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn push(&mut self, pending: Pending, reply: oneshot::Sender<ToolResult>) {
         self.0.push((pending, reply));
     }
