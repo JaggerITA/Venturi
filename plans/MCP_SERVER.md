@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** in progress on branch `mcp_server` (based on `session_layer`): steps 2-5 done.
+**Status:** in progress on branch `mcp_server` (based on `session_layer`): done (steps 1-6), not merged.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -203,7 +203,7 @@ speed ramps, OTIO export, playback control.
 | 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | 5e774af, db8d234 |
 | 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | 0d2e53c |
 | 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | 4175889, bbb4ad3, ad835ff, 7407afd |
-| 6 | `docs/MCP.md` | |
+| 6 | `docs/MCP.md` | ebbfc94 |
 
 Each step builds and passes `timeout 300 cargo test` on its own. The risk
 sits in step 1 (the session refactor); steps 2-6 only add code.
