@@ -233,6 +233,7 @@ fn delete_ranges_rejects_tracks_with_ripple_and_lifts_on_named_tracks() {
             ranges: vec![[10, 20]],
             ripple,
             tracks,
+            media_id: None,
         })
     };
     assert!(error(&mut session, ranges(true, Some(vec!["V1".into()]))).contains("ripple"));
@@ -245,6 +246,7 @@ fn delete_ranges_rejects_tracks_with_ripple_and_lifts_on_named_tracks() {
                 ranges: vec![[20, 10]],
                 ripple: false,
                 tracks: None,
+                media_id: None,
             })
         ),
         "invalid range [20, 10)"
@@ -604,4 +606,55 @@ fn edits_are_refused_when_the_timeline_changed_since_the_agent_read_it() {
         "{refused}"
     );
     assert_eq!(spans(&mut session, &timeline, 0), [(0, 20), (20, 50)]);
+}
+
+#[test]
+fn delete_ranges_by_media_frames_finds_the_material_after_earlier_cuts() {
+    let dir = test_dir("media-ranges");
+    let a = clip_file(&dir, "a.mp4");
+    let mut session = Session::default();
+    let media = import(&mut session, &[&a])["media"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // At the media's fps, so media and timeline frames match one to one.
+    let mut args = create("T");
+    args.from_media = Some(media.clone());
+    let timeline = ok(&mut session, ToolCall::CreateTimeline(args))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ok(
+        &mut session,
+        ToolCall::InsertClip(insert(&timeline, &media)),
+    );
+    let delete = |ranges: Vec<[i64; 2]>, media_id: Option<String>| {
+        ToolCall::DeleteRanges(DeleteRangesArgs {
+            timeline_id: timeline.clone(),
+            if_revision: None,
+            ranges,
+            ripple: true,
+            tracks: None,
+            media_id,
+        })
+    };
+    ok(&mut session, delete(vec![[0, 10]], None));
+
+    let result = ok(&mut session, delete(vec![[15, 20]], Some(media.clone())));
+
+    let removed: Vec<(String, i64, i64)> = result["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["track"].as_str().unwrap().to_owned(),
+                r["start"].as_i64().unwrap(),
+                r["end"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(removed, [("V1".into(), 5, 10), ("A1".into(), 5, 10)]);
+    let not_there = error(&mut session, delete(vec![[0, 5]], Some(media)));
+    assert!(not_there.starts_with("none of those frames"), "{not_there}");
 }

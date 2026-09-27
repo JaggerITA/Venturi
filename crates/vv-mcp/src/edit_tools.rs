@@ -349,6 +349,23 @@ pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> To
         }
     };
     let ranges: Vec<(FrameIdx, FrameIdx)> = args.ranges.iter().map(|&[s, e]| (s, e)).collect();
+    let media = match &args.media_id {
+        Some(id) => {
+            let media = ids::media_id(project, id)?;
+            let tracks = match &mode {
+                RangeDelete::Lift { tracks } => tracks.as_deref(),
+                RangeDelete::Ripple => None,
+            };
+            if edit::media_ranges_on_timeline(project, timeline, media, &ranges, tracks).is_empty()
+            {
+                return fail(
+                    "none of those frames of the media are on this timeline (on unlocked tracks)",
+                );
+            }
+            Some(media)
+        }
+        None => None,
+    };
     one_step(
         session,
         timeline,
@@ -358,8 +375,34 @@ pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> To
             CommandLabel::DeleteClips
         }),
         |s| {
-            edit::delete_ranges(&mut s.project, &mut s.history, timeline, &ranges, &mode);
-            Ok(json!({ "timeline": timeline_json(&s.project, timeline) }))
+            let removed = match media {
+                Some(media) => edit::delete_media_ranges(
+                    &mut s.project,
+                    &mut s.history,
+                    timeline,
+                    media,
+                    &ranges,
+                    &mode,
+                ),
+                None => {
+                    edit::delete_ranges(&mut s.project, &mut s.history, timeline, &ranges, &mode);
+                    Vec::new()
+                }
+            };
+            let mut value = json!({ "timeline": timeline_json(&s.project, timeline) });
+            if media.is_some() {
+                value["removed"] = removed
+                    .iter()
+                    .map(|&(track, start, end)| {
+                        json!({
+                            "track": track_name(&s.project, timeline, track),
+                            "start": start,
+                            "end": end,
+                        })
+                    })
+                    .collect();
+            }
+            Ok(value)
         },
     )
 }

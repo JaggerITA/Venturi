@@ -84,6 +84,11 @@ While attached, the agent shares the window with you:
   `slate`, `gray`.
 - **One call, one undo step.** `undo` reverts the last step, whoever made it.
   A call that fails leaves nothing behind.
+- **Revisions.** Every result that describes a timeline carries its
+  `revision`, and every edit returns the new one. Pass it back as
+  `if_revision`: if the timeline changed in the meantime (in attached mode
+  you may be editing it too), the edit is refused instead of landing on
+  different material. Edits to other timelines do not change it.
 - **Locked tracks** are never changed; a call that would change one fails.
 - Failures come back as tool errors with a plain message, e.g.
   `track V1 is locked` or `no clip "12" in this timeline`.
@@ -120,7 +125,7 @@ Every call below is one undo step.
 | `insert_clip(timeline_id, media_id, at, source_in?, source_out?, video_track?, audio_track?, video?, audio?)` | Overwrites what is at `at`. Puts the video on the timeline plus one linked audio clip per audio stream; audio tracks are created as needed |
 | `split(timeline_id, frame, clip_ids?)` | Returns the left and right id of each cut clip |
 | `delete_clips(timeline_id, clip_ids, ripple?)` | With `ripple`, the gaps close and linked clips go too |
-| `delete_ranges(timeline_id, ranges, ripple?, tracks?)` | Removes `[start, end)` ranges, cutting clips at the edges. With `ripple`, every unlocked track closes up, so audio and video stay in sync |
+| `delete_ranges(timeline_id, ranges, ripple?, tracks?, media_id?)` | Removes `[start, end)` ranges, cutting clips at the edges. With `ripple`, every unlocked track closes up, so audio and video stay in sync. With `media_id` the ranges are frames of that media: Venturi finds that material wherever it is on the timeline, after any earlier cut, and reports the timeline ranges it removed |
 | `move_clips(timeline_id, moves)` | `moves`: `{clip_id, start, track?}`. Overwrites what is at the destination; linked clips must be listed too |
 | `trim_clip(timeline_id, clip_id, edge, frame)` | `edge` is `start` or `end`; the error names the allowed range |
 | `set_clip_properties(timeline_id, clip_ids, …)` | Static values: `opacity` (0-100), `position` and `scale` (`[x, y]`), `rotation` (degrees), `gain_db`, `disabled`, `fade_in`/`fade_out` (frames), `fill_color` (solid color clips). Values with keyframes keep following them; a warning says so |
@@ -164,8 +169,8 @@ second from `talk.mp4` (25 fps):
    its fps and its duration.
 2. `create_timeline({"name": "Talk", "from_media": "<media id>"})`, then
    `insert_clip({"timeline_id": "<id>", "media_id": "<media id>", "at": 0})`.
-   The whole file is placed at frame 0, so a media frame is also a timeline
-   frame.
+   The measurements below are in frames of the media; `delete_ranges` with
+   `media_id` takes them as they are.
 3. `get_audio_levels({"media_id": "<media id>", "start": 0, "end": 150})`
    returns one RMS value per frame:
 
@@ -176,9 +181,12 @@ second from `talk.mp4` (25 fps):
 4. The agent decides what a pause is, for example RMS below -50 dB for at
    least 12 frames. It keeps a few frames at each edge so words are not
    clipped, and turns what is left into ranges, e.g. `[[27, 60], [102, 123]]`.
-5. `delete_ranges({"timeline_id": "<id>", "ranges": [[27, 60], [102, 123]],
-   "ripple": true})` removes both in one undo step, with audio and video
-   still in sync.
+5. `delete_ranges({"timeline_id": "<id>", "media_id": "<media id>",
+   "ranges": [[27, 60], [102, 123]], "ripple": true, "if_revision": "<revision>"})`
+   removes both in one undo step, with audio and video still in sync. With
+   `media_id` the ranges stay valid even if the timeline was already cut
+   before, and `if_revision` refuses the edit if the timeline changed since
+   it was read.
 6. `get_audio_levels` on the timeline, and `render_frame` around the cuts,
    confirm the result. `undo` restores everything if it went wrong.
 7. `export({"timeline_id": "<id>", "path": "/home/me/talk_cut.mp4"})`, then

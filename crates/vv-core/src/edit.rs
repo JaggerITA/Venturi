@@ -309,6 +309,93 @@ pub fn delete_ranges(
     }
 }
 
+/// Where the source frames `media_ranges` (`[start, end)`, frames of the
+/// media) of `media_id` are on the timeline, as `(track, start, end)`: every
+/// clip of that media on the unlocked tracks (only `tracks` when given),
+/// wherever earlier edits moved it. A media used twice maps twice.
+pub fn media_ranges_on_timeline(
+    project: &Project,
+    timeline_id: TimelineId,
+    media_id: MediaId,
+    media_ranges: &[(FrameIdx, FrameIdx)],
+    tracks: Option<&[usize]>,
+) -> Vec<(usize, FrameIdx, FrameIdx)> {
+    let mut mapped = Vec::new();
+    for (track_index, track) in project.timelines[timeline_id].tracks.iter().enumerate() {
+        if track.locked || tracks.is_some_and(|t| !t.contains(&track_index)) {
+            continue;
+        }
+        for clip in &track.clips {
+            if !matches!(clip.source, ClipSource::Media(id) if id == media_id) {
+                continue;
+            }
+            for &(start, end) in media_ranges {
+                let (start, end) = (start.max(clip.source_in()), end.min(clip.source_out()));
+                if start >= end {
+                    continue;
+                }
+                let span = clip.timeline_start..=clip.timeline_end();
+                let from = clip
+                    .timeline_frame_at(start)
+                    .clamp(*span.start(), *span.end());
+                let to = clip
+                    .timeline_frame_at(end)
+                    .clamp(*span.start(), *span.end());
+                if from < to {
+                    mapped.push((track_index, from, to));
+                }
+            }
+        }
+    }
+    mapped
+}
+
+/// `delete_ranges` for source material: removes the frames `media_ranges`
+/// of `media_id` wherever they are on the timeline. With `Ripple` the
+/// timeline closes up on every unlocked track; with `Lift` only that media's
+/// clips are cut. Returns the timeline ranges it removed.
+pub fn delete_media_ranges(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    media_id: MediaId,
+    media_ranges: &[(FrameIdx, FrameIdx)],
+    mode: &RangeDelete,
+) -> Vec<(usize, FrameIdx, FrameIdx)> {
+    let tracks = match mode {
+        RangeDelete::Lift { tracks } => tracks.as_deref(),
+        RangeDelete::Ripple => None,
+    };
+    let mapped = media_ranges_on_timeline(project, timeline_id, media_id, media_ranges, tracks);
+    match mode {
+        RangeDelete::Ripple => {
+            let ranges: Vec<(FrameIdx, FrameIdx)> =
+                mapped.iter().map(|&(_, start, end)| (start, end)).collect();
+            delete_ranges(project, history, timeline_id, &ranges, mode);
+        }
+        RangeDelete::Lift { .. } => {
+            let touched: BTreeSet<usize> = mapped.iter().map(|&(track, _, _)| track).collect();
+            for track in touched {
+                let ranges: Vec<(FrameIdx, FrameIdx)> = mapped
+                    .iter()
+                    .filter(|&&(t, _, _)| t == track)
+                    .map(|&(_, start, end)| (start, end))
+                    .collect();
+                delete_ranges(
+                    project,
+                    history,
+                    timeline_id,
+                    &ranges,
+                    &RangeDelete::Lift {
+                        tracks: Some(vec![track]),
+                    },
+                );
+            }
+        }
+    }
+    mapped
+}
+
 fn merge_ranges(ranges: impl Iterator<Item = (FrameIdx, FrameIdx)>) -> Vec<(FrameIdx, FrameIdx)> {
     let mut ranges: Vec<(FrameIdx, FrameIdx)> = ranges.collect();
     ranges.sort();

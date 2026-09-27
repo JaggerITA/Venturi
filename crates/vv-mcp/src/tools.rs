@@ -261,6 +261,12 @@ pub struct DeleteRangesArgs {
     /// unlocked tracks.
     #[serde(default)]
     pub tracks: Option<Vec<String>>,
+    /// The ranges are frames of this media, not of the timeline: they are
+    /// removed wherever that material is on the timeline (every use of it,
+    /// wherever earlier cuts moved it). Without `ripple`, only the media's
+    /// own clips are cut. The result lists the timeline ranges removed.
+    #[serde(default)]
+    pub media_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]

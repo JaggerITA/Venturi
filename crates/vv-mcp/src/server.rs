@@ -155,7 +155,7 @@ impl VenturiServer {
     }
 
     #[tool(
-        description = "Removes timeline ranges [start, end) from the tracks, cutting the clips at the edges; with `ripple` the later material slides back, keeping all tracks in sync. The tool for removing silences or bad takes in one step."
+        description = "Removes ranges [start, end) from the tracks, cutting the clips at the edges; with `ripple` the later material slides back, keeping all tracks in sync. With `media_id` the ranges are frames of that media (e.g. from its audio levels or a transcript) and Venturi finds where they are on the timeline, even after earlier cuts: prefer it whenever the ranges come from the media. The tool for removing silences or bad takes in one step."
     )]
     async fn delete_ranges(&self, Parameters(args): Parameters<DeleteRangesArgs>) -> ToolReturn {
         self.call(ToolCall::DeleteRanges(args)).await
