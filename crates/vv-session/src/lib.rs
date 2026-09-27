@@ -12,4 +12,4 @@ mod session;
 pub mod worker;
 
 pub use jobs::{JobId, OtioMerged, RelinkEnd, SessionEvent, Waker, file_label};
-pub use session::Session;
+pub use session::{ChangeMark, Session, complete_legacy_media};

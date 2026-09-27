@@ -111,10 +111,7 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
         ToolCall::GetProject => Ok(ToolOutput::json(project_json(session))),
         ToolCall::GetTimeline(args) => {
             let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-            Ok(ToolOutput::json(timeline_detail_json(
-                &session.project,
-                timeline,
-            )))
+            Ok(ToolOutput::json(timeline_detail_json(session, timeline)))
         }
         ToolCall::GetClip(args) => {
             let project = &session.project;
@@ -228,7 +225,7 @@ fn import_otio(session: &mut Session, args: ImportOtioArgs) -> Dispatch {
 fn otio_json(session: &Session, result: &OtioMerged) -> Value {
     let project = &session.project;
     json!({
-        "timelines": result.timelines.iter().map(|&id| timeline_json(project, id)).collect::<Vec<_>>(),
+        "timelines": result.timelines.iter().map(|&id| timeline_json(session, id)).collect::<Vec<_>>(),
         "added_media": result.added_media.iter().map(|&id| media_json(project, id)).collect::<Vec<_>>(),
         "folder": result.folder.map(key_to_string),
         "warnings": result.warnings.iter().map(|w| format!("{w:?}")).collect::<Vec<_>>(),
@@ -264,7 +261,7 @@ fn create_timeline(session: &mut Session, args: CreateTimelineArgs) -> ToolResul
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
     });
-    Ok(ToolOutput::json(timeline_json(&session.project, id)))
+    Ok(ToolOutput::json(timeline_json(session, id)))
 }
 
 #[cfg(test)]

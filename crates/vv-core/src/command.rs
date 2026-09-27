@@ -11,7 +11,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
-pub trait Command: std::fmt::Debug {
+/// `Send`: an editor serving MCP runs commands from another thread too.
+pub trait Command: std::fmt::Debug + Send {
     fn apply(&mut self, project: &mut Project);
     fn undo(&self, project: &mut Project);
     fn label(&self) -> CommandLabel;
@@ -1300,7 +1301,7 @@ pub struct SetClipValue<T> {
     pub track_index: usize,
     pub clip_id: ClipId,
     value: T,
-    access: Box<dyn Fn(&mut Clip) -> &mut T>,
+    access: Box<dyn Fn(&mut Clip) -> &mut T + Send>,
     old: Option<T>,
     label: CommandLabel,
 }
@@ -1312,7 +1313,7 @@ impl<T> SetClipValue<T> {
         clip_id: ClipId,
         label: CommandLabel,
         value: T,
-        access: impl Fn(&mut Clip) -> &mut T + 'static,
+        access: impl Fn(&mut Clip) -> &mut T + Send + 'static,
     ) -> Self {
         Self {
             timeline,
@@ -1335,7 +1336,7 @@ impl<T> std::fmt::Debug for SetClipValue<T> {
     }
 }
 
-impl<T: Clone> Command for SetClipValue<T> {
+impl<T: Clone + Send> Command for SetClipValue<T> {
     fn label(&self) -> CommandLabel {
         self.label
     }

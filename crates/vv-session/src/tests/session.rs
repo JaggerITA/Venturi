@@ -358,3 +358,55 @@ fn otio_import_asks_before_reusing_media_with_the_same_name() {
     assert_eq!(source.project.media_pool.len(), pool_len + 1);
     assert!(source.otio_awaiting_decision().is_none());
 }
+
+#[test]
+fn a_session_can_move_to_another_thread() {
+    fn send<T: Send>() {}
+    send::<Session>();
+}
+
+#[test]
+fn timeline_revisions_follow_edits_undo_and_outside_changes() {
+    let mut session = Session::default();
+    let timeline = add_timeline(&mut session);
+    let other = add_timeline(&mut session);
+    let first = session.timeline_revision(timeline);
+    assert_eq!(session.timeline_revision(timeline), first, "stable");
+
+    edit::insert_generator(
+        &mut session.project,
+        &mut session.history,
+        other,
+        edit::Generator::Text,
+        0,
+        0,
+        None,
+    );
+    assert_eq!(session.timeline_revision(timeline), first, "other timeline");
+
+    edit::insert_generator(
+        &mut session.project,
+        &mut session.history,
+        timeline,
+        edit::Generator::Text,
+        0,
+        0,
+        None,
+    );
+    let edited = session.timeline_revision(timeline);
+    assert_ne!(edited, first);
+    session.history.undo(&mut session.project);
+    assert_eq!(
+        session.timeline_revision(timeline),
+        first,
+        "undo restores it"
+    );
+
+    session.project.timelines[timeline].name = "Renamed".into();
+    session.mark_unsaved();
+    assert_ne!(
+        session.timeline_revision(timeline),
+        first,
+        "outside the history"
+    );
+}

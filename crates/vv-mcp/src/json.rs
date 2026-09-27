@@ -11,6 +11,7 @@ use vv_session::Session;
 use crate::ids::key_to_string;
 
 /// What the user has in front of them in the editor.
+#[derive(Debug, Clone, Default)]
 pub struct GuiState {
     pub active_timeline: Option<TimelineId>,
     /// From the root timeline down to the compound clip being edited.
@@ -23,9 +24,12 @@ pub struct GuiState {
 }
 
 pub fn state_json(session: &Session, state: &GuiState) -> Value {
-    let project = &session.project;
+    // The state may come from the last drawn frame: its timeline may be gone.
+    let active = state
+        .active_timeline
+        .filter(|&id| session.project.timelines.contains_key(id));
     json!({
-        "active_timeline": state.active_timeline.map(|id| timeline_json(project, id)),
+        "active_timeline": active.map(|id| timeline_json(session, id)),
         "timeline_stack": state.timeline_stack.iter().map(|&id| key_to_string(id)).collect::<Vec<_>>(),
         "playhead": state.playhead,
         "selected_clips": state.selected_clips.iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
@@ -73,7 +77,7 @@ pub(crate) fn project_json(session: &Session) -> Value {
         "path": session.path(),
         "unsaved": session.has_unsaved_changes(),
         "media": project.media_pool.keys().map(|id| media_json(project, id)).collect::<Vec<_>>(),
-        "timelines": project.timelines.keys().map(|id| timeline_json(project, id)).collect::<Vec<_>>(),
+        "timelines": project.timelines.keys().map(|id| timeline_json(session, id)).collect::<Vec<_>>(),
         "folders": project.folders.iter().map(|(id, folder)| json!({
             "id": key_to_string(id),
             "name": folder.name,
@@ -120,22 +124,12 @@ pub(crate) fn media_json(project: &Project, id: MediaId) -> Value {
     value
 }
 
-/// Changes whenever anything in the timeline does: a fingerprint of its
-/// content, not a counter, so edits to other timelines leave it alone.
-pub(crate) fn timeline_revision(project: &Project, id: TimelineId) -> String {
-    use std::hash::{Hash, Hasher};
-    let bytes = serde_json::to_vec(&project.timelines[id]).unwrap_or_default();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-pub(crate) fn timeline_json(project: &Project, id: TimelineId) -> Value {
-    let timeline = &project.timelines[id];
+pub(crate) fn timeline_json(session: &Session, id: TimelineId) -> Value {
+    let timeline = &session.project.timelines[id];
     let length = timeline.total_frames();
     json!({
         "id": key_to_string(id),
-        "revision": timeline_revision(project, id),
+        "revision": session.timeline_revision(id),
         "name": timeline.name,
         "fps": fps_json(timeline.fps),
         "resolution": [timeline.resolution.0, timeline.resolution.1],
@@ -156,9 +150,10 @@ pub(crate) fn track_name(project: &Project, timeline: TimelineId, track_index: u
 }
 
 /// Tracks top to bottom as the agent addresses them, with their clips.
-pub(crate) fn timeline_detail_json(project: &Project, id: TimelineId) -> Value {
+pub(crate) fn timeline_detail_json(session: &Session, id: TimelineId) -> Value {
+    let project = &session.project;
     let timeline = &project.timelines[id];
-    let mut value = timeline_json(project, id);
+    let mut value = timeline_json(session, id);
     value["tracks"] = timeline
         .tracks
         .iter()

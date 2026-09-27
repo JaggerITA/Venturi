@@ -100,14 +100,14 @@ pub(crate) fn marker_id(
 }
 
 pub(crate) fn check_revision(
-    project: &Project,
+    session: &vv_session::Session,
     timeline: TimelineId,
     expected: Option<&str>,
 ) -> Result<(), ToolError> {
     let Some(expected) = expected else {
         return Ok(());
     };
-    let current = crate::json::timeline_revision(project, timeline);
+    let current = session.timeline_revision(timeline);
     if expected.trim() != current {
         return Err(ToolError(format!(
             "the timeline changed since you read it (revision {expected}, now {current}): \

@@ -45,7 +45,7 @@ fn one_step(
             if let Some(object) = value.as_object_mut() {
                 object.insert(
                     "revision".into(),
-                    json!(crate::json::timeline_revision(&session.project, timeline)),
+                    json!(session.timeline_revision(timeline)),
                 );
             }
             Ok(ToolOutput::json(value))
@@ -112,7 +112,7 @@ fn rgba([r, g, b, a]: [f32; 4]) -> Result<Rgba> {
 
 pub(crate) fn add_track(session: &mut Session, args: AddTrackArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let kind = match args.kind {
         TrackKindArg::Video => TrackKind::Video,
         TrackKindArg::Audio => TrackKind::Audio,
@@ -125,7 +125,7 @@ pub(crate) fn add_track(session: &mut Session, args: AddTrackArgs) -> ToolResult
 
 pub(crate) fn set_track(session: &mut Session, args: SetTrackArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let index = ids::track_index(&session.project, timeline, &args.track)?;
     one_step(session, timeline, None, |s| {
         for (flag, value) in [
@@ -153,7 +153,7 @@ pub(crate) fn set_track(session: &mut Session, args: SetTrackArgs) -> ToolResult
 pub(crate) fn insert_clip(session: &mut Session, args: InsertClipArgs) -> ToolResult {
     let project = &session.project;
     let timeline = ids::timeline_id(project, &args.timeline_id)?;
-    ids::check_revision(project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let media_id = ids::media_id(project, &args.media_id)?;
     if project.would_create_a_cycle(media_id, timeline) {
         return fail("that timeline contains this one: inserting it would nest it in itself");
@@ -255,7 +255,7 @@ pub(crate) fn insert_clip(session: &mut Session, args: InsertClipArgs) -> ToolRe
 
 pub(crate) fn split(session: &mut Session, args: SplitArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let only: Option<BTreeSet<ClipRef>> = match &args.clip_ids {
         Some(clip_ids) => Some(
             ids::clip_refs(&session.project, timeline, clip_ids)?
@@ -294,7 +294,7 @@ pub(crate) fn split(session: &mut Session, args: SplitArgs) -> ToolResult {
 
 pub(crate) fn delete_clips(session: &mut Session, args: DeleteClipsArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let refs = ids::clip_refs(&session.project, timeline, &args.clip_ids)?;
     for &(track, _) in &refs {
         ensure_unlocked(&session.project, timeline, track)?;
@@ -313,7 +313,7 @@ pub(crate) fn delete_clips(session: &mut Session, args: DeleteClipsArgs) -> Tool
             } else {
                 edit::delete_clips(&mut s.project, &mut s.history, timeline, &refs);
             }
-            Ok(json!({ "timeline": timeline_json(&s.project, timeline) }))
+            Ok(json!({ "timeline": timeline_json(s, timeline) }))
         },
     )
 }
@@ -321,7 +321,7 @@ pub(crate) fn delete_clips(session: &mut Session, args: DeleteClipsArgs) -> Tool
 pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> ToolResult {
     let project = &session.project;
     let timeline = ids::timeline_id(project, &args.timeline_id)?;
-    ids::check_revision(project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     if args.ranges.is_empty() {
         return fail("no ranges given");
     }
@@ -389,7 +389,7 @@ pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> To
                     Vec::new()
                 }
             };
-            let mut value = json!({ "timeline": timeline_json(&s.project, timeline) });
+            let mut value = json!({ "timeline": timeline_json(s, timeline) });
             if media.is_some() {
                 value["removed"] = removed
                     .iter()
@@ -410,7 +410,7 @@ pub(crate) fn delete_ranges(session: &mut Session, args: DeleteRangesArgs) -> To
 pub(crate) fn move_clips(session: &mut Session, args: MoveClipsArgs) -> ToolResult {
     let project = &session.project;
     let timeline = ids::timeline_id(project, &args.timeline_id)?;
-    ids::check_revision(project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     if args.moves.is_empty() {
         return fail("no moves given");
     }
@@ -448,7 +448,7 @@ pub(crate) fn move_clips(session: &mut Session, args: MoveClipsArgs) -> ToolResu
 pub(crate) fn trim_clip(session: &mut Session, args: TrimClipArgs) -> ToolResult {
     let project = &session.project;
     let timeline = ids::timeline_id(project, &args.timeline_id)?;
-    ids::check_revision(project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let clip_ref = ids::clip_ref(project, timeline, &args.clip_id)?;
     ensure_unlocked(project, timeline, clip_ref.0)?;
     let edge = match args.edge {
@@ -492,7 +492,7 @@ pub(crate) fn set_clip_properties(
 ) -> ToolResult {
     let project = &session.project;
     let timeline = ids::timeline_id(project, &args.timeline_id)?;
-    ids::check_revision(project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let refs = ids::clip_refs(project, timeline, &args.clip_ids)?;
     let tl = &project.timelines[timeline];
     for &(track, id) in &refs {
@@ -619,7 +619,7 @@ fn add_generator(
     customize: impl FnOnce(&mut Session, TimelineId, ClipRef),
 ) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, timeline_id)?;
-    ids::check_revision(&session.project, timeline, if_revision)?;
+    ids::check_revision(session, timeline, if_revision)?;
     if at < 0 {
         return fail("`at` must not be negative");
     }
@@ -723,7 +723,7 @@ pub(crate) fn add_adjustment_clip(
 
 pub(crate) fn link_clips(session: &mut Session, args: ClipsArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let refs = ids::clip_refs(&session.project, timeline, &args.clip_ids)?;
     if refs.len() < 2 {
         return fail("linking needs at least two clips");
@@ -739,7 +739,7 @@ pub(crate) fn link_clips(session: &mut Session, args: ClipsArgs) -> ToolResult {
 
 pub(crate) fn unlink_clips(session: &mut Session, args: ClipsArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let refs = ids::clip_refs(&session.project, timeline, &args.clip_ids)?;
     let tl = &session.project.timelines[timeline];
     let mut groups = HashSet::new();
@@ -803,7 +803,7 @@ fn clip_color(color: ClipColorArg) -> Option<ClipColor> {
 
 pub(crate) fn set_clip_color(session: &mut Session, args: SetClipColorArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let refs = ids::clip_refs(&session.project, timeline, &args.clip_ids)?;
     for &(track, _) in &refs {
         ensure_unlocked(&session.project, timeline, track)?;
@@ -835,7 +835,7 @@ pub(crate) fn get_markers(session: &Session, args: TimelineArgs) -> ToolResult {
         .collect();
     Ok(ToolOutput::json(json!({
         "markers": markers,
-        "revision": crate::json::timeline_revision(&session.project, timeline),
+        "revision": session.timeline_revision(timeline),
     })))
 }
 
@@ -848,7 +848,7 @@ fn check_marker_span(start: FrameIdx, duration: FrameIdx) -> Result<()> {
 
 pub(crate) fn add_marker(session: &mut Session, args: AddMarkerArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let duration = args.duration.unwrap_or(0);
     check_marker_span(args.at, duration)?;
     let marker = Marker {
@@ -868,7 +868,7 @@ pub(crate) fn add_marker(session: &mut Session, args: AddMarkerArgs) -> ToolResu
 
 pub(crate) fn edit_marker(session: &mut Session, args: EditMarkerArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let id = ids::marker_id(&session.project, timeline, &args.marker_id)?;
     let mut marker = session.project.timelines[timeline]
         .marker(id)
@@ -897,7 +897,7 @@ pub(crate) fn edit_marker(session: &mut Session, args: EditMarkerArgs) -> ToolRe
 
 pub(crate) fn delete_marker(session: &mut Session, args: MarkerArgs) -> ToolResult {
     let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
-    ids::check_revision(&session.project, timeline, args.if_revision.as_deref())?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
     let id = ids::marker_id(&session.project, timeline, &args.marker_id)?;
     one_step(session, timeline, None, |s| {
         s.history
