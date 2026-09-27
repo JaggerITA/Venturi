@@ -103,7 +103,7 @@ pub struct ExportProgress {
     pub current_frame: FrameIdx,
     pub total_frames: FrameIdx,
     pub done: bool,
-    pub error: Option<String>,
+    pub error: Option<ExportError>,
     pub elapsed: std::time::Duration,
 }
 

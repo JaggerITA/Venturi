@@ -1,9 +1,8 @@
 //! Media import, file dialogs, saving/opening the project, OTIO,
-//! export and relink.
+//! export and relink: the UI over the `vv_session::Session` jobs.
 
 use super::*;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectSwitch {
@@ -34,50 +33,15 @@ pub(crate) enum DialogOutcome {
     Files(Option<Vec<PathBuf>>),
 }
 
-/// Multiple import in progress: probing on the `ImportWorker` threads, outcome
-/// (preview of the last one, errors) applied when it finishes.
-pub(crate) struct PendingImport {
-    pub(crate) worker: import_worker::ImportWorker,
-    pub(crate) errors: Vec<String>,
-    pub(crate) imported: Vec<MediaId>,
-}
-
-/// OTIO import running on a thread: probing every media of a large
-/// timeline takes long enough for the desktop to flag the window as hung.
-pub(crate) struct PendingOtioImport {
-    pub(crate) name: String,
-    pub(crate) probed: Arc<AtomicUsize>,
-    pub(crate) total: Arc<AtomicUsize>,
-    pub(crate) handle: std::thread::JoinHandle<Result<vv_core::OtioImport, String>>,
-}
-
-/// An OTIO import whose media partly share a file name with media already
-/// in the pool: waiting for the user to choose whether to reuse them.
-pub(crate) struct PendingOtioMerge {
-    pub(crate) imported: vv_core::OtioImport,
-    pub(crate) name: String,
-    /// Imported media → the pool media with the same file name.
-    pub(crate) matches: HashMap<MediaId, MediaId>,
-}
-
 pub(crate) struct PendingDialog {
     pub(crate) kind: DialogKind,
     pub(crate) rx: mpsc::Receiver<DialogOutcome>,
 }
 
-/// UI state of an export in progress: progress/cancellation shared with the
-/// thread actually exporting (`export::export_timeline`),
-/// plus the handle to collect its outcome at the end.
+/// The export window: open from the start of an export until closed, so the
+/// outcome stays readable after the job is over.
 pub(crate) struct ExportUiState {
-    pub(crate) progress: std::sync::Arc<Mutex<export::ExportProgress>>,
-    pub(crate) cancel: std::sync::Arc<AtomicBool>,
-    pub(crate) handle: std::thread::JoinHandle<Result<(), export::ExportError>>,
-}
-
-/// Absolute, symlink-free form of `path`, or `path` itself if the file is
-/// not reachable (removed media must still compare equal to itself).
-fn canonical_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    pub(crate) progress: Arc<Mutex<export::ExportProgress>>,
 }
 
 fn export_error_message(e: &export::ExportError) -> String {
@@ -91,7 +55,7 @@ fn export_error_message(e: &export::ExportError) -> String {
 
 impl VenturiApp {
     pub(crate) fn import_media(&mut self, path: PathBuf) {
-        if let Some(existing) = self.media_with_path(&path) {
+        if let Some(existing) = self.session.media_with_path(&path) {
             self.import_warnings.clear();
             self.preview_media(existing);
             self.media_pool_state.select_only([existing]);
@@ -107,108 +71,87 @@ impl VenturiApp {
         }
     }
 
-    /// Multiple import: probing the files goes to `ImportWorker` (tens of
-    /// ms each), the UI stays alive and shows the progress. Preview
-    /// of the last imported media only, errors collected instead of
-    /// overwriting one another.
+    /// Multiple import: probing the files goes to worker threads (tens of
+    /// ms each), the UI stays alive and shows the progress.
     pub(crate) fn import_media_files(&mut self, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
+        if !paths.is_empty() {
+            self.session.import_media(paths);
         }
-        if self.pending_import.is_some() {
-            self.import_queue.extend(paths);
-            return;
-        }
-        let paths = self.without_media_already_in_pool(paths);
-        if paths.is_empty() {
-            return;
-        }
-        self.import_warnings.clear();
-        self.pending_import = Some(PendingImport {
-            worker: import_worker::ImportWorker::spawn(paths),
-            errors: Vec::new(),
-            imported: Vec::new(),
-        });
     }
 
-    /// Adds to the pool the media already probed by the `ImportWorker`.
-    pub(crate) fn poll_pending_import(&mut self, ctx: &egui::Context) {
-        let Some(mut pending) = self.pending_import.take() else {
-            let queued = std::mem::take(&mut self.import_queue);
-            self.import_media_files(queued);
-            return;
-        };
-        for (path, result) in pending.worker.drain_ready() {
-            let label = file_label(&path);
-            match result {
-                Ok(meta) => {
-                    let media_id = self.insert_media(path, meta);
-                    pending.imported.push(media_id);
-                }
-                Err(e) => pending.errors.push(format!("{label}: {e}")),
-            }
+    /// Collects the outcome of the session's background jobs.
+    pub(crate) fn poll_session(&mut self, ctx: &egui::Context) {
+        for event in self.session.tick() {
+            self.handle_session_event(event);
         }
-        if !pending.worker.is_finished() {
-            self.pending_import = Some(pending);
-            // Without a new event egui would not redraw: the progress
-            // bar would stay frozen.
+        // Without a new event egui would not redraw: the progress bars
+        // would stay frozen.
+        if self.session.has_running_jobs() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            return;
-        }
-        self.import_warnings = pending.errors;
-        if let Some(&last) = pending.imported.last() {
-            self.preview_media(last);
-        }
-        if !pending.imported.is_empty() {
-            self.media_pool_state.select_only(pending.imported);
         }
     }
 
-    /// Blocks until the multiple import in progress is finished: the tests
-    /// have no event loop calling `poll_pending_import`.
+    fn handle_session_event(&mut self, event: vv_session::SessionEvent) {
+        use vv_session::{RelinkEnd, SessionEvent as E};
+        match event {
+            E::ImportStarted { .. } => self.import_warnings.clear(),
+            E::MediaAdded { media_id, .. } => {
+                let meta = self.session.project.media_pool[media_id].meta.clone();
+                if meta.has_video {
+                    self.ensure_timeline_for(&meta);
+                } else {
+                    self.ensure_timeline_audio_only();
+                }
+                self.enqueue_media_background_jobs(media_id);
+            }
+            E::ImportFinished {
+                imported, errors, ..
+            } => {
+                // Everything was already in the pool: nothing started.
+                if imported.is_empty() && errors.is_empty() {
+                    return;
+                }
+                self.import_warnings = errors;
+                if let Some(&last) = imported.last() {
+                    self.preview_media(last);
+                }
+                if !imported.is_empty() {
+                    self.media_pool_state.select_only(imported);
+                }
+            }
+            E::OtioNeedsDecision { .. } => {}
+            E::OtioImported { result, .. } => self.apply_otio_merged(result),
+            E::OtioFailed { error, .. } => {
+                self.project_error =
+                    Some(t!("project.otio_import_failed", error = error).into_owned())
+            }
+            E::RelinkFinished { end, .. } => match end {
+                RelinkEnd::Done {
+                    relinked,
+                    not_found,
+                } => self.finish_relink(relinked, not_found),
+                RelinkEnd::Cancelled => {}
+                RelinkEnd::Failed => {
+                    self.relink_message = Some(t!("project.relink_none").into_owned())
+                }
+            },
+            E::ExportFinished { .. } => self.resume_proxies_after_export(),
+        }
+    }
+
+    /// Blocks until the imports in progress are finished: the tests
+    /// have no event loop calling `poll_session`.
     #[cfg(test)]
     pub(crate) fn wait_for_import(&mut self) {
         let ctx = egui::Context::default();
-        while self.pending_import.is_some() || !self.import_queue.is_empty() {
-            self.poll_pending_import(&ctx);
+        while self.session.is_importing() {
+            self.poll_session(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     pub(crate) fn import_progress(&self) -> Option<(usize, usize)> {
-        self.pending_import.as_ref().map(|p| {
-            let (done, total) = p.worker.progress();
-            (done, total + self.import_queue.len())
-        })
-    }
-
-    /// The media in the pool that points at `path`, if any. Paths are
-    /// canonicalized so that symlinks and `..` do not import a duplicate.
-    pub(crate) fn media_with_path(&self, path: &Path) -> Option<MediaId> {
-        let target = canonical_path(path);
-        self.session
-            .project
-            .media_pool
-            .iter()
-            .find(|(_, item)| item.compound.is_none() && canonical_path(&item.path) == target)
-            .map(|(id, _)| id)
-    }
-
-    /// Drops the paths already in the pool and the duplicates inside the
-    /// batch itself.
-    fn without_media_already_in_pool(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
-        let mut seen: std::collections::HashSet<PathBuf> = self
-            .session
-            .project
-            .media_pool
-            .iter()
-            .filter(|(_, item)| item.compound.is_none())
-            .map(|(_, item)| canonical_path(&item.path))
-            .collect();
-        paths
-            .into_iter()
-            .filter(|path| seen.insert(canonical_path(path)))
-            .collect()
+        self.session.import_progress()
     }
 
     pub(crate) fn add_media_to_pool(&mut self, path: PathBuf) -> Result<MediaId, String> {
@@ -224,17 +167,7 @@ impl VenturiApp {
         } else {
             self.ensure_timeline_audio_only();
         }
-        // `0` only if the file vanished in the meantime: at worst a proxy is
-        // regenerated.
-        let content_hash = vv_media::content_fingerprint(&path).unwrap_or(0);
-        let media_id = self.session.project.media_pool.insert(vv_core::MediaItem {
-            path,
-            meta,
-            content_hash,
-            compound: None,
-            folder: None,
-        });
-        self.session.mark_unsaved();
+        let media_id = self.session.add_media(path, meta);
         self.enqueue_media_background_jobs(media_id);
         media_id
     }
@@ -407,7 +340,7 @@ impl VenturiApp {
         });
     }
 
-    /// Saves to the current file (`current_project_path`), or as a "save as"
+    /// Saves to the current file (`Session::path`), or as a "save as"
     /// if the project has not been saved/opened yet.
     pub(crate) fn save_project(&mut self) {
         match self.session.path().map(Path::to_path_buf) {
@@ -573,167 +506,45 @@ impl VenturiApp {
     /// Adds the timelines of an `.otio` to the project, named after the
     /// file. What was not imported ends up in `import_warnings`.
     pub(crate) fn import_otio_from(&mut self, path: &Path) {
-        if self.pending_otio_import.is_some() || self.pending_otio_merge.is_some() {
-            return;
-        }
-        let name = path
-            .file_stem()
-            .map_or_else(|| "OTIO".into(), |s| s.to_string_lossy().into_owned());
-        let probed = Arc::new(AtomicUsize::new(0));
-        let total = Arc::new(AtomicUsize::new(0));
-        let path = path.to_path_buf();
-        let handle = std::thread::spawn({
-            let (probed, total) = (probed.clone(), total.clone());
-            move || {
-                let value: serde_json::Value = std::fs::read_to_string(&path)
-                    .map_err(vv_core::OtioError::from)
-                    .and_then(|text| Ok(serde_json::from_str(&text)?))
-                    .map_err(|e| e.to_string())?;
-                total.store(vv_core::media_url_count(&value), Ordering::Relaxed);
-                let measure = |title: &vv_core::TitleParams| vv_render::text::title_metrics(title);
-                let mut probe = |media_path: &Path| {
-                    let result = vv_media::probe_media(media_path)
-                        .map_err(|e| e.to_string())
-                        .map(|meta| (meta, vv_media::content_fingerprint(media_path).unwrap_or(0)));
-                    probed.fetch_add(1, Ordering::Relaxed);
-                    result
-                };
-                let base_dir = path.parent().unwrap_or(Path::new("."));
-                vv_core::project_from_otio(&value, base_dir, &mut probe, Some(&measure))
-                    .map_err(|e| e.to_string())
-            }
-        });
-        self.pending_otio_import = Some(PendingOtioImport {
-            name,
-            probed,
-            total,
-            handle,
-        });
+        self.session.import_otio(path);
     }
 
-    pub(crate) fn poll_pending_otio_import(&mut self, ctx: &egui::Context) {
-        let Some(pending) = &self.pending_otio_import else {
-            return;
-        };
-        if !pending.handle.is_finished() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            return;
-        }
-        let Some(pending) = self.pending_otio_import.take() else {
-            return;
-        };
-        match pending.handle.join() {
-            Ok(Ok(imported)) => {
-                let matches = self.media_with_same_name(&imported.project);
-                let merge = PendingOtioMerge {
-                    imported,
-                    name: pending.name,
-                    matches,
-                };
-                if merge.matches.is_empty() {
-                    self.merge_otio_import(merge, false);
-                } else {
-                    self.pending_otio_merge = Some(merge);
-                }
-            }
-            Ok(Err(e)) => {
-                self.project_error = Some(t!("project.otio_import_failed", error = e).into_owned())
-            }
-            Err(_) => {
-                self.project_error =
-                    Some(t!("project.otio_import_failed", error = "panic").into_owned())
-            }
+    /// Completes the import waiting for the reuse-media dialog (`None`:
+    /// cancelled).
+    pub(crate) fn finish_otio_import(&mut self, reuse_existing: Option<bool>) {
+        if let Some(result) = self.session.finish_otio_import(reuse_existing) {
+            self.apply_otio_merged(result);
         }
     }
 
-    fn media_with_same_name(&self, imported: &vv_core::Project) -> HashMap<MediaId, MediaId> {
-        let existing: HashMap<String, MediaId> = self
-            .session
-            .project
-            .media_pool
-            .iter()
-            .filter(|(_, item)| item.compound.is_none())
-            .map(|(id, item)| (file_label(&item.path), id))
-            .collect();
-        imported
-            .media_pool
-            .iter()
-            .filter(|(_, item)| item.compound.is_none())
-            .filter_map(|(id, item)| Some((id, *existing.get(&file_label(&item.path))?)))
-            .collect()
-    }
-
-    /// The new media go in a folder named after the file, the timelines at
-    /// the root of the pool; the first one is opened.
-    pub(crate) fn merge_otio_import(&mut self, merge: PendingOtioMerge, reuse_existing: bool) {
-        let PendingOtioMerge {
-            imported,
-            name,
-            matches,
-        } = merge;
-        let mut project = imported.project;
-        let single = project.timelines.len() == 1;
-        for timeline in project.timelines.values_mut() {
-            timeline.name = if single {
-                name.clone()
-            } else {
-                format!("{name} - {}", timeline.name)
-            };
-        }
-        let reuse = if reuse_existing {
-            // The dialog is not modal for the keyboard: a match may have been deleted.
-            matches
-                .into_iter()
-                .filter(|(_, existing)| self.session.project.media_pool.contains_key(*existing))
-                .collect()
-        } else {
-            HashMap::new()
-        };
-        let folder = (project.media_pool.len() > reuse.len()).then(|| {
-            self.session.project.folders.insert(vv_core::MediaFolder {
-                name: name.clone(),
-                parent: None,
-            })
-        });
-        let before: std::collections::HashSet<MediaId> =
-            self.session.project.media_pool.keys().collect();
-        let timelines = self.session.project.absorb(project, &reuse, folder);
-        let added: Vec<MediaId> = self
-            .session
-            .project
-            .media_pool
-            .keys()
-            .filter(|id| !before.contains(id))
-            .collect();
-        for media_id in added {
+    /// The first imported timeline is opened.
+    fn apply_otio_merged(&mut self, result: vv_session::OtioMerged) {
+        for &media_id in &result.added_media {
             self.enqueue_media_background_jobs(media_id);
         }
-        if let Some(folder) = folder {
+        if let Some(folder) = result.folder {
             self.media_pool_state.expanded.insert(folder);
         }
-        self.session.mark_unsaved();
-        self.import_warnings = imported.warnings.iter().map(otio_warning_text).collect();
-        if let Some(&timeline_id) = timelines.first() {
+        self.import_warnings = result.warnings.iter().map(otio_warning_text).collect();
+        if let Some(&timeline_id) = result.timelines.first() {
             self.open_timeline(timeline_id);
             self.spawn_render_ahead_if_needed(timeline_id);
         }
     }
 
     pub(crate) fn show_otio_merge_dialog(&mut self, ui: &mut egui::Ui) {
-        let Some(merge) = &self.pending_otio_merge else {
+        let Some((name, matches)) = self.session.otio_awaiting_decision() else {
             return;
         };
+        let name = name.to_owned();
         let mut choice = None;
         let modal = egui::Modal::new(egui::Id::new("otio_merge")).show(ui.ctx(), |ui| {
             ui.heading(t!("project.otio_media_exist"));
-            ui.label(t!(
-                "project.otio_media_exist_detail",
-                count = merge.matches.len()
-            ));
+            ui.label(t!("project.otio_media_exist_detail", count = matches));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button(t!("project.otio_import_into_folder", folder = merge.name))
+                    .button(t!("project.otio_import_into_folder", folder = name))
                     .clicked()
                 {
                     choice = Some(Some(false));
@@ -749,29 +560,24 @@ impl VenturiApp {
         if choice.is_none() && modal.should_close() {
             choice = Some(None);
         }
-        if let Some(choice) = choice
-            && let Some(merge) = self.pending_otio_merge.take()
-            && let Some(reuse_existing) = choice
-        {
-            self.merge_otio_import(merge, reuse_existing);
+        if let Some(choice) = choice {
+            self.finish_otio_import(choice);
         }
     }
 
     #[cfg(test)]
     pub(crate) fn wait_for_otio_import(&mut self) {
         let ctx = egui::Context::default();
-        while self.pending_otio_import.is_some() {
-            self.poll_pending_otio_import(&ctx);
+        while self.session.otio_progress().is_some() {
+            self.poll_session(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     pub(crate) fn show_otio_import_progress(&mut self, ui: &mut egui::Ui) {
-        let Some(pending) = &self.pending_otio_import else {
+        let Some((done, total)) = self.session.otio_progress() else {
             return;
         };
-        let total = pending.total.load(Ordering::Relaxed);
-        let done = pending.probed.load(Ordering::Relaxed).min(total);
         egui::Modal::new(egui::Id::new("otio_import_progress")).show(ui.ctx(), |ui| {
             ui.heading(t!("project.otio_importing"));
             ui.add_space(8.0);
@@ -906,36 +712,8 @@ impl VenturiApp {
         range: std::ops::Range<FrameIdx>,
     ) {
         self.pause_proxies_for_export();
-
-        let project = self.session.project.clone();
-        let progress = std::sync::Arc::new(Mutex::new(export::ExportProgress::default()));
-        let cancel = std::sync::Arc::new(AtomicBool::new(false));
-
-        let thread_progress = progress.clone();
-        let thread_cancel = cancel.clone();
-        let handle = std::thread::spawn(move || {
-            let result = export::export_timeline(
-                &project,
-                timeline_id,
-                &settings,
-                range,
-                &thread_progress,
-                &thread_cancel,
-            );
-            // Errors and cancellation close `progress` too: the UI reads only that.
-            if let Err(e) = &result {
-                let mut p = thread_progress.lock().unwrap();
-                p.error = Some(export_error_message(e));
-                p.done = true;
-            }
-            result
-        });
-
-        self.export = Some(ExportUiState {
-            progress,
-            cancel,
-            handle,
-        });
+        let (_, progress) = self.session.export(timeline_id, settings, range);
+        self.export = Some(ExportUiState { progress });
     }
 
     pub(crate) fn show_import_warnings(&mut self, ui: &mut egui::Ui) {
@@ -1013,7 +791,7 @@ impl VenturiApp {
                 p.current_frame,
                 p.total_frames,
                 p.done,
-                p.error.clone(),
+                p.error.as_ref().map(export_error_message),
                 p.elapsed,
             )
         };
@@ -1044,7 +822,7 @@ impl VenturiApp {
                 }
                 ui.horizontal(|ui| {
                     if !done && ui.button(t!("common.cancel")).clicked() {
-                        state.cancel.store(true, Ordering::Relaxed);
+                        self.session.cancel_export();
                     }
                     if done && ui.button(t!("common.close")).clicked() {
                         should_close = true;
@@ -1057,12 +835,8 @@ impl VenturiApp {
             ui.ctx().request_repaint();
         }
 
-        if done {
-            self.resume_proxies_after_export();
-        }
-
-        if should_close && let Some(state) = self.export.take() {
-            let _ = state.handle.join();
+        if should_close {
+            self.export = None;
         }
     }
 
@@ -1162,7 +936,7 @@ impl VenturiApp {
                 item.compound.is_none().then(|| (id, item.path.clone()))
             })
             .collect();
-        self.start_relink(relink_job::RelinkRequest::ByName {
+        self.session.relink(relink_job::RelinkRequest::ByName {
             base_dir: base_dir.to_path_buf(),
             targets,
         });
@@ -1175,68 +949,20 @@ impl VenturiApp {
         &mut self,
         relinks: Vec<(MediaId, PathBuf, Option<vv_core::MediaMeta>)>,
     ) {
-        self.start_relink(relink_job::RelinkRequest::Chosen(relinks));
+        self.session
+            .relink(relink_job::RelinkRequest::Chosen(relinks));
     }
 
-    fn start_relink(&mut self, request: relink_job::RelinkRequest) {
-        if self.relink_job.is_none() {
-            self.relink_job = Some(relink_job::spawn(request));
+    fn finish_relink(
+        &mut self,
+        relinked: Vec<MediaId>,
+        not_found: Option<(PathBuf, Vec<MediaId>)>,
+    ) {
+        for &media_id in &relinked {
+            self.enqueue_media_background_jobs(media_id);
         }
-    }
-
-    pub(crate) fn poll_relink_job(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.relink_job else {
-            return;
-        };
-        if !job.handle.is_finished() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            return;
-        }
-        let Some(job) = self.relink_job.take() else {
-            return;
-        };
-        match job.handle.join() {
-            Ok(Some(outcome)) => self.finish_relink(outcome),
-            Ok(None) => {}
-            Err(_) => self.relink_message = Some(t!("project.relink_none").into_owned()),
-        }
-    }
-
-    /// All the relinks in a single undo step.
-    fn finish_relink(&mut self, outcome: relink_job::RelinkOutcome) {
-        // Media deleted while the job was running are skipped.
-        let relinks: Vec<_> = outcome
-            .relinks
-            .into_iter()
-            .filter(|r| self.session.project.media_pool.contains_key(r.media_id))
-            .collect();
-        let media_ids: Vec<MediaId> = relinks.iter().map(|r| r.media_id).collect();
-        if !relinks.is_empty() {
-            let commands: Vec<Box<dyn vv_core::Command>> = relinks
-                .into_iter()
-                .map(|r| {
-                    Box::new(vv_core::SetMediaPath::new(
-                        r.media_id,
-                        r.path,
-                        r.content_hash,
-                        r.meta,
-                    )) as Box<dyn vv_core::Command>
-                })
-                .collect();
-            self.session.history.do_command(
-                &mut self.session.project,
-                Box::new(vv_core::CompositeCommand::new(
-                    vv_core::CommandLabel::RelinkMedia,
-                    commands,
-                )),
-            );
-            self.session.mark_unsaved();
-            for &media_id in &media_ids {
-                self.enqueue_media_background_jobs(media_id);
-            }
-        }
-        let relinked = media_ids.len();
-        self.relink_message = Some(match (&outcome.not_found, relinked) {
+        let relinked = relinked.len();
+        self.relink_message = Some(match (&not_found, relinked) {
             (_, 0) => t!("project.relink_none").into_owned(),
             (None, _) => t!("project.relink_done", count = relinked).into_owned(),
             (Some((_, missing)), _) => t!(
@@ -1246,24 +972,24 @@ impl VenturiApp {
             )
             .into_owned(),
         });
-        self.forced_relink_offer = outcome.not_found;
+        self.forced_relink_offer = not_found;
     }
 
     #[cfg(test)]
     pub(crate) fn wait_for_relink(&mut self) {
         let ctx = egui::Context::default();
-        while self.relink_job.is_some() {
-            self.poll_relink_job(&ctx);
+        while self.session.relink_progress().is_some() {
+            self.poll_session(&ctx);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     pub(crate) fn show_relink_progress(&mut self, ui: &mut egui::Ui) {
-        let Some(job) = &self.relink_job else {
+        let Some(progress) = self.session.relink_progress() else {
             return;
         };
-        let total = job.progress.total.load(Ordering::Relaxed);
-        let done = job.progress.done.load(Ordering::Relaxed).min(total);
+        let total = progress.total.load(Ordering::Relaxed);
+        let done = progress.done.load(Ordering::Relaxed).min(total);
         let mut cancel = false;
         egui::Modal::new(egui::Id::new("relink_progress")).show(ui.ctx(), |ui| {
             ui.heading(t!("relink.title"));
@@ -1284,7 +1010,7 @@ impl VenturiApp {
             cancel = ui.button(t!("common.cancel")).clicked();
         });
         if cancel {
-            job.progress.cancel.store(true, Ordering::Relaxed);
+            self.session.cancel_relink();
         }
     }
 }

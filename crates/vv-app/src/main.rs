@@ -44,12 +44,12 @@ use settings::Action;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use timeline_audio::TimelineAudio;
 use vv_core::edit::TargetTracks;
 use vv_core::{ClipId, FolderId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
-use vv_session::{export, forced_relink, frame_provider, import_worker, relink_job, worker};
+use vv_session::{export, forced_relink, frame_provider, relink_job, worker};
 
 /// ~6 s of margin at 1080p, ~1.5 s at 4K.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
@@ -208,12 +208,6 @@ struct VenturiApp {
     /// Media or elements not imported, shown in a separate window
     /// until the user closes it.
     import_warnings: Vec<String>,
-    /// Probing of the files of a multiple import, in progress in the background.
-    pending_import: Option<project_io::PendingImport>,
-    pending_otio_import: Option<project_io::PendingOtioImport>,
-    pending_otio_merge: Option<project_io::PendingOtioMerge>,
-    /// Files chosen while an import was already in progress: they start afterwards.
-    import_queue: Vec<PathBuf>,
 
     preview_meta: Option<vv_core::MediaMeta>,
     preview_error: Option<String>,
@@ -349,7 +343,6 @@ struct VenturiApp {
     relink_message: Option<String>,
     /// Base folder and media the last relink could not find by name.
     forced_relink_offer: Option<(PathBuf, Vec<MediaId>)>,
-    relink_job: Option<relink_job::RelinkJob>,
     forced_relink: Option<forced_relink_dialog::ForcedRelinkDialog>,
     /// Kept across dialogs within the session.
     forced_relink_criteria: forced_relink::Criteria,
@@ -386,10 +379,6 @@ impl Default for VenturiApp {
             media_pool_state: media_pool::MediaPoolState::default(),
             keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
             import_warnings: Vec::new(),
-            pending_import: None,
-            pending_otio_import: None,
-            pending_otio_merge: None,
-            import_queue: Vec::new(),
             preview_meta: None,
             preview_error: None,
             video_texture_id: None,
@@ -444,7 +433,6 @@ impl Default for VenturiApp {
             project_error: None,
             relink_message: None,
             forced_relink_offer: None,
-            relink_job: None,
             forced_relink: None,
             forced_relink_criteria: Default::default(),
             pending_dialog: None,
@@ -2911,9 +2899,7 @@ impl eframe::App for VenturiApp {
         self.handle_close_request(&ui.ctx().clone());
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
-        self.poll_pending_import(&ui.ctx().clone());
-        self.poll_pending_otio_import(&ui.ctx().clone());
-        self.poll_relink_job(&ui.ctx().clone());
+        self.poll_session(&ui.ctx().clone());
         self.poll_thumbnails(&ui.ctx().clone());
         if self
             .thumbnail_worker
@@ -3586,6 +3572,9 @@ fn main() -> eframe::Result<()> {
             });
             theme::apply(&cc.egui_ctx);
             let mut app = VenturiApp::default();
+            let egui_ctx = cc.egui_ctx.clone();
+            app.session
+                .set_waker(vv_session::Waker::new(move || egui_ctx.request_repaint()));
             app.settings_path = settings::Settings::default_path();
             if let Some(path) = &app.settings_path {
                 app.settings = settings::Settings::load(path);

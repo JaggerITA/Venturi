@@ -44,11 +44,15 @@ pub struct RelinkJob {
     pub handle: std::thread::JoinHandle<Option<RelinkOutcome>>,
 }
 
-pub fn spawn(request: RelinkRequest) -> RelinkJob {
+pub fn spawn(request: RelinkRequest, waker: crate::Waker) -> RelinkJob {
     let progress = Arc::new(RelinkProgress::default());
     let handle = std::thread::spawn({
         let progress = progress.clone();
-        move || run(request, &progress)
+        move || {
+            let outcome = run(request, &progress);
+            waker.wake();
+            outcome
+        }
     });
     RelinkJob { progress, handle }
 }

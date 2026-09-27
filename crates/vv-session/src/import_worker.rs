@@ -26,7 +26,7 @@ pub struct ImportWorker {
 }
 
 impl ImportWorker {
-    pub fn spawn(paths: Vec<PathBuf>) -> Self {
+    pub fn spawn(paths: Vec<PathBuf>, waker: crate::Waker) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (result_tx, rx) = mpsc::channel();
         for (index, path) in paths.iter().enumerate() {
@@ -45,6 +45,7 @@ impl ImportWorker {
         for _ in 0..threads {
             let job_rx = Arc::clone(&job_rx);
             let result_tx = result_tx.clone();
+            let waker = waker.clone();
             std::thread::spawn(move || {
                 loop {
                     let Ok(job) = ({
@@ -60,6 +61,7 @@ impl ImportWorker {
                     {
                         return;
                     }
+                    waker.wake();
                 }
             });
         }

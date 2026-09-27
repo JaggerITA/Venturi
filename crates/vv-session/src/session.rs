@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use vv_core::{History, MediaFileInfo, PersistenceError, Project, TimelineId};
 
+use crate::jobs::{Jobs, Waker};
+
 /// An open document: the project, its history and where it is saved.
 /// `project` and `history` are public so callers can borrow them apart;
 /// changes that bypass the history must call `mark_unsaved`.
@@ -14,6 +16,8 @@ pub struct Session {
     /// The media pool, folders or timeline list changed outside the history.
     changed_outside_history: bool,
     synced_timeline_generation: u64,
+    pub(crate) waker: Waker,
+    pub(crate) jobs: Jobs,
 }
 
 impl Session {

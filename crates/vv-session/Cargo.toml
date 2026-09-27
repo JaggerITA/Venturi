@@ -11,3 +11,4 @@ vv-audio = { path = "../vv-audio" }
 vv-core = { path = "../vv-core" }
 vv-media = { path = "../vv-media" }
 vv-render = { path = "../vv-render" }
+serde_json = "1.0.151"

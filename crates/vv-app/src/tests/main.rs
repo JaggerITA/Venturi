@@ -4091,7 +4091,7 @@ fn import_otio_from_adds_a_timeline_and_reports_skipped_clips() {
 
     assert!(app.project_error.is_none(), "{:?}", app.project_error);
     assert!(
-        app.pending_otio_merge.is_none(),
+        app.session.otio_awaiting_decision().is_none(),
         "no media with the same name"
     );
     assert_eq!(app.session.path(), Some(dir.join("old.vvproj").as_path()));
@@ -4193,12 +4193,12 @@ fn otio_media_already_in_the_pool_wait_for_the_reuse_choice() {
 
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
-    let merge = app
-        .pending_otio_merge
-        .take()
+    let (_, matches) = app
+        .session
+        .otio_awaiting_decision()
         .expect("a.mp4 is already there");
-    assert_eq!(merge.matches.len(), 1);
-    app.merge_otio_import(merge, true);
+    assert_eq!(matches, 1);
+    app.finish_otio_import(Some(true));
 
     assert_eq!(
         app.session.project.media_pool.len(),
@@ -4215,8 +4215,8 @@ fn otio_media_already_in_the_pool_wait_for_the_reuse_choice() {
 
     app.import_otio_from(&otio_path);
     app.wait_for_otio_import();
-    let merge = app.pending_otio_merge.take().unwrap();
-    app.merge_otio_import(merge, false);
+    assert!(app.session.otio_awaiting_decision().is_some());
+    app.finish_otio_import(Some(false));
     assert_eq!(app.session.project.media_pool.len(), pool_len + 3);
     assert_eq!(app.session.project.folders.len(), 2);
 }

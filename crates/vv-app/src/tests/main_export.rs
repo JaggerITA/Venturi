@@ -419,3 +419,50 @@ fn export_timeline_writes_only_the_in_out_range() {
     }
     assert!((9..=10).contains(&count), "count={count}");
 }
+
+#[test]
+fn run_export_goes_through_the_session_and_keeps_the_outcome_readable() {
+    let dir = std::env::temp_dir().join("vv-app-run-export");
+    std::fs::create_dir_all(&dir).unwrap();
+    let output_path = dir.join("out.mp4");
+    let _ = std::fs::remove_file(&output_path);
+
+    let mut app = crate::VenturiApp::default();
+    let timeline_id = app.ensure_timeline();
+    vv_core::edit::insert_generator(
+        &mut app.session.project,
+        &mut app.session.history,
+        timeline_id,
+        vv_core::edit::Generator::SolidColor,
+        0,
+        0,
+    );
+    let mut settings = ExportSettings::new(output_path.clone());
+    settings.scale_percent = 10;
+    app.run_export(timeline_id, settings, 0..10);
+
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while app.session.has_running_jobs() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "export never finished"
+        );
+        app.poll_session(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.poll_session(&ctx);
+
+    let progress = app
+        .export
+        .as_ref()
+        .expect("the window stays open")
+        .progress
+        .clone();
+    let progress = progress.lock().unwrap();
+    assert!(progress.done);
+    assert!(progress.error.is_none(), "{:?}", progress.error);
+    // Same one-frame encoder tolerance as the other export tests.
+    let frames = vv_media::probe(&output_path).unwrap().duration_frames;
+    assert!((9..=10).contains(&frames), "frames={frames}");
+}
