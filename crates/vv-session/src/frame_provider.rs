@@ -8,6 +8,8 @@ use vv_core::{
 };
 use vv_media::FrameYuv420;
 
+use crate::export::ExportError;
+
 /// `&mut self`: the export keeps the decoders open.
 pub trait FrameProvider {
     /// `Ok(None)` = not available now (preview: not cached yet;
@@ -18,7 +20,7 @@ pub trait FrameProvider {
         project: &Project,
         clip: &Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<FrameYuv420>>, String>;
+    ) -> Result<Option<Arc<FrameYuv420>>, ExportError>;
 
     /// The composed frame of `nested` (the nested timeline of a compound
     /// clip) at `local_frame`, as a GPU texture. `None` from the default
@@ -30,7 +32,7 @@ pub trait FrameProvider {
         _project: &Project,
         _nested: &Timeline,
         _local_frame: FrameIdx,
-    ) -> Result<Option<vv_render::PooledTexture>, String> {
+    ) -> Result<Option<vv_render::PooledTexture>, ExportError> {
         Ok(None)
     }
 }
@@ -196,7 +198,7 @@ impl FrameProvider for GpuCompounds<'_> {
         project: &Project,
         clip: &Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<FrameYuv420>>, String> {
+    ) -> Result<Option<Arc<FrameYuv420>>, ExportError> {
         self.inner.frame_for(project, clip, timeline_frame)
     }
 
@@ -205,7 +207,7 @@ impl FrameProvider for GpuCompounds<'_> {
         project: &Project,
         nested: &Timeline,
         local_frame: FrameIdx,
-    ) -> Result<Option<vv_render::PooledTexture>, String> {
+    ) -> Result<Option<vv_render::PooledTexture>, ExportError> {
         if self.depth >= vv_core::MAX_COMPOUND_DEPTH {
             return Ok(None);
         }
@@ -239,7 +241,7 @@ fn nested_layers(
     nested: &Timeline,
     local_frame: FrameIdx,
     provider: &mut dyn FrameProvider,
-) -> Result<Option<Vec<OwnedLayer>>, String> {
+) -> Result<Option<Vec<OwnedLayer>>, ExportError> {
     let mut layers = Vec::new();
     for (track_index, clip) in nested.active_video_clips_at(local_frame) {
         let clip_layers = track_layers_at(
@@ -267,7 +269,7 @@ pub fn clip_layer(
     frame: FrameIdx,
     timeline_size: (u32, u32),
     provider: &mut dyn FrameProvider,
-) -> Result<Option<OwnedLayer>, String> {
+) -> Result<Option<OwnedLayer>, ExportError> {
     let source_frame = clip.source_frame_at(frame);
     let mut transform = clip.effects.transform.value_at(source_frame);
     let push = clip.transition_offset_at(
@@ -298,7 +300,7 @@ fn clip_content(
     clip: &Clip,
     timeline_frame: FrameIdx,
     provider: &mut dyn FrameProvider,
-) -> Result<ClipContent, String> {
+) -> Result<ClipContent, ExportError> {
     if !matches!(clip.source, ClipSource::Media(_)) {
         return Ok(ClipContent::None);
     }
@@ -403,7 +405,7 @@ fn crossing_side_layer(
     timeline_size: (u32, u32),
     provider: &mut dyn FrameProvider,
     extra_offset: [f32; 2],
-) -> Result<Option<OwnedLayer>, String> {
+) -> Result<Option<OwnedLayer>, ExportError> {
     let source_frame = clip.source_frame_at(frame);
     let mut transform = clip.effects.transform.value_at(source_frame);
     transform.position[0] += extra_offset[0];
@@ -437,7 +439,7 @@ fn crossing_layers(
     frame: FrameIdx,
     timeline_size: (u32, u32),
     provider: &mut dyn FrameProvider,
-) -> Result<Vec<OwnedLayer>, String> {
+) -> Result<Vec<OwnedLayer>, ExportError> {
     let frame_size = (timeline_size.0 as f32, timeline_size.1 as f32);
     let progress = crossing.eased_progress_at(frame, left, right);
     // The zoom of each clip at its own source frame: `offsets` needs it to
@@ -491,7 +493,7 @@ pub fn track_layers_at(
     frame: FrameIdx,
     timeline_size: (u32, u32),
     provider: &mut dyn FrameProvider,
-) -> Result<Vec<OwnedLayer>, String> {
+) -> Result<Vec<OwnedLayer>, ExportError> {
     let track = &timeline.tracks[track_index];
     if let Some((left, right, crossing)) = track.crossing_at(frame)
         && (left.id == clip.id || right.id == clip.id)

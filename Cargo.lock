@@ -3575,6 +3575,7 @@ dependencies = [
  "vv-core",
  "vv-media",
  "vv-render",
+ "vv-session",
  "wayland-backend",
  "winit",
 ]
@@ -3617,6 +3618,16 @@ dependencies = [
  "pollster 1.0.1",
  "vv-core",
  "wgpu",
+]
+
+[[package]]
+name = "vv-session"
+version = "0.2.1"
+dependencies = [
+ "vv-audio",
+ "vv-core",
+ "vv-media",
+ "vv-render",
 ]
 
 [[package]]

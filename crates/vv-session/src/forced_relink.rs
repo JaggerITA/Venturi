@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use vv_core::{MediaId, MediaMeta};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Criterion {
+pub enum Criterion {
     Name,
     Extension,
     Duration,
@@ -24,7 +24,7 @@ pub(crate) enum Criterion {
 }
 
 impl Criterion {
-    pub(crate) const ALL: [Criterion; 11] = [
+    pub const ALL: [Criterion; 11] = [
         Criterion::Name,
         Criterion::Extension,
         Criterion::Duration,
@@ -40,7 +40,7 @@ impl Criterion {
 
     /// Whether the project recorded what this criterion compares for
     /// `reference`: without it no candidate can match.
-    pub(crate) fn known_for(self, reference: &Reference) -> bool {
+    pub fn known_for(self, reference: &Reference) -> bool {
         let meta = &reference.meta;
         match self {
             Criterion::Name => reference.path.file_stem().is_some(),
@@ -64,15 +64,15 @@ impl Criterion {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Criteria {
-    pub(crate) enabled: BTreeSet<Criterion>,
-    pub(crate) duration_tolerance_ms: u32,
-    pub(crate) frames_tolerance: u32,
-    pub(crate) size_tolerance_kib: u32,
+pub struct Criteria {
+    pub enabled: BTreeSet<Criterion>,
+    pub duration_tolerance_ms: u32,
+    pub frames_tolerance: u32,
+    pub size_tolerance_kib: u32,
     /// Minimum waveform similarity, 0..=100.
-    pub(crate) waveform_min_percent: u32,
-    pub(crate) tag_key: String,
-    pub(crate) tag_value: String,
+    pub waveform_min_percent: u32,
+    pub tag_key: String,
+    pub tag_value: String,
 }
 
 impl Default for Criteria {
@@ -90,12 +90,12 @@ impl Default for Criteria {
 }
 
 impl Criteria {
-    pub(crate) fn is_enabled(&self, criterion: Criterion) -> bool {
+    pub fn is_enabled(&self, criterion: Criterion) -> bool {
         self.enabled.contains(&criterion)
     }
 
     /// A search needs at least one criterion, and the tag one a key.
-    pub(crate) fn is_searchable(&self) -> bool {
+    pub fn is_searchable(&self) -> bool {
         !self.enabled.is_empty()
             && (!self.is_enabled(Criterion::Tag) || !self.tag_key.trim().is_empty())
     }
@@ -103,19 +103,19 @@ impl Criteria {
 
 /// An offline media, as the project remembers it.
 #[derive(Debug, Clone)]
-pub(crate) struct Reference {
-    pub(crate) media_id: MediaId,
-    pub(crate) path: PathBuf,
-    pub(crate) meta: MediaMeta,
+pub struct Reference {
+    pub media_id: MediaId,
+    pub path: PathBuf,
+    pub meta: MediaMeta,
     /// Peaks of the first audio stream, from the waveform cache.
-    pub(crate) waveform: Option<Vec<f32>>,
+    pub waveform: Option<Vec<f32>>,
 }
 
 /// A file found under the base folder. Everything beyond the path and the
 /// size is read only when an enabled criterion asks for it, once per file
 /// however many references it is compared to.
-pub(crate) struct Candidate {
-    pub(crate) path: PathBuf,
+pub struct Candidate {
+    pub path: PathBuf,
     size_bytes: Option<u64>,
     meta: Option<Option<MediaMeta>>,
     tags: Option<Vec<(String, String)>>,
@@ -123,7 +123,7 @@ pub(crate) struct Candidate {
 }
 
 impl Candidate {
-    pub(crate) fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self {
             size_bytes: std::fs::metadata(&path).ok().map(|m| m.len()),
             path,
@@ -263,11 +263,7 @@ fn matches_one(
 
 /// All the enabled criteria hold. The cheap ones go first, so a file that
 /// already fails on name or size is never probed or decoded.
-pub(crate) fn matches(
-    criteria: &Criteria,
-    reference: &Reference,
-    candidate: &mut Candidate,
-) -> bool {
+pub fn matches(criteria: &Criteria, reference: &Reference, candidate: &mut Candidate) -> bool {
     let (cheap, costly): (Vec<Criterion>, Vec<Criterion>) =
         criteria.enabled.iter().partition(|c| !c.needs_probe());
     let waveform_last = costly
@@ -284,7 +280,7 @@ pub(crate) fn matches(
 /// Pearson correlation of the two envelopes, resampled to the same number of
 /// bins: the peak counts differ whenever the durations do. 0 when either is
 /// flat.
-pub(crate) fn waveform_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub fn waveform_similarity(a: &[f32], b: &[f32]) -> f32 {
     const BINS: usize = 256;
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -319,7 +315,7 @@ pub(crate) fn waveform_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// All the regular files under `base_dir`, breadth-first. Unreadable
 /// directories are skipped; symlinks are not followed.
-pub(crate) fn files_under(base_dir: &Path) -> Vec<PathBuf> {
+pub fn files_under(base_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut dirs = std::collections::VecDeque::from([base_dir.to_path_buf()]);
     while let Some(dir) = dirs.pop_front() {
@@ -341,23 +337,23 @@ pub(crate) fn files_under(base_dir: &Path) -> Vec<PathBuf> {
 }
 
 #[derive(Default)]
-pub(crate) struct SearchProgress {
-    pub(crate) done: AtomicUsize,
-    pub(crate) total: AtomicUsize,
-    pub(crate) cancel: AtomicBool,
+pub struct SearchProgress {
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+    pub cancel: AtomicBool,
 }
 
 /// A candidate accepted for a reference, with the metadata read while
 /// comparing, so applying the relink need not probe it again.
 #[derive(Debug, Clone)]
-pub(crate) struct Match {
-    pub(crate) path: PathBuf,
-    pub(crate) meta: Option<MediaMeta>,
+pub struct Match {
+    pub path: PathBuf,
+    pub meta: Option<MediaMeta>,
 }
 
 /// The matches of each reference (same order), best first: same name, then
 /// closest length, then least nested. `None` if cancelled.
-pub(crate) fn search(
+pub fn search(
     references: &[Reference],
     base_dir: &Path,
     criteria: &Criteria,
@@ -396,12 +392,12 @@ pub(crate) fn search(
     Some(found)
 }
 
-pub(crate) struct RunningSearch {
-    pub(crate) progress: Arc<SearchProgress>,
-    pub(crate) handle: std::thread::JoinHandle<Option<Vec<Vec<Match>>>>,
+pub struct RunningSearch {
+    pub progress: Arc<SearchProgress>,
+    pub handle: std::thread::JoinHandle<Option<Vec<Vec<Match>>>>,
 }
 
-pub(crate) fn spawn_search(
+pub fn spawn_search(
     references: Arc<Vec<Reference>>,
     base_dir: PathBuf,
     criteria: Criteria,

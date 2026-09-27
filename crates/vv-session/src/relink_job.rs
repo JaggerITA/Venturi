@@ -1,12 +1,13 @@
 //! Relinking in the background: walking a large folder and probing the
 //! files found takes long enough for the desktop to flag the window as hung.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use vv_core::{MediaId, MediaMeta};
 
-pub(crate) enum RelinkRequest {
+pub enum RelinkRequest {
     /// Media looked up by file name under `base_dir`; those still reachable
     /// at their path are left alone.
     ByName {
@@ -17,33 +18,33 @@ pub(crate) enum RelinkRequest {
     Chosen(Vec<(MediaId, PathBuf, Option<MediaMeta>)>),
 }
 
-pub(crate) struct PreparedRelink {
-    pub(crate) media_id: MediaId,
-    pub(crate) path: PathBuf,
-    pub(crate) content_hash: u64,
-    pub(crate) meta: Option<MediaMeta>,
+pub struct PreparedRelink {
+    pub media_id: MediaId,
+    pub path: PathBuf,
+    pub content_hash: u64,
+    pub meta: Option<MediaMeta>,
 }
 
-pub(crate) struct RelinkOutcome {
-    pub(crate) relinks: Vec<PreparedRelink>,
+pub struct RelinkOutcome {
+    pub relinks: Vec<PreparedRelink>,
     /// Not found by name, with the folder searched: offered to the forced relink.
-    pub(crate) not_found: Option<(PathBuf, Vec<MediaId>)>,
+    pub not_found: Option<(PathBuf, Vec<MediaId>)>,
 }
 
 /// `total` stays 0 while the folder is being scanned.
 #[derive(Default)]
-pub(crate) struct RelinkProgress {
-    pub(crate) done: AtomicUsize,
-    pub(crate) total: AtomicUsize,
-    pub(crate) cancel: AtomicBool,
+pub struct RelinkProgress {
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+    pub cancel: AtomicBool,
 }
 
-pub(crate) struct RelinkJob {
-    pub(crate) progress: Arc<RelinkProgress>,
-    pub(crate) handle: std::thread::JoinHandle<Option<RelinkOutcome>>,
+pub struct RelinkJob {
+    pub progress: Arc<RelinkProgress>,
+    pub handle: std::thread::JoinHandle<Option<RelinkOutcome>>,
 }
 
-pub(crate) fn spawn(request: RelinkRequest) -> RelinkJob {
+pub fn spawn(request: RelinkRequest) -> RelinkJob {
     let progress = Arc::new(RelinkProgress::default());
     let handle = std::thread::spawn({
         let progress = progress.clone();
@@ -53,7 +54,7 @@ pub(crate) fn spawn(request: RelinkRequest) -> RelinkJob {
 }
 
 /// `None` if cancelled.
-pub(crate) fn run(request: RelinkRequest, progress: &RelinkProgress) -> Option<RelinkOutcome> {
+pub fn run(request: RelinkRequest, progress: &RelinkProgress) -> Option<RelinkOutcome> {
     let (chosen, not_found) = match request {
         RelinkRequest::Chosen(chosen) => (chosen, None),
         RelinkRequest::ByName { base_dir, targets } => {
@@ -62,7 +63,7 @@ pub(crate) fn run(request: RelinkRequest, progress: &RelinkProgress) -> Option<R
             let index = if offline.is_empty() {
                 Default::default()
             } else {
-                crate::project_io::index_media_by_filename(&base_dir)
+                index_media_by_filename(&base_dir)
             };
             if progress.cancel.load(Ordering::Relaxed) {
                 return None;
@@ -93,6 +94,18 @@ pub(crate) fn run(request: RelinkRequest, progress: &RelinkProgress) -> Option<R
         progress.done.fetch_add(1, Ordering::Relaxed);
     }
     Some(RelinkOutcome { relinks, not_found })
+}
+
+/// All the files under `base_dir` by name: on equal names the least nested
+/// one wins.
+pub fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
+    let mut index = HashMap::new();
+    for path in crate::forced_relink::files_under(base_dir) {
+        if let Some(name) = path.file_name() {
+            index.entry(name.to_owned()).or_insert(path);
+        }
+    }
+    index
 }
 
 #[cfg(test)]

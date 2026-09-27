@@ -7,13 +7,9 @@ extern crate rust_i18n;
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod app_menu;
-mod export;
 mod export_dialog;
-mod forced_relink;
 mod forced_relink_dialog;
-mod frame_provider;
 mod i18n;
-mod import_worker;
 mod keyframe_editor;
 mod media_pool;
 mod media_pool_ui;
@@ -23,7 +19,6 @@ mod paste_attributes;
 mod project_io;
 mod properties_panel;
 mod proxy_worker;
-mod relink_job;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
@@ -38,7 +33,6 @@ mod viewer_zoom;
 mod waveform_worker;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
-mod worker;
 
 use eframe::wgpu;
 use media_pool_ui::*;
@@ -55,6 +49,7 @@ use std::sync::mpsc;
 use timeline_audio::TimelineAudio;
 use vv_core::edit::TargetTracks;
 use vv_core::{ClipId, FolderId, FrameIdx, MediaId, TimelineId, Track, TrackKind};
+use vv_session::{export, forced_relink, frame_provider, import_worker, relink_job, worker};
 
 /// ~6 s of margin at 1080p, ~1.5 s at 4K.
 const DEFAULT_CACHE_BUDGET_BYTES: usize = 1_200_000_000;
@@ -3611,3 +3606,7 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 #[path = "tests/main.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/main_export.rs"]
+mod export_tests;

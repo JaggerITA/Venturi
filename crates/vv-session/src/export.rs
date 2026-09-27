@@ -72,6 +72,32 @@ impl ExportSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportError {
+    TimelineNotFound,
+    MediaNotFound,
+    Cancelled,
+    /// Decoding, composition or encoding failed.
+    Failed(String),
+}
+
+impl ExportError {
+    fn failed(e: impl std::fmt::Display) -> Self {
+        Self::Failed(e.to_string())
+    }
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimelineNotFound => f.write_str("timeline not found"),
+            Self::MediaNotFound => f.write_str("media not found"),
+            Self::Cancelled => f.write_str("export cancelled"),
+            Self::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ExportProgress {
     pub current_frame: FrameIdx,
@@ -96,16 +122,16 @@ impl ActiveClipDecoder {
         path: &Path,
         target_source_frame: FrameIdx,
         is_image: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, ExportError> {
         // `Decoder::open` on an image would hit EOF after the first frame.
         let mut decoder = if is_image {
             vv_media::Decoder::open_image(path)
         } else {
             vv_media::Decoder::open(path)
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(ExportError::failed)?;
         let secs = target_source_frame as f64 / decoder.fps().as_f64().max(1e-9);
-        decoder.seek_to_time(secs).map_err(|e| e.to_string())?;
+        decoder.seek_to_time(secs).map_err(ExportError::failed)?;
         let mut me = Self {
             decoder,
             last: None,
@@ -119,14 +145,14 @@ impl ActiveClipDecoder {
     fn advance_to(
         &mut self,
         target: FrameIdx,
-    ) -> Result<Option<Arc<vv_media::FrameYuv420>>, String> {
+    ) -> Result<Option<Arc<vv_media::FrameYuv420>>, ExportError> {
         if let Some((idx, frame)) = &self.last
             && *idx >= target
         {
             return Ok(Some(frame.clone()));
         }
         loop {
-            match self.decoder.next_frame().map_err(|e| e.to_string())? {
+            match self.decoder.next_frame().map_err(ExportError::failed)? {
                 Some((idx, frame)) if idx >= target => {
                     self.last = Some((idx, frame.clone()));
                     return Ok(Some(frame));
@@ -159,7 +185,7 @@ impl FrameProvider for StreamingFrameProvider {
         project: &Project,
         clip: &Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<vv_media::FrameYuv420>>, String> {
+    ) -> Result<Option<Arc<vv_media::FrameYuv420>>, ExportError> {
         let Some((media_id, source_frame)) = media_source_frame(clip, timeline_frame) else {
             self.active.remove(&clip.id);
             return Ok(None);
@@ -167,7 +193,7 @@ impl FrameProvider for StreamingFrameProvider {
         let item = project
             .media_pool
             .get(media_id)
-            .ok_or_else(|| t!("export.error_media_not_found").into_owned())?;
+            .ok_or(ExportError::MediaNotFound)?;
 
         // A compound clip is not decoded: `GpuCompounds` composes it.
         // Getting here means it stopped at the nesting limit —
@@ -197,7 +223,7 @@ pub fn export_timeline(
     range: std::ops::Range<FrameIdx>,
     progress: &Mutex<ExportProgress>,
     cancel: &AtomicBool,
-) -> Result<(), String> {
+) -> Result<(), ExportError> {
     let started = std::time::Instant::now();
     let finish = || {
         let mut p = progress.lock().unwrap();
@@ -207,7 +233,7 @@ pub fn export_timeline(
     let timeline = project
         .timelines
         .get(timeline_id)
-        .ok_or_else(|| t!("export.error_timeline_not_found").into_owned())?;
+        .ok_or(ExportError::TimelineNotFound)?;
 
     let range = range.start.max(0)..range.end.min(timeline.total_frames());
     let total_frames = (range.end - range.start).max(0);
@@ -233,14 +259,14 @@ pub fn export_timeline(
         &settings.video,
         audio_settings.map(|a| (PROJECT_SAMPLE_RATE, PROJECT_CHANNELS, a)),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(ExportError::failed)?;
 
     // Decode, GPU composition and encode on three threads: in series each one
     // waited for the others and none saturated the machine.
     let (decoded_tx, decoded_rx) =
-        std::sync::mpsc::sync_channel::<Result<Vec<OwnedLayer>, String>>(RENDER_AHEAD_FRAMES);
+        std::sync::mpsc::sync_channel::<Result<Vec<OwnedLayer>, ExportError>>(RENDER_AHEAD_FRAMES);
     let (composed_tx, composed_rx) =
-        std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(RENDER_AHEAD_FRAMES);
+        std::sync::mpsc::sync_channel::<Result<Vec<u8>, ExportError>>(RENDER_AHEAD_FRAMES);
     let resolution = timeline.resolution;
     let output = vv_render::OutputFrame::scaled(out_w, out_h, resolution);
     // A single one for the two GPU stages: the texture of a compound clip is born
@@ -298,15 +324,15 @@ pub fn export_timeline(
         let mut audio = AudioInterleaver::new(timeline, range.start);
         for frame in range.clone() {
             if cancel.load(Ordering::Relaxed) {
-                return Err(t!("export.cancelled").into_owned());
+                return Err(ExportError::Cancelled);
             }
             let frame_i420 = match composed_rx.recv() {
                 Ok(frame_i420) => frame_i420?,
-                Err(_) => return Err(t!("export.cancelled").into_owned()),
+                Err(_) => return Err(ExportError::Cancelled),
             };
             encoder
                 .write_video_frame(&frame_i420)
-                .map_err(|e| e.to_string())?;
+                .map_err(ExportError::failed)?;
             if audio_mix.as_ref().is_some_and(|h| h.is_finished()) {
                 audio.mixed = Some(join_audio_mix(audio_mix.take())?);
             }
@@ -320,7 +346,7 @@ pub fn export_timeline(
         audio.write_until(&mut encoder, range.end)
     })?;
 
-    encoder.finish().map_err(|e| e.to_string())?;
+    encoder.finish().map_err(ExportError::failed)?;
     finish();
     Ok(())
 }
@@ -333,7 +359,7 @@ fn render_video_frame(
     provider: &mut StreamingFrameProvider,
     frame: FrameIdx,
     resolution: (u32, u32),
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, ExportError> {
     let layers = decode_video_frame(project, timeline, provider, compositor, frame, resolution)?;
     let output = vv_render::OutputFrame::exact(resolution.0, resolution.1);
     Ok(compose_video_frame(compositor, &layers, output))
@@ -348,7 +374,7 @@ fn decode_video_frame(
     compositor: &vv_render::Compositor,
     frame: FrameIdx,
     resolution: (u32, u32),
-) -> Result<Vec<OwnedLayer>, String> {
+) -> Result<Vec<OwnedLayer>, ExportError> {
     let clips = timeline.active_video_clips_at(frame);
     // In addition to the "naturally" active clips, the other half of a
     // crossing transition in progress too: `track_layers_at` decodes it as well,
@@ -387,8 +413,8 @@ fn compose_video_frame(
 }
 
 fn join_audio_mix(
-    handle: Option<std::thread::ScopedJoinHandle<'_, Result<Vec<f32>, String>>>,
-) -> Result<Vec<f32>, String> {
+    handle: Option<std::thread::ScopedJoinHandle<'_, Result<Vec<f32>, ExportError>>>,
+) -> Result<Vec<f32>, ExportError> {
     handle
         .expect("audio mix already consumed")
         .join()
@@ -420,7 +446,7 @@ impl AudioInterleaver {
         &mut self,
         encoder: &mut vv_media::Encoder,
         frame: FrameIdx,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExportError> {
         let Some(mixed) = &self.mixed else {
             return Ok(());
         };
@@ -430,7 +456,7 @@ impl AudioInterleaver {
         if end > self.written {
             encoder
                 .write_audio_samples(&mixed[self.written..end])
-                .map_err(|e| e.to_string())?;
+                .map_err(ExportError::failed)?;
             self.written = end;
         }
         Ok(())
@@ -443,7 +469,7 @@ fn mix_audio_track(
     project: &Project,
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,
-) -> Result<Vec<f32>, String> {
+) -> Result<Vec<f32>, ExportError> {
     let mut wanted = WantedStreams::default();
     MixSnapshot::from_timeline(
         project,
@@ -466,7 +492,7 @@ fn mix_audio_track(
                 ControlFlow::Continue(())
             },
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(ExportError::failed)?;
         for ((stream, samples), format) in streams.into_iter().zip(decoded).zip(formats) {
             if format.is_some() {
                 audio

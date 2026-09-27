@@ -1,0 +1,13 @@
+[package]
+name = "vv-session"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vv-audio = { path = "../vv-audio" }
+vv-core = { path = "../vv-core" }
+vv-media = { path = "../vv-media" }
+vv-render = { path = "../vv-render" }

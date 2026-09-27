@@ -224,7 +224,7 @@ impl crate::frame_provider::FrameProvider for RenderAhead {
         _project: &Project,
         clip: &vv_core::Clip,
         timeline_frame: FrameIdx,
-    ) -> Result<Option<Arc<FrameYuv420>>, String> {
+    ) -> Result<Option<Arc<FrameYuv420>>, crate::export::ExportError> {
         let Some((media_id, source_frame)) =
             crate::frame_provider::media_source_frame(clip, timeline_frame)
         else {

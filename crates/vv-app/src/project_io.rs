@@ -71,7 +71,7 @@ pub(crate) struct PendingDialog {
 pub(crate) struct ExportUiState {
     pub(crate) progress: std::sync::Arc<Mutex<export::ExportProgress>>,
     pub(crate) cancel: std::sync::Arc<AtomicBool>,
-    pub(crate) handle: std::thread::JoinHandle<Result<(), String>>,
+    pub(crate) handle: std::thread::JoinHandle<Result<(), export::ExportError>>,
 }
 
 /// Absolute, symlink-free form of `path`, or `path` itself if the file is
@@ -80,16 +80,13 @@ fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// All the files under `base_dir` by name: on equal names the least nested
-/// one wins.
-pub(crate) fn index_media_by_filename(base_dir: &Path) -> HashMap<std::ffi::OsString, PathBuf> {
-    let mut index = HashMap::new();
-    for path in forced_relink::files_under(base_dir) {
-        if let Some(name) = path.file_name() {
-            index.entry(name.to_owned()).or_insert(path);
-        }
+fn export_error_message(e: &export::ExportError) -> String {
+    match e {
+        export::ExportError::TimelineNotFound => t!("export.error_timeline_not_found").into_owned(),
+        export::ExportError::MediaNotFound => t!("export.error_media_not_found").into_owned(),
+        export::ExportError::Cancelled => t!("export.cancelled").into_owned(),
+        export::ExportError::Failed(e) => e.clone(),
     }
-    index
 }
 
 impl VenturiApp {
@@ -947,7 +944,7 @@ impl VenturiApp {
             // Errors and cancellation close `progress` too: the UI reads only that.
             if let Err(e) = &result {
                 let mut p = thread_progress.lock().unwrap();
-                p.error = Some(e.clone());
+                p.error = Some(export_error_message(e));
                 p.done = true;
             }
             result

@@ -5,6 +5,7 @@ members = [
     "crates/vv-media",
     "crates/vv-render",
     "crates/vv-audio",
+    "crates/vv-session",
     "crates/vv-app",
 ]
 

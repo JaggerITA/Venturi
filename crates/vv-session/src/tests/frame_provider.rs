@@ -11,7 +11,7 @@ impl FrameProvider for NoMediaProvider {
         _: &Project,
         _: &Clip,
         _: FrameIdx,
-    ) -> Result<Option<Arc<FrameYuv420>>, String> {
+    ) -> Result<Option<Arc<FrameYuv420>>, crate::export::ExportError> {
         Ok(None)
     }
 }
