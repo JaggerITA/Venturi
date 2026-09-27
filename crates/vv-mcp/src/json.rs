@@ -7,6 +7,32 @@ use vv_session::Session;
 
 use crate::ids::key_to_string;
 
+/// What the user has in front of them in the editor.
+pub struct GuiState {
+    pub active_timeline: Option<TimelineId>,
+    /// From the root timeline down to the compound clip being edited.
+    pub timeline_stack: Vec<TimelineId>,
+    pub playhead: vv_core::FrameIdx,
+    pub selected_clips: Vec<vv_core::ClipId>,
+    pub selected_media: Vec<MediaId>,
+    /// Media previewed from the media pool instead of the timeline.
+    pub previewed_media: Option<MediaId>,
+}
+
+pub fn state_json(session: &Session, state: &GuiState) -> Value {
+    let project = &session.project;
+    json!({
+        "active_timeline": state.active_timeline.map(|id| timeline_json(project, id)),
+        "timeline_stack": state.timeline_stack.iter().map(|&id| key_to_string(id)).collect::<Vec<_>>(),
+        "playhead": state.playhead,
+        "selected_clips": state.selected_clips.iter().map(|id| id.0.to_string()).collect::<Vec<_>>(),
+        "selected_media": state.selected_media.iter().map(|&id| key_to_string(id)).collect::<Vec<_>>(),
+        "previewed_media": state.previewed_media.map(key_to_string),
+        "project_path": session.path(),
+        "unsaved": session.has_unsaved_changes(),
+    })
+}
+
 pub(crate) fn fps_json(fps: Rational) -> Value {
     json!({ "num": fps.num, "den": fps.den, "value": fps.as_f64() })
 }

@@ -82,13 +82,17 @@ impl VenturiApp {
 
     /// Collects the outcome of the session's background jobs.
     pub(crate) fn poll_session(&mut self, ctx: &egui::Context) {
-        for event in self.session.tick() {
-            self.handle_session_event(event);
-        }
+        self.process_session_events();
         // Without a new event egui would not redraw: the progress bars
         // would stay frozen.
         if self.session.has_running_jobs() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn process_session_events(&mut self) {
+        for event in self.session.tick() {
+            self.handle_session_event(event);
         }
     }
 
@@ -120,7 +124,7 @@ impl VenturiApp {
                     self.media_pool_state.select_only(imported);
                 }
             }
-            E::OtioNeedsDecision { .. } => {}
+            E::OtioNeedsDecision { .. } | E::OtioCancelled { .. } => {}
             E::OtioImported { result, .. } => self.apply_otio_merged(result),
             E::OtioFailed { error, .. } => {
                 self.project_error =
@@ -513,9 +517,8 @@ impl VenturiApp {
     /// Completes the import waiting for the reuse-media dialog (`None`:
     /// cancelled).
     pub(crate) fn finish_otio_import(&mut self, reuse_existing: Option<bool>) {
-        if let Some(result) = self.session.finish_otio_import(reuse_existing) {
-            self.apply_otio_merged(result);
-        }
+        self.session.finish_otio_import(reuse_existing);
+        self.process_session_events();
     }
 
     /// The first imported timeline is opened.

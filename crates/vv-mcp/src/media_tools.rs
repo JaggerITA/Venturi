@@ -42,7 +42,7 @@ fn export_error(e: ExportError) -> ToolError {
     ToolError(e.to_string())
 }
 
-fn encode_png(rgba: &[u8], (width, height): (u32, u32)) -> Result<Vec<u8>, ToolError> {
+pub fn encode_png(rgba: &[u8], (width, height): (u32, u32)) -> Result<Vec<u8>, ToolError> {
     let mut png = Vec::new();
     let mut encoder = png::Encoder::new(&mut png, width, height);
     encoder.set_color(png::ColorType::Rgba);

@@ -28,6 +28,10 @@ pub struct McpHandle {
 }
 
 impl McpHandle {
+    pub(crate) fn notify(&self) {
+        (self.notify)();
+    }
+
     /// The receiver yields the result, or an error if the host is gone.
     pub fn submit(&self, call: ToolCall) -> oneshot::Receiver<ToolResult> {
         let (reply, result) = oneshot::channel();

@@ -267,6 +267,23 @@ impl VenturiServer {
     }
 
     #[tool(
+        description = "Editor window only: the open timeline, the playhead, what the user selected. Lets the user point at something and say \"this\"."
+    )]
+    async fn get_state(&self) -> ToolReturn {
+        self.call(ToolCall::GetState).await
+    }
+
+    #[tool(description = "Editor window only: a PNG screenshot of the whole Venturi window.")]
+    async fn screenshot_ui(&self) -> ToolReturn {
+        self.call(ToolCall::ScreenshotUi).await
+    }
+
+    #[tool(description = "Editor window only: shows this timeline in the editor.")]
+    async fn set_active_timeline(&self, Parameters(args): Parameters<TimelineArgs>) -> ToolReturn {
+        self.call(ToolCall::SetActiveTimeline(args)).await
+    }
+
+    #[tool(
         description = "Undoes the last step: one editing call, or one action of the user in the editor."
     )]
     async fn undo(&self) -> ToolReturn {

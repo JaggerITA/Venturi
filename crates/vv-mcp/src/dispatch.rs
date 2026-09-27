@@ -77,13 +77,19 @@ impl Pending {
                 },
                 SessionEvent::OtioNeedsDecision { job: waiting },
             ) if job == waiting => {
-                let result = session.finish_otio_import(Some(*reuse_existing_media))?;
-                Some(Ok(ToolOutput::json(otio_json(session, &result))))
+                // Resolved by the `OtioImported` this produces.
+                session.finish_otio_import(Some(*reuse_existing_media));
+                None
             }
             (Pending::Otio { job, .. }, SessionEvent::OtioFailed { job: failed, error })
                 if job == failed =>
             {
                 Some(Err(ToolError(format!("OTIO import failed: {error}"))))
+            }
+            (Pending::Otio { job, .. }, SessionEvent::OtioCancelled { job: dropped })
+                if job == dropped =>
+            {
+                Some(Err(ToolError("the OTIO import was cancelled".into())))
             }
             _ => None,
         }
@@ -183,6 +189,11 @@ fn run(session: &mut Session, call: ToolCall) -> ToolResult {
             };
             session.history.redo(&mut session.project);
             Ok(ToolOutput::json(json!({ "redone": format!("{label:?}") })))
+        }
+        ToolCall::GetState | ToolCall::ScreenshotUi | ToolCall::SetActiveTimeline(_) => {
+            Err(ToolError(
+                "only available when attached to the Venturi window (vv-app mcp --attach)".into(),
+            ))
         }
         ToolCall::ImportMedia(_)
         | ToolCall::ImportOtio(_)

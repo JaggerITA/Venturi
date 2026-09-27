@@ -67,6 +67,10 @@ pub enum SessionEvent {
         job: JobId,
         error: String,
     },
+    /// The host dropped an import waiting for a decision.
+    OtioCancelled {
+        job: JobId,
+    },
     RelinkFinished {
         job: JobId,
         end: RelinkEnd,
@@ -345,10 +349,19 @@ impl Session {
 
     /// Completes the import waiting for a decision: `Some(true)` reuses the
     /// pool media with the same file name, `Some(false)` imports them all,
-    /// `None` drops the import.
-    pub fn finish_otio_import(&mut self, reuse_existing: Option<bool>) -> Option<OtioMerged> {
-        let (_, merge) = self.jobs.otio_merge.take()?;
-        Some(self.merge_otio(merge, reuse_existing?))
+    /// `None` drops the import. The outcome comes from the next `tick`.
+    pub fn finish_otio_import(&mut self, reuse_existing: Option<bool>) {
+        let Some((job, merge)) = self.jobs.otio_merge.take() else {
+            return;
+        };
+        let event = match reuse_existing {
+            Some(reuse) => SessionEvent::OtioImported {
+                job,
+                result: self.merge_otio(merge, reuse),
+            },
+            None => SessionEvent::OtioCancelled { job },
+        };
+        self.jobs.events.push(event);
     }
 
     fn poll_otio(&mut self) {

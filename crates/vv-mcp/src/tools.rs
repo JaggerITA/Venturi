@@ -39,6 +39,69 @@ pub enum ToolCall {
     CancelExport(JobArgs),
     Undo,
     Redo,
+    GetState,
+    ScreenshotUi,
+    SetActiveTimeline(TimelineArgs),
+}
+
+impl ToolCall {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ToolCall::GetProject => "get_project",
+            ToolCall::GetTimeline(_) => "get_timeline",
+            ToolCall::GetClip(_) => "get_clip",
+            ToolCall::NewProject => "new_project",
+            ToolCall::OpenProject(_) => "open_project",
+            ToolCall::SaveProject(_) => "save_project",
+            ToolCall::ImportMedia(_) => "import_media",
+            ToolCall::ImportOtio(_) => "import_otio",
+            ToolCall::CreateTimeline(_) => "create_timeline",
+            ToolCall::AddTrack(_) => "add_track",
+            ToolCall::SetTrack(_) => "set_track",
+            ToolCall::InsertClip(_) => "insert_clip",
+            ToolCall::Split(_) => "split",
+            ToolCall::DeleteClips(_) => "delete_clips",
+            ToolCall::DeleteRanges(_) => "delete_ranges",
+            ToolCall::MoveClips(_) => "move_clips",
+            ToolCall::TrimClip(_) => "trim_clip",
+            ToolCall::SetClipProperties(_) => "set_clip_properties",
+            ToolCall::AddTitle(_) => "add_title",
+            ToolCall::AddSolidColor(_) => "add_solid_color",
+            ToolCall::AddAdjustmentClip(_) => "add_adjustment_clip",
+            ToolCall::LinkClips(_) => "link_clips",
+            ToolCall::UnlinkClips(_) => "unlink_clips",
+            ToolCall::AddMarker(_) => "add_marker",
+            ToolCall::EditMarker(_) => "edit_marker",
+            ToolCall::DeleteMarker(_) => "delete_marker",
+            ToolCall::RenderFrame(_) => "render_frame",
+            ToolCall::GetAudioLevels(_) => "get_audio_levels",
+            ToolCall::Export(_) => "export",
+            ToolCall::ExportStatus(_) => "export_status",
+            ToolCall::CancelExport(_) => "cancel_export",
+            ToolCall::Undo => "undo",
+            ToolCall::Redo => "redo",
+            ToolCall::GetState => "get_state",
+            ToolCall::ScreenshotUi => "screenshot_ui",
+            ToolCall::SetActiveTimeline(_) => "set_active_timeline",
+        }
+    }
+
+    /// Whether the call changes the project (or what the editor shows): an
+    /// editor host holds these while the user is in the middle of a gesture.
+    pub fn mutates(&self) -> bool {
+        !matches!(
+            self,
+            ToolCall::GetProject
+                | ToolCall::GetTimeline(_)
+                | ToolCall::GetClip(_)
+                | ToolCall::RenderFrame(_)
+                | ToolCall::GetAudioLevels(_)
+                | ToolCall::ExportStatus(_)
+                | ToolCall::CancelExport(_)
+                | ToolCall::GetState
+                | ToolCall::ScreenshotUi
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]

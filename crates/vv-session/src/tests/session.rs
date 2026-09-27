@@ -350,7 +350,10 @@ fn otio_import_asks_before_reusing_media_with_the_same_name() {
         [SessionEvent::OtioNeedsDecision { .. }]
     ));
     assert_eq!(source.otio_awaiting_decision(), Some(("edit", 1)));
-    let result = source.finish_otio_import(Some(true)).unwrap();
+    source.finish_otio_import(Some(true));
+    let Some(SessionEvent::OtioImported { result, .. }) = source.tick().pop() else {
+        panic!("the import ends at the next tick");
+    };
     assert!(result.added_media.len() == 1, "only the timeline item");
     assert_eq!(source.project.media_pool.len(), pool_len + 1);
     assert!(source.otio_awaiting_decision().is_none());
