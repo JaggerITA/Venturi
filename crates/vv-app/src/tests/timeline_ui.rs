@@ -1094,7 +1094,7 @@ fn single_trim_range_start_is_not_clamped_by_the_previous_neighbor() {
         visual(0, 1, 0, 5), // ends at 5
         media_clip_visual(0, 2, 10, 8, 20, vv_core::MediaId::default()),
     ];
-    let (min_value, _) = single_trim_range(&project, &visuals[1].clip, TrimEdge::Start);
+    let (min_value, _) = vv_core::edit::trim_range(&project, &visuals[1].clip, TrimEdge::Start);
     assert_eq!(min_value, 2, "10 - source_in 8, not the neighbour's edge");
 }
 
@@ -1112,7 +1112,8 @@ fn single_trim_range_start_is_clamped_by_source_in() {
         20,
         vv_core::MediaId::default(),
     )];
-    let (min_value, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
+    let (min_value, max_value) =
+        vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::Start);
     assert_eq!(min_value, 7);
     assert_eq!(
         max_value, 26,
@@ -1127,7 +1128,7 @@ fn single_trim_range_end_is_not_clamped_by_the_next_neighbor() {
         visual(0, 1, 0, 10),  // being trimmed: [0,10)
         visual(0, 2, 15, 10), // following neighbor: it can be overwritten
     ];
-    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, FrameIdx::MAX);
 }
 
@@ -1137,7 +1138,7 @@ fn single_trim_range_end_is_clamped_by_media_duration() {
     // source_out starts at 20 on a media 25 frames long: the end cannot
     // be extended past timeline_start + (25 - source_in) = 25.
     let visuals = [media_clip_visual(0, 1, 0, 0, 20, media_id)];
-    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, 25);
 }
 
@@ -1161,13 +1162,13 @@ fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
         ),
     ));
 
-    let (min_value, _) = single_trim_range(&project, &visuals[0].clip, TrimEdge::Start);
+    let (min_value, _) = vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::Start);
     assert_eq!(
         min_value, 998,
         "2000 source frames before = 2002 timeline frames before 3000"
     );
 
-    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(
         max_value, 5002,
         "2000 remaining source frames = 2002 timeline frames after 3000"
@@ -1178,7 +1179,7 @@ fn single_trim_range_of_a_conformed_clip_is_in_timeline_frames() {
 fn single_trim_range_end_is_unbounded_for_solid_color() {
     let project = Project::default();
     let visuals = [visual(0, 1, 0, 10)];
-    let (_, max_value) = single_trim_range(&project, &visuals[0].clip, TrimEdge::End);
+    let (_, max_value) = vv_core::edit::trim_range(&project, &visuals[0].clip, TrimEdge::End);
     assert_eq!(max_value, FrameIdx::MAX);
 }
 

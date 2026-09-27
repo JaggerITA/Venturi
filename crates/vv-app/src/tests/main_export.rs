@@ -436,6 +436,7 @@ fn run_export_goes_through_the_session_and_keeps_the_outcome_readable() {
         vv_core::edit::Generator::SolidColor,
         0,
         0,
+        None,
     );
     let mut settings = ExportSettings::new(output_path.clone());
     settings.scale_percent = 10;

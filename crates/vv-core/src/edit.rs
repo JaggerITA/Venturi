@@ -7,8 +7,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::{
     AddTrack, Clip, ClipId, ClipSource, Command, CommandLabel, CompositeCommand, EffectStack,
-    FrameIdx, History, Keyframed, LiftDelete, LinkClips, LinkGroupId, MediaId, Project, Rational,
-    Rgba, RippleDeleteGap, SplitClip, TimelineId, TitleParams, TrackKind,
+    FrameIdx, History, Keyframed, LiftDelete, LinkClips, LinkGroupId, MediaId, MoveClips, Project,
+    Rational, Rgba, RippleDeleteGap, SplitClip, TimelineId, TitleParams, TrackKind, TrimClip,
+    TrimEdge,
 };
 
 pub type ClipRef = (usize, ClipId);
@@ -74,14 +75,15 @@ pub fn add_track(
 
 /// Splits at `frame` the clips of the unlocked tracks strictly covering it,
 /// restricted to `only` when given. The right halves of a link group are
-/// linked to each other. Returns the split clips (now the left halves).
+/// linked to each other. Returns the split clips (now the left halves) with
+/// the id of their right half.
 pub fn split_clips(
     project: &mut Project,
     history: &mut History,
     timeline_id: TimelineId,
     frame: FrameIdx,
     only: Option<&BTreeSet<ClipRef>>,
-) -> Vec<ClipRef> {
+) -> Vec<(ClipRef, ClipId)> {
     split_where(project, history, timeline_id, frame, |track_index, clip| {
         only.is_none_or(|only| only.contains(&(track_index, clip.id)))
     })
@@ -93,7 +95,7 @@ fn split_where(
     timeline_id: TimelineId,
     frame: FrameIdx,
     keep: impl Fn(usize, &Clip) -> bool,
-) -> Vec<ClipRef> {
+) -> Vec<(ClipRef, ClipId)> {
     let targets: Vec<(usize, ClipId, Option<LinkGroupId>)> = project.timelines[timeline_id]
         .tracks
         .iter()
@@ -150,7 +152,7 @@ fn split_where(
     );
     targets
         .into_iter()
-        .map(|(track_index, clip_id, _)| (track_index, clip_id))
+        .map(|(track_index, clip_id, _)| ((track_index, clip_id), new_ids[&clip_id]))
         .collect()
 }
 
@@ -423,7 +425,8 @@ pub fn insert_media(
     Some(refs)
 }
 
-/// Inserts a generator clip of its default length. Returns its id.
+/// Inserts a generator clip, of its default length with `len: None`.
+/// Returns its id.
 pub fn insert_generator(
     project: &mut Project,
     history: &mut History,
@@ -431,8 +434,9 @@ pub fn insert_generator(
     generator: Generator,
     track_index: usize,
     start: FrameIdx,
+    len: Option<FrameIdx>,
 ) -> ClipId {
-    let len = generator.default_len(project.timelines[timeline_id].fps);
+    let len = len.unwrap_or_else(|| generator.default_len(project.timelines[timeline_id].fps));
     let source = match generator {
         Generator::SolidColor => ClipSource::SolidColor,
         Generator::Text => ClipSource::Text,
@@ -458,6 +462,118 @@ pub fn insert_generator(
         CommandLabel::InsertClips,
     );
     id
+}
+
+/// Moves clips to `(track, start)`, overwriting what is at the destination:
+/// `moves` is `(clip, from track, to track, new start)`.
+pub fn move_clips(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    moves: Vec<(ClipId, usize, usize, FrameIdx)>,
+) {
+    // The moved clips stay out of the room making, even at their old place.
+    let ranges: Vec<(usize, FrameIdx, FrameIdx)> = moves
+        .iter()
+        .filter_map(|&(id, from_track, to_track, start)| {
+            let len = project.timelines[timeline_id]
+                .clip(from_track, id)?
+                .timeline_len;
+            Some((to_track, start, start + len))
+        })
+        .collect();
+    let exclude: Vec<ClipRef> = moves
+        .iter()
+        .flat_map(|&(id, from_track, to_track, _)| [(from_track, id), (to_track, id)])
+        .collect();
+    let mut commands: Vec<Box<dyn Command>> = Vec::new();
+    crate::make_room_for_ranges(project, timeline_id, &ranges, &exclude, &mut commands);
+    commands.push(Box::new(MoveClips::new(timeline_id, moves)));
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::MoveClips, commands)),
+    );
+}
+
+/// Where `edge` of `clip` can go: at least one frame must remain, and the
+/// source bounds the extension (not the neighbours, which get overwritten).
+pub fn trim_range(project: &Project, clip: &Clip, edge: TrimEdge) -> (FrameIdx, FrameIdx) {
+    match edge {
+        TrimEdge::Start => {
+            let min_value = clip.timeline_frame_at(0).max(0);
+            let max_value = clip.timeline_end() - 1;
+            (min_value, max_value.max(min_value))
+        }
+        TrimEdge::End => {
+            // Generators have no source length.
+            let max_value = match &clip.source {
+                ClipSource::Media(media_id) => project
+                    .media_pool
+                    .get(*media_id)
+                    .map(|item| clip.timeline_frame_at(item.meta.duration_frames)),
+                ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
+            }
+            .unwrap_or(FrameIdx::MAX);
+            let min_value = clip.timeline_start + 1;
+            (min_value, max_value.max(min_value))
+        }
+    }
+}
+
+/// The stretch of timeline a clip takes by moving `edge` to `new_value`,
+/// if it grows: `None` if it shrinks.
+pub fn grown_range(
+    clip: &Clip,
+    track_index: usize,
+    edge: TrimEdge,
+    new_value: FrameIdx,
+) -> Option<(usize, FrameIdx, FrameIdx)> {
+    match edge {
+        TrimEdge::Start if new_value < clip.timeline_start => {
+            Some((track_index, new_value, clip.timeline_start))
+        }
+        TrimEdge::End if new_value > clip.timeline_end() => {
+            Some((track_index, clip.timeline_end(), new_value))
+        }
+        _ => None,
+    }
+}
+
+/// Moves one edge of a clip to `new_value`, overwriting what the clip grows
+/// over. `new_value` must be inside `trim_range`.
+pub fn trim_clip(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    (track_index, clip_id): ClipRef,
+    edge: TrimEdge,
+    new_value: FrameIdx,
+) {
+    let Some(clip) = project.timelines[timeline_id].clip(track_index, clip_id) else {
+        return;
+    };
+    let grown: Vec<_> = grown_range(clip, track_index, edge, new_value)
+        .into_iter()
+        .collect();
+    let mut commands: Vec<Box<dyn Command>> = Vec::new();
+    crate::make_room_for_ranges(
+        project,
+        timeline_id,
+        &grown,
+        &[(track_index, clip_id)],
+        &mut commands,
+    );
+    commands.push(Box::new(TrimClip::new(
+        timeline_id,
+        track_index,
+        clip_id,
+        edge,
+        new_value,
+    )));
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::TrimClips, commands)),
+    );
 }
 
 #[cfg(test)]

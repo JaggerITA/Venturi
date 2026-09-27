@@ -1364,6 +1364,7 @@ impl VenturiApp {
                 generator,
                 video_track,
                 start,
+                None,
             );
         }
         self.session
@@ -2423,13 +2424,16 @@ impl VenturiApp {
         };
         let playhead = self.timeline_state.playhead;
         let selected = &self.timeline_state.selected;
-        let targets = vv_core::edit::split_clips(
+        let targets: Vec<(usize, ClipId)> = vv_core::edit::split_clips(
             &mut self.session.project,
             &mut self.session.history,
             timeline_id,
             playhead,
             (!selected.is_empty()).then_some(selected),
-        );
+        )
+        .into_iter()
+        .map(|(left, _)| left)
+        .collect();
 
         // Selects the *left* half (the one under the playhead would be the
         // right one): after a cut one usually works on what comes before.

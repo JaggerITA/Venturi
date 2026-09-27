@@ -242,6 +242,7 @@ fn undo_and_redo_name_the_step() {
         edit::Generator::Text,
         0,
         0,
+        None,
     );
 
     assert_eq!(ok(&mut session, ToolCall::Undo)["undone"], "InsertClips");

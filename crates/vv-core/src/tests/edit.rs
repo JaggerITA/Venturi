@@ -103,7 +103,8 @@ fn split_clips_relinks_the_right_halves_and_skips_locked_tracks() {
 
     let split = split_clips(&mut project, &mut history, tl, 40, None);
 
-    assert_eq!(split, vec![(0, v), (1, a)]);
+    let lefts: Vec<ClipRef> = split.iter().map(|&(left, _)| left).collect();
+    assert_eq!(lefts, vec![(0, v), (1, a)]);
     assert_eq!(spans(&project, tl, 0), vec![(0, 40, 0), (40, 100, 40)]);
     assert_eq!(spans(&project, tl, 2), vec![(0, 100, 0)]);
     let timeline = &project.timelines[tl];
@@ -361,6 +362,7 @@ fn insert_generator_overwrites_what_is_underneath() {
         Generator::SolidColor,
         0,
         100,
+        None,
     );
 
     assert_eq!(

@@ -163,6 +163,7 @@ fn saving_and_opening_follow_the_unsaved_state() {
         edit::Generator::Text,
         0,
         0,
+        None,
     );
 
     let path = dir.join("p.vvproj");
@@ -244,6 +245,7 @@ fn a_cancelled_export_reports_it() {
         edit::Generator::SolidColor,
         0,
         0,
+        None,
     );
     let (_, progress) = session.export(timeline, ExportSettings::new(dir.join("out.mp4")), 0..125);
     session.cancel_export();
