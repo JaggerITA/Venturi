@@ -3558,7 +3558,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vv-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "egui",
@@ -3581,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "vv-audio"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cpal",
  "ffmpeg-next",
@@ -3590,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "vv-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ron",
  "serde",
@@ -3601,7 +3601,7 @@ dependencies = [
 
 [[package]]
 name = "vv-media"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ffmpeg-next",
  "thiserror 2.0.20",
@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "vv-render"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "cosmic-text",
