@@ -1,9 +1,15 @@
 FROM docker.io/library/python:3.12-slim
 
+# CUDA=1 adds the cuBLAS/cuDNN libraries CTranslate2 needs to run on an NVIDIA GPU.
+ARG CUDA=0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
- && pip install --no-cache-dir faster-whisper
+ && pip install --no-cache-dir faster-whisper \
+ && if [ "$CUDA" = 1 ]; then \
+      pip install --no-cache-dir nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*'; \
+    fi
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
 
 COPY transcribe.py /app/transcribe.py
 WORKDIR /work

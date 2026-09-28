@@ -206,7 +206,7 @@ whisper.cpp or faster-whisper. To keep that fast and cheap:
 
 - **Install it once**, not in a throwaway environment for every session.
   The repository has one ready in `container/whisper/` (faster-whisper,
-  CPU, word timestamps), built once and reused:
+  word timestamps), built once and reused:
 
   ```sh
   mkdir -p ~/.cache/whisper-models   # model cache, downloaded on first use
@@ -214,12 +214,34 @@ whisper.cpp or faster-whisper. To keep that fast and cheap:
   MEDIA_DIR=/path/to/media podman compose run --rm whisper piece.wav --language it
   ```
 
+  With an NVIDIA GPU and the NVIDIA Container Toolkit (CDI), run the
+  `whisper-gpu` service instead of `whisper`: same arguments, much
+  faster (under a minute for 3 minutes of audio with `crisper`).
+
   The file path is relative to `MEDIA_DIR`; `--stream N` picks an audio
-  stream of a video, `--model` the Whisper model (default `medium`, about
-  1.5 GB). It writes `piece.wav.transcript.json` next to the input:
+  stream of a video, `--model` the model (default `crisper`, below). It
+  writes `piece.wav.transcript.json` next to the input:
   `segments` with `start`/`end`/`text` in seconds and `words` as
-  `{s, e, w}`. A whisper.cpp or `pipx install faster-whisper` already on the
-  system works as well.
+  `{s, e, w}`, plus `pauses` (`{s, e}`, stretches quieter than `--pause-db`,
+  default −45 dBFS, lasting at least `--min-pause`, default 0.3 s). The
+  audio is transcribed in independent pieces of about `--chunk` seconds
+  (default 10), split at those pauses: decoding long windows, each
+  conditioned on the text before, merges retakes into one sentence, loops
+  on a word or drops whole passages. A whisper.cpp or
+  `pipx install faster-whisper` already on the system works as well, with
+  those problems.
+- **`crisper` finds repeated takes.**
+  [CrisperWhisper](https://huggingface.co/nyrahealth/faster_CrisperWhisper)
+  (about 3 GB) transcribes verbatim, keeping false starts and retakes; plain
+  Whisper writes clean text and merges them into one fluent sentence
+  (stretching a word over a second or more), so they vanish from the
+  transcript. Trained on English and German, `crisper` spells other
+  languages badly (glued words, `blocked_out_string…` tokens) and its word
+  times drift by a few tenths of a second: use it to find which takes
+  repeat, keep the last complete one, and put each cut edge inside one of
+  the `pauses` rather than on a word time. When readable text matters more
+  than every retake (cutting by a script in another language),
+  `--model medium` (about 1.5 GB) spells it properly.
 - **Transcribe only what the timeline uses.** A timeline often takes a few
   seconds out of a long recording. `get_timeline` gives each clip's media
   and `source_in`/`source_out` (media frames): merge the ranges per media,
