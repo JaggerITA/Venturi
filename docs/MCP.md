@@ -242,6 +242,11 @@ whisper.cpp or faster-whisper. To keep that fast and cheap:
   the `pauses` rather than on a word time. When readable text matters more
   than every retake (cutting by a script in another language),
   `--model medium` (about 1.5 GB) spells it properly.
+- **Don't analyse audio on the host**: its Python may lack numpy. The
+  transcript's `pauses` and `get_audio_levels` cover the cut edges; any
+  other script runs in the container, where numpy is installed and
+  `MEDIA_DIR` is `/work`:
+  `podman compose run --rm --entrypoint python whisper script.py`.
 - **Transcribe only what the timeline uses.** A timeline often takes a few
   seconds out of a long recording. `get_timeline` gives each clip's media
   and `source_in`/`source_out` (media frames): merge the ranges per media,
