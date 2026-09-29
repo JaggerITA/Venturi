@@ -8,16 +8,17 @@ pub mod persistence;
 pub mod pool;
 
 pub use command::{
-    AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge, GroupMark, History,
-    InsertClip, JoinableStep, KeyframePick, KeyframeTarget, KeyframeValue, LiftDelete, LinkClips,
-    MixerChannel, MixerParam, MoveClips, MoveKeyframes, RemoveKeyframe, RemoveMedia, RemoveTrack,
-    ResetTransformParams, RippleDeleteGap, SetClipAttributes, SetClipColor, SetClipFade,
-    SetClipSpeed, SetClipValue, SetClipsDisabled, SetClipsDisplayColor, SetCrossTransition,
-    SetKeyframeInterpolation, SetMarker, SetMediaPath, SetMixerParam, SetTrackFlag, SpeedFit,
-    SplitClip, TrackFlag, TrimClip, TrimEdge, UnlinkClip, UpsertKeyframe, compound_clip_commands,
-    cut_overlaps, insert_overwriting, make_room_for_ranges, plan_compound_clip, reset_clip_gain,
-    set_clip_blend_mode, set_clip_filters, set_clip_flip, set_clip_gain, set_clip_title,
-    set_clip_transform_param, set_clip_transition,
+    AddAudioEffect, AddTrack, Command, CommandLabel, CompositeCommand, CompoundPlan, FadeEdge,
+    GroupMark, History, InsertClip, JoinableStep, KeyframePick, KeyframeTarget, KeyframeValue,
+    LiftDelete, LinkClips, MixerChannel, MixerParam, MoveClips, MoveKeyframes, RemoveAudioEffect,
+    RemoveKeyframe, RemoveMedia, RemoveTrack, ResetTransformParams, RippleDeleteGap,
+    SetAudioEffect, SetClipAttributes, SetClipColor, SetClipFade, SetClipSpeed, SetClipValue,
+    SetClipsDisabled, SetClipsDisplayColor, SetCrossTransition, SetKeyframeInterpolation,
+    SetMarker, SetMediaPath, SetMixerParam, SetTrackFlag, SpeedFit, SplitClip, TrackFlag, TrimClip,
+    TrimEdge, UnlinkClip, UpsertKeyframe, compound_clip_commands, cut_overlaps, insert_overwriting,
+    make_room_for_ranges, plan_compound_clip, reset_clip_gain, set_clip_blend_mode,
+    set_clip_filters, set_clip_flip, set_clip_gain, set_clip_title, set_clip_transform_param,
+    set_clip_transition,
 };
 pub use model::*;
 pub use otio::{

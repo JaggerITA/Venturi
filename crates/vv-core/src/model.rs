@@ -1609,7 +1609,42 @@ pub struct ChannelStrip {
     pub gain_db: f32,
     /// Left/right balance, -1 (left) to 1 (right).
     pub pan: f32,
+    /// Insert chain before the fader, in order of application.
+    pub effects: Vec<AudioEffect>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioEffect {
+    pub enabled: bool,
+    pub kind: AudioEffectKind,
+}
+
+impl AudioEffect {
+    pub fn new(kind: AudioEffectKind) -> Self {
+        Self {
+            enabled: true,
+            kind,
+        }
+    }
+}
+
+/// An audio effect of the mixer. The variety is open: new variants for new
+/// effects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AudioEffectKind {
+    /// Gain that brings the peak of the whole channel to `target_db` dBFS.
+    Normalize { target_db: f32 },
+}
+
+impl AudioEffectKind {
+    pub const ALL: [AudioEffectKind; 1] = [AudioEffectKind::Normalize {
+        target_db: NORMALIZE_TARGET_DEFAULT,
+    }];
+}
+
+pub const NORMALIZE_TARGET_DEFAULT: f32 = -1.0;
+pub const NORMALIZE_TARGET_MIN: f32 = -30.0;
+pub const NORMALIZE_TARGET_MAX: f32 = 0.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {

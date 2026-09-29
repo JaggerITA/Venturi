@@ -19,3 +19,35 @@ mixer.solo:
 mixer.mute:
   en: "MUTE"
   it: "MUTO"
+
+mixer.add_effect:
+  en: "Add an effect"
+  it: "Aggiungi un effetto"
+
+mixer.effect_normalize:
+  en: "Normalize"
+  it: "Normalizzazione"
+
+mixer.effect_enable:
+  en: "Enable"
+  it: "Abilita"
+
+mixer.effect_disable:
+  en: "Disable"
+  it: "Disabilita"
+
+mixer.effect_remove:
+  en: "Remove"
+  it: "Rimuovi"
+
+mixer.effect_disabled:
+  en: "Disabled: it has no effect on the mix."
+  it: "Disabilitato: non ha effetto sul mix."
+
+mixer.normalize_target:
+  en: "Target peak (dBFS)"
+  it: "Picco obiettivo (dBFS)"
+
+mixer.normalize_hint:
+  en: "Brings the loudest peak of the whole channel to this level."
+  it: "Porta il picco più alto dell'intero canale a questo livello."

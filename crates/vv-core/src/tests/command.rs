@@ -218,3 +218,43 @@ fn a_track_saved_without_mixer_settings_loads_at_unity_gain() {
     let track: Track = serde_json::from_value(value).unwrap();
     assert_eq!(track.mix, ChannelStrip::default());
 }
+
+#[test]
+fn audio_effects_are_added_edited_and_removed_with_undo() {
+    let (mut project, tl) = project();
+    let mut history = History::default();
+    let channel = MixerChannel::Master;
+    let normalize = |target_db| AudioEffect::new(crate::AudioEffectKind::Normalize { target_db });
+    let effects = |project: &Project| project.timelines[tl].master.effects.clone();
+
+    history.do_command(
+        &mut project,
+        Box::new(AddAudioEffect::new(tl, channel, normalize(-1.0))),
+    );
+    history.do_command(
+        &mut project,
+        Box::new(AddAudioEffect::new(tl, channel, normalize(-3.0))),
+    );
+    let off = AudioEffect {
+        enabled: false,
+        ..normalize(-1.0)
+    };
+    let label = CommandLabel::ToggleAudioEffect;
+    history.do_command(
+        &mut project,
+        Box::new(SetAudioEffect::new(tl, channel, 0, off.clone(), label)),
+    );
+    history.do_command(
+        &mut project,
+        Box::new(RemoveAudioEffect::new(tl, channel, 1)),
+    );
+    assert_eq!(effects(&project), [off]);
+    assert_eq!(history.labels().nth(2), Some(label));
+
+    history.undo(&mut project);
+    history.undo(&mut project);
+    assert_eq!(effects(&project), [normalize(-1.0), normalize(-3.0)]);
+    history.undo(&mut project);
+    history.undo(&mut project);
+    assert!(effects(&project).is_empty());
+}

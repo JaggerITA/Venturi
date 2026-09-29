@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 
-use vv_audio::{AudioSource, ClipAudio};
+use vv_audio::{AnalysisSlot, AudioSource, ClipAudio, PeakAnalysis, PeakReading};
 use vv_core::MediaId;
 
 use crate::worker::Worker;
@@ -33,6 +33,14 @@ enum Stretch {
     Ready(Arc<Vec<f32>>),
     Failed,
 }
+
+struct PeakJob {
+    key: u64,
+    analysis: PeakAnalysis,
+}
+
+/// `None`: dropped for a newer job of the same slot.
+type PeakResult = (u64, Option<AnalysisSlot>, Option<f32>);
 
 struct Ready {
     key: Key,
@@ -60,6 +68,12 @@ pub struct MixBufferCache {
     stretch_used: HashSet<StretchKey>,
     stretch_worker: Worker<StretchJob>,
     stretch_rx: mpsc::Receiver<(StretchKey, Result<Vec<f32>, String>)>,
+    /// Normalization peaks by `PeakAnalysis::key`; `None` while measuring.
+    peaks: HashMap<u64, Option<f32>>,
+    last_peak: HashMap<AnalysisSlot, f32>,
+    peak_used: HashSet<u64>,
+    peak_worker: Worker<PeakJob>,
+    peak_rx: mpsc::Receiver<PeakResult>,
 }
 
 impl MixBufferCache {
@@ -116,6 +130,36 @@ impl MixBufferCache {
                 }
             }
         });
+        let (peak_tx, peak_rx) = mpsc::channel::<PeakResult>();
+        let peak_worker = Worker::spawn(move |jobs: mpsc::Receiver<PeakJob>| {
+            while let Ok(first) = jobs.recv() {
+                let mut batch = vec![first];
+                // A drag queues one job per frame: only the newest of each
+                // slot is worth measuring.
+                while let Ok(job) = jobs.try_recv() {
+                    let slot = job.analysis.slot;
+                    let older =
+                        slot.and_then(|s| batch.iter().position(|j| j.analysis.slot == Some(s)));
+                    if let Some(older) = older {
+                        let dropped = std::mem::replace(&mut batch[older], job);
+                        if peak_tx.send((dropped.key, slot, None)).is_err() {
+                            return;
+                        }
+                    } else {
+                        batch.push(job);
+                    }
+                }
+                for job in batch {
+                    let peak = job.analysis.run();
+                    if peak_tx
+                        .send((job.key, job.analysis.slot, Some(peak)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
         Self {
             entries: HashMap::new(),
             in_progress: HashSet::new(),
@@ -126,14 +170,21 @@ impl MixBufferCache {
             stretch_used: HashSet::new(),
             stretch_worker,
             stretch_rx,
+            peaks: HashMap::new(),
+            last_peak: HashMap::new(),
+            peak_used: HashSet::new(),
+            peak_worker,
+            peak_rx,
         }
     }
 
-    /// Drops the stretches no mix asked for since the previous call: to be
-    /// called after rebuilding the snapshot of the whole timeline.
-    pub fn sweep_stretched(&mut self) {
+    /// Drops the stretches and peaks no mix asked for since the previous
+    /// call: to be called after rebuilding the snapshot of the whole timeline.
+    pub fn sweep_unused(&mut self) {
         let used = std::mem::take(&mut self.stretch_used);
         self.stretched.retain(|key, _| used.contains(key));
+        let used = std::mem::take(&mut self.peak_used);
+        self.peaks.retain(|key, _| used.contains(key));
     }
 
     /// Non-blocking: if the buffer is not there it queues its decode (once
@@ -186,6 +237,23 @@ impl MixBufferCache {
                     }
                 };
                 changed = true;
+            }
+        }
+        while let Ok((key, slot, peak)) = self.peak_rx.try_recv() {
+            match peak {
+                Some(peak) => {
+                    if let Some(entry) = self.peaks.get_mut(&key) {
+                        *entry = Some(peak);
+                        changed = true;
+                    }
+                    if let Some(slot) = slot {
+                        self.last_peak.insert(slot, peak);
+                    }
+                }
+                // Asked again, it is measured again.
+                None => {
+                    self.peaks.remove(&key);
+                }
             }
         }
         changed
@@ -255,6 +323,23 @@ impl AudioSource for MixBufferCache {
         self.stretched
             .insert(key, (buffer.clone(), Stretch::Pending));
         ClipAudio::Pending
+    }
+
+    fn peak(&mut self, analysis: PeakAnalysis) -> PeakReading {
+        let key = analysis.key();
+        self.peak_used.insert(key);
+        let last = analysis
+            .slot
+            .and_then(|slot| self.last_peak.get(&slot).copied());
+        match self.peaks.get(&key) {
+            Some(Some(peak)) => PeakReading::Ready(*peak),
+            Some(None) => PeakReading::Pending(last),
+            None => {
+                self.peak_worker.send(PeakJob { key, analysis });
+                self.peaks.insert(key, None);
+                PeakReading::Pending(last)
+            }
+        }
     }
 }
 

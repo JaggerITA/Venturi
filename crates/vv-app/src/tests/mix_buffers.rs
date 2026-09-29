@@ -276,26 +276,21 @@ fn every_stream_of_a_file_starts_playing_before_any_of_them_is_fully_decoded() {
         &path,
     );
 
-    let mut cache = MixBufferCache::spawn(48_000, 2);
-    for stream in 0..3 {
-        cache.get_or_request_first(&path, stream);
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        assert!(std::time::Instant::now() < deadline, "decode never arrived");
-        cache.poll();
-        if (0..3).all(|stream| cache.get_or_request(&path, stream).is_some()) {
-            break;
-        }
-        std::thread::yield_now();
-    }
-    assert_eq!(
-        cache.in_progress.len(),
-        3,
-        "no stream should have finished yet"
-    );
+    // The order of the decoder's messages, not a poll loop racing it: a
+    // fast decode would finish before the loop looked.
+    let (tx, rx) = mpsc::channel();
+    assert!(decode_progressively(&path, &[0, 1, 2], 48_000, 2, &tx));
+    drop(tx);
+    let messages: Vec<Ready> = rx.iter().collect();
+    let first_done = messages.iter().position(|m| m.done).unwrap();
     let full = 120 * 48_000 * 2;
-    assert!((0..3).all(|stream| cache.get_or_request(&path, stream).unwrap().len() < full));
+    for stream in 0..3 {
+        let partial = messages[..first_done]
+            .iter()
+            .find(|m| m.key.1 == stream)
+            .unwrap_or_else(|| panic!("stream {stream} only arrived at the end"));
+        assert!(partial.buffer.as_ref().unwrap().len() < full);
+    }
 }
 
 #[test]
@@ -326,10 +321,10 @@ fn a_stretch_is_computed_in_background_and_dropped_once_unused() {
     let secs = stretched.len() as f64 / 48_000.0;
     assert!((secs - 0.5).abs() < 0.05, "1 s at 2x lasts {secs} s");
 
-    cache.sweep_stretched();
+    cache.sweep_unused();
     assert!(matches!(ask(&mut cache), ClipAudio::Ready(_)), "still used");
-    cache.sweep_stretched();
-    cache.sweep_stretched();
+    cache.sweep_unused();
+    cache.sweep_unused();
     assert!(
         matches!(ask(&mut cache), ClipAudio::Pending),
         "dropped when unused"

@@ -4,15 +4,20 @@
 //! produce the same mix.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use vv_core::{ChannelStrip, ClipSource, FrameIdx, Keyframed, MediaId, Project, Timeline};
+use vv_core::{
+    AudioEffect, AudioEffectKind, ChannelStrip, ClipSource, FrameIdx, Keyframed, MediaId,
+    MixerChannel, Project, Timeline, TimelineId,
+};
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
 pub const GAIN_BLOCK_FRAMES: u64 = 800;
 
+#[derive(Clone)]
 pub struct MixClip {
     /// In timeline audio frames (one sample per channel).
     pub start: u64,
@@ -165,6 +170,72 @@ impl MixSnapshot {
     }
 }
 
+/// The channel a normalization measures: while a new reading is on its way,
+/// the same slot keeps playing with its last one.
+pub type AnalysisSlot = (TimelineId, MixerChannel);
+
+/// A part of the mix whose peak a normalization needs.
+pub struct PeakAnalysis {
+    pub slot: Option<AnalysisSlot>,
+    snapshot: MixSnapshot,
+}
+
+impl PeakAnalysis {
+    /// Same key, same content, same peak.
+    pub fn key(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let s = &self.snapshot;
+        (s.sample_rate, s.channels).hash(&mut h);
+        for clip in &s.clips {
+            (
+                clip.start,
+                clip.len,
+                clip.source_offset,
+                clip.step.to_bits(),
+            )
+                .hash(&mut h);
+            (Arc::as_ptr(&clip.buffer) as usize, clip.buffer.len()).hash(&mut h);
+            if clip.gain_db.is_constant() {
+                clip.gain_db.default.to_bits().hash(&mut h);
+            } else {
+                format!("{:?}", clip.gain_db).hash(&mut h);
+            }
+            (clip.track, clip.clip_fps.to_bits(), clip.media_offset).hash(&mut h);
+            (clip.media_step.to_bits(), clip.fade_in, clip.fade_out).hash(&mut h);
+        }
+        for bus in s.tracks.iter().chain([&s.master]) {
+            (bus.gain.to_bits(), bus.balance.map(f32::to_bits)).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Linear peak over all the channels. Slow: it renders the whole mix.
+    pub fn run(&self) -> f32 {
+        const CHUNK_FRAMES: u64 = 1 << 16;
+        let clips = &self.snapshot.clips;
+        let start = clips.iter().map(|c| c.start).min().unwrap_or(0);
+        let end = clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+        let ch = self.snapshot.channels.max(1) as usize;
+        let mut out = vec![0.0f32; CHUNK_FRAMES as usize * ch];
+        let mut peak = 0.0f32;
+        let mut f = start;
+        while f < end {
+            let frames = (end - f).min(CHUNK_FRAMES);
+            let chunk = &mut out[..frames as usize * ch];
+            mix_range(&self.snapshot, f, chunk);
+            peak = chunk.iter().fold(peak, |p, s| p.max(s.abs()));
+            f += frames;
+        }
+        peak
+    }
+}
+
+pub enum PeakReading {
+    Ready(f32),
+    /// Being measured; the last reading of the same slot, if any.
+    Pending(Option<f32>),
+}
+
 /// A clip's audio, as an `AudioSource` answers it.
 pub enum ClipAudio {
     /// Already at the snapshot's `sample_rate`/`channels`.
@@ -204,6 +275,11 @@ pub trait AudioSource {
     ) -> ClipAudio {
         stretch_range(buffer, range, tempo, sample_rate, channels)
             .map_or(ClipAudio::Missing, |b| ClipAudio::Ready(Arc::new(b)))
+    }
+
+    /// Synchronous here; the preview measures in the background.
+    fn peak(&mut self, analysis: PeakAnalysis) -> PeakReading {
+        PeakReading::Ready(analysis.run())
     }
 }
 
@@ -311,14 +387,80 @@ fn collect_clips(
             clips.push(mix_clip);
         }
     }
-    let tracks = timeline
+    let timeline_id = project
+        .timelines
+        .iter()
+        .find(|(_, t)| std::ptr::eq(*t, timeline))
+        .map(|(id, _)| id);
+    let analysis = |channel, clips, tracks| PeakAnalysis {
+        slot: timeline_id.map(|id| (id, channel)),
+        snapshot: MixSnapshot::new(sample_rate, channels, clips, tracks, Bus::UNITY),
+    };
+    let mut tracks: Vec<Bus> = timeline
         .tracks
         .iter()
         .map(|t| Bus::from_strip(&t.mix))
         .collect();
-    let master = Bus::from_strip(&timeline.master);
+    for (index, track) in timeline.tracks.iter().enumerate() {
+        let Some(target_db) = normalize_target(&track.mix.effects) else {
+            continue;
+        };
+        let track_clips: Vec<MixClip> =
+            clips.iter().filter(|c| c.track == index).cloned().collect();
+        if track_clips.is_empty() {
+            continue;
+        }
+        let reading = source.peak(analysis(
+            MixerChannel::Track(index),
+            track_clips,
+            Vec::new(),
+        ));
+        tracks[index].gain *= normalize_gain(target_db, reading, &mut readiness);
+    }
+    let mut master = Bus::from_strip(&timeline.master);
+    if let Some(target_db) = normalize_target(&timeline.master.effects)
+        && !clips.is_empty()
+    {
+        let reading = source.peak(analysis(
+            MixerChannel::Master,
+            clips.clone(),
+            tracks.clone(),
+        ));
+        master.gain *= normalize_gain(target_db, reading, &mut readiness);
+    }
     let snapshot = MixSnapshot::new(sample_rate, channels, clips, tracks, master);
     (snapshot, readiness)
+}
+
+/// Normalizing twice lands on the target of the second one: only the last
+/// enabled normalization of a chain counts.
+fn normalize_target(effects: &[AudioEffect]) -> Option<f32> {
+    effects
+        .iter()
+        .rev()
+        .filter(|e| e.enabled)
+        .find_map(|e| match e.kind {
+            AudioEffectKind::Normalize { target_db } => Some(target_db),
+        })
+}
+
+/// A reading still on its way leaves the mix `Partial`, so a compound
+/// containing it is not cached with the wrong gain.
+fn normalize_gain(target_db: f32, reading: PeakReading, readiness: &mut Readiness) -> f32 {
+    let peak = match reading {
+        PeakReading::Ready(peak) => Some(peak),
+        PeakReading::Pending(last) => {
+            *readiness = (*readiness).max(Readiness::Partial);
+            last
+        }
+    };
+    match peak {
+        // Silence stays silence, instead of the maximum gain.
+        Some(peak) if peak > 1e-6 => {
+            (db_to_linear(target_db) / peak).min(db_to_linear(vv_core::GAIN_DB_MAX))
+        }
+        _ => 1.0,
+    }
 }
 
 /// The mixdown of the nested timeline of compound clip `media_id`, at

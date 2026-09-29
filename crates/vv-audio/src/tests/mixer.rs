@@ -888,3 +888,91 @@ fn only_the_metered_mix_raises_the_meters_and_taking_resets_them() {
     assert!((snap.meters.master().take().0 - (0.25 + 0.019)).abs() < 1e-5);
     assert_eq!(snap.meters.track(0).unwrap().take(), (0.0, 0.0));
 }
+
+fn normalize(target_db: f32) -> vv_core::AudioEffect {
+    vv_core::AudioEffect::new(vv_core::AudioEffectKind::Normalize { target_db })
+}
+
+#[test]
+fn track_normalization_brings_its_peak_to_the_target_before_the_fader() {
+    let (project, a, _) = project();
+    let mut track = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    track.mix.effects = vec![normalize(-12.0), normalize(0.0)];
+    track.mix.gain_db = -20.0 * 2f32.log10();
+    let tl = timeline(vec![track]);
+    let out = render(&project, &tl, 0, 50);
+    assert!(
+        out.iter().all(|&s| (s - 0.5).abs() < 1e-5),
+        "last one wins, then the fader"
+    );
+}
+
+#[test]
+fn a_disabled_normalization_does_nothing_and_silence_stays_silent() {
+    let (project, a, _) = project();
+    let mut track = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    track.mix.effects = vec![vv_core::AudioEffect {
+        enabled: false,
+        ..normalize(0.0)
+    }];
+    let mut empty = audio_track(Vec::new());
+    empty.mix.effects = vec![normalize(0.0)];
+    let tl = timeline(vec![track, empty]);
+    assert!(render(&project, &tl, 0, 50).iter().all(|&s| s == 0.5));
+}
+
+#[test]
+fn master_normalization_measures_the_mix_after_the_track_faders() {
+    let (project, a, _) = project();
+    let mut quiet = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    quiet.mix.gain_db = -20.0 * 4f32.log10();
+    let mut tl = timeline(vec![quiet, audio_track(vec![clip_at(a, 0, 0, 5)])]);
+    tl.master.effects = vec![normalize(-20.0 * 2f32.log10())];
+    // 0.125 + 0.5 = 0.625, brought to 0.5.
+    let out = render(&project, &tl, 0, 50);
+    assert!(out.iter().all(|&s| (s - 0.5).abs() < 1e-5));
+}
+
+/// Measures nothing: every peak is on its way, with `last` as the reading
+/// kept from before.
+struct PendingPeaks {
+    last: Option<f32>,
+    stored: bool,
+}
+
+impl AudioSource for PendingPeaks {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        buffers(path, stream).map_or(ClipAudio::Missing, ClipAudio::Ready)
+    }
+
+    fn store_compound(&mut self, _: MediaId, _: u64, _: Arc<Vec<f32>>) {
+        self.stored = true;
+    }
+
+    fn peak(&mut self, _: PeakAnalysis) -> PeakReading {
+        PeakReading::Pending(self.last)
+    }
+}
+
+#[test]
+fn a_pending_peak_plays_the_last_reading_and_keeps_a_compound_out_of_the_cache() {
+    let (mut project, compound) = project_with_compound();
+    let nested = project.media_pool[compound].compound.unwrap();
+    project.timelines[nested].tracks[0].mix.effects = vec![normalize(0.0)];
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 5)])]);
+
+    let mut source = PendingPeaks {
+        last: Some(0.25),
+        stored: false,
+    };
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    let mut out = vec![0.0; 50];
+    mix_range(&snap, 0, &mut out);
+    assert!(out.iter().all(|&s| (s - 2.0).abs() < 1e-5), "0.5 * 1/0.25");
+    assert!(!source.stored);
+
+    source.last = None;
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
+    mix_range(&snap, 0, &mut out);
+    assert!(out.iter().all(|&s| s == 0.5), "unity until measured");
+}

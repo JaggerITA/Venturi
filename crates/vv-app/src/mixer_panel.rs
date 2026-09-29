@@ -5,11 +5,12 @@ use std::collections::HashMap;
 
 use vv_audio::mixer::{MixMeters, StereoPeak, db_to_linear};
 use vv_core::{
-    ChannelStrip, MixerChannel, MixerParam, Project, SetMixerParam, SetTrackFlag, TimelineId,
-    TrackFlag, TrackKind,
+    AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, MixerChannel,
+    MixerParam, Project, RemoveAudioEffect, SetAudioEffect, SetMixerParam, SetTrackFlag, Timeline,
+    TimelineId, TrackFlag, TrackKind,
 };
 
-use crate::properties_panel::{BoxedCommand, drag_field};
+use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
 
 const STRIP_WIDTH: f32 = 84.0;
 const FADER_HEIGHT: f32 = 230.0;
@@ -21,6 +22,7 @@ const KNOB_RADIUS: f32 = 14.0;
 /// Of the knob travel, each side of the centre.
 const KNOB_SWEEP: f32 = 135.0_f32 * std::f32::consts::PI / 180.0;
 const METER_DECAY: f32 = 0.85;
+const EFFECT_ROW_HEIGHT: f32 = 20.0;
 const SCALE_MARKS: [f32; 9] = [12.0, 6.0, 0.0, -6.0, -12.0, -20.0, -30.0, -40.0, -60.0];
 const MUTE_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 150, 190);
 
@@ -79,9 +81,31 @@ pub(crate) fn format_pan(pan: f32) -> String {
 #[derive(Default)]
 pub(crate) struct MixerPanelState {
     levels: HashMap<MixerChannel, [f32; 2]>,
+    /// The effect whose settings window is open.
+    open_effect: Option<(TimelineId, MixerChannel, usize)>,
 }
 
 impl MixerPanelState {
+    /// The settings window opened by `edit`, or following the removal of an
+    /// effect above it in the same chain.
+    fn follow_edit(&mut self, edit: &StripEdit, timeline: TimelineId, channel: MixerChannel) {
+        if let Some(index) = edit.open_settings {
+            self.open_effect = Some((timeline, channel, index));
+        }
+        let Some(removed) = edit.remove_effect else {
+            return;
+        };
+        if let Some((tl, open_channel, open_index)) = &mut self.open_effect
+            && (*tl, *open_channel) == (timeline, channel)
+        {
+            match (*open_index).cmp(&removed) {
+                std::cmp::Ordering::Equal => self.open_effect = None,
+                std::cmp::Ordering::Greater => *open_index -= 1,
+                std::cmp::Ordering::Less => {}
+            }
+        }
+    }
+
     fn level(&mut self, channel: MixerChannel, peak: Option<&StereoPeak>) -> [f32; 2] {
         let (l, r) = peak.map_or((0.0, 0.0), StereoPeak::take);
         let level = self.levels.entry(channel).or_default();
@@ -111,6 +135,16 @@ pub(crate) fn show_mixer(
                 return;
             };
             let mut falling = false;
+            // The strips with fewer effects leave the difference empty on
+            // top, so the faders stay on one line.
+            let effect_slots = timeline
+                .tracks_of_kind(TrackKind::Audio)
+                .map(|(_, t)| &t.mix)
+                .chain([&timeline.master])
+                .map(|strip| strip.effects.len())
+                .max()
+                .unwrap_or(0);
+            let mut edits: Vec<(StripEdit, MixerChannel)> = Vec::new();
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     for (index, track) in timeline.tracks_of_kind(TrackKind::Audio) {
@@ -125,8 +159,9 @@ pub(crate) fn show_mixer(
                             &track.mix,
                             flags,
                             level,
+                            effect_slots,
                         );
-                        commands.extend(edit.into_commands(timeline_id, channel));
+                        edits.push((edit, channel));
                     }
                     let level = state.level(MixerChannel::Master, meters.map(MixMeters::master));
                     falling |= level.iter().any(|l| *l > 0.001);
@@ -137,14 +172,109 @@ pub(crate) fn show_mixer(
                         &timeline.master,
                         None,
                         level,
+                        effect_slots,
                     );
-                    commands.extend(edit.into_commands(timeline_id, MixerChannel::Master));
+                    edits.push((edit, MixerChannel::Master));
                 });
             });
             if falling {
                 ui.ctx().request_repaint();
             }
+            for (edit, channel) in edits {
+                state.follow_edit(&edit, timeline_id, channel);
+                commands.extend(edit.into_commands(timeline_id, channel));
+            }
         });
+    match timeline_id.and_then(|id| project.timelines.get(id).map(|t| (id, t))) {
+        Some((id, timeline)) => commands.extend(effect_window(ctx, state, id, timeline)),
+        None => state.open_effect = None,
+    }
+    commands
+}
+
+fn channel_label(timeline: &Timeline, channel: MixerChannel) -> String {
+    match channel {
+        MixerChannel::Track(index) => timeline.track_label(index),
+        MixerChannel::Master => t!("mixer.master").into_owned(),
+    }
+}
+
+fn channel_strip(timeline: &Timeline, channel: MixerChannel) -> Option<&ChannelStrip> {
+    match channel {
+        MixerChannel::Track(index) => timeline.tracks.get(index).map(|t| &t.mix),
+        MixerChannel::Master => Some(&timeline.master),
+    }
+}
+
+pub(crate) fn effect_name(kind: &AudioEffectKind) -> String {
+    match kind {
+        AudioEffectKind::Normalize { .. } => t!("mixer.effect_normalize").into_owned(),
+    }
+}
+
+/// Settings of the effect in `state.open_effect`: closed when the effect is
+/// gone (undo, another timeline).
+fn effect_window(
+    ctx: &egui::Context,
+    state: &mut MixerPanelState,
+    timeline_id: TimelineId,
+    timeline: &Timeline,
+) -> Vec<BoxedCommand> {
+    let mut commands: Vec<BoxedCommand> = Vec::new();
+    let Some((open_timeline, channel, index)) = state.open_effect else {
+        return commands;
+    };
+    let effect = channel_strip(timeline, channel).and_then(|strip| strip.effects.get(index));
+    let Some(effect) = effect.filter(|_| open_timeline == timeline_id).cloned() else {
+        state.open_effect = None;
+        return commands;
+    };
+    let mut open = true;
+    let title = format!(
+        "{} — {}",
+        effect_name(&effect.kind),
+        channel_label(timeline, channel)
+    );
+    egui::Window::new(title)
+        .id(egui::Id::new("audio_effect_settings"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            if !effect.enabled {
+                ui.weak(t!("mixer.effect_disabled"));
+            }
+            match effect.kind {
+                AudioEffectKind::Normalize { mut target_db } => {
+                    ui.horizontal(|ui| {
+                        ui.label(t!("mixer.normalize_target"));
+                        if slider_field(
+                            ui,
+                            &mut target_db,
+                            vv_core::NORMALIZE_TARGET_MIN..=vv_core::NORMALIZE_TARGET_MAX,
+                            0.1,
+                            1,
+                        ) {
+                            let edited = AudioEffect {
+                                kind: AudioEffectKind::Normalize { target_db },
+                                ..effect.clone()
+                            };
+                            commands.push(Box::new(SetAudioEffect::new(
+                                timeline_id,
+                                channel,
+                                index,
+                                edited,
+                                CommandLabel::EditAudioEffect,
+                            )));
+                        }
+                    });
+                    ui.small(t!("mixer.normalize_hint"));
+                }
+            }
+        });
+    if !open {
+        state.open_effect = None;
+    }
     commands
 }
 
@@ -154,6 +284,10 @@ struct StripEdit {
     pan: Option<f32>,
     toggle_solo: Option<bool>,
     toggle_mute: Option<bool>,
+    add_effect: Option<AudioEffectKind>,
+    remove_effect: Option<usize>,
+    set_effect: Option<(usize, AudioEffect)>,
+    open_settings: Option<usize>,
 }
 
 impl StripEdit {
@@ -169,6 +303,25 @@ impl StripEdit {
                     timeline, channel, param, value,
                 )));
             }
+        }
+        if let Some(kind) = self.add_effect {
+            commands.push(Box::new(AddAudioEffect::new(
+                timeline,
+                channel,
+                AudioEffect::new(kind),
+            )));
+        }
+        if let Some((index, effect)) = self.set_effect {
+            commands.push(Box::new(SetAudioEffect::new(
+                timeline,
+                channel,
+                index,
+                effect,
+                CommandLabel::ToggleAudioEffect,
+            )));
+        }
+        if let Some(index) = self.remove_effect {
+            commands.push(Box::new(RemoveAudioEffect::new(timeline, channel, index)));
         }
         if let MixerChannel::Track(index) = channel {
             let flags = [
@@ -193,6 +346,7 @@ fn strip(
     mix: &ChannelStrip,
     flags: Option<(bool, bool)>,
     level: [f32; 2],
+    effect_slots: usize,
 ) -> StripEdit {
     let mut edit = StripEdit::default();
     let frame = egui::Frame::group(ui.style())
@@ -202,6 +356,8 @@ fn strip(
         ui.set_width(STRIP_WIDTH);
         ui.vertical_centered(|ui| {
             ui.push_id(channel, |ui| {
+                effects(ui, &mix.effects, effect_slots, &mut edit);
+                ui.add_space(6.0);
                 edit.pan = pan_knob(ui, mix.pan);
                 ui.small(format_pan(mix.pan));
                 ui.add_space(4.0);
@@ -227,6 +383,59 @@ fn strip(
         });
     });
     edit
+}
+
+/// The insert chain, top to bottom, and the "+" that appends to it.
+fn effects(ui: &mut egui::Ui, effects: &[AudioEffect], slots: usize, edit: &mut StripEdit) {
+    let row = egui::vec2(STRIP_WIDTH, EFFECT_ROW_HEIGHT);
+    for _ in effects.len()..slots {
+        ui.allocate_space(row);
+    }
+    for (index, effect) in effects.iter().enumerate() {
+        let name = effect_name(&effect.kind);
+        let (fill, text) = if effect.enabled {
+            (crate::theme::ACCENT_FILL, egui::Color32::WHITE)
+        } else {
+            (
+                egui::Color32::from_gray(45),
+                ui.visuals().weak_text_color().gamma_multiply(0.7),
+            )
+        };
+        let button = egui::Button::new(egui::RichText::new(&name).small().color(text))
+            .fill(fill)
+            .truncate();
+        let response = ui.add_sized(row, button).on_hover_text(&name);
+        if response.clicked() {
+            edit.open_settings = Some(index);
+        }
+        egui::Popup::context_menu(&response).show(|ui| {
+            let toggle = if effect.enabled {
+                t!("mixer.effect_disable")
+            } else {
+                t!("mixer.effect_enable")
+            };
+            if ui.button(toggle).clicked() {
+                let toggled = AudioEffect {
+                    enabled: !effect.enabled,
+                    ..effect.clone()
+                };
+                edit.set_effect = Some((index, toggled));
+            }
+            if ui.button(t!("mixer.effect_remove")).clicked() {
+                edit.remove_effect = Some(index);
+            }
+        });
+    }
+    let plus = ui
+        .add_sized(row, egui::Button::new("+"))
+        .on_hover_text(t!("mixer.add_effect"));
+    egui::Popup::menu(&plus).show(|ui| {
+        for kind in AudioEffectKind::ALL {
+            if ui.button(effect_name(&kind)).clicked() {
+                edit.add_effect = Some(kind);
+            }
+        }
+    });
 }
 
 fn solo_mute(ui: &mut egui::Ui, flags: Option<(bool, bool)>, edit: &mut StripEdit) {

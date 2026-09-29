@@ -104,6 +104,22 @@ history.mixer_pan:
   en: "Mixer balance"
   it: "Bilanciamento mixer"
 
+history.add_audio_effect:
+  en: "Add audio effect"
+  it: "Aggiungi effetto audio"
+
+history.remove_audio_effect:
+  en: "Remove audio effect"
+  it: "Rimuovi effetto audio"
+
+history.edit_audio_effect:
+  en: "Edit audio effect"
+  it: "Modifica effetto audio"
+
+history.toggle_audio_effect:
+  en: "Enable/disable audio effect"
+  it: "Attiva/disattiva effetto audio"
+
 history.title:
   en: "Edit title"
   it: "Modifica titolo"

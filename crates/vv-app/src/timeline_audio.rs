@@ -117,7 +117,7 @@ impl TimelineAudio {
             channels,
             &mut self.buffers,
         ));
-        self.buffers.sweep_stretched();
+        self.buffers.sweep_unused();
         self.publish();
     }
 

@@ -2,10 +2,10 @@
 //! needed to invert itself at the moment it is applied.
 
 use crate::model::{
-    ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition,
-    EffectStack, FrameIdx, GAIN_DB_MAX, GAIN_DB_MIN, Interpolation, Keyframed, LinkGroupId, Marker,
-    MarkerId, MediaId, MediaItem, MediaMeta, Project, Rational, Rgba, Timeline, TimelineId,
-    TitleParams, Track, TrackKind, Transform, TransformParam, Transition,
+    AudioEffect, ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource,
+    CrossTransition, EffectStack, FrameIdx, GAIN_DB_MAX, GAIN_DB_MIN, Interpolation, Keyframed,
+    LinkGroupId, Marker, MarkerId, MediaId, MediaItem, MediaMeta, Project, Rational, Rgba,
+    Timeline, TimelineId, TitleParams, Track, TrackKind, Transform, TransformParam, Transition,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -27,6 +27,10 @@ pub enum CommandLabel {
     LockTrack,
     MixerGain,
     MixerPan,
+    AddAudioEffect,
+    RemoveAudioEffect,
+    EditAudioEffect,
+    ToggleAudioEffect,
     ToggleClipsDisabled,
     InsertClips,
     PasteClips,
@@ -491,6 +495,144 @@ impl Command for SetMixerParam {
             channel_strip(project, self.timeline, self.channel),
         ) {
             *self.param.field(strip) = old;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AddAudioEffect {
+    pub timeline: TimelineId,
+    pub channel: MixerChannel,
+    pub effect: AudioEffect,
+    added_at: Option<usize>,
+}
+
+impl AddAudioEffect {
+    /// Appended at the end of the chain.
+    pub fn new(timeline: TimelineId, channel: MixerChannel, effect: AudioEffect) -> Self {
+        Self {
+            timeline,
+            channel,
+            effect,
+            added_at: None,
+        }
+    }
+}
+
+impl Command for AddAudioEffect {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::AddAudioEffect
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(strip) = channel_strip(project, self.timeline, self.channel) {
+            strip.effects.push(self.effect.clone());
+            self.added_at = Some(strip.effects.len() - 1);
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if let (Some(index), Some(strip)) = (
+            self.added_at,
+            channel_strip(project, self.timeline, self.channel),
+        ) && index < strip.effects.len()
+        {
+            strip.effects.remove(index);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RemoveAudioEffect {
+    pub timeline: TimelineId,
+    pub channel: MixerChannel,
+    pub index: usize,
+    removed: Option<AudioEffect>,
+}
+
+impl RemoveAudioEffect {
+    pub fn new(timeline: TimelineId, channel: MixerChannel, index: usize) -> Self {
+        Self {
+            timeline,
+            channel,
+            index,
+            removed: None,
+        }
+    }
+}
+
+impl Command for RemoveAudioEffect {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::RemoveAudioEffect
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        self.removed = channel_strip(project, self.timeline, self.channel)
+            .filter(|strip| self.index < strip.effects.len())
+            .map(|strip| strip.effects.remove(self.index));
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if let (Some(effect), Some(strip)) = (
+            self.removed.clone(),
+            channel_strip(project, self.timeline, self.channel),
+        ) {
+            let index = self.index.min(strip.effects.len());
+            strip.effects.insert(index, effect);
+        }
+    }
+}
+
+/// Replaces an effect of the chain: its parameters, or whether it is on.
+#[derive(Debug)]
+pub struct SetAudioEffect {
+    pub timeline: TimelineId,
+    pub channel: MixerChannel,
+    pub index: usize,
+    pub effect: AudioEffect,
+    label: CommandLabel,
+    old: Option<AudioEffect>,
+}
+
+impl SetAudioEffect {
+    pub fn new(
+        timeline: TimelineId,
+        channel: MixerChannel,
+        index: usize,
+        effect: AudioEffect,
+        label: CommandLabel,
+    ) -> Self {
+        Self {
+            timeline,
+            channel,
+            index,
+            effect,
+            label,
+            old: None,
+        }
+    }
+}
+
+impl Command for SetAudioEffect {
+    fn label(&self) -> CommandLabel {
+        self.label
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(slot) = channel_strip(project, self.timeline, self.channel)
+            .and_then(|strip| strip.effects.get_mut(self.index))
+        {
+            self.old = Some(std::mem::replace(slot, self.effect.clone()));
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if let (Some(old), Some(slot)) = (
+            self.old.clone(),
+            channel_strip(project, self.timeline, self.channel)
+                .and_then(|strip| strip.effects.get_mut(self.index)),
+        ) {
+            *slot = old;
         }
     }
 }

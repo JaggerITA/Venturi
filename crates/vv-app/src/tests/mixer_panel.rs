@@ -22,3 +22,30 @@ fn pan_reads_as_centre_or_side_percent() {
     assert_eq!(format_pan(-0.3), "L30");
     assert_eq!(format_pan(1.0), "R100");
 }
+
+#[test]
+fn the_settings_window_follows_the_removal_of_an_effect_above_it() {
+    let timeline = <vv_core::TimelineId as vv_core::Id>::from_raw(1);
+    let channel = MixerChannel::Track(2);
+    let mut state = MixerPanelState::default();
+    let remove = |index| StripEdit {
+        remove_effect: Some(index),
+        ..StripEdit::default()
+    };
+
+    state.follow_edit(
+        &StripEdit {
+            open_settings: Some(2),
+            ..StripEdit::default()
+        },
+        timeline,
+        channel,
+    );
+    state.follow_edit(&remove(3), timeline, channel);
+    state.follow_edit(&remove(0), timeline, MixerChannel::Master);
+    assert_eq!(state.open_effect, Some((timeline, channel, 2)));
+    state.follow_edit(&remove(0), timeline, channel);
+    assert_eq!(state.open_effect, Some((timeline, channel, 1)));
+    state.follow_edit(&remove(1), timeline, channel);
+    assert_eq!(state.open_effect, None);
+}
