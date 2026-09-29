@@ -1633,13 +1633,60 @@ impl AudioEffect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AudioEffectKind {
     /// Gain that brings the peak of the whole channel to `target_db` dBFS.
-    Normalize { target_db: f32 },
+    Normalize {
+        target_db: f32,
+    },
+    MultibandCompressor(MultibandCompressor),
 }
 
 impl AudioEffectKind {
-    pub const ALL: [AudioEffectKind; 1] = [AudioEffectKind::Normalize {
-        target_db: NORMALIZE_TARGET_DEFAULT,
-    }];
+    pub const ALL: [AudioEffectKind; 2] = [
+        AudioEffectKind::Normalize {
+            target_db: NORMALIZE_TARGET_DEFAULT,
+        },
+        AudioEffectKind::MultibandCompressor(MultibandCompressor::DEFAULT),
+    ];
+}
+
+/// Three bands split at `crossovers_hz`, each with its own compressor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultibandCompressor {
+    /// Low/mid and mid/high, ascending.
+    pub crossovers_hz: [f32; 2],
+    /// Low, mid, high.
+    pub bands: [CompressorBand; 3],
+}
+
+impl MultibandCompressor {
+    pub const DEFAULT: Self = Self {
+        crossovers_hz: [200.0, 2000.0],
+        bands: [CompressorBand::DEFAULT; 3],
+    };
+    pub const CROSSOVER_RANGE_HZ: (f32, f32) = (20.0, 20_000.0);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CompressorBand {
+    pub threshold_db: f32,
+    pub ratio: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub makeup_db: f32,
+}
+
+impl CompressorBand {
+    pub const DEFAULT: Self = Self {
+        threshold_db: -20.0,
+        ratio: 3.0,
+        attack_ms: 10.0,
+        release_ms: 150.0,
+        makeup_db: 0.0,
+    };
+    pub const THRESHOLD_RANGE_DB: (f32, f32) = (-60.0, 0.0);
+    pub const RATIO_RANGE: (f32, f32) = (1.0, 20.0);
+    pub const ATTACK_RANGE_MS: (f32, f32) = (0.1, 200.0);
+    pub const RELEASE_RANGE_MS: (f32, f32) = (5.0, 2000.0);
+    pub const MAKEUP_RANGE_DB: (f32, f32) = (-12.0, 24.0);
 }
 
 pub const NORMALIZE_TARGET_DEFAULT: f32 = -1.0;

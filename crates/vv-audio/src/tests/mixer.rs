@@ -542,10 +542,7 @@ fn mixer_seek_and_snapshot_swaps_do_not_reopen_or_leak() {
     );
     for _ in 0..50 {
         let mix = Arc::new(MixSnapshot::empty(mixer.sample_rate(), mixer.channels()));
-        mixer.set_state(Arc::new(MixerState {
-            mix,
-            stretched: None,
-        }));
+        mixer.set_state(Arc::new(MixerState::new(mix, None)));
     }
     assert!(
         mixer.retained.len() <= 3,
@@ -881,7 +878,7 @@ fn only_the_metered_mix_raises_the_meters_and_taking_resets_them() {
     mix_range(&snap, 0, &mut out);
     assert_eq!(snap.meters.master().take(), (0.0, 0.0));
 
-    mix_range_metered(&snap, 0, &mut out);
+    mix_range_metered(&snap, &mut MixState::new(&snap), 0, &mut out);
     let (l, r) = snap.meters.track(0).unwrap().take();
     assert!((l - 0.25).abs() < 1e-5 && l == r, "mono on both sides");
     assert_eq!(snap.meters.track(1).unwrap().take().0, 19.0 / 1000.0);
@@ -975,4 +972,59 @@ fn a_pending_peak_plays_the_last_reading_and_keeps_a_compound_out_of_the_cache()
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
     mix_range(&snap, 0, &mut out);
     assert!(out.iter().all(|&s| s == 0.5), "unity until measured");
+}
+
+fn compressor() -> vv_core::AudioEffect {
+    let mut params = vv_core::MultibandCompressor::DEFAULT;
+    for band in &mut params.bands {
+        band.threshold_db = -30.0;
+        band.ratio = 8.0;
+    }
+    vv_core::AudioEffect::new(vv_core::AudioEffectKind::MultibandCompressor(params))
+}
+
+fn peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0, |p, s| p.max(s.abs()))
+}
+
+#[test]
+fn a_normalization_after_a_compressor_measures_the_compressed_signal() {
+    let (project, _, b) = project();
+    let mut track = audio_track(vec![clip_at(b, 0, 0, 90)]);
+    track.mix.effects = vec![compressor(), normalize(-20.0 * 2f32.log10())];
+    let tl = timeline(vec![track.clone()]);
+    let out = render(&project, &tl, 0, 900);
+    assert!((peak(&out) - 0.5).abs() < 1e-3, "{}", peak(&out));
+
+    track.mix.effects.reverse();
+    let tl = timeline(vec![track]);
+    assert!(
+        peak(&render(&project, &tl, 0, 900)) < 0.4,
+        "compressed after"
+    );
+}
+
+#[test]
+fn the_output_stream_carries_the_effects_over_from_one_call_to_the_next() {
+    let (project, _, b) = project();
+    let mut track = audio_track(vec![clip_at(b, 0, 0, 90)]);
+    track.mix.effects = vec![compressor()];
+    let tl = timeline(vec![track]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let whole = render(&project, &tl, 0, 600);
+
+    let mut state = MixState::new(&snap);
+    let mut halves = vec![0.0; 600];
+    let (first, second) = halves.split_at_mut(300);
+    mix_range_metered(&snap, &mut state, 0, first);
+    mix_range_metered(&snap, &mut state, 300, second);
+    assert_eq!(halves, whole);
+
+    let mut jumped = vec![0.0; 300];
+    mix_range_metered(&snap, &mut state, 300, &mut jumped);
+    assert_eq!(
+        jumped,
+        render(&project, &tl, 300, 300),
+        "a seek starts over"
+    );
 }

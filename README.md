@@ -41,7 +41,8 @@ is where the time goes, so that is the part that has to be perfect.
 - **Professional timeline workflow.** Track scrubbing with audio, ripple
   delete, compound clips, copy/paste properties, magnet snapping, an audio
   mixer with per-track and master gain, balance, meters and effect inserts
-  (normalization), unlimited undo with a jumpable history.
+  (normalization, multiband compressor), unlimited undo with a jumpable
+  history.
 - **Keyframes done right.** Every parameter is keyframable: crop, zoom,
   rotation, position, speed, opacity, audio gain. A dedicated curve editor
   with custom curves.

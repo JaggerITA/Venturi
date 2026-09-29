@@ -8,8 +8,8 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use vv_audio::mixer::{
-    Bus, MixClip, MixMeters, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE, StretchedWindow,
-    mix_range, sample_to_timeline_frame, timeline_frame_to_sample,
+    Channel, MixClip, MixMeters, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE,
+    StretchedWindow, mix_range, sample_to_timeline_frame, timeline_frame_to_sample,
 };
 use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
 
@@ -156,17 +156,17 @@ impl TimelineAudio {
             channels,
             clips,
             Vec::new(),
-            Bus::UNITY,
+            Channel::UNITY,
         ));
         self.publish();
     }
 
     fn publish(&mut self) {
         if let Some(mixer) = &mut self.mixer {
-            mixer.set_state(Arc::new(MixerState {
-                mix: self.mix.clone(),
-                stretched: self.stretched.clone(),
-            }));
+            mixer.set_state(Arc::new(MixerState::new(
+                self.mix.clone(),
+                self.stretched.clone(),
+            )));
         }
     }
 

@@ -273,6 +273,7 @@ fn moving_an_audio_effect_reorders_the_chain_and_undoes() {
             .iter()
             .map(|e| match e.kind {
                 crate::AudioEffectKind::Normalize { target_db } => target_db,
+                crate::AudioEffectKind::MultibandCompressor(_) => f32::NAN,
             })
             .collect()
     };

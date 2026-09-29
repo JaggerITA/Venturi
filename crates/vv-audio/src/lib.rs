@@ -2,6 +2,7 @@
 //! (see ARCHITECTURE.md § Audio pipeline). The mixer position is the
 //! playback clock.
 
+pub mod dynamics;
 pub mod mixer;
 pub mod stretch;
 

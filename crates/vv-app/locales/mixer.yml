@@ -51,3 +51,43 @@ mixer.normalize_target:
 mixer.normalize_hint:
   en: "Brings the loudest peak of the whole channel to this level."
   it: "Porta il picco più alto dell'intero canale a questo livello."
+
+mixer.effect_multiband:
+  en: "Multiband compressor"
+  it: "Compressore multibanda"
+
+mixer.crossovers:
+  en: "Crossovers"
+  it: "Crossover"
+
+mixer.band_low:
+  en: "Low"
+  it: "Bassi"
+
+mixer.band_mid:
+  en: "Mid"
+  it: "Medi"
+
+mixer.band_high:
+  en: "High"
+  it: "Alti"
+
+mixer.threshold:
+  en: "Threshold"
+  it: "Soglia"
+
+mixer.ratio:
+  en: "Ratio"
+  it: "Rapporto"
+
+mixer.attack:
+  en: "Attack"
+  it: "Attacco"
+
+mixer.release:
+  en: "Release"
+  it: "Rilascio"
+
+mixer.makeup:
+  en: "Makeup gain"
+  it: "Guadagno di compensazione"

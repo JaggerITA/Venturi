@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 use vv_audio::mixer::{MixMeters, StereoPeak, db_to_linear};
 use vv_core::{
-    AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, MixerChannel,
-    MixerParam, MoveAudioEffect, Project, RemoveAudioEffect, SetAudioEffect, SetMixerParam,
-    SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
+    AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, CompressorBand,
+    MixerChannel, MixerParam, MoveAudioEffect, MultibandCompressor, Project, RemoveAudioEffect,
+    SetAudioEffect, SetMixerParam, SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
 };
 
 use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
@@ -196,6 +196,126 @@ pub(crate) fn show_mixer(
     commands
 }
 
+fn normalize_settings(ui: &mut egui::Ui, mut target_db: f32) -> Option<AudioEffectKind> {
+    let changed = ui
+        .horizontal(|ui| {
+            ui.label(t!("mixer.normalize_target"));
+            slider_field(
+                ui,
+                &mut target_db,
+                vv_core::NORMALIZE_TARGET_MIN..=vv_core::NORMALIZE_TARGET_MAX,
+                0.1,
+                1,
+            )
+        })
+        .inner;
+    ui.small(t!("mixer.normalize_hint"));
+    changed.then_some(AudioEffectKind::Normalize { target_db })
+}
+
+/// A numeric field for an `f32` within `(min, max)`.
+fn value_field(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    (min, max): (f32, f32),
+    speed: f64,
+    decimals: usize,
+    suffix: &str,
+) -> bool {
+    let mut field = *value as f64;
+    let changed = drag_field(
+        ui,
+        &mut field,
+        speed,
+        min as f64..=max as f64,
+        decimals,
+        suffix,
+    );
+    if changed {
+        *value = field as f32;
+    }
+    changed
+}
+
+fn compressor_settings(ui: &mut egui::Ui, params: &MultibandCompressor) -> Option<AudioEffectKind> {
+    let mut params = params.clone();
+    let mut changed = false;
+    let (min_hz, max_hz) = MultibandCompressor::CROSSOVER_RANGE_HZ;
+    ui.horizontal(|ui| {
+        ui.label(t!("mixer.crossovers"));
+        let [low, high] = &mut params.crossovers_hz;
+        // A drag moves the frequency by a share of itself, as on a log scale.
+        changed |= value_field(ui, low, (min_hz, *high), *low as f64 * 0.005, 0, " Hz");
+        changed |= value_field(ui, high, (*low, max_hz), *high as f64 * 0.005, 0, " Hz");
+    });
+    ui.add_space(4.0);
+    type Field = fn(&mut CompressorBand) -> &mut f32;
+    let rows: [(String, Field, (f32, f32), f64, usize, &str); 5] = [
+        (
+            t!("mixer.threshold").into_owned(),
+            |b| &mut b.threshold_db,
+            CompressorBand::THRESHOLD_RANGE_DB,
+            0.2,
+            1,
+            " dB",
+        ),
+        (
+            t!("mixer.ratio").into_owned(),
+            |b| &mut b.ratio,
+            CompressorBand::RATIO_RANGE,
+            0.05,
+            1,
+            ":1",
+        ),
+        (
+            t!("mixer.attack").into_owned(),
+            |b| &mut b.attack_ms,
+            CompressorBand::ATTACK_RANGE_MS,
+            0.2,
+            1,
+            " ms",
+        ),
+        (
+            t!("mixer.release").into_owned(),
+            |b| &mut b.release_ms,
+            CompressorBand::RELEASE_RANGE_MS,
+            2.0,
+            0,
+            " ms",
+        ),
+        (
+            t!("mixer.makeup").into_owned(),
+            |b| &mut b.makeup_db,
+            CompressorBand::MAKEUP_RANGE_DB,
+            0.1,
+            1,
+            " dB",
+        ),
+    ];
+    egui::Grid::new("multiband_bands")
+        .num_columns(4)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("");
+            for name in [
+                t!("mixer.band_low"),
+                t!("mixer.band_mid"),
+                t!("mixer.band_high"),
+            ] {
+                ui.strong(name);
+            }
+            ui.end_row();
+            for (label, field, range, speed, decimals, suffix) in rows {
+                ui.label(label);
+                for band in &mut params.bands {
+                    changed |= value_field(ui, field(band), range, speed, decimals, suffix);
+                }
+                ui.end_row();
+            }
+        });
+    changed.then_some(AudioEffectKind::MultibandCompressor(params))
+}
+
 fn channel_label(timeline: &Timeline, channel: MixerChannel) -> String {
     match channel {
         MixerChannel::Track(index) => timeline.track_label(index),
@@ -213,6 +333,7 @@ fn channel_strip(timeline: &Timeline, channel: MixerChannel) -> Option<&ChannelS
 pub(crate) fn effect_name(kind: &AudioEffectKind) -> String {
     match kind {
         AudioEffectKind::Normalize { .. } => t!("mixer.effect_normalize").into_owned(),
+        AudioEffectKind::MultibandCompressor(_) => t!("mixer.effect_multiband").into_owned(),
     }
 }
 
@@ -248,32 +369,22 @@ fn effect_window(
             if !effect.enabled {
                 ui.weak(t!("mixer.effect_disabled"));
             }
-            match effect.kind {
-                AudioEffectKind::Normalize { mut target_db } => {
-                    ui.horizontal(|ui| {
-                        ui.label(t!("mixer.normalize_target"));
-                        if slider_field(
-                            ui,
-                            &mut target_db,
-                            vv_core::NORMALIZE_TARGET_MIN..=vv_core::NORMALIZE_TARGET_MAX,
-                            0.1,
-                            1,
-                        ) {
-                            let edited = AudioEffect {
-                                kind: AudioEffectKind::Normalize { target_db },
-                                ..effect.clone()
-                            };
-                            commands.push(Box::new(SetAudioEffect::new(
-                                timeline_id,
-                                channel,
-                                index,
-                                edited,
-                                CommandLabel::EditAudioEffect,
-                            )));
-                        }
-                    });
-                    ui.small(t!("mixer.normalize_hint"));
-                }
+            let edited = match &effect.kind {
+                AudioEffectKind::Normalize { target_db } => normalize_settings(ui, *target_db),
+                AudioEffectKind::MultibandCompressor(params) => compressor_settings(ui, params),
+            };
+            if let Some(kind) = edited {
+                let edited = AudioEffect {
+                    kind,
+                    ..effect.clone()
+                };
+                commands.push(Box::new(SetAudioEffect::new(
+                    timeline_id,
+                    channel,
+                    index,
+                    edited,
+                    CommandLabel::EditAudioEffect,
+                )));
             }
         });
     if !open {

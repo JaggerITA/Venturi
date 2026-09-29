@@ -9,13 +9,17 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vv_core::{
-    AudioEffect, AudioEffectKind, ChannelStrip, ClipSource, FrameIdx, Keyframed, MediaId,
-    MixerChannel, Project, Timeline, TimelineId,
+    AudioEffectKind, ChannelStrip, ClipSource, FrameIdx, Keyframed, MediaId, MixerChannel,
+    MultibandCompressor, Project, Timeline, TimelineId,
 };
+
+use crate::dynamics::MultibandProcessor;
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
 pub const GAIN_BLOCK_FRAMES: u64 = 800;
+/// The mix goes track by track through buffers of this many frames.
+const MIX_BLOCK_FRAMES: usize = 512;
 
 #[derive(Clone)]
 pub struct MixClip {
@@ -121,29 +125,74 @@ impl MixMeters {
     }
 }
 
+/// An effect of a chain, ready for the mix: a normalization is the gain it
+/// measured.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Insert {
+    Gain(f32),
+    Compressor(MultibandCompressor),
+}
+
+/// A mixer strip, ready for the mix: its inserts, then fader and balance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Channel {
+    pub inserts: Vec<Insert>,
+    pub bus: Bus,
+}
+
+impl Channel {
+    pub const UNITY: Channel = Channel {
+        inserts: Vec::new(),
+        bus: Bus::UNITY,
+    };
+}
+
+impl Default for Channel {
+    fn default() -> Self {
+        Self::UNITY
+    }
+}
+
 pub struct MixSnapshot {
     pub sample_rate: u32,
     pub channels: u16,
+    /// Sorted by track.
     pub clips: Vec<MixClip>,
+    /// Track and range of `clips` of each track with clips.
+    groups: Vec<(usize, std::ops::Range<usize>)>,
     /// Indexed by timeline track index; a clip whose track is missing plays
     /// at unity.
-    pub tracks: Vec<Bus>,
-    pub master: Bus,
+    pub tracks: Vec<Channel>,
+    pub master: Channel,
     pub meters: MixMeters,
 }
 
 impl MixSnapshot {
     pub fn empty(sample_rate: u32, channels: u16) -> Self {
-        Self::new(sample_rate, channels, Vec::new(), Vec::new(), Bus::UNITY)
+        Self::new(
+            sample_rate,
+            channels,
+            Vec::new(),
+            Vec::new(),
+            Channel::UNITY,
+        )
     }
 
     pub fn new(
         sample_rate: u32,
         channels: u16,
-        clips: Vec<MixClip>,
-        tracks: Vec<Bus>,
-        master: Bus,
+        mut clips: Vec<MixClip>,
+        tracks: Vec<Channel>,
+        master: Channel,
     ) -> Self {
+        clips.sort_by_key(|c| c.track);
+        let mut groups: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+        for (i, clip) in clips.iter().enumerate() {
+            match groups.last_mut() {
+                Some((track, range)) if *track == clip.track => range.end = i + 1,
+                _ => groups.push((clip.track, i..i + 1)),
+            }
+        }
         let meters = MixMeters {
             tracks: tracks.iter().map(|_| StereoPeak::default()).collect(),
             master: StereoPeak::default(),
@@ -152,6 +201,7 @@ impl MixSnapshot {
             sample_rate,
             channels,
             clips,
+            groups,
             tracks,
             master,
             meters,
@@ -168,11 +218,86 @@ impl MixSnapshot {
     ) -> Self {
         collect_clips(project, timeline, sample_rate, channels, source, 0).0
     }
+
+    fn track(&self, index: usize) -> &Channel {
+        static UNITY: Channel = Channel::UNITY;
+        self.tracks.get(index).unwrap_or(&UNITY)
+    }
+}
+
+/// The memory of the mix between two calls: the state of the effects that
+/// have one, and where the previous call ended. A call that does not follow
+/// on starts them over.
+pub struct MixState {
+    /// Aligned with the inserts of `MixSnapshot::tracks`.
+    tracks: Vec<Vec<Option<MultibandProcessor>>>,
+    master: Vec<Option<MultibandProcessor>>,
+    scratch: Vec<f32>,
+    peaks: Vec<[f32; 2]>,
+    next: Option<u64>,
+}
+
+impl MixState {
+    pub fn new(snapshot: &MixSnapshot) -> Self {
+        let processors = |channel: &Channel| -> Vec<Option<MultibandProcessor>> {
+            channel
+                .inserts
+                .iter()
+                .map(|insert| match insert {
+                    Insert::Gain(_) => None,
+                    Insert::Compressor(params) => Some(MultibandProcessor::new(
+                        params,
+                        snapshot.sample_rate,
+                        snapshot.channels,
+                    )),
+                })
+                .collect()
+        };
+        Self {
+            tracks: snapshot.tracks.iter().map(processors).collect(),
+            master: processors(&snapshot.master),
+            scratch: vec![0.0; MIX_BLOCK_FRAMES * snapshot.channels.max(1) as usize],
+            peaks: vec![[0.0; 2]; snapshot.tracks.len()],
+            next: None,
+        }
+    }
+
+    /// Carries on from the state of the previous snapshot: the effects
+    /// found at the same place keep their memory, so an edit does not
+    /// restart them.
+    pub fn continue_from(&mut self, previous: &MixState) {
+        let pairs = self
+            .tracks
+            .iter_mut()
+            .zip(&previous.tracks)
+            .chain([(&mut self.master, &previous.master)]);
+        for (chain, old_chain) in pairs {
+            for (processor, old) in chain.iter_mut().zip(old_chain) {
+                if let (Some(processor), Some(old)) = (processor, old) {
+                    processor.take_memory_from(old);
+                }
+            }
+        }
+        self.next = previous.next;
+    }
+
+    fn reset(&mut self) {
+        for processor in self
+            .tracks
+            .iter_mut()
+            .chain([&mut self.master])
+            .flatten()
+            .flatten()
+        {
+            processor.reset();
+        }
+    }
 }
 
 /// The channel a normalization measures: while a new reading is on its way,
 /// the same slot keeps playing with its last one.
-pub type AnalysisSlot = (TimelineId, MixerChannel);
+/// The channel and the position of the normalization in its chain.
+pub type AnalysisSlot = (TimelineId, MixerChannel, usize);
 
 /// A part of the mix whose peak a normalization needs.
 pub struct PeakAnalysis {
@@ -203,8 +328,12 @@ impl PeakAnalysis {
             (clip.track, clip.clip_fps.to_bits(), clip.media_offset).hash(&mut h);
             (clip.media_step.to_bits(), clip.fade_in, clip.fade_out).hash(&mut h);
         }
-        for bus in s.tracks.iter().chain([&s.master]) {
+        for channel in s.tracks.iter().chain([&s.master]) {
+            let bus = &channel.bus;
             (bus.gain.to_bits(), bus.balance.map(f32::to_bits)).hash(&mut h);
+            for insert in &channel.inserts {
+                hash_insert(insert, &mut h);
+            }
         }
         h.finish()
     }
@@ -217,16 +346,36 @@ impl PeakAnalysis {
         let end = clips.iter().map(|c| c.start + c.len).max().unwrap_or(0);
         let ch = self.snapshot.channels.max(1) as usize;
         let mut out = vec![0.0f32; CHUNK_FRAMES as usize * ch];
+        let mut state = MixState::new(&self.snapshot);
         let mut peak = 0.0f32;
         let mut f = start;
         while f < end {
             let frames = (end - f).min(CHUNK_FRAMES);
             let chunk = &mut out[..frames as usize * ch];
-            mix_range(&self.snapshot, f, chunk);
+            mix_into(&self.snapshot, &mut state, f, chunk, false);
             peak = chunk.iter().fold(peak, |p, s| p.max(s.abs()));
             f += frames;
         }
         peak
+    }
+}
+
+fn hash_insert(insert: &Insert, h: &mut impl Hasher) {
+    match insert {
+        Insert::Gain(gain) => (0u8, gain.to_bits()).hash(h),
+        Insert::Compressor(params) => {
+            (1u8, params.crossovers_hz.map(f32::to_bits)).hash(h);
+            for band in &params.bands {
+                let fields = [
+                    band.threshold_db,
+                    band.ratio,
+                    band.attack_ms,
+                    band.release_ms,
+                    band.makeup_db,
+                ];
+                fields.map(f32::to_bits).hash(h);
+            }
+        }
     }
 }
 
@@ -392,56 +541,88 @@ fn collect_clips(
         .iter()
         .find(|(_, t)| std::ptr::eq(*t, timeline))
         .map(|(id, _)| id);
-    let analysis = |channel, clips, tracks| PeakAnalysis {
-        slot: timeline_id.map(|id| (id, channel)),
-        snapshot: MixSnapshot::new(sample_rate, channels, clips, tracks, Bus::UNITY),
-    };
-    let mut tracks: Vec<Bus> = timeline
-        .tracks
-        .iter()
-        .map(|t| Bus::from_strip(&t.mix))
-        .collect();
+    let slot = |channel| timeline_id.map(|id| (id, channel));
+    let mut tracks: Vec<Channel> = Vec::with_capacity(timeline.tracks.len());
     for (index, track) in timeline.tracks.iter().enumerate() {
-        let Some(target_db) = normalize_target(&track.mix.effects) else {
-            continue;
-        };
         let track_clips: Vec<MixClip> =
             clips.iter().filter(|c| c.track == index).cloned().collect();
-        if track_clips.is_empty() {
-            continue;
-        }
-        let reading = source.peak(analysis(
-            MixerChannel::Track(index),
-            track_clips,
-            Vec::new(),
-        ));
-        tracks[index].gain *= normalize_gain(target_db, reading, &mut readiness);
+        // Measured alone and before the fader: only this track has an entry.
+        let measure = |inserts: &[Insert]| {
+            let mut tracks = vec![Channel::UNITY; index + 1];
+            tracks[index].inserts = inserts.to_vec();
+            MixSnapshot::new(
+                sample_rate,
+                channels,
+                track_clips.clone(),
+                tracks,
+                Channel::UNITY,
+            )
+        };
+        let inserts = resolve_chain(
+            &track.mix,
+            !track_clips.is_empty(),
+            slot(MixerChannel::Track(index)),
+            measure,
+            source,
+            &mut readiness,
+        );
+        tracks.push(Channel {
+            inserts,
+            bus: Bus::from_strip(&track.mix),
+        });
     }
-    let mut master = Bus::from_strip(&timeline.master);
-    if let Some(target_db) = normalize_target(&timeline.master.effects)
-        && !clips.is_empty()
-    {
-        let reading = source.peak(analysis(
-            MixerChannel::Master,
-            clips.clone(),
-            tracks.clone(),
-        ));
-        master.gain *= normalize_gain(target_db, reading, &mut readiness);
-    }
+    let measure = |inserts: &[Insert]| {
+        let master = Channel {
+            inserts: inserts.to_vec(),
+            bus: Bus::UNITY,
+        };
+        MixSnapshot::new(sample_rate, channels, clips.clone(), tracks.clone(), master)
+    };
+    let master = Channel {
+        inserts: resolve_chain(
+            &timeline.master,
+            !clips.is_empty(),
+            slot(MixerChannel::Master),
+            measure,
+            source,
+            &mut readiness,
+        ),
+        bus: Bus::from_strip(&timeline.master),
+    };
     let snapshot = MixSnapshot::new(sample_rate, channels, clips, tracks, master);
     (snapshot, readiness)
 }
 
-/// Normalizing twice lands on the target of the second one: only the last
-/// enabled normalization of a chain counts.
-fn normalize_target(effects: &[AudioEffect]) -> Option<f32> {
-    effects
-        .iter()
-        .rev()
-        .filter(|e| e.enabled)
-        .find_map(|e| match e.kind {
-            AudioEffectKind::Normalize { target_db } => Some(target_db),
-        })
+/// The enabled effects of `strip`, in order. A normalization measures the
+/// channel through the effects before it (`measure` builds that mix), so it
+/// stays right after a compressor too.
+fn resolve_chain(
+    strip: &ChannelStrip,
+    has_audio: bool,
+    slot: Option<(TimelineId, MixerChannel)>,
+    measure: impl Fn(&[Insert]) -> MixSnapshot,
+    source: &mut impl AudioSource,
+    readiness: &mut Readiness,
+) -> Vec<Insert> {
+    let mut inserts = Vec::new();
+    for effect in strip.effects.iter().filter(|e| e.enabled) {
+        match &effect.kind {
+            AudioEffectKind::Normalize { target_db } => {
+                if !has_audio {
+                    continue;
+                }
+                let reading = source.peak(PeakAnalysis {
+                    slot: slot.map(|(timeline, channel)| (timeline, channel, inserts.len())),
+                    snapshot: measure(&inserts),
+                });
+                inserts.push(Insert::Gain(normalize_gain(*target_db, reading, readiness)));
+            }
+            AudioEffectKind::MultibandCompressor(params) => {
+                inserts.push(Insert::Compressor(params.clone()));
+            }
+        }
+    }
+    inserts
 }
 
 /// A reading still on its way leaves the mix `Partial`, so a compound
@@ -576,82 +757,143 @@ pub fn sample_to_timeline_frame(sample: u64, fps: f64, sample_rate: u32) -> Fram
 }
 
 /// Writes into `out` (interleaved, `snapshot.channels` channels) the mix
-/// starting from timeline audio frame `start`. No allocations: it runs
-/// in the realtime callback.
+/// starting from timeline audio frame `start`, with the effects starting
+/// from scratch.
 pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
-    mix_into(snapshot, start, out, false);
+    mix_into(snapshot, &mut MixState::new(snapshot), start, out, false);
 }
 
-/// `mix_range` for the output stream: it also raises `snapshot.meters`.
-pub fn mix_range_metered(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
-    mix_into(snapshot, start, out, true);
+/// `mix_range` for the output stream: the effects carry on from the
+/// previous call through `state`, and `snapshot.meters` go up. No
+/// allocations: it runs in the realtime callback.
+pub fn mix_range_metered(
+    snapshot: &MixSnapshot,
+    state: &mut MixState,
+    start: u64,
+    out: &mut [f32],
+) {
+    mix_into(snapshot, state, start, out, true);
 }
 
-fn mix_into(snapshot: &MixSnapshot, start: u64, out: &mut [f32], metered: bool) {
+fn mix_into(
+    snapshot: &MixSnapshot,
+    state: &mut MixState,
+    start: u64,
+    out: &mut [f32],
+    metered: bool,
+) {
     out.fill(0.0);
     let ch = snapshot.channels as usize;
     if ch == 0 {
         return;
     }
-    let end = start + (out.len() / ch) as u64;
-    for clip in &snapshot.clips {
-        let bus = snapshot.tracks.get(clip.track).unwrap_or(&Bus::UNITY);
-        let mut peak = [0.0f32; 2];
-        let clip_end = clip.start + clip.len;
-        let to = end.min(clip_end);
-        let mut f = start.max(clip.start);
-        while f < to {
-            let in_clip = f - clip.start;
-            let block = in_clip / GAIN_BLOCK_FRAMES;
-            let block_end = (clip.start + (block + 1) * GAIN_BLOCK_FRAMES).min(to);
-            let gain = block_gain_linear(clip, block, snapshot.sample_rate)
-                * fade_multiplier(clip, in_clip);
-            let gain_of = |c: usize| gain * bus.channel_gain(c, ch);
-
-            let dst = ((f - start) as usize) * ch;
-            if clip.step == 1.0 {
-                let src = ((clip.source_offset + in_clip) as usize) * ch;
-                let count =
-                    ((block_end - f) as usize * ch).min(clip.buffer.len().saturating_sub(src));
-                for (frame, source) in out[dst..dst + count]
-                    .chunks_exact_mut(ch)
-                    .zip(clip.buffer[src..src + count].chunks_exact(ch))
-                {
-                    for (c, (d, s)) in frame.iter_mut().zip(source).enumerate() {
-                        add_sample(d, s * gain_of(c), c, &mut peak);
+    let frames = out.len() / ch;
+    if state.next != Some(start) {
+        state.reset();
+    }
+    state.next = Some(start + frames as u64);
+    state.peaks.fill([0.0; 2]);
+    let mut master_peak = [0.0f32; 2];
+    for block_start in (0..frames).step_by(MIX_BLOCK_FRAMES) {
+        let len = MIX_BLOCK_FRAMES.min(frames - block_start);
+        let block = &mut out[block_start * ch..(block_start + len) * ch];
+        let block_time = start + block_start as u64;
+        for (track, range) in &snapshot.groups {
+            let channel = snapshot.track(*track);
+            let scratch = &mut state.scratch[..len * ch];
+            scratch.fill(0.0);
+            for clip in &snapshot.clips[range.clone()] {
+                add_clip(snapshot, clip, block_time, scratch);
+            }
+            let processors = state.tracks.get_mut(*track).map(Vec::as_mut_slice);
+            apply_inserts(&channel.inserts, processors.unwrap_or_default(), scratch);
+            let mut peak = [0.0f32; 2];
+            for (dst, src) in block.chunks_exact_mut(ch).zip(scratch.chunks_exact(ch)) {
+                for (c, (d, s)) in dst.iter_mut().zip(src).enumerate() {
+                    let value = s * channel.bus.channel_gain(c, ch);
+                    *d += value;
+                    if c < 2 {
+                        peak[c] = peak[c].max(value.abs());
                     }
                 }
-            } else {
-                let frames = &mut out[dst..dst + (block_end - f) as usize * ch];
-                for (i, frame) in frames.chunks_exact_mut(ch).enumerate() {
-                    let pos = clip.source_offset as f64 + (in_clip + i as u64) as f64 * clip.step;
-                    add_resampled(&clip.buffer, ch, pos, clip.step, gain_of, frame, &mut peak);
-                }
             }
-            f = block_end;
+            if let Some(track_peak) = state.peaks.get_mut(*track) {
+                *track_peak = [track_peak[0].max(peak[0]), track_peak[1].max(peak[1])];
+            }
         }
-        if metered && let Some(meter) = snapshot.meters.track(clip.track) {
-            meter.raise(mono_as_stereo(peak, ch));
-        }
-    }
-    let mut peak = [0.0f32; 2];
-    for frame in out.chunks_exact_mut(ch) {
-        for (c, s) in frame.iter_mut().enumerate() {
-            *s *= snapshot.master.channel_gain(c, ch);
-            if c < 2 {
-                peak[c] = peak[c].max(s.abs());
+        apply_inserts(&snapshot.master.inserts, &mut state.master, block);
+        for frame in block.chunks_exact_mut(ch) {
+            for (c, s) in frame.iter_mut().enumerate() {
+                *s *= snapshot.master.bus.channel_gain(c, ch);
+                if c < 2 {
+                    master_peak[c] = master_peak[c].max(s.abs());
+                }
             }
         }
     }
     if metered {
-        snapshot.meters.master.raise(mono_as_stereo(peak, ch));
+        for (track, peak) in state.peaks.iter().enumerate() {
+            if let Some(meter) = snapshot.meters.track(track) {
+                meter.raise(mono_as_stereo(*peak, ch));
+            }
+        }
+        snapshot
+            .meters
+            .master
+            .raise(mono_as_stereo(master_peak, ch));
     }
 }
 
-fn add_sample(out: &mut f32, value: f32, c: usize, peak: &mut [f32; 2]) {
-    *out += value;
-    if c < 2 {
-        peak[c] = peak[c].max(value.abs());
+fn apply_inserts(
+    inserts: &[Insert],
+    processors: &mut [Option<MultibandProcessor>],
+    samples: &mut [f32],
+) {
+    for (index, insert) in inserts.iter().enumerate() {
+        match insert {
+            Insert::Gain(gain) => samples.iter_mut().for_each(|s| *s *= gain),
+            Insert::Compressor(_) => {
+                if let Some(Some(processor)) = processors.get_mut(index) {
+                    processor.process(samples);
+                }
+            }
+        }
+    }
+}
+
+/// Adds the part of `clip` from timeline audio frame `start` into `out`,
+/// with its gain and fades.
+fn add_clip(snapshot: &MixSnapshot, clip: &MixClip, start: u64, out: &mut [f32]) {
+    let ch = snapshot.channels as usize;
+    let end = start + (out.len() / ch) as u64;
+    let to = end.min(clip.start + clip.len);
+    let mut f = start.max(clip.start);
+    while f < to {
+        let in_clip = f - clip.start;
+        let block = in_clip / GAIN_BLOCK_FRAMES;
+        let block_end = (clip.start + (block + 1) * GAIN_BLOCK_FRAMES).min(to);
+        // At the start of the block, not of the call: how the mix is split
+        // into calls must not change it.
+        let gain = block_gain_linear(clip, block, snapshot.sample_rate)
+            * fade_multiplier(clip, block * GAIN_BLOCK_FRAMES);
+        let dst = ((f - start) as usize) * ch;
+        if clip.step == 1.0 {
+            let src = ((clip.source_offset + in_clip) as usize) * ch;
+            let count = ((block_end - f) as usize * ch).min(clip.buffer.len().saturating_sub(src));
+            for (d, s) in out[dst..dst + count]
+                .iter_mut()
+                .zip(&clip.buffer[src..src + count])
+            {
+                *d += s * gain;
+            }
+        } else {
+            let frames = &mut out[dst..dst + (block_end - f) as usize * ch];
+            for (i, frame) in frames.chunks_exact_mut(ch).enumerate() {
+                let pos = clip.source_offset as f64 + (in_clip + i as u64) as f64 * clip.step;
+                add_resampled(&clip.buffer, ch, pos, clip.step, gain, frame);
+            }
+        }
+        f = block_end;
     }
 }
 
@@ -662,29 +904,20 @@ fn mono_as_stereo(peak: [f32; 2], channels: usize) -> [f32; 2] {
 /// Varispeed read of the frame at fractional position `pos`: linear
 /// interpolation slowing down; speeding up, the average of the `step`
 /// frames skipped over, a crude low-pass against aliasing.
-fn add_resampled(
-    buffer: &[f32],
-    ch: usize,
-    pos: f64,
-    step: f64,
-    gain_of: impl Fn(usize) -> f32,
-    out: &mut [f32],
-    peak: &mut [f32; 2],
-) {
+fn add_resampled(buffer: &[f32], ch: usize, pos: f64, step: f64, gain: f32, out: &mut [f32]) {
     let frames = buffer.len() / ch;
     let at = |frame: usize, c: usize| buffer[frame.min(frames - 1) * ch + c];
     let i = pos as usize;
     if step < 1.0 {
         let t = (pos - i as f64) as f32;
         for (c, o) in out.iter_mut().enumerate() {
-            let value = at(i, c) + (at(i + 1, c) - at(i, c)) * t;
-            add_sample(o, value * gain_of(c), c, peak);
+            *o += (at(i, c) + (at(i + 1, c) - at(i, c)) * t) * gain;
         }
     } else {
         let n = (step as usize).max(1);
         for (c, o) in out.iter_mut().enumerate() {
             let sum: f32 = (i..i + n).map(|frame| at(frame, c)).sum();
-            add_sample(o, sum / n as f32 * gain_of(c), c, peak);
+            *o += sum / n as f32 * gain;
         }
     }
 }
@@ -780,6 +1013,19 @@ impl StretchedWindow {
 pub struct MixerState {
     pub mix: Arc<MixSnapshot>,
     pub stretched: Option<StretchedWindow>,
+    /// Locked only by the callback; allocated here, on the UI thread.
+    effects: Mutex<MixState>,
+}
+
+impl MixerState {
+    pub fn new(mix: Arc<MixSnapshot>, stretched: Option<StretchedWindow>) -> Self {
+        let effects = Mutex::new(MixState::new(&mix));
+        Self {
+            mix,
+            stretched,
+            effects,
+        }
+    }
 }
 
 /// Writes into `out` the stretched audio corresponding to timeline audio
@@ -846,11 +1092,11 @@ impl Mixer {
 
         let playing = Arc::new(AtomicBool::new(false));
         let position = Arc::new(AtomicU64::new(0));
-        let initial = Arc::new(MixerState {
-            mix: Arc::new(MixSnapshot::empty(sample_rate, channels)),
-            stretched: None,
-        });
-        let pending = Arc::new(Mutex::new(None));
+        let initial = Arc::new(MixerState::new(
+            Arc::new(MixSnapshot::empty(sample_rate, channels)),
+            None,
+        ));
+        let pending: Arc<Mutex<Option<Arc<MixerState>>>> = Arc::new(Mutex::new(None));
         let peak_left_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let peak_right_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
 
@@ -869,6 +1115,11 @@ impl Mixer {
                     if let Ok(mut slot) = cb_pending.try_lock()
                         && let Some(next) = slot.take()
                     {
+                        if let (Ok(mut effects), Ok(previous)) =
+                            (next.effects.try_lock(), current.effects.try_lock())
+                        {
+                            effects.continue_from(&previous);
+                        }
                         current = next;
                     }
                     if cb_playing.load(Ordering::Relaxed) && current.mix.channels as usize == ch {
@@ -880,7 +1131,12 @@ impl Mixer {
                                 frames * window.tempo
                             }
                             None => {
-                                mix_range_metered(&current.mix, pos, data);
+                                match current.effects.try_lock() {
+                                    Ok(mut effects) => {
+                                        mix_range_metered(&current.mix, &mut effects, pos, data)
+                                    }
+                                    Err(_) => data.fill(0.0),
+                                }
                                 frames
                             }
                         };
