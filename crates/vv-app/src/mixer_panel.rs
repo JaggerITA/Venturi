@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use vv_audio::mixer::{MixMeters, StereoPeak, db_to_linear};
 use vv_core::{
     AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, MixerChannel,
-    MixerParam, Project, RemoveAudioEffect, SetAudioEffect, SetMixerParam, SetTrackFlag, Timeline,
-    TimelineId, TrackFlag, TrackKind,
+    MixerParam, MoveAudioEffect, Project, RemoveAudioEffect, SetAudioEffect, SetMixerParam,
+    SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
 };
 
 use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
@@ -92,12 +92,16 @@ impl MixerPanelState {
         if let Some(index) = edit.open_settings {
             self.open_effect = Some((timeline, channel, index));
         }
-        let Some(removed) = edit.remove_effect else {
+        let Some((tl, open_channel, open_index)) = &mut self.open_effect else {
             return;
         };
-        if let Some((tl, open_channel, open_index)) = &mut self.open_effect
-            && (*tl, *open_channel) == (timeline, channel)
-        {
+        if (*tl, *open_channel) != (timeline, channel) {
+            return;
+        }
+        if let Some((from, to)) = edit.move_effect {
+            *open_index = index_after_move(*open_index, from, to);
+        }
+        if let Some(removed) = edit.remove_effect {
             match (*open_index).cmp(&removed) {
                 std::cmp::Ordering::Equal => self.open_effect = None,
                 std::cmp::Ordering::Greater => *open_index -= 1,
@@ -286,6 +290,8 @@ struct StripEdit {
     toggle_mute: Option<bool>,
     add_effect: Option<AudioEffectKind>,
     remove_effect: Option<usize>,
+    /// From, to (index afterwards).
+    move_effect: Option<(usize, usize)>,
     set_effect: Option<(usize, AudioEffect)>,
     open_settings: Option<usize>,
 }
@@ -319,6 +325,9 @@ impl StripEdit {
                 effect,
                 CommandLabel::ToggleAudioEffect,
             )));
+        }
+        if let Some((from, to)) = self.move_effect {
+            commands.push(Box::new(MoveAudioEffect::new(timeline, channel, from, to)));
         }
         if let Some(index) = self.remove_effect {
             commands.push(Box::new(RemoveAudioEffect::new(timeline, channel, index)));
@@ -356,7 +365,7 @@ fn strip(
         ui.set_width(STRIP_WIDTH);
         ui.vertical_centered(|ui| {
             ui.push_id(channel, |ui| {
-                effects(ui, &mix.effects, effect_slots, &mut edit);
+                effects(ui, channel, &mix.effects, effect_slots, &mut edit);
                 ui.add_space(6.0);
                 edit.pan = pan_knob(ui, mix.pan);
                 ui.small(format_pan(mix.pan));
@@ -385,8 +394,41 @@ fn strip(
     edit
 }
 
-/// The insert chain, top to bottom, and the "+" that appends to it.
-fn effects(ui: &mut egui::Ui, effects: &[AudioEffect], slots: usize, edit: &mut StripEdit) {
+/// Where an effect dragged from `from` ends up when dropped in the gap
+/// before `slot` (`slot` = the length for the end); `None` if it stays.
+pub(crate) fn moved_to(from: usize, slot: usize) -> Option<usize> {
+    let to = if slot > from { slot - 1 } else { slot };
+    (to != from).then_some(to)
+}
+
+/// Where the effect at `index` is after the one at `from` moved to `to`.
+pub(crate) fn index_after_move(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < index && index <= to {
+        index - 1
+    } else if to <= index && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EffectDrag {
+    channel: MixerChannel,
+    index: usize,
+}
+
+/// The insert chain, top to bottom, and the "+" that appends to it. The
+/// effects are dragged to reorder them within the chain.
+fn effects(
+    ui: &mut egui::Ui,
+    channel: MixerChannel,
+    effects: &[AudioEffect],
+    slots: usize,
+    edit: &mut StripEdit,
+) {
     let row = egui::vec2(STRIP_WIDTH, EFFECT_ROW_HEIGHT);
     for _ in effects.len()..slots {
         ui.allocate_space(row);
@@ -403,10 +445,39 @@ fn effects(ui: &mut egui::Ui, effects: &[AudioEffect], slots: usize, edit: &mut 
         };
         let button = egui::Button::new(egui::RichText::new(&name).small().color(text))
             .fill(fill)
-            .truncate();
+            .truncate()
+            .sense(egui::Sense::click_and_drag());
         let response = ui.add_sized(row, button).on_hover_text(&name);
         if response.clicked() {
             edit.open_settings = Some(index);
+        }
+        if response.drag_started() {
+            response.dnd_set_drag_payload(EffectDrag { channel, index });
+        }
+        if response.dragged() {
+            paint_drag_ghost(ui, &name, fill, text);
+        }
+        if let Some(drag) = response.dnd_hover_payload::<EffectDrag>()
+            && drag.channel == channel
+            && let Some(pointer) = ui.ctx().pointer_interact_pos()
+        {
+            let below = pointer.y > response.rect.center().y;
+            let gap = ui.spacing().item_spacing.y / 2.0;
+            let y = if below {
+                response.rect.bottom() + gap
+            } else {
+                response.rect.top() - gap
+            };
+            ui.painter().hline(
+                response.rect.x_range(),
+                y,
+                egui::Stroke::new(2.0, crate::theme::ACCENT),
+            );
+            if let Some(drag) = response.dnd_release_payload::<EffectDrag>()
+                && let Some(to) = moved_to(drag.index, index + usize::from(below))
+            {
+                edit.move_effect = Some((drag.index, to));
+            }
         }
         egui::Popup::context_menu(&response).show(|ui| {
             let toggle = if effect.enabled {
@@ -436,6 +507,25 @@ fn effects(ui: &mut egui::Ui, effects: &[AudioEffect], slots: usize, edit: &mut 
             }
         }
     });
+}
+
+fn paint_drag_ghost(ui: &egui::Ui, name: &str, fill: egui::Color32, text: egui::Color32) {
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("audio_effect_drag"),
+    ));
+    let rect = egui::Rect::from_center_size(pointer, egui::vec2(STRIP_WIDTH, EFFECT_ROW_HEIGHT));
+    painter.rect_filled(rect, 3.0, fill.gamma_multiply(0.8));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        name,
+        egui::FontId::proportional(11.0),
+        text,
+    );
 }
 
 fn solo_mute(ui: &mut egui::Ui, flags: Option<(bool, bool)>, edit: &mut StripEdit) {

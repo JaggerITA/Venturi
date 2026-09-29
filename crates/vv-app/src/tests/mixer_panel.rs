@@ -49,3 +49,22 @@ fn the_settings_window_follows_the_removal_of_an_effect_above_it() {
     state.follow_edit(&remove(1), timeline, channel);
     assert_eq!(state.open_effect, None);
 }
+
+#[test]
+fn dropping_in_the_gaps_around_an_effect_leaves_it_where_it_is() {
+    assert_eq!(moved_to(1, 1), None);
+    assert_eq!(moved_to(1, 2), None);
+    assert_eq!(moved_to(1, 0), Some(0));
+    assert_eq!(moved_to(0, 3), Some(2), "to the end of three");
+    assert_eq!(moved_to(2, 1), Some(1));
+}
+
+#[test]
+fn the_other_effects_shift_around_a_moved_one() {
+    // [a b c d], b to the end: [a c d b].
+    let after: Vec<usize> = (0..4).map(|i| index_after_move(i, 1, 3)).collect();
+    assert_eq!(after, [0, 3, 1, 2]);
+    // [a b c d], d to the front: [d a b c].
+    let after: Vec<usize> = (0..4).map(|i| index_after_move(i, 3, 0)).collect();
+    assert_eq!(after, [1, 2, 3, 0]);
+}

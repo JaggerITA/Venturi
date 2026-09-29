@@ -29,6 +29,7 @@ pub enum CommandLabel {
     MixerPan,
     AddAudioEffect,
     RemoveAudioEffect,
+    MoveAudioEffect,
     EditAudioEffect,
     ToggleAudioEffect,
     ToggleClipsDisabled,
@@ -580,6 +581,50 @@ impl Command for RemoveAudioEffect {
             let index = self.index.min(strip.effects.len());
             strip.effects.insert(index, effect);
         }
+    }
+}
+
+/// Moves an effect of the chain from `from` to `to` (its index afterwards).
+#[derive(Debug)]
+pub struct MoveAudioEffect {
+    pub timeline: TimelineId,
+    pub channel: MixerChannel,
+    pub from: usize,
+    pub to: usize,
+}
+
+impl MoveAudioEffect {
+    pub fn new(timeline: TimelineId, channel: MixerChannel, from: usize, to: usize) -> Self {
+        Self {
+            timeline,
+            channel,
+            from,
+            to,
+        }
+    }
+
+    fn shift(&self, project: &mut Project, from: usize, to: usize) {
+        if let Some(strip) = channel_strip(project, self.timeline, self.channel)
+            && from < strip.effects.len()
+            && to < strip.effects.len()
+        {
+            let effect = strip.effects.remove(from);
+            strip.effects.insert(to, effect);
+        }
+    }
+}
+
+impl Command for MoveAudioEffect {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::MoveAudioEffect
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        self.shift(project, self.from, self.to);
+    }
+
+    fn undo(&self, project: &mut Project) {
+        self.shift(project, self.to, self.from);
     }
 }
 

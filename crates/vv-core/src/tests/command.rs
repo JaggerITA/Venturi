@@ -258,3 +258,37 @@ fn audio_effects_are_added_edited_and_removed_with_undo() {
     history.undo(&mut project);
     assert!(effects(&project).is_empty());
 }
+
+#[test]
+fn moving_an_audio_effect_reorders_the_chain_and_undoes() {
+    let (mut project, tl) = project();
+    let channel = MixerChannel::Track(0);
+    let normalize = |target_db| AudioEffect::new(crate::AudioEffectKind::Normalize { target_db });
+    project.timelines[tl].tracks[0].mix.effects =
+        vec![normalize(-1.0), normalize(-2.0), normalize(-3.0)];
+    let targets = |project: &Project| -> Vec<f32> {
+        project.timelines[tl].tracks[0]
+            .mix
+            .effects
+            .iter()
+            .map(|e| match e.kind {
+                crate::AudioEffectKind::Normalize { target_db } => target_db,
+            })
+            .collect()
+    };
+    let mut history = History::default();
+
+    history.do_command(
+        &mut project,
+        Box::new(MoveAudioEffect::new(tl, channel, 0, 2)),
+    );
+    assert_eq!(targets(&project), [-2.0, -3.0, -1.0]);
+    history.do_command(
+        &mut project,
+        Box::new(MoveAudioEffect::new(tl, channel, 2, 1)),
+    );
+    assert_eq!(targets(&project), [-2.0, -1.0, -3.0]);
+    history.undo(&mut project);
+    history.undo(&mut project);
+    assert_eq!(targets(&project), [-1.0, -2.0, -3.0]);
+}

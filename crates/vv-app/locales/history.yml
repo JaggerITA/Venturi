@@ -112,6 +112,10 @@ history.remove_audio_effect:
   en: "Remove audio effect"
   it: "Rimuovi effetto audio"
 
+history.move_audio_effect:
+  en: "Move audio effect"
+  it: "Sposta effetto audio"
+
 history.edit_audio_effect:
   en: "Edit audio effect"
   it: "Modifica effetto audio"
