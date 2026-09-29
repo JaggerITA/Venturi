@@ -132,6 +132,7 @@ Every call below is one undo step.
 | `move_clips(timeline_id, moves)` | `moves`: `{clip_id, start, track?}`. Overwrites what is at the destination; linked clips must be listed too |
 | `trim_clip(timeline_id, clip_id, edge, frame)` | `edge` is `start` or `end`; the error names the allowed range |
 | `set_clip_properties(timeline_id, clip_ids, …)` | Static values: `opacity` (0-100), `position` and `scale` (`[x, y]`), `rotation` (degrees), `gain_db`, `disabled`, `fade_in`/`fade_out` (frames), `fill_color` (solid color clips). Values with keyframes keep following them; a warning says so |
+| `set_transition(timeline_id, clip_ids, edge, kind?, duration?, direction?, ease?, curve?)` | Video clips. On the `start` or `end` edge, `push` (default) slides the clip in from, or out to, the edge of the frame over what is below; `kind: none` removes it. Defaults: 0.45 s, `right`, `in_out`, curve 0.5; options not given keep the value already on that edge. Reported by `get_clip` as `transition_in`/`transition_out` |
 | `add_title(timeline_id, text, at, duration?, track?, size?, color?, position?)` | |
 | `add_solid_color(timeline_id, at, duration?, track?, color?)` | |
 | `add_adjustment_clip(timeline_id, at, duration?, track?)` | |
@@ -329,6 +330,7 @@ those frames, not the timeline's.
 - `get_audio_levels` on a timeline decodes the whole audio files involved,
   so it is slow with long media. On a media it decodes only up to the end of
   the range, so measure the media when you can.
-- Not available yet: keyframe editing, speed changes, transitions, compound
+- Not available yet: keyframe editing, speed changes, transitions between
+  two adjacent clips (only one edge against what is below), compound
   clips, pasting properties, OTIO export, playback control, a ripple
   (insert) mode for `insert_clip`.

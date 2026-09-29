@@ -6,9 +6,10 @@ use std::collections::{BTreeSet, HashSet};
 use serde_json::{Value, json};
 use vv_core::edit::{self, ClipRef, Generator, MediaInsert, RangeDelete, TargetTracks};
 use vv_core::{
-    ClipColor, ClipSource, CommandLabel, FadeEdge, FrameIdx, LinkClips, Marker, Project, Rgba,
-    SetClipColor, SetClipFade, SetClipsDisabled, SetClipsDisplayColor, SetMarker, SetTrackFlag,
-    TimelineId, TrackFlag, TrackKind, TransformParam, TrimEdge, UnlinkClip,
+    ClipColor, ClipSource, CommandLabel, Ease, FadeEdge, FrameIdx, LinkClips, Marker, Project,
+    PushDirection, Rgba, SetClipColor, SetClipFade, SetClipsDisabled, SetClipsDisplayColor,
+    SetMarker, SetTrackFlag, TimelineId, TrackFlag, TrackKind, TransformParam, Transition,
+    TransitionKind, TrimEdge, UnlinkClip,
 };
 use vv_session::Session;
 
@@ -824,6 +825,93 @@ pub(crate) fn set_clip_color(session: &mut Session, args: SetClipColorArgs) -> T
             Ok(json!({ "clips": clips_json(&s.project, timeline, &refs) }))
         },
     )
+}
+
+pub(crate) fn set_transition(session: &mut Session, args: SetTransitionArgs) -> ToolResult {
+    let timeline = ids::timeline_id(&session.project, &args.timeline_id)?;
+    ids::check_revision(session, timeline, args.if_revision.as_deref())?;
+    let refs = ids::clip_refs(&session.project, timeline, &args.clip_ids)?;
+    for &(track, _) in &refs {
+        ensure_kind(&session.project, timeline, track, TrackKind::Video)?;
+        ensure_unlocked(&session.project, timeline, track)?;
+    }
+    if args.duration.is_some_and(|d| d <= 0) {
+        return fail("the duration must be at least one frame");
+    }
+    if args.curve.is_some_and(|c| !(0.0..=1.0).contains(&c)) {
+        return fail("`curve` must be between 0 and 1");
+    }
+    let edge = match args.edge {
+        EdgeArg::Start => FadeEdge::In,
+        EdgeArg::End => FadeEdge::Out,
+    };
+    let tl = &session.project.timelines[timeline];
+    // Same defaults as a transition dropped from the Effects panel.
+    let default = Transition {
+        kind: TransitionKind::Push,
+        duration: ((tl.fps.as_f64() * 0.45).round() as FrameIdx).max(1),
+        direction: PushDirection::Right,
+        ease: Ease::InOut,
+        curve: 0.5,
+    };
+    let mut warnings = Vec::new();
+    let mut values = Vec::with_capacity(refs.len());
+    for &(track, id) in &refs {
+        if args.kind == Some(TransitionKindArg::None) {
+            values.push(None);
+            continue;
+        }
+        let clip = tl.clip(track, id).expect("resolved above");
+        let current = match edge {
+            FadeEdge::In => &clip.effects.transition_in,
+            FadeEdge::Out => &clip.effects.transition_out,
+        };
+        let mut transition = current.clone().unwrap_or_else(|| default.clone());
+        if let Some(duration) = args.duration {
+            transition.duration = duration;
+        }
+        if let Some(direction) = args.direction {
+            transition.direction = match direction {
+                DirectionArg::Left => PushDirection::Left,
+                DirectionArg::Right => PushDirection::Right,
+                DirectionArg::Up => PushDirection::Up,
+                DirectionArg::Down => PushDirection::Down,
+            };
+        }
+        if let Some(ease) = args.ease {
+            transition.ease = match ease {
+                EaseArg::None => Ease::None,
+                EaseArg::In => Ease::In,
+                EaseArg::Out => Ease::Out,
+                EaseArg::InOut => Ease::InOut,
+            };
+        }
+        if let Some(curve) = args.curve {
+            transition.curve = curve;
+        }
+        if transition.duration > clip.timeline_len {
+            warnings.push(format!(
+                "clip {}: duration cut to the clip's length, {} frames",
+                id.0, clip.timeline_len
+            ));
+            transition.duration = clip.timeline_len;
+        }
+        values.push(Some(transition));
+    }
+    one_step(session, timeline, Some(CommandLabel::Transition), |s| {
+        for (&(track, id), value) in refs.iter().zip(values) {
+            s.history.do_command(
+                &mut s.project,
+                Box::new(vv_core::set_clip_transition(
+                    timeline, track, id, edge, value,
+                )),
+            );
+        }
+        Ok(json!({
+            "clips": clips_json(&s.project, timeline, &refs),
+            "warnings": warnings,
+        }))
+    })
 }
 
 pub(crate) fn get_markers(session: &Session, args: TimelineArgs) -> ToolResult {

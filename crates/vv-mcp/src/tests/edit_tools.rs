@@ -658,3 +658,83 @@ fn delete_ranges_by_media_frames_finds_the_material_after_earlier_cuts() {
     let not_there = error(&mut session, delete(vec![[0, 5]], Some(media)));
     assert!(not_there.starts_with("none of those frames"), "{not_there}");
 }
+
+fn transition(timeline: &str, clip: &str, edge: EdgeArg) -> SetTransitionArgs {
+    SetTransitionArgs {
+        timeline_id: timeline.into(),
+        if_revision: None,
+        clip_ids: vec![clip.into()],
+        edge,
+        kind: None,
+        duration: None,
+        direction: None,
+        ease: None,
+        curve: None,
+    }
+}
+
+fn clip_effects(session: &mut Session, timeline: &str, clip: &str) -> Value {
+    ok(
+        session,
+        ToolCall::GetClip(ClipArgs {
+            timeline_id: timeline.into(),
+            clip_id: clip.into(),
+        }),
+    )["effects"]
+        .clone()
+}
+
+#[test]
+fn transitions_get_defaults_keep_earlier_values_and_are_removed() {
+    let mut session = Session::default();
+    let timeline = with_timeline(&mut session);
+    let clip = solid(&mut session, &timeline, 0, 100);
+
+    let result = ok(
+        &mut session,
+        ToolCall::SetTransition(transition(&timeline, &clip, EdgeArg::Start)),
+    );
+    assert_eq!(result["clips"][0]["effects"], json!(["transition_in"]));
+    let push = &clip_effects(&mut session, &timeline, &clip)["transition_in"];
+    assert_eq!(push["kind"], "Push");
+    // 0.45 s at the default 25 fps.
+    assert_eq!(push["duration"], 11);
+    assert_eq!(push["direction"], "Right");
+    assert_eq!(push["ease"], "InOut");
+    assert_eq!(ok(&mut session, ToolCall::Undo)["undone"], "Transition");
+    ok(&mut session, ToolCall::Redo);
+
+    let mut args = transition(&timeline, &clip, EdgeArg::Start);
+    args.direction = Some(DirectionArg::Up);
+    ok(&mut session, ToolCall::SetTransition(args));
+    let push = &clip_effects(&mut session, &timeline, &clip)["transition_in"];
+    assert_eq!(push["direction"], "Up");
+    assert_eq!(push["duration"], 11);
+
+    let mut args = transition(&timeline, &clip, EdgeArg::Start);
+    args.kind = Some(TransitionKindArg::None);
+    ok(&mut session, ToolCall::SetTransition(args));
+    assert!(clip_effects(&mut session, &timeline, &clip)["transition_in"].is_null());
+}
+
+#[test]
+fn transitions_longer_than_the_clip_are_cut_with_a_warning() {
+    let mut session = Session::default();
+    let timeline = with_timeline(&mut session);
+    let clip = solid(&mut session, &timeline, 0, 20);
+    let mut args = transition(&timeline, &clip, EdgeArg::End);
+    args.duration = Some(50);
+    let result = ok(&mut session, ToolCall::SetTransition(args));
+    assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        clip_effects(&mut session, &timeline, &clip)["transition_out"]["duration"],
+        20
+    );
+
+    let mut args = transition(&timeline, &clip, EdgeArg::End);
+    args.curve = Some(2.0);
+    assert_eq!(
+        error(&mut session, ToolCall::SetTransition(args)),
+        "`curve` must be between 0 and 1"
+    );
+}

@@ -34,6 +34,7 @@ pub enum ToolCall {
     DeleteMarker(MarkerArgs),
     GetMarkers(TimelineArgs),
     SetClipColor(SetClipColorArgs),
+    SetTransition(SetTransitionArgs),
     RenderFrame(RenderFrameArgs),
     GetAudioLevels(AudioLevelsArgs),
     Export(ExportArgs),
@@ -77,6 +78,7 @@ impl ToolCall {
             ToolCall::DeleteMarker(_) => "delete_marker",
             ToolCall::GetMarkers(_) => "get_markers",
             ToolCall::SetClipColor(_) => "set_clip_color",
+            ToolCall::SetTransition(_) => "set_transition",
             ToolCall::RenderFrame(_) => "render_frame",
             ToolCall::GetAudioLevels(_) => "get_audio_levels",
             ToolCall::Export(_) => "export",
@@ -463,6 +465,62 @@ pub struct SetClipColorArgs {
     /// How the clips look on the timeline, to tag them (e.g. takes to
     /// review). It does not change the picture.
     pub color: ClipColorArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TransitionKindArg {
+    Push,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DirectionArg {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EaseArg {
+    None,
+    In,
+    Out,
+    InOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct SetTransitionArgs {
+    pub timeline_id: String,
+    /// The timeline's `revision` from your last read: the call is refused
+    /// if the timeline changed since (e.g. the user edited it meanwhile).
+    #[serde(default)]
+    pub if_revision: Option<String>,
+    /// Video clips.
+    pub clip_ids: Vec<String>,
+    /// `start`: the clip enters; `end`: it leaves.
+    pub edge: EdgeArg,
+    /// `push` (default) slides the clip in or out of the frame; `none`
+    /// removes the transition from that edge.
+    #[serde(default)]
+    pub kind: Option<TransitionKindArg>,
+    /// Timeline frames from the edge, at most the clip's length. Default
+    /// 0.45 s, or the value already set on that edge (as for the options
+    /// below).
+    #[serde(default)]
+    pub duration: Option<i64>,
+    /// Where the picture moves on screen. Default `right`.
+    #[serde(default)]
+    pub direction: Option<DirectionArg>,
+    /// Default `in_out`.
+    #[serde(default)]
+    pub ease: Option<EaseArg>,
+    /// Strength of the ease, 0-1. Default 0.5.
+    #[serde(default)]
+    pub curve: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]

@@ -243,6 +243,13 @@ impl VenturiServer {
         self.call(ToolCall::SetClipColor(args)).await
     }
 
+    #[tool(
+        description = "Sets or removes (`kind: none`) the transition on one edge of video clips: `push` slides the clip in from, or out to, the edge of the frame over what is below. Options not given keep the value already on that edge, else the defaults. `get_clip` reports it as `transition_in`/`transition_out`."
+    )]
+    async fn set_transition(&self, Parameters(args): Parameters<SetTransitionArgs>) -> ToolReturn {
+        self.call(ToolCall::SetTransition(args)).await
+    }
+
     #[tool(description = "Changes a marker's position, duration, note or color.")]
     async fn edit_marker(&self, Parameters(args): Parameters<EditMarkerArgs>) -> ToolReturn {
         self.call(ToolCall::EditMarker(args)).await
