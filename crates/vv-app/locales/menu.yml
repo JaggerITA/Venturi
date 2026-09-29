@@ -4,6 +4,10 @@ menu.file:
   en: "File"
   it: "File"
 
+menu.new_project:
+  en: "New project"
+  it: "Nuovo progetto"
+
 menu.open_project:
   en: "Open project..."
   it: "Apri progetto..."

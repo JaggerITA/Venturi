@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectSwitch {
+    New,
     Open,
     OpenRecent(PathBuf),
     Quit,
@@ -430,6 +431,7 @@ impl VenturiApp {
 
     pub(crate) fn run_project_switch(&mut self, switch: ProjectSwitch) {
         match switch {
+            ProjectSwitch::New => self.new_project(),
             ProjectSwitch::Open => self.open_project_dialog(),
             ProjectSwitch::OpenRecent(path) => self.load_project_from(path),
             ProjectSwitch::Quit => self.quit_confirmed = true,
@@ -603,6 +605,11 @@ impl VenturiApp {
             dlg.add_filter(t!("file_filter.project"), &["vvproj"])
                 .pick_file()
         });
+    }
+
+    pub(crate) fn new_project(&mut self) {
+        self.session.new_project();
+        self.reset_for_replaced_project();
     }
 
     /// Replaces the project and resets the UI state tied to the old one.

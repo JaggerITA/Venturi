@@ -4262,6 +4262,26 @@ fn switching_project_with_unsaved_changes_waits_and_keeps_the_project_on_failure
     );
 }
 
+/// "New project" asks about unsaved changes, then starts from an empty,
+/// untitled project.
+#[test]
+fn new_project_discards_after_confirmation() {
+    let mut app = VenturiApp::default();
+    make_timeline_with_clip(&mut app, 0, 0, 10);
+    app.session
+        .set_path(Some(std::env::temp_dir().join("vv-app-new-project.vvproj")));
+
+    app.request_project_switch(ProjectSwitch::New);
+    assert_eq!(app.pending_project_switch, Some(ProjectSwitch::New));
+    app.resolve_unsaved_changes(UnsavedChoice::Discard);
+
+    assert!(app.session.project.timelines.is_empty());
+    assert!(app.session.project.media_pool.is_empty());
+    assert_eq!(app.timeline_id, None);
+    assert_eq!(app.session.path(), None);
+    assert!(!app.has_unsaved_changes());
+}
+
 /// The waveform cache may be missing (deleted, another machine):
 /// opening the project regenerates it.
 #[test]

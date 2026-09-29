@@ -180,6 +180,9 @@ action.select_all:
 action.select_from_playhead:
   en: Select forward from playhead
   it: Seleziona dal playhead in avanti
+action.new_project:
+  en: New project
+  it: Nuovo progetto
 action.open_project:
   en: Open project
   it: Apri progetto

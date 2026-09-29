@@ -35,6 +35,7 @@ pub enum Action {
     RetimeControls,
     SelectAll,
     SelectFromPlayhead,
+    NewProject,
     OpenProject,
     SaveProject,
     SaveProjectAs,
@@ -46,7 +47,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 31] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -69,6 +70,7 @@ impl Action {
         Action::RetimeControls,
         Action::SelectAll,
         Action::SelectFromPlayhead,
+        Action::NewProject,
         Action::OpenProject,
         Action::SaveProject,
         Action::SaveProjectAs,
@@ -104,6 +106,7 @@ impl Action {
             Action::RetimeControls => "retime_controls",
             Action::SelectAll => "select_all",
             Action::SelectFromPlayhead => "select_from_playhead",
+            Action::NewProject => "new_project",
             Action::OpenProject => "open_project",
             Action::SaveProject => "save_project",
             Action::SaveProjectAs => "save_project_as",
@@ -143,7 +146,8 @@ impl Action {
             | Action::RetimeControls
             | Action::SelectAll
             | Action::SelectFromPlayhead => t!("action_category.edit"),
-            Action::OpenProject
+            Action::NewProject
+            | Action::OpenProject
             | Action::SaveProject
             | Action::SaveProjectAs
             | Action::ImportMedia
@@ -196,6 +200,7 @@ impl Action {
                 alt: true,
                 ..plain(Key::Y)
             }],
+            Action::NewProject => vec![ctrl(Key::N)],
             Action::OpenProject => vec![ctrl(Key::O)],
             Action::SaveProject => vec![ctrl(Key::S)],
             Action::SaveProjectAs => vec![ctrl_shift(Key::S)],

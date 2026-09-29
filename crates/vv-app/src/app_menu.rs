@@ -97,6 +97,9 @@ impl VenturiApp {
             if pressed(Action::SaveProjectAs) {
                 self.save_project_as();
             }
+            if pressed(Action::NewProject) {
+                self.request_project_switch(ProjectSwitch::New);
+            }
             if pressed(Action::OpenProject) {
                 self.request_project_switch(ProjectSwitch::Open);
             }
@@ -165,6 +168,13 @@ impl VenturiApp {
 
                 bar_menus.push(
                     ui.menu_button(t!("menu.file"), |ui| {
+                        if ui
+                            .button(keymap.menu_label(&t!("menu.new_project"), Action::NewProject))
+                            .clicked()
+                        {
+                            self.request_project_switch(ProjectSwitch::New);
+                            ui.close();
+                        }
                         if ui
                             .button(
                                 keymap.menu_label(&t!("menu.open_project"), Action::OpenProject),
