@@ -53,6 +53,7 @@ fn project_with_timeline_item() -> (Project, MediaId) {
         resolution: (64, 48),
         tracks: vec![track],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let media_id = project.media_pool.insert(MediaItem {
         path: "Timeline 1".into(),

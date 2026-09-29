@@ -9,6 +9,7 @@ fn project_with_tracks(kinds: &[TrackKind]) -> (Project, TimelineId) {
         resolution: (1920, 1080),
         tracks: kinds.iter().map(|&k| Track::new(k)).collect(),
         markers: Vec::new(),
+        master: Default::default(),
     });
     (project, timeline)
 }

@@ -10,6 +10,7 @@ fn media_ids(n: usize) -> Vec<MediaId> {
                 resolution: (64, 48),
                 tracks: Vec::new(),
                 markers: Vec::new(),
+                master: Default::default(),
             });
             project.insert_timeline_item(timeline, None)
         })

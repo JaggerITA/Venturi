@@ -65,8 +65,10 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         }],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),

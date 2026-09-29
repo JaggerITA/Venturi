@@ -39,8 +39,9 @@ is where the time goes, so that is the part that has to be perfect.
 - **Fast playback and scrubbing.** Timeline-wide frame cache, optional
   background proxies, playback up to 8x with pitch-preserved audio.
 - **Professional timeline workflow.** Track scrubbing with audio, ripple
-  delete, compound clips, copy/paste properties, magnet snapping, unlimited
-  undo with a jumpable history.
+  delete, compound clips, copy/paste properties, magnet snapping, an audio
+  mixer with per-track and master gain, unlimited undo with a jumpable
+  history.
 - **Keyframes done right.** Every parameter is keyframable: crop, zoom,
   rotation, position, speed, opacity, audio gain. A dedicated curve editor
   with custom curves.

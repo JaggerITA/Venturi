@@ -7,7 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use vv_core::{ClipSource, FrameIdx, Keyframed, MediaId, Project, Timeline};
+use vv_core::{ChannelStrip, ClipSource, FrameIdx, Keyframed, MediaId, Project, Timeline};
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
@@ -25,6 +25,8 @@ pub struct MixClip {
     /// Interleaved at the snapshot's `sample_rate`/`channels`.
     pub buffer: Arc<Vec<f32>>,
     pub gain_db: Keyframed<f32>,
+    /// Timeline index of the track: its entry in `MixSnapshot::tracks`.
+    pub track: usize,
     pub clip_fps: f64,
     /// Audio frame of the media at `start` and media frames per timeline
     /// frame: where the gain keyframes are read, even from a stretched copy.
@@ -36,18 +38,118 @@ pub struct MixClip {
     pub fade_out: u64,
 }
 
+/// A mixer strip, ready for the mix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bus {
+    pub gain: f32,
+    /// Multipliers of the left and right channel.
+    pub balance: [f32; 2],
+}
+
+impl Bus {
+    pub const UNITY: Bus = Bus {
+        gain: 1.0,
+        balance: [1.0, 1.0],
+    };
+
+    pub fn from_strip(strip: &ChannelStrip) -> Self {
+        Self {
+            gain: db_to_linear(strip.gain_db),
+            balance: balance_gains(strip.pan),
+        }
+    }
+
+    /// Multiplier of output channel `c` of `channels`: the balance only
+    /// touches the first two, and nothing in mono.
+    fn channel_gain(&self, c: usize, channels: usize) -> f32 {
+        if channels < 2 || c >= 2 {
+            self.gain
+        } else {
+            self.gain * self.balance[c]
+        }
+    }
+}
+
+/// Balance, not a pan law: the centre keeps both channels at unity, moving
+/// towards a side only attenuates the other one.
+pub fn balance_gains(pan: f32) -> [f32; 2] {
+    let pan = pan.clamp(-1.0, 1.0);
+    [(1.0 - pan).min(1.0), (1.0 + pan).min(1.0)]
+}
+
+/// Peak of a left/right pair since the last `take`. Non-negative floats
+/// order like their bits, so `fetch_max` works on them.
+#[derive(Debug, Default)]
+pub struct StereoPeak([AtomicU32; 2]);
+
+impl StereoPeak {
+    fn raise(&self, peak: [f32; 2]) {
+        for (slot, value) in self.0.iter().zip(peak) {
+            slot.fetch_max(value.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn take(&self) -> (f32, f32) {
+        let [l, r] = &self.0;
+        (
+            f32::from_bits(l.swap(0, Ordering::Relaxed)),
+            f32::from_bits(r.swap(0, Ordering::Relaxed)),
+        )
+    }
+}
+
+/// Post-fader peaks of what the output stream played.
+#[derive(Debug, Default)]
+pub struct MixMeters {
+    /// Indexed like `MixSnapshot::tracks`.
+    tracks: Vec<StereoPeak>,
+    master: StereoPeak,
+}
+
+impl MixMeters {
+    pub fn track(&self, index: usize) -> Option<&StereoPeak> {
+        self.tracks.get(index)
+    }
+
+    pub fn master(&self) -> &StereoPeak {
+        &self.master
+    }
+}
+
 pub struct MixSnapshot {
     pub sample_rate: u32,
     pub channels: u16,
     pub clips: Vec<MixClip>,
+    /// Indexed by timeline track index; a clip whose track is missing plays
+    /// at unity.
+    pub tracks: Vec<Bus>,
+    pub master: Bus,
+    pub meters: MixMeters,
 }
 
 impl MixSnapshot {
     pub fn empty(sample_rate: u32, channels: u16) -> Self {
+        Self::new(sample_rate, channels, Vec::new(), Vec::new(), Bus::UNITY)
+    }
+
+    pub fn new(
+        sample_rate: u32,
+        channels: u16,
+        clips: Vec<MixClip>,
+        tracks: Vec<Bus>,
+        master: Bus,
+    ) -> Self {
+        let meters = MixMeters {
+            tracks: tracks.iter().map(|_| StereoPeak::default()).collect(),
+            master: StereoPeak::default(),
+        };
         Self {
             sample_rate,
             channels,
-            clips: Vec::new(),
+            clips,
+            tracks,
+            master,
+            meters,
         }
     }
 
@@ -146,7 +248,7 @@ fn collect_clips(
     let ch = channels.max(1) as u64;
     let mut clips = Vec::new();
     let mut readiness = Readiness::Complete;
-    for (_, track) in timeline.audible_tracks() {
+    for (track_index, track) in timeline.audible_tracks() {
         for clip in track.clips.iter().filter(|c| !c.disabled) {
             let ClipSource::Media(media_id) = &clip.source else {
                 continue;
@@ -182,6 +284,7 @@ fn collect_clips(
             else {
                 continue;
             };
+            mix_clip.track = track_index;
             if pitch_corrected {
                 let range = mix_clip.source_offset
                     ..mix_clip.source_offset + (mix_clip.len as f64 * mix_clip.step).ceil() as u64;
@@ -208,11 +311,13 @@ fn collect_clips(
             clips.push(mix_clip);
         }
     }
-    let snapshot = MixSnapshot {
-        sample_rate,
-        channels,
-        clips,
-    };
+    let tracks = timeline
+        .tracks
+        .iter()
+        .map(|t| Bus::from_strip(&t.mix))
+        .collect();
+    let master = Bus::from_strip(&timeline.master);
+    let snapshot = MixSnapshot::new(sample_rate, channels, clips, tracks, master);
     (snapshot, readiness)
 }
 
@@ -307,6 +412,7 @@ fn mix_clip_from(
         step,
         buffer,
         gain_db: clip.effects.gain_db.clone(),
+        track: 0,
         clip_fps,
         media_offset: source_offset,
         media_step: step,
@@ -331,6 +437,15 @@ pub fn sample_to_timeline_frame(sample: u64, fps: f64, sample_rate: u32) -> Fram
 /// starting from timeline audio frame `start`. No allocations: it runs
 /// in the realtime callback.
 pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
+    mix_into(snapshot, start, out, false);
+}
+
+/// `mix_range` for the output stream: it also raises `snapshot.meters`.
+pub fn mix_range_metered(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
+    mix_into(snapshot, start, out, true);
+}
+
+fn mix_into(snapshot: &MixSnapshot, start: u64, out: &mut [f32], metered: bool) {
     out.fill(0.0);
     let ch = snapshot.channels as usize;
     if ch == 0 {
@@ -338,6 +453,8 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
     }
     let end = start + (out.len() / ch) as u64;
     for clip in &snapshot.clips {
+        let bus = snapshot.tracks.get(clip.track).unwrap_or(&Bus::UNITY);
+        let mut peak = [0.0f32; 2];
         let clip_end = clip.start + clip.len;
         let to = end.min(clip_end);
         let mut f = start.max(clip.start);
@@ -347,47 +464,85 @@ pub fn mix_range(snapshot: &MixSnapshot, start: u64, out: &mut [f32]) {
             let block_end = (clip.start + (block + 1) * GAIN_BLOCK_FRAMES).min(to);
             let gain = block_gain_linear(clip, block, snapshot.sample_rate)
                 * fade_multiplier(clip, in_clip);
+            let gain_of = |c: usize| gain * bus.channel_gain(c, ch);
 
             let dst = ((f - start) as usize) * ch;
             if clip.step == 1.0 {
                 let src = ((clip.source_offset + in_clip) as usize) * ch;
                 let count =
                     ((block_end - f) as usize * ch).min(clip.buffer.len().saturating_sub(src));
-                for (d, s) in out[dst..dst + count]
-                    .iter_mut()
-                    .zip(&clip.buffer[src..src + count])
+                for (frame, source) in out[dst..dst + count]
+                    .chunks_exact_mut(ch)
+                    .zip(clip.buffer[src..src + count].chunks_exact(ch))
                 {
-                    *d += s * gain;
+                    for (c, (d, s)) in frame.iter_mut().zip(source).enumerate() {
+                        add_sample(d, s * gain_of(c), c, &mut peak);
+                    }
                 }
             } else {
                 let frames = &mut out[dst..dst + (block_end - f) as usize * ch];
                 for (i, frame) in frames.chunks_exact_mut(ch).enumerate() {
                     let pos = clip.source_offset as f64 + (in_clip + i as u64) as f64 * clip.step;
-                    add_resampled(&clip.buffer, ch, pos, clip.step, gain, frame);
+                    add_resampled(&clip.buffer, ch, pos, clip.step, gain_of, frame, &mut peak);
                 }
             }
             f = block_end;
         }
+        if metered && let Some(meter) = snapshot.meters.track(clip.track) {
+            meter.raise(mono_as_stereo(peak, ch));
+        }
     }
+    let mut peak = [0.0f32; 2];
+    for frame in out.chunks_exact_mut(ch) {
+        for (c, s) in frame.iter_mut().enumerate() {
+            *s *= snapshot.master.channel_gain(c, ch);
+            if c < 2 {
+                peak[c] = peak[c].max(s.abs());
+            }
+        }
+    }
+    if metered {
+        snapshot.meters.master.raise(mono_as_stereo(peak, ch));
+    }
+}
+
+fn add_sample(out: &mut f32, value: f32, c: usize, peak: &mut [f32; 2]) {
+    *out += value;
+    if c < 2 {
+        peak[c] = peak[c].max(value.abs());
+    }
+}
+
+fn mono_as_stereo(peak: [f32; 2], channels: usize) -> [f32; 2] {
+    if channels == 1 { [peak[0]; 2] } else { peak }
 }
 
 /// Varispeed read of the frame at fractional position `pos`: linear
 /// interpolation slowing down; speeding up, the average of the `step`
 /// frames skipped over, a crude low-pass against aliasing.
-fn add_resampled(buffer: &[f32], ch: usize, pos: f64, step: f64, gain: f32, out: &mut [f32]) {
+fn add_resampled(
+    buffer: &[f32],
+    ch: usize,
+    pos: f64,
+    step: f64,
+    gain_of: impl Fn(usize) -> f32,
+    out: &mut [f32],
+    peak: &mut [f32; 2],
+) {
     let frames = buffer.len() / ch;
     let at = |frame: usize, c: usize| buffer[frame.min(frames - 1) * ch + c];
     let i = pos as usize;
     if step < 1.0 {
         let t = (pos - i as f64) as f32;
         for (c, o) in out.iter_mut().enumerate() {
-            *o += (at(i, c) + (at(i + 1, c) - at(i, c)) * t) * gain;
+            let value = at(i, c) + (at(i + 1, c) - at(i, c)) * t;
+            add_sample(o, value * gain_of(c), c, peak);
         }
     } else {
         let n = (step as usize).max(1);
         for (c, o) in out.iter_mut().enumerate() {
             let sum: f32 = (i..i + n).map(|frame| at(frame, c)).sum();
-            *o += sum / n as f32 * gain;
+            add_sample(o, sum / n as f32 * gain_of(c), c, peak);
         }
     }
 }
@@ -583,7 +738,7 @@ impl Mixer {
                                 frames * window.tempo
                             }
                             None => {
-                                mix_range(&current.mix, pos, data);
+                                mix_range_metered(&current.mix, pos, data);
                                 frames
                             }
                         };

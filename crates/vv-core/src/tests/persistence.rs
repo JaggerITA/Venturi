@@ -10,6 +10,7 @@ fn save_then_load_round_trips_a_project_with_clips_and_keyframes() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let media_id = project.media_pool.insert(MediaItem {
         path: "/tmp/example.mp4".into(),

@@ -2,10 +2,10 @@
 //! needed to invert itself at the moment it is applied.
 
 use crate::model::{
-    Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition, EffectStack,
-    FrameIdx, Interpolation, Keyframed, LinkGroupId, Marker, MarkerId, MediaId, MediaItem,
-    MediaMeta, Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind,
-    Transform, TransformParam, Transition,
+    ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource, CrossTransition,
+    EffectStack, FrameIdx, GAIN_DB_MAX, GAIN_DB_MIN, Interpolation, Keyframed, LinkGroupId, Marker,
+    MarkerId, MediaId, MediaItem, MediaMeta, Project, Rational, Rgba, Timeline, TimelineId,
+    TitleParams, Track, TrackKind, Transform, TransformParam, Transition,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -25,6 +25,8 @@ pub enum CommandLabel {
     MuteTrack,
     SoloTrack,
     LockTrack,
+    MixerGain,
+    MixerPan,
     ToggleClipsDisabled,
     InsertClips,
     PasteClips,
@@ -401,6 +403,95 @@ impl Command for SetTrackFlag {
             return;
         };
         *self.flag.field(track) = old;
+    }
+}
+
+/// A strip of the audio mixer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MixerChannel {
+    Track(usize),
+    Master,
+}
+
+fn channel_strip(
+    project: &mut Project,
+    timeline: TimelineId,
+    channel: MixerChannel,
+) -> Option<&mut ChannelStrip> {
+    let tl = project.timelines.get_mut(timeline)?;
+    match channel {
+        MixerChannel::Track(index) => tl.tracks.get_mut(index).map(|t| &mut t.mix),
+        MixerChannel::Master => Some(&mut tl.master),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixerParam {
+    GainDb,
+    Pan,
+}
+
+impl MixerParam {
+    fn field(self, strip: &mut ChannelStrip) -> &mut f32 {
+        match self {
+            MixerParam::GainDb => &mut strip.gain_db,
+            MixerParam::Pan => &mut strip.pan,
+        }
+    }
+
+    pub fn range(self) -> std::ops::RangeInclusive<f32> {
+        match self {
+            MixerParam::GainDb => GAIN_DB_MIN..=GAIN_DB_MAX,
+            MixerParam::Pan => -1.0..=1.0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SetMixerParam {
+    pub timeline: TimelineId,
+    pub channel: MixerChannel,
+    pub param: MixerParam,
+    pub value: f32,
+    old: Option<f32>,
+}
+
+impl SetMixerParam {
+    pub fn new(timeline: TimelineId, channel: MixerChannel, param: MixerParam, value: f32) -> Self {
+        let range = param.range();
+        Self {
+            timeline,
+            channel,
+            param,
+            value: value.clamp(*range.start(), *range.end()),
+            old: None,
+        }
+    }
+}
+
+impl Command for SetMixerParam {
+    fn label(&self) -> CommandLabel {
+        match self.param {
+            MixerParam::GainDb => CommandLabel::MixerGain,
+            MixerParam::Pan => CommandLabel::MixerPan,
+        }
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(strip) = channel_strip(project, self.timeline, self.channel) {
+            let field = self.param.field(strip);
+            self.old = Some(*field);
+            *field = self.value;
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if let (Some(old), Some(strip)) = (
+            self.old,
+            channel_strip(project, self.timeline, self.channel),
+        ) {
+            *self.param.field(strip) = old;
+        }
     }
 }
 
@@ -2698,6 +2789,15 @@ pub fn plan_compound_clip(
         .copied()
         .filter(|&i| timeline.tracks[i].kind == TrackKind::Audio)
         .min();
+    // The compound clip plays through the gain of its host track: the nested
+    // tracks keep only the difference, so the mix sounds the same.
+    let host_gain_db = audio_track.map_or(0.0, |i| timeline.tracks[i].mix.gain_db);
+    for (&old_index, &new_index) in &index_map {
+        if nested_tracks[new_index].kind == TrackKind::Audio {
+            nested_tracks[new_index].mix.gain_db =
+                timeline.tracks[old_index].mix.gain_db - host_gain_db;
+        }
+    }
 
     Some(CompoundPlan {
         nested_timeline: Timeline {
@@ -2706,6 +2806,7 @@ pub fn plan_compound_clip(
             resolution: timeline.resolution,
             tracks: nested_tracks,
             markers: Vec::new(),
+            master: Default::default(),
         },
         range_start,
         len: range_end - range_start,

@@ -29,6 +29,7 @@ fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
             Track {
                 kind: TrackKind::Video,
@@ -37,9 +38,11 @@ fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
         ],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(
         tl.active_video_clip_at(5).map(|(t, c)| (t, c.id)),
@@ -70,6 +73,7 @@ fn active_video_clip_at_skips_what_is_not_composited() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     };
     let mut disabled = clip_at(0, 10, 2);
     disabled.disabled = true;
@@ -79,6 +83,7 @@ fn active_video_clip_at_skips_what_is_not_composited() {
         resolution: (1920, 1080),
         tracks: vec![track(clip_at(0, 10, 1), false), track(disabled, false)],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(
         tl.active_video_clip_at(5).map(|(_, c)| c.id),
@@ -106,6 +111,7 @@ fn active_video_clips_at_returns_every_covering_track_bottom_to_top() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
             Track {
                 kind: TrackKind::Video,
@@ -114,9 +120,11 @@ fn active_video_clips_at_returns_every_covering_track_bottom_to_top() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
         ],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(
         tl.active_video_clips_at(15)
@@ -151,6 +159,7 @@ fn active_video_clip_at_ignores_audio_tracks() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
             Track {
                 kind: TrackKind::Audio,
@@ -159,9 +168,11 @@ fn active_video_clip_at_ignores_audio_tracks() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
         ],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(
         tl.active_video_clip_at(5).map(|(_, c)| c.id),
@@ -181,6 +192,7 @@ fn first_track_index_finds_the_bottom_most_track_of_a_kind() {
             Track::new(TrackKind::Video),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(tl.first_track_index(TrackKind::Video), Some(0));
     assert_eq!(tl.first_track_index(TrackKind::Audio), Some(1));
@@ -214,6 +226,7 @@ fn total_frames_is_the_furthest_clip_end_across_tracks() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
             Track {
                 kind: TrackKind::Audio,
@@ -222,9 +235,11 @@ fn total_frames_is_the_furthest_clip_end_across_tracks() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
         ],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(tl.total_frames(), 25);
 }
@@ -368,8 +383,10 @@ fn refresh_clip_rates_conforms_a_clip_loaded_without_a_rate() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         }],
         markers: Vec::new(),
+        master: Default::default(),
     });
 
     project.refresh_clip_rates();
@@ -415,6 +432,7 @@ fn total_frames_is_zero_for_an_empty_timeline() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     };
     assert_eq!(tl.total_frames(), 0);
 }

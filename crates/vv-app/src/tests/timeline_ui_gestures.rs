@@ -29,6 +29,7 @@ impl Harness {
             resolution: (1920, 1080),
             tracks,
             markers: Vec::new(),
+            master: Default::default(),
         });
         let mut harness = Self {
             ctx: egui::Context::default(),

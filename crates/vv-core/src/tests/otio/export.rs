@@ -31,6 +31,7 @@ fn project() -> (Project, TimelineId, MediaId) {
             Track::new(TrackKind::Audio),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     });
     (project, timeline, media)
 }
@@ -356,6 +357,7 @@ fn normalizes_the_position_on_the_clip_not_on_the_frame() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut clip = Clip::from_source_range(
         ClipId(1),

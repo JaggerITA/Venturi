@@ -46,6 +46,7 @@ fn adding_at_the_playhead_skips_a_frame_that_already_has_a_marker() {
         resolution: (1920, 1080),
         tracks: Vec::new(),
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = vv_core::History::default();
     add_marker_at_playhead(&mut project, &mut history, timeline_id, 12);

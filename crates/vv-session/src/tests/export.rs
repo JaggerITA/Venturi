@@ -22,6 +22,7 @@ fn timeline_with(tracks: Vec<Track>) -> Timeline {
         resolution: (4, 2),
         tracks,
         markers: Vec::new(),
+        master: Default::default(),
     }
 }
 
@@ -66,6 +67,7 @@ fn render_video_frame_returns_black_in_a_gap() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut active = StreamingFrameProvider::default();
@@ -83,6 +85,7 @@ fn render_video_frame_reads_solid_color_at_the_clips_source_frame() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut active = StreamingFrameProvider::default();
@@ -108,8 +111,10 @@ fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         }],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
@@ -144,6 +149,7 @@ fn render_video_frame_recurses_into_a_compound_clips_nested_timeline() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut provider = StreamingFrameProvider::default();
@@ -187,8 +193,10 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         }],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
@@ -224,6 +232,7 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
         Track {
             kind: TrackKind::Video,
@@ -232,6 +241,7 @@ fn render_video_frame_lets_the_track_below_show_through_the_compound_clips_empty
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
     ]);
     let compositor = vv_render::Compositor::new_headless();
@@ -297,6 +307,7 @@ fn render_video_frame_lets_the_track_below_show_through_a_transparent_png() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
         Track {
             kind: TrackKind::Video,
@@ -305,6 +316,7 @@ fn render_video_frame_lets_the_track_below_show_through_a_transparent_png() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
     ]);
     let compositor = vv_render::Compositor::new_headless();
@@ -339,6 +351,7 @@ fn render_video_frame_applies_the_transform_to_a_solid_color_clip() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut active = StreamingFrameProvider::default();
@@ -387,6 +400,7 @@ fn render_video_frame_fails_loudly_when_the_clip_references_a_missing_media() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }]);
     let compositor = vv_render::Compositor::new_headless();
     let mut provider = StreamingFrameProvider::default();
@@ -407,6 +421,7 @@ fn render_video_frame_prefers_the_topmost_video_track() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
         Track {
             kind: TrackKind::Video,
@@ -415,6 +430,7 @@ fn render_video_frame_prefers_the_topmost_video_track() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
     ]);
     let compositor = vv_render::Compositor::new_headless();
@@ -446,6 +462,7 @@ fn mix_audio_track_is_silence_when_no_audio_track_has_clips() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
         Track {
             kind: TrackKind::Audio,
@@ -454,6 +471,7 @@ fn mix_audio_track_is_silence_when_no_audio_track_has_clips() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         },
     ]);
     let mixed = mix_audio_track(&project, &tl, 0..25).unwrap();
@@ -521,8 +539,10 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         }],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let compound_media = project.media_pool.insert(vv_core::MediaItem {
         path: "Compound Clip 1".into(),
@@ -558,6 +578,7 @@ fn mix_audio_track_recurses_into_a_compound_clips_nested_timeline() {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }]);
 
     let mixed = mix_audio_track(&project, &tl, 0..50).unwrap();
@@ -643,6 +664,7 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
             Track {
                 kind: TrackKind::Audio,
@@ -651,9 +673,11 @@ fn export_keeps_video_and_audio_frame_accurate_at_a_fractional_ntsc_fps() {
                 solo: false,
                 locked: false,
                 crossings: Vec::new(),
+                mix: Default::default(),
             },
         ],
         markers: Vec::new(),
+        master: Default::default(),
     };
     let timeline_id = project.timelines.insert(tl);
 
@@ -796,6 +820,7 @@ fn mix_audio_track_plays_a_faster_clip_with_or_without_its_pitch() {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: Default::default(),
         }]);
         let mixed = mix_audio_track(&project, &tl, 0..25).unwrap();
         // First channel, the middle half second: away from the stretch's edges.

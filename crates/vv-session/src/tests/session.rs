@@ -60,6 +60,7 @@ fn timeline() -> Timeline {
         resolution: (64, 48),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     }
 }
 

@@ -1393,6 +1393,7 @@ fn duplicate_clips_keeps_the_originals_relinks_the_copies_and_cuts_what_they_cov
             vv_core::Track::new(TrackKind::Audio),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
     let solid = |id, start, len| {
@@ -1481,6 +1482,7 @@ fn make_compound_clip_replaces_the_selection_and_names_it_in_order() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
     let solid = |id, start, len| {
@@ -1593,6 +1595,7 @@ fn show_timeline_renders_without_panicking_with_real_clips() {
             vv_core::Track::new(TrackKind::Audio),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
 
@@ -1663,6 +1666,7 @@ fn show_timeline_renders_without_panicking_with_more_than_two_tracks() {
             vv_core::Track::new(TrackKind::Audio),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
     let mut state = TimelineState::default();
@@ -1708,6 +1712,7 @@ fn zoom_keeps_playhead_at_same_screen_position() {
             vv_core::Track::new(TrackKind::Audio),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
     // Clip long enough to make the timeline scrollable (content
@@ -1833,6 +1838,7 @@ fn show_timeline_panel_does_not_shrink_to_short_content() {
         resolution: (1920, 1080),
         tracks: vec![vv_core::Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
     let clip = Clip::from_source_range(

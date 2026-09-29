@@ -14,6 +14,7 @@ mod keyframe_editor;
 mod media_pool;
 mod media_pool_ui;
 mod mix_buffers;
+mod mixer_panel;
 mod new_timeline_dialog;
 mod paste_attributes;
 mod project_io;
@@ -205,6 +206,7 @@ struct VenturiApp {
     timeline_state: timeline_ui::TimelineState,
     media_pool_state: media_pool::MediaPoolState,
     keyframe_editor: keyframe_editor::KeyframeEditorState,
+    mixer_panel: mixer_panel::MixerPanelState,
     /// Media or elements not imported, shown in a separate window
     /// until the user closes it.
     import_warnings: Vec<String>,
@@ -378,6 +380,7 @@ impl Default for VenturiApp {
             timeline_state: timeline_ui::TimelineState::default(),
             media_pool_state: media_pool::MediaPoolState::default(),
             keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
+            mixer_panel: mixer_panel::MixerPanelState::default(),
             import_warnings: Vec::new(),
             preview_meta: None,
             preview_error: None,
@@ -565,6 +568,7 @@ impl VenturiApp {
             resolution: (meta.width, meta.height),
             tracks: vec![track],
             markers: Vec::new(),
+            master: Default::default(),
         });
         let render_ahead = render_ahead::RenderAhead::spawn(
             project,
@@ -1148,6 +1152,7 @@ impl VenturiApp {
             resolution,
             tracks,
             markers: Vec::new(),
+            master: Default::default(),
         };
         let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::NewTimeline);
         let (id, _) = add.timeline(&mut self.session.project, timeline, None);
@@ -1174,6 +1179,7 @@ impl VenturiApp {
             resolution,
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
             markers: Vec::new(),
+            master: Default::default(),
         };
         let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::NewTimeline);
         let (id, _) = add.timeline(&mut self.session.project, timeline, None);
@@ -2601,6 +2607,7 @@ enum ToolbarIcon {
     Media,
     Effects,
     Curves,
+    Mixer,
     Properties,
 }
 
@@ -2693,6 +2700,18 @@ fn paint_toolbar_icon(
             ));
             painter.circle_filled(from, 1.8, color);
             painter.circle_filled(to, 1.8, color);
+        }
+        // Three faders.
+        ToolbarIcon::Mixer => {
+            for (dx, knob) in [(-4.0, 2.0), (0.0, -3.0), (4.0, 0.5)] {
+                let x = c.x + dx;
+                painter.line_segment([egui::pos2(x, c.y - 6.0), egui::pos2(x, c.y + 6.0)], stroke);
+                painter.rect_filled(
+                    egui::Rect::from_center_size(egui::pos2(x, c.y + knob), egui::vec2(3.5, 2.0)),
+                    0.5,
+                    color,
+                );
+            }
         }
         // Three slider tracks with their knobs.
         ToolbarIcon::Properties => {
@@ -2985,6 +3004,12 @@ impl eframe::App for VenturiApp {
                     &mut self.settings.panels.keyframe_editor_open,
                     ToolbarIcon::Curves,
                     &t!("toolbar.keyframe_editor"),
+                );
+                toolbar_toggle(
+                    ui,
+                    &mut self.settings.panels.mixer_open,
+                    ToolbarIcon::Mixer,
+                    &t!("toolbar.mixer"),
                 );
                 if let Some(err) = &self.project_error {
                     ui.separator();
@@ -3282,6 +3307,16 @@ impl eframe::App for VenturiApp {
             );
             pending_effects.extend(editor.commands);
             pending_playhead = editor.playhead.or(pending_playhead);
+        }
+        if self.settings.panels.mixer_open {
+            pending_effects.extend(mixer_panel::show_mixer(
+                ui.ctx(),
+                &mut self.settings.panels.mixer_open,
+                &mut self.mixer_panel,
+                &self.session.project,
+                self.timeline_id,
+                self.timeline_audio.as_ref().map(TimelineAudio::meters),
+            ));
         }
 
         if let Some(id) = preview_action {

@@ -54,6 +54,7 @@ fn make_timeline_with_clip(
             resolution: (1920, 1080),
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
             markers: Vec::new(),
+            master: Default::default(),
         });
         app.timeline_id = Some(id);
     }
@@ -111,6 +112,7 @@ fn pasting_from_a_video_only_compound_keeps_the_clips_on_video_tracks() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     insert_compound_media(&mut app, nested_id);
     app.enter_compound_timeline(nested_id);
@@ -157,6 +159,7 @@ fn deleting_a_compound_clip_while_editing_it_goes_back_to_the_parent_timeline() 
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let media = insert_compound_media(&mut app, nested_id);
     app.enter_compound_timeline(nested_id);
@@ -198,6 +201,7 @@ fn a_compound_waveform_is_composed_from_the_nested_clips() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let clip = vv_core::Clip::from_source_range(
         app.session.project.alloc_clip_id(),
@@ -247,6 +251,7 @@ fn entering_and_exiting_a_compound_timeline_switches_the_active_one_and_resets_u
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     insert_compound_media(&mut app, nested_id);
     app.timeline_state.playhead = 42;
@@ -295,6 +300,7 @@ fn entering_the_current_timeline_or_an_ancestor_already_in_the_stack_is_a_no_op(
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     insert_compound_media(&mut app, nested_id);
     app.enter_compound_timeline(nested_id);
@@ -323,6 +329,7 @@ fn clipboard_survives_navigating_into_a_compound_timeline_and_pastes_there() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     insert_compound_media(&mut app, nested_id);
 
@@ -408,6 +415,7 @@ fn dropping_a_compound_clip_that_would_close_an_indirect_cycle_is_refused() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let compound_media = insert_compound_media(&mut app, nested_id);
     let root_media = app
@@ -482,6 +490,7 @@ fn app_with_media_at(
         resolution: (320, 240),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     app.timeline_id = Some(timeline_id);
     (app, media_id)
@@ -537,6 +546,7 @@ fn the_prefetch_window_shrinks_to_what_the_cache_budget_holds() {
         resolution: (1920, 1080),
         tracks: vec![track_a, track_b],
         markers: Vec::new(),
+        master: Default::default(),
     });
     app.timeline_id = Some(timeline_id);
     app.timeline_state.playhead = 6_000;
@@ -1257,6 +1267,7 @@ fn pasting_into_a_timeline_at_another_fps_keeps_the_duration_in_seconds() {
         resolution: (320, 240),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     app.timeline_id = Some(other);
     app.timeline_state.playhead = 50;
@@ -3339,6 +3350,7 @@ fn buffered_timeline_ranges_covers_a_compound_clip_through_its_nested_timeline()
         resolution: (320, 240),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     app.session.project.timelines[nested_id].tracks[0].insert_sorted(inner);
     let compound = insert_compound_media(&mut app, nested_id);

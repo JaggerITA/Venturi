@@ -55,6 +55,7 @@ fn timeline(tracks: Vec<Track>) -> Timeline {
         resolution: (4, 2),
         tracks,
         markers: Vec::new(),
+        master: Default::default(),
     }
 }
 
@@ -66,6 +67,7 @@ fn audio_track(clips: Vec<Clip>) -> Track {
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     }
 }
 
@@ -663,6 +665,7 @@ fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
         step: 1.0,
         buffer: Arc::new(Vec::new()),
         gain_db: Keyframed::constant(0.0),
+        track: 0,
         clip_fps: 10.0,
         media_offset: 0,
         media_step: 1.0,
@@ -823,4 +826,65 @@ fn a_pitch_corrected_clip_plays_the_stretch_of_its_source_range_or_nothing() {
     let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut source);
     mix_range(&snap, 0, &mut out);
     assert!(out.iter().all(|&s| s == 0.0), "silent until it is ready");
+}
+
+#[test]
+fn track_and_master_gains_scale_the_mix() {
+    let (project, a, b) = project();
+    let mut louder = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    louder.mix.gain_db = 20.0 * 2f32.log10();
+    let mut tl = timeline(vec![louder, audio_track(vec![clip_at(b, 0, 0, 5)])]);
+    tl.master.gain_db = -20.0 * 2f32.log10();
+    let out = render(&project, &tl, 0, 5);
+    for (i, s) in out.iter().enumerate() {
+        let expected = (2.0 * 0.5 + i as f32 / 1000.0) / 2.0;
+        assert!((s - expected).abs() < 1e-5, "{s} != {expected}");
+    }
+}
+
+#[test]
+fn a_compound_clip_plays_through_its_nested_master() {
+    let (mut project, compound) = project_with_compound();
+    let nested = project.media_pool[compound].compound.unwrap();
+    project.timelines[nested].master.gain_db = -20.0 * 2f32.log10();
+    let tl = timeline(vec![audio_track(vec![clip_at(compound, 0, 0, 5)])]);
+    let out = render(&project, &tl, 0, 50);
+    assert!(out.iter().all(|&s| (s - 0.25).abs() < 1e-5));
+}
+
+#[test]
+fn balance_attenuates_only_the_opposite_channel() {
+    assert_eq!(balance_gains(0.0), [1.0, 1.0]);
+    assert_eq!(balance_gains(-0.25), [1.0, 0.75]);
+    assert_eq!(balance_gains(2.0), [0.0, 1.0], "clamped");
+
+    let (project, a, _) = project();
+    let mut left = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    left.mix.pan = -0.5;
+    let mut tl = timeline(vec![left]);
+    tl.master.pan = 0.5;
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut buffers);
+    let mut out = vec![9.0; 4];
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(out, [0.25, 0.25, 0.25, 0.25]);
+}
+
+#[test]
+fn only_the_metered_mix_raises_the_meters_and_taking_resets_them() {
+    let (project, a, b) = project();
+    let mut quiet = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    quiet.mix.gain_db = -20.0 * 2f32.log10();
+    let tl = timeline(vec![quiet, audio_track(vec![clip_at(b, 0, 0, 5)])]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let mut out = vec![0.0; 20];
+
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(snap.meters.master().take(), (0.0, 0.0));
+
+    mix_range_metered(&snap, 0, &mut out);
+    let (l, r) = snap.meters.track(0).unwrap().take();
+    assert!((l - 0.25).abs() < 1e-5 && l == r, "mono on both sides");
+    assert_eq!(snap.meters.track(1).unwrap().take().0, 19.0 / 1000.0);
+    assert!((snap.meters.master().take().0 - (0.25 + 0.019)).abs() < 1e-5);
+    assert_eq!(snap.meters.track(0).unwrap().take(), (0.0, 0.0));
 }

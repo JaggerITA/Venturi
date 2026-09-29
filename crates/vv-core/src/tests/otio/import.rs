@@ -60,6 +60,7 @@ fn a_venturi_export_imports_back_unchanged() {
             Track::new(TrackKind::Audio),
         ],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let rate = Rational::conform_rate(Rational::new(30, 1), media_meta.fps);
     let group = project.alloc_link_group_id();
@@ -161,6 +162,7 @@ fn reads_back_the_generators_without_our_metadata() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut color =
         Clip::from_source_range(ClipId(1), ClipSource::SolidColor, 0, 60, 0, Rational::one());
@@ -301,6 +303,7 @@ fn an_exported_adjustment_clip_reads_back_without_our_metadata() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut clip = Clip::from_source_range(
         ClipId(1),
@@ -767,6 +770,7 @@ fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let rate = Rational::conform_rate(fps, Rational::new(30, 1));
     project.timelines[timeline_id].tracks[1]
@@ -882,6 +886,7 @@ fn a_clip_speed_round_trips_with_and_without_our_metadata() {
         resolution: (1280, 720),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut clip = Clip::from_source_range(
         ClipId(1),
@@ -944,6 +949,7 @@ fn an_unknown_clip_color_imports_as_no_color() {
         resolution: (1280, 720),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut clip = Clip::from_source_range(
         ClipId(1),

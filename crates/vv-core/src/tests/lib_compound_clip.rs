@@ -8,6 +8,7 @@ fn project_with_tracks(kinds: &[TrackKind]) -> (Project, TimelineId) {
         resolution: (1920, 1080),
         tracks: kinds.iter().map(|k| Track::new(*k)).collect(),
         markers: Vec::new(),
+        master: Default::default(),
     });
     (project, timeline)
 }
@@ -41,6 +42,7 @@ fn insert_compound_media(project: &mut Project, plan: &CompoundPlan) -> MediaId 
         resolution: plan.nested_timeline.resolution,
         tracks: plan.nested_timeline.tracks.clone(),
         markers: Vec::new(),
+        master: Default::default(),
     });
     let path = project.alloc_compound_name().into();
     let content_hash = project.alloc_compound_generation();
@@ -247,6 +249,7 @@ fn would_create_a_cycle_catches_importing_a_timeline_into_itself() {
         resolution: (1920, 1080),
         tracks: vec![],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let media = compound_media_for(&mut project, timeline);
 
@@ -265,6 +268,7 @@ fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip
         resolution: (1920, 1080),
         tracks: vec![],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let b = project.timelines.insert(Timeline {
         name: "B".into(),
@@ -272,6 +276,7 @@ fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip
         resolution: (1920, 1080),
         tracks: vec![],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let media_a = compound_media_for(&mut project, a);
     let media_b = compound_media_for(&mut project, b);
@@ -291,6 +296,7 @@ fn would_create_a_cycle_catches_an_indirect_cycle_through_a_nested_compound_clip
         solo: false,
         locked: false,
         crossings: Vec::new(),
+        mix: Default::default(),
     });
 
     assert!(project.would_create_a_cycle(media_b, a), "A -> B -> A");
@@ -309,6 +315,7 @@ fn would_create_a_cycle_is_false_for_unrelated_timelines() {
         resolution: (1920, 1080),
         tracks: vec![],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let b = project.timelines.insert(Timeline {
         name: "B".into(),
@@ -316,8 +323,29 @@ fn would_create_a_cycle_is_false_for_unrelated_timelines() {
         resolution: (1920, 1080),
         tracks: vec![],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let media_a = compound_media_for(&mut project, a);
 
     assert!(!project.would_create_a_cycle(media_a, b));
+}
+
+#[test]
+fn plan_keeps_the_nested_track_gains_relative_to_the_host_track() {
+    let (mut project, timeline) = project_with_tracks(&[TrackKind::Audio, TrackKind::Audio]);
+    project.timelines[timeline].tracks[0].mix.gain_db = -6.0;
+    project.timelines[timeline].tracks[1].mix.gain_db = 3.0;
+    let low = insert_clip(&mut project, timeline, 0, 0, 20);
+    let high = insert_clip(&mut project, timeline, 1, 0, 20);
+
+    let plan = plan_compound_clip(&project, timeline, &[(0, low), (1, high)]).unwrap();
+
+    assert_eq!(plan.audio_track, Some(0));
+    let gains: Vec<f32> = plan
+        .nested_timeline
+        .tracks
+        .iter()
+        .map(|t| t.mix.gain_db)
+        .collect();
+    assert_eq!(gains, [0.0, 9.0]);
 }

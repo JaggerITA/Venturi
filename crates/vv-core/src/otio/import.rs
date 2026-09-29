@@ -263,6 +263,7 @@ impl Importer<'_> {
             resolution,
             tracks,
             markers: Vec::new(),
+            master: Default::default(),
         });
     }
 

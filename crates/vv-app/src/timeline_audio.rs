@@ -8,8 +8,8 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use vv_audio::mixer::{
-    MixClip, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE, StretchedWindow, mix_range,
-    sample_to_timeline_frame, timeline_frame_to_sample,
+    Bus, MixClip, MixMeters, MixSnapshot, Mixer, MixerState, PROJECT_SAMPLE_RATE, StretchedWindow,
+    mix_range, sample_to_timeline_frame, timeline_frame_to_sample,
 };
 use vv_core::{FrameIdx, Keyframed, Project, TimelineId};
 
@@ -143,6 +143,7 @@ impl TimelineAudio {
                 step: 1.0,
                 buffer,
                 gain_db: Keyframed::constant(0.0),
+                track: 0,
                 clip_fps: fps,
                 media_offset: 0,
                 media_step: 1.0,
@@ -150,11 +151,13 @@ impl TimelineAudio {
                 fade_out: 0,
             })
             .collect();
-        self.mix = Arc::new(MixSnapshot {
-            sample_rate: rate,
+        self.mix = Arc::new(MixSnapshot::new(
+            rate,
             channels,
             clips,
-        });
+            Vec::new(),
+            Bus::UNITY,
+        ));
         self.publish();
     }
 
@@ -461,6 +464,11 @@ impl TimelineAudio {
         self.mixer
             .as_ref()
             .map_or((0.0, 0.0), Mixer::peak_linear_stereo)
+    }
+
+    /// Per-track and master peaks of what is playing.
+    pub fn meters(&self) -> &MixMeters {
+        &self.mix.meters
     }
 }
 

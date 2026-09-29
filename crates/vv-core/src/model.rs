@@ -1602,6 +1602,15 @@ pub enum TrackKind {
     Audio,
 }
 
+/// Mixer settings of an audio track or of the master bus.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelStrip {
+    pub gain_db: f32,
+    /// Left/right balance, -1 (left) to 1 (right).
+    pub pan: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub kind: TrackKind,
@@ -1630,6 +1639,9 @@ pub struct Track {
     /// are the places to imitate for a new command touching the clips).
     #[serde(default)]
     pub crossings: Vec<CrossTransition>,
+    /// Audio only.
+    #[serde(default)]
+    pub mix: ChannelStrip,
 }
 
 impl Track {
@@ -1641,6 +1653,7 @@ impl Track {
             solo: false,
             locked: false,
             crossings: Vec::new(),
+            mix: ChannelStrip::default(),
         }
     }
 
@@ -1811,6 +1824,9 @@ pub struct Timeline {
     /// Sorted by `start`.
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Applied to the sum of the audio tracks.
+    #[serde(default)]
+    pub master: ChannelStrip,
 }
 
 impl Timeline {

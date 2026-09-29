@@ -8,6 +8,7 @@ fn make_project_with_two_tracks() -> (Project, TimelineId) {
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     (project, timeline)
 }
@@ -558,6 +559,7 @@ fn moving_a_clip_to_another_track_removes_its_crossings_and_undo_restores_them()
         resolution: (1920, 1080),
         tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     let mut history = History::default();
 

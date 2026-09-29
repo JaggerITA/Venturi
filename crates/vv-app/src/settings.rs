@@ -468,6 +468,7 @@ pub struct PanelLayout {
     pub effects_open: bool,
     pub inspector_open: bool,
     pub keyframe_editor_open: bool,
+    pub mixer_open: bool,
     pub left_column_width: f32,
     /// Share of the left column's height given to the media pool when the
     /// Effects panel is open too.
@@ -483,6 +484,7 @@ impl Default for PanelLayout {
             effects_open: false,
             inspector_open: true,
             keyframe_editor_open: false,
+            mixer_open: false,
             left_column_width: 260.0,
             media_pool_fraction: 0.5,
             inspector_width: 300.0,
@@ -582,6 +584,8 @@ struct PanelLayoutFile {
     #[serde(default)]
     keyframe_editor_open: Option<bool>,
     #[serde(default)]
+    mixer_open: Option<bool>,
+    #[serde(default)]
     left_column_width: Option<f32>,
     #[serde(default)]
     media_pool_fraction: Option<f32>,
@@ -648,6 +652,7 @@ impl Settings {
                 .panels
                 .keyframe_editor_open
                 .unwrap_or(defaults.keyframe_editor_open),
+            mixer_open: file.panels.mixer_open.unwrap_or(defaults.mixer_open),
             left_column_width: file
                 .panels
                 .left_column_width
@@ -705,6 +710,7 @@ impl Settings {
                 effects_open: Some(self.panels.effects_open),
                 inspector_open: Some(self.panels.inspector_open),
                 keyframe_editor_open: Some(self.panels.keyframe_editor_open),
+                mixer_open: Some(self.panels.mixer_open),
                 left_column_width: Some(self.panels.left_column_width),
                 media_pool_fraction: Some(self.panels.media_pool_fraction),
                 inspector_width: Some(self.panels.inspector_width),

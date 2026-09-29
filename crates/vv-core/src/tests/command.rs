@@ -9,6 +9,7 @@ fn project() -> (Project, TimelineId) {
         resolution: (64, 48),
         tracks: vec![Track::new(TrackKind::Video)],
         markers: Vec::new(),
+        master: Default::default(),
     });
     (project, timeline)
 }
@@ -177,4 +178,43 @@ fn an_explicit_label_renames_a_group_of_one_step() {
     );
     history.undo(&mut project);
     assert_eq!(tracks(&project, tl), 1);
+}
+
+#[test]
+fn mixer_params_set_track_and_master_and_undo() {
+    let (mut project, tl) = project();
+    let mut history = History::default();
+    let set = |channel, param, value| Box::new(SetMixerParam::new(tl, channel, param, value));
+    history.do_command(
+        &mut project,
+        set(MixerChannel::Track(0), MixerParam::GainDb, -6.0),
+    );
+    history.do_command(
+        &mut project,
+        set(MixerChannel::Master, MixerParam::GainDb, 1000.0),
+    );
+    history.do_command(
+        &mut project,
+        set(MixerChannel::Track(0), MixerParam::Pan, -3.0),
+    );
+
+    let timeline = &project.timelines[tl];
+    assert_eq!(timeline.tracks[0].mix.gain_db, -6.0);
+    assert_eq!(timeline.master.gain_db, crate::GAIN_DB_MAX, "clamped");
+    assert_eq!(timeline.tracks[0].mix.pan, -1.0, "clamped");
+
+    for _ in 0..3 {
+        history.undo(&mut project);
+    }
+    let timeline = &project.timelines[tl];
+    assert_eq!(timeline.tracks[0].mix, ChannelStrip::default());
+    assert_eq!(timeline.master, ChannelStrip::default());
+}
+
+#[test]
+fn a_track_saved_without_mixer_settings_loads_at_unity_gain() {
+    let mut value = serde_json::to_value(Track::new(TrackKind::Audio)).unwrap();
+    value.as_object_mut().unwrap().remove("mix");
+    let track: Track = serde_json::from_value(value).unwrap();
+    assert_eq!(track.mix, ChannelStrip::default());
 }

@@ -96,6 +96,14 @@ history.reset_gain:
   en: "Reset gain"
   it: "Reimposta guadagno"
 
+history.mixer_gain:
+  en: "Mixer gain"
+  it: "Guadagno mixer"
+
+history.mixer_pan:
+  en: "Mixer balance"
+  it: "Bilanciamento mixer"
+
 history.title:
   en: "Edit title"
   it: "Modifica titolo"
