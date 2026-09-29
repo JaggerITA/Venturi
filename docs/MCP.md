@@ -264,6 +264,66 @@ whisper.cpp or faster-whisper. To keep that fast and cheap:
   transcribing it again after every edit: the media's frames do not change
   when the timeline does.
 
+## Screenshots of web pages
+
+For cover images (a product's homepage over the talk), take the screenshot
+with `ghcr.io/karakeep-app/karakeep-chrome`, a headless Chromium driven
+over the DevTools protocol (CDP) on port 9222:
+
+```sh
+podman run -d --name vv-shot -p 127.0.0.1:9222:9222 ghcr.io/karakeep-app/karakeep-chrome:latest
+node shot.mjs out/          # the script below, Node 22+ (built-in WebSocket)
+podman rm -f vv-shot
+```
+
+- Its `headless-shell` ignores `--screenshot` on the command line: drive it
+  through CDP. `docker.io/zenika/alpine-chrome --screenshot` renders some
+  sites without their CSS and hangs on others.
+- The `webSocketDebuggerUrl` it returns names the container's address:
+  replace the host with `127.0.0.1:9222`.
+- Settings that give a clean frame: viewport 1920×1080 at scale factor 1
+  (`Emulation.setDeviceMetricsOverride`), wait for `Page.loadEventFired`
+  plus about 4 s for animations, then click the cookie banner's refusing
+  or accepting button and hide the scrollbars, wait 1.5 s and capture.
+
+```js
+import { writeFileSync } from "node:fs";
+const sites = { netbird: "https://netbird.io" };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+for (const [name, url] of Object.entries(sites)) {
+  const t = await (await fetch("http://127.0.0.1:9222/json/new?about:blank", { method: "PUT" })).json();
+  const ws = new WebSocket(t.webSocketDebuggerUrl.replace(/ws:\/\/[^/]+/, "ws://127.0.0.1:9222"));
+  await new Promise(r => (ws.onopen = r));
+  let id = 0; const pending = new Map(); let loaded = false;
+  ws.onmessage = m => { const d = JSON.parse(m.data);
+    if (pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
+    else if (d.method === "Page.loadEventFired") loaded = true; };
+  const send = (method, params = {}) => new Promise(r => { pending.set(++id, r); ws.send(JSON.stringify({ id, method, params })); });
+  await send("Page.enable");
+  await send("Emulation.setDeviceMetricsOverride", { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
+  await send("Page.navigate", { url });
+  for (let i = 0; i < 150 && !loaded; i++) await sleep(100);
+  await sleep(4000);
+  await send("Runtime.evaluate", { expression: `(() => {
+    const st = document.createElement('style');
+    st.textContent = '::-webkit-scrollbar{display:none}html{scrollbar-width:none}';
+    document.head.appendChild(st);
+    const re = /^(reject all|required only cookies|accept( all)?( cookies)?|i agree|got it)$/i;
+    for (const b of document.querySelectorAll('button, a[role=button]'))
+      if (re.test(b.innerText.trim())) { b.click(); return; } })()` });
+  await sleep(1500);
+  const r = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(`${process.argv[2]}/${name}.png`, Buffer.from(r.result.data, "base64"));
+  ws.close();
+  await fetch(`http://127.0.0.1:9222/json/close/${t.id}`);
+}
+```
+
+Look at every image before using it: a banner the regex misses stays in
+the frame. Put the images on a video track above the talk with
+`insert_clip`; an image media has its own fps (25), so `source_out` is in
+those frames, not the timeline's.
+
 ## Limits
 
 - `get_audio_levels` on a timeline decodes the whole audio files involved,
