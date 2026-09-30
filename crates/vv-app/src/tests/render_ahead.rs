@@ -3376,3 +3376,79 @@ fn a_media_naming_another_file_loses_its_decoder_and_frames() {
         assert_eq!(caches.bytes_used(), 0);
     }
 }
+
+/// Black frames after repositioning during 1x playback, on a real file:
+/// `VV_BENCH_CLIP=<path> cargo test --release -p vv-app bench_black_frames -- --ignored --nocapture`.
+/// Keyframes are assumed every 250 frames (a 60 fps OBS recording).
+#[test]
+#[ignore = "manual measurement, not a correctness assertion"]
+fn bench_black_frames_after_repositioning_during_playback() {
+    let Ok(path) = std::env::var("VV_BENCH_CLIP") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let meta = vv_media::probe(&path).unwrap();
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        content_hash: vv_media::content_fingerprint(&path).unwrap(),
+        path,
+        meta: meta.clone(),
+        compound: None,
+        folder: None,
+    });
+    let mut timeline = timeline_with(vec![Track {
+        kind: TrackKind::Video,
+        clips: vec![media_clip(1, media, 0, meta.duration_frames)],
+        muted: false,
+        solo: false,
+        locked: false,
+        crossings: Vec::new(),
+        mix: Default::default(),
+        armed: Default::default(),
+    }]);
+    timeline.fps = meta.fps;
+    let fps = meta.fps.as_f64();
+    let timeline_id = project.timelines.insert(timeline);
+    let render_ahead = RenderAhead::spawn(
+        project,
+        timeline_id,
+        2 << 30,
+        None,
+        DEFAULT_LOOKAHEAD_SECS,
+        DEFAULT_BEHIND_SECS,
+    );
+
+    let gop = 250;
+    // The first two teach the worker the GOP, as the first clicks in the app do.
+    let clicks = [
+        (20, 220),
+        (22, 125),
+        (24, 30),
+        (26, 125),
+        (28, 220),
+        (30, 60),
+        (32, 180),
+    ];
+    for (gop_index, offset) in clicks {
+        let start = gop_index * gop + offset;
+        let t0 = std::time::Instant::now();
+        let mut first_shown = None;
+        let mut black = 0;
+        let mut frames = 0;
+        while t0.elapsed() < Duration::from_secs(3) {
+            let playhead = start + (t0.elapsed().as_secs_f64() * fps) as FrameIdx;
+            render_ahead.set_target(playhead);
+            if render_ahead.get_frame(media, playhead).is_some() {
+                first_shown.get_or_insert(t0.elapsed());
+            } else {
+                black += 1;
+            }
+            frames += 1;
+            std::thread::sleep(Duration::from_secs_f64(1.0 / fps));
+        }
+        eprintln!(
+            "click {offset:>3} frames past a keyframe: first frame after {:>6.0} ms, black {black}/{frames} refreshes in 3 s",
+            first_shown.map_or(f64::NAN, |d| d.as_secs_f64() * 1000.0)
+        );
+    }
+}

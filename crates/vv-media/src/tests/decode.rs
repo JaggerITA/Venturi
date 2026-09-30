@@ -257,6 +257,47 @@ fn decode_first_frame_of_x264_reads_correct_dimensions_and_pixels() {
     );
 }
 
+/// A YUV420P source skips the scaler: its planes, odd sizes included, must
+/// come out byte for byte as ffmpeg decodes them.
+#[test]
+fn a_yuv420p_source_is_copied_plane_by_plane_with_odd_dimensions() {
+    let dir = std::env::temp_dir().join("vv-media-decode-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("odd_yuv420p.mkv");
+    crate::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=321x241:rate=25:duration=1",
+            "-c:v",
+            "ffv1",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        &path,
+    );
+    let reference_path = dir.join("odd_yuv420p.yuv");
+    crate::test_support::ffmpeg(
+        &[
+            "-i",
+            path.to_str().unwrap(),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        &reference_path,
+    );
+
+    let frame = decode_first_frame(&path).expect("decode failed");
+    assert_eq!((frame.u_width, frame.u_height), (161, 121));
+    let decoded = [frame.y.as_slice(), &frame.u, &frame.v].concat();
+    assert!(decoded == std::fs::read(&reference_path).unwrap());
+}
+
 fn make_test_image(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("vv-media-decode-test");
     std::fs::create_dir_all(&dir).unwrap();

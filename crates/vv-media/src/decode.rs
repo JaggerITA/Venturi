@@ -387,10 +387,19 @@ fn yuv420_from_decoded(
     matrix: ColorMatrix,
     full_range: bool,
 ) -> Result<FrameYuv420, crate::MediaError> {
-    let mut scaled = ffmpeg::frame::Video::empty();
-    scaler.run(decoded, &mut scaled)?;
+    // Already in the target format (most camera and screen recordings): sws
+    // would only copy the planes once more, on the thread feeding the decoder.
+    let converted;
+    let scaled = if decoded.format() == target_format(decoded.format()) {
+        decoded
+    } else {
+        let mut frame = ffmpeg::frame::Video::empty();
+        scaler.run(decoded, &mut frame)?;
+        converted = frame;
+        &converted
+    };
 
-    // `sws_scale` may leave padding at the end of a row: each plane is recompacted.
+    // Rows may carry padding (decoder or sws): each plane is recompacted.
     let pack_plane = |index: usize| -> Vec<u8> {
         let w = scaled.plane_width(index) as usize;
         let h = scaled.plane_height(index) as usize;
