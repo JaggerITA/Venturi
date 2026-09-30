@@ -118,3 +118,43 @@ fn generate_proxy_downscales_a_wider_source() {
         .expect("proxy generation failed");
     assert_eq!(Decoder::open(&proxy_path).unwrap().width(), 640);
 }
+
+/// An NV12 source reaches the proxy encoder interleaved: U and V must not
+/// come out swapped or smeared. A red frame tells them apart.
+#[test]
+fn generate_proxy_keeps_the_colors_of_an_nv12_source() {
+    let dir = std::env::temp_dir().join("vv-media-proxy-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("red_nv12.mkv");
+    crate::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=64x48:rate=25:duration=1",
+            "-c:v",
+            "rawvideo",
+            "-pix_fmt",
+            "nv12",
+        ],
+        &path,
+    );
+    let content_hash = 0x4e5631;
+    let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true)
+        .expect("proxy generation failed");
+
+    let first_chroma = |path: &Path| {
+        let (_, frame) = Decoder::open(path).unwrap().next_frame().unwrap().unwrap();
+        frame.chroma_at(
+            frame.chroma_width as usize / 2,
+            frame.chroma_height as usize / 2,
+        )
+    };
+    let (u, v) = first_chroma(&proxy_path);
+    let (source_u, source_v) = first_chroma(&path);
+    assert!(
+        u.abs_diff(source_u) <= 3 && v.abs_diff(source_v) <= 3,
+        "proxy U/V {u}/{v}, source {source_u}/{source_v}"
+    );
+}
