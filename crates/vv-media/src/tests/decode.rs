@@ -567,3 +567,17 @@ fn skip_before_hands_out_the_same_frames_as_a_full_decode() {
         assert!(frame.y == reference[&idx].y, "frame {idx} differs");
     }
 }
+
+/// A skip in the middle of the stream (no seek before it) must not look like
+/// a hole to fill by repeating the last frame handed out.
+#[test]
+fn skip_before_without_a_seek_resumes_at_the_first_wanted_frame() {
+    let path = make_test_clip_with_gop_and_bframes("skip_mid_stream.mp4", 4, 25, 2);
+    let mut decoder = Decoder::open(&path).unwrap();
+    for _ in 0..=20 {
+        decoder.next_frame().unwrap().unwrap();
+    }
+    decoder.skip_before(40);
+    let (idx, _) = decoder.next_frame().unwrap().unwrap();
+    assert_eq!(idx, 40);
+}

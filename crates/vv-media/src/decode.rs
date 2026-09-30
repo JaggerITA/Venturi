@@ -261,10 +261,13 @@ impl Decoder {
                     self.pending = None;
                     last_skipped = Some(idx);
                 }
-                // A frame to hand out, or the end of the stream.
+                // A frame to hand out, or the end of the stream. The skipped
+                // stretch is no hole to fill with the last frame handed out.
                 _ => {
                     self.skip_before = None;
                     self.set_skip_nonref(false);
+                    self.emit_idx = None;
+                    self.held = None;
                 }
             }
         }
