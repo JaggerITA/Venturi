@@ -225,8 +225,10 @@ fn packed_frame(samples: &[f32], channels: u16, rate: u32, layout: ChannelLayout
 fn packed_samples(frame: &frame::Audio, channels: u16) -> impl Iterator<Item = f32> + '_ {
     let len = frame.samples() * channels as usize;
     frame.data(0)[..len * 4]
-        .chunks_exact(4)
-        .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
 }
 
 /// `samples` from `from` to `to` Hz, with the resampler's tail flushed.

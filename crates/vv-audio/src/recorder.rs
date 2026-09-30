@@ -68,7 +68,7 @@ impl Recorder {
         let (tx, chunks) = mpsc::channel();
         let stream = device
             .build_input_stream_raw(
-                stream_config.clone(),
+                stream_config,
                 format,
                 move |data: &cpal::Data, _: &cpal::InputCallbackInfo| {
                     if let Some(samples) = to_f32(data) {
