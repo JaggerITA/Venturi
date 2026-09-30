@@ -6,7 +6,7 @@
 //! Global cache keyed by `content_hash`, not next to the project: it serves
 //! every project using the same file, even before saving.
 
-use crate::decode::{ColorMatrix, Decoder};
+use crate::decode::{Chroma, ColorMatrix, Decoder};
 use ffmpeg::Dictionary;
 use ffmpeg::codec::{self, encoder};
 use ffmpeg::format::{self, Pixel};
@@ -124,8 +124,6 @@ pub fn generate_proxy(
             &tmp_path,
             dst_w,
             dst_h,
-            src_w,
-            src_h,
             quality,
             decoder.fps(),
             first_frame.matrix,
@@ -192,7 +190,10 @@ fn to_ffmpeg_range(full_range: bool) -> color::Range {
 struct ProxyEncoder {
     octx: format::context::Output,
     encoder: encoder::Video,
-    scaler: Scaler,
+    /// Built for the format of the frames, which changes if the decoder
+    /// falls back from HW (NV12) to software (planar).
+    scaler: Option<Scaler>,
+    dst_size: (u32, u32),
     stream_index: usize,
     time_base: ffmpeg::Rational,
     ost_time_base: ffmpeg::Rational,
@@ -205,8 +206,6 @@ impl ProxyEncoder {
         path: &Path,
         dst_w: u32,
         dst_h: u32,
-        src_w: u32,
-        src_h: u32,
         quality: ProxyQuality,
         fps: vv_core::Rational,
         matrix: ColorMatrix,
@@ -248,23 +247,14 @@ impl ProxyEncoder {
         let mut ost = ost;
         ost.set_parameters(&encoder);
 
-        let scaler = Scaler::get(
-            Pixel::YUV420P,
-            src_w,
-            src_h,
-            Pixel::YUV420P,
-            dst_w,
-            dst_h,
-            Flags::BILINEAR,
-        )?;
-
         octx.write_header()?;
         let ost_time_base = octx.stream(stream_index).unwrap().time_base();
 
         Ok(Self {
             octx,
             encoder,
-            scaler,
+            scaler: None,
+            dst_size: (dst_w, dst_h),
             stream_index,
             time_base,
             ost_time_base,
@@ -273,13 +263,39 @@ impl ProxyEncoder {
     }
 
     fn write_frame(&mut self, frame: &crate::decode::FrameYuv420) -> Result<(), crate::MediaError> {
-        let mut src = ffmpeg::frame::Video::new(Pixel::YUV420P, frame.width, frame.height);
+        let format = match frame.chroma {
+            Chroma::Planar { .. } => Pixel::YUV420P,
+            Chroma::Interleaved(_) => Pixel::NV12,
+        };
+        let mut src = ffmpeg::frame::Video::new(format, frame.width, frame.height);
         crate::encode::fill_plane(&mut src, 0, &frame.y, frame.width as usize);
-        crate::encode::fill_plane(&mut src, 1, &frame.u, frame.u_width as usize);
-        crate::encode::fill_plane(&mut src, 2, &frame.v, frame.u_width as usize);
+        let chroma_width = frame.chroma_width as usize;
+        match &frame.chroma {
+            Chroma::Planar { u, v } => {
+                crate::encode::fill_plane(&mut src, 1, u, chroma_width);
+                crate::encode::fill_plane(&mut src, 2, v, chroma_width);
+            }
+            Chroma::Interleaved(uv) => crate::encode::fill_plane(&mut src, 1, uv, 2 * chroma_width),
+        }
 
+        let fits = self.scaler.as_ref().is_some_and(|s| {
+            let input = s.input();
+            (input.format, input.width, input.height) == (format, frame.width, frame.height)
+        });
+        if !fits {
+            let (dst_w, dst_h) = self.dst_size;
+            self.scaler = Some(Scaler::get(
+                format,
+                frame.width,
+                frame.height,
+                Pixel::YUV420P,
+                dst_w,
+                dst_h,
+                Flags::BILINEAR,
+            )?);
+        }
         let mut scaled = ffmpeg::frame::Video::empty();
-        self.scaler.run(&src, &mut scaled)?;
+        self.scaler.as_mut().unwrap().run(&src, &mut scaled)?;
         scaled.set_pts(Some(self.next_pts));
         scaled.set_kind(ffmpeg::picture::Type::None);
         self.next_pts += 1;

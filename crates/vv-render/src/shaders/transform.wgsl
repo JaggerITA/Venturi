@@ -25,6 +25,8 @@ struct TransformUniform {
     // opacity). y: id of the compositing method (see `blend_shader_id`).
     // z: opacity of an adjustment layer (`x` is then 1). w: 1 if it is one.
     extra: vec4<f32>,
+    // x: 1 if U/V are interleaved in u_tex (NV12), v_tex then unused.
+    planes: vec4<f32>,
     // Shader ids of the clip's active filters, in order of application
     // (0 = empty slot); see `filter_shader_id` in compositor.rs, the only
     // place that knows which `FilterKind` each id corresponds to.
@@ -204,8 +206,10 @@ fn shade(in: VertexOutput) -> vec4<f32> {
             rgb = transform.solid.rgb;
             out_alpha = alpha * transform.solid.a * y_sample;
         } else {
-            let u_sample = textureSample(u_tex, input_sampler, source_uv).r;
-            let v_sample = textureSample(v_tex, input_sampler, source_uv).r;
+            let u_texel = textureSample(u_tex, input_sampler, source_uv);
+            let v_planar = textureSample(v_tex, input_sampler, source_uv).r;
+            let u_sample = u_texel.r;
+            let v_sample = select(v_planar, u_texel.g, transform.planes.x > 0.5);
             let matrix_id = i32(transform.color.x);
             let full_range = transform.color.y > 0.5;
             rgb = yuv_to_rgb(y_sample, u_sample, v_sample, matrix_id, full_range);

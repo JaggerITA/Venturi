@@ -1,5 +1,14 @@
 use super::*;
 
+/// U and V as planes, whatever the layout of the frame.
+fn planar_chroma(frame: &FrameYuv420) -> (Vec<u8>, Vec<u8>) {
+    let (w, h) = (frame.chroma_width as usize, frame.chroma_height as usize);
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| frame.chroma_at(x, y))
+        .unzip()
+}
+
 fn decode_first_frame(path: &Path) -> Result<Arc<FrameYuv420>, crate::MediaError> {
     let mut decoder = Decoder::open(path)?;
     decoder
@@ -243,10 +252,11 @@ fn decode_first_frame_of_x264_reads_correct_dimensions_and_pixels() {
     assert_eq!(frame.y.len(), 320 * 240, "dense Y plane, 1 byte/pixel");
     // 4:2:0: chroma planes at half resolution (rounded up,
     // exact here because 320x240 is already even).
-    assert_eq!(frame.u_width, 160);
-    assert_eq!(frame.u_height, 120);
-    assert_eq!(frame.u.len(), 160 * 120);
-    assert_eq!(frame.v.len(), 160 * 120);
+    assert_eq!(frame.chroma_width, 160);
+    assert_eq!(frame.chroma_height, 120);
+    let (u, v) = planar_chroma(&frame);
+    assert_eq!(u.len(), 160 * 120);
+    assert_eq!(v.len(), 160 * 120);
 
     // The testsrc pattern is never uniform: if we find more than one
     // distinct value in the Y plane, the stride/format are correct.
@@ -293,8 +303,9 @@ fn a_yuv420p_source_is_copied_plane_by_plane_with_odd_dimensions() {
     );
 
     let frame = decode_first_frame(&path).expect("decode failed");
-    assert_eq!((frame.u_width, frame.u_height), (161, 121));
-    let decoded = [frame.y.as_slice(), &frame.u, &frame.v].concat();
+    assert_eq!((frame.chroma_width, frame.chroma_height), (161, 121));
+    let (u, v) = planar_chroma(&frame);
+    let decoded = [frame.y.as_slice(), &u, &v].concat();
     assert!(decoded == std::fs::read(&reference_path).unwrap());
 }
 
@@ -591,7 +602,7 @@ fn assert_same_frames(got: &[(FrameIdx, Arc<FrameYuv420>)], want: &[(FrameIdx, A
     for ((idx, frame), (want_idx, want_frame)) in got.iter().zip(want) {
         assert_eq!(idx, want_idx);
         assert!(
-            frame.y == want_frame.y && frame.u == want_frame.u && frame.v == want_frame.v,
+            frame.y == want_frame.y && planar_chroma(frame) == planar_chroma(want_frame),
             "frame {idx} differs"
         );
     }
@@ -749,4 +760,49 @@ fn bench_hw_decode() {
             (decoder.transfer_time() - transfer_start).as_secs_f64() * 1000.0 / count as f64,
         );
     }
+}
+
+/// An NV12 source (as hwaccels, some cameras and screen recorders hand it
+/// out) skips the scaler and keeps its interleaved chroma, odd sizes
+/// included.
+#[test]
+fn an_nv12_source_keeps_its_interleaved_chroma() {
+    let dir = std::env::temp_dir().join("vv-media-decode-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("odd_nv12.mkv");
+    crate::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=321x241:rate=25:duration=1",
+            "-c:v",
+            "rawvideo",
+            "-pix_fmt",
+            "nv12",
+        ],
+        &path,
+    );
+    let reference_path = dir.join("odd_nv12.yuv");
+    crate::test_support::ffmpeg(
+        &[
+            "-i",
+            path.to_str().unwrap(),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "nv12",
+        ],
+        &reference_path,
+    );
+
+    let frame = decode_first_frame(&path).expect("decode failed");
+    assert_eq!((frame.chroma_width, frame.chroma_height), (161, 121));
+    let Chroma::Interleaved(uv) = &frame.chroma else {
+        panic!("NV12 made planar");
+    };
+    let decoded = [frame.y.as_slice(), uv].concat();
+    assert!(decoded == std::fs::read(&reference_path).unwrap());
 }

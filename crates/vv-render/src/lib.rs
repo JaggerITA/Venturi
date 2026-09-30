@@ -5,8 +5,8 @@ pub mod compositor;
 pub mod text;
 
 pub use compositor::{
-    Compositor, Layer, LayerContent, OutputFrame, PooledTexture, YuvFrame, device_limits,
-    fit_output_size,
+    Compositor, Layer, LayerContent, OutputFrame, PooledTexture, YuvChroma, YuvFrame,
+    device_limits, fit_output_size,
 };
 /// Re-exported: whoever owns a texture for `LayerContent::Texture` must use the
 /// same wgpu version as the compositor.

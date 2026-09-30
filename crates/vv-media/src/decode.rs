@@ -1,5 +1,5 @@
 //! Decoding a media: `next_frame` in sequence or after `seek_to_time`.
-//! Every pixel format becomes dense 8-bit YUV420P — YUVA420P if the
+//! Every pixel format becomes dense 8-bit YUV420P or NV12 — YUVA420P if the
 //! source has an alpha channel (PNG, WebM with alpha, ProRes 4444), so
 //! transparency makes it all the way to compositing; the conversion to RGB
 //! is done by the shader. Matrix and range are read from the original frame
@@ -17,19 +17,31 @@ use vv_core::FrameIdx;
 
 pub use vv_core::ColorMatrix;
 
-/// 8-bit YUV420P frame, dense planes (no row padding).
+/// The 4:2:0 chroma of a `FrameYuv420`.
+#[derive(Clone)]
+pub enum Chroma {
+    Planar {
+        u: Vec<u8>,
+        v: Vec<u8>,
+    },
+    /// NV12, as hwaccels hand it out: U and V alternating in one plane,
+    /// `2 * chroma_width` bytes a row. Carried to the shader as it is, since
+    /// making it planar would cost as much as the scaling `Decoder` avoids.
+    Interleaved(Vec<u8>),
+}
+
+/// 8-bit YUV 4:2:0 frame, dense planes (no row padding).
 #[derive(Clone)]
 pub struct FrameYuv420 {
     pub width: u32,
     pub height: u32,
     pub y: Vec<u8>,
-    /// 4:2:0 subsampled U/V planes: `plane_width(1)` x `plane_height(1)`
-    /// dimensions of the scaled frame (ffmpeg rounds up on odd
-    /// dimensions, not a plain `width/2`).
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
-    pub u_width: u32,
-    pub u_height: u32,
+    pub chroma: Chroma,
+    /// Chroma samples per row and rows: `plane_width(1)` x `plane_height(1)`
+    /// of the scaled frame (ffmpeg rounds up on odd dimensions, not a plain
+    /// `width/2`).
+    pub chroma_width: u32,
+    pub chroma_height: u32,
     pub matrix: ColorMatrix,
     /// `true` = full range (0-255), `false` = limited (16-235/240), the norm.
     pub full_range: bool,
@@ -45,7 +57,20 @@ pub struct FrameYuv420 {
 impl FrameYuv420 {
     /// Bytes used by the planes.
     pub fn byte_len(&self) -> usize {
-        self.y.len() + self.u.len() + self.v.len() + self.alpha.as_ref().map_or(0, Vec::len)
+        let chroma = match &self.chroma {
+            Chroma::Planar { u, v } => u.len() + v.len(),
+            Chroma::Interleaved(uv) => uv.len(),
+        };
+        self.y.len() + chroma + self.alpha.as_ref().map_or(0, Vec::len)
+    }
+
+    /// U and V of the chroma sample at `(x, y)`, in chroma coordinates.
+    pub fn chroma_at(&self, x: usize, y: usize) -> (u8, u8) {
+        let i = y * self.chroma_width as usize + x;
+        match &self.chroma {
+            Chroma::Planar { u, v } => (u[i], v[i]),
+            Chroma::Interleaved(uv) => (uv[2 * i], uv[2 * i + 1]),
+        }
     }
 }
 
@@ -540,10 +565,13 @@ fn format_is_rgb(format: Pixel) -> bool {
 }
 
 /// The format to scale to: YUVA420P preserves the alpha in the fourth plane,
-/// YUV420P would throw it away.
+/// YUV420P would throw it away. Semi-planar sources (hwaccel frames) stay
+/// semi-planar, the 10-bit ones only lose their bits.
 fn target_format(source: Pixel) -> Pixel {
     if format_has_alpha(source) {
         Pixel::YUVA420P
+    } else if matches!(source, Pixel::NV12 | Pixel::P010LE | Pixel::P016LE) {
+        Pixel::NV12
     } else {
         Pixel::YUV420P
     }
@@ -607,9 +635,11 @@ fn yuv420_from_decoded(
         &converted
     };
 
+    let interleaved = scaled.format() == Pixel::NV12;
     // Rows may carry padding (decoder or sws): each plane is recompacted.
     let pack_plane = |index: usize| -> Vec<u8> {
-        let w = scaled.plane_width(index) as usize;
+        let samples = if interleaved && index == 1 { 2 } else { 1 };
+        let w = scaled.plane_width(index) as usize * samples;
         let h = scaled.plane_height(index) as usize;
         let stride = scaled.stride(index);
         let plane = scaled.data(index);
@@ -623,21 +653,24 @@ fn yuv420_from_decoded(
 
     let width = scaled.width();
     let height = scaled.height();
-    let u_width = scaled.plane_width(1);
-    let u_height = scaled.plane_height(1);
     let y = pack_plane(0);
-    let u = pack_plane(1);
-    let v = pack_plane(2);
+    let chroma = if interleaved {
+        Chroma::Interleaved(pack_plane(1))
+    } else {
+        Chroma::Planar {
+            u: pack_plane(1),
+            v: pack_plane(2),
+        }
+    };
     let alpha = (scaled.format() == Pixel::YUVA420P).then(|| pack_plane(3));
 
     Ok(FrameYuv420 {
         width,
         height,
         y,
-        u,
-        v,
-        u_width,
-        u_height,
+        chroma,
+        chroma_width: scaled.plane_width(1),
+        chroma_height: scaled.plane_height(1),
         matrix,
         full_range,
         alpha,

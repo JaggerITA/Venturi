@@ -28,8 +28,10 @@ const SOLID_PLACEHOLDER: YuvFrame<'static> = YuvFrame {
     y: &[0],
     width: 1,
     height: 1,
-    u: &[128],
-    v: &[128],
+    chroma: YuvChroma::Planar {
+        u: &[128],
+        v: &[128],
+    },
     chroma_width: 1,
     chroma_height: 1,
     matrix: ColorMatrix::Bt601,
@@ -43,6 +45,8 @@ const OPAQUE: &[u8] = &[255];
 /// Format of the three input planes (Y/U/V): a single 8-bit channel, read
 /// as `.r` in the shader.
 const PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Interleaved U/V plane (NV12), read as `.rg` in the shader.
+const UV_PLANE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 
 /// Matrix selector for the shader: must stay aligned with
 /// `kr_kb` in `transform.wgsl`.
@@ -59,9 +63,8 @@ pub struct YuvFrame<'a> {
     pub y: &'a [u8],
     pub width: u32,
     pub height: u32,
-    pub u: &'a [u8],
-    pub v: &'a [u8],
-    /// Dimensions of the U/V planes (4:2:0 subsampled, typically
+    pub chroma: YuvChroma<'a>,
+    /// Chroma samples per row and rows (4:2:0 subsampled, typically
     /// `(width+1)/2` x `(height+1)/2` but not recomputed here: the
     /// caller passes the real dimensions allocated by the decoder).
     pub chroma_width: u32,
@@ -74,6 +77,16 @@ pub struct YuvFrame<'a> {
     /// has no alpha channel), otherwise `width`x`height` bytes like Y — see
     /// `FrameYuv420::alpha`, where it comes from when it is not the placeholder.
     pub alpha: &'a [u8],
+}
+
+#[derive(Clone, Copy)]
+pub enum YuvChroma<'a> {
+    Planar {
+        u: &'a [u8],
+        v: &'a [u8],
+    },
+    /// NV12: U and V alternating, `2 * chroma_width` bytes a row.
+    Interleaved(&'a [u8]),
 }
 
 /// A layer of the stack: what it shows and how it composes.
@@ -224,6 +237,8 @@ struct TransformUniform {
     /// x: opacity of the whole layer. y: id of the compositing method
     /// (`blend_shader_id`). z: opacity of an adjustment layer, w: 1 if it is one.
     extra: [f32; 4],
+    /// x: 1 if U/V are interleaved in the U texture (NV12).
+    planes: [f32; 4],
     /// Shader ids of the active filters, in order of application (see
     /// `filter_shader_id`); 0 = empty slot. `MAX_LAYER_FILTERS` in two vec4s
     /// for the uniform alignment.
@@ -302,6 +317,7 @@ impl TransformUniform {
                 ]
             }),
             extra: [opacity.clamp(0.0, 1.0), blend_shader_id(blend), 0.0, 0.0],
+            planes: [0.0; 4],
             filters: {
                 let mut ids = [0.0f32; MAX_LAYER_FILTERS];
                 for (slot, kind) in ids.iter_mut().zip(filters.iter().take(MAX_LAYER_FILTERS)) {
@@ -387,10 +403,15 @@ impl Drop for PooledTexture {
 /// Past that, the textures of no longer used sizes are let go.
 const MAX_POOLED: usize = 32;
 
-fn take_sized(pool: &mut Vec<wgpu::Texture>, width: u32, height: u32) -> Option<wgpu::Texture> {
+fn take_sized(
+    pool: &mut Vec<wgpu::Texture>,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> Option<wgpu::Texture> {
     let i = pool
         .iter()
-        .position(|t| t.width() == width && t.height() == height)?;
+        .position(|t| t.width() == width && t.height() == height && t.format() == format)?;
     Some(pool.swap_remove(i))
 }
 
@@ -983,8 +1004,16 @@ impl Compositor {
         backdrop: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let y_texture = self.plane_texture(frame.y, frame.width, frame.height);
-        let u_texture = self.plane_texture(frame.u, frame.chroma_width, frame.chroma_height);
-        let v_texture = self.plane_texture(frame.v, frame.chroma_width, frame.chroma_height);
+        let (u_texture, v_texture) = match frame.chroma {
+            YuvChroma::Planar { u, v } => (
+                self.plane_texture(u, frame.chroma_width, frame.chroma_height),
+                self.plane_texture(v, frame.chroma_width, frame.chroma_height),
+            ),
+            YuvChroma::Interleaved(uv) => (
+                self.texture_with(uv, frame.chroma_width, frame.chroma_height, UV_PLANE_FORMAT),
+                self.plane_texture(&[128], 1, 1),
+            ),
+        };
         // A single byte = "opaque everywhere" placeholder (see the docs of
         // `YuvFrame::alpha`): the texture stays 1x1, sampled everywhere
         // by the `ClampToEdge` as Y/U/V already are for Solid/Text.
@@ -999,7 +1028,7 @@ impl Compositor {
         let v_view = v_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let a_view = a_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let uniform = TransformUniform::new(
+        let mut uniform = TransformUniform::new(
             transform,
             frame.matrix,
             frame.full_range,
@@ -1014,6 +1043,9 @@ impl Compositor {
             filters,
             blend,
         );
+        if matches!(frame.chroma, YuvChroma::Interleaved(_)) {
+            uniform.planes[0] = 1.0;
+        }
         let bind_group =
             self.bind_group_for([&y_view, &u_view, &v_view, &a_view, backdrop], &uniform);
         planes.extend([y_texture, u_texture, v_texture, a_texture]);
@@ -1132,7 +1164,17 @@ impl Compositor {
     /// An R8 plane with `data`, taken from the pool if there is one of the same
     /// size.
     fn plane_texture(&self, data: &[u8], width: u32, height: u32) -> wgpu::Texture {
-        let pooled = take_sized(&mut self.pool.lock().unwrap().planes, width, height);
+        self.texture_with(data, width, height, PLANE_FORMAT)
+    }
+
+    fn texture_with(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
+        let pooled = take_sized(&mut self.pool.lock().unwrap().planes, width, height, format);
         let texture = pooled.unwrap_or_else(|| {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("vv-render plane"),
@@ -1144,7 +1186,7 @@ impl Compositor {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: PLANE_FORMAT,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
@@ -1154,7 +1196,7 @@ impl Compositor {
             data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width),
+                bytes_per_row: Some(width * format.block_copy_size(None).unwrap()),
                 rows_per_image: Some(height),
             },
             texture.size(),
@@ -1166,14 +1208,22 @@ impl Compositor {
     /// `PooledTexture`), separate because there a texture stays taken
     /// until whoever uses it gives it back.
     fn scratch_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
-        take_sized(&mut self.scratch.lock().unwrap(), output_w, output_h)
-            .unwrap_or_else(|| self.new_output_texture(output_w, output_h))
+        take_sized(
+            &mut self.scratch.lock().unwrap(),
+            output_w,
+            output_h,
+            OUTPUT_FORMAT,
+        )
+        .unwrap_or_else(|| self.new_output_texture(output_w, output_h))
     }
 
     fn output_texture(&self, output_w: u32, output_h: u32) -> wgpu::Texture {
-        if let Some(texture) =
-            take_sized(&mut self.pool.lock().unwrap().outputs, output_w, output_h)
-        {
+        if let Some(texture) = take_sized(
+            &mut self.pool.lock().unwrap().outputs,
+            output_w,
+            output_h,
+            OUTPUT_FORMAT,
+        ) {
             return texture;
         }
         self.new_output_texture(output_w, output_h)

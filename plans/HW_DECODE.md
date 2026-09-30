@@ -55,6 +55,18 @@ release build, 2026-09-30, still converting NV12 → YUV420P with sws):
 - Frame threading with NVDEC overlaps decode and transfer (+25%) but
   slows the open; left off for now, to remeasure after §4.6 removes sws.
 
+After §4.6 (NV12 kept as it is, no sws):
+
+| Decoder | open + first frame | fps | transfer / frame | CPU time |
+|---|---|---|---|---|
+| software, 24 threads | 126 ms | 382 | — | 26.1 s |
+| NVDEC | 52 ms | 265 | 1.8 ms | 2.6 s |
+| Vulkan (NVIDIA driver) | 29 ms | 135 | 4.6 ms | 5.7 s |
+
+With frame threads on, two runs gave NVDEC 323 and 140 fps (transfer
+1.8 vs 4.7 ms): too noisy to decide on this machine. Still off; to
+measure on a quiet machine and on the M1.
+
 The dev box is atypical (24-thread CPU): on most workstations the GPU
 decoder beats the CPU, so HW decode is the default (`Auto`). Where it
 only frees the CPU it still helps export, UI and audio running in
@@ -277,7 +289,8 @@ cache (same pixels).
 3. ~~`hw.rs`: device, codec setup, transfer/map, fallback (§4.2), with
    tests~~ done.
 4. ~~Benchmarks with transfer and reopen cost~~ done on the dev box (§1).
-5. NV12 in `FrameYuv420`, compositor and shader, CPU consumers.
+5. ~~NV12 in `FrameYuv420`, compositor and shader, CPU consumers~~ done
+   (`FrameYuv420::chroma_at` for the thumbnails).
 6. Budget (§4.3), wiring into render-ahead, then proxies; settings and
    translation.
 7. Measure on the dev box and on the M1; then decide on export and on

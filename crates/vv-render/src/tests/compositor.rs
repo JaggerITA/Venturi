@@ -21,8 +21,10 @@ impl OwnedYuvFrame {
             y: &self.y,
             width: self.width,
             height: self.height,
-            u: &self.u,
-            v: &self.v,
+            chroma: YuvChroma::Planar {
+                u: &self.u,
+                v: &self.v,
+            },
             chroma_width: self.chroma_width,
             chroma_height: self.chroma_height,
             matrix: self.matrix,
@@ -1411,4 +1413,37 @@ fn an_adjustment_over_nothing_stays_transparent_in_a_transparent_render() {
         OutputFrame::exact(8, 8),
     );
     assert!(out.iter().all(|&b| b == 0));
+}
+
+/// NV12 samples U/V from one `Rg8` texture: same filtering, same pixels as
+/// the planar layout, also when scaling interpolates the chroma.
+#[test]
+fn an_interleaved_chroma_renders_like_the_planar_one() {
+    let compositor = Compositor::new_headless();
+    let (w, h, cw, ch) = (16u32, 12u32, 8u32, 6u32);
+    let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 256) as u8).collect();
+    let u: Vec<u8> = (0..cw * ch).map(|i| (40 + i * 5) as u8).collect();
+    let v: Vec<u8> = (0..cw * ch).map(|i| (220 - i * 3) as u8).collect();
+    let uv: Vec<u8> = u.iter().zip(&v).flat_map(|(u, v)| [*u, *v]).collect();
+    let frame = |chroma| YuvFrame {
+        y: &y,
+        width: w,
+        height: h,
+        chroma,
+        chroma_width: cw,
+        chroma_height: ch,
+        matrix: ColorMatrix::Bt709,
+        full_range: false,
+        alpha: OPAQUE,
+    };
+    let render = |chroma| {
+        compositor.render_frame(
+            &frame(chroma),
+            &Transform::default(),
+            OutputFrame::exact(37, 29),
+        )
+    };
+    let planar = render(YuvChroma::Planar { u: &u, v: &v });
+    let interleaved = render(YuvChroma::Interleaved(&uv));
+    assert!(planar == interleaved);
 }
