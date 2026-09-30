@@ -17,4 +17,4 @@ cargo update --workspace --quiet
 git add Cargo.toml Cargo.lock
 git commit -q -m "chore: release v$VERSION"
 git tag "v$VERSION"
-echo "tagged v$VERSION, publish with: git push origin master v$VERSION"
+echo "tagged v$VERSION: git push origin master, then once CI is green: git push origin v$VERSION"

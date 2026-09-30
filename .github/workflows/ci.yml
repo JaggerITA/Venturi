@@ -4,7 +4,6 @@ on:
   pull_request:
   push:
     branches: [master]
-  workflow_call:
 
 jobs:
   check:
@@ -32,9 +31,14 @@ jobs:
 
       # Its own key ignores [profile] and [env], and an exact hit never saves
       # again: after a profile change every run would rebuild from scratch.
+      # The version line is left out, or every release would miss the cache.
+      - name: Cache key
+        id: cache-key
+        run: echo "hash=$(grep -v '^version = ' Cargo.toml | cat - .cargo/config.toml | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ hashFiles('Cargo.toml', '.cargo/config.toml') }}
+          key: ${{ steps.cache-key.outputs.hash }}
           cache-on-failure: true
 
       - name: Format
