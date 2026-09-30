@@ -134,8 +134,10 @@ impl MultibandProcessor {
         }
     }
 
-    /// In place, interleaved. No allocations: it runs in the realtime callback.
-    pub fn process(&mut self, samples: &mut [f32]) {
+    /// In place, interleaved. No allocations: it runs in the realtime
+    /// callback.
+    pub fn process(&mut self, samples: &mut [f32]) -> BandActivity {
+        let mut activity = BandActivity::default();
         let ch = self.memory.len();
         let [lp1, lp2] = &self.low_pass;
         let [hp1, hp2] = &self.high_pass;
@@ -162,12 +164,120 @@ impl MultibandProcessor {
                 };
                 *env = coefficient * *env + (1.0 - coefficient) * peak[b];
                 let level_db = 20.0 * env.max(1e-9).log10();
-                gains[b] = db_to_linear(-band.reduction_db(level_db)) * band.makeup;
+                let reduction_db = band.reduction_db(level_db);
+                activity.reduction_db[b] = activity.reduction_db[b].max(reduction_db);
+                activity.level[b] = activity.level[b].max(*env);
+                gains[b] = db_to_linear(-reduction_db) * band.makeup;
             }
             for (x, split) in frame.iter_mut().zip(&self.split) {
                 *x = split[0] * gains[0] + split[1] * gains[1] + split[2] * gains[2];
             }
         }
+        activity
+    }
+}
+
+/// What the bands went through during a `process`: the highest level the
+/// detectors saw (linear) and the most they were reduced (dB).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BandActivity {
+    pub level: [f32; 3],
+    pub reduction_db: [f32; 3],
+}
+
+#[derive(Clone, Copy)]
+struct Complex {
+    re: f32,
+    im: f32,
+}
+
+impl Complex {
+    fn add(self, o: Self) -> Self {
+        Self {
+            re: self.re + o.re,
+            im: self.im + o.im,
+        }
+    }
+
+    fn mul(self, o: Self) -> Self {
+        Self {
+            re: self.re * o.re - self.im * o.im,
+            im: self.re * o.im + self.im * o.re,
+        }
+    }
+
+    fn scale(self, k: f32) -> Self {
+        Self {
+            re: self.re * k,
+            im: self.im * k,
+        }
+    }
+
+    fn div(self, o: Self) -> Self {
+        let d = o.re * o.re + o.im * o.im;
+        Self {
+            re: (self.re * o.re + self.im * o.im) / d,
+            im: (self.im * o.re - self.re * o.im) / d,
+        }
+    }
+}
+
+impl Biquad {
+    fn response(&self, z1: Complex, z2: Complex) -> Complex {
+        let one = Complex { re: 1.0, im: 0.0 };
+        let num = one
+            .scale(self.b0)
+            .add(z1.scale(self.b1))
+            .add(z2.scale(self.b2));
+        let den = one.add(z1.scale(self.a1)).add(z2.scale(self.a2));
+        num.div(den)
+    }
+
+    fn response_lr4(&self, z1: Complex, z2: Complex) -> Complex {
+        let h = self.response(z1, z2);
+        h.mul(h)
+    }
+}
+
+/// The frequency response of a compressor's crossovers, for drawing it.
+pub struct CrossoverResponse {
+    low_pass: [Biquad; 2],
+    high_pass: [Biquad; 2],
+    sample_rate: f32,
+}
+
+impl CrossoverResponse {
+    pub fn new(params: &MultibandCompressor, sample_rate: u32) -> Self {
+        let processor = MultibandProcessor::new(params, sample_rate, 1);
+        Self {
+            low_pass: processor.low_pass,
+            high_pass: processor.high_pass,
+            sample_rate: sample_rate as f32,
+        }
+    }
+
+    /// Gain in dB at `freq_hz` with each band at `gains_db`: the bands
+    /// weighted and summed through the same filters as the audio.
+    pub fn gain_db(&self, gains_db: [f32; 3], freq_hz: f32) -> f32 {
+        let [lp1, lp2] = &self.low_pass;
+        let [hp1, hp2] = &self.high_pass;
+        let w = 2.0 * std::f32::consts::PI * freq_hz / self.sample_rate;
+        let z1 = Complex {
+            re: w.cos(),
+            im: -w.sin(),
+        };
+        let z2 = z1.mul(z1);
+        let allpass = lp2.response_lr4(z1, z2).add(hp2.response_lr4(z1, z2));
+        let low = lp1.response_lr4(z1, z2).mul(allpass);
+        let rest = hp1.response_lr4(z1, z2);
+        let mid = rest.mul(lp2.response_lr4(z1, z2));
+        let high = rest.mul(hp2.response_lr4(z1, z2));
+        let [g_low, g_mid, g_high] = gains_db.map(db_to_linear);
+        let sum = low
+            .scale(g_low)
+            .add(mid.scale(g_mid))
+            .add(high.scale(g_high));
+        10.0 * (sum.re * sum.re + sum.im * sum.im).max(1e-12).log10()
     }
 }
 

@@ -56,9 +56,6 @@ mixer.effect_multiband:
   en: "Multiband compressor"
   it: "Compressore multibanda"
 
-mixer.crossovers:
-  en: "Crossovers"
-  it: "Crossover"
 
 mixer.band_low:
   en: "Low"
@@ -88,6 +85,8 @@ mixer.release:
   en: "Release"
   it: "Rilascio"
 
-mixer.makeup:
-  en: "Makeup gain"
-  it: "Guadagno di compensazione"
+
+
+mixer.makeup_short:
+  en: "Gain"
+  it: "Guadagno"

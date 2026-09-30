@@ -13,7 +13,7 @@ use vv_core::{
     MultibandCompressor, Project, Timeline, TimelineId,
 };
 
-use crate::dynamics::MultibandProcessor;
+use crate::dynamics::{BandActivity, MultibandProcessor};
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
@@ -113,9 +113,28 @@ pub struct MixMeters {
     /// Indexed like `MixSnapshot::tracks`.
     tracks: Vec<StereoPeak>,
     master: StereoPeak,
+    /// Per channel and insert, like the chains of `MixSnapshot::tracks`.
+    track_band_meters: Vec<Vec<BandMeter>>,
+    master_band_meters: Vec<BandMeter>,
 }
 
 impl MixMeters {
+    fn new(tracks: &[Channel], master: &Channel) -> Self {
+        let band_meters = |channel: &Channel| {
+            channel
+                .inserts
+                .iter()
+                .map(|_| BandMeter::default())
+                .collect()
+        };
+        Self {
+            tracks: tracks.iter().map(|_| StereoPeak::default()).collect(),
+            master: StereoPeak::default(),
+            track_band_meters: tracks.iter().map(band_meters).collect(),
+            master_band_meters: band_meters(master),
+        }
+    }
+
     pub fn track(&self, index: usize) -> Option<&StereoPeak> {
         self.tracks.get(index)
     }
@@ -123,12 +142,61 @@ impl MixMeters {
     pub fn master(&self) -> &StereoPeak {
         &self.master
     }
+
+    /// Of the effect at `index` in the chain of `channel`.
+    pub fn band_meter(&self, channel: MixerChannel, index: usize) -> Option<&BandMeter> {
+        match channel {
+            MixerChannel::Track(track) => self.track_band_meters.get(track)?.get(index),
+            MixerChannel::Master => self.master_band_meters.get(index),
+        }
+    }
+
+    fn track_band_meters(&self, track: usize) -> &[BandMeter] {
+        self.track_band_meters.get(track).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Level and gain reduction of each band of a compressor since the last
+/// `take`.
+#[derive(Debug, Default)]
+pub struct BandMeter {
+    level: [AtomicU32; 3],
+    reduction_db: [AtomicU32; 3],
+}
+
+impl BandMeter {
+    fn raise(&self, activity: BandActivity) {
+        let pairs = [
+            (&self.level, activity.level),
+            (&self.reduction_db, activity.reduction_db),
+        ];
+        for (slots, values) in pairs {
+            for (slot, value) in slots.iter().zip(values) {
+                slot.fetch_max(value.max(0.0).to_bits(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn take(&self) -> BandActivity {
+        let take = |slots: &[AtomicU32; 3]| {
+            slots
+                .each_ref()
+                .map(|slot| f32::from_bits(slot.swap(0, Ordering::Relaxed)))
+        };
+        BandActivity {
+            level: take(&self.level),
+            reduction_db: take(&self.reduction_db),
+        }
+    }
 }
 
 /// An effect of a chain, ready for the mix: a normalization is the gain it
 /// measured.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Insert {
+    /// A disabled effect, or one with nothing to act on: it keeps the
+    /// inserts aligned with the effects of the strip.
+    Off,
     Gain(f32),
     Compressor(MultibandCompressor),
 }
@@ -193,10 +261,7 @@ impl MixSnapshot {
                 _ => groups.push((clip.track, i..i + 1)),
             }
         }
-        let meters = MixMeters {
-            tracks: tracks.iter().map(|_| StereoPeak::default()).collect(),
-            master: StereoPeak::default(),
-        };
+        let meters = MixMeters::new(&tracks, &master);
         Self {
             sample_rate,
             channels,
@@ -244,7 +309,7 @@ impl MixState {
                 .inserts
                 .iter()
                 .map(|insert| match insert {
-                    Insert::Gain(_) => None,
+                    Insert::Off | Insert::Gain(_) => None,
                     Insert::Compressor(params) => Some(MultibandProcessor::new(
                         params,
                         snapshot.sample_rate,
@@ -362,6 +427,7 @@ impl PeakAnalysis {
 
 fn hash_insert(insert: &Insert, h: &mut impl Hasher) {
     match insert {
+        Insert::Off => 2u8.hash(h),
         Insert::Gain(gain) => (0u8, gain.to_bits()).hash(h),
         Insert::Compressor(params) => {
             (1u8, params.crossovers_hz.map(f32::to_bits)).hash(h);
@@ -593,9 +659,9 @@ fn collect_clips(
     (snapshot, readiness)
 }
 
-/// The enabled effects of `strip`, in order. A normalization measures the
-/// channel through the effects before it (`measure` builds that mix), so it
-/// stays right after a compressor too.
+/// The effects of `strip`, in order, one insert each. A normalization
+/// measures the channel through the effects before it (`measure` builds that
+/// mix), so it stays right after a compressor too.
 fn resolve_chain(
     strip: &ChannelStrip,
     has_audio: bool,
@@ -605,12 +671,14 @@ fn resolve_chain(
     readiness: &mut Readiness,
 ) -> Vec<Insert> {
     let mut inserts = Vec::new();
-    for effect in strip.effects.iter().filter(|e| e.enabled) {
+    for effect in &strip.effects {
+        if !effect.enabled {
+            inserts.push(Insert::Off);
+            continue;
+        }
         match &effect.kind {
+            AudioEffectKind::Normalize { .. } if !has_audio => inserts.push(Insert::Off),
             AudioEffectKind::Normalize { target_db } => {
-                if !has_audio {
-                    continue;
-                }
                 let reading = source.peak(PeakAnalysis {
                     slot: slot.map(|(timeline, channel)| (timeline, channel, inserts.len())),
                     snapshot: measure(&inserts),
@@ -806,7 +874,13 @@ fn mix_into(
                 add_clip(snapshot, clip, block_time, scratch);
             }
             let processors = state.tracks.get_mut(*track).map(Vec::as_mut_slice);
-            apply_inserts(&channel.inserts, processors.unwrap_or_default(), scratch);
+            let band_meters = metered.then(|| snapshot.meters.track_band_meters(*track));
+            apply_inserts(
+                &channel.inserts,
+                processors.unwrap_or_default(),
+                scratch,
+                band_meters,
+            );
             let mut peak = [0.0f32; 2];
             for (dst, src) in block.chunks_exact_mut(ch).zip(scratch.chunks_exact(ch)) {
                 for (c, (d, s)) in dst.iter_mut().zip(src).enumerate() {
@@ -821,7 +895,13 @@ fn mix_into(
                 *track_peak = [track_peak[0].max(peak[0]), track_peak[1].max(peak[1])];
             }
         }
-        apply_inserts(&snapshot.master.inserts, &mut state.master, block);
+        let band_meters = metered.then_some(snapshot.meters.master_band_meters.as_slice());
+        apply_inserts(
+            &snapshot.master.inserts,
+            &mut state.master,
+            block,
+            band_meters,
+        );
         for frame in block.chunks_exact_mut(ch) {
             for (c, s) in frame.iter_mut().enumerate() {
                 *s *= snapshot.master.bus.channel_gain(c, ch);
@@ -844,17 +924,23 @@ fn mix_into(
     }
 }
 
+/// `band_meters`: where the compressors report, if metered.
 fn apply_inserts(
     inserts: &[Insert],
     processors: &mut [Option<MultibandProcessor>],
     samples: &mut [f32],
+    band_meters: Option<&[BandMeter]>,
 ) {
     for (index, insert) in inserts.iter().enumerate() {
         match insert {
+            Insert::Off => {}
             Insert::Gain(gain) => samples.iter_mut().for_each(|s| *s *= gain),
             Insert::Compressor(_) => {
                 if let Some(Some(processor)) = processors.get_mut(index) {
-                    processor.process(samples);
+                    let activity = processor.process(samples);
+                    if let Some(meter) = band_meters.and_then(|r| r.get(index)) {
+                        meter.raise(activity);
+                    }
                 }
             }
         }

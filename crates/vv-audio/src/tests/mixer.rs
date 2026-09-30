@@ -1028,3 +1028,33 @@ fn the_output_stream_carries_the_effects_over_from_one_call_to_the_next() {
         "a seek starts over"
     );
 }
+
+#[test]
+fn the_compressor_reports_its_reduction_at_its_place_in_the_strip() {
+    let (project, _, b) = project();
+    let mut track = audio_track(vec![clip_at(b, 0, 0, 90)]);
+    let disabled = vv_core::AudioEffect {
+        enabled: false,
+        ..normalize(0.0)
+    };
+    track.mix.effects = vec![disabled, compressor()];
+    let tl = timeline(vec![track]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let meter = || snap.meters.band_meter(MixerChannel::Track(0), 1).unwrap();
+    let mut out = vec![0.0; 900];
+    let silent = crate::dynamics::BandActivity::default();
+
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(meter().take(), silent);
+
+    mix_range_metered(&snap, &mut MixState::new(&snap), 0, &mut out);
+    let activity = meter().take();
+    assert!(
+        activity.reduction_db.iter().any(|r| *r > 1.0),
+        "{activity:?}"
+    );
+    assert!(activity.level.iter().any(|l| *l > 0.01), "{activity:?}");
+    assert_eq!(meter().take(), silent);
+    let disabled = snap.meters.band_meter(MixerChannel::Track(0), 0).unwrap();
+    assert_eq!(disabled.take(), silent);
+}

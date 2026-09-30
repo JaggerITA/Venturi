@@ -7,6 +7,7 @@ extern crate rust_i18n;
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod app_menu;
+mod compressor_panel;
 mod export_dialog;
 mod forced_relink_dialog;
 mod i18n;

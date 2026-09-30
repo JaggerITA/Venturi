@@ -50,6 +50,13 @@ fn a_loud_band_is_brought_down_by_its_ratio() {
     let peak = settled_peak(&run(&params, sine(700.0, 1.0, 1.0)));
     let peak_db = 20.0 * peak.log10();
     assert!((-15.0..-12.5).contains(&peak_db), "{peak_db} dB");
+
+    let mut samples = sine(700.0, 1.0, 1.0);
+    let reported = MultibandProcessor::new(&params, RATE, 1)
+        .process(&mut samples)
+        .reduction_db;
+    assert!((12.5..15.5).contains(&reported[1]), "{reported:?}");
+    assert!(reported[0] < 0.5 && reported[2] < 0.5, "{reported:?}");
 }
 
 #[test]
@@ -78,4 +85,17 @@ fn reset_forgets_the_envelope() {
     processor.process(&mut quiet);
     assert!(quiet.iter().all(|s| s.is_finite() && s.abs() < 0.01));
     assert_eq!(processor.envelope.iter().filter(|e| **e > 0.1).count(), 0);
+}
+
+#[test]
+fn the_drawn_response_is_flat_at_unity_and_follows_each_band() {
+    let params = MultibandCompressor::DEFAULT;
+    let response = CrossoverResponse::new(&params, RATE);
+    for freq in [30.0, 200.0, 1000.0, 2000.0, 12_000.0] {
+        assert!(response.gain_db([0.0; 3], freq).abs() < 0.01, "{freq} Hz");
+    }
+    let mid_down = [0.0, -12.0, 0.0];
+    assert!((response.gain_db(mid_down, 630.0) + 12.0).abs() < 1.0);
+    assert!(response.gain_db(mid_down, 30.0).abs() < 0.5);
+    assert!(response.gain_db(mid_down, 15_000.0).abs() < 0.5);
 }

@@ -3,11 +3,12 @@
 
 use std::collections::HashMap;
 
-use vv_audio::mixer::{MixMeters, StereoPeak, db_to_linear};
+use vv_audio::dynamics::BandActivity;
+use vv_audio::mixer::{BandMeter, MixMeters, StereoPeak, db_to_linear};
 use vv_core::{
-    AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, CompressorBand,
-    MixerChannel, MixerParam, MoveAudioEffect, MultibandCompressor, Project, RemoveAudioEffect,
-    SetAudioEffect, SetMixerParam, SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
+    AddAudioEffect, AudioEffect, AudioEffectKind, ChannelStrip, CommandLabel, MixerChannel,
+    MixerParam, MoveAudioEffect, Project, RemoveAudioEffect, SetAudioEffect, SetMixerParam,
+    SetTrackFlag, Timeline, TimelineId, TrackFlag, TrackKind,
 };
 
 use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
@@ -83,6 +84,9 @@ pub(crate) struct MixerPanelState {
     levels: HashMap<MixerChannel, [f32; 2]>,
     /// The effect whose settings window is open.
     open_effect: Option<(TimelineId, MixerChannel, usize)>,
+    /// Band levels and reductions shown in that window, with their fall,
+    /// and the effect they belong to.
+    band_activity: (BandActivity, Option<(TimelineId, MixerChannel, usize)>),
 }
 
 impl MixerPanelState {
@@ -190,7 +194,9 @@ pub(crate) fn show_mixer(
             }
         });
     match timeline_id.and_then(|id| project.timelines.get(id).map(|t| (id, t))) {
-        Some((id, timeline)) => commands.extend(effect_window(ctx, state, id, timeline)),
+        Some((id, timeline)) => {
+            commands.extend(effect_window(ctx, state, id, timeline, meters));
+        }
         None => state.open_effect = None,
     }
     commands
@@ -211,109 +217,6 @@ fn normalize_settings(ui: &mut egui::Ui, mut target_db: f32) -> Option<AudioEffe
         .inner;
     ui.small(t!("mixer.normalize_hint"));
     changed.then_some(AudioEffectKind::Normalize { target_db })
-}
-
-/// A numeric field for an `f32` within `(min, max)`.
-fn value_field(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    (min, max): (f32, f32),
-    speed: f64,
-    decimals: usize,
-    suffix: &str,
-) -> bool {
-    let mut field = *value as f64;
-    let changed = drag_field(
-        ui,
-        &mut field,
-        speed,
-        min as f64..=max as f64,
-        decimals,
-        suffix,
-    );
-    if changed {
-        *value = field as f32;
-    }
-    changed
-}
-
-fn compressor_settings(ui: &mut egui::Ui, params: &MultibandCompressor) -> Option<AudioEffectKind> {
-    let mut params = params.clone();
-    let mut changed = false;
-    let (min_hz, max_hz) = MultibandCompressor::CROSSOVER_RANGE_HZ;
-    ui.horizontal(|ui| {
-        ui.label(t!("mixer.crossovers"));
-        let [low, high] = &mut params.crossovers_hz;
-        // A drag moves the frequency by a share of itself, as on a log scale.
-        changed |= value_field(ui, low, (min_hz, *high), *low as f64 * 0.005, 0, " Hz");
-        changed |= value_field(ui, high, (*low, max_hz), *high as f64 * 0.005, 0, " Hz");
-    });
-    ui.add_space(4.0);
-    type Field = fn(&mut CompressorBand) -> &mut f32;
-    let rows: [(String, Field, (f32, f32), f64, usize, &str); 5] = [
-        (
-            t!("mixer.threshold").into_owned(),
-            |b| &mut b.threshold_db,
-            CompressorBand::THRESHOLD_RANGE_DB,
-            0.2,
-            1,
-            " dB",
-        ),
-        (
-            t!("mixer.ratio").into_owned(),
-            |b| &mut b.ratio,
-            CompressorBand::RATIO_RANGE,
-            0.05,
-            1,
-            ":1",
-        ),
-        (
-            t!("mixer.attack").into_owned(),
-            |b| &mut b.attack_ms,
-            CompressorBand::ATTACK_RANGE_MS,
-            0.2,
-            1,
-            " ms",
-        ),
-        (
-            t!("mixer.release").into_owned(),
-            |b| &mut b.release_ms,
-            CompressorBand::RELEASE_RANGE_MS,
-            2.0,
-            0,
-            " ms",
-        ),
-        (
-            t!("mixer.makeup").into_owned(),
-            |b| &mut b.makeup_db,
-            CompressorBand::MAKEUP_RANGE_DB,
-            0.1,
-            1,
-            " dB",
-        ),
-    ];
-    egui::Grid::new("multiband_bands")
-        .num_columns(4)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.label("");
-            for name in [
-                t!("mixer.band_low"),
-                t!("mixer.band_mid"),
-                t!("mixer.band_high"),
-            ] {
-                ui.strong(name);
-            }
-            ui.end_row();
-            for (label, field, range, speed, decimals, suffix) in rows {
-                ui.label(label);
-                for band in &mut params.bands {
-                    changed |= value_field(ui, field(band), range, speed, decimals, suffix);
-                }
-                ui.end_row();
-            }
-        });
-    changed.then_some(AudioEffectKind::MultibandCompressor(params))
 }
 
 fn channel_label(timeline: &Timeline, channel: MixerChannel) -> String {
@@ -344,6 +247,7 @@ fn effect_window(
     state: &mut MixerPanelState,
     timeline_id: TimelineId,
     timeline: &Timeline,
+    meters: Option<&MixMeters>,
 ) -> Vec<BoxedCommand> {
     let mut commands: Vec<BoxedCommand> = Vec::new();
     let Some((open_timeline, channel, index)) = state.open_effect else {
@@ -354,6 +258,32 @@ fn effect_window(
         state.open_effect = None;
         return commands;
     };
+    let reading = meters
+        .and_then(|m| m.band_meter(channel, index))
+        .map_or_else(BandActivity::default, BandMeter::take);
+    let (shown, of) = &mut state.band_activity;
+    if *of != state.open_effect {
+        *shown = BandActivity::default();
+        *of = state.open_effect;
+    }
+    let pairs = [
+        (&mut shown.level, reading.level),
+        (&mut shown.reduction_db, reading.reduction_db),
+    ];
+    for (values, new) in pairs {
+        for (value, new) in values.iter_mut().zip(new) {
+            *value = new.max(*value * METER_DECAY);
+        }
+    }
+    let activity = *shown;
+    if activity
+        .level
+        .iter()
+        .chain(&activity.reduction_db)
+        .any(|v| *v > 0.001)
+    {
+        ctx.request_repaint();
+    }
     let mut open = true;
     let title = format!(
         "{} — {}",
@@ -371,7 +301,9 @@ fn effect_window(
             }
             let edited = match &effect.kind {
                 AudioEffectKind::Normalize { target_db } => normalize_settings(ui, *target_db),
-                AudioEffectKind::MultibandCompressor(params) => compressor_settings(ui, params),
+                AudioEffectKind::MultibandCompressor(params) => {
+                    crate::compressor_panel::show(ui, params, &activity)
+                }
             };
             if let Some(kind) = edited {
                 let edited = AudioEffect {
@@ -674,62 +606,14 @@ fn solo_mute(ui: &mut egui::Ui, flags: Option<(bool, bool)>, edit: &mut StripEdi
     });
 }
 
-/// Balance knob: drag up/right to turn it clockwise, Shift for precision,
-/// double click to centre it.
+/// Balance knob, with L and R at the ends of its travel.
 fn pan_knob(ui: &mut egui::Ui, pan: f32) -> Option<f32> {
-    let size = egui::Vec2::splat(KNOB_RADIUS * 2.0 + 8.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-    let mut changed = None;
-    if response.double_clicked() {
-        changed = Some(0.0);
-    } else if response.dragged() {
-        let delta = response.drag_delta();
-        let fine = if ui.input(|i| i.modifiers.shift) {
-            0.1
-        } else {
-            1.0
-        };
-        let moved = (delta.x - delta.y) / 100.0 * fine;
-        if moved != 0.0 {
-            changed = Some((pan + moved).clamp(-1.0, 1.0));
-        }
-    }
-
-    let painter = ui.painter();
-    let c = rect.center();
+    let (response, changed) = knob(ui, (pan + 1.0) / 2.0, 0.5, KNOB_RADIUS);
+    let c = response.rect.center();
     let at = |angle: f32, radius: f32| c + radius * egui::vec2(angle.sin(), -angle.cos());
-    let track: Vec<egui::Pos2> = (0..=24)
-        .map(|i| {
-            at(
-                -KNOB_SWEEP + 2.0 * KNOB_SWEEP * i as f32 / 24.0,
-                KNOB_RADIUS + 3.0,
-            )
-        })
-        .collect();
-    painter.add(egui::Shape::line(
-        track,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
-    ));
-    let visuals = ui.style().interact(&response);
-    painter.circle(
-        c,
-        KNOB_RADIUS,
-        egui::Color32::from_gray(if response.hovered() { 75 } else { 60 }),
-        egui::Stroke::new(1.0, visuals.fg_stroke.color),
-    );
-    let angle = pan.clamp(-1.0, 1.0) * KNOB_SWEEP;
-    let pointer = if pan.abs() < 0.005 {
-        egui::Color32::from_gray(220)
-    } else {
-        crate::theme::ACCENT
-    };
-    painter.line_segment(
-        [at(angle, 4.0), at(angle, KNOB_RADIUS - 2.0)],
-        egui::Stroke::new(2.5, pointer),
-    );
     let font = egui::FontId::proportional(9.0);
     let weak = ui.visuals().weak_text_color();
+    let painter = ui.painter();
     painter.text(
         at(-KNOB_SWEEP, KNOB_RADIUS + 6.0),
         egui::Align2::RIGHT_TOP,
@@ -744,7 +628,74 @@ fn pan_knob(ui: &mut egui::Ui, pan: f32) -> Option<f32> {
         font,
         weak,
     );
-    changed
+    changed.map(|t| t * 2.0 - 1.0)
+}
+
+/// Rotary control over `0..=1`: drag up/right to turn it clockwise, Shift
+/// for precision, double click to bring it back to `default`. The pointer
+/// takes the accent away from `default`.
+pub(crate) fn knob(
+    ui: &mut egui::Ui,
+    t: f32,
+    default: f32,
+    radius: f32,
+) -> (egui::Response, Option<f32>) {
+    let size = egui::Vec2::splat(radius * 2.0 + 8.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let mut changed = None;
+    if response.double_clicked() {
+        changed = Some(default);
+    } else if response.dragged() {
+        let delta = response.drag_delta();
+        let fine = if ui.input(|i| i.modifiers.shift) {
+            0.1
+        } else {
+            1.0
+        };
+        let moved = (delta.x - delta.y) / 200.0 * fine;
+        if moved != 0.0 {
+            changed = Some((t + moved).clamp(0.0, 1.0));
+        }
+    }
+
+    let painter = ui.painter();
+    let c = rect.center();
+    let at = |angle: f32, r: f32| c + r * egui::vec2(angle.sin(), -angle.cos());
+    let angle_of = |t: f32| (t.clamp(0.0, 1.0) * 2.0 - 1.0) * KNOB_SWEEP;
+    let arc = |from: f32, to: f32| -> Vec<egui::Pos2> {
+        (0..=24)
+            .map(|i| at(from + (to - from) * i as f32 / 24.0, radius + 3.0))
+            .collect()
+    };
+    painter.add(egui::Shape::line(
+        arc(-KNOB_SWEEP, KNOB_SWEEP),
+        egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+    ));
+    let at_default = (t - default).abs() < 0.0025;
+    if !at_default {
+        painter.add(egui::Shape::line(
+            arc(angle_of(default), angle_of(t)),
+            egui::Stroke::new(2.0, crate::theme::ACCENT_FILL),
+        ));
+    }
+    let visuals = ui.style().interact(&response);
+    painter.circle(
+        c,
+        radius,
+        egui::Color32::from_gray(if response.hovered() { 75 } else { 60 }),
+        egui::Stroke::new(1.0, visuals.fg_stroke.color),
+    );
+    let pointer = if at_default {
+        egui::Color32::from_gray(220)
+    } else {
+        crate::theme::ACCENT
+    };
+    painter.line_segment(
+        [at(angle_of(t), 4.0), at(angle_of(t), radius - 2.0)],
+        egui::Stroke::new(2.5, pointer),
+    );
+    (response, changed)
 }
 
 /// Console fader with its dB scale and the stereo meter of the strip. The
@@ -817,7 +768,12 @@ fn fader(ui: &mut egui::Ui, gain_db: f32, level: [f32; 2]) -> Option<f32> {
     paint_meter(painter, meter_rect, level, &y_of);
 
     let handle = egui::Rect::from_center_size(egui::pos2(groove_x, y_of(position)), HANDLE_SIZE);
-    let lit = response.hovered() || response.dragged();
+    paint_fader_handle(painter, handle, response.hovered() || response.dragged());
+    changed
+}
+
+/// Console fader cap: raised, with the centre line that marks the value.
+pub(crate) fn paint_fader_handle(painter: &egui::Painter, handle: egui::Rect, lit: bool) {
     let base = if lit { 205 } else { 180 };
     painter.rect_filled(
         handle.translate(egui::vec2(0.0, 2.0)),
@@ -849,7 +805,6 @@ fn fader(ui: &mut egui::Ui, gain_db: f32, level: [f32; 2]) -> Option<f32> {
         egui::Stroke::new(1.0, egui::Color32::from_gray(50)),
         egui::StrokeKind::Inside,
     );
-    changed
 }
 
 /// Two bars on the fader scale: green, yellow from -6 dBFS, red past 0.

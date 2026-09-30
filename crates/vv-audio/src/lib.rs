@@ -7,7 +7,7 @@ pub mod mixer;
 pub mod stretch;
 
 pub use mixer::{
-    AnalysisSlot, AudioSource, ClipAudio, MixSnapshot, Mixer, MixerState, PeakAnalysis,
+    AnalysisSlot, AudioSource, BandMeter, ClipAudio, MixSnapshot, Mixer, MixerState, PeakAnalysis,
     PeakReading, StretchedWindow,
 };
 pub use stretch::stretch_samples;
