@@ -3740,6 +3740,18 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport,
+        wgpu_options: eframe::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetupCreateNew {
+                device_descriptor: std::sync::Arc::new(|adapter| wgpu::DeviceDescriptor {
+                    label: Some("egui wgpu device"),
+                    required_limits: vv_render::device_limits(adapter),
+                    ..Default::default()
+                }),
+                ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+            }
+            .into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

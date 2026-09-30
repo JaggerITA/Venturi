@@ -400,6 +400,17 @@ fn give_back(pool: &mut Vec<wgpu::Texture>, textures: impl IntoIterator<Item = w
     pool.drain(..excess);
 }
 
+/// wgpu refuses a device asking for more than the adapter offers, and the
+/// defaults exceed small GPUs (Raspberry Pi 4: 4 color attachments, 4096
+/// textures on GL).
+pub fn device_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    wgpu::Limits {
+        max_texture_dimension_2d: 8192,
+        ..wgpu::Limits::default()
+    }
+    .or_worse_values_from(&adapter.limits())
+}
+
 impl Compositor {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -540,6 +551,7 @@ impl Compositor {
             adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("vv-render headless device"),
+                    required_limits: device_limits(&adapter),
                     ..Default::default()
                 })
                 .await
