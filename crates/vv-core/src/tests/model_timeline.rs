@@ -30,6 +30,7 @@ fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
             Track {
                 kind: TrackKind::Video,
@@ -39,6 +40,7 @@ fn active_video_clip_at_prefers_the_topmost_video_track_where_it_has_a_clip() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
         ],
         markers: Vec::new(),
@@ -74,6 +76,7 @@ fn active_video_clip_at_skips_what_is_not_composited() {
         locked: false,
         crossings: Vec::new(),
         mix: Default::default(),
+        armed: Default::default(),
     };
     let mut disabled = clip_at(0, 10, 2);
     disabled.disabled = true;
@@ -112,6 +115,7 @@ fn active_video_clips_at_returns_every_covering_track_bottom_to_top() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
             Track {
                 kind: TrackKind::Video,
@@ -121,6 +125,7 @@ fn active_video_clips_at_returns_every_covering_track_bottom_to_top() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
         ],
         markers: Vec::new(),
@@ -160,6 +165,7 @@ fn active_video_clip_at_ignores_audio_tracks() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
             Track {
                 kind: TrackKind::Audio,
@@ -169,6 +175,7 @@ fn active_video_clip_at_ignores_audio_tracks() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
         ],
         markers: Vec::new(),
@@ -227,6 +234,7 @@ fn total_frames_is_the_furthest_clip_end_across_tracks() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
             Track {
                 kind: TrackKind::Audio,
@@ -236,6 +244,7 @@ fn total_frames_is_the_furthest_clip_end_across_tracks() {
                 locked: false,
                 crossings: Vec::new(),
                 mix: Default::default(),
+                armed: Default::default(),
             },
         ],
         markers: Vec::new(),
@@ -384,6 +393,7 @@ fn refresh_clip_rates_conforms_a_clip_loaded_without_a_rate() {
             locked: false,
             crossings: Vec::new(),
             mix: Default::default(),
+            armed: Default::default(),
         }],
         markers: Vec::new(),
         master: Default::default(),

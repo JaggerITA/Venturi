@@ -1707,6 +1707,9 @@ pub struct Track {
     /// land on it.
     #[serde(default)]
     pub locked: bool,
+    /// Audio only: armed for recording, a take lands on it.
+    #[serde(default)]
+    pub armed: bool,
     /// Transitions straddling two adjacent clips. It never touches
     /// `timeline_start`/`timeline_len` of the clips involved (they stay non-
     /// overlapping, invariant intact): it is the rendering that "lends" for
@@ -1734,6 +1737,7 @@ impl Track {
             muted: false,
             solo: false,
             locked: false,
+            armed: false,
             crossings: Vec::new(),
             mix: ChannelStrip::default(),
         }

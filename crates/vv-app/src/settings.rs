@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use vv_media::audio_file::AudioFileFormat;
 use vv_media::proxy::ProxyQuality;
 
 use crate::i18n::Language;
@@ -514,6 +515,13 @@ pub struct Settings {
     pub panels: PanelLayout,
     /// Saved by the user, in the order they were first saved.
     pub compressor_presets: Vec<CompressorPreset>,
+    /// Microphone of the voiceover, by name; `None` is the system's default.
+    pub input_device: Option<String>,
+    /// Of the takes; `None`, or one this FFmpeg lacks, is
+    /// `AudioFileFormat::resolve`'s choice.
+    pub recording_format: Option<AudioFileFormat>,
+    /// Where the takes go; `None` is `Recordings` next to the project file.
+    pub recording_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -537,6 +545,9 @@ impl Default for Settings {
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
             compressor_presets: Vec::new(),
+            input_device: None,
+            recording_format: None,
+            recording_dir: None,
         }
     }
 }
@@ -584,6 +595,12 @@ struct SettingsFile {
     /// with the whole file.
     #[serde(default)]
     compressor_presets: Vec<serde_json::Value>,
+    #[serde(default)]
+    input_device: Option<String>,
+    #[serde(default)]
+    recording_format: Option<String>,
+    #[serde(default)]
+    recording_dir: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -650,6 +667,12 @@ impl Settings {
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
         settings.recent_projects = file.recent_projects;
+        settings.input_device = file.input_device;
+        settings.recording_format = file
+            .recording_format
+            .as_deref()
+            .and_then(AudioFileFormat::from_id);
+        settings.recording_dir = file.recording_dir;
         settings.compressor_presets = file
             .compressor_presets
             .into_iter()
@@ -739,6 +762,9 @@ impl Settings {
                 .iter()
                 .filter_map(|preset| serde_json::to_value(preset).ok())
                 .collect(),
+            input_device: self.input_device.clone(),
+            recording_format: self.recording_format.map(|f| f.id().to_owned()),
+            recording_dir: self.recording_dir.clone(),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

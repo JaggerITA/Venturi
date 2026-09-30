@@ -4,6 +4,7 @@
 
 pub mod dynamics;
 pub mod mixer;
+pub mod recorder;
 pub mod spectrum;
 pub mod stretch;
 

@@ -68,6 +68,7 @@ fn audio_track(clips: Vec<Clip>) -> Track {
         locked: false,
         crossings: Vec::new(),
         mix: Default::default(),
+        armed: Default::default(),
     }
 }
 

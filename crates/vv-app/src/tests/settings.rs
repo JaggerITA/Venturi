@@ -169,6 +169,9 @@ fn compressor_presets_are_saved_and_a_broken_one_is_dropped_alone() {
         params,
     }];
     settings.kinetic_scroll = false;
+    settings.input_device = Some("USB Microphone".into());
+    settings.recording_format = Some(vv_media::audio_file::AudioFileFormat::Flac);
+    settings.recording_dir = Some("/tmp/takes".into());
     settings.save(&path).unwrap();
     assert_eq!(Settings::load(&path), settings);
 

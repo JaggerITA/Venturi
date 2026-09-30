@@ -25,6 +25,8 @@ pub enum CommandLabel {
     MuteTrack,
     SoloTrack,
     LockTrack,
+    ArmTrack,
+    RecordVoiceover,
     MixerGain,
     MixerPan,
     AddAudioEffect,
@@ -344,6 +346,7 @@ pub enum TrackFlag {
     Muted,
     Solo,
     Locked,
+    Armed,
 }
 
 impl TrackFlag {
@@ -352,6 +355,7 @@ impl TrackFlag {
             TrackFlag::Muted => &mut track.muted,
             TrackFlag::Solo => &mut track.solo,
             TrackFlag::Locked => &mut track.locked,
+            TrackFlag::Armed => &mut track.armed,
         }
     }
 }
@@ -383,6 +387,7 @@ impl Command for SetTrackFlag {
             TrackFlag::Muted => CommandLabel::MuteTrack,
             TrackFlag::Solo => CommandLabel::SoloTrack,
             TrackFlag::Locked => CommandLabel::LockTrack,
+            TrackFlag::Armed => CommandLabel::ArmTrack,
         }
     }
 

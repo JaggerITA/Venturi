@@ -175,3 +175,15 @@ timeline.marker_note_hint:
 timeline.marker_editor_hint:
   en: "Ctrl+click or Ctrl+Enter: save and close"
   it: "Ctrl+clic o Ctrl+Invio: salva e chiudi"
+
+timeline.arm:
+  en: "Record on this track (R): the next playback with Space records the microphone here"
+  it: "Registra su questa traccia (R): la prossima riproduzione con Spazio registra qui il microfono"
+
+timeline.add_video_track:
+  en: "Add video track"
+  it: "Aggiungi traccia video"
+
+timeline.add_audio_track:
+  en: "Add audio track"
+  it: "Aggiungi traccia audio"

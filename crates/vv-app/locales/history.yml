@@ -96,6 +96,14 @@ history.reset_gain:
   en: "Reset gain"
   it: "Reimposta guadagno"
 
+history.arm_track:
+  en: "Arm track for recording"
+  it: "Abilita registrazione traccia"
+
+history.record_voiceover:
+  en: "Record voiceover"
+  it: "Registra voiceover"
+
 history.mixer_gain:
   en: "Mixer gain"
   it: "Guadagno mixer"

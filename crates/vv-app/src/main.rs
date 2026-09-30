@@ -32,6 +32,7 @@ mod timeline_ui;
 mod transport;
 mod viewer_overlay;
 mod viewer_zoom;
+mod voiceover;
 mod waveform_worker;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
@@ -208,6 +209,7 @@ struct VenturiApp {
     media_pool_state: media_pool::MediaPoolState,
     keyframe_editor: keyframe_editor::KeyframeEditorState,
     mixer_panel: mixer_panel::MixerPanelState,
+    take: Option<voiceover::ActiveTake>,
     /// Media or elements not imported, shown in a separate window
     /// until the user closes it.
     import_warnings: Vec<String>,
@@ -382,6 +384,7 @@ impl Default for VenturiApp {
             media_pool_state: media_pool::MediaPoolState::default(),
             keyframe_editor: keyframe_editor::KeyframeEditorState::default(),
             mixer_panel: mixer_panel::MixerPanelState::default(),
+            take: None,
             import_warnings: Vec::new(),
             preview_meta: None,
             preview_error: None,
@@ -839,9 +842,12 @@ impl VenturiApp {
         let timeline = &self.session.project.timelines[timeline_id];
         let (fps, end) = (timeline.fps.as_f64(), timeline.total_frames());
         let playhead = self.timeline_state.playhead;
-        if playhead >= end {
+        if playhead >= end || !self.prepare_take() {
             return;
         }
+        // Before the playback: opening the microphone takes a while, and
+        // the take must not start late.
+        self.start_take(playhead);
         self.timeline_audio();
         self.sync_timeline_audio();
         let audio = self.timeline_audio();
@@ -1751,6 +1757,16 @@ impl VenturiApp {
         let response = dialog.show(ctx, &mut self.settings);
         if !response.open {
             self.settings_dialog = None;
+        }
+        if response.pick_recording_dir {
+            let start = self.settings.recording_dir.clone();
+            self.spawn_file_dialog(project_io::DialogKind::RecordingFolder, move |dlg| {
+                let dlg = match start {
+                    Some(dir) => dlg.set_directory(dir),
+                    None => dlg,
+                };
+                dlg.pick_folder()
+            });
         }
         if !response.changed {
             return;
@@ -3048,6 +3064,7 @@ impl eframe::App for VenturiApp {
         self.show_forced_relink_dialog(ui.ctx());
         self.show_unsaved_changes_dialog(ui);
         self.show_new_timeline_dialog(ui.ctx());
+        self.show_record_needs_save(ui.ctx());
         if std::mem::take(&mut self.timeline_state.paste_attributes_requested) {
             self.open_paste_attributes_dialog();
         }
@@ -3285,6 +3302,7 @@ impl eframe::App for VenturiApp {
             }
         }
         self.drive_browse_playback();
+        self.drive_take();
         // The timeline buffer stays warm during the pool preview too.
         self.sync_render_ahead();
         self.sync_root_timeline_media();

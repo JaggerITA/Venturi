@@ -66,6 +66,7 @@ fn compound_mixdown_waits_for_its_real_media_then_caches_it() {
             locked: false,
             crossings: Vec::new(),
             mix: Default::default(),
+            armed: Default::default(),
         }],
         markers: Vec::new(),
         master: Default::default(),

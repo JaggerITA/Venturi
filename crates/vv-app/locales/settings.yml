@@ -9,6 +9,27 @@ settings.section_general:
 settings.section_playback:
   en: Playback
   it: Playback
+settings.section_recording:
+  en: Recording
+  it: Registrazione
+settings.recording_format:
+  en: Audio format
+  it: Formato audio
+settings.recording_format_missing:
+  en: The chosen format is not available in this build; the takes use the one shown.
+  it: Il formato scelto non è disponibile in questa versione; le registrazioni usano quello mostrato.
+settings.recording_dir:
+  en: "Save the takes in:"
+  it: "Salva le registrazioni in:"
+settings.recording_dir_project:
+  en: The Recordings folder next to the project file
+  it: La cartella Recordings accanto al file del progetto
+settings.recording_dir_other:
+  en: "Another folder:"
+  it: "Un'altra cartella:"
+settings.recording_dir_choose:
+  en: Choose…
+  it: Scegli…
 settings.read_ahead:
   en: Read-ahead
   it: Read-ahead
@@ -72,6 +93,12 @@ settings.kinetic_scroll:
 settings.kinetic_scroll_media_pool:
   en: Kinetic scrolling in the media pool
   it: Scrolling cinetico nel media pool
+settings.input_device:
+  en: Voiceover microphone
+  it: Microfono per il voiceover
+settings.input_device_default:
+  en: System default
+  it: Predefinito di sistema
 settings.shortcuts_hint:
   en: Click a shortcut and press the new keys (Esc cancels).
   it: Clicca una scorciatoia e premi i tasti nuovi (Esc annulla).

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use vv_media::audio_file::AudioFileFormat;
 use vv_media::proxy::ProxyQuality;
 
 use crate::i18n::Language;
@@ -12,16 +13,23 @@ use crate::settings::{Action, Keymap, Settings, Shortcut};
 pub enum Section {
     General,
     Playback,
+    Recording,
     Shortcuts,
 }
 
 impl Section {
-    const ALL: [Section; 3] = [Section::General, Section::Playback, Section::Shortcuts];
+    const ALL: [Section; 4] = [
+        Section::General,
+        Section::Playback,
+        Section::Recording,
+        Section::Shortcuts,
+    ];
 
     fn title(self) -> Cow<'static, str> {
         match self {
             Section::General => t!("settings.section_general"),
             Section::Playback => t!("settings.section_playback"),
+            Section::Recording => t!("settings.section_recording"),
             Section::Shortcuts => t!("settings.section_shortcuts"),
         }
     }
@@ -39,11 +47,17 @@ pub struct SettingsDialog {
     section: Section,
     capture: Option<Capture>,
     notice: Option<String>,
+    /// Asked once per opening: listing the devices is slow on some hosts.
+    input_devices: Vec<String>,
+    /// The formats this FFmpeg can write, asked once like the devices.
+    recording_formats: Vec<AudioFileFormat>,
 }
 
 pub struct SettingsDialogResponse {
     pub open: bool,
     pub changed: bool,
+    /// The folder of the takes must be chosen with the system dialog.
+    pub pick_recording_dir: bool,
 }
 
 impl SettingsDialog {
@@ -52,6 +66,8 @@ impl SettingsDialog {
             section,
             capture: None,
             notice: None,
+            input_devices: vv_audio::recorder::input_device_names(),
+            recording_formats: AudioFileFormat::available(),
         }
     }
 
@@ -64,6 +80,7 @@ impl SettingsDialog {
         let mut response = SettingsDialogResponse {
             open: true,
             changed: false,
+            pick_recording_dir: false,
         };
         response.changed |= self.capture_key(ctx, &mut settings.keymap);
         egui::Window::new(t!("settings.title"))
@@ -83,6 +100,16 @@ impl SettingsDialog {
                     ui.vertical(|ui| match self.section {
                         Section::General => {
                             response.changed |= general_section(ui, settings);
+                        }
+                        Section::Recording => {
+                            let (changed, pick) = recording_section(
+                                ui,
+                                settings,
+                                &self.input_devices,
+                                &self.recording_formats,
+                            );
+                            response.changed |= changed;
+                            response.pick_recording_dir |= pick;
                         }
                         Section::Playback => {
                             response.changed |= playback_section(ui, settings);
@@ -248,6 +275,99 @@ fn general_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
         )
         .changed();
     changed
+}
+
+/// `(changed, pick the folder)`.
+fn recording_section(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    input_devices: &[String],
+    formats: &[AudioFileFormat],
+) -> (bool, bool) {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(t!("settings.input_device"));
+        let default = t!("settings.input_device_default").into_owned();
+        let missing = settings
+            .input_device
+            .clone()
+            .filter(|name| !input_devices.contains(name));
+        egui::ComboBox::from_id_salt("settings_input_device")
+            .width(260.0)
+            .selected_text(
+                settings
+                    .input_device
+                    .clone()
+                    .unwrap_or_else(|| default.clone()),
+            )
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut settings.input_device, None, &default)
+                    .changed();
+                // A device unplugged since keeps its place: the recording
+                // falls back to the default until it is back.
+                for name in input_devices.iter().chain(missing.as_ref()) {
+                    changed |= ui
+                        .selectable_value(&mut settings.input_device, Some(name.clone()), name)
+                        .changed();
+                }
+            });
+    });
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(t!("settings.recording_format"));
+        let current = AudioFileFormat::resolve(settings.recording_format);
+        egui::ComboBox::from_id_salt("settings_recording_format")
+            .width(160.0)
+            .selected_text(current.label())
+            .show_ui(ui, |ui| {
+                for &format in formats {
+                    if ui
+                        .selectable_label(format == current, format.label())
+                        .clicked()
+                    {
+                        settings.recording_format = Some(format);
+                        changed = true;
+                    }
+                }
+            });
+    });
+    if settings
+        .recording_format
+        .is_some_and(|f| !formats.contains(&f))
+    {
+        ui.weak(t!("settings.recording_format_missing"));
+    }
+
+    ui.add_space(8.0);
+    ui.label(t!("settings.recording_dir"));
+    let mut pick = false;
+    if ui
+        .radio(
+            settings.recording_dir.is_none(),
+            t!("settings.recording_dir_project"),
+        )
+        .clicked()
+        && settings.recording_dir.is_some()
+    {
+        settings.recording_dir = None;
+        changed = true;
+    }
+    ui.horizontal(|ui| {
+        // Choosing "another folder" is choosing which one.
+        pick |= ui
+            .radio(
+                settings.recording_dir.is_some(),
+                t!("settings.recording_dir_other"),
+            )
+            .clicked();
+        if let Some(dir) = &settings.recording_dir {
+            ui.monospace(dir.display().to_string());
+        }
+        pick |= ui.button(t!("settings.recording_dir_choose")).clicked();
+    });
+    (changed, pick)
 }
 
 fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {

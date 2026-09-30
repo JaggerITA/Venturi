@@ -584,6 +584,8 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::Flip => t!("history.flip"),
         L::Gain => t!("history.gain"),
         L::ResetGain => t!("history.reset_gain"),
+        L::ArmTrack => t!("history.arm_track"),
+        L::RecordVoiceover => t!("history.record_voiceover"),
         L::MixerGain => t!("history.mixer_gain"),
         L::MixerPan => t!("history.mixer_pan"),
         L::AddAudioEffect => t!("history.add_audio_effect"),

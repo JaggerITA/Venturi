@@ -1,0 +1,21 @@
+_version: 2
+
+voiceover.needs_save_title:
+  en: "Save the project to record"
+  it: "Salva il progetto per registrare"
+
+voiceover.needs_save:
+  en: "Recordings go into the %{dir} folder next to the project file, and this project has not been saved yet. Save it, then record; or choose another folder in Settings → Recording."
+  it: "Le registrazioni vanno nella cartella %{dir} accanto al file del progetto, e questo progetto non è ancora stato salvato. Salvalo, poi registra; oppure scegli un'altra cartella in Impostazioni → Registrazione."
+
+voiceover.save_project:
+  en: "Save project…"
+  it: "Salva progetto…"
+
+voiceover.no_input:
+  en: "Cannot record from the microphone: %{error}"
+  it: "Impossibile registrare dal microfono: %{error}"
+
+voiceover.save_failed:
+  en: "The recording could not be saved: %{error}"
+  it: "Non è stato possibile salvare la registrazione: %{error}"

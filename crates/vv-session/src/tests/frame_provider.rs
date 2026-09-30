@@ -309,6 +309,7 @@ fn video_track(clips: Vec<Clip>) -> Track {
         locked: false,
         crossings: Vec::new(),
         mix: Default::default(),
+        armed: Default::default(),
     }
 }
 
@@ -363,6 +364,7 @@ fn crossing_offsets_clear_a_zoomed_clip_fully_off_screen() {
             },
         }],
         mix: Default::default(),
+        armed: Default::default(),
     };
     let timeline = Timeline {
         name: "t".into(),

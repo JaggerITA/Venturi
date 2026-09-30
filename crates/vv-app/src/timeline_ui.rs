@@ -53,11 +53,27 @@ pub(crate) enum TransitionSelection {
     Crossing(usize, ClipId),
 }
 
+/// A take in progress, as the timeline draws it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RecordingView {
+    pub start: FrameIdx,
+    pub tracks: Vec<usize>,
+    /// Peak of every `1 / RECORDING_PEAKS_PER_SEC` s recorded so far.
+    pub peaks: Vec<f32>,
+}
+
+pub const RECORDING_PEAKS_PER_SEC: f64 = 100.0;
+
 pub struct TimelineState {
     /// Selected clips. Empty if no clip is selected (it must not
     /// be confused with "no timeline": here it is only the state of the
     /// selection inside an existing timeline).
     pub selected: BTreeSet<ClipKey>,
+    /// The project has a folder to record into: set by the app every frame.
+    pub can_record: bool,
+    /// Arming was refused for that: the app shows why.
+    pub record_needs_save: bool,
+    pub recording: Option<RecordingView>,
     /// Origin of the shift+click. A shift+click does not move it, as in
     /// file managers.
     selection_anchor: Option<ClipKey>,
@@ -363,6 +379,9 @@ impl Default for TimelineState {
     fn default() -> Self {
         Self {
             selected: BTreeSet::new(),
+            can_record: false,
+            record_needs_save: false,
+            recording: None,
             selection_anchor: None,
             playhead: 0,
             pixels_per_sec: 60.0,
@@ -606,6 +625,9 @@ enum PendingAction {
     Link(Vec<ClipKey>),
     /// Removes the track at this index (and its clips).
     RemoveTrack(usize),
+    AddTrack(TrackKind),
+    /// Arming for recording asked on a project with no folder yet.
+    ArmNeedsSave,
     SetTrackFlag(usize, TrackFlag, bool),
     /// Replaces the listed clips with a compound clip (see
     /// `make_compound_clip`).
@@ -627,6 +649,7 @@ struct TrackFlags {
     muted: bool,
     solo: bool,
     locked: bool,
+    armed: bool,
 }
 
 /// Drawing order: Video from the highest index (the new one is at the top),
@@ -926,6 +949,7 @@ fn draw_track_headers(
     pending: &mut Option<PendingAction>,
     playhead: FrameIdx,
     fps: f64,
+    can_record: bool,
 ) {
     let (rect, _resp) = ui.allocate_exact_size(
         egui::vec2(TRACK_HEADER_WIDTH, RULER_HEIGHT),
@@ -988,7 +1012,7 @@ fn draw_track_headers(
             paint(ui.painter(), rect);
             resp.clicked()
         };
-        if toggle(42.0, "lock_track", &t!("timeline.lock_track"), &|p, r| {
+        if toggle(38.0, "lock_track", &t!("timeline.lock_track"), &|p, r| {
             paint_lock_icon(p, r, flags.locked)
         }) {
             *pending = Some(PendingAction::SetTrackFlag(
@@ -1000,7 +1024,7 @@ fn draw_track_headers(
         match kind {
             TrackKind::Video => {
                 if toggle(
-                    66.0,
+                    60.0,
                     "mute_track",
                     &t!("timeline.disable_video_track"),
                     &|p, r| paint_film_icon(p, r, !flags.muted),
@@ -1014,7 +1038,7 @@ fn draw_track_headers(
             }
             TrackKind::Audio => {
                 let solo_color = crate::theme::ACCENT;
-                if toggle(66.0, "solo_track", &t!("timeline.solo"), &|p, r| {
+                if toggle(60.0, "solo_track", &t!("timeline.solo"), &|p, r| {
                     paint_letter_button(p, r, "S", flags.solo.then_some(solo_color))
                 }) {
                     *pending = Some(PendingAction::SetTrackFlag(
@@ -1024,7 +1048,7 @@ fn draw_track_headers(
                     ));
                 }
                 let mute_color = egui::Color32::from_rgb(120, 150, 190);
-                if toggle(90.0, "mute_track", &t!("timeline.mute"), &|p, r| {
+                if toggle(82.0, "mute_track", &t!("timeline.mute"), &|p, r| {
                     paint_letter_button(p, r, "M", flags.muted.then_some(mute_color))
                 }) {
                     *pending = Some(PendingAction::SetTrackFlag(
@@ -1032,6 +1056,16 @@ fn draw_track_headers(
                         TrackFlag::Muted,
                         !flags.muted,
                     ));
+                }
+                let arm_color = crate::theme::ERROR;
+                if toggle(104.0, "arm_track", &t!("timeline.arm"), &|p, r| {
+                    paint_letter_button(p, r, "R", flags.armed.then_some(arm_color))
+                }) {
+                    *pending = Some(if flags.armed || can_record {
+                        PendingAction::SetTrackFlag(track_index, TrackFlag::Armed, !flags.armed)
+                    } else {
+                        PendingAction::ArmNeedsSave
+                    });
                 }
             }
         }
@@ -1076,6 +1110,46 @@ fn draw_track_headers(
         if remove_resp.clicked() {
             *pending = Some(PendingAction::RemoveTrack(track_index));
         }
+    }
+
+    // The empty part of each box, above the video rows and below the audio
+    // ones: right click adds a track there.
+    let empty_parts = [
+        (
+            TrackKind::Video,
+            layout.video_pane,
+            layout.video_pane.min,
+            layout.video_rows_top,
+        ),
+        (
+            TrackKind::Audio,
+            layout.audio_pane,
+            layout.audio_rows_bottom(),
+            layout.audio_pane.max,
+        ),
+    ];
+    for (kind, pane, top, bottom) in empty_parts {
+        let (top, bottom) = (top.max(pane.min), bottom.min(pane.max));
+        if bottom - top < 1.0 {
+            continue;
+        }
+        let empty =
+            egui::Rect::from_x_y_ranges(rect.x_range(), (origin.y + top)..=(origin.y + bottom));
+        ui.set_clip_rect(full_clip.intersect(empty));
+        let resp = ui.interact(
+            empty,
+            ui.id().with(("header_empty", kind == TrackKind::Video)),
+            egui::Sense::click(),
+        );
+        resp.context_menu(|ui| {
+            let label = match kind {
+                TrackKind::Video => t!("timeline.add_video_track"),
+                TrackKind::Audio => t!("timeline.add_audio_track"),
+            };
+            if ui.button(label).clicked() {
+                *pending = Some(PendingAction::AddTrack(kind));
+            }
+        });
     }
 
     ui.set_clip_rect(full_clip);
@@ -1774,6 +1848,7 @@ pub fn show_timeline(
             muted: t.muted,
             solo: t.solo,
             locked: t.locked,
+            armed: t.armed,
         })
         .collect();
     let track_locked = |track_index: usize| track_flags.get(track_index).is_some_and(|f| f.locked);
@@ -1909,6 +1984,7 @@ pub fn show_timeline(
             &mut pending,
             state.playhead,
             fps,
+            state.can_record,
         );
 
         egui::ScrollArea::horizontal()
@@ -3384,6 +3460,46 @@ pub fn show_timeline(
                     paint_pointer_overlay(ui.ctx(), pos, format_speed(r.speed_for(len)));
                 }
 
+                if let Some(take) = &state.recording {
+                    for &track_index in take.tracks.iter().filter(|t| **t < track_count) {
+                        let x0 = origin.x + take.start as f32 * px_per_frame;
+                        let x1 = origin.x + state.playhead as f32 * px_per_frame;
+                        let y = origin.y + row_y[track_index];
+                        let area = egui::Rect::from_min_max(
+                            egui::pos2(x0, y + 1.0),
+                            egui::pos2(x1.max(x0), y + row_height - 1.0),
+                        );
+                        let painter = track_painter(track_index);
+                        painter.rect_filled(area, 3.0, crate::theme::ERROR.gamma_multiply(0.35));
+                        paint_recording_waveform(
+                            &painter,
+                            area,
+                            &take.peaks,
+                            px_per_frame as f64 * fps,
+                        );
+                        painter.rect_stroke(
+                            area,
+                            3.0,
+                            egui::Stroke::new(1.5, crate::theme::ERROR),
+                            egui::StrokeKind::Inside,
+                        );
+                        let label = painter.layout_no_wrap(
+                            "REC".to_owned(),
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::WHITE,
+                        );
+                        let badge = egui::Rect::from_min_size(
+                            area.left_top() + egui::vec2(3.0, 3.0),
+                            label.size() + egui::vec2(6.0, 2.0),
+                        );
+                        painter.rect_filled(badge, 2.0, crate::theme::ERROR);
+                        painter.galley(
+                            badge.min + egui::vec2(3.0, 1.0),
+                            label,
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
                 paint_playhead(
                     &painter,
                     origin,
@@ -4850,6 +4966,39 @@ fn show_ruler(
     }
 }
 
+/// The peaks recorded so far across `area`, from its left edge, at
+/// `px_per_sec`.
+fn paint_recording_waveform(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    peaks: &[f32],
+    px_per_sec: f64,
+) {
+    let peaks_per_px = RECORDING_PEAKS_PER_SEC / px_per_sec.max(1e-9);
+    let half = (area.height() - 6.0).max(0.0) / 2.0;
+    let mid = area.center().y;
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(210));
+    let mut x = area.left();
+    while x < area.right() {
+        let column = (x - area.left()) as f64;
+        let from = (column * peaks_per_px) as usize;
+        let to = (((column + 1.0) * peaks_per_px) as usize)
+            .max(from + 1)
+            .min(peaks.len());
+        if from >= peaks.len() {
+            break;
+        }
+        let peak = peaks[from..to]
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max)
+            .min(1.0);
+        let h = (peak * half).max(0.5);
+        painter.line_segment([egui::pos2(x, mid - h), egui::pos2(x, mid + h)], stroke);
+        x += 1.0;
+    }
+}
+
 /// Playhead line plus a triangular head in the ruler.
 fn paint_playhead(painter: &egui::Painter, origin: egui::Pos2, x_offset: f32, visual_height: f32) {
     let px = origin.x + x_offset;
@@ -5230,6 +5379,10 @@ fn apply_pending_action(
                 state.drop_locked(&project.timelines[timeline_id]);
             }
         }
+        PendingAction::AddTrack(kind) => {
+            add_track(project, history, timeline_id, kind);
+        }
+        PendingAction::ArmNeedsSave => state.record_needs_save = true,
         PendingAction::RemoveTrack(track_index) => {
             history.do_command(
                 project,

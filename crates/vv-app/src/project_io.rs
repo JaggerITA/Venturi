@@ -27,6 +27,7 @@ pub(crate) enum DialogKind {
     ImportOtio,
     OpenProject,
     RelinkMedia(Vec<MediaId>),
+    RecordingFolder,
 }
 
 pub(crate) enum DialogOutcome {
@@ -290,6 +291,10 @@ impl VenturiApp {
             }
             (DialogKind::SaveProjectAs, DialogOutcome::File(Some(path))) => {
                 self.save_project_to(&path);
+            }
+            (DialogKind::RecordingFolder, DialogOutcome::File(Some(path))) => {
+                self.settings.recording_dir = Some(path);
+                self.persist_settings();
             }
             (DialogKind::ExportOtio(timeline_id), DialogOutcome::File(Some(path))) => {
                 self.export_otio_to(timeline_id, &path);
