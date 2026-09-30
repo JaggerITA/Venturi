@@ -514,7 +514,8 @@ pub struct Settings {
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
     /// Saved by the user, in the order they were first saved.
-    pub compressor_presets: Vec<CompressorPreset>,
+    pub compressor_presets: Vec<Preset<vv_core::MultibandCompressor>>,
+    pub eq_presets: Vec<Preset<vv_core::Equalizer>>,
     /// Microphone of the voiceover, by name; `None` is the system's default.
     pub input_device: Option<String>,
     /// Of the takes; `None`, or one this FFmpeg lacks, is
@@ -525,9 +526,9 @@ pub struct Settings {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CompressorPreset {
+pub struct Preset<P> {
     pub name: String,
-    pub params: vv_core::MultibandCompressor,
+    pub params: P,
 }
 
 impl Default for Settings {
@@ -545,6 +546,7 @@ impl Default for Settings {
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
             compressor_presets: Vec::new(),
+            eq_presets: Vec::new(),
             input_device: None,
             recording_format: None,
             recording_dir: None,
@@ -595,6 +597,8 @@ struct SettingsFile {
     /// with the whole file.
     #[serde(default)]
     compressor_presets: Vec<serde_json::Value>,
+    #[serde(default)]
+    eq_presets: Vec<serde_json::Value>,
     #[serde(default)]
     input_device: Option<String>,
     #[serde(default)]
@@ -673,11 +677,8 @@ impl Settings {
             .as_deref()
             .and_then(AudioFileFormat::from_id);
         settings.recording_dir = file.recording_dir;
-        settings.compressor_presets = file
-            .compressor_presets
-            .into_iter()
-            .filter_map(|preset| serde_json::from_value(preset).ok())
-            .collect();
+        settings.compressor_presets = readable_presets(file.compressor_presets);
+        settings.eq_presets = readable_presets(file.eq_presets);
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
             media_pool_open: file
@@ -757,11 +758,8 @@ impl Settings {
                 inspector_width: Some(self.panels.inspector_width),
                 timeline_height: Some(self.panels.timeline_height),
             },
-            compressor_presets: self
-                .compressor_presets
-                .iter()
-                .filter_map(|preset| serde_json::to_value(preset).ok())
-                .collect(),
+            compressor_presets: preset_values(&self.compressor_presets),
+            eq_presets: preset_values(&self.eq_presets),
             input_device: self.input_device.clone(),
             recording_format: self.recording_format.map(|f| f.id().to_owned()),
             recording_dir: self.recording_dir.clone(),
@@ -772,6 +770,22 @@ impl Settings {
         }
         std::fs::write(path, text).map_err(|e| e.to_string())
     }
+}
+
+fn readable_presets<P: serde::de::DeserializeOwned>(
+    values: Vec<serde_json::Value>,
+) -> Vec<Preset<P>> {
+    values
+        .into_iter()
+        .filter_map(|preset| serde_json::from_value(preset).ok())
+        .collect()
+}
+
+fn preset_values<P: Serialize>(presets: &[Preset<P>]) -> Vec<serde_json::Value> {
+    presets
+        .iter()
+        .filter_map(|preset| serde_json::to_value(preset).ok())
+        .collect()
 }
 
 #[cfg(test)]

@@ -157,16 +157,22 @@ fn shift_is_ignored_on_symbols_but_not_on_letters() {
 }
 
 #[test]
-fn compressor_presets_are_saved_and_a_broken_one_is_dropped_alone() {
+fn effect_presets_are_saved_and_a_broken_one_is_dropped_alone() {
     let path = std::env::temp_dir()
         .join(format!("vv-settings-presets-{}", std::process::id()))
         .join("settings.json");
     let mut settings = Settings::default();
     let mut params = vv_core::MultibandCompressor::DEFAULT;
     params.bands[1].ratio = 5.0;
-    settings.compressor_presets = vec![CompressorPreset {
+    settings.compressor_presets = vec![Preset {
         name: "Mine".into(),
         params,
+    }];
+    let mut eq = vv_core::Equalizer::DEFAULT;
+    eq.bands[2].gain_db = -4.0;
+    settings.eq_presets = vec![Preset {
+        name: "Mine".into(),
+        params: eq,
     }];
     settings.kinetic_scroll = false;
     settings.input_device = Some("USB Microphone".into());
@@ -181,9 +187,14 @@ fn compressor_presets_are_saved_and_a_broken_one_is_dropped_alone() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({ "name": "Old", "params": { "bands": 3 } }));
+    json["eq_presets"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "name": "Old", "params": { "bands": [] } }));
     std::fs::write(&path, json.to_string()).unwrap();
     let loaded = Settings::load(&path);
     assert_eq!(loaded.compressor_presets, settings.compressor_presets);
+    assert_eq!(loaded.eq_presets, settings.eq_presets);
     assert!(!loaded.kinetic_scroll, "the rest of the file still reads");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

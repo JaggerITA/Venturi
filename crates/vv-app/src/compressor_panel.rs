@@ -9,7 +9,7 @@ use vv_core::{AudioEffectKind, CompressorBand, MultibandCompressor};
 
 use crate::mixer_panel::{knob, paint_fader_handle};
 use crate::properties_panel::drag_field;
-use crate::settings::CompressorPreset;
+use crate::settings::Preset;
 
 /// As wide as the three band strips below it, frames and gaps included.
 const GRAPH_SIZE: egui::Vec2 = egui::vec2(3.0 * (STRIP_WIDTH + 18.0) + 16.0, 230.0);
@@ -17,7 +17,7 @@ const FREQ_MIN: f32 = 20.0;
 const FREQ_MAX: f32 = 20_000.0;
 const DB_TOP: f32 = 24.0;
 const DB_BOTTOM: f32 = -30.0;
-const CURVE_POINTS: usize = 240;
+pub(crate) const CURVE_POINTS: usize = 240;
 const BAND_COLORS: [egui::Color32; 3] = [
     egui::Color32::from_rgb(90, 160, 255),
     egui::Color32::from_rgb(110, 205, 120),
@@ -27,7 +27,7 @@ const FADER_COLUMN_WIDTH: f32 = 76.0;
 const STRIP_WIDTH: f32 = FADER_COLUMN_WIDTH + 2.0 * KNOB_CELL_WIDTH + 16.0;
 const FADER_HEIGHT: f32 = 150.0;
 const KNOB_RADIUS: f32 = 15.0;
-const KNOB_CELL_WIDTH: f32 = 60.0;
+pub(crate) const KNOB_CELL_WIDTH: f32 = 60.0;
 /// The crossovers never get closer than this ratio.
 const MIN_CROSSOVER_RATIO: f32 = 1.2;
 
@@ -36,9 +36,11 @@ const SPECTRUM_TOP_DB: f32 = 0.0;
 const SPECTRUM_FLOOR_DB: f32 = -96.0;
 /// How fast a peak of the spectrum falls back, per repaint.
 const SPECTRUM_FALL_DB: f32 = 1.5;
+const GRID_COLOR: egui::Color32 = egui::Color32::from_gray(40);
+const LABEL_COLOR: egui::Color32 = egui::Color32::from_gray(110);
 
 /// Frequency of point `i` of the curves.
-fn curve_freq(i: usize) -> f32 {
+pub(crate) fn curve_freq(i: usize) -> f32 {
     fraction_freq(i as f32 / CURVE_POINTS as f32)
 }
 
@@ -161,7 +163,7 @@ fn band_edges(params: &MultibandCompressor) -> [f32; 4] {
     [FREQ_MIN, low, high, FREQ_MAX]
 }
 
-fn format_freq(freq: f32) -> String {
+pub(crate) fn format_freq(freq: f32) -> String {
     if freq >= 1000.0 {
         let k = freq / 1000.0;
         if k.fract() < 0.05 {
@@ -174,14 +176,12 @@ fn format_freq(freq: f32) -> String {
     }
 }
 
-/// The edited parameters, if changed. `activity`: the band levels and gain
-/// reductions playing now.
 /// What the window keeps between repaints.
 #[derive(Default)]
-pub(crate) struct CompressorPanelState {
+pub(crate) struct EffectPanelState {
     pub(crate) spectrum: SpectrumView,
     /// Being typed in the save dialog.
-    preset_name: String,
+    pub(crate) preset_name: String,
 }
 
 /// Built-in presets: translation key and settings.
@@ -255,12 +255,8 @@ pub(crate) fn builtin_presets() -> [(&'static str, MultibandCompressor); 7] {
 }
 
 /// Adds `params` as `name`, or replaces the preset already called so.
-pub(crate) fn save_preset(
-    presets: &mut Vec<CompressorPreset>,
-    name: &str,
-    params: &MultibandCompressor,
-) {
-    let preset = CompressorPreset {
+pub(crate) fn save_preset<P: Clone>(presets: &mut Vec<Preset<P>>, name: &str, params: &P) {
+    let preset = Preset {
         name: name.to_owned(),
         params: params.clone(),
     };
@@ -276,11 +272,19 @@ pub(crate) fn show(
     ui: &mut egui::Ui,
     params: &MultibandCompressor,
     activity: &BandActivity,
-    state: &mut CompressorPanelState,
-    presets: &mut Vec<CompressorPreset>,
+    state: &mut EffectPanelState,
+    presets: &mut Vec<Preset<MultibandCompressor>>,
 ) -> Option<AudioEffectKind> {
     let mut params = params.clone();
-    let mut changed = preset_bar(ui, &mut params, state, presets);
+    let builtin = builtin_presets();
+    let mut changed = preset_bar(
+        ui,
+        "compressor_preset",
+        &mut params,
+        &builtin,
+        state,
+        presets,
+    );
     ui.add_space(6.0);
     changed |= graph(ui, &mut params, activity, &state.spectrum);
     ui.add_space(8.0);
@@ -292,14 +296,16 @@ pub(crate) fn show(
     changed.then_some(AudioEffectKind::MultibandCompressor(params))
 }
 
-/// Choosing a preset, and saving the current settings as one.
-fn preset_bar(
+/// Choosing a preset, and saving the current settings as one. `builtin`:
+/// translation key and settings.
+pub(crate) fn preset_bar<P: Clone + PartialEq>(
     ui: &mut egui::Ui,
-    params: &mut MultibandCompressor,
-    state: &mut CompressorPanelState,
-    presets: &mut Vec<CompressorPreset>,
+    id_salt: &str,
+    params: &mut P,
+    builtin: &[(&'static str, P)],
+    state: &mut EffectPanelState,
+    presets: &mut Vec<Preset<P>>,
 ) -> bool {
-    let builtin = builtin_presets();
     let current = builtin
         .iter()
         .find(|(_, p)| p == params)
@@ -315,11 +321,11 @@ fn preset_bar(
     ui.horizontal(|ui| {
         ui.label(t!("mixer.preset"));
         let mut delete = None;
-        egui::ComboBox::from_id_salt("compressor_preset")
+        egui::ComboBox::from_id_salt(id_salt)
             .width(220.0)
             .selected_text(&current)
             .show_ui(ui, |ui| {
-                for (key, preset) in &builtin {
+                for (key, preset) in builtin {
                     if ui.selectable_label(preset == params, t!(*key)).clicked() {
                         *params = preset.clone();
                         changed = true;
@@ -464,39 +470,9 @@ fn graph(
         painter.rect_filled(area, 0.0, BAND_COLORS[band].gamma_multiply(alpha));
     }
 
-    // Under everything: the input as a shade, the output as a line on it.
-    let spectrum_y = |db: f32| {
-        let t = (SPECTRUM_TOP_DB - db) / (SPECTRUM_TOP_DB - SPECTRUM_FLOOR_DB);
-        rect.top() + rect.height() * t.clamp(0.0, 1.0)
-    };
-    if spectrum.pre.len() == CURVE_POINTS + 1 {
-        let shade = egui::Color32::from_white_alpha(28);
-        for i in 0..CURVE_POINTS {
-            let (x0, x1) = (x_of(curve_freq(i)), x_of(curve_freq(i + 1)));
-            let (y0, y1) = (spectrum_y(spectrum.pre[i]), spectrum_y(spectrum.pre[i + 1]));
-            if y0 < rect.bottom() || y1 < rect.bottom() {
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        egui::pos2(x0, rect.bottom()),
-                        egui::pos2(x0, y0),
-                        egui::pos2(x1, y1),
-                        egui::pos2(x1, rect.bottom()),
-                    ],
-                    shade,
-                    egui::Stroke::NONE,
-                ));
-            }
-        }
-        painter.add(egui::Shape::line(
-            (0..=CURVE_POINTS)
-                .map(|i| egui::pos2(x_of(curve_freq(i)), spectrum_y(spectrum.post[i])))
-                .collect(),
-            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110)),
-        ));
-    }
+    paint_spectrum(&painter, rect, spectrum);
 
-    let grid = egui::Color32::from_gray(40);
-    let label = egui::Color32::from_gray(110);
+    let (grid, label) = (GRID_COLOR, LABEL_COLOR);
     let font = egui::FontId::proportional(9.0);
     for db in (DB_BOTTOM as i32..=DB_TOP as i32).step_by(6) {
         let y = y_of(db as f32);
@@ -507,17 +483,7 @@ fn graph(
         };
         painter.hline(rect.x_range(), y, stroke);
     }
-    for freq in [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0] {
-        let x = x_of(freq);
-        painter.vline(x, rect.y_range(), egui::Stroke::new(1.0, grid));
-        painter.text(
-            egui::pos2(x, rect.bottom() - 3.0),
-            egui::Align2::CENTER_BOTTOM,
-            format_freq(freq),
-            font.clone(),
-            label,
-        );
-    }
+    paint_freq_grid(&painter, rect);
 
     // The static curve is the makeup alone; the live one takes the current
     // reduction off each band, and the space between them is what is being
@@ -560,15 +526,7 @@ fn graph(
         egui::Stroke::new(2.0, crate::theme::ACCENT),
     ));
 
-    for db in [-30.0, -60.0, -90.0] {
-        painter.text(
-            egui::pos2(rect.left() + 4.0, spectrum_y(db) - 1.0),
-            egui::Align2::LEFT_BOTTOM,
-            format!("{db}"),
-            font.clone(),
-            egui::Color32::from_gray(80),
-        );
-    }
+    paint_spectrum_scale(&painter, rect);
     // Not +18: the reset button sits there.
     for db in (DB_BOTTOM as i32 + 6..DB_TOP as i32 - 6).step_by(6) {
         let text = if db > 0 {
@@ -663,6 +621,71 @@ fn graph(
         egui::StrokeKind::Inside,
     );
     changed
+}
+
+/// Under everything: the input as a shade, the output as a line on it.
+pub(crate) fn paint_spectrum(painter: &egui::Painter, rect: egui::Rect, spectrum: &SpectrumView) {
+    if spectrum.pre.len() != CURVE_POINTS + 1 {
+        return;
+    }
+    let x_of = |freq: f32| rect.left() + rect.width() * freq_fraction(freq);
+    let y_of = |db: f32| spectrum_y(rect, db);
+    let shade = egui::Color32::from_white_alpha(28);
+    for i in 0..CURVE_POINTS {
+        let (x0, x1) = (x_of(curve_freq(i)), x_of(curve_freq(i + 1)));
+        let (y0, y1) = (y_of(spectrum.pre[i]), y_of(spectrum.pre[i + 1]));
+        if y0 < rect.bottom() || y1 < rect.bottom() {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(x0, rect.bottom()),
+                    egui::pos2(x0, y0),
+                    egui::pos2(x1, y1),
+                    egui::pos2(x1, rect.bottom()),
+                ],
+                shade,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+    painter.add(egui::Shape::line(
+        (0..=CURVE_POINTS)
+            .map(|i| egui::pos2(x_of(curve_freq(i)), y_of(spectrum.post[i])))
+            .collect(),
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110)),
+    ));
+}
+
+pub(crate) fn spectrum_y(rect: egui::Rect, db: f32) -> f32 {
+    let t = (SPECTRUM_TOP_DB - db) / (SPECTRUM_TOP_DB - SPECTRUM_FLOOR_DB);
+    rect.top() + rect.height() * t.clamp(0.0, 1.0)
+}
+
+/// The dBFS marks of the spectrum on the left edge.
+pub(crate) fn paint_spectrum_scale(painter: &egui::Painter, rect: egui::Rect) {
+    for db in [-30.0, -60.0, -90.0] {
+        painter.text(
+            egui::pos2(rect.left() + 4.0, spectrum_y(rect, db) - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{db}"),
+            egui::FontId::proportional(9.0),
+            egui::Color32::from_gray(80),
+        );
+    }
+}
+
+/// Vertical lines and labels at the round frequencies.
+pub(crate) fn paint_freq_grid(painter: &egui::Painter, rect: egui::Rect) {
+    for freq in [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0] {
+        let x = rect.left() + rect.width() * freq_fraction(freq);
+        painter.vline(x, rect.y_range(), egui::Stroke::new(1.0, GRID_COLOR));
+        painter.text(
+            egui::pos2(x, rect.bottom() - 3.0),
+            egui::Align2::CENTER_BOTTOM,
+            format_freq(freq),
+            egui::FontId::proportional(9.0),
+            LABEL_COLOR,
+        );
+    }
 }
 
 fn band_strip(
@@ -789,14 +812,14 @@ fn band_strip(
     changed
 }
 
-struct KnobScale {
+pub(crate) struct KnobScale {
     range: (f32, f32),
     log: bool,
     default: f32,
 }
 
 impl KnobScale {
-    fn new(range: (f32, f32), log: bool, default: f32) -> Self {
+    pub(crate) fn new(range: (f32, f32), log: bool, default: f32) -> Self {
         Self {
             range,
             log,
@@ -807,7 +830,7 @@ impl KnobScale {
 
 /// Label, knob and the numeric field under it; `field` is speed, decimals
 /// and suffix of the field.
-fn param_knob(
+pub(crate) fn param_knob(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut f32,

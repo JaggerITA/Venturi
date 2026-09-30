@@ -170,3 +170,75 @@ mixer.effect_mono:
 mixer.mono_hint:
   en: "Sends the average of the channels to all of them: a voice recorded on one side comes out of both. No settings."
   it: "Manda la media dei canali a tutti: una voce registrata da un solo lato esce da entrambi. Nessuna impostazione."
+
+mixer.effect_eq:
+  en: "Equalizer"
+  it: "Equalizzatore"
+
+mixer.eq_graph_hint:
+  en: "Drag a point: frequency and gain · wheel: Q · double click: on/off"
+  it: "Trascina un punto: frequenza e guadagno · rotella: Q · doppio clic: attiva/disattiva"
+
+mixer.eq_reset_all_hint:
+  en: "Brings every band back to its default"
+  it: "Riporta ogni banda al suo valore predefinito"
+
+mixer.eq_band_on:
+  en: "Band on"
+  it: "Banda attiva"
+
+mixer.eq_freq:
+  en: "Freq"
+  it: "Freq"
+
+mixer.eq_gain:
+  en: "Gain"
+  it: "Guadagno"
+
+mixer.eq_high_pass:
+  en: "Low cut"
+  it: "Taglio bassi"
+
+mixer.eq_low_shelf:
+  en: "Low shelf"
+  it: "Shelf bassi"
+
+mixer.eq_peak:
+  en: "Bell"
+  it: "Campana"
+
+mixer.eq_high_shelf:
+  en: "High shelf"
+  it: "Shelf alti"
+
+mixer.eq_low_pass:
+  en: "High cut"
+  it: "Taglio alti"
+
+mixer.eq_preset_flat:
+  en: "Flat"
+  it: "Piatto"
+
+mixer.eq_preset_voice:
+  en: "Voice clarity"
+  it: "Chiarezza voce"
+
+mixer.eq_preset_warm:
+  en: "Warmth"
+  it: "Calore"
+
+mixer.eq_preset_bright:
+  en: "Brighten"
+  it: "Brillantezza"
+
+mixer.eq_preset_mud:
+  en: "Reduce mud"
+  it: "Meno rimbombo"
+
+mixer.eq_preset_rumble:
+  en: "Rumble cut"
+  it: "Taglio rombo"
+
+mixer.eq_preset_telephone:
+  en: "Telephone"
+  it: "Telefono"

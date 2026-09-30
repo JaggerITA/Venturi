@@ -9,11 +9,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vv_core::{
-    AudioEffectKind, ChannelStrip, ClipSource, FrameIdx, Keyframed, MediaId, MixerChannel,
-    MultibandCompressor, Project, Timeline, TimelineId,
+    AudioEffectKind, ChannelStrip, ClipSource, Equalizer, FrameIdx, Keyframed, MediaId,
+    MixerChannel, MultibandCompressor, Project, Timeline, TimelineId,
 };
 
 use crate::dynamics::{BandActivity, MultibandProcessor};
+use crate::eq::EqProcessor;
 use crate::spectrum::SpectrumTap;
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
@@ -122,7 +123,7 @@ pub struct MixMeters {
 #[derive(Debug, Default)]
 struct InsertMeter {
     bands: BandMeter,
-    /// Compressors only.
+    /// Compressors and equalizers only.
     spectrum: Option<Arc<SpectrumTap>>,
 }
 
@@ -134,7 +135,7 @@ impl MixMeters {
                 .iter()
                 .map(|insert| InsertMeter {
                     bands: BandMeter::default(),
-                    spectrum: matches!(insert, Insert::Compressor(_))
+                    spectrum: matches!(insert, Insert::Compressor(_) | Insert::Eq(_))
                         .then(|| Arc::new(SpectrumTap::default())),
                 })
                 .collect()
@@ -238,6 +239,7 @@ pub enum Insert {
     Gain(f32),
     Compressor(MultibandCompressor),
     Mono,
+    Eq(Equalizer),
 }
 
 /// A mixer strip, ready for the mix: its inserts, then fader and balance.
@@ -329,13 +331,36 @@ impl MixSnapshot {
     }
 }
 
+/// An effect that keeps a state from one block to the next.
+enum Processor {
+    Compressor(MultibandProcessor),
+    Eq(EqProcessor),
+}
+
+impl Processor {
+    fn reset(&mut self) {
+        match self {
+            Processor::Compressor(p) => p.reset(),
+            Processor::Eq(p) => p.reset(),
+        }
+    }
+
+    fn take_memory_from(&mut self, other: &Self) {
+        match (self, other) {
+            (Processor::Compressor(p), Processor::Compressor(old)) => p.take_memory_from(old),
+            (Processor::Eq(p), Processor::Eq(old)) => p.take_memory_from(old),
+            _ => {}
+        }
+    }
+}
+
 /// The memory of the mix between two calls: the state of the effects that
 /// have one, and where the previous call ended. A call that does not follow
 /// on starts them over.
 pub struct MixState {
     /// Aligned with the inserts of `MixSnapshot::tracks`.
-    tracks: Vec<Vec<Option<MultibandProcessor>>>,
-    master: Vec<Option<MultibandProcessor>>,
+    tracks: Vec<Vec<Option<Processor>>>,
+    master: Vec<Option<Processor>>,
     scratch: Vec<f32>,
     peaks: Vec<[f32; 2]>,
     next: Option<u64>,
@@ -343,17 +368,19 @@ pub struct MixState {
 
 impl MixState {
     pub fn new(snapshot: &MixSnapshot) -> Self {
-        let processors = |channel: &Channel| -> Vec<Option<MultibandProcessor>> {
+        let (rate, channels) = (snapshot.sample_rate, snapshot.channels);
+        let processors = |channel: &Channel| -> Vec<Option<Processor>> {
             channel
                 .inserts
                 .iter()
                 .map(|insert| match insert {
                     Insert::Off | Insert::Gain(_) | Insert::Mono => None,
-                    Insert::Compressor(params) => Some(MultibandProcessor::new(
-                        params,
-                        snapshot.sample_rate,
-                        snapshot.channels,
+                    Insert::Compressor(params) => Some(Processor::Compressor(
+                        MultibandProcessor::new(params, rate, channels),
                     )),
+                    Insert::Eq(params) => {
+                        Some(Processor::Eq(EqProcessor::new(params, rate, channels)))
+                    }
                 })
                 .collect()
         };
@@ -480,6 +507,15 @@ fn hash_insert(insert: &Insert, h: &mut impl Hasher) {
                     band.makeup_db,
                 ];
                 fields.map(f32::to_bits).hash(h);
+            }
+        }
+        Insert::Eq(params) => {
+            4u8.hash(h);
+            for band in &params.bands {
+                (band.enabled, band.shape as u8).hash(h);
+                [band.freq_hz, band.gain_db, band.q]
+                    .map(f32::to_bits)
+                    .hash(h);
             }
         }
     }
@@ -729,6 +765,7 @@ fn resolve_chain(
                 inserts.push(Insert::Compressor(params.clone()));
             }
             AudioEffectKind::Mono => inserts.push(Insert::Mono),
+            AudioEffectKind::Equalizer(params) => inserts.push(Insert::Eq(params.clone())),
         }
     }
     inserts
@@ -970,7 +1007,7 @@ fn mix_into(
 /// `meters`: where the compressors report, if metered.
 fn apply_inserts(
     inserts: &[Insert],
-    processors: &mut [Option<MultibandProcessor>],
+    processors: &mut [Option<Processor>],
     samples: &mut [f32],
     channels: usize,
     meters: Option<&[InsertMeter]>,
@@ -985,7 +1022,7 @@ fn apply_inserts(
                     frame.fill(average);
                 }
             }
-            Insert::Compressor(_) => {
+            Insert::Compressor(_) | Insert::Eq(_) => {
                 let Some(Some(processor)) = processors.get_mut(index) else {
                     continue;
                 };
@@ -994,12 +1031,17 @@ fn apply_inserts(
                 if let Some(spectrum) = spectrum {
                     spectrum.record_pre(samples, channels);
                 }
-                let activity = processor.process(samples);
+                match processor {
+                    Processor::Compressor(compressor) => {
+                        let activity = compressor.process(samples);
+                        if let Some(meter) = meter {
+                            meter.bands.raise(activity);
+                        }
+                    }
+                    Processor::Eq(eq) => eq.process(samples),
+                }
                 if let Some(spectrum) = spectrum {
                     spectrum.record_post(samples, channels);
-                }
-                if let Some(meter) = meter {
-                    meter.bands.raise(activity);
                 }
             }
         }

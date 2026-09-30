@@ -12,7 +12,7 @@ use vv_core::{
 };
 
 use crate::properties_panel::{BoxedCommand, drag_field, slider_field};
-use crate::settings::CompressorPreset;
+use crate::settings::Preset;
 
 const STRIP_WIDTH: f32 = 84.0;
 const FADER_HEIGHT: f32 = 230.0;
@@ -88,7 +88,13 @@ pub(crate) struct MixerPanelState {
     /// Band levels and reductions shown in that window, with their fall,
     /// and the effect they belong to.
     band_activity: (BandActivity, Option<(TimelineId, MixerChannel, usize)>),
-    compressor: crate::compressor_panel::CompressorPanelState,
+    effect_panel: crate::compressor_panel::EffectPanelState,
+}
+
+/// The user's own presets of each effect.
+pub(crate) struct EffectPresets<'a> {
+    pub(crate) compressor: &'a mut Vec<Preset<vv_core::MultibandCompressor>>,
+    pub(crate) eq: &'a mut Vec<Preset<vv_core::Equalizer>>,
 }
 
 impl MixerPanelState {
@@ -131,7 +137,7 @@ pub(crate) fn show_mixer(
     project: &Project,
     timeline_id: Option<TimelineId>,
     meters: Option<&MixMeters>,
-    presets: &mut Vec<CompressorPreset>,
+    presets: EffectPresets,
 ) -> Vec<BoxedCommand> {
     let mut commands: Vec<BoxedCommand> = Vec::new();
     egui::Window::new(t!("mixer.title"))
@@ -241,6 +247,7 @@ pub(crate) fn effect_name(kind: &AudioEffectKind) -> String {
         AudioEffectKind::Normalize { .. } => t!("mixer.effect_normalize").into_owned(),
         AudioEffectKind::MultibandCompressor(_) => t!("mixer.effect_multiband").into_owned(),
         AudioEffectKind::Mono => t!("mixer.effect_mono").into_owned(),
+        AudioEffectKind::Equalizer(_) => t!("mixer.effect_eq").into_owned(),
     }
 }
 
@@ -252,7 +259,7 @@ fn effect_window(
     timeline_id: TimelineId,
     timeline: &Timeline,
     meters: Option<&MixMeters>,
-    presets: &mut Vec<CompressorPreset>,
+    presets: EffectPresets,
 ) -> Vec<BoxedCommand> {
     let mut commands: Vec<BoxedCommand> = Vec::new();
     let Some((open_timeline, channel, index)) = state.open_effect else {
@@ -270,7 +277,7 @@ fn effect_window(
     if *of != state.open_effect {
         *shown = BandActivity::default();
         *of = state.open_effect;
-        state.compressor.spectrum = Default::default();
+        state.effect_panel.spectrum = Default::default();
     }
     let pairs = [
         (&mut shown.level, reading.level),
@@ -282,9 +289,13 @@ fn effect_window(
         }
     }
     let activity = *shown;
-    if matches!(effect.kind, AudioEffectKind::MultibandCompressor(_))
+    let graphed = matches!(
+        effect.kind,
+        AudioEffectKind::MultibandCompressor(_) | AudioEffectKind::Equalizer(_)
+    );
+    if graphed
         && state
-            .compressor
+            .effect_panel
             .spectrum
             .update(meters.and_then(|m| m.spectrum(channel, index)))
     {
@@ -323,9 +334,12 @@ fn effect_window(
                     ui,
                     params,
                     &activity,
-                    &mut state.compressor,
-                    presets,
+                    &mut state.effect_panel,
+                    presets.compressor,
                 ),
+                AudioEffectKind::Equalizer(params) => {
+                    crate::eq_panel::show(ui, params, &mut state.effect_panel, presets.eq)
+                }
             };
             if let Some(kind) = edited {
                 let edited = AudioEffect {

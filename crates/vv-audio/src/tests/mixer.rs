@@ -1107,3 +1107,24 @@ fn mono_sends_the_average_of_the_channels_to_all_of_them() {
     mix_range(&snap, 0, &mut out);
     assert_eq!(&out[..4], [0.4, 0.4, 0.4, 0.4]);
 }
+
+#[test]
+fn an_equalizer_in_the_chain_shapes_the_audio_and_feeds_its_spectrum() {
+    let (project, _, b) = project();
+    let mut track = audio_track(vec![clip_at(b, 0, 0, 90)]);
+    let mut params = vv_core::Equalizer::DEFAULT;
+    // The clip is a slow ramp: all below the shelf.
+    params.bands[1].freq_hz = 2000.0;
+    params.bands[1].gain_db = -12.0;
+    track.mix.effects = vec![vv_core::AudioEffect::new(
+        vv_core::AudioEffectKind::Equalizer(params),
+    )];
+    let tl = timeline(vec![track]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let mut out = vec![0.0; 900];
+    mix_range_metered(&snap, &mut MixState::new(&snap), 0, &mut out);
+    let (shaped, ramp) = (out[800], 0.8);
+    assert!((shaped / ramp - 0.25).abs() < 0.02, "{shaped}");
+    let tap = snap.meters.spectrum(MixerChannel::Track(0), 0).unwrap();
+    assert_eq!(tap.written(), 900);
+}

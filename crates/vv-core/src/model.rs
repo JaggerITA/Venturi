@@ -1640,16 +1640,88 @@ pub enum AudioEffectKind {
     /// Every channel gets their average: a voice recorded on one side
     /// comes out of both.
     Mono,
+    Equalizer(Equalizer),
 }
 
 impl AudioEffectKind {
-    pub const ALL: [AudioEffectKind; 3] = [
+    pub const ALL: [AudioEffectKind; 4] = [
         AudioEffectKind::Normalize {
             target_db: NORMALIZE_TARGET_DEFAULT,
         },
         AudioEffectKind::MultibandCompressor(MultibandCompressor::DEFAULT),
+        AudioEffectKind::Equalizer(Equalizer::DEFAULT),
         AudioEffectKind::Mono,
     ];
+}
+
+/// Parametric equalizer: filters in series, one per band.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Equalizer {
+    pub bands: [EqBand; 6],
+}
+
+impl Equalizer {
+    /// Low and high cut off, the four in between flat.
+    pub const DEFAULT: Self = Self {
+        bands: [
+            EqBand::new(EqShape::HighPass, 80.0, false),
+            EqBand::new(EqShape::LowShelf, 120.0, true),
+            EqBand::new(EqShape::Peak, 500.0, true),
+            EqBand::new(EqShape::Peak, 2500.0, true),
+            EqBand::new(EqShape::HighShelf, 8000.0, true),
+            EqBand::new(EqShape::LowPass, 18_000.0, false),
+        ],
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EqShape {
+    HighPass,
+    LowShelf,
+    Peak,
+    HighShelf,
+    LowPass,
+}
+
+impl EqShape {
+    pub const ALL: [EqShape; 5] = [
+        EqShape::HighPass,
+        EqShape::LowShelf,
+        EqShape::Peak,
+        EqShape::HighShelf,
+        EqShape::LowPass,
+    ];
+
+    /// The cuts have no gain: `q` is their resonance.
+    pub fn has_gain(self) -> bool {
+        !matches!(self, EqShape::HighPass | EqShape::LowPass)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EqBand {
+    pub enabled: bool,
+    pub shape: EqShape,
+    pub freq_hz: f32,
+    pub gain_db: f32,
+    pub q: f32,
+}
+
+impl EqBand {
+    pub const FREQ_RANGE_HZ: (f32, f32) = (20.0, 20_000.0);
+    pub const GAIN_RANGE_DB: (f32, f32) = (-24.0, 24.0);
+    pub const Q_RANGE: (f32, f32) = (0.1, 18.0);
+    pub const Q_DEFAULT: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+    pub const fn new(shape: EqShape, freq_hz: f32, enabled: bool) -> Self {
+        Self {
+            enabled,
+            shape,
+            freq_hz,
+            gain_db: 0.0,
+            q: Self::Q_DEFAULT,
+        }
+    }
 }
 
 /// Three bands split at `crossovers_hz`, each with its own compressor.

@@ -3,55 +3,11 @@
 
 use vv_core::{CompressorBand, MultibandCompressor};
 
+use crate::filter::{Biquad, unit_delays};
 use crate::mixer::db_to_linear;
 
 /// Of the soft knee, in dB.
 const KNEE_DB: f32 = 6.0;
-
-#[derive(Debug, Clone, Copy)]
-struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-}
-
-impl Biquad {
-    /// Butterworth (Q = 1/√2) low or high pass, from the RBJ cookbook.
-    fn butterworth(freq: f32, sample_rate: f32, high: bool) -> Self {
-        let w = 2.0 * std::f32::consts::PI * freq / sample_rate;
-        let alpha = w.sin() / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
-        let cos = w.cos();
-        let a0 = 1.0 + alpha;
-        let (b0, b1) = if high {
-            ((1.0 + cos) / 2.0, -(1.0 + cos))
-        } else {
-            ((1.0 - cos) / 2.0, 1.0 - cos)
-        };
-        Self {
-            b0: b0 / a0,
-            b1: b1 / a0,
-            b2: b0 / a0,
-            a1: -2.0 * cos / a0,
-            a2: (1.0 - alpha) / a0,
-        }
-    }
-
-    /// Transposed direct form II.
-    fn tick(&self, z: &mut [f32; 2], x: f32) -> f32 {
-        let y = self.b0 * x + z[0];
-        z[0] = self.b1 * x - self.a1 * y + z[1];
-        z[1] = self.b2 * x - self.a2 * y;
-        y
-    }
-
-    /// Linkwitz-Riley 4th order: the same Butterworth twice.
-    fn tick_lr4(&self, z: &mut [[f32; 2]], x: f32) -> f32 {
-        let y = self.tick(&mut z[0], x);
-        self.tick(&mut z[1], y)
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 struct BandDynamics {
@@ -185,60 +141,6 @@ pub struct BandActivity {
     pub reduction_db: [f32; 3],
 }
 
-#[derive(Clone, Copy)]
-struct Complex {
-    re: f32,
-    im: f32,
-}
-
-impl Complex {
-    fn add(self, o: Self) -> Self {
-        Self {
-            re: self.re + o.re,
-            im: self.im + o.im,
-        }
-    }
-
-    fn mul(self, o: Self) -> Self {
-        Self {
-            re: self.re * o.re - self.im * o.im,
-            im: self.re * o.im + self.im * o.re,
-        }
-    }
-
-    fn scale(self, k: f32) -> Self {
-        Self {
-            re: self.re * k,
-            im: self.im * k,
-        }
-    }
-
-    fn div(self, o: Self) -> Self {
-        let d = o.re * o.re + o.im * o.im;
-        Self {
-            re: (self.re * o.re + self.im * o.im) / d,
-            im: (self.im * o.re - self.re * o.im) / d,
-        }
-    }
-}
-
-impl Biquad {
-    fn response(&self, z1: Complex, z2: Complex) -> Complex {
-        let one = Complex { re: 1.0, im: 0.0 };
-        let num = one
-            .scale(self.b0)
-            .add(z1.scale(self.b1))
-            .add(z2.scale(self.b2));
-        let den = one.add(z1.scale(self.a1)).add(z2.scale(self.a2));
-        num.div(den)
-    }
-
-    fn response_lr4(&self, z1: Complex, z2: Complex) -> Complex {
-        let h = self.response(z1, z2);
-        h.mul(h)
-    }
-}
-
 /// The frequency response of a compressor's crossovers, for drawing it.
 pub struct CrossoverResponse {
     low_pass: [Biquad; 2],
@@ -261,12 +163,7 @@ impl CrossoverResponse {
     pub fn gain_db(&self, gains_db: [f32; 3], freq_hz: f32) -> f32 {
         let [lp1, lp2] = &self.low_pass;
         let [hp1, hp2] = &self.high_pass;
-        let w = 2.0 * std::f32::consts::PI * freq_hz / self.sample_rate;
-        let z1 = Complex {
-            re: w.cos(),
-            im: -w.sin(),
-        };
-        let z2 = z1.mul(z1);
+        let (z1, z2) = unit_delays(freq_hz, self.sample_rate);
         let allpass = lp2.response_lr4(z1, z2).add(hp2.response_lr4(z1, z2));
         let low = lp1.response_lr4(z1, z2).mul(allpass);
         let rest = hp1.response_lr4(z1, z2);
@@ -277,7 +174,7 @@ impl CrossoverResponse {
             .scale(g_low)
             .add(mid.scale(g_mid))
             .add(high.scale(g_high));
-        10.0 * (sum.re * sum.re + sum.im * sum.im).max(1e-12).log10()
+        sum.power_db()
     }
 }
 

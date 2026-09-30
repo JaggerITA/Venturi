@@ -8,6 +8,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 mod app_menu;
 mod compressor_panel;
+mod eq_panel;
 mod export_dialog;
 mod forced_relink_dialog;
 mod i18n;
@@ -3328,7 +3329,10 @@ impl eframe::App for VenturiApp {
             pending_playhead = editor.playhead.or(pending_playhead);
         }
         if self.settings.panels.mixer_open {
-            let presets_before = self.settings.compressor_presets.clone();
+            let presets_before = (
+                self.settings.compressor_presets.clone(),
+                self.settings.eq_presets.clone(),
+            );
             pending_effects.extend(mixer_panel::show_mixer(
                 ui.ctx(),
                 &mut self.settings.panels.mixer_open,
@@ -3336,10 +3340,15 @@ impl eframe::App for VenturiApp {
                 &self.session.project,
                 self.timeline_id,
                 self.timeline_audio.as_ref().map(TimelineAudio::meters),
-                &mut self.settings.compressor_presets,
+                mixer_panel::EffectPresets {
+                    compressor: &mut self.settings.compressor_presets,
+                    eq: &mut self.settings.eq_presets,
+                },
             ));
             // Saved at once: a preset must not wait for the periodic save.
-            if self.settings.compressor_presets != presets_before {
+            if (&self.settings.compressor_presets, &self.settings.eq_presets)
+                != (&presets_before.0, &presets_before.1)
+            {
                 self.persist_settings();
             }
         }

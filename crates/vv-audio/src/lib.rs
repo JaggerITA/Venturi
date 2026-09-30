@@ -3,6 +3,8 @@
 //! playback clock.
 
 pub mod dynamics;
+pub mod eq;
+mod filter;
 pub mod mixer;
 pub mod recorder;
 pub mod spectrum;
