@@ -93,10 +93,35 @@ fn debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("VV_DEBUG_RENDER_AHEAD").is_ok())
 }
 
+/// The playhead as last reported by the UI.
+struct LiveTarget {
+    frame: AtomicI64,
+    /// Bumped every time the user moves the playhead (not playback): the
+    /// cycle in progress serves a position no longer wanted.
+    jumps: AtomicU64,
+}
+
+impl LiveTarget {
+    fn still(frame: FrameIdx) -> Self {
+        Self {
+            frame: AtomicI64::new(frame),
+            jumps: AtomicU64::new(0),
+        }
+    }
+
+    fn frame(&self) -> FrameIdx {
+        self.frame.load(Ordering::Relaxed)
+    }
+
+    fn jumps(&self) -> u64 {
+        self.jumps.load(Ordering::Relaxed)
+    }
+}
+
 /// State shared between `RenderAhead` (UI thread) and the worker.
 struct SharedState {
     caches: SharedFrameCache,
-    target: AtomicI64,
+    target: LiveTarget,
     cache_budget_bytes: AtomicUsize,
     /// The worker's last cycle found the whole window cached: the
     /// UI stops asking for repaints for the "buffered" strip.
@@ -126,7 +151,7 @@ impl RenderAhead {
     ) -> Self {
         let shared = Arc::new(SharedState {
             caches: SharedFrameCache::new(),
-            target: AtomicI64::new(0),
+            target: LiveTarget::still(0),
             cache_budget_bytes: AtomicUsize::new(cache_budget_bytes),
             caught_up: AtomicBool::new(false),
             lookahead_secs: AtomicU64::new(lookahead_secs.max(0.0).to_bits()),
@@ -148,11 +173,20 @@ impl RenderAhead {
     /// would stop asking for repaints on a stale state) and wakes the
     /// worker: with narrow windows 50 ms of waiting limit the playback.
     pub fn set_target(&self, frame: FrameIdx) {
-        let previous = self.shared.target.swap(frame, Ordering::Relaxed);
+        let previous = self.shared.target.frame.swap(frame, Ordering::Relaxed);
         if previous != frame {
             self.shared.caught_up.store(false, Ordering::Relaxed);
             let _ = self.tx.send(Command::Wake);
         }
+    }
+
+    /// The user moved the playhead to `frame`: unlike playback, whatever
+    /// the worker is decoding is abandoned right away, however short the jump.
+    pub fn jump_to(&self, frame: FrameIdx) {
+        self.shared.target.jumps.fetch_add(1, Ordering::Relaxed);
+        self.shared.target.frame.store(frame, Ordering::Relaxed);
+        self.shared.caught_up.store(false, Ordering::Relaxed);
+        let _ = self.tx.send(Command::Wake);
     }
 
     pub fn set_cache_budget_bytes(&self, bytes: usize) {
@@ -350,7 +384,7 @@ fn worker_loop(
             }
         }
 
-        let from = shared.target.load(Ordering::Relaxed);
+        let from = shared.target.frame();
         let went_backward = last_from_frame.is_some_and(|last| from < last);
         last_from_frame = Some(from);
         let outcome = walk_and_fill(
@@ -795,8 +829,9 @@ fn walk_and_fill(
     proxy: Option<ProxyQuality>,
     lookahead_secs: f64,
     behind_secs: f64,
-    target: &AtomicI64,
+    target: &LiveTarget,
 ) -> WalkOutcome {
+    let jumps = target.jumps();
     let Some(timeline) = project.timelines.get(timeline_id) else {
         return WalkOutcome::SETTLED;
     };
@@ -855,6 +890,7 @@ fn walk_and_fill(
         from_frame,
         proxy,
         target,
+        jumps,
         window: &forward_segments,
     };
     // The forward window first: behind gets only the budget left over.
@@ -916,7 +952,9 @@ struct FillContext<'a> {
     /// from the last `Command::SetProxy` — see `fill_segments`
     /// where it decides whether to resolve the source path or the proxy one.
     proxy: Option<ProxyQuality>,
-    target: &'a AtomicI64,
+    target: &'a LiveTarget,
+    /// `target.jumps()` when the cycle started.
+    jumps: u64,
     /// The ranges the transit towards a segment must still hand out; the
     /// decoder skips the rest. Ahead only the window ahead counts: the first
     /// frame at the playhead comes first, the window behind is filled
@@ -981,7 +1019,15 @@ fn fill_segments(
             item.meta.is_image(),
         ) {
             Positioned::Failed => continue,
-            Positioned::Reused => {}
+            // Going on in sequence towards a segment ahead (a jump shorter
+            // than a GOP, or one that interrupted a skip) is a transit too.
+            Positioned::Reused => {
+                let od = open.get_mut(&segment.media_id).unwrap();
+                let first_wanted = first_wanted_frame(ctx.window, segment, od.next_frame);
+                if first_wanted > od.next_frame {
+                    od.decoder.skip_before(first_wanted);
+                }
+            }
             Positioned::Seeked | Positioned::Opened => {
                 let od = open.get_mut(&segment.media_id).unwrap();
                 if let Some(landing) = od.decoder.landing() {
@@ -1022,8 +1068,14 @@ fn fill_segments(
             }
             let threshold_frames = od.seek_threshold_frames();
             if od.decoder.is_skipping() {
-                if od.decoder.skip_some(SKIP_STEP_FRAMES).is_err() {
-                    break;
+                match od.decoder.skip_some(SKIP_STEP_FRAMES) {
+                    // Where the decoder is, should a jump restart the cycle.
+                    Ok(skipped) => {
+                        if let Some(idx) = skipped {
+                            od.next_frame = idx + 1;
+                        }
+                    }
+                    Err(_) => break,
                 }
             } else {
                 match od.decoder.next_frame() {
@@ -1096,8 +1148,8 @@ fn fill_segments(
             }
             // Live target: if the playhead moved past the threshold the prefetch is
             // obsolete and it restarts immediately.
-            let live = ctx.target.load(Ordering::Relaxed);
-            if (live - ctx.from_frame).abs() > threshold_frames {
+            let live = ctx.target.frame();
+            if ctx.target.jumps() != ctx.jumps || (live - ctx.from_frame).abs() > threshold_frames {
                 if debug_enabled() {
                     eprintln!(
                         "[render_ahead] INTERROTTO media={:?} segment=[{},{}] live={live} from_frame={} threshold={threshold_frames} estimated_gop={:?} last_keyframe_landed={:?}",

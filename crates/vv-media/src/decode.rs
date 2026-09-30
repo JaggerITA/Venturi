@@ -246,16 +246,21 @@ impl Decoder {
 
     /// Advances a `skip_before` by at most `max` frames, so a caller can
     /// check between steps whether it still wants the frame it is heading to.
-    pub fn skip_some(&mut self, max: usize) -> Result<(), crate::MediaError> {
+    /// Returns the last frame skipped.
+    pub fn skip_some(&mut self, max: usize) -> Result<Option<FrameIdx>, crate::MediaError> {
+        let mut last_skipped = None;
         for _ in 0..max {
             let Some(skip_before) = self.skip_before else {
-                return Ok(());
+                break;
             };
             if self.pending.is_none() {
                 self.pending = self.decode_next_raw()?;
             }
             match self.landing() {
-                Some(idx) if idx < skip_before => self.pending = None,
+                Some(idx) if idx < skip_before => {
+                    self.pending = None;
+                    last_skipped = Some(idx);
+                }
                 // A frame to hand out, or the end of the stream.
                 _ => {
                     self.skip_before = None;
@@ -263,7 +268,7 @@ impl Decoder {
                 }
             }
         }
-        Ok(())
+        Ok(last_skipped)
     }
 
     fn set_skip_nonref(&mut self, skip: bool) {

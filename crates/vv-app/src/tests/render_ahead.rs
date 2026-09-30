@@ -101,7 +101,7 @@ fn walk_and_fill_decodes_a_stretched_image_clip_past_its_only_real_frame() {
         None,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(0),
+        &LiveTarget::still(0),
     );
 
     assert!(!outcome.interrupted);
@@ -1353,7 +1353,7 @@ fn walk_and_fill_reports_caught_up_when_the_whole_window_fits_the_budget() {
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(0),
+        &LiveTarget::still(0),
     );
 
     assert!(
@@ -1423,7 +1423,7 @@ fn walk_and_fill_decodes_the_behind_window_on_a_fresh_area() {
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(60),
+        &LiveTarget::still(60),
     );
 
     let ranges = caches.cached_ranges(media_a);
@@ -1514,7 +1514,7 @@ fn walk_and_fill_decodes_the_behind_window_nearest_frames_first_under_a_tight_bu
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(95),
+        &LiveTarget::still(95),
     );
 
     assert!(
@@ -1600,7 +1600,7 @@ fn walk_and_fill_does_not_reseek_an_already_complete_behind_window_when_idle() {
         None,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(95),
+        &LiveTarget::still(95),
     );
     assert!(
         first.caught_up,
@@ -1631,7 +1631,7 @@ fn walk_and_fill_does_not_reseek_an_already_complete_behind_window_when_idle() {
             None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
-            &AtomicI64::new(95),
+            &LiveTarget::still(95),
         );
         assert!(outcome.caught_up);
     }
@@ -1699,7 +1699,7 @@ fn walk_and_fill_buffers_only_a_minimal_margin_when_configured_to_zero_seconds()
         None, // proxy: irrelevant for this test
         0.0,  // lookahead_secs: the one under test
         0.0,  // behind_secs: the one under test
-        &AtomicI64::new(60),
+        &LiveTarget::still(60),
     );
 
     // [56,63], not a wider interval: with the default keyint
@@ -1787,7 +1787,7 @@ fn walk_and_fill_prioritizes_frames_near_the_playhead_when_the_budget_is_too_sma
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(0),
+        &LiveTarget::still(0),
     );
 
     let ranges = caches.cached_ranges(media_a);
@@ -1849,7 +1849,7 @@ fn walk_and_fill_stops_early_and_reports_true_when_the_live_target_has_already_d
     // The live target is already past the threshold relative to from_frame=0 before
     // the fill even starts: it simulates the playhead having jumped
     // elsewhere while this cycle was about to start.
-    let drifted_target = AtomicI64::new(DEFAULT_SEEK_THRESHOLD_FRAMES + 200);
+    let drifted_target = LiveTarget::still(DEFAULT_SEEK_THRESHOLD_FRAMES + 200);
 
     let outcome = walk_and_fill(
         &project,
@@ -1954,7 +1954,7 @@ fn walk_and_fill_does_not_invalidate_one_segment_while_processing_another_segmen
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(40),
+        &LiveTarget::still(40),
     );
 
     let ranges = caches.cached_ranges(media_a);
@@ -2046,7 +2046,7 @@ fn walk_and_fill_does_not_let_one_segment_of_a_media_evict_another_via_capacity_
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(40),
+        &LiveTarget::still(40),
     );
 
     let ranges = caches.cached_ranges(media_a);
@@ -2210,7 +2210,7 @@ fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_bud
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(0),
+        &LiveTarget::still(0),
     );
     let frames_b_shared = frames_cached(&caches.cached_ranges(media_b));
 
@@ -2230,7 +2230,7 @@ fn walk_and_fill_buffers_more_of_a_media_once_fewer_distinct_media_share_the_bud
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(200),
+        &LiveTarget::still(200),
     );
     let ranges = caches.cached_ranges(media_b);
     let frames_b_alone = frames_cached(&ranges);
@@ -2586,7 +2586,7 @@ fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum()
             None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
-            &AtomicI64::new(from),
+            &LiveTarget::still(from),
         );
     }
 
@@ -2613,7 +2613,7 @@ fn walk_and_fill_catches_up_after_a_backward_seek_above_the_historical_minimum()
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(80),
+        &LiveTarget::still(80),
     );
 
     let ranges_after = caches.cached_ranges(media_a);
@@ -2703,7 +2703,7 @@ fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backw
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(300),
+        &LiveTarget::still(300),
     );
     let filled_up_to = open.get(&media_a).unwrap().next_frame - 1;
     assert!(
@@ -2726,7 +2726,7 @@ fn walk_and_fill_does_not_redecode_the_already_buffered_tail_after_a_small_backw
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(270),
+        &LiveTarget::still(270),
     );
 
     let next_frame_after = open.get(&media_a).unwrap().next_frame;
@@ -2818,7 +2818,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
         None,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(300),
+        &LiveTarget::still(300),
     );
     walk_and_fill(
         &project,
@@ -2832,7 +2832,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
         None,
         DEFAULT_LOOKAHEAD_SECS,
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(290),
+        &LiveTarget::still(290),
     );
 
     // 20 later cycles, playhead still at 290 (no scrub): in the
@@ -2854,7 +2854,7 @@ fn walk_and_fill_does_not_loop_forever_after_reconnecting_early_from_a_backward_
             None,
             DEFAULT_LOOKAHEAD_SECS,
             DEFAULT_BEHIND_SECS,
-            &AtomicI64::new(290),
+            &LiveTarget::still(290),
         );
     }
     let elapsed = start.elapsed();
@@ -2930,7 +2930,8 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         cache_budget_bytes: usize::MAX,
         from_frame: 5,
         proxy: None,
-        target: &AtomicI64::new(5),
+        target: &LiveTarget::still(5),
+        jumps: 0,
         window: &[],
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -3002,7 +3003,8 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         cache_budget_bytes: tight_budget,
         from_frame: 80,
         proxy: None,
-        target: &AtomicI64::new(80),
+        target: &LiveTarget::still(80),
+        jumps: 0,
         window: &[],
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -3097,7 +3099,8 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
         cache_budget_bytes: budget_enough_for_the_wanted_range_but_not_the_full_transit,
         from_frame: 24,
         proxy: None,
-        target: &AtomicI64::new(24),
+        target: &LiveTarget::still(24),
+        jumps: 0,
         window: &[],
     };
     let outcome = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -3188,7 +3191,7 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(10),
+        &LiveTarget::still(10),
     );
 
     let mut target = 300;
@@ -3204,7 +3207,7 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
         None,                   // proxy: irrelevant for this test
         DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
         DEFAULT_BEHIND_SECS,
-        &AtomicI64::new(target),
+        &LiveTarget::still(target),
     );
     for _ in 0..15 {
         target += 10;
@@ -3220,7 +3223,7 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
             None,                   // proxy: irrelevant for this test
             DEFAULT_LOOKAHEAD_SECS, // read_ahead: irrelevant for this test
             DEFAULT_BEHIND_SECS,
-            &AtomicI64::new(target),
+            &LiveTarget::still(target),
         );
         let ranges = caches.cached_ranges(media_a);
         assert!(
@@ -3277,13 +3280,67 @@ fn fill_segments_caches_only_the_transit_some_window_wants() {
         cache_budget_bytes: usize::MAX,
         from_frame: 80,
         proxy: None,
-        target: &AtomicI64::new(80),
+        target: &LiveTarget::still(80),
+        jumps: 0,
         window: &window,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
     assert_eq!(caches.cached_ranges(media_a), vec![(60, 90)]);
     assert_eq!(open[&media_a].last_keyframe_landed, Some(0));
+}
+
+/// A jump of the user abandons the cycle however short it is: the frames
+/// it was heading to belong to a position no longer wanted.
+#[test]
+fn fill_segments_is_interrupted_by_a_jump_below_the_seek_threshold() {
+    let path =
+        make_test_clip_with_short_gop("vv-app-render-ahead-test", "jump_interrupts.mp4", 4, 25);
+    let mut project = Project::default();
+    let media_a = project.media_pool.insert(MediaItem {
+        path,
+        meta: MediaMeta {
+            duration_frames: 100,
+            fps: Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 0,
+        compound: None,
+        folder: None,
+    });
+    let segment = WantedRange {
+        media_id: media_a,
+        source_start: 10,
+        source_end: 60,
+        timeline_start: 10,
+        rate: Rational::one(),
+    };
+    let target = LiveTarget::still(12);
+    target.jumps.fetch_add(1, Ordering::Relaxed);
+    let caches = SharedFrameCache::new();
+    let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    let ctx = FillContext {
+        project: &project,
+        caches: &caches,
+        went_backward: false,
+        cache_budget_bytes: usize::MAX,
+        from_frame: 10,
+        proxy: None,
+        target: &target,
+        jumps: 0,
+        window: std::slice::from_ref(&segment),
+    };
+
+    let flow = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
+    assert!(matches!(flow, ControlFlow::Break(outcome) if outcome.interrupted));
+    assert!(!caches.covers(media_a, 10, 60));
 }
 
 fn make_color_clip(dir_name: &str, file_name: &str, color: &str) -> std::path::PathBuf {
@@ -3468,13 +3525,18 @@ fn bench_black_frames_after_repositioning_during_playback() {
     timeline.fps = meta.fps;
     let fps = meta.fps.as_f64();
     let timeline_id = project.timelines.insert(timeline);
+    // Default budget and windows shrunk to fit it, as `effective_window_secs` does.
+    let budget = crate::DEFAULT_CACHE_BUDGET_BYTES;
+    let frame_bytes = vv_media::yuv420_frame_bytes(meta.width, meta.height) as f64;
+    let affordable_secs = budget as f64 * 0.85 / (frame_bytes * fps);
+    let scale = (affordable_secs / (DEFAULT_LOOKAHEAD_SECS + DEFAULT_BEHIND_SECS)).min(1.0);
     let render_ahead = RenderAhead::spawn(
         project,
         timeline_id,
-        2 << 30,
+        budget,
         None,
-        DEFAULT_LOOKAHEAD_SECS,
-        DEFAULT_BEHIND_SECS,
+        DEFAULT_LOOKAHEAD_SECS * scale,
+        DEFAULT_BEHIND_SECS * scale,
     );
 
     let gop = 250;
@@ -3496,7 +3558,11 @@ fn bench_black_frames_after_repositioning_during_playback() {
         let mut frames = 0;
         while t0.elapsed() < Duration::from_secs(3) {
             let playhead = start + (t0.elapsed().as_secs_f64() * fps) as FrameIdx;
-            render_ahead.set_target(playhead);
+            if frames == 0 {
+                render_ahead.jump_to(playhead);
+            } else {
+                render_ahead.set_target(playhead);
+            }
             if render_ahead.get_frame(media, playhead).is_some() {
                 first_shown.get_or_insert(t0.elapsed());
             } else {

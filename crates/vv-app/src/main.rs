@@ -650,14 +650,18 @@ impl VenturiApp {
         };
         let playhead = self.timeline_state.playhead;
         self.active_clip = self.active_video_clip_at(playhead);
-        if playhead != self.last_synced_playhead
-            && (force_seek || !self.is_timeline_playing())
-            && let Some(audio) = &mut self.timeline_audio
-        {
-            audio.seek_frame(
-                playhead,
-                self.session.project.timelines[timeline_id].fps.as_f64(),
-            );
+        let user_moved_playhead =
+            playhead != self.last_synced_playhead && (force_seek || !self.is_timeline_playing());
+        if user_moved_playhead {
+            if let Some(audio) = &mut self.timeline_audio {
+                audio.seek_frame(
+                    playhead,
+                    self.session.project.timelines[timeline_id].fps.as_f64(),
+                );
+            }
+            if let Some(render_ahead) = &self.render_ahead {
+                render_ahead.jump_to(playhead);
+            }
         }
         self.last_synced_playhead = playhead;
     }
@@ -742,7 +746,7 @@ impl VenturiApp {
             audio.seek_frame(frame, fps);
         }
         if let Some((render_ahead, _)) = &self.browsing_render_ahead {
-            render_ahead.set_target(frame);
+            render_ahead.jump_to(frame);
         }
     }
 
