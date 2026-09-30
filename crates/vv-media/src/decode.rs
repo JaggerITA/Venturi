@@ -86,8 +86,11 @@ pub struct Decoder {
     /// drains.
     eof_sent: bool,
     /// Frame decoded by `seek_to_time` to check where it landed:
-    /// `next_frame` returns it first.
-    pending: Option<(FrameIdx, Arc<FrameYuv420>)>,
+    /// `next_frame` returns it first. Not converted yet: it may be skipped.
+    pending: Option<(FrameIdx, ffmpeg::frame::Video)>,
+    /// See `skip_before`.
+    skip_before: Option<FrameIdx>,
+    skipping_nonref: bool,
     /// The single frame of an image: seek and `next_frame` always return it,
     /// the rest of the decode would treat EOF after one frame as an error.
     still_image: Option<Arc<FrameYuv420>>,
@@ -147,6 +150,8 @@ impl Decoder {
             fps,
             eof_sent: false,
             pending: None,
+            skip_before: None,
+            skipping_nonref: false,
             still_image: None,
             synthetic_idx: 0,
             emit_idx: None,
@@ -160,11 +165,10 @@ impl Decoder {
         // The same fps as `probe_image`, not the demuxer's (fictitious) one, or
         // the seek seconds would not match the media frames.
         decoder.fps = crate::probe::IMAGE_FPS;
-        let frame = decoder
-            .decode_next_frame()?
-            .map(|(_, f)| f)
+        let (_, mut raw) = decoder
+            .decode_next_raw()?
             .ok_or_else(|| crate::MediaError::NoStream(path.display().to_string()))?;
-        decoder.still_image = Some(frame);
+        decoder.still_image = Some(decoder.convert(&mut raw)?);
         Ok(decoder)
     }
 
@@ -187,13 +191,13 @@ impl Decoder {
     /// is retried further back, doubling the step.
     pub fn seek_to_time(&mut self, secs: f64) -> Result<(), crate::MediaError> {
         let target_idx = (secs.max(0.0) * self.fps.as_f64()).round() as FrameIdx;
-        if let Some(frame) = &self.still_image {
-            // An image lands exactly on the target; `synthetic_idx` restarts from
-            // there.
-            self.pending = Some((target_idx, frame.clone()));
-            self.synthetic_idx = target_idx + 1;
+        if self.still_image.is_some() {
+            // An image lands exactly on the target.
+            self.synthetic_idx = target_idx;
             return Ok(());
         }
+        self.skip_before = None;
+        self.set_skip_nonref(false);
         let mut ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
         // Initial backoff step: one second, doubled on every attempt.
         let mut step = i64::from(ffmpeg::ffi::AV_TIME_BASE);
@@ -205,7 +209,7 @@ impl Decoder {
             self.pending = None;
             self.emit_idx = None;
             self.held = None;
-            match self.decode_next_frame()? {
+            match self.decode_next_raw()? {
                 Some((idx, frame)) if idx > target_idx && ts > 0 => {
                     ts = ts.saturating_sub(step).max(0);
                     step = step.saturating_mul(2);
@@ -220,32 +224,94 @@ impl Decoder {
         Ok(())
     }
 
+    /// Frame the last `seek_to_time` landed on (its keyframe), until
+    /// `next_frame` hands it out.
+    pub fn landing(&self) -> Option<FrameIdx> {
+        self.pending.as_ref().map(|(idx, _)| *idx)
+    }
+
+    /// After a seek: the frames before `idx` are wanted by nobody, only
+    /// decoded as far as later frames reference them. `next_frame` skips them
+    /// without converting them, and the non-reference ones (most B-frames)
+    /// are not even decoded. Lasts until the first frame handed out.
+    pub fn skip_before(&mut self, idx: FrameIdx) {
+        if self.still_image.is_none() {
+            self.skip_before = Some(idx);
+        }
+    }
+
+    pub fn is_skipping(&self) -> bool {
+        self.skip_before.is_some()
+    }
+
+    /// Advances a `skip_before` by at most `max` frames, so a caller can
+    /// check between steps whether it still wants the frame it is heading to.
+    pub fn skip_some(&mut self, max: usize) -> Result<(), crate::MediaError> {
+        for _ in 0..max {
+            let Some(skip_before) = self.skip_before else {
+                return Ok(());
+            };
+            if self.pending.is_none() {
+                self.pending = self.decode_next_raw()?;
+            }
+            match self.landing() {
+                Some(idx) if idx < skip_before => self.pending = None,
+                // A frame to hand out, or the end of the stream.
+                _ => {
+                    self.skip_before = None;
+                    self.set_skip_nonref(false);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_skip_nonref(&mut self, skip: bool) {
+        if skip == self.skipping_nonref {
+            return;
+        }
+        self.skipping_nonref = skip;
+        // SAFETY: plain field of the open codec context, read by libavcodec
+        // on every packet sent afterwards.
+        unsafe {
+            (*self.decoder.as_mut_ptr()).skip_frame = if skip {
+                ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
+            } else {
+                ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT
+            };
+        }
+    }
+
+    fn frame_idx(&self, pts: i64) -> FrameIdx {
+        let secs =
+            pts as f64 * self.time_base.numerator() as f64 / self.time_base.denominator() as f64;
+        (secs * self.fps.as_f64()).round() as FrameIdx
+    }
+
     /// Decodes the next available video frame in presentation order.
     /// `Ok(None)` at the end of the stream.
     pub fn next_frame(
         &mut self,
     ) -> Result<Option<(FrameIdx, Arc<FrameYuv420>)>, crate::MediaError> {
         if let Some(frame) = self.still_image.clone() {
-            if let Some(landed) = self.pending.take() {
-                return Ok(Some(landed));
-            }
-            // Called without a preceding seek (`pending` empty): "advances" by
-            // a synthetic frame, always the same image — see the docs of
-            // `still_image`/`synthetic_idx`.
+            // "Advances" by a synthetic frame, always the same image — see the
+            // docs of `still_image`/`synthetic_idx`.
             let idx = self.synthetic_idx;
             self.synthetic_idx += 1;
             return Ok(Some((idx, frame)));
         }
+        self.skip_some(usize::MAX)?;
         loop {
             if self.pending.is_none() {
-                self.pending = self.decode_next_frame()?;
+                self.pending = self.decode_next_raw()?;
             }
-            let Some((decoded_idx, _)) = self.pending.as_ref().map(|(i, f)| (*i, f)) else {
+            let Some(decoded_idx) = self.landing() else {
                 return Ok(None);
             };
             let emit = *self.emit_idx.get_or_insert(decoded_idx);
             if decoded_idx == emit {
-                let (_, frame) = self.pending.take().unwrap();
+                let (_, mut raw) = self.pending.take().unwrap();
+                let frame = self.convert(&mut raw)?;
                 self.emit_idx = Some(emit + 1);
                 self.held = Some(frame.clone());
                 return Ok(Some((emit, frame)));
@@ -271,16 +337,16 @@ impl Decoder {
         }
     }
 
-    /// `next_frame` without `pending`.
-    fn decode_next_frame(
+    /// The next decoded frame in presentation order, not converted yet.
+    fn decode_next_raw(
         &mut self,
-    ) -> Result<Option<(FrameIdx, Arc<FrameYuv420>)>, crate::MediaError> {
+    ) -> Result<Option<(FrameIdx, ffmpeg::frame::Video)>, crate::MediaError> {
         let mut decoded = ffmpeg::frame::Video::empty();
 
         // EOF already sent: only the remaining frames are drained.
         if self.eof_sent {
             return Ok(if self.decoder.receive_frame(&mut decoded).is_ok() {
-                Some(self.finish_frame(&mut decoded)?)
+                Some(self.raw_frame(decoded))
             } else {
                 None
             });
@@ -294,16 +360,24 @@ impl Decoder {
                     if packet.stream() != self.video_stream_index {
                         continue;
                     }
+                    // A non-reference frame is needed only by itself: before
+                    // `skip_before` it can go undecoded. Without a pts, decode it.
+                    let skip = self.skip_before.is_some_and(|skip_before| {
+                        packet
+                            .pts()
+                            .is_some_and(|pts| self.frame_idx(pts) < skip_before)
+                    });
+                    self.set_skip_nonref(skip);
                     self.decoder.send_packet(&packet)?;
                     if self.decoder.receive_frame(&mut decoded).is_ok() {
-                        return Ok(Some(self.finish_frame(&mut decoded)?));
+                        return Ok(Some(self.raw_frame(decoded)));
                     }
                 }
                 Err(ffmpeg::Error::Eof) => {
                     self.decoder.send_eof()?;
                     self.eof_sent = true;
                     if self.decoder.receive_frame(&mut decoded).is_ok() {
-                        return Ok(Some(self.finish_frame(&mut decoded)?));
+                        return Ok(Some(self.raw_frame(decoded)));
                     }
                     return Ok(None);
                 }
@@ -312,14 +386,14 @@ impl Decoder {
         }
     }
 
-    fn finish_frame(
+    fn raw_frame(&self, decoded: ffmpeg::frame::Video) -> (FrameIdx, ffmpeg::frame::Video) {
+        (self.frame_idx(decoded.pts().unwrap_or(0)), decoded)
+    }
+
+    fn convert(
         &mut self,
         decoded: &mut ffmpeg::frame::Video,
-    ) -> Result<(FrameIdx, Arc<FrameYuv420>), crate::MediaError> {
-        let pts = decoded.pts().unwrap_or(0);
-        let secs =
-            pts as f64 * self.time_base.numerator() as f64 / self.time_base.denominator() as f64;
-        let idx = (secs * self.fps.as_f64()).round() as FrameIdx;
+    ) -> Result<Arc<FrameYuv420>, crate::MediaError> {
         let matrix = guess_matrix(decoded.color_space(), decoded.height());
         let format = decoded.format();
         // An RGB frame always declares itself `JPEG`, but that is the range of
@@ -331,7 +405,7 @@ impl Decoder {
                 || without_deprecated_range(format) != format);
         decoded.set_format(without_deprecated_range(format));
         let frame = yuv420_from_decoded(&mut self.scaler, decoded, matrix, full_range)?;
-        Ok((idx, Arc::new(frame)))
+        Ok(Arc::new(frame))
     }
 }
 

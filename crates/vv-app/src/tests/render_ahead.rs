@@ -2931,6 +2931,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         from_frame: 5,
         proxy: None,
         target: &AtomicI64::new(5),
+        window: &[],
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3002,6 +3003,7 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         from_frame: 80,
         proxy: None,
         target: &AtomicI64::new(80),
+        window: &[],
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3096,6 +3098,7 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
         from_frame: 24,
         proxy: None,
         target: &AtomicI64::new(24),
+        window: &[],
     };
     let outcome = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3225,6 +3228,62 @@ fn walk_and_fill_keeps_the_buffer_front_at_the_playhead_even_without_a_real_rese
             "the buffer must cover the playhead (target={target}): {ranges:?}"
         );
     }
+}
+
+/// The transit from the keyframe to a segment is decoded but not cached
+/// unless another wanted range (here the window behind) covers it.
+#[test]
+fn fill_segments_caches_only_the_transit_some_window_wants() {
+    let path = make_test_clip_with_short_gop(
+        "vv-app-render-ahead-test",
+        "transit_outside_window.mp4",
+        4,
+        250,
+    );
+    let mut project = Project::default();
+    let media_a = project.media_pool.insert(MediaItem {
+        path,
+        meta: MediaMeta {
+            duration_frames: 100,
+            fps: Rational::new(25, 1),
+            width: 320,
+            height: 240,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 0,
+        compound: None,
+        folder: None,
+    });
+    let range = |source_start, source_end| WantedRange {
+        media_id: media_a,
+        source_start,
+        source_end,
+        timeline_start: source_start,
+        rate: Rational::one(),
+    };
+    let segment = range(80, 90);
+    let window = [range(60, 79), segment];
+    let caches = SharedFrameCache::new();
+    let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
+    let ctx = FillContext {
+        project: &project,
+        caches: &caches,
+        went_backward: false,
+        cache_budget_bytes: usize::MAX,
+        from_frame: 80,
+        proxy: None,
+        target: &AtomicI64::new(80),
+        window: &window,
+    };
+    let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
+
+    assert_eq!(caches.cached_ranges(media_a), vec![(60, 90)]);
+    assert_eq!(open[&media_a].last_keyframe_landed, Some(0));
 }
 
 fn make_color_clip(dir_name: &str, file_name: &str, color: &str) -> std::path::PathBuf {

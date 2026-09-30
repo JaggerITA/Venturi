@@ -58,6 +58,10 @@ fn load_secs(atomic: &AtomicU64) -> f64 {
     f64::from_bits(atomic.load(Ordering::Relaxed))
 }
 
+/// Frames skipped per step of a transit (`Decoder::skip_some`) between two
+/// checks of the live playhead.
+const SKIP_STEP_FRAMES: usize = 8;
+
 /// A cycle finding everything cached returns immediately: a short poll costs little.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -247,9 +251,6 @@ struct OpenDecoder {
     /// adaptive GOP estimate instead of merely initializing it.
     is_all_intra: bool,
     next_frame: FrameIdx,
-    /// After a seek or an open the first frame is a keyframe: it serves to
-    /// learn the GOP of the media.
-    just_repositioned: bool,
     /// Last seek landing and GOP estimated from the distance between landings.
     last_keyframe_landed: Option<FrameIdx>,
     estimated_gop: Option<FrameIdx>,
@@ -262,7 +263,6 @@ impl OpenDecoder {
             resolved_path,
             is_all_intra,
             next_frame: 0,
-            just_repositioned: true,
             last_keyframe_landed: None,
             estimated_gop: None,
         }
@@ -714,7 +714,6 @@ fn position_decoder(
         }
         // Placeholder: the next frame will say where the seek really landed.
         o.next_frame = 0;
-        o.just_repositioned = true;
         return Positioned::Seeked;
     }
     // No decoder open for this media: here the real open is
@@ -744,6 +743,22 @@ fn position_decoder(
         OpenDecoder::fresh(decoder, path.to_path_buf(), is_all_intra),
     );
     Positioned::Opened
+}
+
+/// The first frame from `landing` on that the transit towards `segment` must
+/// hand out: the start of `segment`, or earlier where another wanted range of
+/// the same media (the window behind, another clip of the same file) overlaps
+/// the transit.
+fn first_wanted_frame(
+    window: &[WantedRange],
+    segment: &WantedRange,
+    landing: FrameIdx,
+) -> FrameIdx {
+    window
+        .iter()
+        .filter(|r| r.media_id == segment.media_id && r.source_end >= landing)
+        .map(|r| r.source_start.max(landing))
+        .fold(segment.source_start, FrameIdx::min)
 }
 
 /// Outcome of one `walk_and_fill` cycle.
@@ -840,6 +855,7 @@ fn walk_and_fill(
         from_frame,
         proxy,
         target,
+        window: &forward_segments,
     };
     // The forward window first: behind gets only the budget left over.
     let forward_chunks = chunk_forward_segments_near_to_far(&forward_segments);
@@ -877,6 +893,7 @@ fn walk_and_fill(
     }
     let behind_ctx = FillContext {
         went_backward: true,
+        window: &window,
         ..ctx
     };
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
@@ -900,6 +917,12 @@ struct FillContext<'a> {
     /// where it decides whether to resolve the source path or the proxy one.
     proxy: Option<ProxyQuality>,
     target: &'a AtomicI64,
+    /// The ranges the transit towards a segment must still hand out; the
+    /// decoder skips the rest. Ahead only the window ahead counts: the first
+    /// frame at the playhead comes first, the window behind is filled
+    /// afterwards by its own decoders. Behind, the whole window: the transit
+    /// of a chunk is the next chunks, farther back.
+    window: &'a [WantedRange],
 }
 
 /// Decodes what is needed to cover `segments`, stopping if the budget is
@@ -947,7 +970,7 @@ fn fill_segments(
             .map(|q| vv_media::proxy::proxy_path_for(item.content_hash, q));
         let is_proxy = proxy_path.is_some();
         let path = proxy_path.unwrap_or_else(|| item.path.clone());
-        if position_decoder(
+        match position_decoder(
             ctx.caches,
             open,
             segment.media_id,
@@ -956,9 +979,17 @@ fn fill_segments(
             ctx.went_backward,
             is_proxy,
             item.meta.is_image(),
-        ) == Positioned::Failed
-        {
-            continue;
+        ) {
+            Positioned::Failed => continue,
+            Positioned::Reused => {}
+            Positioned::Seeked | Positioned::Opened => {
+                let od = open.get_mut(&segment.media_id).unwrap();
+                if let Some(landing) = od.decoder.landing() {
+                    od.record_keyframe_landing(landing);
+                    od.decoder
+                        .skip_before(first_wanted_frame(ctx.window, segment, landing));
+                }
+            }
         }
 
         // `next_frame` is a placeholder until the first frame after the seek
@@ -989,77 +1020,78 @@ fn fill_segments(
                 }
                 break;
             }
-            let mut threshold_frames = od.seek_threshold_frames();
-            match od.decoder.next_frame() {
-                Ok(Some((idx, frame))) => {
-                    if od.just_repositioned {
-                        od.record_keyframe_landing(idx);
-                        od.just_repositioned = false;
-                        threshold_frames = od.seek_threshold_frames();
-                    }
-                    let frame_bytes = frame.byte_len();
-                    if idx >= segment.source_start {
-                        if ctx.caches.bytes_used().saturating_sub(transit_bytes)
-                            >= ctx.cache_budget_bytes
-                        {
-                            if debug_enabled() {
-                                eprintln!(
-                                    "[render_ahead] BUDGET-SATURO media={:?} segment=[{},{}] next_frame={} bytes_used={} transit_bytes={transit_bytes} budget={}",
-                                    segment.media_id,
-                                    segment.source_start,
-                                    segment.source_end,
-                                    od.next_frame,
-                                    ctx.caches.bytes_used(),
-                                    ctx.cache_budget_bytes
-                                );
-                            }
-                            return ControlFlow::Break(WalkOutcome::UNFINISHED);
-                        }
-                    } else {
-                        // Transit before the segment: kept anyway, a nearby segment in
-                        // this same round reuses it instead of crossing the GOP again.
-                        if transit_frames >= TRANSIT_SAFETY_CAP_FRAMES {
-                            if debug_enabled() {
-                                eprintln!(
-                                    "[render_ahead] EXCESSIVE-TRANSIT media={:?} segment=[{},{}] next_frame={} transit_frames={transit_frames}",
-                                    segment.media_id,
-                                    segment.source_start,
-                                    segment.source_end,
-                                    od.next_frame,
-                                );
-                            }
-                            return ControlFlow::Break(WalkOutcome::UNFINISHED);
-                        }
-                        transit_bytes += frame_bytes;
-                        transit_frames += 1;
-                    }
-                    ctx.caches.insert(segment.media_id, idx, frame);
-                    od.next_frame = idx + 1;
-                    resumed = true;
-                }
-                Ok(None) => {
-                    if debug_enabled() {
-                        eprintln!(
-                            "[render_ahead] DECODE-FINE(EOF) media={:?} segment=[{},{}] next_frame={}",
-                            segment.media_id,
-                            segment.source_start,
-                            segment.source_end,
-                            od.next_frame
-                        );
-                    }
+            let threshold_frames = od.seek_threshold_frames();
+            if od.decoder.is_skipping() {
+                if od.decoder.skip_some(SKIP_STEP_FRAMES).is_err() {
                     break;
                 }
-                Err(e) => {
-                    if debug_enabled() {
-                        eprintln!(
-                            "[render_ahead] DECODE-FINE(ERR) media={:?} segment=[{},{}] next_frame={} error={e}",
-                            segment.media_id,
-                            segment.source_start,
-                            segment.source_end,
-                            od.next_frame
-                        );
+            } else {
+                match od.decoder.next_frame() {
+                    Ok(Some((idx, frame))) => {
+                        let frame_bytes = frame.byte_len();
+                        if idx >= segment.source_start {
+                            if ctx.caches.bytes_used().saturating_sub(transit_bytes)
+                                >= ctx.cache_budget_bytes
+                            {
+                                if debug_enabled() {
+                                    eprintln!(
+                                        "[render_ahead] BUDGET-SATURO media={:?} segment=[{},{}] next_frame={} bytes_used={} transit_bytes={transit_bytes} budget={}",
+                                        segment.media_id,
+                                        segment.source_start,
+                                        segment.source_end,
+                                        od.next_frame,
+                                        ctx.caches.bytes_used(),
+                                        ctx.cache_budget_bytes
+                                    );
+                                }
+                                return ControlFlow::Break(WalkOutcome::UNFINISHED);
+                            }
+                        } else {
+                            // Transit before the segment: kept anyway, a nearby segment in
+                            // this same round reuses it instead of crossing the GOP again.
+                            if transit_frames >= TRANSIT_SAFETY_CAP_FRAMES {
+                                if debug_enabled() {
+                                    eprintln!(
+                                        "[render_ahead] EXCESSIVE-TRANSIT media={:?} segment=[{},{}] next_frame={} transit_frames={transit_frames}",
+                                        segment.media_id,
+                                        segment.source_start,
+                                        segment.source_end,
+                                        od.next_frame,
+                                    );
+                                }
+                                return ControlFlow::Break(WalkOutcome::UNFINISHED);
+                            }
+                            transit_bytes += frame_bytes;
+                            transit_frames += 1;
+                        }
+                        ctx.caches.insert(segment.media_id, idx, frame);
+                        od.next_frame = idx + 1;
+                        resumed = true;
                     }
-                    break;
+                    Ok(None) => {
+                        if debug_enabled() {
+                            eprintln!(
+                                "[render_ahead] DECODE-FINE(EOF) media={:?} segment=[{},{}] next_frame={}",
+                                segment.media_id,
+                                segment.source_start,
+                                segment.source_end,
+                                od.next_frame
+                            );
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if debug_enabled() {
+                            eprintln!(
+                                "[render_ahead] DECODE-FINE(ERR) media={:?} segment=[{},{}] next_frame={} error={e}",
+                                segment.media_id,
+                                segment.source_start,
+                                segment.source_end,
+                                od.next_frame
+                            );
+                        }
+                        break;
+                    }
                 }
             }
             // Live target: if the playhead moved past the threshold the prefetch is

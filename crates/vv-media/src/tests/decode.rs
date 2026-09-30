@@ -545,3 +545,25 @@ fn decoder_seek_lands_at_or_before_target_near_every_keyframe_boundary() {
         }
     }
 }
+
+/// Skipping the transit after a seek (non-reference B-frames undecoded,
+/// the rest unconverted) must not change a single pixel of what follows.
+#[test]
+fn skip_before_hands_out_the_same_frames_as_a_full_decode() {
+    let path = make_test_clip_with_gop_and_bframes("skip_before.mp4", 4, 25, 2);
+    let mut full = Decoder::open(&path).unwrap();
+    let mut reference = std::collections::HashMap::new();
+    while let Some((idx, frame)) = full.next_frame().unwrap() {
+        reference.insert(idx, frame);
+    }
+
+    let mut decoder = Decoder::open(&path).unwrap();
+    decoder.seek_to_time(70.0 / 25.0).unwrap();
+    assert_eq!(decoder.landing(), Some(50));
+    decoder.skip_before(68);
+    for expected in 68..=80 {
+        let (idx, frame) = decoder.next_frame().unwrap().unwrap();
+        assert_eq!(idx, expected);
+        assert!(frame.y == reference[&idx].y, "frame {idx} differs");
+    }
+}
