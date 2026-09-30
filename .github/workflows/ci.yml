@@ -30,8 +30,11 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # Its own key ignores [profile] and [env], and an exact hit never saves
+      # again: after a profile change every run would rebuild from scratch.
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ hashFiles('Cargo.toml', '.cargo/config.toml') }}
           cache-on-failure: true
 
       - name: Format

@@ -86,13 +86,17 @@ jobs:
       - name: Install build tools
         run: brew install pkgconf meson ninja
 
-      # The compiled FFmpeg only changes with its build script.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml', '.cargo/config.toml') }}
+
+      # The compiled FFmpeg only changes with its build script. After
+      # rust-cache: post steps run in reverse, and rust-cache's cleanup would
+      # empty target/ffmpeg-shared before this one saves it.
       - uses: actions/cache@v4
         with:
           path: target/ffmpeg-shared
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: scripts/build-macos.sh
