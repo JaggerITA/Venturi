@@ -88,8 +88,10 @@ autotools_install() {
 }
 
 tarball "https://downloads.sourceforge.net/project/lame/lame/$LAME_VERSION/lame-$LAME_VERSION.tar.gz"
-# Exported but not defined in 3.100: the macOS linker refuses it.
-sed -i.orig '/^lame_init_old$/d' "$SRC/lame-$LAME_VERSION/include/libmp3lame.sym"
+# Exported but not defined in 3.100 (the decoder ones once it is disabled):
+# the macOS linker refuses them.
+sed -i.orig -E '/^(lame_init_old|hip_.*|lame_decode.*)$/d' \
+    "$SRC/lame-$LAME_VERSION/include/libmp3lame.sym"
 autotools_install "lame-$LAME_VERSION" --disable-frontend --disable-decoder
 
 tarball "https://downloads.xiph.org/releases/ogg/libogg-$OGG_VERSION.tar.gz"
