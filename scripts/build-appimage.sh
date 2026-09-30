@@ -76,9 +76,11 @@ patchelf --force-rpath --set-rpath '$ORIGIN/../lib' "$APPDIR/usr/bin/vv-app"
 # uncopied library) that then blows up on a different distro.
 # Instead we check that every required libav*/libx264 soname really is
 # inside the AppDir.
-for so in $(patchelf --print-needed "$APPDIR/usr/bin/vv-app"); do
+# The codec libraries are needed by libavcodec, not by vv-app: its
+# dependencies are checked too.
+for so in $(patchelf --print-needed "$APPDIR/usr/bin/vv-app" "$APPDIR"/usr/lib/libavcodec.so.*); do
     case "$so" in
-        libav*|libsw*|libpostproc*|libx264*)
+        libav*|libsw*|libpostproc*|libx264*|libmp3lame*|libopus*|libvorbis*|libogg*)
             if [ ! -e "$APPDIR/usr/lib/$so" ]; then
                 echo "required library missing from the bundle: $so" >&2
                 exit 1

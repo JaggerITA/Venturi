@@ -151,8 +151,9 @@ scripts/build-appimage.sh
 ```
 
 Produces `target/appimage/Venturi-<arch>.AppImage` with FFmpeg compiled from
-source inside it (shared libraries, with libx264, librubberband, zlib and
-NVENC) plus libx264: the target machine needs neither FFmpeg nor RPM Fusion.
+source inside it (shared libraries, with libx264, librubberband, zlib,
+NVENC and the encoders of the voiceover takes: libmp3lame, libopus,
+libvorbis): the target machine needs neither FFmpeg nor RPM Fusion.
 glibc, ALSA, Vulkan and the NVIDIA driver, if any (NVENC requires >= 550),
 stay the system ones.
 
@@ -181,7 +182,8 @@ scripts/build-macos.sh
 
 Must run on a Mac with the Xcode command line tools and `pkgconf`. Produces
 `target/macos/Venturi.app` and `target/macos/Venturi-arm64.dmg`, with FFmpeg
-(libx264, librubberband, zlib, VideoToolbox) bundled in
+(libx264, librubberband, zlib, libmp3lame, libopus, libvorbis,
+VideoToolbox) bundled in
 `Contents/Frameworks`.
 
 The `Release` GitHub Actions workflow runs the same script on a `macos-14`
