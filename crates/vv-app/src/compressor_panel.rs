@@ -202,31 +202,31 @@ pub(crate) fn builtin_presets() -> [(&'static str, MultibandCompressor); 7] {
         ("mixer.preset_default", MultibandCompressor::DEFAULT),
         (
             "mixer.preset_glue",
-            preset([150.0, 3000.0], [band(-24.0, 1.5, 30.0, 250.0, 1.0); 3]),
+            preset([150.0, 3000.0], [band(-26.0, 2.0, 30.0, 250.0, 2.0); 3]),
         ),
         (
             "mixer.preset_voice",
             preset(
-                [180.0, 4000.0],
+                [200.0, 5000.0],
                 [
-                    band(-30.0, 4.0, 10.0, 120.0, 0.0),
-                    band(-22.0, 2.5, 8.0, 150.0, 2.0),
-                    band(-30.0, 3.0, 2.0, 80.0, 0.0),
+                    band(-26.0, 3.0, 15.0, 150.0, -2.0),
+                    band(-28.0, 3.0, 8.0, 120.0, 4.0),
+                    band(-26.0, 2.0, 3.0, 80.0, 2.0),
                 ],
             ),
         ),
         (
             "mixer.preset_deesser",
             preset(
-                [1000.0, 5500.0],
-                [bypass, bypass, band(-32.0, 6.0, 0.5, 60.0, 0.0)],
+                [1000.0, 6000.0],
+                [bypass, bypass, band(-18.0, 6.0, 0.5, 40.0, 0.0)],
             ),
         ),
         (
             "mixer.preset_low_end",
             preset(
                 [120.0, 2000.0],
-                [band(-28.0, 4.0, 20.0, 200.0, 0.0), bypass, bypass],
+                [band(-26.0, 4.0, 20.0, 200.0, 0.0), bypass, bypass],
             ),
         ),
         (
@@ -234,9 +234,9 @@ pub(crate) fn builtin_presets() -> [(&'static str, MultibandCompressor); 7] {
             preset(
                 [200.0, 3000.0],
                 [
-                    band(-28.0, 4.0, 5.0, 120.0, 6.0),
-                    band(-28.0, 4.0, 5.0, 120.0, 5.0),
-                    band(-28.0, 4.0, 5.0, 120.0, 4.0),
+                    band(-28.0, 4.0, 5.0, 120.0, 10.5),
+                    band(-28.0, 4.0, 5.0, 120.0, 8.5),
+                    band(-28.0, 4.0, 5.0, 120.0, 7.5),
                 ],
             ),
         ),
@@ -245,9 +245,9 @@ pub(crate) fn builtin_presets() -> [(&'static str, MultibandCompressor); 7] {
             preset(
                 [120.0, 5000.0],
                 [
-                    band(-20.0, 2.0, 30.0, 200.0, 1.0),
-                    band(-18.0, 1.8, 20.0, 180.0, 1.0),
-                    band(-22.0, 2.0, 10.0, 120.0, 1.0),
+                    band(-26.0, 2.0, 30.0, 200.0, 3.0),
+                    band(-26.0, 2.0, 20.0, 180.0, 3.0),
+                    band(-26.0, 2.0, 10.0, 120.0, 3.0),
                 ],
             ),
         ),

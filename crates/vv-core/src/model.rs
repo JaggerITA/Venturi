@@ -1676,7 +1676,7 @@ pub struct CompressorBand {
 
 impl CompressorBand {
     pub const DEFAULT: Self = Self {
-        threshold_db: -20.0,
+        threshold_db: -24.0,
         ratio: 3.0,
         attack_ms: 10.0,
         release_ms: 150.0,

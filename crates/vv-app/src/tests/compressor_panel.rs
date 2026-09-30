@@ -139,3 +139,100 @@ fn the_builtin_presets_are_distinct_valid_and_translated() {
     }
     assert_eq!(presets[0].1, MultibandCompressor::DEFAULT);
 }
+
+/// Pink noise with peaks at -6 dBFS, about the level of a mix.
+fn pink_noise(frames: usize) -> Vec<f32> {
+    let mut seed = 7u32;
+    let mut b = [0f32; 7];
+    let mut pink: Vec<f32> = (0..frames)
+        .map(|_| {
+            let white = white_noise(&mut seed);
+            // Paul Kellet's filter.
+            b[0] = 0.99886 * b[0] + white * 0.0555179;
+            b[1] = 0.99332 * b[1] + white * 0.0750759;
+            b[2] = 0.96900 * b[2] + white * 0.1538520;
+            b[3] = 0.86650 * b[3] + white * 0.3104856;
+            b[4] = 0.55000 * b[4] + white * 0.5329522;
+            b[5] = -0.7616 * b[5] - white * 0.0168980;
+            let out = b.iter().sum::<f32>() + white * 0.5362;
+            b[6] = white * 0.115926;
+            out
+        })
+        .collect();
+    let peak = pink.iter().fold(0f32, |p, s| p.max(s.abs()));
+    let gain = 10f32.powf(-6.0 / 20.0) / peak;
+    pink.iter_mut().for_each(|s| *s *= gain);
+    pink
+}
+
+fn white_noise(seed: &mut u32) -> f32 {
+    *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    (*seed >> 8) as f32 / 8388608.0 - 1.0
+}
+
+fn rms_db(samples: &[f32]) -> f32 {
+    let power = samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32;
+    10.0 * power.log10()
+}
+
+/// Mean reduction of each band past the first 0.25 s, and the output.
+fn run_preset(params: &MultibandCompressor, input: &[f32]) -> ([f32; 3], Vec<f32>) {
+    let mut processor = vv_audio::dynamics::MultibandProcessor::new(params, 48_000, 1);
+    let mut out = input.to_vec();
+    let mut sum = [0f32; 3];
+    let mut counted = 0;
+    for (i, chunk) in out.chunks_mut(512).enumerate() {
+        let activity = processor.process(chunk);
+        if i * 512 >= 12_000 {
+            for (s, r) in sum.iter_mut().zip(activity.reduction_db) {
+                *s += r;
+            }
+            counted += 1;
+        }
+    }
+    (sum.map(|s| s / counted as f32), out)
+}
+
+#[test]
+fn every_preset_audibly_does_its_job_on_a_mix_level_signal() {
+    let input = pink_noise(48_000 * 2);
+    let presets = builtin_presets();
+    let find = |key: &str| presets.iter().find(|(k, _)| *k == key).unwrap().1.clone();
+    let in_db = rms_db(&input);
+
+    for key in [
+        "mixer.preset_default",
+        "mixer.preset_glue",
+        "mixer.preset_master",
+    ] {
+        let (reduction, out) = run_preset(&find(key), &input);
+        let most = reduction.iter().copied().fold(0.0, f32::max);
+        assert!((2.0..8.0).contains(&most), "{key}: {reduction:?}");
+        if key != "mixer.preset_default" {
+            assert!((rms_db(&out) - in_db).abs() < 1.5, "{key}: level-matched");
+        }
+    }
+
+    let (reduction, _) = run_preset(&find("mixer.preset_low_end"), &input);
+    assert!(
+        reduction[0] > 3.0 && reduction[1] == 0.0 && reduction[2] == 0.0,
+        "{reduction:?}"
+    );
+
+    let (_, out) = run_preset(&find("mixer.preset_broadcast"), &input);
+    let peak_db = 20.0 * out.iter().fold(0f32, |p, s| p.max(s.abs())).log10();
+    assert!(rms_db(&out) - in_db > 2.0, "louder than what goes in");
+    assert!(peak_db < -1.0, "without clipping: {peak_db}");
+
+    // Steady highs pass; a sibilant 10 dB over them is caught.
+    let deesser = find("mixer.preset_deesser");
+    let (steady, _) = run_preset(&deesser, &input);
+    assert!(steady[2] < 1.0, "{steady:?}");
+    let mut hiss = input.clone();
+    let mut seed = 99u32;
+    for s in &mut hiss {
+        *s += white_noise(&mut seed) * 0.5;
+    }
+    let (hissing, _) = run_preset(&deesser, &hiss);
+    assert!(hissing[2] > 5.0 && hissing[0] == 0.0, "{hissing:?}");
+}
