@@ -779,8 +779,9 @@ fn position_decoder(
     let _ = decoder.seek_to_time(secs);
     if let Some(t) = debug_start {
         eprintln!(
-            "[render_ahead] OPEN (new decoder) media={media_id:?} path={} target={segment_start} elapsed={:?}",
+            "[render_ahead] OPEN (new decoder) media={media_id:?} path={} hw={} target={segment_start} elapsed={:?}",
             path.display(),
+            decoder.is_hw(),
             t.elapsed()
         );
     }

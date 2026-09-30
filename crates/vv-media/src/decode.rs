@@ -465,6 +465,10 @@ impl Decoder {
     }
 
     fn reopen_in_software(&mut self) -> Result<(), crate::MediaError> {
+        eprintln!(
+            "HW decoding failed on {}: software from now on",
+            self.path.display()
+        );
         crate::hw::mark_failed(&self.path);
         let transfer_time = self.transfer_time;
         *self = Self::open(&self.path)?;
