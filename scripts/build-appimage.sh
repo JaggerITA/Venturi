@@ -88,6 +88,16 @@ for so in $(patchelf --print-needed "$APPDIR/usr/bin/vv-app" "$APPDIR"/usr/lib/l
     esac
 done
 
+# The GPU drivers belong to the system: FFmpeg must load them with dlopen,
+# or the AppImage would not start where they are missing.
+for so in $(patchelf --print-needed "$APPDIR/usr/bin/vv-app" "$APPDIR"/usr/lib/*.so.*); do
+    case "$so" in
+        libva*|libcuda*|libnvcuvid*|libvulkan*|libdrm*)
+            echo "GPU driver library linked instead of loaded at run time: $so" >&2
+            exit 1 ;;
+    esac
+done
+
 TOOL="$TARGET_DIR/appimage/appimagetool-$ARCH.AppImage"
 if [ ! -x "$TOOL" ]; then
     curl -fL -o "$TOOL" \

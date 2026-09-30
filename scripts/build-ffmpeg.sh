@@ -1,8 +1,8 @@
 #!/bin/bash
 # Builds FFmpeg from source (shared libraries) with libx264, librubberband,
 # zlib, the encoders of the voiceover takes (libmp3lame, libopus, libvorbis)
-# and the platform hardware encoder (NVENC on Linux, VideoToolbox on macOS)
-# into a local prefix. Used by build-appimage.sh and build-macos.sh.
+# and the platform hardware encoder and decoders (NVENC, NVDEC and Vulkan
+# video on Linux, VideoToolbox on macOS) into a local prefix. Used by build-appimage.sh and build-macos.sh.
 #
 # Usage: scripts/build-ffmpeg.sh <prefix>
 set -euo pipefail
@@ -28,9 +28,11 @@ if [ "$OS" = Darwin ]; then
     JOBS="$(sysctl -n hw.ncpu)"
     HW_FLAGS=(--enable-videotoolbox)
 else
-    WANT="$FFMPEG_TAG $NV_HEADERS_TAG $X264_BRANCH $RUBBERBAND_TAG $AUDIO_CODECS"
+    WANT="$FFMPEG_TAG $NV_HEADERS_TAG nvdec vulkan $X264_BRANCH $RUBBERBAND_TAG $AUDIO_CODECS"
     JOBS="$(nproc)"
-    HW_FLAGS=(--enable-ffnvcodec --enable-nvenc)
+    # No VA-API: libva would be linked, not loaded with dlopen like CUDA and
+    # Vulkan, and the AppImage would not start on a system without it.
+    HW_FLAGS=(--enable-ffnvcodec --enable-nvenc --enable-cuda --enable-nvdec --enable-vulkan)
 fi
 
 STAMP="$PREFIX/.build-stamp"

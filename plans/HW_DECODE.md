@@ -4,7 +4,7 @@ Follow-up to Vikunja #25 (black viewer after repositioning during
 playback on heavy footage). One code path over FFmpeg's hwaccel API for
 every platform: VideoToolbox on macOS, NVDEC and Vulkan video on Linux.
 
-**Status:** proposed, not started.
+**Status:** in progress (see §7).
 
 ---
 
@@ -34,12 +34,26 @@ of that clip:
 | VA-API (NVIDIA → VA-API shim) | 264 | 2.5 s |
 
 **Caveat:** it is not known whether these numbers include downloading
-the frames to system memory (`-hwaccel_output_format` left on the GPU
-would skip it). They are an upper bound until remeasured. Every HW
-benchmark of this plan measures decode + transfer + packing into
-`FrameYuv420`, and reports the transfer time separately: on some drivers
-(VA-API on AMD/Intel especially) the readback from uncached memory, not
-the decode, is the bottleneck.
+the frames to system memory. Every HW benchmark of this plan measures
+decode + transfer + packing into `FrameYuv420`, and reports the transfer
+time separately: the readback, not the decode, can be the bottleneck.
+
+Remeasured that way (`bench_hw_decode` in `tests/decode.rs`, same clip,
+release build, 2026-09-30, still converting NV12 → YUV420P with sws):
+
+| Decoder | open + first frame | fps | transfer / frame | CPU time |
+|---|---|---|---|---|
+| software, 24 threads | 125 ms | 368 | — | 26.8 s |
+| NVDEC | 57 ms | 202 | 1.9 ms | 3.9 s |
+| NVDEC, frame threads on | 99 ms | 252 | 1.8 ms | 3.9 s |
+| Vulkan (NVIDIA driver) | 27–35 ms | 88–168 (noisy) | 3.9–5.5 ms | 3.9–8.6 s |
+
+- The transfer is a third to a half of the HW time per frame: the
+  earlier table did not include it.
+- `av_hwframe_map` on Vulkan was no faster than a transfer (CUDA cannot
+  map): only VideoToolbox frames are mapped.
+- Frame threading with NVDEC overlaps decode and transfer (+25%) but
+  slows the open; left off for now, to remeasure after §4.6 removes sws.
 
 The dev box is atypical (24-thread CPU): on most workstations the GPU
 decoder beats the CPU, so HW decode is the default (`Auto`). Where it
@@ -178,11 +192,10 @@ reopen redoes `hw_frames_ctx` and the VideoToolbox/NVDEC session (tens
 of ms?), on top of the container parse already paid today. The shared
 device (§4.1.1) does not cover this.
 
-Measure it (open + first frame, software vs HW, per backend) in the
-benchmarks of §6 before deciding. If it matters, the options to discuss
-are keeping recently closed HW decoders in a small LRU instead of
-dropping them, or keeping the media's decoder open while it is anywhere
-near the window.
+Measured (§1): open + first frame is *shorter* on HW (27–57 ms) than in
+software (125 ms, which spins up 24 frame threads), with the device
+already created. No LRU needed; the CUDA device must be warmed up at
+startup, as planned. To recheck on the M1.
 
 ### 4.6 NV12 end to end
 
@@ -258,11 +271,12 @@ cache (same pixels).
 
 ## 7. Order
 
-1. Build flags (§3), CI image, `readelf` check on the AppImage.
-2. Lazy scaler (§4.1.4), on its own: it is correct in software too.
-3. `hw.rs`: device, codec setup, transfer/map, fallback (§4.2), with
-   tests.
-4. Benchmarks with transfer and reopen cost; discuss §4.5 if needed.
+1. ~~Build flags (§3), `readelf` check on the AppImage~~ done (the Debian
+   13 image already has Vulkan headers 1.4.309).
+2. ~~Lazy scaler (§4.1.4)~~ done.
+3. ~~`hw.rs`: device, codec setup, transfer/map, fallback (§4.2), with
+   tests~~ done.
+4. ~~Benchmarks with transfer and reopen cost~~ done on the dev box (§1).
 5. NV12 in `FrameYuv420`, compositor and shader, CPU consumers.
 6. Budget (§4.3), wiring into render-ahead, then proxies; settings and
    translation.

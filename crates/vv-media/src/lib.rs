@@ -7,6 +7,7 @@ pub mod audio_file;
 pub mod cache;
 pub mod decode;
 pub mod encode;
+pub mod hw;
 pub mod probe;
 pub mod proxy;
 pub mod thumbnail;
@@ -16,6 +17,7 @@ pub use audio::{AudioBuffer, decode_audio_streams_streaming, decode_audio_track}
 pub use cache::{SharedFrameCache, WantedRange};
 pub use decode::{ColorMatrix, Decoder, FrameYuv420, yuv420_frame_bytes};
 pub use encode::{AudioCodec, AudioSettings, Encoder, VideoCodec, VideoSettings};
+pub use hw::HwDevice;
 pub use probe::{
     AUDIO_ONLY_FPS, AudioStreamInfo, IMAGE_EXTENSIONS, IMAGE_FPS, audio_streams,
     content_fingerprint, is_image_path, probe, probe_file_info, probe_image, probe_media,

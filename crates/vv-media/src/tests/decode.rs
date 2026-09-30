@@ -581,3 +581,172 @@ fn skip_before_without_a_seek_resumes_at_the_first_wanted_frame() {
     let (idx, _) = decoder.next_frame().unwrap().unwrap();
     assert_eq!(idx, 40);
 }
+
+fn decode_all(mut decoder: Decoder) -> Vec<(FrameIdx, Arc<FrameYuv420>)> {
+    std::iter::from_fn(|| decoder.next_frame().unwrap()).collect()
+}
+
+fn assert_same_frames(got: &[(FrameIdx, Arc<FrameYuv420>)], want: &[(FrameIdx, Arc<FrameYuv420>)]) {
+    assert_eq!(got.len(), want.len());
+    for ((idx, frame), (want_idx, want_frame)) in got.iter().zip(want) {
+        assert_eq!(idx, want_idx);
+        assert!(
+            frame.y == want_frame.y && frame.u == want_frame.u && frame.v == want_frame.v,
+            "frame {idx} differs"
+        );
+    }
+}
+
+/// Decoder with a hwaccel that is not there: frames in `pix_fmt` are what
+/// the fake "hardware" is expected to produce.
+fn fake_hw(path: &Path, pix_fmt: ffmpeg::ffi::AVPixelFormat, fail_after: Option<u32>) -> Decoder {
+    let mut decoder = Decoder::open(path).unwrap();
+    decoder.hw = Some(crate::hw::HwState { pix_fmt });
+    decoder.fail_after = fail_after;
+    decoder
+}
+
+/// Without a usable device (CI), or with one, the frames are those of
+/// software decoding: the hwaccels decode H.264 bit-exactly and NV12 →
+/// YUV420P only moves bytes.
+#[test]
+fn open_with_hw_decodes_the_same_frames_as_software() {
+    use crate::hw::HwDevice;
+    let path = make_test_clip_with_gop_and_bframes("hw_same_frames.mp4", 2, 25, 2);
+    let want = decode_all(Decoder::open(&path).unwrap());
+    let hw = Decoder::open_with(
+        &path,
+        &[
+            HwDevice::VideoToolbox,
+            HwDevice::Cuda,
+            HwDevice::Vulkan(None),
+        ],
+    )
+    .unwrap();
+    assert_same_frames(&decode_all(hw), &want);
+}
+
+#[test]
+fn a_silent_software_fallback_of_ffmpeg_reopens_the_decoder_in_software() {
+    let path = make_test_clip_with_gop_and_bframes("hw_silent_fallback.mp4", 2, 25, 2);
+    let want = decode_all(Decoder::open(&path).unwrap());
+    let mut decoder = fake_hw(&path, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA, None);
+    decoder.seek_to_time(0.0).unwrap();
+    assert!(!decoder.is_hw());
+    assert!(crate::hw::has_failed(&path), "not retried on the next open");
+    assert_same_frames(&decode_all(decoder), &want);
+}
+
+#[test]
+fn a_hw_error_mid_stream_goes_on_in_software_without_changing_the_frames() {
+    let path = make_test_clip_with_gop_and_bframes("hw_error_mid_stream.mp4", 2, 25, 2);
+    let want = decode_all(Decoder::open(&path).unwrap());
+    let decoder = fake_hw(
+        &path,
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+        Some(33),
+    );
+    assert_same_frames(&decode_all(decoder), &want);
+}
+
+#[test]
+fn a_hw_error_during_a_transit_lands_on_the_wanted_frame() {
+    let path = make_test_clip_with_gop_and_bframes("hw_error_transit.mp4", 4, 25, 2);
+    let want = decode_all(Decoder::open(&path).unwrap());
+    let mut decoder = fake_hw(&path, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_YUV420P, None);
+    decoder.seek_to_time(70.0 / 25.0).unwrap();
+    assert_eq!(decoder.landing(), Some(50));
+    decoder.skip_before(68);
+    decoder.fail_after = Some(5);
+    let got: Vec<_> = (0..13)
+        .map(|_| decoder.next_frame().unwrap().unwrap())
+        .collect();
+    assert!(!decoder.is_hw());
+    assert_same_frames(&got, &want[68..=80]);
+}
+
+/// Process CPU time (user + system), where `/proc` has it.
+fn cpu_time() -> Option<std::time::Duration> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // Fields after the `(comm)`, which may contain spaces: utime and stime
+    // are the 14th and 15th of the line, in ticks of 1/100 s on Linux.
+    let rest = &stat[stat.rfind(')')? + 2..];
+    let fields: Vec<&str> = rest.split(' ').collect();
+    let ticks: u64 = fields[11].parse::<u64>().ok()? + fields[12].parse::<u64>().ok()?;
+    Some(std::time::Duration::from_millis(ticks * 10))
+}
+
+/// Software vs every HW backend on `VV_BENCH_CLIP` (a synthetic 1080p HEVC
+/// clip without it): open + first frame, then throughput with the transfer
+/// to system memory included and reported apart.
+/// `VV_BENCH_CLIP=<path> cargo test --release -p vv-media bench_hw_decode -- --ignored --nocapture`.
+#[test]
+#[ignore = "manual measurement, not a correctness assertion"]
+fn bench_hw_decode() {
+    use crate::hw::HwDevice;
+    let path = std::env::var("VV_BENCH_CLIP").map_or_else(
+        |_| {
+            let dir = std::env::temp_dir().join("vv-media-decode-bench");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("hevc_1080p.mkv");
+            crate::test_support::ffmpeg(
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=1920x1080:rate=60:duration=12",
+                    "-c:v",
+                    "libx265",
+                    "-preset",
+                    "fast",
+                    "-g",
+                    "250",
+                    "-pix_fmt",
+                    "yuv420p",
+                ],
+                &path,
+            );
+            path
+        },
+        std::path::PathBuf::from,
+    );
+    const FRAMES: usize = 1200;
+    let backends: [(&str, &[HwDevice]); 4] = [
+        ("software", &[]),
+        ("NVDEC", &[HwDevice::Cuda]),
+        ("Vulkan", &[HwDevice::Vulkan(None)]),
+        ("VideoToolbox", &[HwDevice::VideoToolbox]),
+    ];
+    for (name, devices) in backends {
+        if devices.iter().any(|d| !crate::hw::available(d)) {
+            eprintln!("{name}: no device");
+            continue;
+        }
+        let start = std::time::Instant::now();
+        let mut decoder = Decoder::open_with(&path, devices).unwrap();
+        decoder.seek_to_time(0.0).unwrap();
+        decoder.next_frame().unwrap().unwrap();
+        let first_frame = start.elapsed();
+        if !devices.is_empty() && !decoder.is_hw() {
+            eprintln!("{name}: fell back to software (codec or size unsupported)");
+            continue;
+        }
+
+        let cpu_start = cpu_time();
+        let start = std::time::Instant::now();
+        let transfer_start = decoder.transfer_time();
+        let mut count = 0;
+        while count < FRAMES && decoder.next_frame().unwrap().is_some() {
+            count += 1;
+        }
+        let elapsed = start.elapsed();
+        let cpu = cpu_start.zip(cpu_time()).map(|(a, b)| b - a);
+        eprintln!(
+            "{name}: open + first frame {first_frame:?}; {count} frames in {elapsed:?} \
+             ({:.0} fps), transfer {:?} ({:.2} ms/frame), CPU {cpu:?}",
+            count as f64 / elapsed.as_secs_f64(),
+            decoder.transfer_time() - transfer_start,
+            (decoder.transfer_time() - transfer_start).as_secs_f64() * 1000.0 / count as f64,
+        );
+    }
+}

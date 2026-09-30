@@ -10,8 +10,9 @@ use ffmpeg::media::Type;
 use ffmpeg::software::scaling::{context::Context as Scaler, flag::Flags};
 use ffmpeg::util::color;
 use ffmpeg_next as ffmpeg;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use vv_core::FrameIdx;
 
 pub use vv_core::ColorMatrix;
@@ -76,6 +77,7 @@ fn guess_matrix(space: color::Space, height: u32) -> ColorMatrix {
 /// decode thread (e.g. the decode-ahead in `playback`) owns its own
 /// instance.
 pub struct Decoder {
+    path: PathBuf,
     ictx: ffmpeg::format::context::Input,
     decoder: ffmpeg::codec::decoder::Video,
     /// Built from the first frame that needs one: the format the decoder
@@ -107,10 +109,21 @@ pub struct Decoder {
     /// copied: a still stretch of a screen capture costs one frame however
     /// many CFR slots it spans.
     held: Option<Arc<FrameYuv420>>,
+    hw: Option<crate::hw::HwState>,
+    transfer_time: Duration,
+    #[cfg(test)]
+    fail_after: Option<u32>,
 }
 
 impl Decoder {
     pub fn open(path: &Path) -> Result<Self, crate::MediaError> {
+        Self::open_with(path, &[])
+    }
+
+    /// Like `open`, decoding on the first of `hw` that the codec supports.
+    /// Software if none does, if the media already failed on HW, or if the
+    /// hwaccel fails on a frame (see `decode_next_raw`).
+    pub fn open_with(path: &Path, hw: &[crate::hw::HwDevice]) -> Result<Self, crate::MediaError> {
         crate::probe::ensure_init();
 
         let ictx = ffmpeg::format::input(&path)?;
@@ -124,15 +137,22 @@ impl Decoder {
 
         let mut decoder_ctx =
             ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?.decoder();
+        let hw = if hw.is_empty() || crate::hw::has_failed(path) {
+            None
+        } else {
+            // SAFETY: the context is not opened yet.
+            unsafe { crate::hw::attach(decoder_ctx.as_mut_ptr(), hw) }
+        };
         // Multithreaded decode: a seek decodes from the last keyframe up to
         // the target, in parallel it is much faster.
         decoder_ctx.set_threading(ffmpeg::threading::Config {
             kind: ffmpeg::threading::Type::Frame,
-            count: 0,
+            count: if hw.is_some() { 1 } else { 0 },
         });
         let decoder = decoder_ctx.video()?;
 
         Ok(Self {
+            path: path.to_path_buf(),
             ictx,
             decoder,
             scaler: None,
@@ -147,6 +167,10 @@ impl Decoder {
             synthetic_idx: 0,
             emit_idx: None,
             held: None,
+            hw,
+            transfer_time: Duration::ZERO,
+            #[cfg(test)]
+            fail_after: None,
         })
     }
 
@@ -175,6 +199,17 @@ impl Decoder {
         self.fps
     }
 
+    /// Whether the frames come from a hwaccel. Can turn `false` on any
+    /// decode, never back.
+    pub fn is_hw(&self) -> bool {
+        self.hw.is_some()
+    }
+
+    /// Time spent so far bringing HW frames to system memory.
+    pub fn transfer_time(&self) -> Duration {
+        self.transfer_time
+    }
+
     /// Seek to the keyframe `<= secs`, guaranteed: on mp4 with B-frames
     /// `avformat_seek_file` sometimes lands on the keyframe *after*, and the
     /// frames in between would never be decoded. The landing frame is decoded
@@ -189,7 +224,8 @@ impl Decoder {
         }
         self.skip_before = None;
         self.set_skip_nonref(false);
-        let mut ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+        let start_ts = (secs * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+        let mut ts = start_ts;
         // Initial backoff step: one second, doubled on every attempt.
         let mut step = i64::from(ffmpeg::ffi::AV_TIME_BASE);
         const MAX_RETRIES: u32 = 20;
@@ -200,7 +236,14 @@ impl Decoder {
             self.pending = None;
             self.emit_idx = None;
             self.held = None;
-            match self.decode_next_raw()? {
+            let landed = self.decode_next_raw_unchecked();
+            if self.hw_failed(&landed) {
+                self.reopen_in_software()?;
+                ts = start_ts;
+                step = i64::from(ffmpeg::ffi::AV_TIME_BASE);
+                continue;
+            }
+            match landed? {
                 Some((idx, frame)) if idx > target_idx && ts > 0 => {
                     ts = ts.saturating_sub(step).max(0);
                     step = step.saturating_mul(2);
@@ -336,10 +379,69 @@ impl Decoder {
         }
     }
 
-    /// The next decoded frame in presentation order, not converted yet.
+    /// The next decoded frame in presentation order, not converted yet. If
+    /// the hwaccel fails, it goes on in software from where it was.
     fn decode_next_raw(
         &mut self,
     ) -> Result<Option<(FrameIdx, ffmpeg::frame::Video)>, crate::MediaError> {
+        let result = self.decode_next_raw_unchecked();
+        if !self.hw_failed(&result) {
+            return result;
+        }
+        let skip_before = self.skip_before;
+        let emit_idx = self.emit_idx;
+        let held = self.held.take();
+        self.reopen_in_software()?;
+        let Some(resume) = skip_before.or(emit_idx) else {
+            // Nothing handed out since the open: the new decoder is there too.
+            return self.decode_next_raw();
+        };
+        self.seek_to_time(resume as f64 / self.fps.as_f64())?;
+        // Resumed from the keyframe: `next_frame` drops what is before
+        // `emit_idx`, `skip_some` what is before `skip_before`.
+        self.skip_before = skip_before;
+        self.emit_idx = emit_idx;
+        self.held = held;
+        Ok(self.pending.take())
+    }
+
+    /// An error, or a frame in a format other than the hwaccel's: FFmpeg
+    /// falls back to software silently when the hwaccel refuses the stream,
+    /// and with frame threading off that would be a single-thread decode.
+    fn hw_failed(
+        &self,
+        result: &Result<Option<(FrameIdx, ffmpeg::frame::Video)>, crate::MediaError>,
+    ) -> bool {
+        let Some(hw) = self.hw else {
+            return false;
+        };
+        match result {
+            Err(_) => true,
+            // SAFETY: plain field read.
+            Ok(Some((_, frame))) => unsafe { (*frame.as_ptr()).format != hw.pix_fmt as i32 },
+            Ok(None) => false,
+        }
+    }
+
+    fn reopen_in_software(&mut self) -> Result<(), crate::MediaError> {
+        crate::hw::mark_failed(&self.path);
+        let transfer_time = self.transfer_time;
+        *self = Self::open(&self.path)?;
+        self.transfer_time = transfer_time;
+        Ok(())
+    }
+
+    fn decode_next_raw_unchecked(
+        &mut self,
+    ) -> Result<Option<(FrameIdx, ffmpeg::frame::Video)>, crate::MediaError> {
+        #[cfg(test)]
+        if let Some(n) = self.fail_after.as_mut() {
+            if *n == 0 {
+                self.fail_after = None;
+                return Err(ffmpeg::Error::InvalidData.into());
+            }
+            *n -= 1;
+        }
         let mut decoded = ffmpeg::frame::Video::empty();
 
         // EOF already sent: only the remaining frames are drained.
@@ -393,6 +495,13 @@ impl Decoder {
         &mut self,
         decoded: &mut ffmpeg::frame::Video,
     ) -> Result<Arc<FrameYuv420>, crate::MediaError> {
+        let mut downloaded;
+        let decoded = if crate::hw::is_hw_frame(decoded) {
+            downloaded = crate::hw::download(decoded, &mut self.transfer_time)?;
+            &mut downloaded
+        } else {
+            decoded
+        };
         let matrix = guess_matrix(decoded.color_space(), decoded.height());
         let format = decoded.format();
         // An RGB frame always declares itself `JPEG`, but that is the range of
