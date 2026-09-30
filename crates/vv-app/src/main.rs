@@ -11,6 +11,7 @@ mod compressor_panel;
 mod eq_panel;
 mod export_dialog;
 mod forced_relink_dialog;
+mod hw_decode;
 mod i18n;
 mod keyframe_editor;
 mod mcp_host;
@@ -1791,6 +1792,13 @@ impl VenturiApp {
         }
         if self.settings.proxy() != before.proxy() {
             self.apply_proxy_settings();
+        }
+        vv_media::hw::set_budget_bytes(self.settings.hw_decode_budget_bytes());
+        if self.settings.hw_decode != before.hw_decode {
+            hw_decode::apply(self.settings.hw_decode);
+            for render_ahead in self.render_aheads() {
+                render_ahead.reopen_decoders();
+            }
         }
         // The timeline one is then scaled on every sync (`effective_window_secs`).
         for render_ahead in self.render_aheads() {
@@ -3780,6 +3788,8 @@ fn main() -> eframe::Result<()> {
                 app.settings = settings::Settings::load(path);
             }
             app.settings.language.apply();
+            vv_media::hw::set_budget_bytes(app.settings.hw_decode_budget_bytes());
+            hw_decode::start(app.settings.hw_decode);
             app.mcp_forced = mcp_forced;
             // Opened immediately: opening the audio stream blocks for hundreds of ms.
             app.timeline_audio = Some(TimelineAudio::new());

@@ -85,6 +85,7 @@ impl ProxyWorker {
                     &job.path,
                     job.content_hash,
                     quality,
+                    &crate::hw_decode::devices(),
                     |frames| {
                         let fraction = (frames as f32 / total).min(1.0);
                         // Updating the lock on every frame is pointless: the UI reads at ~60Hz.

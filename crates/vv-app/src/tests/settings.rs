@@ -66,6 +66,8 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     settings.lookahead_secs = 7.5;
     settings.behind_secs = 0.5;
     settings.cache_budget_bytes = 3_000_000_000;
+    settings.hw_decode = crate::hw_decode::HwDecodeMode::Vulkan;
+    settings.hw_decode_budget_bytes = Some(2_000_000_000);
     settings.save(&path).unwrap();
 
     let loaded = Settings::load(&path);
@@ -93,6 +95,11 @@ fn save_then_load_keeps_custom_shortcuts_and_defaults_for_the_rest() {
     assert_eq!(
         loaded.cache_budget_bytes,
         Settings::default().cache_budget_bytes
+    );
+    assert_eq!(loaded.hw_decode, crate::hw_decode::HwDecodeMode::Auto);
+    assert_eq!(
+        loaded.hw_decode_budget_bytes, None,
+        "follows the RAM until set"
     );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

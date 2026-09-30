@@ -93,6 +93,36 @@ settings.proxy_quality_high_hint:
 settings.proxy_quality_note:
   en: "Changing quality generates new proxies in the background; the ones already generated for other qualities stay on disk."
   it: "Cambiando qualità vengono generati nuovi proxy in background; quelli già generati per altre qualità restano su disco."
+settings.hw_decode:
+  en: "Hardware decoding"
+  it: "Decodifica hardware"
+settings.hw_decode_auto:
+  en: "Automatic"
+  it: "Automatica"
+settings.hw_decode_auto_hint:
+  en: "Decodes video on the GPU when it can: on a laptop with two GPUs, on the integrated one to save battery. Falls back to the CPU for the files the GPU cannot decode."
+  it: "Decodifica i video sulla GPU quando può: su un portatile con due GPU, su quella integrata per risparmiare batteria. Torna alla CPU per i file che la GPU non sa decodificare."
+settings.hw_decode_off:
+  en: "Off (CPU only)"
+  it: "Disattivata (solo CPU)"
+settings.hw_decode_nvdec:
+  en: "NVIDIA (NVDEC)"
+  it: "NVIDIA (NVDEC)"
+settings.hw_decode_vulkan:
+  en: "Vulkan video"
+  it: "Vulkan video"
+settings.hw_decode_vulkan_hint:
+  en: "Any GPU whose driver supports Vulkan video decoding (Intel, AMD, NVIDIA): on a laptop with two GPUs, the discrete one."
+  it: "Qualsiasi GPU il cui driver supporti la decodifica Vulkan video (Intel, AMD, NVIDIA): su un portatile con due GPU, quella dedicata."
+settings.hw_decode_memory:
+  en: "GPU decoding memory:"
+  it: "Memoria decodifica GPU:"
+settings.hw_decode_memory_hint:
+  en: "Memory the GPU decoders may hold together; past it, new ones decode on the CPU. On Apple Silicon it is the same memory as the rest of the system. Default: an eighth of the RAM."
+  it: "Memoria che i decoder GPU possono occupare insieme; oltre, i nuovi decodificano sulla CPU. Su Apple Silicon è la stessa memoria del resto del sistema. Predefinita: un ottavo della RAM."
+settings.hw_decode_memory_reset:
+  en: "Default"
+  it: "Predefinita"
 settings.section_shortcuts:
   en: Keyboard shortcuts
   it: Scorciatoie da tastiera

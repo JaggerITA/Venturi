@@ -291,7 +291,18 @@ cache (same pixels).
 4. ~~Benchmarks with transfer and reopen cost~~ done on the dev box (§1).
 5. ~~NV12 in `FrameYuv420`, compositor and shader, CPU consumers~~ done
    (`FrameYuv420::chroma_at` for the thumbnails).
-6. Budget (§4.3), wiring into render-ahead, then proxies; settings and
-   translation.
+6. ~~Budget (§4.3), wiring into render-ahead, then proxies; settings and
+   translation~~ done. `bench_black_frames_after_repositioning_during_playback`
+   on a 180 s clip like #25's (the bench needs ≥ 137 s, it clicks up to
+   frame 8180), `VV_BENCH_HW` to pick the backend, 2026-09-30:
+
+   | | first frame after a click | black refreshes / 180 |
+   |---|---|---|
+   | software | 184–636 ms | 11–38 |
+   | Auto (NVDEC) | 67–284 ms | 4–17 |
+   | Vulkan | 117–335 ms | 7–20 |
+
+   HW halves the #25 latency even on the dev box: the transit's skipped
+   frames are decoded but never transferred.
 7. Measure on the dev box and on the M1; then decide on export and on
    zero-copy.

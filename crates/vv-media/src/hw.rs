@@ -5,6 +5,7 @@ use ffmpeg::ffi;
 use ffmpeg_next as ffmpeg;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,61 @@ unsafe impl Send for DeviceRef {}
 /// One device per `HwDevice` per process; `None` if it could not be created.
 static DEVICES: LazyLock<Mutex<HashMap<HwDevice, Option<DeviceRef>>>> =
     LazyLock::new(Default::default);
+
+/// Bytes of HW surfaces all decoders may hold together (see `Lease`).
+static BUDGET: AtomicUsize = AtomicUsize::new(usize::MAX);
+static USED: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_budget_bytes(bytes: usize) {
+    BUDGET.store(bytes, Ordering::Relaxed);
+}
+
+/// How much of the budget a decoder may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwPriority {
+    Normal,
+    /// Only up to half of the budget, so it cannot crowd out the `Normal`
+    /// ones opened later (the window behind the playhead, proxies).
+    Low,
+}
+
+/// A decoder's share of `BUDGET`, given back on drop.
+pub(crate) struct Lease(usize);
+
+impl Lease {
+    pub(crate) fn take(bytes: usize, priority: HwPriority) -> Option<Self> {
+        let budget = BUDGET.load(Ordering::Relaxed);
+        let limit = match priority {
+            HwPriority::Normal => budget,
+            HwPriority::Low => budget / 2,
+        };
+        USED.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            (used.saturating_add(bytes) <= limit).then_some(used + bytes)
+        })
+        .ok()
+        .map(|_| Self(bytes))
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        USED.fetch_sub(self.0, Ordering::AcqRel);
+    }
+}
+
+/// Surfaces a decoder of this stream allocates: the largest DPB (16, HEVC
+/// and H.264), `extra_hw_frames` and the one being decoded.
+pub(crate) fn surfaces_bytes(width: u32, height: u32, format: ffi::AVPixelFormat) -> usize {
+    // SAFETY: a static table, null for an unknown format.
+    let deep = unsafe {
+        let desc = ffi::av_pix_fmt_desc_get(format);
+        !desc.is_null() && (*desc).comp[0].depth > 8
+    };
+    let frame = crate::decode::yuv420_frame_bytes(width, height) * if deep { 2 } else { 1 };
+    frame * (16 + EXTRA_HW_FRAMES as usize + 1)
+}
+
+const EXTRA_HW_FRAMES: i32 = 2;
 
 /// Media whose HW decode failed: they open in software from then on.
 static FAILED: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
@@ -116,7 +172,7 @@ pub(crate) unsafe fn attach(
         unsafe {
             (*ctx).hw_device_ctx = buf;
             // The decoder holds a frame (`Decoder::pending`) while it decodes on.
-            (*ctx).extra_hw_frames = 2;
+            (*ctx).extra_hw_frames = EXTRA_HW_FRAMES;
         }
         return Some(HwState { pix_fmt });
     }

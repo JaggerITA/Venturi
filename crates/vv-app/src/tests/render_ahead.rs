@@ -1,5 +1,6 @@
 use super::*;
 use vv_core::{Clip, ClipId, MediaItem, MediaMeta, Rational, Track, TrackKind};
+use vv_media::HwPriority;
 
 fn make_test_clip(dir_name: &str, file_name: &str, duration_secs: u32) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(dir_name);
@@ -1131,13 +1132,31 @@ fn position_decoder_reuses_the_open_decoder_for_a_real_seek_instead_of_reopening
     let caches = SharedFrameCache::new();
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened
     );
 
     assert_eq!(
         position_decoder(
-            &caches, &mut open, media_a, &path, 1000, false, false, false
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            1000,
+            false,
+            false,
+            false,
+            HwPriority::Normal
         ),
         Positioned::Seeked,
         "a real seek on an already open media must reuse the decoder, not reopen it"
@@ -1160,7 +1179,17 @@ fn position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek()
     let caches = SharedFrameCache::new();
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path_a, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path_a,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened
     );
 
@@ -1170,7 +1199,17 @@ fn position_decoder_reopens_when_the_resolved_path_changes_even_without_a_seek()
     // would return `Reused` — reusing a decoder pointing at the
     // wrong file.
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path_b, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path_b,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened,
         "the path changed: it must reopen on the new one, not reuse the old decoder"
     );
@@ -1195,7 +1234,17 @@ fn position_decoder_reseeks_when_next_frame_claims_coverage_the_cache_no_longer_
     let caches = SharedFrameCache::new();
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened
     );
     // Decodes and caches a few frames, as
@@ -1242,7 +1291,17 @@ fn position_decoder_reseeks_when_next_frame_claims_coverage_the_cache_no_longer_
     caches.reconcile(0, &window, usize::MAX);
 
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Seeked,
         "a hole left by an eviction behind next_frame must force a real seek, \
              not a Reused that leaves it uncovered forever"
@@ -1264,7 +1323,17 @@ fn position_decoder_does_not_reseek_when_already_usefully_ahead_of_the_segment_s
     let caches = SharedFrameCache::new();
     let mut open: HashMap<MediaId, OpenDecoder> = HashMap::new();
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened
     );
 
@@ -1291,7 +1360,17 @@ fn position_decoder_does_not_reseek_when_already_usefully_ahead_of_the_segment_s
     // position — the normal state during forward playback —
     // must not reopen/reset the decoder.
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Reused
     );
     assert_eq!(
@@ -2095,11 +2174,31 @@ fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in
     // Cycle 1: two segments of the same media in the same window
     // (as on the two sides of a cut), source_start 10 and then 25.
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            10,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened
     );
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 25, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            25,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Reused,
         "in the same cycle the second segment must never need a seek: the decoder is already there"
     );
@@ -2109,12 +2208,32 @@ fn position_decoder_does_not_reseek_across_cycles_when_the_same_media_appears_in
     // not look like it "went backwards" just because the last call
     // seen in the previous cycle was for the following segment (25).
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 10, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            10,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Reused,
         "playhead still: reprocessing the first segment must not trigger a real seek"
     );
     assert_eq!(
-        position_decoder(&caches, &mut open, media_a, &path, 25, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media_a,
+            &path,
+            25,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Reused
     );
 }
@@ -2935,6 +3054,7 @@ fn fill_segments_bridges_the_gap_between_two_disconnected_cached_islands() {
         target: &LiveTarget::still(5),
         jumps: 0,
         window: &[],
+        hw_priority: HwPriority::Normal,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3008,6 +3128,7 @@ fn fill_segments_does_not_let_transit_frames_exhaust_the_budget_before_the_wante
         target: &LiveTarget::still(80),
         jumps: 0,
         window: &[],
+        hw_priority: HwPriority::Normal,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3104,6 +3225,7 @@ fn fill_segments_does_not_block_a_reachable_segment_just_because_its_transit_wou
         target: &LiveTarget::still(24),
         jumps: 0,
         window: &[],
+        hw_priority: HwPriority::Normal,
     };
     let outcome = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3285,6 +3407,7 @@ fn fill_segments_caches_only_the_transit_some_window_wants() {
         target: &LiveTarget::still(80),
         jumps: 0,
         window: &window,
+        hw_priority: HwPriority::Normal,
     };
     let _ = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
 
@@ -3338,6 +3461,7 @@ fn fill_segments_is_interrupted_by_a_jump_below_the_seek_threshold() {
         target: &target,
         jumps: 0,
         window: std::slice::from_ref(&segment),
+        hw_priority: HwPriority::Normal,
     };
 
     let flow = fill_segments(std::slice::from_ref(&segment), &ctx, &mut open);
@@ -3450,7 +3574,17 @@ fn opened_media(
     let caches = SharedFrameCache::new();
     let mut open = HashMap::new();
     assert_eq!(
-        position_decoder(&caches, &mut open, media, path, 0, false, false, false),
+        position_decoder(
+            &caches,
+            &mut open,
+            media,
+            path,
+            0,
+            false,
+            false,
+            false,
+            HwPriority::Normal
+        ),
         Positioned::Opened
     );
     caches.insert(media, 0, Arc::new(dummy_frame()));
@@ -3496,7 +3630,8 @@ fn a_media_naming_another_file_loses_its_decoder_and_frames() {
 }
 
 /// Black frames after repositioning during 1x playback, on a real file:
-/// `VV_BENCH_CLIP=<path> cargo test --release -p vv-app bench_black_frames -- --ignored --nocapture`.
+/// `VV_BENCH_CLIP=<path> cargo test --release -p vv-app bench_black_frames -- --ignored --nocapture`,
+/// with `VV_BENCH_HW=auto|nvdec|vulkan` to decode on the GPU.
 /// Keyframes are assumed every 250 frames (a 60 fps OBS recording).
 #[test]
 #[ignore = "manual measurement, not a correctness assertion"]
@@ -3504,6 +3639,10 @@ fn bench_black_frames_after_repositioning_during_playback() {
     let Ok(path) = std::env::var("VV_BENCH_CLIP") else {
         return;
     };
+    if let Ok(mode) = std::env::var("VV_BENCH_HW") {
+        crate::hw_decode::apply(crate::hw_decode::HwDecodeMode::from_id(&mode).unwrap());
+        eprintln!("HW decode: {:?}", crate::hw_decode::devices());
+    }
     let path = std::path::PathBuf::from(path);
     let meta = vv_media::probe(&path).unwrap();
     let mut project = Project::default();
@@ -3552,6 +3691,13 @@ fn bench_black_frames_after_repositioning_during_playback() {
         (30, 60),
         (32, 180),
     ];
+    let (last_gop, last_offset) = clicks[clicks.len() - 1];
+    let needed = last_gop * gop + last_offset + (3.0 * fps) as FrameIdx;
+    assert!(
+        meta.duration_frames >= needed,
+        "the clip must last at least {needed} frames ({:.0} s): past its end every refresh is black",
+        needed as f64 / fps
+    );
     for (gop_index, offset) in clicks {
         let start = gop_index * gop + offset;
         let t0 = std::time::Instant::now();

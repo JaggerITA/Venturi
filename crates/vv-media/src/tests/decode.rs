@@ -617,23 +617,25 @@ fn fake_hw(path: &Path, pix_fmt: ffmpeg::ffi::AVPixelFormat, fail_after: Option<
     decoder
 }
 
+/// The HW budget is global: the tests that open HW decoders or change it
+/// take turns.
+static HW_BUDGET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+const ALL_DEVICES: &[crate::hw::HwDevice] = &[
+    crate::hw::HwDevice::VideoToolbox,
+    crate::hw::HwDevice::Cuda,
+    crate::hw::HwDevice::Vulkan(None),
+];
+
 /// Without a usable device (CI), or with one, the frames are those of
 /// software decoding: the hwaccels decode H.264 bit-exactly and NV12 →
 /// YUV420P only moves bytes.
 #[test]
 fn open_with_hw_decodes_the_same_frames_as_software() {
-    use crate::hw::HwDevice;
+    let _budget = HW_BUDGET_LOCK.lock().unwrap();
     let path = make_test_clip_with_gop_and_bframes("hw_same_frames.mp4", 2, 25, 2);
     let want = decode_all(Decoder::open(&path).unwrap());
-    let hw = Decoder::open_with(
-        &path,
-        &[
-            HwDevice::VideoToolbox,
-            HwDevice::Cuda,
-            HwDevice::Vulkan(None),
-        ],
-    )
-    .unwrap();
+    let hw = Decoder::open_with(&path, ALL_DEVICES, crate::hw::HwPriority::Normal).unwrap();
     assert_same_frames(&decode_all(hw), &want);
 }
 
@@ -734,7 +736,8 @@ fn bench_hw_decode() {
             continue;
         }
         let start = std::time::Instant::now();
-        let mut decoder = Decoder::open_with(&path, devices).unwrap();
+        let mut decoder =
+            Decoder::open_with(&path, devices, crate::hw::HwPriority::Normal).unwrap();
         decoder.seek_to_time(0.0).unwrap();
         decoder.next_frame().unwrap().unwrap();
         let first_frame = start.elapsed();
@@ -805,4 +808,31 @@ fn an_nv12_source_keeps_its_interleaved_chroma() {
     };
     let decoded = [frame.y.as_slice(), uv].concat();
     assert!(decoded == std::fs::read(&reference_path).unwrap());
+}
+
+#[test]
+fn a_decoder_whose_surfaces_do_not_fit_the_budget_opens_in_software() {
+    let _budget = HW_BUDGET_LOCK.lock().unwrap();
+    let path = make_test_clip("hw_over_budget.mp4", 1);
+    crate::hw::set_budget_bytes(1);
+    let decoder = Decoder::open_with(&path, ALL_DEVICES, crate::hw::HwPriority::Normal);
+    crate::hw::set_budget_bytes(usize::MAX);
+    assert!(!decoder.unwrap().is_hw());
+}
+
+#[test]
+fn a_low_priority_lease_leaves_half_of_the_budget_to_the_others() {
+    use crate::hw::{HwPriority, Lease};
+    let _budget = HW_BUDGET_LOCK.lock().unwrap();
+    crate::hw::set_budget_bytes(100);
+    let low = Lease::take(40, HwPriority::Low).expect("fits in half");
+    assert!(Lease::take(20, HwPriority::Low).is_none(), "past half");
+    let normal = Lease::take(60, HwPriority::Normal).expect("fits in the whole");
+    assert!(Lease::take(1, HwPriority::Normal).is_none(), "budget full");
+    drop((low, normal));
+    assert!(
+        Lease::take(100, HwPriority::Normal).is_some(),
+        "given back on drop"
+    );
+    crate::hw::set_budget_bytes(usize::MAX);
 }

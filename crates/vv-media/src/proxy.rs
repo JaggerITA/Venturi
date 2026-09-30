@@ -87,18 +87,21 @@ pub fn proxy_exists(content_hash: u64, quality: ProxyQuality) -> bool {
     proxy_path_for(content_hash, quality).is_file()
 }
 
-/// Generates the proxy and writes it atomically (temporary file + `rename`).
+/// Generates the proxy and writes it atomically (temporary file + `rename`),
+/// decoding on the first of `hw` that works.
 /// `on_frame(frames_written)` may block (pause); `false` cancels without
 /// leaving files on disk.
 pub fn generate_proxy(
     source_path: &Path,
     content_hash: u64,
     quality: ProxyQuality,
+    hw: &[crate::hw::HwDevice],
     mut on_frame: impl FnMut(u64) -> bool,
 ) -> Result<PathBuf, crate::MediaError> {
     crate::probe::ensure_init();
 
-    let mut decoder = Decoder::open(source_path)?;
+    // Low: runs alongside the playback, whose decoders come first.
+    let mut decoder = Decoder::open_with(source_path, hw, crate::hw::HwPriority::Low)?;
     // Real dimensions and color metadata from the first decoded frame, as
     // in the preview path.
     let Some((_, first_frame)) = decoder.next_frame()? else {

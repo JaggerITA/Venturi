@@ -60,7 +60,7 @@ fn generate_proxy_produces_a_smaller_all_intra_file_that_decodes_back_correctly(
     let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
     assert!(!proxy_exists(content_hash, ProxyQuality::Medium));
-    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true)
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, &[], |_| true)
         .expect("proxy generation failed");
     assert_eq!(
         proxy_path,
@@ -107,14 +107,14 @@ fn generate_proxy_downscales_a_wider_source() {
     let content_hash = 0x123456;
     let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
 
-    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true)
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, &[], |_| true)
         .expect("proxy generation failed");
     let proxy_decoder = Decoder::open(&proxy_path).unwrap();
     assert_eq!(proxy_decoder.width(), 960);
     assert_eq!(proxy_decoder.height(), 540);
 
     let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Low));
-    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Low, |_| true)
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Low, &[], |_| true)
         .expect("proxy generation failed");
     assert_eq!(Decoder::open(&proxy_path).unwrap().width(), 640);
 }
@@ -141,7 +141,7 @@ fn generate_proxy_keeps_the_colors_of_an_nv12_source() {
     );
     let content_hash = 0x4e5631;
     let _ = std::fs::remove_file(proxy_path_for(content_hash, ProxyQuality::Medium));
-    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, |_| true)
+    let proxy_path = generate_proxy(&path, content_hash, ProxyQuality::Medium, &[], |_| true)
         .expect("proxy generation failed");
 
     let first_chroma = |path: &Path| {

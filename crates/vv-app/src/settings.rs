@@ -510,6 +510,9 @@ pub struct Settings {
     pub behind_secs: f64,
     /// Memory budget for the decoded frame cache of every `RenderAhead`.
     pub cache_budget_bytes: usize,
+    pub hw_decode: crate::hw_decode::HwDecodeMode,
+    /// `None`: `hw_decode::default_budget_bytes`, which follows the RAM.
+    pub hw_decode_budget_bytes: Option<usize>,
     /// Recently opened projects, most recent first.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
@@ -545,6 +548,8 @@ impl Default for Settings {
             lookahead_secs: crate::render_ahead::DEFAULT_LOOKAHEAD_SECS,
             behind_secs: crate::render_ahead::DEFAULT_BEHIND_SECS,
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
+            hw_decode: Default::default(),
+            hw_decode_budget_bytes: None,
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
             compressor_presets: Vec::new(),
@@ -561,6 +566,11 @@ impl Settings {
     /// Quality of the proxies to use, `None` if they are off.
     pub fn proxy(&self) -> Option<ProxyQuality> {
         self.proxy_enabled.then_some(self.proxy_quality)
+    }
+
+    pub fn hw_decode_budget_bytes(&self) -> usize {
+        self.hw_decode_budget_bytes
+            .unwrap_or_else(crate::hw_decode::default_budget_bytes)
     }
 
     pub fn add_recent_project(&mut self, path: PathBuf) {
@@ -592,6 +602,10 @@ struct SettingsFile {
     behind_secs: Option<f64>,
     #[serde(default)]
     cache_budget_mb: Option<u32>,
+    #[serde(default)]
+    hw_decode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hw_decode_budget_mb: Option<u32>,
     #[serde(default)]
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
@@ -675,6 +689,13 @@ impl Settings {
         settings.cache_budget_bytes = file
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
+        settings.hw_decode = file
+            .hw_decode
+            .as_deref()
+            .and_then(crate::hw_decode::HwDecodeMode::from_id)
+            .unwrap_or_default();
+        settings.hw_decode_budget_bytes =
+            file.hw_decode_budget_mb.map(|mb| mb as usize * 1_000_000);
         settings.recent_projects = file.recent_projects;
         settings.input_device = file.input_device;
         settings.recording_format = file
@@ -752,6 +773,10 @@ impl Settings {
             lookahead_secs: Some(self.lookahead_secs),
             behind_secs: Some(self.behind_secs),
             cache_budget_mb: Some((self.cache_budget_bytes / 1_000_000) as u32),
+            hw_decode: Some(self.hw_decode.id().to_owned()),
+            hw_decode_budget_mb: self
+                .hw_decode_budget_bytes
+                .map(|bytes| (bytes / 1_000_000) as u32),
             recent_projects: self.recent_projects.clone(),
             panels: PanelLayoutFile {
                 media_pool_open: Some(self.panels.media_pool_open),

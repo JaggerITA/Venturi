@@ -135,6 +135,7 @@ pub struct Decoder {
     /// many CFR slots it spans.
     held: Option<Arc<FrameYuv420>>,
     hw: Option<crate::hw::HwState>,
+    _hw_lease: Option<crate::hw::Lease>,
     transfer_time: Duration,
     #[cfg(test)]
     fail_after: Option<u32>,
@@ -142,13 +143,18 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn open(path: &Path) -> Result<Self, crate::MediaError> {
-        Self::open_with(path, &[])
+        Self::open_with(path, &[], crate::hw::HwPriority::Normal)
     }
 
     /// Like `open`, decoding on the first of `hw` that the codec supports.
-    /// Software if none does, if the media already failed on HW, or if the
+    /// Software if none does, if the media already failed on HW, if its
+    /// surfaces do not fit the budget (`hw::set_budget_bytes`), or if the
     /// hwaccel fails on a frame (see `decode_next_raw`).
-    pub fn open_with(path: &Path, hw: &[crate::hw::HwDevice]) -> Result<Self, crate::MediaError> {
+    pub fn open_with(
+        path: &Path,
+        hw: &[crate::hw::HwDevice],
+        priority: crate::hw::HwPriority,
+    ) -> Result<Self, crate::MediaError> {
         crate::probe::ensure_init();
 
         let ictx = ffmpeg::format::input(&path)?;
@@ -162,12 +168,21 @@ impl Decoder {
 
         let mut decoder_ctx =
             ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())?.decoder();
-        let hw = if hw.is_empty() || crate::hw::has_failed(path) {
+        let lease = if hw.is_empty() || crate::hw::has_failed(path) {
             None
         } else {
-            // SAFETY: the context is not opened yet.
-            unsafe { crate::hw::attach(decoder_ctx.as_mut_ptr(), hw) }
+            // SAFETY: plain fields, filled from the stream parameters.
+            let bytes = unsafe {
+                let ctx = decoder_ctx.as_ptr();
+                crate::hw::surfaces_bytes((*ctx).width as u32, (*ctx).height as u32, (*ctx).pix_fmt)
+            };
+            crate::hw::Lease::take(bytes, priority)
         };
+        let hw = lease
+            .as_ref()
+            // SAFETY: the context is not opened yet.
+            .and_then(|_| unsafe { crate::hw::attach(decoder_ctx.as_mut_ptr(), hw) });
+        let lease = lease.filter(|_| hw.is_some());
         // Multithreaded decode: a seek decodes from the last keyframe up to
         // the target, in parallel it is much faster.
         decoder_ctx.set_threading(ffmpeg::threading::Config {
@@ -193,6 +208,7 @@ impl Decoder {
             emit_idx: None,
             held: None,
             hw,
+            _hw_lease: lease,
             transfer_time: Duration::ZERO,
             #[cfg(test)]
             fail_after: None,

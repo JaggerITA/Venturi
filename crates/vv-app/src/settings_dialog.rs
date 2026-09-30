@@ -410,6 +410,62 @@ fn integrations_section(ui: &mut egui::Ui, settings: &mut Settings, forced: bool
     changed
 }
 
+fn hw_decode_settings(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
+    use crate::hw_decode::HwDecodeMode;
+    let mut changed = false;
+    ui.strong(t!("settings.hw_decode"));
+    for &mode in HwDecodeMode::available() {
+        let (label, hint) = match mode {
+            HwDecodeMode::Auto => (
+                t!("settings.hw_decode_auto"),
+                Some(t!("settings.hw_decode_auto_hint")),
+            ),
+            HwDecodeMode::Off => (t!("settings.hw_decode_off"), None),
+            HwDecodeMode::Nvdec => (t!("settings.hw_decode_nvdec"), None),
+            HwDecodeMode::Vulkan => (
+                t!("settings.hw_decode_vulkan"),
+                Some(t!("settings.hw_decode_vulkan_hint")),
+            ),
+        };
+        let response = ui.radio_value(&mut settings.hw_decode, mode, label);
+        let response = match hint {
+            Some(hint) => response.on_hover_text(hint),
+            None => response,
+        };
+        changed |= response.changed();
+    }
+    ui.add_enabled_ui(settings.hw_decode != HwDecodeMode::Off, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(t!("settings.hw_decode_memory"))
+                .on_hover_text(t!("settings.hw_decode_memory_hint"));
+            let mut budget_mb = (settings.hw_decode_budget_bytes() / 1_000_000) as u32;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut budget_mb)
+                        .range(100..=64000)
+                        .suffix(" MB"),
+                )
+                .on_hover_text(t!("settings.hw_decode_memory_hint"))
+                .changed()
+            {
+                settings.hw_decode_budget_bytes = Some(budget_mb as usize * 1_000_000);
+                changed = true;
+            }
+            if ui
+                .add_enabled(
+                    settings.hw_decode_budget_bytes.is_some(),
+                    egui::Button::new(t!("settings.hw_decode_memory_reset")),
+                )
+                .clicked()
+            {
+                settings.hw_decode_budget_bytes = None;
+                changed = true;
+            }
+        });
+    });
+    changed
+}
+
 fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     let mut changed = false;
     ui.strong(t!("settings.read_ahead"));
@@ -459,6 +515,9 @@ fn playback_section(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             }
             ui.end_row();
         });
+
+    ui.add_space(12.0);
+    changed |= hw_decode_settings(ui, settings);
 
     ui.add_space(12.0);
     ui.strong(t!("settings.proxy"));

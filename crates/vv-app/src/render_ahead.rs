@@ -82,6 +82,9 @@ enum Command {
     /// Goes through the commands and not through an atomic: the worker must react to the change
     /// by emptying caches and decoders (the frames have the wrong resolution).
     SetProxy(Option<ProxyQuality>),
+    /// The HW decode setting changed: the decoders reopen with it, the
+    /// frames already cached stay (same pixels).
+    ReopenDecoders,
     /// Wakes the worker immediately instead of waiting for `POLL_INTERVAL`.
     Wake,
     Stop,
@@ -222,6 +225,10 @@ impl RenderAhead {
     /// "Use proxy" toggle (plans/REFACTOR_PIPELINE.md proxy): the worker
     /// empties the shared cache and reopens from scratch every decoder on the
     /// right path for the new state — see the docs of `Command::SetProxy`.
+    pub fn reopen_decoders(&self) {
+        let _ = self.tx.send(Command::ReopenDecoders);
+    }
+
     pub fn set_proxy(&self, proxy: Option<ProxyQuality>) {
         self.shared.caught_up.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Command::SetProxy(proxy));
@@ -377,6 +384,10 @@ fn worker_loop(
                 Command::SetProxy(v) => {
                     proxy = v;
                     shared.caches.clear();
+                    open.clear();
+                    open_behind.clear();
+                }
+                Command::ReopenDecoders => {
                     open.clear();
                     open_behind.clear();
                 }
@@ -723,6 +734,7 @@ fn position_decoder(
     went_backward: bool,
     is_all_intra: bool,
     is_image: bool,
+    hw_priority: vv_media::HwPriority,
 ) -> Positioned {
     if open.get(&media_id).is_some_and(|o| o.resolved_path != path) {
         open.remove(&media_id);
@@ -758,7 +770,7 @@ fn position_decoder(
     let opened = if is_image {
         Decoder::open_image(path)
     } else {
-        Decoder::open(path)
+        Decoder::open_with(path, &crate::hw_decode::devices(), hw_priority)
     };
     let Ok(mut decoder) = opened else {
         return Positioned::Failed;
@@ -892,6 +904,7 @@ fn walk_and_fill(
         target,
         jumps,
         window: &forward_segments,
+        hw_priority: vv_media::HwPriority::Normal,
     };
     // The forward window first: behind gets only the budget left over.
     let forward_chunks = chunk_forward_segments_near_to_far(&forward_segments);
@@ -930,6 +943,7 @@ fn walk_and_fill(
     let behind_ctx = FillContext {
         went_backward: true,
         window: &window,
+        hw_priority: vv_media::HwPriority::Low,
         ..ctx
     };
     if let ControlFlow::Break(outcome) = fill_segments(&behind_chunks, &behind_ctx, open_behind) {
@@ -961,6 +975,8 @@ struct FillContext<'a> {
     /// afterwards by its own decoders. Behind, the whole window: the transit
     /// of a chunk is the next chunks, farther back.
     window: &'a [WantedRange],
+    /// Behind is `Low`: the HW surfaces go to the window ahead first.
+    hw_priority: vv_media::HwPriority,
 }
 
 /// Decodes what is needed to cover `segments`, stopping if the budget is
@@ -1017,6 +1033,7 @@ fn fill_segments(
             ctx.went_backward,
             is_proxy,
             item.meta.is_image(),
+            ctx.hw_priority,
         ) {
             Positioned::Failed => continue,
             // Going on in sequence towards a segment ahead (a jump shorter
