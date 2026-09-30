@@ -102,6 +102,9 @@ settings.hw_decode_auto:
 settings.hw_decode_auto_hint:
   en: "Decodes video on the GPU when it can: on a laptop with two GPUs, on the integrated one to save battery. Falls back to the CPU for the files the GPU cannot decode."
   it: "Decodifica i video sulla GPU quando può: su un portatile con due GPU, su quella integrata per risparmiare batteria. Torna alla CPU per i file che la GPU non sa decodificare."
+settings.hw_decode_auto_cpu:
+  en: "no GPU decoder found, CPU"
+  it: "nessun decoder GPU trovato, CPU"
 settings.hw_decode_off:
   en: "Off (CPU only)"
   it: "Disattivata (solo CPU)"

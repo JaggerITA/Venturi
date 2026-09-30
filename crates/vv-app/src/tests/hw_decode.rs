@@ -96,3 +96,13 @@ fn modes_round_trip_through_their_ids() {
         assert_eq!(HwDecodeMode::from_id(mode.id()), Some(mode));
     }
 }
+
+#[test]
+fn device_labels_name_the_backend_and_the_gpu() {
+    assert_eq!(device_label(&HwDevice::VideoToolbox), "VideoToolbox");
+    assert_eq!(device_label(&HwDevice::Cuda), "NVDEC");
+    assert_eq!(
+        device_label(&vulkan(&intel())),
+        "Vulkan, Intel(R) UHD Graphics 620"
+    );
+}

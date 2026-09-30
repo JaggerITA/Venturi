@@ -416,10 +416,20 @@ fn hw_decode_settings(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     ui.strong(t!("settings.hw_decode"));
     for &mode in HwDecodeMode::available() {
         let (label, hint) = match mode {
-            HwDecodeMode::Auto => (
-                t!("settings.hw_decode_auto"),
-                Some(t!("settings.hw_decode_auto_hint")),
-            ),
+            HwDecodeMode::Auto => {
+                let label = match crate::hw_decode::auto_device() {
+                    None => t!("settings.hw_decode_auto").into_owned(),
+                    Some(device) => format!(
+                        "{} ({})",
+                        t!("settings.hw_decode_auto"),
+                        device.map_or_else(
+                            || t!("settings.hw_decode_auto_cpu").into_owned(),
+                            |d| crate::hw_decode::device_label(&d)
+                        )
+                    ),
+                };
+                (label.into(), Some(t!("settings.hw_decode_auto_hint")))
+            }
             HwDecodeMode::Off => (t!("settings.hw_decode_off"), None),
             HwDecodeMode::Nvdec => (t!("settings.hw_decode_nvdec"), None),
             HwDecodeMode::Vulkan => (

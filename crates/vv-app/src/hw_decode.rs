@@ -87,8 +87,9 @@ pub fn resolve(mode: HwDecodeMode, gpus: &[wgpu::AdapterInfo], macos: bool) -> V
     }
 }
 
+static GPUS: OnceLock<Vec<wgpu::AdapterInfo>> = OnceLock::new();
+
 fn gpus() -> &'static [wgpu::AdapterInfo] {
-    static GPUS: OnceLock<Vec<wgpu::AdapterInfo>> = OnceLock::new();
     GPUS.get_or_init(|| {
         if cfg!(target_os = "macos") {
             Vec::new()
@@ -96,6 +97,23 @@ fn gpus() -> &'static [wgpu::AdapterInfo] {
             vv_render::vulkan_adapters()
         }
     })
+}
+
+/// What `Auto` decodes on here, for the settings: `None` while `start` is
+/// still enumerating the GPUs, `Some(None)` if there is no GPU decoder.
+pub fn auto_device() -> Option<Option<HwDevice>> {
+    let macos = cfg!(target_os = "macos");
+    let gpus = if macos { &[][..] } else { GPUS.get()? };
+    Some(resolve(HwDecodeMode::Auto, gpus, macos).into_iter().next())
+}
+
+pub fn device_label(device: &HwDevice) -> String {
+    match device {
+        HwDevice::VideoToolbox => "VideoToolbox".into(),
+        HwDevice::Cuda => "NVDEC".into(),
+        HwDevice::Vulkan(Some(gpu)) => format!("Vulkan, {gpu}"),
+        HwDevice::Vulkan(None) => "Vulkan".into(),
+    }
 }
 
 /// The setting read at startup; unset (tests) means software.
