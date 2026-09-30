@@ -110,13 +110,10 @@ impl TimelineAudio {
             return;
         };
         let (rate, channels) = (self.mix.sample_rate, self.mix.channels);
-        self.mix = Arc::new(MixSnapshot::from_timeline(
-            project,
-            timeline,
-            rate,
-            channels,
-            &mut self.buffers,
-        ));
+        let mut mix =
+            MixSnapshot::from_timeline(project, timeline, rate, channels, &mut self.buffers);
+        mix.meters.keep_spectra_of(&self.mix.meters);
+        self.mix = Arc::new(mix);
         self.buffers.sweep_unused();
         self.publish();
     }

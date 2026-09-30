@@ -4,6 +4,7 @@
 
 use vv_audio::dynamics::{BandActivity, CrossoverResponse};
 use vv_audio::mixer::PROJECT_SAMPLE_RATE;
+use vv_audio::spectrum::{SpectrumTap, magnitudes_db};
 use vv_core::{AudioEffectKind, CompressorBand, MultibandCompressor};
 
 use crate::mixer_panel::{knob, paint_fader_handle};
@@ -28,6 +29,104 @@ const KNOB_RADIUS: f32 = 15.0;
 const KNOB_CELL_WIDTH: f32 = 60.0;
 /// The crossovers never get closer than this ratio.
 const MIN_CROSSOVER_RATIO: f32 = 1.2;
+
+/// Scale of the spectrum, in dBFS per bin.
+const SPECTRUM_TOP_DB: f32 = 0.0;
+const SPECTRUM_FLOOR_DB: f32 = -96.0;
+/// How fast a peak of the spectrum falls back, per repaint.
+const SPECTRUM_FALL_DB: f32 = 1.5;
+
+/// Frequency of point `i` of the curves.
+fn curve_freq(i: usize) -> f32 {
+    fraction_freq(i as f32 / CURVE_POINTS as f32)
+}
+
+/// The spectrum `bins_db` (from 0 Hz to Nyquist) at each point of the
+/// curves: the loudest bin around the point, or between the two nearest
+/// bins where the points are closer than the bins (the low end).
+pub(crate) fn spectrum_at_points(bins_db: &[f32], sample_rate: u32) -> Vec<f32> {
+    let bin_hz = sample_rate as f32 / (2.0 * (bins_db.len() - 1) as f32);
+    let bin_at = |freq: f32| freq / bin_hz;
+    (0..=CURVE_POINTS)
+        .map(|i| {
+            let half_step = 0.5 / CURVE_POINTS as f32;
+            let t = i as f32 / CURVE_POINTS as f32;
+            let from = bin_at(fraction_freq(t - half_step)).ceil() as usize;
+            let to = bin_at(fraction_freq(t + half_step)).floor() as usize;
+            let last = bins_db.len() - 1;
+            if from <= to && from <= last {
+                bins_db[from..=to.min(last)]
+                    .iter()
+                    .copied()
+                    .fold(f32::MIN, f32::max)
+            } else {
+                let at = bin_at(curve_freq(i)).min(last as f32);
+                let below = at.floor() as usize;
+                let above = (below + 1).min(last);
+                let w = at - below as f32;
+                bins_db[below] * (1.0 - w) + bins_db[above] * w
+            }
+        })
+        .collect()
+}
+
+/// Each point averaged with its neighbours, about a fifth of an octave: the
+/// bins of real audio are too jagged to read. In power, not dB, or a lone
+/// tone would sink.
+pub(crate) fn smooth(points: &[f32]) -> Vec<f32> {
+    const REACH: usize = 2;
+    (0..points.len())
+        .map(|i| {
+            let around = &points[i.saturating_sub(REACH)..(i + REACH + 1).min(points.len())];
+            let power = around.iter().map(|db| 10f32.powf(db / 10.0)).sum::<f32>();
+            10.0 * (power / around.len() as f32).log10()
+        })
+        .collect()
+}
+
+/// The spectrum drawn under the curves, before and after the compressor,
+/// with its peaks falling back slowly.
+#[derive(Default)]
+pub(crate) struct SpectrumView {
+    pre: Vec<f32>,
+    post: Vec<f32>,
+    written: usize,
+}
+
+impl SpectrumView {
+    /// Reads `tap`; while the audio is stopped the spectrum falls away.
+    /// `true` while something is still shown.
+    pub(crate) fn update(&mut self, tap: Option<&SpectrumTap>) -> bool {
+        let floor = vec![SPECTRUM_FLOOR_DB; CURVE_POINTS + 1];
+        let fresh = tap.filter(|tap| tap.written() != self.written);
+        let (pre, post) = match fresh {
+            Some(tap) => {
+                self.written = tap.written();
+                let (pre, post) = tap.read();
+                let points = |samples: &[f32]| {
+                    smooth(&spectrum_at_points(
+                        &magnitudes_db(samples),
+                        PROJECT_SAMPLE_RATE,
+                    ))
+                };
+                (points(&pre), points(&post))
+            }
+            None => (floor.clone(), floor.clone()),
+        };
+        for (shown, new) in [(&mut self.pre, pre), (&mut self.post, post)] {
+            if shown.len() != new.len() {
+                *shown = floor.clone();
+            }
+            for (value, new) in shown.iter_mut().zip(new) {
+                *value = new.max(*value - SPECTRUM_FALL_DB).max(SPECTRUM_FLOOR_DB);
+            }
+        }
+        self.pre
+            .iter()
+            .chain(&self.post)
+            .any(|db| *db > SPECTRUM_FLOOR_DB)
+    }
+}
 
 /// Position of `freq` on the logarithmic axis, 0 at 20 Hz, 1 at 20 kHz.
 pub(crate) fn freq_fraction(freq: f32) -> f32 {
@@ -80,9 +179,10 @@ pub(crate) fn show(
     ui: &mut egui::Ui,
     params: &MultibandCompressor,
     activity: &BandActivity,
+    spectrum: &SpectrumView,
 ) -> Option<AudioEffectKind> {
     let mut params = params.clone();
-    let mut changed = graph(ui, &mut params, activity);
+    let mut changed = graph(ui, &mut params, activity, spectrum);
     ui.add_space(8.0);
     ui.horizontal_top(|ui| {
         for band in 0..3 {
@@ -92,7 +192,12 @@ pub(crate) fn show(
     changed.then_some(AudioEffectKind::MultibandCompressor(params))
 }
 
-fn graph(ui: &mut egui::Ui, params: &mut MultibandCompressor, activity: &BandActivity) -> bool {
+fn graph(
+    ui: &mut egui::Ui,
+    params: &mut MultibandCompressor,
+    activity: &BandActivity,
+    spectrum: &SpectrumView,
+) -> bool {
     let (rect, _) = ui.allocate_exact_size(GRAPH_SIZE, egui::Sense::hover());
     let x_of = |freq: f32| rect.left() + rect.width() * freq_fraction(freq);
     let y_of = |db: f32| {
@@ -166,6 +271,37 @@ fn graph(ui: &mut egui::Ui, params: &mut MultibandCompressor, activity: &BandAct
         painter.rect_filled(area, 0.0, BAND_COLORS[band].gamma_multiply(alpha));
     }
 
+    // Under everything: the input as a shade, the output as a line on it.
+    let spectrum_y = |db: f32| {
+        let t = (SPECTRUM_TOP_DB - db) / (SPECTRUM_TOP_DB - SPECTRUM_FLOOR_DB);
+        rect.top() + rect.height() * t.clamp(0.0, 1.0)
+    };
+    if spectrum.pre.len() == CURVE_POINTS + 1 {
+        let shade = egui::Color32::from_white_alpha(28);
+        for i in 0..CURVE_POINTS {
+            let (x0, x1) = (x_of(curve_freq(i)), x_of(curve_freq(i + 1)));
+            let (y0, y1) = (spectrum_y(spectrum.pre[i]), spectrum_y(spectrum.pre[i + 1]));
+            if y0 < rect.bottom() || y1 < rect.bottom() {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(x0, rect.bottom()),
+                        egui::pos2(x0, y0),
+                        egui::pos2(x1, y1),
+                        egui::pos2(x1, rect.bottom()),
+                    ],
+                    shade,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        painter.add(egui::Shape::line(
+            (0..=CURVE_POINTS)
+                .map(|i| egui::pos2(x_of(curve_freq(i)), spectrum_y(spectrum.post[i])))
+                .collect(),
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110)),
+        ));
+    }
+
     let grid = egui::Color32::from_gray(40);
     let label = egui::Color32::from_gray(110);
     let font = egui::FontId::proportional(9.0);
@@ -198,7 +334,7 @@ fn graph(ui: &mut egui::Ui, params: &mut MultibandCompressor, activity: &BandAct
     let live = [0, 1, 2].map(|b| makeup[b] - activity.reduction_db[b]);
     let points: Vec<(f32, f32, f32)> = (0..=CURVE_POINTS)
         .map(|i| {
-            let freq = fraction_freq(i as f32 / CURVE_POINTS as f32);
+            let freq = curve_freq(i);
             (
                 x_of(freq),
                 y_of(response.gain_db(makeup, freq)),
@@ -231,6 +367,15 @@ fn graph(ui: &mut egui::Ui, params: &mut MultibandCompressor, activity: &BandAct
         egui::Stroke::new(2.0, crate::theme::ACCENT),
     ));
 
+    for db in [-30.0, -60.0, -90.0] {
+        painter.text(
+            egui::pos2(rect.left() + 4.0, spectrum_y(db) - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{db}"),
+            font.clone(),
+            egui::Color32::from_gray(80),
+        );
+    }
     for db in (DB_BOTTOM as i32 + 6..DB_TOP as i32).step_by(6) {
         let text = if db > 0 {
             format!("+{db}")

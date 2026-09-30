@@ -14,6 +14,7 @@ use vv_core::{
 };
 
 use crate::dynamics::{BandActivity, MultibandProcessor};
+use crate::spectrum::SpectrumTap;
 
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
 /// Control-rate (~60Hz) granularity of the keyframed gain, not sample-accurate.
@@ -114,25 +115,65 @@ pub struct MixMeters {
     tracks: Vec<StereoPeak>,
     master: StereoPeak,
     /// Per channel and insert, like the chains of `MixSnapshot::tracks`.
-    track_band_meters: Vec<Vec<BandMeter>>,
-    master_band_meters: Vec<BandMeter>,
+    track_inserts: Vec<Vec<InsertMeter>>,
+    master_inserts: Vec<InsertMeter>,
+}
+
+#[derive(Debug, Default)]
+struct InsertMeter {
+    bands: BandMeter,
+    /// Compressors only.
+    spectrum: Option<Arc<SpectrumTap>>,
 }
 
 impl MixMeters {
     fn new(tracks: &[Channel], master: &Channel) -> Self {
-        let band_meters = |channel: &Channel| {
+        let inserts = |channel: &Channel| {
             channel
                 .inserts
                 .iter()
-                .map(|_| BandMeter::default())
+                .map(|insert| InsertMeter {
+                    bands: BandMeter::default(),
+                    spectrum: matches!(insert, Insert::Compressor(_))
+                        .then(|| Arc::new(SpectrumTap::default())),
+                })
                 .collect()
         };
         Self {
             tracks: tracks.iter().map(|_| StereoPeak::default()).collect(),
             master: StereoPeak::default(),
-            track_band_meters: tracks.iter().map(band_meters).collect(),
-            master_band_meters: band_meters(master),
+            track_inserts: tracks.iter().map(inserts).collect(),
+            master_inserts: inserts(master),
         }
+    }
+
+    fn insert(&self, channel: MixerChannel, index: usize) -> Option<&InsertMeter> {
+        match channel {
+            MixerChannel::Track(track) => self.track_inserts.get(track)?.get(index),
+            MixerChannel::Master => self.master_inserts.get(index),
+        }
+    }
+
+    /// Takes over the spectra of `previous` where an effect is still there:
+    /// a new snapshot for every edit would otherwise empty them all the time.
+    pub fn keep_spectra_of(&mut self, previous: &MixMeters) {
+        let pairs = self
+            .track_inserts
+            .iter_mut()
+            .zip(&previous.track_inserts)
+            .chain([(&mut self.master_inserts, &previous.master_inserts)]);
+        for (chain, old_chain) in pairs {
+            for (meter, old) in chain.iter_mut().zip(old_chain) {
+                if let (Some(spectrum), Some(old)) = (&mut meter.spectrum, &old.spectrum) {
+                    *spectrum = old.clone();
+                }
+            }
+        }
+    }
+
+    /// Before and after the effect at `index` in the chain of `channel`.
+    pub fn spectrum(&self, channel: MixerChannel, index: usize) -> Option<&SpectrumTap> {
+        self.insert(channel, index)?.spectrum.as_deref()
     }
 
     pub fn track(&self, index: usize) -> Option<&StereoPeak> {
@@ -145,14 +186,11 @@ impl MixMeters {
 
     /// Of the effect at `index` in the chain of `channel`.
     pub fn band_meter(&self, channel: MixerChannel, index: usize) -> Option<&BandMeter> {
-        match channel {
-            MixerChannel::Track(track) => self.track_band_meters.get(track)?.get(index),
-            MixerChannel::Master => self.master_band_meters.get(index),
-        }
+        Some(&self.insert(channel, index)?.bands)
     }
 
-    fn track_band_meters(&self, track: usize) -> &[BandMeter] {
-        self.track_band_meters.get(track).map_or(&[], Vec::as_slice)
+    fn track_inserts(&self, track: usize) -> &[InsertMeter] {
+        self.track_inserts.get(track).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -874,12 +912,13 @@ fn mix_into(
                 add_clip(snapshot, clip, block_time, scratch);
             }
             let processors = state.tracks.get_mut(*track).map(Vec::as_mut_slice);
-            let band_meters = metered.then(|| snapshot.meters.track_band_meters(*track));
+            let meters = metered.then(|| snapshot.meters.track_inserts(*track));
             apply_inserts(
                 &channel.inserts,
                 processors.unwrap_or_default(),
                 scratch,
-                band_meters,
+                ch,
+                meters,
             );
             let mut peak = [0.0f32; 2];
             for (dst, src) in block.chunks_exact_mut(ch).zip(scratch.chunks_exact(ch)) {
@@ -895,12 +934,13 @@ fn mix_into(
                 *track_peak = [track_peak[0].max(peak[0]), track_peak[1].max(peak[1])];
             }
         }
-        let band_meters = metered.then_some(snapshot.meters.master_band_meters.as_slice());
+        let meters = metered.then_some(snapshot.meters.master_inserts.as_slice());
         apply_inserts(
             &snapshot.master.inserts,
             &mut state.master,
             block,
-            band_meters,
+            ch,
+            meters,
         );
         for frame in block.chunks_exact_mut(ch) {
             for (c, s) in frame.iter_mut().enumerate() {
@@ -924,23 +964,33 @@ fn mix_into(
     }
 }
 
-/// `band_meters`: where the compressors report, if metered.
+/// `meters`: where the compressors report, if metered.
 fn apply_inserts(
     inserts: &[Insert],
     processors: &mut [Option<MultibandProcessor>],
     samples: &mut [f32],
-    band_meters: Option<&[BandMeter]>,
+    channels: usize,
+    meters: Option<&[InsertMeter]>,
 ) {
     for (index, insert) in inserts.iter().enumerate() {
         match insert {
             Insert::Off => {}
             Insert::Gain(gain) => samples.iter_mut().for_each(|s| *s *= gain),
             Insert::Compressor(_) => {
-                if let Some(Some(processor)) = processors.get_mut(index) {
-                    let activity = processor.process(samples);
-                    if let Some(meter) = band_meters.and_then(|r| r.get(index)) {
-                        meter.raise(activity);
-                    }
+                let Some(Some(processor)) = processors.get_mut(index) else {
+                    continue;
+                };
+                let meter = meters.and_then(|m| m.get(index));
+                let spectrum = meter.and_then(|m| m.spectrum.as_deref());
+                if let Some(spectrum) = spectrum {
+                    spectrum.record_pre(samples, channels);
+                }
+                let activity = processor.process(samples);
+                if let Some(spectrum) = spectrum {
+                    spectrum.record_post(samples, channels);
+                }
+                if let Some(meter) = meter {
+                    meter.bands.raise(activity);
                 }
             }
         }

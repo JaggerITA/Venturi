@@ -87,6 +87,7 @@ pub(crate) struct MixerPanelState {
     /// Band levels and reductions shown in that window, with their fall,
     /// and the effect they belong to.
     band_activity: (BandActivity, Option<(TimelineId, MixerChannel, usize)>),
+    spectrum: crate::compressor_panel::SpectrumView,
 }
 
 impl MixerPanelState {
@@ -265,6 +266,7 @@ fn effect_window(
     if *of != state.open_effect {
         *shown = BandActivity::default();
         *of = state.open_effect;
+        state.spectrum = Default::default();
     }
     let pairs = [
         (&mut shown.level, reading.level),
@@ -276,6 +278,13 @@ fn effect_window(
         }
     }
     let activity = *shown;
+    if matches!(effect.kind, AudioEffectKind::MultibandCompressor(_))
+        && state
+            .spectrum
+            .update(meters.and_then(|m| m.spectrum(channel, index)))
+    {
+        ctx.request_repaint();
+    }
     if activity
         .level
         .iter()
@@ -302,7 +311,7 @@ fn effect_window(
             let edited = match &effect.kind {
                 AudioEffectKind::Normalize { target_db } => normalize_settings(ui, *target_db),
                 AudioEffectKind::MultibandCompressor(params) => {
-                    crate::compressor_panel::show(ui, params, &activity)
+                    crate::compressor_panel::show(ui, params, &activity, &state.spectrum)
                 }
             };
             if let Some(kind) = edited {

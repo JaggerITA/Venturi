@@ -4,6 +4,7 @@
 
 pub mod dynamics;
 pub mod mixer;
+pub mod spectrum;
 pub mod stretch;
 
 pub use mixer::{

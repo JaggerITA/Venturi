@@ -1058,3 +1058,25 @@ fn the_compressor_reports_its_reduction_at_its_place_in_the_strip() {
     let disabled = snap.meters.band_meter(MixerChannel::Track(0), 0).unwrap();
     assert_eq!(disabled.take(), silent);
 }
+
+#[test]
+fn the_output_stream_feeds_the_compressor_spectrum_and_a_new_snapshot_keeps_it() {
+    let (project, _, b) = project();
+    let mut track = audio_track(vec![clip_at(b, 0, 0, 90)]);
+    track.mix.effects = vec![compressor()];
+    let tl = timeline(vec![track]);
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    let tap = || snap.meters.spectrum(MixerChannel::Track(0), 0).unwrap();
+    let mut out = vec![0.0; 900];
+
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(tap().written(), 0);
+    mix_range_metered(&snap, &mut MixState::new(&snap), 0, &mut out);
+    assert_eq!(tap().written(), 900);
+
+    let mut next = MixSnapshot::from_timeline(&project, &tl, RATE, 1, &mut buffers);
+    next.meters.keep_spectra_of(&snap.meters);
+    let kept = next.meters.spectrum(MixerChannel::Track(0), 0).unwrap();
+    assert_eq!(kept.written(), 900);
+    assert!(snap.meters.spectrum(MixerChannel::Track(0), 1).is_none());
+}
