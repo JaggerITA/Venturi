@@ -1637,14 +1637,18 @@ pub enum AudioEffectKind {
         target_db: f32,
     },
     MultibandCompressor(MultibandCompressor),
+    /// Every channel gets their average: a voice recorded on one side
+    /// comes out of both.
+    Mono,
 }
 
 impl AudioEffectKind {
-    pub const ALL: [AudioEffectKind; 2] = [
+    pub const ALL: [AudioEffectKind; 3] = [
         AudioEffectKind::Normalize {
             target_db: NORMALIZE_TARGET_DEFAULT,
         },
         AudioEffectKind::MultibandCompressor(MultibandCompressor::DEFAULT),
+        AudioEffectKind::Mono,
     ];
 }
 

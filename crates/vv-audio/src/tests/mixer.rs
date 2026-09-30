@@ -1081,3 +1081,29 @@ fn the_output_stream_feeds_the_compressor_spectrum_and_a_new_snapshot_keeps_it()
     assert_eq!(kept.written(), 900);
     assert!(snap.meters.spectrum(MixerChannel::Track(0), 1).is_none());
 }
+
+#[test]
+fn mono_sends_the_average_of_the_channels_to_all_of_them() {
+    let (project, a, _) = project();
+    let mut track = audio_track(vec![clip_at(a, 0, 0, 5)]);
+    track.mix.effects = vec![vv_core::AudioEffect::new(vv_core::AudioEffectKind::Mono)];
+    // The balance comes after the chain: hard left, the right side stays
+    // silent even after the mono.
+    track.mix.pan = -1.0;
+    let tl = timeline(vec![track]);
+    // Sound on the left channel only.
+    let snap = MixSnapshot::from_timeline(&project, &tl, RATE, 2, &mut |path: &Path, _| {
+        (path.to_str()? == "a.wav").then(|| Arc::new([0.8f32, 0.0].repeat(500)))
+    });
+    let mut out = vec![0.0; 20];
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(&out[..4], [0.4, 0.0, 0.4, 0.0]);
+
+    let mut centred = tl.clone();
+    centred.tracks[0].mix.pan = 0.0;
+    let snap = MixSnapshot::from_timeline(&project, &centred, RATE, 2, &mut |path: &Path, _| {
+        (path.to_str()? == "a.wav").then(|| Arc::new([0.8f32, 0.0].repeat(500)))
+    });
+    mix_range(&snap, 0, &mut out);
+    assert_eq!(&out[..4], [0.4, 0.4, 0.4, 0.4]);
+}

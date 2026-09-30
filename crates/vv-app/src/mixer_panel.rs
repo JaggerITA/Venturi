@@ -240,6 +240,7 @@ pub(crate) fn effect_name(kind: &AudioEffectKind) -> String {
     match kind {
         AudioEffectKind::Normalize { .. } => t!("mixer.effect_normalize").into_owned(),
         AudioEffectKind::MultibandCompressor(_) => t!("mixer.effect_multiband").into_owned(),
+        AudioEffectKind::Mono => t!("mixer.effect_mono").into_owned(),
     }
 }
 
@@ -314,6 +315,10 @@ fn effect_window(
             }
             let edited = match &effect.kind {
                 AudioEffectKind::Normalize { target_db } => normalize_settings(ui, *target_db),
+                AudioEffectKind::Mono => {
+                    ui.label(t!("mixer.mono_hint"));
+                    None
+                }
                 AudioEffectKind::MultibandCompressor(params) => crate::compressor_panel::show(
                     ui,
                     params,

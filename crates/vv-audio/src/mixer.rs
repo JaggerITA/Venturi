@@ -237,6 +237,7 @@ pub enum Insert {
     Off,
     Gain(f32),
     Compressor(MultibandCompressor),
+    Mono,
 }
 
 /// A mixer strip, ready for the mix: its inserts, then fader and balance.
@@ -347,7 +348,7 @@ impl MixState {
                 .inserts
                 .iter()
                 .map(|insert| match insert {
-                    Insert::Off | Insert::Gain(_) => None,
+                    Insert::Off | Insert::Gain(_) | Insert::Mono => None,
                     Insert::Compressor(params) => Some(MultibandProcessor::new(
                         params,
                         snapshot.sample_rate,
@@ -466,6 +467,7 @@ impl PeakAnalysis {
 fn hash_insert(insert: &Insert, h: &mut impl Hasher) {
     match insert {
         Insert::Off => 2u8.hash(h),
+        Insert::Mono => 3u8.hash(h),
         Insert::Gain(gain) => (0u8, gain.to_bits()).hash(h),
         Insert::Compressor(params) => {
             (1u8, params.crossovers_hz.map(f32::to_bits)).hash(h);
@@ -726,6 +728,7 @@ fn resolve_chain(
             AudioEffectKind::MultibandCompressor(params) => {
                 inserts.push(Insert::Compressor(params.clone()));
             }
+            AudioEffectKind::Mono => inserts.push(Insert::Mono),
         }
     }
     inserts
@@ -976,6 +979,12 @@ fn apply_inserts(
         match insert {
             Insert::Off => {}
             Insert::Gain(gain) => samples.iter_mut().for_each(|s| *s *= gain),
+            Insert::Mono => {
+                for frame in samples.chunks_exact_mut(channels.max(1)) {
+                    let average = frame.iter().sum::<f32>() / frame.len() as f32;
+                    frame.fill(average);
+                }
+            }
             Insert::Compressor(_) => {
                 let Some(Some(processor)) = processors.get_mut(index) else {
                     continue;

@@ -162,3 +162,11 @@ mixer.preset_save_confirm:
 mixer.preset_delete:
   en: "Delete this preset"
   it: "Elimina questo preset"
+
+mixer.effect_mono:
+  en: "Mono"
+  it: "Mono"
+
+mixer.mono_hint:
+  en: "Sends the average of the channels to all of them: a voice recorded on one side comes out of both. No settings."
+  it: "Manda la media dei canali a tutti: una voce registrata da un solo lato esce da entrambi. Nessuna impostazione."
