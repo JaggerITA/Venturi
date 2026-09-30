@@ -867,3 +867,79 @@ fn mix_audio_track_plays_a_faster_clip_with_or_without_its_pitch() {
         "pitch follows: {varispeed} Hz"
     );
 }
+
+/// A range decodes only the frames it reads, resampled like the whole file.
+#[test]
+fn mix_audio_track_of_a_range_is_the_same_part_of_the_whole_mix() {
+    let dir = std::env::temp_dir().join("vv-app-export-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("range_source.wav");
+    vv_media::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc=sin(40*t*t):sample_rate=44100:duration=4",
+        ],
+        &path,
+    );
+    let mut project = Project::default();
+    let media = project.media_pool.insert(vv_core::MediaItem {
+        path,
+        meta: vv_core::MediaMeta {
+            duration_frames: 100,
+            fps: vv_core::Rational::new(25, 1),
+            width: 0,
+            height: 0,
+            has_video: false,
+            has_audio: true,
+            sample_rate: 44_100,
+            channels: 1,
+            audio_streams: 1,
+            file: Default::default(),
+        },
+        content_hash: 1,
+        compound: None,
+        folder: None,
+    });
+    let clip = |id, source_in, start| {
+        Clip::from_source_range(
+            ClipId(id),
+            ClipSource::Media(media),
+            source_in,
+            source_in + 40,
+            start,
+            vv_core::Rational::one(),
+        )
+    };
+    let mut faster = clip(2, 10, 20);
+    faster.speed = vv_core::Rational::new(3, 2);
+    faster.conform(vv_core::Rational::one());
+    faster.timeline_len = 30;
+    let track = |clips| Track {
+        kind: TrackKind::Audio,
+        clips,
+        muted: false,
+        solo: false,
+        locked: false,
+        crossings: Vec::new(),
+        mix: Default::default(),
+        armed: Default::default(),
+    };
+    let tl = timeline_with(vec![track(vec![clip(1, 30, 5)]), track(vec![faster])]);
+
+    let whole = mix_audio_track(&project, &tl, 0..75).unwrap();
+    let part = mix_audio_track(&project, &tl, 30..40).unwrap();
+    let per_frame = (PROJECT_SAMPLE_RATE / 25) as usize * PROJECT_CHANNELS as usize;
+    assert_eq!(part, whole[30 * per_frame..40 * per_frame]);
+    assert!(part.iter().any(|&s| s.abs() > 0.1));
+
+    let mut wanted = WantedFrames::default();
+    let samples = 30 * 1920..40 * 1920;
+    MixSnapshot::from_timeline_range(&project, &tl, 48_000, 2, &mut wanted, samples);
+    let windows = &wanted.0.values().next().unwrap();
+    assert!(
+        windows.iter().all(|(_, frames)| frames.end < 4 * 48_000),
+        "{windows:?}"
+    );
+}

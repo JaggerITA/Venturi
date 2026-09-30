@@ -139,6 +139,7 @@ impl TimelineAudio {
                 source_offset: 0,
                 step: 1.0,
                 buffer,
+                buffer_start: 0,
                 gain_db: Keyframed::constant(0.0),
                 track: 0,
                 clip_fps: fps,

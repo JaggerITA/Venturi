@@ -470,81 +470,141 @@ fn mix_audio_track(
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,
 ) -> Result<Vec<f32>, ExportError> {
-    let mut wanted = WantedStreams::default();
-    MixSnapshot::from_timeline(
-        project,
-        timeline,
-        PROJECT_SAMPLE_RATE,
-        PROJECT_CHANNELS,
-        &mut wanted,
-    );
-    // The same decoding as the preview (`mix_buffers`): swresample to
-    // `PROJECT_SAMPLE_RATE`, all the streams of a file in one pass.
-    let mut audio = DecodedAudio::default();
-    for (path, streams) in wanted.0 {
-        let mut decoded = vec![Vec::new(); streams.len()];
-        let formats = vv_media::decode_audio_streams_streaming(
-            &path,
-            &streams,
-            Some(PROJECT_SAMPLE_RATE),
-            |slot, channels, chunk| {
-                remix_channels_into(chunk, channels, PROJECT_CHANNELS, &mut decoded[slot]);
-                ControlFlow::Continue(())
-            },
-        )
-        .map_err(ExportError::failed)?;
-        for ((stream, samples), format) in streams.into_iter().zip(decoded).zip(formats) {
-            if format.is_some() {
-                audio
-                    .files
-                    .insert((path.clone(), stream), Arc::new(samples));
-            }
-        }
-    }
-
-    let snapshot = MixSnapshot::from_timeline(
-        project,
-        timeline,
-        PROJECT_SAMPLE_RATE,
-        PROJECT_CHANNELS,
-        &mut audio,
-    );
     let fps = timeline.fps.as_f64();
     let start_sample = timeline_frame_to_sample(range.start, fps, PROJECT_SAMPLE_RATE);
     let end_sample = timeline_frame_to_sample(range.end, fps, PROJECT_SAMPLE_RATE);
+    let samples = start_sample..end_sample;
+    let (rate, channels) = (PROJECT_SAMPLE_RATE, PROJECT_CHANNELS);
+    let mut wanted = WantedFrames::default();
+    MixSnapshot::from_timeline_range(
+        project,
+        timeline,
+        rate,
+        channels,
+        &mut wanted,
+        samples.clone(),
+    );
+    let mut audio = DecodedAudio::default();
+    for (path, windows) in wanted.0 {
+        decode_windows(&path, windows, &mut audio)?;
+    }
+    let snapshot =
+        MixSnapshot::from_timeline_range(project, timeline, rate, channels, &mut audio, samples);
     let mut mixed = vec![0.0_f32; (end_sample - start_sample) as usize * PROJECT_CHANNELS as usize];
     mix_range(&snapshot, start_sample, &mut mixed);
     Ok(mixed)
 }
 
-/// Lists the streams of every real file the mix reaches, compound clips
-/// included, without providing any.
-#[derive(Default)]
-struct WantedStreams(HashMap<PathBuf, Vec<usize>>);
-
-impl AudioSource for WantedStreams {
-    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
-        let streams = self.0.entry(path.to_path_buf()).or_default();
-        if !streams.contains(&stream) {
-            streams.push(stream);
+/// Decodes the `(stream, frames)` windows of `path` in one pass, stopping
+/// past the last one. The same decoding as the preview (`mix_buffers`),
+/// from the start of the file: swresample to `PROJECT_SAMPLE_RATE`, so the
+/// frames line up with the preview's.
+fn decode_windows(
+    path: &Path,
+    windows: Vec<(usize, std::ops::Range<u64>)>,
+    audio: &mut DecodedAudio,
+) -> Result<(), ExportError> {
+    let ch = PROJECT_CHANNELS as u64;
+    let mut streams: Vec<usize> = windows.iter().map(|(stream, _)| *stream).collect();
+    streams.sort_unstable();
+    streams.dedup();
+    let slot_of = |stream: usize| streams.iter().position(|s| *s == stream).unwrap();
+    let mut ends = vec![0_u64; streams.len()];
+    for (stream, frames) in &windows {
+        let end = &mut ends[slot_of(*stream)];
+        *end = (*end).max(frames.end);
+    }
+    let mut buffers = vec![Vec::new(); windows.len()];
+    let mut decoded = vec![0_u64; streams.len()];
+    let mut remixed = Vec::new();
+    let formats = vv_media::decode_audio_streams_streaming(
+        path,
+        &streams,
+        Some(PROJECT_SAMPLE_RATE),
+        |slot, channels, chunk| {
+            remixed.clear();
+            remix_channels_into(chunk, channels, PROJECT_CHANNELS, &mut remixed);
+            let from = decoded[slot];
+            let to = from + remixed.len() as u64 / ch;
+            decoded[slot] = to;
+            for ((stream, frames), buffer) in windows.iter().zip(&mut buffers) {
+                let (a, b) = (frames.start.max(from), frames.end.min(to));
+                if *stream == streams[slot] && a < b {
+                    buffer.extend_from_slice(
+                        &remixed[((a - from) * ch) as usize..((b - from) * ch) as usize],
+                    );
+                }
+            }
+            if decoded
+                .iter()
+                .zip(&ends)
+                .all(|(decoded, end)| decoded >= end)
+            {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .map_err(ExportError::failed)?;
+    for ((stream, frames), buffer) in windows.into_iter().zip(buffers) {
+        if formats[slot_of(stream)].is_some() {
+            audio
+                .files
+                .insert((path.to_path_buf(), stream, frames), Arc::new(buffer));
         }
-        ClipAudio::Pending
+    }
+    Ok(())
+}
+
+/// The frames of every real file the mix reaches, compound clips included,
+/// without providing any.
+#[derive(Default)]
+struct WantedFrames(HashMap<PathBuf, Vec<(usize, std::ops::Range<u64>)>>);
+
+impl AudioSource for WantedFrames {
+    fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.file_frames(path, stream, 0..u64::MAX).0
+    }
+
+    fn file_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: std::ops::Range<u64>,
+    ) -> (ClipAudio, u64) {
+        let windows = self.0.entry(path.to_path_buf()).or_default();
+        let window = (stream, frames);
+        if !windows.contains(&window) {
+            windows.push(window);
+        }
+        (ClipAudio::Pending, 0)
     }
 }
 
 /// Everything decoded up front: a compound used several times is mixed once.
 #[derive(Default)]
 struct DecodedAudio {
-    files: HashMap<(PathBuf, usize), Arc<Vec<f32>>>,
+    files: HashMap<(PathBuf, usize, std::ops::Range<u64>), Arc<Vec<f32>>>,
     compounds: HashMap<MediaId, Arc<Vec<f32>>>,
 }
 
 impl AudioSource for DecodedAudio {
     fn file(&mut self, path: &Path, stream: usize) -> ClipAudio {
+        self.file_frames(path, stream, 0..u64::MAX).0
+    }
+
+    fn file_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: std::ops::Range<u64>,
+    ) -> (ClipAudio, u64) {
+        let start = frames.start;
         self.files
-            .get(&(path.to_path_buf(), stream))
-            .map_or(ClipAudio::Missing, |buffer| {
-                ClipAudio::Ready(buffer.clone())
+            .get(&(path.to_path_buf(), stream, frames))
+            .map_or((ClipAudio::Missing, 0), |buffer| {
+                (ClipAudio::Ready(buffer.clone()), start)
             })
     }
 

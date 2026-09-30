@@ -662,6 +662,7 @@ fn fade_test_clip(fade_in: u64, fade_out: u64) -> MixClip {
         source_offset: 0,
         step: 1.0,
         buffer: Arc::new(Vec::new()),
+        buffer_start: 0,
         gain_db: Keyframed::constant(0.0),
         track: 0,
         clip_fps: 10.0,
@@ -1127,4 +1128,83 @@ fn an_equalizer_in_the_chain_shapes_the_audio_and_feeds_its_spectrum() {
     assert!((shaped / ramp - 0.25).abs() < 0.02, "{shaped}");
     let tap = snap.meters.spectrum(MixerChannel::Track(0), 0).unwrap();
     assert_eq!(tap.written(), 900);
+}
+
+/// Hands out only the frames asked for, and records them.
+#[derive(Default)]
+struct Windowed {
+    asked: Vec<(PathBuf, std::ops::Range<u64>)>,
+}
+
+impl AudioSource for Windowed {
+    fn file(&mut self, _path: &Path, _stream: usize) -> ClipAudio {
+        unreachable!("a range mix asks for frames")
+    }
+
+    fn file_frames(
+        &mut self,
+        path: &Path,
+        stream: usize,
+        frames: std::ops::Range<u64>,
+    ) -> (ClipAudio, u64) {
+        self.asked.push((path.to_path_buf(), frames.clone()));
+        let Some(whole) = buffers(path, stream) else {
+            return (ClipAudio::Missing, 0);
+        };
+        let end = (frames.end as usize).min(whole.len());
+        let start = (frames.start as usize).min(end);
+        (
+            ClipAudio::Ready(Arc::new(whole[start..end].to_vec())),
+            frames.start,
+        )
+    }
+}
+
+#[test]
+fn a_range_mix_reads_only_its_frames_and_matches_the_whole_mix() {
+    let (project, a, b) = project();
+    let mut offset = clip_at(b, 2, 3, 20);
+    offset.fade_out = 4;
+    let mut faster = sped_up_clip(b, Rational::new(3, 2), 30);
+    faster.timeline_start = 5;
+    // `b` ends 10 frames into it: the fade-out comes before its end.
+    let mut past_the_file = clip_at(b, 10, 90, 20);
+    past_the_file.fade_out = 5;
+    let tl = timeline(vec![
+        audio_track(vec![offset, clip_at(a, 80, 0, 5)]),
+        audio_track(vec![faster]),
+        audio_track(vec![past_the_file]),
+    ]);
+
+    let mut source = Windowed::default();
+    let snap = MixSnapshot::from_timeline_range(&project, &tl, RATE, 1, &mut source, 100..250);
+    let mut out = vec![9.0; 150];
+    mix_range(&snap, 100, &mut out);
+
+    assert_eq!(out, render(&project, &tl, 100, 150));
+    assert!(
+        source
+            .asked
+            .iter()
+            .all(|(path, frames)| path.ends_with("b.wav") && frames.start > 0),
+        "{:?}",
+        source.asked
+    );
+}
+
+#[test]
+fn a_range_mix_reads_whole_clips_for_a_normalization() {
+    let (project, _, b) = project();
+    let mut tl = timeline(vec![audio_track(vec![clip_at(b, 0, 0, 50)])]);
+    tl.master.effects.push(vv_core::AudioEffect {
+        enabled: true,
+        kind: AudioEffectKind::Normalize { target_db: -1.0 },
+    });
+    let mut source = Windowed::default();
+    let snap = MixSnapshot::from_timeline_range(&project, &tl, RATE, 1, &mut source, 100..150);
+    let mut out = vec![9.0; 50];
+    mix_range(&snap, 100, &mut out);
+
+    assert_eq!(out, render(&project, &tl, 100, 50));
+    assert_eq!(source.asked[0].1.start, 0);
 }
