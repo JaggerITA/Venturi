@@ -9,6 +9,7 @@ use vv_core::{AudioEffectKind, CompressorBand, MultibandCompressor};
 
 use crate::mixer_panel::{knob, paint_fader_handle};
 use crate::properties_panel::drag_field;
+use crate::settings::CompressorPreset;
 
 /// As wide as the three band strips below it, frames and gaps included.
 const GRAPH_SIZE: egui::Vec2 = egui::vec2(3.0 * (STRIP_WIDTH + 18.0) + 16.0, 230.0);
@@ -175,14 +176,113 @@ fn format_freq(freq: f32) -> String {
 
 /// The edited parameters, if changed. `activity`: the band levels and gain
 /// reductions playing now.
+/// What the window keeps between repaints.
+#[derive(Default)]
+pub(crate) struct CompressorPanelState {
+    pub(crate) spectrum: SpectrumView,
+    /// Being typed in the save dialog.
+    preset_name: String,
+}
+
+/// Built-in presets: translation key and settings.
+pub(crate) fn builtin_presets() -> [(&'static str, MultibandCompressor); 7] {
+    let band = |threshold_db, ratio, attack_ms, release_ms, makeup_db| CompressorBand {
+        threshold_db,
+        ratio,
+        attack_ms,
+        release_ms,
+        makeup_db,
+    };
+    let bypass = band(0.0, 1.0, 10.0, 150.0, 0.0);
+    let preset = |crossovers_hz, bands| MultibandCompressor {
+        crossovers_hz,
+        bands,
+    };
+    [
+        ("mixer.preset_default", MultibandCompressor::DEFAULT),
+        (
+            "mixer.preset_glue",
+            preset([150.0, 3000.0], [band(-24.0, 1.5, 30.0, 250.0, 1.0); 3]),
+        ),
+        (
+            "mixer.preset_voice",
+            preset(
+                [180.0, 4000.0],
+                [
+                    band(-30.0, 4.0, 10.0, 120.0, 0.0),
+                    band(-22.0, 2.5, 8.0, 150.0, 2.0),
+                    band(-30.0, 3.0, 2.0, 80.0, 0.0),
+                ],
+            ),
+        ),
+        (
+            "mixer.preset_deesser",
+            preset(
+                [1000.0, 5500.0],
+                [bypass, bypass, band(-32.0, 6.0, 0.5, 60.0, 0.0)],
+            ),
+        ),
+        (
+            "mixer.preset_low_end",
+            preset(
+                [120.0, 2000.0],
+                [band(-28.0, 4.0, 20.0, 200.0, 0.0), bypass, bypass],
+            ),
+        ),
+        (
+            "mixer.preset_broadcast",
+            preset(
+                [200.0, 3000.0],
+                [
+                    band(-28.0, 4.0, 5.0, 120.0, 6.0),
+                    band(-28.0, 4.0, 5.0, 120.0, 5.0),
+                    band(-28.0, 4.0, 5.0, 120.0, 4.0),
+                ],
+            ),
+        ),
+        (
+            "mixer.preset_master",
+            preset(
+                [120.0, 5000.0],
+                [
+                    band(-20.0, 2.0, 30.0, 200.0, 1.0),
+                    band(-18.0, 1.8, 20.0, 180.0, 1.0),
+                    band(-22.0, 2.0, 10.0, 120.0, 1.0),
+                ],
+            ),
+        ),
+    ]
+}
+
+/// Adds `params` as `name`, or replaces the preset already called so.
+pub(crate) fn save_preset(
+    presets: &mut Vec<CompressorPreset>,
+    name: &str,
+    params: &MultibandCompressor,
+) {
+    let preset = CompressorPreset {
+        name: name.to_owned(),
+        params: params.clone(),
+    };
+    match presets.iter_mut().find(|p| p.name == name) {
+        Some(existing) => *existing = preset,
+        None => presets.push(preset),
+    }
+}
+
+/// The edited parameters, if changed. `presets`: the user's own, saved and
+/// deleted here.
 pub(crate) fn show(
     ui: &mut egui::Ui,
     params: &MultibandCompressor,
     activity: &BandActivity,
-    spectrum: &SpectrumView,
+    state: &mut CompressorPanelState,
+    presets: &mut Vec<CompressorPreset>,
 ) -> Option<AudioEffectKind> {
     let mut params = params.clone();
-    let mut changed = graph(ui, &mut params, activity, spectrum);
+    let mut changed = preset_bar(ui, &mut params, state, presets);
+    ui.add_space(6.0);
+    changed |= graph(ui, &mut params, activity, &state.spectrum);
     ui.add_space(8.0);
     ui.horizontal_top(|ui| {
         for band in 0..3 {
@@ -190,6 +290,99 @@ pub(crate) fn show(
         }
     });
     changed.then_some(AudioEffectKind::MultibandCompressor(params))
+}
+
+/// Choosing a preset, and saving the current settings as one.
+fn preset_bar(
+    ui: &mut egui::Ui,
+    params: &mut MultibandCompressor,
+    state: &mut CompressorPanelState,
+    presets: &mut Vec<CompressorPreset>,
+) -> bool {
+    let builtin = builtin_presets();
+    let current = builtin
+        .iter()
+        .find(|(_, p)| p == params)
+        .map(|(key, _)| t!(*key).into_owned())
+        .or_else(|| {
+            presets
+                .iter()
+                .find(|p| p.params == *params)
+                .map(|p| p.name.clone())
+        })
+        .unwrap_or_else(|| t!("mixer.preset_custom").into_owned());
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(t!("mixer.preset"));
+        let mut delete = None;
+        egui::ComboBox::from_id_salt("compressor_preset")
+            .width(220.0)
+            .selected_text(&current)
+            .show_ui(ui, |ui| {
+                for (key, preset) in &builtin {
+                    if ui.selectable_label(preset == params, t!(*key)).clicked() {
+                        *params = preset.clone();
+                        changed = true;
+                    }
+                }
+                if !presets.is_empty() {
+                    ui.separator();
+                }
+                for (index, preset) in presets.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let delete_button = ui
+                            .small_button("×")
+                            .on_hover_text(t!("mixer.preset_delete"));
+                        if delete_button.clicked() {
+                            delete = Some(index);
+                        }
+                        let selected = preset.params == *params;
+                        if ui.selectable_label(selected, &preset.name).clicked() {
+                            *params = preset.params.clone();
+                            changed = true;
+                        }
+                    });
+                }
+            });
+        if let Some(index) = delete {
+            presets.remove(index);
+        }
+
+        let save = ui.button(t!("mixer.preset_save"));
+        if save.clicked() {
+            state.preset_name = presets
+                .iter()
+                .find(|p| p.params == *params)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+        }
+        egui::Popup::from_toggle_button_response(&save)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(220.0);
+                ui.label(t!("mixer.preset_name"));
+                let edit = ui.text_edit_singleline(&mut state.preset_name);
+                if save.clicked() {
+                    edit.request_focus();
+                }
+                let name = state.preset_name.trim().to_owned();
+                if presets.iter().any(|p| p.name == name) {
+                    ui.weak(t!("mixer.preset_replaces"));
+                }
+                let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let confirm = ui
+                    .add_enabled(
+                        !name.is_empty(),
+                        egui::Button::new(t!("mixer.preset_save_confirm")),
+                    )
+                    .clicked();
+                if (confirm || entered) && !name.is_empty() {
+                    save_preset(presets, &name, params);
+                    ui.close();
+                }
+            });
+    });
+    changed
 }
 
 fn graph(
@@ -376,7 +569,8 @@ fn graph(
             egui::Color32::from_gray(80),
         );
     }
-    for db in (DB_BOTTOM as i32 + 6..DB_TOP as i32).step_by(6) {
+    // Not +18: the reset button sits there.
+    for db in (DB_BOTTOM as i32 + 6..DB_TOP as i32 - 6).step_by(6) {
         let text = if db > 0 {
             format!("+{db}")
         } else {
@@ -447,6 +641,21 @@ fn graph(
             );
         }
     }
+    let reset = egui::Rect::from_min_size(
+        rect.right_top() + egui::vec2(-84.0, 6.0),
+        egui::vec2(78.0, 18.0),
+    );
+    let reset_all = egui::Button::new(egui::RichText::new(t!("mixer.reset_all")).small());
+    // A detached child: `put` would move the layout past the graph's top.
+    let mut overlay = ui.new_child(egui::UiBuilder::new().max_rect(reset));
+    if overlay
+        .add_sized(reset.size(), reset_all)
+        .on_hover_text(t!("mixer.reset_all_hint"))
+        .clicked()
+    {
+        *params = MultibandCompressor::DEFAULT;
+        changed = true;
+    }
     painter.rect_stroke(
         rect,
         4.0,
@@ -491,6 +700,15 @@ fn band_strip(
                                 .clone(),
                         );
                         ui.weak(range);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let reset = ui
+                                .small_button(t!("mixer.reset"))
+                                .on_hover_text(t!("mixer.reset_band_hint"));
+                            if reset.clicked() {
+                                *settings = CompressorBand::DEFAULT;
+                                changed = true;
+                            }
+                        });
                     });
                     ui.add_space(4.0);
                     ui.horizontal_top(|ui| {

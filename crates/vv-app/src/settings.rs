@@ -512,6 +512,14 @@ pub struct Settings {
     /// Recently opened projects, most recent first.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
+    /// Saved by the user, in the order they were first saved.
+    pub compressor_presets: Vec<CompressorPreset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompressorPreset {
+    pub name: String,
+    pub params: vv_core::MultibandCompressor,
 }
 
 impl Default for Settings {
@@ -528,6 +536,7 @@ impl Default for Settings {
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
+            compressor_presets: Vec::new(),
         }
     }
 }
@@ -571,6 +580,10 @@ struct SettingsFile {
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
     panels: PanelLayoutFile,
+    /// One by one: a preset that no longer reads is dropped alone, not
+    /// with the whole file.
+    #[serde(default)]
+    compressor_presets: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -637,6 +650,11 @@ impl Settings {
             .cache_budget_mb
             .map_or(settings.cache_budget_bytes, |mb| mb as usize * 1_000_000);
         settings.recent_projects = file.recent_projects;
+        settings.compressor_presets = file
+            .compressor_presets
+            .into_iter()
+            .filter_map(|preset| serde_json::from_value(preset).ok())
+            .collect();
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
             media_pool_open: file
@@ -716,6 +734,11 @@ impl Settings {
                 inspector_width: Some(self.panels.inspector_width),
                 timeline_height: Some(self.panels.timeline_height),
             },
+            compressor_presets: self
+                .compressor_presets
+                .iter()
+                .filter_map(|preset| serde_json::to_value(preset).ok())
+                .collect(),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

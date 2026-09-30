@@ -90,3 +90,75 @@ mixer.release:
 mixer.makeup_short:
   en: "Gain"
   it: "Guadagno"
+
+mixer.reset:
+  en: "Reset"
+  it: "Reimposta"
+
+mixer.reset_band_hint:
+  en: "Back to the default settings of this band"
+  it: "Riporta questa banda alle impostazioni predefinite"
+
+mixer.reset_all:
+  en: "Reset all"
+  it: "Reimposta tutto"
+
+mixer.reset_all_hint:
+  en: "Back to the default settings of every band and crossover"
+  it: "Riporta tutte le bande e i crossover alle impostazioni predefinite"
+
+mixer.preset:
+  en: "Preset"
+  it: "Preset"
+
+mixer.preset_custom:
+  en: "Custom"
+  it: "Personalizzato"
+
+mixer.preset_default:
+  en: "Default"
+  it: "Predefinito"
+
+mixer.preset_glue:
+  en: "Gentle glue"
+  it: "Coesione leggera"
+
+mixer.preset_voice:
+  en: "Voice clarity"
+  it: "Chiarezza voce"
+
+mixer.preset_deesser:
+  en: "De-esser"
+  it: "De-esser"
+
+mixer.preset_low_end:
+  en: "Tame the low end"
+  it: "Controllo dei bassi"
+
+mixer.preset_broadcast:
+  en: "Broadcast loud"
+  it: "Broadcast"
+
+mixer.preset_master:
+  en: "Music mastering"
+  it: "Mastering musicale"
+
+mixer.preset_save:
+  en: "Save preset…"
+  it: "Salva preset…"
+
+mixer.preset_name:
+  en: "Preset name"
+  it: "Nome del preset"
+
+mixer.preset_replaces:
+  en: "Replaces the preset with this name."
+  it: "Sostituisce il preset con questo nome."
+
+mixer.preset_save_confirm:
+  en: "Save"
+  it: "Salva"
+
+mixer.preset_delete:
+  en: "Delete this preset"
+  it: "Elimina questo preset"

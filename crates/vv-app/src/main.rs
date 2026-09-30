@@ -3310,6 +3310,7 @@ impl eframe::App for VenturiApp {
             pending_playhead = editor.playhead.or(pending_playhead);
         }
         if self.settings.panels.mixer_open {
+            let presets_before = self.settings.compressor_presets.clone();
             pending_effects.extend(mixer_panel::show_mixer(
                 ui.ctx(),
                 &mut self.settings.panels.mixer_open,
@@ -3317,7 +3318,12 @@ impl eframe::App for VenturiApp {
                 &self.session.project,
                 self.timeline_id,
                 self.timeline_audio.as_ref().map(TimelineAudio::meters),
+                &mut self.settings.compressor_presets,
             ));
+            // Saved at once: a preset must not wait for the periodic save.
+            if self.settings.compressor_presets != presets_before {
+                self.persist_settings();
+            }
         }
 
         if let Some(id) = preview_action {

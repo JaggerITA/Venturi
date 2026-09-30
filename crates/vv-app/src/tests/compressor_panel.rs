@@ -91,3 +91,51 @@ fn smoothing_spreads_a_spike_by_its_power_and_keeps_a_flat_run() {
     assert!((smoothed[10] + 16.99).abs() < 0.01, "{}", smoothed[10]);
     assert!((smoothed[0] + 60.0).abs() < 1e-3);
 }
+
+#[test]
+fn saving_a_preset_under_an_existing_name_replaces_it() {
+    let mut presets = Vec::new();
+    let mut params = MultibandCompressor::DEFAULT;
+    save_preset(&mut presets, "A", &params);
+    params.bands[0].ratio = 8.0;
+    save_preset(&mut presets, "B", &params);
+    save_preset(&mut presets, "A", &params);
+    let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["A", "B"]);
+    assert_eq!(presets[0].params, params);
+}
+
+#[test]
+fn the_builtin_presets_are_distinct_valid_and_translated() {
+    let presets = builtin_presets();
+    let within = |v: f32, (min, max): (f32, f32)| (min..=max).contains(&v);
+    for (i, (key, preset)) in presets.iter().enumerate() {
+        assert_ne!(t!(*key), *key, "{key} has no text");
+        let [low, high] = preset.crossovers_hz;
+        assert!(low * MIN_CROSSOVER_RATIO <= high, "{key}");
+        for band in &preset.bands {
+            assert!(
+                within(band.threshold_db, CompressorBand::THRESHOLD_RANGE_DB),
+                "{key}"
+            );
+            assert!(within(band.ratio, CompressorBand::RATIO_RANGE), "{key}");
+            assert!(
+                within(band.attack_ms, CompressorBand::ATTACK_RANGE_MS),
+                "{key}"
+            );
+            assert!(
+                within(band.release_ms, CompressorBand::RELEASE_RANGE_MS),
+                "{key}"
+            );
+            assert!(
+                within(band.makeup_db, CompressorBand::MAKEUP_RANGE_DB),
+                "{key}"
+            );
+        }
+        assert!(
+            presets[..i].iter().all(|(_, other)| other != preset),
+            "{key}"
+        );
+    }
+    assert_eq!(presets[0].1, MultibandCompressor::DEFAULT);
+}

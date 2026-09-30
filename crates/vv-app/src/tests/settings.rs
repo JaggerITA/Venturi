@@ -155,3 +155,32 @@ fn shift_is_ignored_on_symbols_but_not_on_letters() {
     assert_eq!(press(egui::Key::S, ctrl_shift), (false, false));
     assert_eq!(press(egui::Key::S, egui::Modifiers::COMMAND), (false, true));
 }
+
+#[test]
+fn compressor_presets_are_saved_and_a_broken_one_is_dropped_alone() {
+    let path = std::env::temp_dir()
+        .join(format!("vv-settings-presets-{}", std::process::id()))
+        .join("settings.json");
+    let mut settings = Settings::default();
+    let mut params = vv_core::MultibandCompressor::DEFAULT;
+    params.bands[1].ratio = 5.0;
+    settings.compressor_presets = vec![CompressorPreset {
+        name: "Mine".into(),
+        params,
+    }];
+    settings.kinetic_scroll = false;
+    settings.save(&path).unwrap();
+    assert_eq!(Settings::load(&path), settings);
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    json["compressor_presets"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "name": "Old", "params": { "bands": 3 } }));
+    std::fs::write(&path, json.to_string()).unwrap();
+    let loaded = Settings::load(&path);
+    assert_eq!(loaded.compressor_presets, settings.compressor_presets);
+    assert!(!loaded.kinetic_scroll, "the rest of the file still reads");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
