@@ -123,3 +123,7 @@ export.error_timeline_not_found:
 export.cancelled:
   en: "cancelled"
   it: "annullato"
+
+export.already_running:
+  en: "Another export is already running"
+  it: "È già in corso un altro export"

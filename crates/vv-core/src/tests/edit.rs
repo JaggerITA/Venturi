@@ -104,7 +104,8 @@ fn split_clips_relinks_the_right_halves_and_skips_locked_tracks() {
 
     let split = split_clips(&mut project, &mut history, tl, 40, None);
 
-    assert_eq!(split, vec![(0, v), (1, a)]);
+    let lefts: Vec<ClipRef> = split.iter().map(|&(left, _)| left).collect();
+    assert_eq!(lefts, vec![(0, v), (1, a)]);
     assert_eq!(spans(&project, tl, 0), vec![(0, 40, 0), (40, 100, 40)]);
     assert_eq!(spans(&project, tl, 2), vec![(0, 100, 0)]);
     let timeline = &project.timelines[tl];
@@ -409,6 +410,7 @@ fn insert_generator_overwrites_what_is_underneath() {
         Generator::SolidColor,
         0,
         100,
+        None,
     );
 
     assert_eq!(
@@ -420,4 +422,170 @@ fn insert_generator_overwrites_what_is_underneath() {
         clip.effects.color.as_ref().map(|c| c.value_at(0)),
         Some(DEFAULT_SOLID_COLOR)
     );
+}
+
+fn place(
+    project: &mut Project,
+    history: &mut History,
+    tl: TimelineId,
+    media: MediaId,
+    source: (FrameIdx, FrameIdx),
+    at: FrameIdx,
+    audio: bool,
+) {
+    insert_media(
+        project,
+        history,
+        tl,
+        MediaInsert {
+            media_id: media,
+            source_in: source.0,
+            source_out: source.1,
+            video: true,
+            audio,
+        },
+        at,
+        TargetTracks {
+            video: Some(0),
+            extra_audio: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn media_ranges_follow_the_material_after_earlier_cuts() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+    let mut history = History::default();
+    let media = media(&mut project, 1);
+    place(&mut project, &mut history, tl, media, (0, 100), 0, true);
+    delete_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        &[(10, 20)],
+        &RangeDelete::Ripple,
+    );
+
+    let removed = delete_media_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        media,
+        &[(30, 40)],
+        &RangeDelete::Ripple,
+    );
+
+    assert_eq!(removed, [(0, 20, 30), (1, 20, 30)]);
+    let expected = vec![(0, 10, 0), (10, 20, 20), (20, 80, 40)];
+    assert_eq!(spans(&project, tl, 0), expected);
+    assert_eq!(spans(&project, tl, 1), expected);
+}
+
+#[test]
+fn a_media_used_twice_loses_the_frames_in_both_places() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video]);
+    let mut history = History::default();
+    let media = media(&mut project, 0);
+    place(&mut project, &mut history, tl, media, (0, 50), 0, false);
+    place(&mut project, &mut history, tl, media, (0, 50), 100, false);
+
+    delete_media_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        media,
+        &[(10, 20)],
+        &RangeDelete::Lift { tracks: None },
+    );
+
+    let starts: Vec<(FrameIdx, FrameIdx)> = spans(&project, tl, 0)
+        .iter()
+        .map(|&(s, e, _)| (s, e))
+        .collect();
+    assert_eq!(starts, [(0, 10), (20, 50), (100, 110), (120, 150)]);
+}
+
+#[test]
+fn lifting_media_ranges_leaves_other_material_at_the_same_time() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Video]);
+    let mut history = History::default();
+    let media = media(&mut project, 0);
+    place(&mut project, &mut history, tl, media, (0, 100), 0, false);
+    put(&mut project, &mut history, tl, 1, 0, 100);
+
+    delete_media_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        media,
+        &[(10, 20)],
+        &RangeDelete::Lift { tracks: None },
+    );
+
+    assert_eq!(spans(&project, tl, 0), [(0, 10, 0), (20, 100, 20)]);
+    assert_eq!(spans(&project, tl, 1), [(0, 100, 0)]);
+}
+
+#[test]
+fn lifting_media_ranges_on_several_tracks_is_one_undo_step() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+    let mut history = History::default();
+    let media = media(&mut project, 1);
+    place(&mut project, &mut history, tl, media, (0, 100), 0, true);
+    let before = snapshot(&project, tl);
+    let position = history.position();
+
+    delete_media_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        media,
+        &[(10, 20)],
+        &RangeDelete::Lift { tracks: None },
+    );
+    assert_eq!(spans(&project, tl, 1), [(0, 10, 0), (20, 100, 20)]);
+    assert_eq!(history.position(), position + 1);
+    history.undo(&mut project);
+
+    assert_eq!(snapshot(&project, tl), before);
+}
+
+#[test]
+fn media_ranges_map_through_a_conformed_frame_rate() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video]);
+    let mut history = History::default();
+    let media = media(&mut project, 0);
+    project.media_pool[media].meta.fps = Rational::new(30000, 1001);
+    place(&mut project, &mut history, tl, media, (0, 300), 0, false);
+    let clip = project.timelines[tl].tracks[0].clips[0].clone();
+
+    let mapped = media_ranges_on_timeline(&project, tl, media, &[(100, 130)], None);
+
+    assert_eq!(
+        mapped,
+        [(0, clip.timeline_frame_at(100), clip.timeline_frame_at(130))]
+    );
+    assert_ne!(mapped[0].1, 100, "25 fps timeline, 29.97 fps media");
+}
+
+#[test]
+fn media_ranges_outside_the_used_portion_remove_nothing() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video]);
+    let mut history = History::default();
+    let media = media(&mut project, 0);
+    place(&mut project, &mut history, tl, media, (100, 200), 0, false);
+    let before = history.position();
+
+    let removed = delete_media_ranges(
+        &mut project,
+        &mut history,
+        tl,
+        media,
+        &[(0, 50), (300, 400)],
+        &RangeDelete::Ripple,
+    );
+
+    assert!(removed.is_empty());
+    assert_eq!(history.position(), before);
 }

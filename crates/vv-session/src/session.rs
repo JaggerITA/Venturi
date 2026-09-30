@@ -1,6 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use vv_core::{Command, History, MediaFileInfo, PersistenceError, Project, TimelineId};
+use vv_core::{
+    AddEntities, Command, CommandLabel, History, MediaFileInfo, PersistenceError, Project,
+    Timeline, TimelineId,
+};
+
+use std::collections::HashMap;
 
 use crate::jobs::{Jobs, Waker};
 
@@ -15,8 +20,19 @@ pub struct Session {
     path: Option<PathBuf>,
     saved_generation: u64,
     synced_timeline_generation: u64,
+    /// Bumped whenever the project is replaced.
+    epoch: u64,
+    /// `timeline_revision` per timeline, with the state it was computed at.
+    revisions: std::sync::Mutex<HashMap<TimelineId, (ChangeMark, String)>>,
     pub(crate) waker: Waker,
     pub(crate) jobs: Jobs,
+}
+
+/// Where the project stands: equal marks mean nothing changed in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeMark {
+    epoch: u64,
+    generation: u64,
 }
 
 impl Session {
@@ -40,6 +56,54 @@ impl Session {
         self.saved_generation = self.history.generation();
     }
 
+    pub fn change_mark(&self) -> ChangeMark {
+        ChangeMark {
+            epoch: self.epoch,
+            generation: self.history.generation(),
+        }
+    }
+
+    /// Bumped each time the project is replaced (opened, new).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// A fingerprint of the timeline's content: it changes with any edit of
+    /// that timeline, not with edits elsewhere. Recomputed only after the
+    /// project changed.
+    pub fn timeline_revision(&self, id: TimelineId) -> String {
+        let mark = self.change_mark();
+        let mut revisions = self.revisions.lock().unwrap();
+        if let Some((at, revision)) = revisions.get(&id)
+            && *at == mark
+        {
+            return revision.clone();
+        }
+        use std::hash::{Hash, Hasher};
+        let bytes = self
+            .project
+            .timelines
+            .get(id)
+            .and_then(|timeline| serde_json::to_vec(timeline).ok())
+            .unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let revision = format!("{:016x}", hasher.finish());
+        revisions.insert(id, (mark, revision.clone()));
+        revision
+    }
+
+    /// Saved `project`, a copy of this session's taken at `mark`: the
+    /// session counts as saved only if nothing changed since.
+    pub fn finish_save(&mut self, path: PathBuf, mark: ChangeMark) {
+        self.path = Some(path);
+        if mark == self.change_mark() {
+            self.mark_saved();
+        } else if mark.epoch == self.epoch {
+            self.saved_generation = mark.generation;
+        }
+    }
+
     pub fn save_to(&mut self, path: &Path) -> Result<(), PersistenceError> {
         vv_core::save_project(&self.project, path)?;
         self.path = Some(path.to_path_buf());
@@ -59,30 +123,30 @@ impl Session {
 
     /// Starts over on `project` (opened from `path`, or new): empty history,
     /// nothing unsaved. Fills in the media fields older projects lack.
-    pub fn replace_project(&mut self, project: Project, path: Option<PathBuf>) {
+    pub fn replace_project(&mut self, mut project: Project, path: Option<PathBuf>) {
+        complete_legacy_media(&mut project);
+        self.install_project(project, path);
+    }
+
+    /// Like `replace_project`, for a project `complete_legacy_media` already
+    /// went through (it reads the media files: slow, better done first).
+    pub fn install_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.project = project;
         self.history = History::default();
         // The new history counts from 0 again.
         self.synced_timeline_generation = self.history.generation();
         self.path = path;
+        self.epoch += 1;
         self.mark_saved();
-        for item in self.project.media_pool.values_mut() {
-            if item.compound.is_some() {
-                continue;
-            }
-            // Projects saved before `MediaMeta::audio_streams`.
-            if item.meta.has_audio && item.meta.audio_streams == 0 {
-                item.meta.audio_streams =
-                    vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
-            }
-            // Projects saved before `MediaMeta::file`: record it while the
-            // file is still reachable.
-            if item.meta.file == MediaFileInfo::default()
-                && let Ok(file) = vv_media::probe_file_info(&item.path)
-            {
-                item.meta.file = file;
-            }
-        }
+    }
+
+    /// Adds a timeline and its media pool entry, through which it can be
+    /// used as a clip in other timelines.
+    pub fn create_timeline(&mut self, timeline: Timeline) -> TimelineId {
+        let mut add = AddEntities::new(CommandLabel::NewTimeline);
+        let (id, _) = add.timeline(&mut self.project, timeline, None);
+        self.apply(Box::new(add));
+        id
     }
 
     /// Keeps the media pool entry of `timeline_id` (its duration, video and
@@ -104,6 +168,27 @@ impl Session {
             return;
         };
         self.project.sync_compound_meta(media_id);
+    }
+}
+
+/// Fills in the media fields that projects saved by older versions lack,
+/// reading the files while they are still reachable.
+pub fn complete_legacy_media(project: &mut Project) {
+    for item in project.media_pool.values_mut() {
+        if item.compound.is_some() {
+            continue;
+        }
+        // Projects saved before `MediaMeta::audio_streams`.
+        if item.meta.has_audio && item.meta.audio_streams == 0 {
+            item.meta.audio_streams =
+                vv_media::audio_streams(&item.path).map_or(1, |s| s.len() as u16);
+        }
+        // Projects saved before `MediaMeta::file`.
+        if item.meta.file == MediaFileInfo::default()
+            && let Ok(file) = vv_media::probe_file_info(&item.path)
+        {
+            item.meta.file = file;
+        }
     }
 }
 

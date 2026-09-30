@@ -1,6 +1,6 @@
 # MCP_SERVER — Model Context Protocol server (Vikunja #13)
 
-**Status:** planned, not started. `SESSION_LAYER.md` is done (branch `session_layer`); see its deviations.
+**Status:** done on branch `mcp_server` (based on `session_layer`), not merged.
 
 An MCP server that lets an agent drive Venturi: import media, build
 timelines, cut, add titles/transitions, save, export, plus visual feedback
@@ -93,8 +93,8 @@ This plan assumes its steps 1-4 are done.
   send an `McpRequest` and await the reply; schemas via `schemars`.
 - Same server code for both transports: stdio (headless) and one socket
   connection (attach). The tokio runtime lives on its own thread.
-- **Ids**: strings. `MediaId`/`TimelineId`/`FolderId` via
-  `KeyData::as_ffi` (u64 would overflow JS-safe integers),
+- **Ids**: strings. `MediaId`/`TimelineId`/`FolderId` via `Id::raw`
+  (u64 would overflow JS-safe integers; stable across undo/redo),
   `ClipId`/`MarkerId`/`LinkGroupId` from their `u64`. Clips are addressed
   by `(timeline_id, clip_id)`; the track index is looked up, since it can
   change under the agent's feet in attach mode.
@@ -199,14 +199,177 @@ speed ramps, OTIO export, playback control.
 | # | Step | Commit |
 |---|------|--------|
 | 1 | `SESSION_LAYER.md` steps 1-4 (edit layer, `vv-session`, jobs + events) | see that plan |
-| 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | |
-| 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | |
-| 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | |
-| 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | |
-| 6 | `docs/MCP.md` | |
+| 2 | `vv-mcp` crate: `ToolCall`/`ToolResult`, `dispatch` over `Session`, headless `vv-app mcp` loop; dispatch tests | 555241f |
+| 3 | rmcp over stdio; state, project, timeline and edit tools; manual test with Claude Code | 5e774af, db8d234 |
+| 4 | `render_frame` (single-frame export path), `get_audio_levels`, export tools | 0d2e53c |
+| 5 | GUI attach: setting/flag, socket listener, `--attach` bridge, gesture deferral, indicator, `screenshot_ui` | 4175889, bbb4ad3, ad835ff, 7407afd |
+| 6 | `docs/MCP.md` | ebbfc94 |
 
 Each step builds and passes `timeout 300 cargo test` on its own. The risk
 sits in step 1 (the session refactor); steps 2-6 only add code.
+
+## Step 2 notes
+
+- No `McpHost` trait: a concrete channel (`vv_mcp::channel(notify)` →
+  `McpHandle` for the transport, `McpInbox` for the owner of the
+  `Session`) serves both hosts; `notify` is the GUI's repaint request.
+  The inbox's session waker holds the sender weakly, so dropping the last
+  handle still ends `run_headless`.
+- `run_headless` lives in vv-mcp; the `vv-app mcp` subcommand that starts it
+  comes with the stdio transport in step 3 (without a transport nobody could
+  talk to it).
+- `Session` is not `Send` (`History` holds `Box<dyn Command>`): the host
+  owns it on its thread, the tokio runtime of step 3 goes on another one.
+- First tools, enough to exercise immediate and deferred calls:
+  `get_project`, `new_project`, `open_project`, `save_project`,
+  `import_media` (answers when the import job ends, listing media already
+  in the pool too), `create_timeline`, `undo`, `redo`.
+- `undo`/`redo` do not resync timeline pool entries (which timeline a step
+  touched is unknown); only matters once compound clips are exposed (v2).
+
+## Step 3 notes
+
+- `vv-app mcp [project.vvproj]` serves 28 tools over stdio (rmcp 3.4.1,
+  tokio current-thread runtime on its own thread). Claude Code:
+  `claude mcp add venturi -- /path/to/vv-app mcp`.
+- Tracks are addressed by the names the user sees (`V1`, `A2`), clips by id
+  alone (the track is looked up). Every editing tool validates all its
+  arguments before touching the project and runs as one undo step; if it
+  still fails midway, what it applied is undone.
+- `vv_core::edit` gained `move_clips`, `trim_range`/`grown_range`/`trim_clip`
+  (moved out of `timeline_ui`, which now uses them) and `split_clips`
+  returns the right halves.
+- Not done from the v1 list, left for later: `set_active_timeline` (a GUI
+  notion, goes with `get_state` in step 5); the `folder` argument of
+  `import_media`; `insert_clip` insert (ripple) mode — only overwrite, a
+  ripple insert needs a new command; `set_transition`; speed, blend mode and
+  filters in `set_clip_properties`.
+- Tested end to end: a scripted JSON-RPC client over the real binary's
+  stdio, an in-process rmcp client test, and Claude Code itself
+  (`claude-local.sh -p` with `--mcp-config`) importing, building a
+  timeline, ripple-deleting a second, adding a title and saving — the saved
+  project reopened as expected.
+
+## Step 4 notes
+
+- `render_frame` decodes through the export's `StreamingFrameProvider` and
+  composites with `Compositor::render_layers` (same shaders, read back as
+  RGBA instead of I420). A test checks it returns exactly the asked frame
+  (luma-numbered frames, conformed source offset). One headless compositor
+  is created on first use and shared.
+- `get_audio_levels`: `vv_session::analysis`. A media stream is decoded
+  only up to the end of the range, resampled to 48 kHz; the timeline source
+  uses the export mix (`mix_audio_track`, which still decodes whole files:
+  audit §1.6). Levels floored at -120 dBFS; max 20 000 windows.
+- Heavy calls run on a thread and come back as `Pending::Worker`, which the
+  host polls after every tick; the worker wakes the host through the
+  session waker.
+- `export`/`export_status`/`cancel_export` by job id. `Session::export`
+  now refuses a second concurrent export (before, it silently replaced the
+  running one, whose end was then never reported); a finished export that
+  `tick` has not collected yet is no longer cancellable.
+- Agent test (plain `claude -p` with `--mcp-config`): found the two pauses
+  of a test file with `get_audio_levels`, removed them with one
+  `delete_ranges` ripple call, checked with render_frame and the timeline
+  levels, exported; ffmpeg confirms 3.6 s and no silence left.
+
+## Step 5 notes
+
+- Settings > Integrations ("Let AI agents work in this window (MCP)", off
+  by default) or `--mcp` for one run. The socket is
+  `$XDG_RUNTIME_DIR/venturi/mcp-<pid>.sock` (fallback
+  `$TMPDIR/venturi-$USER`), dir 0700, socket 0600; sockets nobody answers on
+  are removed when an editor starts or a bridge looks for one. One tokio
+  current-thread runtime per editor serves every connection.
+- `vv-app mcp --attach [--pid N]` pipes stdio to it. It must not use
+  `io::copy`: between two descriptors it may `splice`, and replies stalled
+  when stdout was a pipe to `podman exec` (clients timed out).
+- Editor host (`vv-app/src/mcp_host.rs`): calls that change the project wait
+  while the user has the pointer down / a timeline gesture / an open edit
+  group, so they never merge into the user's undo step; they are refused
+  while the unsaved-changes, OTIO-merge or forced-relink dialog waits;
+  `new_project`/`open_project` are refused over unsaved changes. Agent jobs
+  (imports, OTIO) do not move the user's view or warnings; the agent's
+  export shows in the progress window. `get_state`, `screenshot_ui` (next
+  `Event::Screenshot`) and `set_active_timeline` are answered by the
+  editor; headless they return an error.
+- `Session::finish_otio_import` now reports through `OtioImported` /
+  `OtioCancelled`, so the editor and an agent waiting on the same import
+  both get the outcome.
+- Every MCP edit names its undo step after the tool (a ripple
+  `delete_ranges` was listed as its first command, "SplitClips").
+- Toolbar: an accent "● MCP" while a client is connected, tooltip with the
+  last tool called.
+- Tested: `tests/mcp_host.rs` (8 tests), socket tests, and Claude Code on the
+  host driving the editor in the podman container through
+  `podman exec -i venturi-session vv-app mcp --attach`: import, timeline
+  shown with set_active_timeline, silences removed, screenshot_ui (the
+  indicator visible), undo/redo.
+- Not done: Windows named pipe (#15), Flatpak socket path (#1).
+
+## Step 7: calls answered without UI frames (done: f7ec2be, 272e227)
+
+**Problem.** In the editor the calls are handled inside `ui()`. On Wayland a
+window that is hidden or on another workspace gets no frame callbacks, so
+no frame runs and calls wait until the window is shown (a `get_state` waited
+over 2 minutes). eframe 0.36 has `App::logic()` for hidden windows, but it
+only runs when the platform reports occlusion, and winit does not on
+Wayland ("Wayland: Unsupported"). The user works elsewhere while the agent
+runs, so the calls must be answered without frames.
+
+**Design: the session is checked out, not owned, by the UI.**
+- The `Session` lives in a shared slot (`Mutex<Option<Session>>` + `Condvar`).
+  Every eframe entry point (`logic`, `ui`, `raw_input_hook`, `save`,
+  `on_exit`) checks it out into `VenturiApp::session` at its start and checks
+  it back in at its end, so all the existing `self.session` code stays as it
+  is. Outside those calls the field holds a placeholder (a debug assertion
+  catches any use of it).
+- An **MCP host thread** replaces `poll_mcp`: it drains the inbox, takes the
+  session from the slot, runs the calls, ticks the session, puts it back.
+  With the window drawing, it slips in between two frames (the UI waits for
+  it at most the length of a call); with the window hidden, it just runs.
+- `Session` must be `Send`: `Command: Send` (and `Send + Sync` on the
+  `SetClipValue` accessor closures); everything else in it already is.
+- **What the UI publishes** into the shared host state at the end of each
+  frame: mid-gesture (pointer down / timeline gesture / edit group), a
+  dialog waiting for the user, the `GuiState` for `get_state`. The host
+  thread holds project-changing calls while mid-gesture and refuses them
+  while a dialog waits, as now. With the window hidden, the last published
+  values apply (pointer up, no gesture).
+- **Calls that need the UI:** `get_state` is answered from the published
+  snapshot; `set_active_timeline` is queued and applied at the next frame
+  (answered at once, "shown when the window is drawn"); `screenshot_ui`
+  waits for a drawn frame and fails after ~10 s with "the window is not
+  being drawn (hidden?)".
+- **Session events:** whoever ticks (UI or host thread) first resolves the
+  pending MCP calls (shared), then the UI-side handling (thumbnails,
+  warnings, opening an OTIO timeline for the user's own jobs) runs in the UI
+  at its next frame from a queue.
+- **Changes made while the UI slept** reconcile as today through
+  `History::generation` (render-ahead, audio). A project replaced by the
+  agent bumps a session epoch; the UI calls `reset_for_replaced_project`
+  when it sees it change. An agent export found running shows the progress
+  window.
+- Tests: the host thread answers calls with no UI frame at all (hidden
+  window), holds edits while a published gesture is on, and a UI frame
+  after agent edits reconciles (render-ahead generation, replaced project).
+
+Implementation notes (step 7):
+- The slot exists only while MCP is on; with it off, nothing changes.
+- The UI publishes gesture/dialog/state in `mcp_checkin`, catches up in
+  `mcp_checkout` (events, epoch, timeline to show, export window).
+- Whoever ticks the session forwards the events to the other side
+  (`events_for_host` / `events_for_ui`, `SessionEvent: Clone`).
+- Timeline revisions are cached in the session by `ChangeMark` (epoch,
+  history generation, outside-history changes).
+- `save_project` writes a copy and `open_project` reads (and completes the
+  legacy media of) the file before taking the session, so the UI is not
+  held during the I/O.
+- Verified: unit tests answer calls with no UI frame at all; in the
+  container, Claude Code drove the drawn window, and raw calls (including an
+  undo) were answered with the X11 window unmapped, the UI catching up when
+  mapped again. The Wayland hidden-window case itself is to be confirmed on
+  a real session.
 
 ## Open points
 

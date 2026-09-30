@@ -39,6 +39,7 @@ impl Default for Waker {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum SessionEvent {
     ImportStarted {
         job: JobId,
@@ -67,6 +68,10 @@ pub enum SessionEvent {
         job: JobId,
         error: String,
     },
+    /// The host dropped an import waiting for a decision.
+    OtioCancelled {
+        job: JobId,
+    },
     RelinkFinished {
         job: JobId,
         end: RelinkEnd,
@@ -77,6 +82,7 @@ pub enum SessionEvent {
     },
 }
 
+#[derive(Debug, Clone)]
 pub struct OtioMerged {
     /// The first one is the natural one to open.
     pub timelines: Vec<TimelineId>,
@@ -85,6 +91,7 @@ pub struct OtioMerged {
     pub warnings: Vec<OtioWarning>,
 }
 
+#[derive(Debug, Clone)]
 pub enum RelinkEnd {
     Done {
         relinked: Vec<MediaId>,
@@ -107,6 +114,8 @@ pub(crate) struct Jobs {
     otio_merge: Option<(JobId, PendingOtioMerge)>,
     relink: Option<(JobId, relink_job::RelinkJob)>,
     export: Option<RunningExport>,
+    /// Every export of the session, readable after it ended.
+    export_progress: HashMap<JobId, Arc<Mutex<ExportProgress>>>,
 }
 
 struct RunningImport {
@@ -160,6 +169,11 @@ pub fn file_label(path: &Path) -> String {
 impl Session {
     pub fn set_waker(&mut self, waker: Waker) {
         self.waker = waker;
+    }
+
+    /// For work the host runs on its own threads.
+    pub fn waker(&self) -> Waker {
+        self.waker.clone()
     }
 
     /// Collects what the background work produced since the last call.
@@ -367,10 +381,19 @@ impl Session {
 
     /// Completes the import waiting for a decision: `Some(true)` reuses the
     /// pool media with the same file name, `Some(false)` imports them all,
-    /// `None` drops the import.
-    pub fn finish_otio_import(&mut self, reuse_existing: Option<bool>) -> Option<OtioMerged> {
-        let (_, merge) = self.jobs.otio_merge.take()?;
-        Some(self.merge_otio(merge, reuse_existing?))
+    /// `None` drops the import. The outcome comes from the next `tick`.
+    pub fn finish_otio_import(&mut self, reuse_existing: Option<bool>) {
+        let Some((job, merge)) = self.jobs.otio_merge.take() else {
+            return;
+        };
+        let event = match reuse_existing {
+            Some(reuse) => SessionEvent::OtioImported {
+                job,
+                result: self.merge_otio(merge, reuse),
+            },
+            None => SessionEvent::OtioCancelled { job },
+        };
+        self.jobs.events.push(event);
     }
 
     fn poll_otio(&mut self) {
@@ -597,12 +620,34 @@ impl Session {
             cancel,
             handle,
         });
+        self.jobs.export_progress.insert(job, progress.clone());
         Some((job, progress))
     }
 
-    pub fn cancel_export(&self) {
-        if let Some(running) = &self.jobs.export {
-            running.cancel.store(true, Ordering::Relaxed);
+    pub fn is_exporting(&self) -> bool {
+        self.jobs.export.is_some()
+    }
+
+    pub fn running_export(&self) -> Option<JobId> {
+        self.jobs.export.as_ref().map(|running| running.job)
+    }
+
+    pub fn export_progress(&self, job: JobId) -> Option<Arc<Mutex<ExportProgress>>> {
+        self.jobs.export_progress.get(&job).cloned()
+    }
+
+    /// `false` if `job` is not the running export.
+    pub fn cancel_export(&self, job: JobId) -> bool {
+        // Done but not collected by `tick` yet: nothing left to cancel.
+        let done = self
+            .export_progress(job)
+            .is_some_and(|p| p.lock().unwrap().done);
+        match &self.jobs.export {
+            Some(running) if running.job == job && !done => {
+                running.cancel.store(true, Ordering::Relaxed);
+                true
+            }
+            _ => false,
         }
     }
 

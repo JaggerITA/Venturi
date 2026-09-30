@@ -258,6 +258,20 @@ and playhead onto them and owns the undo grouping.
 - **Export**: a dedicated thread on a clone of `Project`, with shared
   progress and cancellation.
 
+## MCP server
+
+`vv-mcp` turns MCP tool calls into `ToolCall`s and runs them with
+`dispatch` on a `vv_session::Session`; the editing goes through
+`vv_core::edit`, like the UI's. The transport (rmcp, on a tokio thread) only
+submits calls through a channel (`McpHandle` → `McpInbox`); whoever owns the
+`Session` answers them. Headless (`vv-app mcp`) that is `run_headless`; in
+the editor window it is `vv-app/src/mcp_host.rs`, between two frames, which
+holds project-changing calls while the user is mid-gesture (so they never
+join the user's undo group) and refuses them while a dialog waits. Slow calls
+(`render_frame`, `get_audio_levels`) run on a worker thread and are polled.
+The window serves on a 0600 Unix socket; `vv-app mcp --attach` bridges a
+client's stdio to it. Usage: [docs/MCP.md](docs/MCP.md).
+
 ## Cargo workspace layout
 
 ```
@@ -268,7 +282,8 @@ venturi/
     vv-render/   # wgpu compositor, wgsl shaders, text
     vv-audio/    # mixer, resample, time-stretch, cpal output
     vv-session/  # UI-free application core: export, import/relink workers
-    vv-app/      # egui UI (timeline, viewer, panels), playback
+    vv-mcp/      # MCP server: tools over a Session, stdio and socket transports
+    vv-app/      # egui UI (timeline, viewer, panels), playback, MCP editor host
 ```
 
 ## Feature status

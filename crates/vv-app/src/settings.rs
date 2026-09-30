@@ -523,6 +523,8 @@ pub struct Settings {
     pub recording_format: Option<AudioFileFormat>,
     /// Where the takes go; `None` is `Recordings` next to the project file.
     pub recording_dir: Option<PathBuf>,
+    /// Serve MCP on a local socket for `vv-app mcp --attach`.
+    pub mcp_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -550,6 +552,7 @@ impl Default for Settings {
             input_device: None,
             recording_format: None,
             recording_dir: None,
+            mcp_enabled: false,
         }
     }
 }
@@ -605,6 +608,8 @@ struct SettingsFile {
     recording_format: Option<String>,
     #[serde(default)]
     recording_dir: Option<PathBuf>,
+    #[serde(default)]
+    mcp_enabled: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -679,6 +684,7 @@ impl Settings {
         settings.recording_dir = file.recording_dir;
         settings.compressor_presets = readable_presets(file.compressor_presets);
         settings.eq_presets = readable_presets(file.eq_presets);
+        settings.mcp_enabled = file.mcp_enabled.unwrap_or(false);
         let defaults = PanelLayout::default();
         settings.panels = PanelLayout {
             media_pool_open: file
@@ -763,6 +769,7 @@ impl Settings {
             input_device: self.input_device.clone(),
             recording_format: self.recording_format.map(|f| f.id().to_owned()),
             recording_dir: self.recording_dir.clone(),
+            mcp_enabled: Some(self.mcp_enabled),
         };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {

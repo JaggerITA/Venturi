@@ -193,20 +193,19 @@ Every change to the project is a history step, so the dirty state is just
   removed timeline, stops a removed media's preview, prunes the pool
   selection/rename/expanded folders.
 
-### Aligning `mcp_server`
+### Aligning `mcp_server` (done in the merge of master into `mcp_server`)
 
-- Export: `mcp_server` already returns `Option` and cancels per job; keep
-  its version.
-- Resync: `mcp_server` moved the reset point to `install_project` and added
-  `epoch`, but does not reset `synced_timeline_generation`. Decide there
-  whether to reset it in `install_project` or to gate the resync on
-  `change_mark()` (epoch + generation) like the timeline revisions.
-- `one_step` in `vv-mcp/src/edit_tools.rs` keeps working unchanged.
-- Ids: `vv-mcp/src/ids.rs` goes through `KeyData::from_ffi`; switch to
-  `Id::raw`/`Id::from_raw` (still decimal strings). Ids an agent holds now
-  survive undo/redo.
-- `mark_unsaved` and its counter in `ChangeMark` are gone: a change mark is
-  `(epoch, generation)`. `Session::create_timeline` becomes an
-  `AddEntities::timeline` applied through the history.
+- Export: kept `mcp_server`'s version (`Option`, cancel per job, a
+  message when an export is already running).
+- Resync: the reset landed in `install_project`.
+- `ChangeMark` is `(epoch, generation)`; `Session::create_timeline` is an
+  `AddEntities` step, so the MCP `create_timeline` is undoable.
+- Ids: `vv-mcp/src/ids.rs` uses `Id::raw`/`Id::from_raw`; `slotmap` is gone
+  from every crate but the legacy reader.
+- The MCP host thread no longer ticks mid-gesture (same reason as the UI).
+- `edit::delete_media_ranges` groups its per-track lifts.
+- `History::close_group` renames a single-step group too: once edit
+  operations group themselves, a tool's `one_step` could hold just one
+  step and lost its label.
 - The import tool keeps using `import_media`; the media join the job's step,
   not the tool's `one_step`.

@@ -43,6 +43,7 @@ pub(crate) struct PendingDialog {
 /// The export window: open from the start of an export until closed, so the
 /// outcome stays readable after the job is over.
 pub(crate) struct ExportUiState {
+    pub(crate) job: vv_session::JobId,
     pub(crate) progress: Arc<Mutex<export::ExportProgress>>,
 }
 
@@ -83,9 +84,7 @@ impl VenturiApp {
 
     /// Collects the outcome of the session's background jobs.
     pub(crate) fn poll_session(&mut self, ctx: &egui::Context) {
-        for event in self.session.tick() {
-            self.handle_session_event(event);
-        }
+        self.process_session_events();
         // Without a new event egui would not redraw: the progress bars
         // would stay frozen.
         if self.session.has_running_jobs() {
@@ -93,24 +92,38 @@ impl VenturiApp {
         }
     }
 
-    fn handle_session_event(&mut self, event: vv_session::SessionEvent) {
+    fn process_session_events(&mut self) {
+        for event in self.session.tick() {
+            self.mcp_session_event(&event);
+            self.handle_session_event(event);
+        }
+    }
+
+    pub(crate) fn handle_session_event(&mut self, event: vv_session::SessionEvent) {
         use vv_session::{RelinkEnd, SessionEvent as E};
         match event {
-            E::ImportStarted { .. } => self.import_warnings.clear(),
+            // The agent gets the outcome of its own jobs; the user's view and
+            // warnings stay as they are.
+            E::ImportStarted { job } if !self.is_agent_job(job) => self.import_warnings.clear(),
+            E::ImportStarted { .. } => {}
             E::MediaAdded { job, media_id } => {
-                let meta = self.session.project.media_pool[media_id].meta.clone();
-                if meta.has_video {
-                    self.ensure_timeline_for(&meta, Some(job));
-                } else {
-                    self.ensure_timeline_audio_only(Some(job));
+                if !self.is_agent_job(job) {
+                    let meta = self.session.project.media_pool[media_id].meta.clone();
+                    if meta.has_video {
+                        self.ensure_timeline_for(&meta, Some(job));
+                    } else {
+                        self.ensure_timeline_audio_only(Some(job));
+                    }
                 }
                 self.enqueue_media_background_jobs(media_id);
             }
             E::ImportFinished {
-                imported, errors, ..
+                job,
+                imported,
+                errors,
             } => {
                 // Everything was already in the pool: nothing started.
-                if imported.is_empty() && errors.is_empty() {
+                if (imported.is_empty() && errors.is_empty()) || self.is_agent_job(job) {
                     return;
                 }
                 self.import_warnings = errors;
@@ -121,8 +134,12 @@ impl VenturiApp {
                     self.media_pool_state.select_only(imported);
                 }
             }
-            E::OtioNeedsDecision { .. } => {}
-            E::OtioImported { result, .. } => self.apply_otio_merged(result),
+            E::OtioNeedsDecision { .. } | E::OtioCancelled { .. } => {}
+            E::OtioImported { job, result } => {
+                let by_agent = self.is_agent_job(job);
+                self.apply_otio_merged(result, by_agent)
+            }
+            E::OtioFailed { job, .. } if self.is_agent_job(job) => {}
             E::OtioFailed { error, .. } => {
                 self.project_error =
                     Some(t!("project.otio_import_failed", error = error).into_owned())
@@ -523,18 +540,20 @@ impl VenturiApp {
     /// Completes the import waiting for the reuse-media dialog (`None`:
     /// cancelled).
     pub(crate) fn finish_otio_import(&mut self, reuse_existing: Option<bool>) {
-        if let Some(result) = self.session.finish_otio_import(reuse_existing) {
-            self.apply_otio_merged(result);
-        }
+        self.session.finish_otio_import(reuse_existing);
+        self.process_session_events();
     }
 
-    /// The first imported timeline is opened.
-    fn apply_otio_merged(&mut self, result: vv_session::OtioMerged) {
+    /// The first imported timeline is opened, unless the agent imported it.
+    fn apply_otio_merged(&mut self, result: vv_session::OtioMerged, by_agent: bool) {
         for &media_id in &result.added_media {
             self.enqueue_media_background_jobs(media_id);
         }
         if let Some(folder) = result.folder {
             self.media_pool_state.expanded.insert(folder);
+        }
+        if by_agent {
+            return;
         }
         self.import_warnings = result.warnings.iter().map(otio_warning_text).collect();
         if let Some(&timeline_id) = result.timelines.first() {
@@ -639,7 +658,8 @@ impl VenturiApp {
 
     /// After the session switched project: the UI state tied to the old
     /// one goes, the first timeline opens.
-    fn reset_for_replaced_project(&mut self) {
+    pub(crate) fn reset_for_replaced_project(&mut self) {
+        self.seen_epoch = self.session.epoch();
         self.timeline_id = self.session.project.timelines.keys().next();
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();
@@ -727,11 +747,14 @@ impl VenturiApp {
         settings: export::ExportSettings,
         range: std::ops::Range<FrameIdx>,
     ) {
-        let Some((_, progress)) = self.session.export(timeline_id, settings, range) else {
-            return;
-        };
         self.pause_proxies_for_export();
-        self.export = Some(ExportUiState { progress });
+        match self.session.export(timeline_id, settings, range) {
+            Some((job, progress)) => self.export = Some(ExportUiState { job, progress }),
+            None => {
+                self.resume_proxies_after_export();
+                self.project_error = Some(t!("export.already_running").into_owned());
+            }
+        }
     }
 
     pub(crate) fn show_import_warnings(&mut self, ui: &mut egui::Ui) {
@@ -840,7 +863,7 @@ impl VenturiApp {
                 }
                 ui.horizontal(|ui| {
                     if !done && ui.button(t!("common.cancel")).clicked() {
-                        self.session.cancel_export();
+                        self.session.cancel_export(state.job);
                     }
                     if done && ui.button(t!("common.close")).clicked() {
                         should_close = true;

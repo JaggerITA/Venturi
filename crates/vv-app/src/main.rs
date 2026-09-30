@@ -13,6 +13,7 @@ mod export_dialog;
 mod forced_relink_dialog;
 mod i18n;
 mod keyframe_editor;
+mod mcp_host;
 mod media_pool;
 mod media_pool_ui;
 mod mix_buffers;
@@ -369,6 +370,13 @@ struct VenturiApp {
     settings_path: Option<PathBuf>,
     settings_dialog: Option<settings_dialog::SettingsDialog>,
     about_open: bool,
+    /// Serving MCP to agents (see `mcp_host`); follows the setting.
+    mcp: Option<mcp_host::McpHost>,
+    /// `Session::epoch` last caught up with: the agent may replace the
+    /// project while the UI is not drawing.
+    seen_epoch: u64,
+    /// `--mcp` on the command line: served whatever the setting says.
+    mcp_forced: bool,
     #[cfg(target_os = "linux")]
     wayland_dnd: Option<wayland_dnd::WaylandDnd>,
     #[cfg(target_os = "macos")]
@@ -451,6 +459,9 @@ impl Default for VenturiApp {
             settings_path: None,
             settings_dialog: None,
             about_open: false,
+            mcp: None,
+            seen_epoch: 0,
+            mcp_forced: false,
             #[cfg(target_os = "linux")]
             wayland_dnd: None,
             #[cfg(target_os = "macos")]
@@ -1181,18 +1192,14 @@ impl VenturiApp {
         fps: vv_core::Rational,
         resolution: (u32, u32),
     ) -> TimelineId {
-        let timeline = vv_core::Timeline {
+        self.session.create_timeline(vv_core::Timeline {
             name,
             fps,
             resolution,
             tracks: vec![Track::new(TrackKind::Video), Track::new(TrackKind::Audio)],
             markers: Vec::new(),
             master: Default::default(),
-        };
-        let mut add = vv_core::AddEntities::new(vv_core::CommandLabel::NewTimeline);
-        let (id, _) = add.timeline(&mut self.session.project, timeline, None);
-        self.session.apply(Box::new(add));
-        id
+        })
     }
 
     /// Opens a timeline as the top level one: the breadcrumb of the compound
@@ -1389,6 +1396,7 @@ impl VenturiApp {
                 generator,
                 video_track,
                 start,
+                None,
             );
         }
         self.session
@@ -1747,7 +1755,9 @@ impl VenturiApp {
     /// Transform handles of the first selected video clip, if it is under
     /// the playhead and the viewer shows the timeline stopped.
     fn open_settings(&mut self, section: settings_dialog::Section) {
-        self.settings_dialog = Some(settings_dialog::SettingsDialog::new(section));
+        let mut dialog = settings_dialog::SettingsDialog::new(section);
+        dialog.mcp_forced = self.mcp_forced;
+        self.settings_dialog = Some(dialog);
     }
 
     fn show_settings_dialog(&mut self, ctx: &egui::Context) {
@@ -1756,6 +1766,9 @@ impl VenturiApp {
         };
         let before = self.settings.clone();
         let response = dialog.show(ctx, &mut self.settings);
+        if self.settings.mcp_enabled != before.mcp_enabled {
+            self.apply_mcp_setting(ctx);
+        }
         if !response.open {
             self.settings_dialog = None;
         }
@@ -2487,13 +2500,16 @@ impl VenturiApp {
         };
         let playhead = self.timeline_state.playhead;
         let selected = &self.timeline_state.selected;
-        let targets = vv_core::edit::split_clips(
+        let targets: Vec<(usize, ClipId)> = vv_core::edit::split_clips(
             &mut self.session.project,
             &mut self.session.history,
             timeline_id,
             playhead,
             (!selected.is_empty()).then_some(selected),
-        );
+        )
+        .into_iter()
+        .map(|(left, _)| left)
+        .collect();
 
         // Selects the *left* half (the one under the playhead would be the
         // right one): after a cut one usually works on what comes before.
@@ -2742,6 +2758,34 @@ fn paint_toolbar_icon(
     }
 }
 
+/// Shown while an MCP client is connected: an accent dot and "MCP".
+fn agent_indicator(ui: &mut egui::Ui, last_tool: Option<&str>) {
+    let galley = ui.painter().layout_no_wrap(
+        "MCP".to_owned(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        theme::ACCENT,
+    );
+    let size = egui::vec2(18.0 + galley.size().x, ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.circle_filled(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        3.5,
+        theme::ACCENT,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::ACCENT,
+    );
+    response.on_hover_ui(|ui| {
+        ui.label(t!("toolbar.mcp_connected"));
+        if let Some(tool) = last_tool {
+            ui.label(t!("toolbar.mcp_last_tool", tool = tool));
+        }
+    });
+}
+
 /// Hand-drawn magnet: on some platforms (Asahi) egui's fonts
 /// do not have the 🧲 glyph.
 fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
@@ -2967,13 +3011,43 @@ impl eframe::App for VenturiApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // With MCP on, the session lives in a slot shared with the agent's
+        // host thread between frames (see `mcp_host`).
+        self.mcp_checkout();
+        self.frame_ui(ui, frame);
+        self.mcp_checkin(&ui.ctx().clone());
+    }
+
+    /// Called by eframe on close and periodically (see
+    /// `auto_save_interval`): the panel layout updated on every frame
+    /// in `ui()` thus ends up on disk without writing it on every resize.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.persist_settings();
+    }
+}
+
+impl VenturiApp {
+    fn frame_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_close_request(&ui.ctx().clone());
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
         // What the session applies would land inside the open group.
         if self.edit_drag_group.is_none() && !self.timeline_state.holds_undo_group() {
             self.poll_session(&ui.ctx().clone());
+        }
+        let screenshots: Vec<std::sync::Arc<egui::ColorImage>> = ui.ctx().input(|i| {
+            i.raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for image in screenshots {
+            self.mcp_screenshot(&image);
         }
         self.poll_thumbnails(&ui.ctx().clone());
         if self
@@ -3049,6 +3123,9 @@ impl eframe::App for VenturiApp {
                         ToolbarIcon::Properties,
                         &t!("menu.inspector"),
                     );
+                    if let Some(mcp) = self.mcp.as_ref().filter(|mcp| mcp.clients() > 0) {
+                        agent_indicator(ui, mcp.last_tool());
+                    }
                 });
             });
         });
@@ -3615,13 +3692,6 @@ impl eframe::App for VenturiApp {
             ui.ctx().request_repaint();
         }
     }
-
-    /// Called by eframe on close and periodically (see
-    /// `auto_save_interval`): the panel layout updated on every frame
-    /// in `ui()` thus ends up on disk without writing it on every resize.
-    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        self.persist_settings();
-    }
 }
 
 fn app_icon() -> Option<egui::IconData> {
@@ -3644,9 +3714,16 @@ fn app_icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("mcp") {
+        run_mcp_command(&args[1..]);
+    }
+    let mcp_forced = args.iter().any(|a| a == "--mcp");
+    args.retain(|a| a != "--mcp");
+    let first = args.into_iter().next();
     // Optional argument: path of a video to import immediately at startup
     // (handy for debugging/smoke tests, as well as for command-line use).
-    let startup_path = std::env::args().nth(1).map(PathBuf::from);
+    let startup_path = first.map(PathBuf::from);
     std::thread::spawn(vv_render::text::warm_up);
     // The first NVENC check initializes CUDA: better not in the UI.
     std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
@@ -3687,6 +3764,7 @@ fn main() -> eframe::Result<()> {
                 app.settings = settings::Settings::load(path);
             }
             app.settings.language.apply();
+            app.mcp_forced = mcp_forced;
             // Opened immediately: opening the audio stream blocks for hundreds of ms.
             app.timeline_audio = Some(TimelineAudio::new());
             if let Some(render_state) = cc.wgpu_render_state.clone() {
@@ -3703,9 +3781,57 @@ fn main() -> eframe::Result<()> {
             if let Some(path) = startup_path {
                 app.import_media(path);
             }
+            app.apply_mcp_setting(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
+}
+
+/// `vv-app mcp [project.vvproj]`: an MCP server on stdin/stdout, no window.
+/// `vv-app mcp --attach [--pid N]`: the same, served by a running editor.
+/// Stdout carries the protocol: nothing else may print there.
+fn run_mcp_command(args: &[String]) -> ! {
+    if args.first().map(String::as_str) == Some("--attach") {
+        let pid = match args.get(1..) {
+            Some([flag, pid]) if flag == "--pid" => match pid.parse() {
+                Ok(pid) => Some(pid),
+                Err(_) => {
+                    eprintln!("--pid needs a process id, got {pid}");
+                    std::process::exit(2);
+                }
+            },
+            Some([]) | None => None,
+            Some(_) => {
+                eprintln!("usage: vv-app mcp --attach [--pid N]");
+                std::process::exit(2);
+            }
+        };
+        match vv_mcp::bridge_stdio(pid) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    run_mcp_server(args.first().map(PathBuf::from))
+}
+
+fn run_mcp_server(project: Option<PathBuf>) -> ! {
+    let mut session = vv_session::Session::default();
+    if let Some(path) = project
+        && let Err(e) = session.open(&path)
+    {
+        eprintln!("cannot open {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    match vv_mcp::serve_headless_stdio(session) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("MCP server: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]

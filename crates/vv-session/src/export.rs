@@ -20,7 +20,7 @@ use crate::frame_provider::{
     FrameProvider, GpuCompounds, OwnedLayer, media_source_frame, track_layers_at,
 };
 
-const PROJECT_CHANNELS: u16 = 2;
+pub(crate) const PROJECT_CHANNELS: u16 = 2;
 const RENDER_AHEAD_FRAMES: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,6 +365,34 @@ fn render_video_frame(
     Ok(compose_video_frame(compositor, &layers, output))
 }
 
+/// One timeline frame, decoded and composed as the export does it, in RGBA8
+/// at `size` (the timeline's aspect ratio). Frame-accurate: it decodes the
+/// frame itself, nothing comes from a cache.
+pub fn render_frame_rgba(
+    project: &Project,
+    timeline_id: TimelineId,
+    frame: FrameIdx,
+    size: (u32, u32),
+    compositor: &vv_render::Compositor,
+) -> Result<Vec<u8>, ExportError> {
+    let timeline = project
+        .timelines
+        .get(timeline_id)
+        .ok_or(ExportError::TimelineNotFound)?;
+    let mut provider = StreamingFrameProvider::default();
+    let layers = decode_video_frame(
+        project,
+        timeline,
+        &mut provider,
+        compositor,
+        frame,
+        timeline.resolution,
+    )?;
+    let layers: Vec<vv_render::Layer> = layers.iter().map(OwnedLayer::as_render).collect();
+    let output = vv_render::OutputFrame::scaled(size.0, size.1, timeline.resolution);
+    Ok(compositor.render_layers(&layers, output))
+}
+
 /// The layers of the frame, from bottom to top. A missing media frame
 /// (past the real end of the file) leaves out only that layer.
 fn decode_video_frame(
@@ -465,7 +493,7 @@ impl AudioInterleaver {
 
 /// Mix of all the audio tracks at `PROJECT_SAMPLE_RATE`/`PROJECT_CHANNELS`,
 /// over the timeline frames in `range`: the same `mix_range` as the preview.
-fn mix_audio_track(
+pub(crate) fn mix_audio_track(
     project: &Project,
     timeline: &Timeline,
     range: std::ops::Range<FrameIdx>,

@@ -50,6 +50,9 @@ is where the time goes, so that is the part that has to be perfect.
   timeline, no node graph to wire up.
 - **Interoperability.** Timelines move in both directions through
   OpenTimelineIO, tested with DaVinci Resolve: cut here, grade there.
+- **Drivable by AI agents.** A built-in MCP server lets an agent such as
+  Claude Code import, cut, measure audio, look at frames and export, on its
+  own or in the window you are editing. See [docs/MCP.md](docs/MCP.md).
 - **Linux first.** Developed and tested on Linux, not ported to it. Also runs
   on Apple Silicon Macs, and possibly Windows.
 

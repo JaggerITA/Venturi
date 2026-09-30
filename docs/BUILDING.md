@@ -83,6 +83,9 @@ A working graphics backend is required at runtime (Vulkan on Linux, through
 `mesa-vulkan-drivers` or the proprietary GPU driver): without one, `wgpu`
 finds no adapter and the window does not open.
 
+`vv-app mcp` runs the MCP server for AI agents instead of the window, and
+`vv-app --mcp` opens the window with it on: see [MCP.md](MCP.md).
+
 To install the binary, the `.desktop` file and the icons into `~/.local`
 (or `/usr/local` as root):
 

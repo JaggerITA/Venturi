@@ -1,0 +1,22 @@
+# Usage (from this directory):
+#   MEDIA_DIR=/path/to/videos podman compose run --rm whisper "file.mkv" --stream 0 --language it
+# With an NVIDIA GPU (NVIDIA Container Toolkit with CDI), use the whisper-gpu service instead.
+# Output: file.mkv.transcript.json inside MEDIA_DIR.
+services:
+  whisper:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: localhost/vv-whisper:latest
+    volumes:
+      - ${MEDIA_DIR:-.}:/work:z
+      # Model cache shared across runs (medium ≈ 1.5 GB, crisper ≈ 3 GB, downloaded once).
+      - ${HOME}/.cache/whisper-models:/models:z
+  whisper-gpu:
+    extends: whisper
+    build:
+      args:
+        CUDA: "1"
+    image: localhost/vv-whisper-gpu:latest
+    devices:
+      - nvidia.com/gpu=all

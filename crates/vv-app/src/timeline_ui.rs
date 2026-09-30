@@ -463,6 +463,11 @@ impl TimelineState {
     }
 
     /// Sets selection and anchor from outside (e.g. after a cut).
+    /// A drag on the timeline is in progress.
+    pub fn gesture_active(&self) -> bool {
+        self.gesture.is_some()
+    }
+
     pub fn set_selection(&mut self, selected: BTreeSet<ClipKey>, anchor: Option<ClipKey>) {
         self.selected = selected;
         self.selection_anchor = anchor;
@@ -4680,9 +4685,10 @@ fn finish_trim(
 ) -> PendingAction {
     let new_value = trimmed_primary_new_value.unwrap_or(t.original_value);
     let mut trims = vec![(t.clip_id, t.track_index, t.edge, new_value)];
-    let mut overwritten: Vec<_> = grown_range(&visual.clip, visual.track_index, t.edge, new_value)
-        .into_iter()
-        .collect();
+    let mut overwritten: Vec<_> =
+        vv_core::edit::grown_range(&visual.clip, visual.track_index, t.edge, new_value)
+            .into_iter()
+            .collect();
     for &(other_id, other_track, offset, edge) in &t.followers {
         let Some(other) = visuals
             .iter()
@@ -4692,7 +4698,12 @@ fn finish_trim(
         };
         let other_value = new_value + offset;
         trims.push((other_id, other_track, edge, other_value));
-        overwritten.extend(grown_range(&other.clip, other_track, edge, other_value));
+        overwritten.extend(vv_core::edit::grown_range(
+            &other.clip,
+            other_track,
+            edge,
+            other_value,
+        ));
     }
     PendingAction::Trim { trims, overwritten }
 }
@@ -5070,31 +5081,7 @@ fn apply_pending_action(
                 duplicate_clips(project, history, state, timeline_id, &moves);
                 return;
             }
-            // The destinations overwrite what was there; the moved clips stay
-            // out, even at the starting position.
-            let ranges: Vec<(usize, FrameIdx, FrameIdx)> = moves
-                .iter()
-                .filter_map(|&(id, from_track, to_track, start)| {
-                    let len = project.timelines[timeline_id]
-                        .clip(from_track, id)?
-                        .timeline_len;
-                    Some((to_track, start, start + len))
-                })
-                .collect();
-            let exclude: Vec<(usize, ClipId)> = moves
-                .iter()
-                .flat_map(|&(id, from_track, to_track, _)| [(from_track, id), (to_track, id)])
-                .collect();
-            let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
-            vv_core::make_room_for_ranges(project, timeline_id, &ranges, &exclude, &mut commands);
-            commands.push(Box::new(vv_core::MoveClips::new(timeline_id, moves)));
-            history.do_command(
-                project,
-                Box::new(vv_core::CompositeCommand::new(
-                    vv_core::CommandLabel::MoveClips,
-                    commands,
-                )),
-            );
+            vv_core::edit::move_clips(project, history, timeline_id, moves);
         }
         PendingAction::Trim { trims, overwritten } => {
             // The stretch gained by lengthening overwrites what was there; the trimmed
@@ -5433,7 +5420,7 @@ fn apply_pending_action(
                             retimed.timeline_end()
                         }
                     };
-                    grown_range(clip, track_index, TrimEdge::End, new_end)
+                    vv_core::edit::grown_range(clip, track_index, TrimEdge::End, new_end)
                 })
                 .collect();
             let mut commands: Vec<Box<dyn vv_core::Command>> = Vec::new();
@@ -6148,7 +6135,7 @@ fn combined_trim_range(
     let mut followers = Vec::new();
     for &(v, v_edge) in &trimmed {
         let offset = edge_value(&v.clip, v_edge) - primary_value;
-        let (mut o_min, mut o_max) = single_trim_range(project, &v.clip, v_edge);
+        let (mut o_min, mut o_max) = vv_core::edit::trim_range(project, &v.clip, v_edge);
         // Two clips trimmed together on the same track must not
         // lengthen over each other; in a roll, instead, the edge of the
         // neighbor moves with this one.
@@ -6354,60 +6341,6 @@ fn paint_retime_cursor(painter: &egui::Painter, pos: egui::Pos2) {
         egui::FontId::proportional(11.0),
         egui::Color32::WHITE,
     );
-}
-
-/// The neighbors do not limit the trim (they get overwritten on release): only the
-/// source and the opposite edge do.
-fn single_trim_range(project: &Project, clip: &Clip, edge: TrimEdge) -> (FrameIdx, FrameIdx) {
-    match edge {
-        TrimEdge::Start => {
-            // Not past the end minus 1 frame (at least one frame
-            // of content must remain) and not before the start of the source
-            // (source_in cannot go below 0).
-            let min_value = clip.timeline_frame_at(0).max(0);
-            let max_value = clip.timeline_end() - 1;
-            (min_value, max_value.max(min_value))
-        }
-        TrimEdge::End => {
-            // Not past the start plus 1 frame and not past the real duration
-            // of the source (unlimited for a SolidColor generator, which
-            // does not have one).
-            let max_value = media_duration_frames(project, clip)
-                .map(|max_source_out| clip.timeline_frame_at(max_source_out))
-                .unwrap_or(FrameIdx::MAX);
-            let min_value = clip.timeline_start + 1;
-            (min_value, max_value.max(min_value))
-        }
-    }
-}
-
-fn media_duration_frames(project: &Project, clip: &Clip) -> Option<FrameIdx> {
-    match &clip.source {
-        ClipSource::Media(media_id) => project
-            .media_pool
-            .get(*media_id)
-            .map(|item| item.meta.duration_frames),
-        ClipSource::SolidColor | ClipSource::Text | ClipSource::Adjustment => None,
-    }
-}
-
-/// The stretch of timeline a clip takes by lengthening `edge` up to
-/// `new_value`, if it lengthened: `None` if it shortened instead.
-fn grown_range(
-    clip: &Clip,
-    track_index: usize,
-    edge: TrimEdge,
-    new_value: FrameIdx,
-) -> Option<(usize, FrameIdx, FrameIdx)> {
-    match edge {
-        TrimEdge::Start if new_value < clip.timeline_start => {
-            Some((track_index, new_value, clip.timeline_start))
-        }
-        TrimEdge::End if new_value > clip.timeline_end() => {
-            Some((track_index, clip.timeline_end(), new_value))
-        }
-        _ => None,
-    }
 }
 
 /// Snapping threshold, in screen pixels (not in frames:

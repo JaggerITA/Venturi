@@ -30,6 +30,21 @@ settings.recording_dir_other:
 settings.recording_dir_choose:
   en: Choose…
   it: Scegli…
+settings.section_integrations:
+  en: Integrations
+  it: Integrazioni
+settings.mcp_enabled:
+  en: Let AI agents work in this window (MCP)
+  it: Consenti agli agenti AI di lavorare in questa finestra (MCP)
+settings.mcp_enabled_hint:
+  en: "An MCP client (e.g. Claude Code) connects with the command below. Only your user account can reach it; every change the agent makes can be undone."
+  it: "Un client MCP (es. Claude Code) si collega con il comando qui sotto. È raggiungibile solo dal tuo account utente; ogni modifica dell'agente si può annullare."
+settings.mcp_forced:
+  en: "On for this session: Venturi was started with --mcp."
+  it: "Attivo per questa sessione: Venturi è stato avviato con --mcp."
+settings.mcp_failed:
+  en: "Could not start the MCP server: %{error}"
+  it: "Impossibile avviare il server MCP: %{error}"
 settings.read_ahead:
   en: Read-ahead
   it: Read-ahead

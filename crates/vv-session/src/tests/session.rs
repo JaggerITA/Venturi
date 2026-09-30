@@ -223,6 +223,7 @@ fn saving_and_opening_follow_the_unsaved_state() {
         edit::Generator::Text,
         0,
         0,
+        None,
     );
 
     let path = dir.join("p.vvproj");
@@ -303,6 +304,7 @@ fn a_new_project_resyncs_its_timeline_media_from_the_first_edit() {
             edit::Generator::SolidColor,
             0,
             0,
+            None,
         );
         session.sync_timeline_media(timeline);
     };
@@ -334,11 +336,18 @@ fn a_cancelled_export_reports_it() {
         edit::Generator::SolidColor,
         0,
         0,
+        None,
     );
-    let settings = ExportSettings::new(dir.join("out.mp4"));
-    let (_, progress) = session.export(timeline, settings.clone(), 0..125).unwrap();
-    assert!(session.export(timeline, settings, 0..125).is_none());
-    session.cancel_export();
+    let (job, progress) = session
+        .export(timeline, ExportSettings::new(dir.join("out.mp4")), 0..125)
+        .unwrap();
+    assert!(
+        session
+            .export(timeline, ExportSettings::new(dir.join("other.mp4")), 0..125)
+            .is_none(),
+        "one export at a time"
+    );
+    assert!(session.cancel_export(job));
     let events = run_jobs(&mut session);
 
     // A very fast machine may finish before seeing the flag.
@@ -430,8 +439,68 @@ fn otio_import_asks_before_reusing_media_with_the_same_name() {
         [SessionEvent::OtioNeedsDecision { .. }]
     ));
     assert_eq!(source.otio_awaiting_decision(), Some(("edit", 1)));
-    let result = source.finish_otio_import(Some(true)).unwrap();
+    source.finish_otio_import(Some(true));
+    let Some(SessionEvent::OtioImported { result, .. }) = source.tick().pop() else {
+        panic!("the import ends at the next tick");
+    };
     assert!(result.added_media.len() == 1, "only the timeline item");
     assert_eq!(source.project.media_pool.len(), pool_len + 1);
     assert!(source.otio_awaiting_decision().is_none());
+}
+
+#[test]
+fn a_session_can_move_to_another_thread() {
+    fn send<T: Send>() {}
+    send::<Session>();
+}
+
+#[test]
+fn timeline_revisions_follow_edits_undo_and_outside_changes() {
+    let mut session = Session::default();
+    let timeline = add_timeline(&mut session);
+    let other = add_timeline(&mut session);
+    let first = session.timeline_revision(timeline);
+    assert_eq!(session.timeline_revision(timeline), first, "stable");
+
+    edit::insert_generator(
+        &mut session.project,
+        &mut session.history,
+        other,
+        edit::Generator::Text,
+        0,
+        0,
+        None,
+    );
+    assert_eq!(session.timeline_revision(timeline), first, "other timeline");
+
+    edit::insert_generator(
+        &mut session.project,
+        &mut session.history,
+        timeline,
+        edit::Generator::Text,
+        0,
+        0,
+        None,
+    );
+    let edited = session.timeline_revision(timeline);
+    assert_ne!(edited, first);
+    session.history.undo(&mut session.project);
+    assert_eq!(
+        session.timeline_revision(timeline),
+        first,
+        "undo restores it"
+    );
+
+    let item = session
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound == Some(timeline))
+        .map(|(id, _)| id)
+        .unwrap();
+    session.apply(Box::new(vv_core::RenameTimeline::new(
+        item,
+        "Renamed".into(),
+    )));
+    assert_ne!(session.timeline_revision(timeline), first, "renamed");
 }

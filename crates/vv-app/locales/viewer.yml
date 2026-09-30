@@ -12,6 +12,12 @@ viewer.drag_audio_only:
   en: "Drag onto the timeline to add only the audio"
   it: "Trascina sulla timeline per aggiungere solo l'audio"
 
+toolbar.mcp_connected:
+  en: "An AI agent is connected (MCP)"
+  it: "Un agente AI è collegato (MCP)"
+toolbar.mcp_last_tool:
+  en: "Last action: %{tool}"
+  it: "Ultima azione: %{tool}"
 toolbar.media_pool:
   en: "Media"
   it: "Media"

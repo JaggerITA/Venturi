@@ -20,6 +20,7 @@ vv-audio = { path = "../vv-audio" }
 vv-core = { path = "../vv-core" }
 vv-media = { path = "../vv-media" }
 vv-render = { path = "../vv-render" }
+vv-mcp = { path = "../vv-mcp" }
 vv-session = { path = "../vv-session" }
 
 
@@ -30,3 +31,6 @@ winit = { version = "0.30.13", features = ["wayland-csd-adwaita"] }
 raw-window-handle = "0.6.2"
 sctk = { package = "smithay-client-toolkit", version = "0.20.0", default-features = false }
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync"] }
