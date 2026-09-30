@@ -3443,9 +3443,11 @@ fn proxy_timeline_ranges_covers_the_whole_clip_once_the_proxy_is_ready() {
         "the proxy cannot be ready right after the import"
     );
 
+    // Not the file: the worker marks the proxy ready only after renaming it
+    // into place.
     let start = std::time::Instant::now();
     loop {
-        if vv_media::proxy::proxy_exists(content_hash, quality) {
+        if !app.proxy_timeline_ranges().is_empty() {
             break;
         }
         assert!(
