@@ -78,7 +78,9 @@ fn guess_matrix(space: color::Space, height: u32) -> ColorMatrix {
 pub struct Decoder {
     ictx: ffmpeg::format::context::Input,
     decoder: ffmpeg::codec::decoder::Video,
-    scaler: Scaler,
+    /// Built from the first frame that needs one: the format the decoder
+    /// declares before decoding is not always the one of its frames.
+    scaler: Option<Scaler>,
     video_stream_index: usize,
     time_base: ffmpeg::Rational,
     fps: vv_core::Rational,
@@ -130,21 +132,10 @@ impl Decoder {
         });
         let decoder = decoder_ctx.video()?;
 
-        let source_format = without_deprecated_range(decoder.format());
-        let scaler = Scaler::get(
-            source_format,
-            decoder.width(),
-            decoder.height(),
-            target_format(source_format),
-            decoder.width(),
-            decoder.height(),
-            Flags::BILINEAR,
-        )?;
-
         Ok(Self {
             ictx,
             decoder,
-            scaler,
+            scaler: None,
             video_stream_index,
             time_base,
             fps,
@@ -463,8 +454,34 @@ fn without_deprecated_range(format: Pixel) -> Pixel {
     }
 }
 
+/// The scaler converting `frame` to its target format, rebuilt when the
+/// frames change format or size.
+fn scaler_for<'a>(
+    scaler: &'a mut Option<Scaler>,
+    frame: &ffmpeg::frame::Video,
+) -> Result<&'a mut Scaler, crate::MediaError> {
+    let fits = scaler.as_ref().is_some_and(|s| {
+        let input = s.input();
+        input.format == frame.format()
+            && input.width == frame.width()
+            && input.height == frame.height()
+    });
+    if !fits {
+        *scaler = Some(Scaler::get(
+            frame.format(),
+            frame.width(),
+            frame.height(),
+            target_format(frame.format()),
+            frame.width(),
+            frame.height(),
+            Flags::BILINEAR,
+        )?);
+    }
+    Ok(scaler.as_mut().unwrap())
+}
+
 fn yuv420_from_decoded(
-    scaler: &mut Scaler,
+    scaler: &mut Option<Scaler>,
     decoded: &ffmpeg::frame::Video,
     matrix: ColorMatrix,
     full_range: bool,
@@ -476,7 +493,7 @@ fn yuv420_from_decoded(
         decoded
     } else {
         let mut frame = ffmpeg::frame::Video::empty();
-        scaler.run(decoded, &mut frame)?;
+        scaler_for(scaler, decoded)?.run(decoded, &mut frame)?;
         converted = frame;
         &converted
     };
