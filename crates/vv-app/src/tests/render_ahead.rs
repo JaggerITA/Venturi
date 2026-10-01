@@ -3725,3 +3725,80 @@ fn bench_black_frames_after_repositioning_during_playback() {
         );
     }
 }
+
+#[test]
+#[ignore = "manual"]
+fn bench_backward_scrub_with_proxy() {
+    let Ok(path) = std::env::var("VV_BENCH_CLIP") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let meta = vv_media::probe(&path).unwrap();
+    let hash = vv_media::content_fingerprint(&path).unwrap();
+    let quality = vv_media::proxy::ProxyQuality::Medium;
+    let proxy = vv_media::proxy::proxy_path_for(hash, quality);
+    if !proxy.is_file() {
+        vv_media::proxy::generate_proxy(&path, hash, quality, &[], |_| true).unwrap();
+    }
+    let pmeta = vv_media::probe(&proxy).unwrap();
+    let mut project = Project::default();
+    let media = project.media_pool.insert(MediaItem {
+        content_hash: hash,
+        path,
+        meta: meta.clone(),
+        compound: None,
+        folder: None,
+    });
+    let mut timeline = timeline_with(vec![Track {
+        kind: TrackKind::Video,
+        clips: vec![media_clip(1, media, 0, meta.duration_frames)],
+        muted: false,
+        solo: false,
+        locked: false,
+        crossings: Vec::new(),
+        mix: Default::default(),
+        armed: Default::default(),
+    }]);
+    timeline.fps = meta.fps;
+    let fps = meta.fps.as_f64();
+    let timeline_id = project.timelines.insert(timeline);
+    let budget = crate::DEFAULT_CACHE_BUDGET_BYTES;
+    let frame_bytes = vv_media::yuv420_frame_bytes(pmeta.width, pmeta.height) as f64;
+    let affordable_secs = budget as f64 * 0.85 / (frame_bytes * fps);
+    let scale = (affordable_secs / (DEFAULT_LOOKAHEAD_SECS + DEFAULT_BEHIND_SECS)).min(1.0);
+    let render_ahead = RenderAhead::spawn(
+        project,
+        timeline_id,
+        budget,
+        Some(quality),
+        DEFAULT_LOOKAHEAD_SECS * scale,
+        DEFAULT_BEHIND_SECS * scale,
+    );
+    let speed: f64 = std::env::var("VV_BENCH_SPEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    for dir in [1.0f64, -1.0] {
+        let start: FrameIdx = 20_000;
+        render_ahead.jump_to(start);
+        std::thread::sleep(Duration::from_secs(3));
+        let t0 = std::time::Instant::now();
+        let (mut hit, mut total, mut last) = (0, 0, start);
+        let mut longest_miss = 0;
+        let mut miss_run = 0;
+        while t0.elapsed() < Duration::from_secs(4) {
+            let p = start + (dir * speed * t0.elapsed().as_secs_f64() * fps) as FrameIdx;
+            if p != last {
+                render_ahead.jump_to(p);
+                last = p;
+            }
+            if render_ahead.get_frame(media, p).is_some() {
+                hit += 1;
+                miss_run = 0;
+            } else {
+                miss_run += 1;
+                longest_miss = longest_miss.max(miss_run);
+            }
+            total += 1;
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        eprintln!("dir {dir:+} speed {speed}: shown {hit}/{total} refreshes, longest black run {longest_miss}");
+    }
+}
