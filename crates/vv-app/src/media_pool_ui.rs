@@ -807,8 +807,6 @@ impl VenturiApp {
                 }
             }
         }
-        self.media_pool_state
-            .refresh_offline(&self.session.project);
         let search_changed = media_pool_search_field(ui, &mut self.media_pool_state.search);
         media_pool_header(ui, &mut self.media_pool_state);
         kinetic_pool_scroll(

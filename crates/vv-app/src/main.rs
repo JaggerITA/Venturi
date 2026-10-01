@@ -2221,7 +2221,8 @@ impl VenturiApp {
         }
     }
 
-    /// The active clip points at a media no longer in the media pool.
+    /// The active clip points at a media no longer in the media pool, or
+    /// whose file is missing.
     fn active_clip_media_offline(&self) -> bool {
         if self.browsing_media.is_some() {
             return false;
@@ -2236,6 +2237,7 @@ impl VenturiApp {
             .is_some_and(|c| match &c.source {
                 vv_core::ClipSource::Media(id) => {
                     !self.session.project.media_pool.contains_key(*id)
+                        || self.media_pool_state.is_offline(*id)
                 }
                 vv_core::ClipSource::SolidColor
                 | vv_core::ClipSource::Text
@@ -3075,6 +3077,9 @@ impl VenturiApp {
         for image in screenshots {
             self.mcp_screenshot(&image);
         }
+        // Here and not in the pool: the viewer needs it with the pool closed too.
+        self.media_pool_state
+            .refresh_offline(&self.session.project);
         self.poll_thumbnails(&ui.ctx().clone());
         if self
             .thumbnail_worker

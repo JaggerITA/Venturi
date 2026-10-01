@@ -771,6 +771,28 @@ fn deleting_a_media_leaves_its_clip_in_timeline_but_offline() {
 }
 
 #[test]
+fn a_clip_whose_file_is_missing_shows_as_offline() {
+    let (mut app, media_id) = app_with_media_at(
+        vv_core::Rational::new(25, 1),
+        vv_core::Rational::new(25, 1),
+        100,
+    );
+    let meta = app.session.project.media_pool[media_id].meta.clone();
+    app.add_media_to_timeline_at(
+        timeline_ui::MediaDrag::whole(media_id, &meta),
+        0,
+        timeline_ui::MediaDropTarget::Default,
+    );
+    let clip_id = app.session.project.timelines[app.timeline_id.unwrap()].tracks[0].clips[0].id;
+    app.active_clip = Some((0, clip_id));
+
+    app.session.project.media_pool[media_id].path = "/missing/clip.mov".into();
+    app.media_pool_state.refresh_offline(&app.session.project);
+
+    assert!(app.active_clip_media_offline());
+}
+
+#[test]
 fn select_all_media_selects_every_media_in_the_pool() {
     let (mut app, media_a) = app_with_media_at(
         vv_core::Rational::new(25, 1),
