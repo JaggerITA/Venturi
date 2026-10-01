@@ -306,7 +306,7 @@ fn move_and_trim_validate_their_targets() {
     };
     assert_eq!(
         error(&mut session, trim(&b, EdgeArg::Start, 100)),
-        "the start edge can go from frame 50 to frame 99"
+        "the start edge can go from frame 0 to frame 99"
     );
     ok(&mut session, trim(&b, EdgeArg::End, 120));
     assert_eq!(spans(&mut session, &timeline, 0), [(30, 80), (80, 120)]);
