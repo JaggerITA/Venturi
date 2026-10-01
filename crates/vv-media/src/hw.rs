@@ -116,10 +116,43 @@ fn device_ref(device: &HwDevice) -> Option<*mut ffi::AVBufferRef> {
                 0,
             )
         };
-        (ret >= 0).then_some(DeviceRef(buf))
+        if ret < 0 {
+            return None;
+        }
+        // SAFETY: a device just created, of `device`'s type.
+        if !unsafe { can_decode(buf) } {
+            unsafe { ffi::av_buffer_unref(&mut buf) };
+            return None;
+        }
+        Some(DeviceRef(buf))
     });
     // SAFETY: the stored reference stays valid for the whole process.
     created.as_ref().map(|d| unsafe { ffi::av_buffer_ref(d.0) })
+}
+
+/// A Vulkan device opens without video decode queues too (Asahi's
+/// Honeykrisp): each stream would then fail and fall back one by one.
+///
+/// # Safety
+/// `buf` must reference a valid `AVHWDeviceContext`.
+unsafe fn can_decode(buf: *mut ffi::AVBufferRef) -> bool {
+    let ctx = unsafe { &*((*buf).data as *const ffi::AVHWDeviceContext) };
+    if ctx.type_ != ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN {
+        return true;
+    }
+    let vk = unsafe { &*(ctx.hwctx as *const ffi::AVVulkanDeviceContext) };
+    (0..vk.nb_enabled_dev_extensions as usize).any(|i| {
+        let name = unsafe { std::ffi::CStr::from_ptr(*vk.enabled_dev_extensions.add(i)) };
+        name == c"VK_KHR_video_decode_queue"
+    })
+}
+
+/// Whether opening `device` was tried and failed, without waiting for a
+/// creation in progress.
+pub fn known_unavailable(device: &HwDevice) -> bool {
+    DEVICES
+        .try_lock()
+        .is_ok_and(|devices| matches!(devices.get(device), Some(None)))
 }
 
 /// Whether `device` can be opened. Creating a CUDA device costs

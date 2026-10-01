@@ -104,7 +104,11 @@ fn gpus() -> &'static [wgpu::AdapterInfo] {
 pub fn auto_device() -> Option<Option<HwDevice>> {
     let macos = cfg!(target_os = "macos");
     let gpus = if macos { &[][..] } else { GPUS.get()? };
-    Some(resolve(HwDecodeMode::Auto, gpus, macos).into_iter().next())
+    Some(
+        resolve(HwDecodeMode::Auto, gpus, macos)
+            .into_iter()
+            .find(|device| !vv_media::hw::known_unavailable(device)),
+    )
 }
 
 pub fn device_label(device: &HwDevice) -> String {
@@ -144,10 +148,8 @@ pub fn apply(mode: HwDecodeMode) {
 }
 
 fn created(mode: HwDecodeMode) -> Vec<HwDevice> {
-    let devices = resolve(mode, gpus(), cfg!(target_os = "macos"));
-    for device in &devices {
-        vv_media::hw::available(device);
-    }
+    let mut devices = resolve(mode, gpus(), cfg!(target_os = "macos"));
+    devices.retain(vv_media::hw::available);
     devices
 }
 
