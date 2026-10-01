@@ -13,7 +13,7 @@ jobs:
   version:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -31,15 +31,15 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The compiled FFmpeg only changes with its build script or the image.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/ffmpeg-shared
           key: ffmpeg-appimage-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'container/Containerfile.appimage') }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/cargo-registry
           key: cargo-registry-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
@@ -65,7 +65,7 @@ jobs:
             -e GIT_CONFIG_VALUE_0=/workspace \
             venturi-appimage scripts/build-appimage.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Venturi-appimage-${{ runner.arch }}
           path: target/appimage/Venturi-*.AppImage
@@ -75,7 +75,7 @@ jobs:
     needs: version
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -94,7 +94,7 @@ jobs:
       # The compiled FFmpeg only changes with its build script. After
       # rust-cache: post steps run in reverse, and rust-cache's cleanup would
       # empty target/ffmpeg-shared before this one saves it.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: target/ffmpeg-shared
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
@@ -102,7 +102,7 @@ jobs:
       - name: Build
         run: scripts/build-macos.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Venturi-macos-arm64
           path: target/macos/Venturi-*.dmg
@@ -115,12 +115,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true

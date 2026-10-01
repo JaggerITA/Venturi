@@ -27,7 +27,7 @@ jobs:
           printf 'pcm.!default {\n  type null\n}\nctl.!default {\n  type null\n}\n' \
             > /etc/asound.conf
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Its own key ignores [profile] and [env], and an exact hit never saves
       # again: after a profile change every run would rebuild from scratch.
