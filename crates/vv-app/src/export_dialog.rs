@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::properties_panel::preview_combo;
 use vv_core::{FrameIdx, Rational};
-use vv_media::{AudioCodec, VideoCodec};
+use vv_media::{AudioCodec, HwDevice, VideoCodec};
 
 use crate::export::ExportSettings;
 use crate::format_duration;
@@ -35,16 +35,21 @@ pub struct ExportDialog {
     whole_timeline: bool,
     /// Kept aside while "Include audio" is off, so they can be restored.
     audio_settings: vv_media::AudioSettings,
+    /// Those of Settings > Playback; empty if it decodes on the CPU.
+    gpu_decoders: Vec<HwDevice>,
+    decode_on_gpu: bool,
     /// File dialog opened on a separate thread (on the GNOME/Wayland event
     /// loop thread it marks the app as unresponsive).
     browsing: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl ExportDialog {
-    pub fn new(settings: ExportSettings) -> Self {
+    pub fn new(settings: ExportSettings, gpu_decoders: Vec<HwDevice>) -> Self {
         Self {
             path_text: settings.output_path.display().to_string(),
             audio_settings: settings.audio.clone().unwrap_or_default(),
+            decode_on_gpu: !settings.hw_decode.is_empty() && !gpu_decoders.is_empty(),
+            gpu_decoders,
             settings,
             whole_timeline: false,
             browsing: None,
@@ -169,6 +174,26 @@ impl ExportDialog {
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
+                ui.label(t!("export.decoder"));
+                let gpu_label = match self.gpu_decoders.first() {
+                    Some(device) => format!("GPU ({})", crate::hw_decode::device_label(device)),
+                    None => "GPU".to_owned(),
+                };
+                let items = [
+                    (false, "CPU".to_owned(), true),
+                    (true, gpu_label, !self.gpu_decoders.is_empty()),
+                ];
+                preview_combo(
+                    ui,
+                    "export_decoder",
+                    &mut self.decode_on_gpu,
+                    &items,
+                    None,
+                    None,
+                    Some(&t!("export.gpu_decoder_off")),
+                );
+                ui.end_row();
+
                 ui.label(t!("export.encoder"));
                 let before = video.codec;
                 let items: Vec<_> = VideoCodec::ALL
@@ -333,6 +358,14 @@ impl ExportDialog {
         }
     }
 
+    fn selected_decoders(&self) -> Vec<HwDevice> {
+        if self.decode_on_gpu {
+            self.gpu_decoders.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
     fn buttons(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) -> ExportDialogAction {
         let path = validate_path(&self.path_text);
         let mut action = ExportDialogAction::None;
@@ -344,6 +377,7 @@ impl ExportDialog {
             {
                 let mut settings = self.settings.clone();
                 settings.output_path = path;
+                settings.hw_decode = self.selected_decoders();
                 action = ExportDialogAction::Export {
                     settings,
                     range: self.export_range(info),

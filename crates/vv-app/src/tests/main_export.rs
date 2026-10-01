@@ -467,3 +467,71 @@ fn run_export_goes_through_the_session_and_keeps_the_outcome_readable() {
     let frames = vv_media::probe(&output_path).unwrap().duration_frames;
     assert!((9..=10).contains(&frames), "frames={frames}");
 }
+
+/// Without a usable GPU decoder (CI) it falls back to the CPU; with one, the
+/// hwaccels decode H.264 bit-exactly, so the export does not change.
+#[test]
+fn export_decoding_on_the_gpu_writes_the_same_frames_as_on_the_cpu() {
+    let dir = std::env::temp_dir().join("vv-app-export-hw-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let source_path = dir.join("source.mp4");
+    vv_media::test_support::ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=25:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        &source_path,
+    );
+    let mut app = crate::VenturiApp::default();
+    app.import_media(source_path);
+    let timeline_id = app.timeline_id.unwrap();
+    let media_id = app
+        .session
+        .project
+        .media_pool
+        .iter()
+        .find(|(_, item)| item.compound.is_none())
+        .map(|(id, _)| id)
+        .unwrap();
+    app.add_media_to_timeline(media_id);
+    let total = app.session.project.timelines[timeline_id].total_frames();
+
+    let export = |name: &str, hw_decode: Vec<vv_media::HwDevice>| {
+        let mut settings = ExportSettings::new(dir.join(name));
+        settings.audio = None;
+        settings.hw_decode = hw_decode;
+        export_timeline(
+            &app.session.project,
+            timeline_id,
+            &settings,
+            0..total,
+            &Mutex::new(ExportProgress::default()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let mut decoder = vv_media::Decoder::open(&settings.output_path).unwrap();
+        let mut frames = Vec::new();
+        while let Some((_, frame)) = decoder.next_frame().unwrap() {
+            frames.push(frame.y.clone());
+        }
+        frames
+    };
+    let cpu = export("cpu.mp4", Vec::new());
+    let gpu = export(
+        "gpu.mp4",
+        vec![
+            vv_media::HwDevice::VideoToolbox,
+            vv_media::HwDevice::Cuda,
+            vv_media::HwDevice::Vulkan(None),
+        ],
+    );
+    // Same tolerance for the encoder's B-frame reordering as above.
+    assert!(cpu.len() as FrameIdx >= total - 1, "{} frames", cpu.len());
+    assert!(cpu == gpu, "the GPU export differs from the CPU one");
+}

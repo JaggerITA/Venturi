@@ -23,7 +23,7 @@ fn export_uses_in_out_marks_unless_whole_timeline_is_chosen() {
         has_audio: true,
     };
     let path = std::env::temp_dir().join("out.mp4");
-    let mut dialog = ExportDialog::new(ExportSettings::new(path));
+    let mut dialog = ExportDialog::new(ExportSettings::new(path), Vec::new());
     assert_eq!(dialog.export_range(&info), 20..60);
     dialog.whole_timeline = true;
     assert_eq!(dialog.export_range(&info), 0..100);
@@ -48,7 +48,10 @@ fn dialog_renders_without_starting_an_export_on_its_own() {
         marks: Some((600, 1200)),
         has_audio: true,
     };
-    let mut dialog = ExportDialog::new(ExportSettings::new(std::env::temp_dir().join("x.mp4")));
+    let mut dialog = ExportDialog::new(
+        ExportSettings::new(std::env::temp_dir().join("x.mp4")),
+        Vec::new(),
+    );
     let ctx = egui::Context::default();
     for _ in 0..3 {
         let mut action = None;
@@ -58,4 +61,24 @@ fn dialog_renders_without_starting_an_export_on_its_own() {
         output.textures_delta.clear();
         assert!(matches!(action, Some(ExportDialogAction::None)));
     }
+}
+
+#[test]
+fn gpu_decoding_is_kept_only_while_a_gpu_decoder_is_there() {
+    let mut settings = ExportSettings::new(PathBuf::from("out.mp4"));
+    settings.hw_decode = vec![HwDevice::Cuda];
+
+    let dialog = ExportDialog::new(settings.clone(), vec![HwDevice::Vulkan(None)]);
+    assert_eq!(dialog.selected_decoders(), [HwDevice::Vulkan(None)]);
+
+    let dialog = ExportDialog::new(settings, Vec::new());
+    assert!(dialog.selected_decoders().is_empty());
+
+    let mut dialog = ExportDialog::new(
+        ExportSettings::new(PathBuf::from("out.mp4")),
+        vec![HwDevice::Cuda],
+    );
+    assert!(dialog.selected_decoders().is_empty());
+    dialog.decode_on_gpu = true;
+    assert_eq!(dialog.selected_decoders(), [HwDevice::Cuda]);
 }

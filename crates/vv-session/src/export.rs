@@ -31,6 +31,8 @@ pub struct ExportSettings {
     pub video: vv_media::VideoSettings,
     /// `None` = export without audio.
     pub audio: Option<vv_media::AudioSettings>,
+    /// GPU decoders to try, in order; empty decodes on the CPU.
+    pub hw_decode: Vec<vv_media::HwDevice>,
 }
 
 impl ExportSettings {
@@ -42,6 +44,7 @@ impl ExportSettings {
             scale_percent: 100,
             video: vv_media::VideoSettings::default(),
             audio: Some(vv_media::AudioSettings::default()),
+            hw_decode: Vec::new(),
         }
     }
 
@@ -122,12 +125,13 @@ impl ActiveClipDecoder {
         path: &Path,
         target_source_frame: FrameIdx,
         is_image: bool,
+        hw: &[vv_media::HwDevice],
     ) -> Result<Self, ExportError> {
         // `Decoder::open` on an image would hit EOF after the first frame.
         let mut decoder = if is_image {
             vv_media::Decoder::open_image(path)
         } else {
-            vv_media::Decoder::open(path)
+            vv_media::Decoder::open_with(path, hw, vv_media::HwPriority::Normal)
         }
         .map_err(ExportError::failed)?;
         let secs = target_source_frame as f64 / decoder.fps().as_f64().max(1e-9);
@@ -171,6 +175,7 @@ struct StreamingFrameProvider {
     /// One per clip: several tracks can be active on the same frame.
     /// Pruned by `retain_clips`.
     active: HashMap<ClipId, ActiveClipDecoder>,
+    hw: Vec<vv_media::HwDevice>,
 }
 
 impl StreamingFrameProvider {
@@ -207,9 +212,12 @@ impl FrameProvider for StreamingFrameProvider {
 
         let decoder = match self.active.entry(clip.id) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                e.insert(ActiveClipDecoder::open_for(&path, source_frame, is_image)?)
-            }
+            Entry::Vacant(e) => e.insert(ActiveClipDecoder::open_for(
+                &path,
+                source_frame,
+                is_image,
+                &self.hw,
+            )?),
         };
         decoder.advance_to(source_frame)
     }
@@ -283,7 +291,10 @@ pub fn export_timeline(
 
         let decode_range = range.clone();
         scope.spawn(move || {
-            let mut provider = StreamingFrameProvider::default();
+            let mut provider = StreamingFrameProvider {
+                hw: settings.hw_decode.clone(),
+                ..Default::default()
+            };
             for frame in decode_range {
                 if cancel.load(Ordering::Relaxed) {
                     return;
