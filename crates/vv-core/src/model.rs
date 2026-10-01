@@ -437,6 +437,14 @@ impl<T: Clone> Keyframed<T> {
         self.keyframes.dedup_by_key(|k| k.0);
     }
 
+    /// Applies `f` to the default and to every keyframe value.
+    pub fn map_values(&mut self, f: impl Fn(&T) -> T) {
+        self.default = f(&self.default);
+        for keyframe in &mut self.keyframes {
+            keyframe.1 = f(&keyframe.1);
+        }
+    }
+
     /// Moves every keyframe `delta` frames later.
     pub fn shift(&mut self, delta: FrameIdx) {
         for keyframe in &mut self.keyframes {
@@ -1220,6 +1228,21 @@ impl EffectStack {
         self.for_each_f32_track(|k| k.shift(delta));
         if let Some(c) = &mut self.color {
             c.shift(delta);
+        }
+    }
+
+    /// The crop is in source pixels: same cut for a source of another
+    /// resolution. The softness follows the mean of the two scales.
+    pub fn rescale_crop(&mut self, scale_x: f32, scale_y: f32) {
+        let scales = [
+            (TransformParam::CropLeft, scale_x),
+            (TransformParam::CropRight, scale_x),
+            (TransformParam::CropTop, scale_y),
+            (TransformParam::CropBottom, scale_y),
+            (TransformParam::CropSoftness, (scale_x * scale_y).sqrt()),
+        ];
+        for (param, scale) in scales {
+            self.transform.track_mut(param).map_values(|v| v * scale);
         }
     }
 

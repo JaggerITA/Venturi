@@ -216,6 +216,47 @@ fn set_media_path_to_another_fps_keeps_the_keyframe_seconds() {
     assert_eq!(keyframe_frames(&project), (40, 100));
 }
 
+/// The crop is in source pixels: a file at another resolution keeps the same
+/// cut.
+#[test]
+fn set_media_path_to_another_resolution_keeps_the_crop() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let media = insert_media(&mut project);
+    let mut meta = project.media_pool[media].meta.clone();
+    let conform = Rational::conform_rate(project.timelines[timeline].fps, meta.fps);
+    let clip_id = project.alloc_clip_id();
+    let mut clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 100, 0, conform);
+    clip.effects.transform.track_mut(TransformParam::CropLeft).default = 100.0;
+    clip.effects
+        .transform
+        .track_mut(TransformParam::CropTop)
+        .upsert(10, 54.0, Interpolation::Linear);
+    project.timelines[timeline].tracks[0].clips.push(clip);
+    let crop = |project: &Project| {
+        let transform = &project.timelines[timeline].clip(0, clip_id).unwrap().effects.transform;
+        (
+            transform.track(TransformParam::CropLeft).default,
+            transform.track(TransformParam::CropTop).keyframes()[0].1,
+        )
+    };
+
+    (meta.width, meta.height) = (3840, 2160);
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMediaPath::new(
+            media,
+            "/found/clip.mp4".into(),
+            1,
+            Some(meta),
+        )),
+    );
+    assert_eq!(crop(&project), (200.0, 108.0));
+
+    history.undo(&mut project);
+    assert_eq!(crop(&project), (100.0, 54.0));
+}
+
 #[test]
 fn add_track_appends_and_undo_removes_it() {
     let (mut project, timeline) = make_project_with_two_tracks();

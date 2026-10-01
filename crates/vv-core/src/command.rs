@@ -2642,7 +2642,18 @@ impl Command for SetMediaPath {
         project.conform_clips_of(self.media);
         let mut old_effects = self.old_effects.borrow_mut();
         old_effects.clear();
-        if meta.fps == old_meta.fps {
+        let fps_changed = meta.fps != old_meta.fps;
+        // An offline media imported from OTIO may not know its size.
+        let crop_scale = (old_meta.width > 0
+            && old_meta.height > 0
+            && (meta.width, meta.height) != (old_meta.width, old_meta.height))
+            .then(|| {
+                (
+                    meta.width as f32 / old_meta.width as f32,
+                    meta.height as f32 / old_meta.height as f32,
+                )
+            });
+        if !fps_changed && crop_scale.is_none() {
             return;
         }
         for (timeline_id, timeline) in project.timelines.iter_mut() {
@@ -2652,7 +2663,12 @@ impl Command for SetMediaPath {
                         continue;
                     }
                     old_effects.push((timeline_id, track_index, clip.id, clip.effects.clone()));
-                    clip.effects.rescale_keyframe_times(old_meta.fps, meta.fps);
+                    if fps_changed {
+                        clip.effects.rescale_keyframe_times(old_meta.fps, meta.fps);
+                    }
+                    if let Some((scale_x, scale_y)) = crop_scale {
+                        clip.effects.rescale_crop(scale_x, scale_y);
+                    }
                 }
             }
         }
