@@ -4,7 +4,8 @@
 //! as a pure function (testable without `egui::Ui`); the panel drawing stays
 //! in `main.rs`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use vv_core::{FolderId, MediaId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,6 +54,9 @@ pub struct MediaPoolState {
     /// The pool's ScrollArea as of the last frame: its offset is driven
     /// before `show`, when the current frame's geometry is not known yet.
     pub scroll_area: Option<PoolScrollArea>,
+    /// Whether each media's file was missing, and at which path it was
+    /// checked: only a new media or a changed path hits the disk again.
+    offline: HashMap<MediaId, (PathBuf, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +134,32 @@ impl MediaPoolState {
     pub fn select_folder(&mut self, folder: FolderId) {
         self.clear();
         self.selected_folder = Some(folder);
+    }
+
+    pub fn is_offline(&self, id: MediaId) -> bool {
+        self.offline.get(&id).is_some_and(|&(_, missing)| missing)
+    }
+
+    pub fn refresh_offline(&mut self, project: &vv_core::Project) {
+        self.offline
+            .retain(|&id, _| project.media_pool.contains_key(id));
+        for (id, item) in project.media_pool.iter() {
+            if item.compound.is_some()
+                || self
+                    .offline
+                    .get(&id)
+                    .is_some_and(|(path, _)| *path == item.path)
+            {
+                continue;
+            }
+            self.offline
+                .insert(id, (item.path.clone(), !item.path.exists()));
+        }
+    }
+
+    /// Makes the next `refresh_offline` check every file again.
+    pub fn invalidate_offline(&mut self) {
+        self.offline.clear();
     }
 
     pub fn clear(&mut self) {

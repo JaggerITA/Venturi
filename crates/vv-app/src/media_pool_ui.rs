@@ -401,6 +401,32 @@ fn paint_film_icon(
     }
 }
 
+/// Thumbnail of a media whose file is missing.
+fn paint_offline_thumbnail(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 2.0, egui::Color32::BLACK);
+    let c = rect.center();
+    let (half_w, h) = (12.0, 21.0);
+    let (top, bottom) = (c.y - h / 2.0, c.y + h / 2.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x, top),
+            egui::pos2(c.x + half_w, bottom),
+            egui::pos2(c.x - half_w, bottom),
+        ],
+        crate::theme::ERROR,
+        egui::Stroke::NONE,
+    ));
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(c.x - 1.25, top + 7.0),
+            egui::pos2(c.x + 1.25, bottom - 6.0),
+        ),
+        1.0,
+        egui::Color32::BLACK,
+    );
+    painter.circle_filled(egui::pos2(c.x, bottom - 3.0), 1.4, egui::Color32::BLACK);
+}
+
 impl VenturiApp {
     fn start_rename(&mut self, media_id: MediaId) {
         let Some(item) = self.session.project.media_pool.get(media_id) else {
@@ -730,6 +756,8 @@ impl VenturiApp {
                 }
             }
         }
+        self.media_pool_state
+            .refresh_offline(&self.session.project);
         media_pool_header(ui, &mut self.media_pool_state);
         kinetic_pool_scroll(
             ui.ctx(),
@@ -841,7 +869,8 @@ impl VenturiApp {
                                 .proxy_worker
                                 .as_ref()
                                 .and_then(|w| w.state(content_hash));
-                            let thumbnail = if is_timeline {
+                            let offline = self.media_pool_state.is_offline(id);
+                            let thumbnail = if is_timeline || offline {
                                 None
                             } else {
                                 self.thumbnails.get(&content_hash).cloned().flatten()
@@ -893,7 +922,9 @@ impl VenturiApp {
                                                     2.0,
                                                     ui.visuals().extreme_bg_color,
                                                 );
-                                                if is_timeline {
+                                                if offline {
+                                                    paint_offline_thumbnail(ui.painter(), rect);
+                                                } else if is_timeline {
                                                     paint_film_icon(
                                                         ui.painter(),
                                                         rect,

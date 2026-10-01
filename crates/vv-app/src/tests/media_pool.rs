@@ -265,3 +265,39 @@ fn tree_rows_put_items_of_a_missing_folder_at_the_root() {
         ["0:[kept]", "0:orphan.mp4"]
     );
 }
+
+#[test]
+fn offline_media_are_rechecked_when_their_path_changes() {
+    let mut project = vv_core::Project::default();
+    let item = |path: &str| vv_core::MediaItem {
+        path: path.into(),
+        meta: vv_core::MediaMeta {
+            duration_frames: 0,
+            fps: vv_core::Rational::new(25, 1),
+            width: 0,
+            height: 0,
+            has_video: true,
+            has_audio: false,
+            sample_rate: 0,
+            channels: 0,
+            audio_streams: 0,
+            file: Default::default(),
+        },
+        content_hash: 0,
+        compound: None,
+        folder: None,
+    };
+    let present = project
+        .media_pool
+        .insert(item(env!("CARGO_MANIFEST_PATH")));
+    let missing = project.media_pool.insert(item("/missing/clip.mov"));
+    let mut state = MediaPoolState::default();
+
+    state.refresh_offline(&project);
+    assert!(!state.is_offline(present));
+    assert!(state.is_offline(missing));
+
+    project.media_pool[missing].path = env!("CARGO_MANIFEST_PATH").into();
+    state.refresh_offline(&project);
+    assert!(!state.is_offline(missing));
+}

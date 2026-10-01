@@ -1277,6 +1277,7 @@ impl VenturiApp {
         self.timeline_state = timeline_ui::TimelineState::default();
         self.timeline_state.clipboard = clipboard;
         self.active_clip = None;
+        self.media_pool_state.invalidate_offline();
         if let Some(render_ahead) = &self.render_ahead {
             render_ahead.update_project(&self.session.project, timeline_id);
             self.render_ahead_generation = self.session.history.generation();

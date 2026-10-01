@@ -663,6 +663,7 @@ impl VenturiApp {
         self.timeline_id = self.session.project.timelines.keys().next();
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();
+        self.media_pool_state.invalidate_offline();
         self.last_export_settings = None;
         self.preview_meta = None;
         self.preview_error = None;
@@ -1014,6 +1015,7 @@ impl VenturiApp {
         for &media_id in &relinked {
             self.enqueue_media_background_jobs(media_id);
         }
+        self.media_pool_state.invalidate_offline();
         let relinked = relinked.len();
         self.relink_message = Some(match (&not_found, relinked) {
             (_, 0) => t!("project.relink_none").into_owned(),
