@@ -2857,7 +2857,7 @@ pub fn show_timeline(
                             &painter,
                             clip_rect,
                             id,
-                            dragged.unwrap_or(visual.clip.speed),
+                            dragged.unwrap_or(visual.clip.speed()),
                             !visual.locked,
                         ) {
                             Some(RetimeBarAction::Close) => {
@@ -5546,8 +5546,8 @@ fn clip_label_and_color(
                 return (t!("timeline.media_offline").into_owned(), OFFLINE_COLOR);
             }
             let mut label = media_labels(*media_id);
-            if !clip.speed.is_one() {
-                label = format!("{label} ({})", format_speed(clip.speed));
+            if !clip.speed().is_one() {
+                label = format!("{label} ({})", format_speed(clip.speed()));
             }
             let color = if track.kind == TrackKind::Video {
                 egui::Color32::from_rgb(90, 140, 200)

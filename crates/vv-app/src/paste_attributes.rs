@@ -406,10 +406,10 @@ impl VenturiApp {
                 ));
                 if dialog.selected.contains(&Attribute::Speed)
                     && matches!(target.source, vv_core::ClipSource::Media(_))
-                    && (target.speed, target.pitch_correction)
-                        != (source.speed, source.pitch_correction)
+                    && (target.speed(), target.pitch_correction)
+                        != (source.speed(), source.pitch_correction)
                 {
-                    let key = (source.speed, source.pitch_correction);
+                    let key = (source.speed(), source.pitch_correction);
                     match speeds.iter_mut().find(|(k, _)| *k == key) {
                         Some((_, clips)) => clips.push((track_index, clip_id)),
                         None => speeds.push((key, vec![(track_index, clip_id)])),

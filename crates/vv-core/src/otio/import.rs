@@ -410,7 +410,7 @@ impl Importer<'_> {
         };
         // Seconds into the media at the start of the clip and the media fps, to
         // translate the effect keyframes of other editors.
-        let (source, rate, source_offset, media_start) = match schema(reference) {
+        let (source, conform_rate, source_offset, media_start) = match schema(reference) {
             "ExternalReference" => {
                 let url = reference["target_url"].as_str().unwrap_or("");
                 let Some(media_id) = self.media(url, reference, kind) else {
@@ -424,7 +424,8 @@ impl Importer<'_> {
                     return (duration, None);
                 }
                 let media_fps = meta.fps;
-                let rate = Rational::conform_rate(fps, media_fps).divided_by(speed);
+                let conform_rate = Rational::conform_rate(fps, media_fps);
+                let rate = conform_rate.divided_by(speed);
                 let available_start =
                     time_range(&reference["available_range"]).map_or(0.0, |(start, _)| start);
                 let secs = source_start - available_start;
@@ -436,7 +437,7 @@ impl Importer<'_> {
                 };
                 (
                     ClipSource::Media(media_id),
-                    rate,
+                    conform_rate,
                     offset.max(0),
                     Some((secs, media_fps)),
                 )
@@ -523,23 +524,24 @@ impl Importer<'_> {
         let disabled = item["enabled"] == false
             || (matches!(schema(reference), "MissingReference")
                 && !matches!(source, ClipSource::Adjustment));
-        let clip = Clip {
-            id: self.project.alloc_clip_id(),
+        let mut clip = Clip::new(
+            self.project.alloc_clip_id(),
             source,
             source_offset,
             timeline_start,
             timeline_len,
-            effects,
-            linked_group,
-            audio_stream_index,
-            rate,
+            conform_rate,
             speed,
-            pitch_correction: venturi["pitch_correction"].as_bool().unwrap_or(true),
-            disabled,
-            fade_in: fades.0.clamp(0, timeline_len),
-            fade_out: fades.1.clamp(0, timeline_len),
-            display_color: serde_json::from_value(venturi["display_color"].clone()).unwrap_or(None),
-        };
+        );
+        clip.effects = effects;
+        clip.linked_group = linked_group;
+        clip.audio_stream_index = audio_stream_index;
+        clip.pitch_correction = venturi["pitch_correction"].as_bool().unwrap_or(true);
+        clip.disabled = disabled;
+        clip.fade_in = fades.0.clamp(0, timeline_len);
+        clip.fade_out = fades.1.clamp(0, timeline_len);
+        clip.display_color =
+            serde_json::from_value(venturi["display_color"].clone()).unwrap_or(None);
         (duration, Some((clip, is_foreign)))
     }
 

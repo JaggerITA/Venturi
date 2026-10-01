@@ -820,18 +820,16 @@ fn mix_audio_track_plays_a_faster_clip_with_or_without_its_pitch() {
         folder: None,
     });
     let frequency = |pitch_correction: bool| {
-        let mut clip = Clip::from_source_range(
+        let mut clip = Clip::new(
             ClipId(1),
             ClipSource::Media(media),
             0,
-            50,
             0,
+            25,
             vv_core::Rational::one(),
+            vv_core::Rational::new(2, 1),
         );
-        clip.speed = vv_core::Rational::new(2, 1);
         clip.pitch_correction = pitch_correction;
-        clip.conform(vv_core::Rational::one());
-        clip.timeline_len = 25;
         let tl = timeline_with(vec![Track {
             kind: TrackKind::Audio,
             clips: vec![clip],
@@ -912,10 +910,15 @@ fn mix_audio_track_of_a_range_is_the_same_part_of_the_whole_mix() {
             vv_core::Rational::one(),
         )
     };
-    let mut faster = clip(2, 10, 20);
-    faster.speed = vv_core::Rational::new(3, 2);
-    faster.conform(vv_core::Rational::one());
-    faster.timeline_len = 30;
+    let faster = Clip::new(
+        ClipId(2),
+        ClipSource::Media(media),
+        10,
+        20,
+        30,
+        vv_core::Rational::one(),
+        vv_core::Rational::new(3, 2),
+    );
     let track = |clips| Track {
         kind: TrackKind::Audio,
         clips,

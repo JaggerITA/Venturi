@@ -214,8 +214,8 @@ pub(crate) fn clip_json(
             value["audio_stream"] = json!(clip.audio_stream_index);
         }
     }
-    if clip.speed != Rational::one() {
-        value["speed"] = json!(clip.speed.as_f64());
+    if clip.speed() != Rational::one() {
+        value["speed"] = json!(clip.speed().as_f64());
     }
     value
 }

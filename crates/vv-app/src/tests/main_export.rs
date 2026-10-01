@@ -255,7 +255,7 @@ fn export_conforms_a_clip_whose_fps_differs_from_the_timeline() {
         .flat_map(|t| t.clips.iter())
         .find(|c| c.timeline_start == second_start)
         .expect("conformed clip expected");
-    assert_ne!(conformed.rate, vv_core::Rational::one());
+    assert_ne!(conformed.rate(), vv_core::Rational::one());
     let total = app.session.project.timelines[timeline_id].total_frames();
     // 1 s at 25 fps + 2 s conformed to 25 fps, within one frame of
     // rounding on the duration reported by ffmpeg.

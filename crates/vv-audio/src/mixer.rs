@@ -656,7 +656,7 @@ fn collect_clips(
             let Some(item) = project.media_pool.get(*media_id) else {
                 continue;
             };
-            let pitch_corrected = clip.pitch_correction && !clip.speed.is_one();
+            let pitch_corrected = clip.pitch_correction && !clip.speed().is_one();
             let span = ClipSpan::new(clip, fps, sample_rate);
             // The stretch starts from the start of the clip.
             let mixed = range.as_ref().filter(|_| !pitch_corrected);
@@ -933,7 +933,7 @@ impl ClipSpan {
                 clip.media_secs_at(clip.timeline_start, timeline_fps),
                 sample_rate,
             ),
-            step: clip.speed.as_f64(),
+            step: clip.speed().as_f64(),
             fade_in: frames(clip.fade_in),
             fade_out: frames(clip.fade_out),
         }

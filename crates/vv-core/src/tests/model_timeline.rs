@@ -535,3 +535,17 @@ fn transitions_do_not_apply_to_adjustment_clips() {
         [0.0, 0.0]
     );
 }
+
+#[test]
+fn retime_keeps_the_clip_speed() {
+    let rate_30 = Rational::conform_rate(Rational::new(30, 1), Rational::new(30, 1));
+    let mut clip = media_clip_at(rate_30, 300, 900, 150);
+    clip.set_speed(Rational::new(2, 1), rate_30);
+
+    let rate_25 = Rational::conform_rate(Rational::new(25, 1), Rational::new(30, 1));
+    clip.retime(Rational::new(30, 1), Rational::new(25, 1), rate_25);
+
+    assert_eq!(clip.speed(), Rational::new(2, 1));
+    assert_eq!(clip.rate(), rate_25.divided_by(Rational::new(2, 1)));
+    assert_eq!(clip.conform_rate(), rate_25);
+}

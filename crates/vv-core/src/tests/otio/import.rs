@@ -33,7 +33,7 @@ fn span(clip: &Clip) -> (FrameIdx, FrameIdx, FrameIdx, Rational) {
         clip.timeline_start,
         clip.source_offset,
         clip.timeline_len,
-        clip.rate,
+        clip.rate(),
     )
 }
 
@@ -456,7 +456,7 @@ fn reads_the_transform_of_a_resolve_clip() {
 
     let (_, tl) = imported.project.timelines.iter().next().unwrap();
     let clip = &tl.tracks[0].clips[0];
-    assert_eq!(clip.speed, Rational::new(2, 1));
+    assert_eq!(clip.speed(), Rational::new(2, 1));
     assert_eq!(
         (clip.timeline_len, clip.source_frame_at(99)),
         (100, 198),
@@ -852,7 +852,7 @@ fn audio_only_media_round_trips_and_is_refused_on_video_tracks() {
         (25, 13),
         "1 s from 0.5 s, at 25 fps"
     );
-    assert_eq!(clip.rate, rate);
+    assert_eq!(clip.rate(), rate);
     assert_eq!(tl.resolution, (1920, 1080));
 }
 
@@ -922,10 +922,9 @@ fn a_clip_speed_round_trips_with_and_without_our_metadata() {
         12,
         Rational::one(),
     );
-    clip.speed = Rational::from_percent(250.0);
+    clip.set_speed(Rational::from_percent(250.0), Rational::one());
     clip.pitch_correction = true;
-    clip.conform(Rational::one());
-    clip.source_offset = clip.rate.scale_round(100);
+    clip.source_offset = clip.rate().scale_round(100);
     clip.timeline_len = 40;
     project.timelines[timeline_id].tracks[0].clips.push(clip);
     let original = project.timelines[timeline_id].tracks[0].clips[0].clone();
@@ -944,7 +943,7 @@ fn a_clip_speed_round_trips_with_and_without_our_metadata() {
     let ours = import(&otio);
     assert_eq!(span(&ours), span(&original));
     assert_eq!(
-        (ours.speed, ours.pitch_correction),
+        (ours.speed(), ours.pitch_correction),
         (Rational::new(5, 2), true)
     );
 
@@ -954,7 +953,7 @@ fn a_clip_speed_round_trips_with_and_without_our_metadata() {
         }
     }
     let foreign = import(&otio);
-    assert_eq!(foreign.speed, Rational::new(5, 2));
+    assert_eq!(foreign.speed(), Rational::new(5, 2));
     assert_eq!(foreign.source_in(), original.source_in(), "media time");
     assert_eq!(span(&foreign), span(&original));
 }

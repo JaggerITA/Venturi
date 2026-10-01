@@ -1359,13 +1359,14 @@ pub struct Clip {
     #[serde(default)]
     pub audio_stream_index: usize,
     /// Timeline frames per source frame: `Rational::conform_rate` divided
-    /// by `speed` (see `Clip::conform`).
+    /// by `speed`. Private, like `speed`, so the two cannot drift apart:
+    /// written only through `conform`.
     #[serde(default = "Rational::one")]
-    pub rate: Rational,
+    rate: Rational,
     /// Source time per timeline time: `2/1` plays the media twice as fast.
     /// Only on `Media` clips.
     #[serde(default = "Rational::one")]
-    pub speed: Rational,
+    speed: Rational,
     /// Audio of a clip with `speed != 1`: pitch preserved (time-stretch)
     /// instead of following the speed.
     #[serde(default = "pitch_correction_default")]
@@ -1419,6 +1420,41 @@ impl Clip {
             fade_out: 0,
             display_color: None,
         }
+    }
+
+    /// A clip at `speed` with its timeline geometry already computed, without
+    /// effects or links.
+    pub fn new(
+        id: ClipId,
+        source: ClipSource,
+        source_offset: FrameIdx,
+        timeline_start: FrameIdx,
+        timeline_len: FrameIdx,
+        conform_rate: Rational,
+        speed: Rational,
+    ) -> Self {
+        let mut clip = Self::from_source_range(id, source, 0, 0, timeline_start, conform_rate);
+        clip.source_offset = source_offset;
+        clip.timeline_len = timeline_len;
+        clip.speed = speed;
+        clip.conform(conform_rate);
+        clip
+    }
+
+    pub fn rate(&self) -> Rational {
+        self.rate
+    }
+
+    pub fn speed(&self) -> Rational {
+        self.speed
+    }
+
+    /// `rate` without the speed: timeline fps against source fps.
+    pub fn conform_rate(&self) -> Rational {
+        Rational::reduced(
+            self.rate.num as i64 * self.speed.num as i64,
+            self.rate.den as i64 * self.speed.den as i64,
+        )
     }
 
     /// Solid color, title or adjustment: no media bounds its length.
@@ -1497,14 +1533,14 @@ impl Clip {
     }
 
     /// Moves the clip from a timeline at `from` fps to one at `to` fps,
-    /// preserving the seconds; `rate` is the clip's one on the new
-    /// timeline.
-    pub fn retime(&mut self, from: Rational, to: Rational, rate: Rational) {
+    /// preserving the seconds; `conform_rate` is the one of its source on
+    /// the new timeline.
+    pub fn retime(&mut self, from: Rational, to: Rational, conform_rate: Rational) {
         let end = convert_frames(self.timeline_end(), from, to);
         self.timeline_start = convert_frames(self.timeline_start, from, to);
         self.timeline_len = (end - self.timeline_start).max(1);
         self.source_offset = convert_frames(self.source_offset, from, to);
-        self.rate = rate;
+        self.conform(conform_rate);
     }
 
     /// Opacity/volume multiplier at `timeline_frame` for the
@@ -2415,14 +2451,25 @@ impl Project {
     /// Recomputes `Clip::rate` from the fps. `source_offset`/`timeline_len` are
     /// in timeline frames and do not change.
     pub fn refresh_clip_rates(&mut self) {
+        self.conform_clips(|_| true);
+    }
+
+    /// After the fps of `media` changed.
+    pub fn conform_clips_of(&mut self, media: MediaId) {
+        self.conform_clips(|id| id == media);
+    }
+
+    fn conform_clips(&mut self, of: impl Fn(MediaId) -> bool) {
         let media_pool = &self.media_pool;
         for timeline in self.timelines.values_mut() {
             let timeline_fps = timeline.fps;
             for clip in timeline.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
-                let ClipSource::Media(media_id) = &clip.source else {
+                let ClipSource::Media(media_id) = clip.source else {
                     continue;
                 };
-                if let Some(item) = media_pool.get(*media_id) {
+                if of(media_id)
+                    && let Some(item) = media_pool.get(media_id)
+                {
                     clip.conform(Rational::conform_rate(timeline_fps, item.meta.fps));
                 }
             }

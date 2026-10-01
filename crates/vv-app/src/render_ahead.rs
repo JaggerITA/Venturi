@@ -531,7 +531,7 @@ fn clipped_media_segments(
             source_start,
             source_end,
             timeline_start: segment_start,
-            rate: clip.rate,
+            rate: clip.rate(),
         };
         push_or_recurse(project, track_index, segment, depth, &mut real);
     }
@@ -646,7 +646,7 @@ fn push_borrowed_segment(
         source_start: a.min(b),
         source_end: a.max(b),
         timeline_start: from_timeline,
-        rate: clip.rate,
+        rate: clip.rate(),
     };
     match item.compound {
         Some(nested_id) => {

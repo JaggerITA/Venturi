@@ -195,7 +195,7 @@ fn clip_to_otio(
             "start_time": {
                 "OTIO_SCHEMA": "RationalTime.1",
                 "rate": fps.as_f64(),
-                "value": clip.source_offset as f64 * clip.speed.as_f64(),
+                "value": clip.source_offset as f64 * clip.speed().as_f64(),
             },
             "duration": rational_time(clip.timeline_len, fps),
         },
@@ -211,7 +211,7 @@ fn clip_to_otio(
                 "fade_in": clip.fade_in,
                 "fade_out": clip.fade_out,
                 "display_color": clip.display_color,
-                "speed": clip.speed,
+                "speed": clip.speed(),
                 "pitch_correction": clip.pitch_correction,
             }
         },

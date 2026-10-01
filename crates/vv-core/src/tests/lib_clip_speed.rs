@@ -88,7 +88,7 @@ fn doubling_the_speed_halves_the_clip_and_ripples_every_track() {
     assert_eq!(span(&project, tl, 0, a), (0, 100));
     assert_eq!(span(&project, tl, 0, b), (100, 50));
     assert_eq!(
-        project.timelines[tl].clip(0, a).unwrap().speed,
+        project.timelines[tl].clip(0, a).unwrap().speed(),
         Rational::one()
     );
 }
@@ -237,7 +237,7 @@ fn refreshing_the_rates_keeps_the_speed() {
     );
     project.refresh_clip_rates();
     assert_eq!(
-        project.timelines[tl].clip(0, a).unwrap().rate,
+        project.timelines[tl].clip(0, a).unwrap().rate(),
         Rational::new(1, 2)
     );
 }

@@ -1095,7 +1095,7 @@ fn inserting_a_media_at_another_fps_conforms_it_to_the_timeline() {
     );
 
     let clip = &app.session.project.timelines[timeline_id].tracks[0].clips[0];
-    assert_eq!(clip.rate, vv_core::Rational::new(1001, 1000));
+    assert_eq!(clip.rate(), vv_core::Rational::new(1001, 1000));
     assert_eq!(clip.source_len(), 3000);
     assert_eq!(clip.timeline_len, 3003, "100,1 s a 30 fps");
     assert_eq!(clip.source_frame_at(clip.timeline_end() - 1), 2999);
@@ -1259,7 +1259,7 @@ fn pasting_a_conformed_clip_keeps_its_timeline_duration() {
     let clips = &app.session.project.timelines[timeline_id].tracks[0].clips;
     assert_eq!(clips.len(), 2);
     let pasted = clips.iter().find(|c| c.timeline_start == 5000).unwrap();
-    assert_eq!(pasted.rate, vv_core::Rational::new(1001, 1000));
+    assert_eq!(pasted.rate(), vv_core::Rational::new(1001, 1000));
     assert_eq!(pasted.timeline_len, 3003);
 }
 
@@ -1298,7 +1298,7 @@ fn pasting_into_a_timeline_at_another_fps_keeps_the_duration_in_seconds() {
     let pasted = &app.session.project.timelines[other].tracks[0].clips[0];
     assert_eq!(pasted.timeline_start, 50);
     assert_eq!(pasted.timeline_len, 250, "10 secondi a 25 fps");
-    assert_eq!(pasted.rate, vv_core::Rational::new(5, 6));
+    assert_eq!(pasted.rate(), vv_core::Rational::new(5, 6));
     assert_eq!((pasted.source_in(), pasted.source_out()), (0, 300));
 }
 

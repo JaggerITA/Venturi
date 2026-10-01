@@ -133,7 +133,7 @@ fn set_media_path_with_meta_updates_the_clip_rates() {
             Some(new_meta.clone()),
         )),
     );
-    let rate = |project: &Project| project.timelines[timeline].clip(0, clip_id).unwrap().rate;
+    let rate = |project: &Project| project.timelines[timeline].clip(0, clip_id).unwrap().rate();
     assert_eq!(project.media_pool[media].meta.fps, new_meta.fps);
     assert_eq!(rate(&project), Rational::conform_rate(tl_fps, new_meta.fps));
     assert_ne!(rate(&project), old_rate);
@@ -155,7 +155,7 @@ fn set_media_path_with_meta_keeps_the_clip_speed() {
     let clip_id = project.alloc_clip_id();
     let mut clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 100, 0, conform);
     clip.set_speed(Rational::new(2, 1), conform);
-    let sped_up_rate = clip.rate;
+    let sped_up_rate = clip.rate();
     project.timelines[timeline].tracks[0].clips.push(clip);
 
     history.do_command(
@@ -168,7 +168,7 @@ fn set_media_path_with_meta_keeps_the_clip_speed() {
         )),
     );
     assert_eq!(
-        project.timelines[timeline].clip(0, clip_id).unwrap().rate,
+        project.timelines[timeline].clip(0, clip_id).unwrap().rate(),
         sped_up_rate
     );
 }

@@ -291,7 +291,7 @@ fn pasting_the_speed_retimes_the_target() {
     let tl = &app.session.project.timelines[timeline_id];
     let pasted = tl.clip(track_index, target_id).unwrap();
     assert_eq!(
-        (pasted.speed, pasted.pitch_correction),
+        (pasted.speed(), pasted.pitch_correction),
         (Rational::new(2, 1), true)
     );
     assert_eq!((pasted.timeline_start, pasted.timeline_len), (100, 50));
@@ -300,7 +300,7 @@ fn pasting_the_speed_retimes_the_target() {
     app.session.history.undo(&mut app.session.project);
     let tl = &app.session.project.timelines[timeline_id];
     assert_eq!(
-        tl.clip(track_index, target_id).unwrap().speed,
+        tl.clip(track_index, target_id).unwrap().speed(),
         Rational::one()
     );
     assert_eq!(

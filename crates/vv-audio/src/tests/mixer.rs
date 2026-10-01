@@ -736,10 +736,9 @@ fn fade_in_silences_the_start_of_a_block_and_full_gain_clip_is_unaffected() {
 /// varispeed.
 fn sped_up_clip(media: vv_core::MediaId, speed: Rational, len: FrameIdx) -> Clip {
     let mut clip = clip_at(media, 0, 0, 1);
-    clip.speed = speed;
+    clip.set_speed(speed, Rational::one());
     clip.pitch_correction = false;
-    clip.conform(Rational::one());
-    clip.source_offset = clip.rate.scale_round(10);
+    clip.source_offset = clip.rate().scale_round(10);
     clip.timeline_len = len;
     clip
 }

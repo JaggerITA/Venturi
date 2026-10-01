@@ -364,7 +364,7 @@ fn with_the_retime_bar_the_right_edge_changes_the_speed() {
         egui::vec2(-50.0 * PX_PER_FRAME, 0.0),
     );
     let clip = h.clip(0, ClipId(1));
-    assert_eq!((clip.speed, clip.timeline_len), (Rational::new(2, 1), 50));
+    assert_eq!((clip.speed(), clip.timeline_len), (Rational::new(2, 1), 50));
     assert_eq!(clip.source_in(), 0);
     assert_eq!(
         h.clip(0, ClipId(2)).timeline_start,
@@ -387,7 +387,7 @@ fn slowing_down_with_the_retime_bar_overwrites_the_next_clip() {
     );
     let clip = h.clip(0, ClipId(1));
     assert_eq!(
-        (clip.speed, clip.timeline_len),
+        (clip.speed(), clip.timeline_len),
         (Rational::new(10, 11), 110)
     );
     let next = h.clip(0, ClipId(2));
@@ -414,7 +414,7 @@ fn the_retime_bar_closes_with_its_x() {
     h.frame(vec![button(true)]);
     h.frame(vec![button(false)]);
     assert!(h.state.retime_controls.is_empty());
-    assert_eq!(h.clip(0, ClipId(1)).speed, Rational::one());
+    assert_eq!(h.clip(0, ClipId(1)).speed(), Rational::one());
 }
 
 /// Reported bug: an already retimed clip stopped a few frames short of

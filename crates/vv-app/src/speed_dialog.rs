@@ -49,7 +49,7 @@ impl VenturiApp {
             return;
         };
         self.speed_dialog = Some(SpeedDialog {
-            percent: first.speed.as_percent(),
+            percent: first.speed().as_percent(),
             pitch_correction: first.pitch_correction,
             ripple: true,
             targets,

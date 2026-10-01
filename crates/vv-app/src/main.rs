@@ -2388,21 +2388,19 @@ impl VenturiApp {
                 clip.timeline_start = entry.relative_start;
                 clip.linked_group = None;
                 if entry.timeline_fps != timeline_fps {
-                    let rate = match &clip.source {
+                    // A media gone from the pool keeps the conform rate it had.
+                    let conform_rate = match &clip.source {
                         vv_core::ClipSource::Media(media_id) => {
                             self.session.project.media_pool.get(*media_id).map_or(
-                                clip.rate,
-                                |item| {
-                                    vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
-                                        .divided_by(clip.speed)
-                                },
+                                clip.conform_rate(),
+                                |item| vv_core::Rational::conform_rate(timeline_fps, item.meta.fps),
                             )
                         }
                         vv_core::ClipSource::SolidColor
                         | vv_core::ClipSource::Text
-                        | vv_core::ClipSource::Adjustment => clip.rate,
+                        | vv_core::ClipSource::Adjustment => clip.conform_rate(),
                     };
-                    clip.retime(entry.timeline_fps, timeline_fps, rate);
+                    clip.retime(entry.timeline_fps, timeline_fps, conform_rate);
                 }
                 clip.timeline_start += playhead;
                 (*track_index, clip, entry.link_tag)

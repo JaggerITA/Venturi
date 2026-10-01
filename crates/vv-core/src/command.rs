@@ -1104,7 +1104,7 @@ impl Command for SetClipSpeed {
                 };
                 if let Some(len) = wanted_len {
                     let available =
-                        clip.rate.scale_round(media.meta.duration_frames) - clip.source_offset;
+                        clip.rate().scale_round(media.meta.duration_frames) - clip.source_offset;
                     clip.timeline_len = len.min(available).max(1);
                     clip.fade_in = clip.fade_in.min(clip.timeline_len);
                     clip.fade_out = clip.fade_out.min(clip.timeline_len);
@@ -2599,8 +2599,6 @@ pub struct SetMediaPath {
     /// `None` keeps the current one.
     new_meta: Option<MediaMeta>,
     old: RefCell<Option<(PathBuf, u64, MediaMeta)>>,
-    /// Clips whose conform rate changed with the new fps.
-    old_rates: RefCell<Vec<(TimelineId, usize, ClipId, Rational)>>,
 }
 
 impl SetMediaPath {
@@ -2616,7 +2614,6 @@ impl SetMediaPath {
             new_content_hash,
             new_meta,
             old: RefCell::new(None),
-            old_rates: RefCell::new(Vec::new()),
         }
     }
 }
@@ -2637,23 +2634,7 @@ impl Command for SetMediaPath {
             return;
         };
         item.meta = meta.clone();
-        let mut old_rates = self.old_rates.borrow_mut();
-        old_rates.clear();
-        for (timeline_id, timeline) in project.timelines.iter_mut() {
-            let rate = Rational::conform_rate(timeline.fps, meta.fps);
-            for (track_index, track) in timeline.tracks.iter_mut().enumerate() {
-                for clip in &mut track.clips {
-                    if !matches!(clip.source, ClipSource::Media(id) if id == self.media) {
-                        continue;
-                    }
-                    let old_rate = clip.rate;
-                    clip.conform(rate);
-                    if clip.rate != old_rate {
-                        old_rates.push((timeline_id, track_index, clip.id, old_rate));
-                    }
-                }
-            }
-        }
+        project.conform_clips_of(self.media);
     }
 
     fn undo(&self, project: &mut Project) {
@@ -2665,10 +2646,8 @@ impl Command for SetMediaPath {
             item.content_hash = hash;
             item.meta = meta;
         }
-        for (timeline_id, track_index, clip_id, rate) in self.old_rates.borrow_mut().drain(..) {
-            if let Some(clip) = project.timelines[timeline_id].clip_mut(track_index, clip_id) {
-                clip.rate = rate;
-            }
+        if self.new_meta.is_some() {
+            project.conform_clips_of(self.media);
         }
     }
 }
