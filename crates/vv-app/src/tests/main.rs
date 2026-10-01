@@ -4715,3 +4715,11 @@ fn a_single_file_import_and_its_timeline_are_one_undo_step() {
     app.undo();
     assert!(app.session.project.timelines.is_empty());
 }
+
+#[test]
+fn a_replaced_project_does_not_inherit_the_last_export_destination() {
+    let mut app = VenturiApp::default();
+    app.last_export_settings = Some(export::ExportSettings::new("/old/project.mp4".into()));
+    app.new_project();
+    assert!(app.last_export_settings.is_none());
+}

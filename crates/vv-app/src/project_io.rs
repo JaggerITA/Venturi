@@ -663,6 +663,7 @@ impl VenturiApp {
         self.timeline_id = self.session.project.timelines.keys().next();
         self.timeline_state = timeline_ui::TimelineState::default();
         self.import_warnings.clear();
+        self.last_export_settings = None;
         self.preview_meta = None;
         self.preview_error = None;
         self.last_viewer_frame_kind = None;
