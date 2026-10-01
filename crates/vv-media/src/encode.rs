@@ -1,4 +1,4 @@
-//! Encoding + muxing into MP4 (H.264 x264/NVENC + AAC). It receives already
+//! Encoding + muxing into MP4 (H.264 x264/NVENC/VideoToolbox/Vulkan + AAC). It receives already
 //! composited I420 frames (BT.709 limited) and already mixed PCM; it only
 //! converts the audio into the AAC encoder's native format.
 
@@ -15,15 +15,28 @@ use std::sync::OnceLock;
 pub enum VideoCodec {
     X264,
     Nvenc,
+    VideoToolbox,
+    Vulkan,
 }
 
 impl VideoCodec {
-    pub const ALL: [Self; 2] = [Self::X264, Self::Nvenc];
+    pub const ALL: [Self; 4] = [Self::X264, Self::Nvenc, Self::VideoToolbox, Self::Vulkan];
+
+    /// The encoders that can exist on this platform.
+    pub fn choices() -> &'static [Self] {
+        if cfg!(target_os = "macos") {
+            &[Self::X264, Self::VideoToolbox]
+        } else {
+            &[Self::X264, Self::Nvenc, Self::Vulkan]
+        }
+    }
 
     fn ffmpeg_name(self) -> &'static str {
         match self {
             Self::X264 => "libx264",
             Self::Nvenc => "h264_nvenc",
+            Self::VideoToolbox => "h264_videotoolbox",
+            Self::Vulkan => "h264_vulkan",
         }
     }
 
@@ -42,6 +55,7 @@ impl VideoCodec {
                 "veryslow",
             ],
             Self::Nvenc => &["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+            Self::VideoToolbox | Self::Vulkan => &[],
         }
     }
 
@@ -51,30 +65,47 @@ impl VideoCodec {
             // ~2× larger files.
             Self::X264 => "superfast",
             Self::Nvenc => "p5",
+            Self::VideoToolbox | Self::Vulkan => "",
+        }
+    }
+
+    /// The scale of `VideoSettings::quality`.
+    pub fn quality_range(self) -> std::ops::RangeInclusive<u8> {
+        match self {
+            Self::X264 | Self::Nvenc | Self::Vulkan => 0..=51,
+            Self::VideoToolbox => 1..=100,
+        }
+    }
+
+    /// Whether a higher `quality` means a better picture: VideoToolbox's
+    /// scale goes up, the quantizers of the others down.
+    pub fn quality_rises(self) -> bool {
+        self == Self::VideoToolbox
+    }
+
+    pub fn default_quality(self) -> u8 {
+        match self {
+            Self::X264 | Self::Nvenc => 20,
+            // A constant QP spends more than a CRF at the same number.
+            Self::Vulkan => 23,
+            Self::VideoToolbox => 65,
         }
     }
 
     /// Tries to actually open the encoder (result cached): NVENC is
     /// compiled into many ffmpeg builds even where there is no NVIDIA GPU,
-    /// and the first open can cost a second.
+    /// a Vulkan driver may have no encode queue, VideoToolbox has no
+    /// constant quality on Intel Macs, and the first open can cost a second.
     pub fn is_available(self) -> bool {
-        static CACHE: [OnceLock<bool>; 2] = [OnceLock::new(), OnceLock::new()];
+        static CACHE: [OnceLock<bool>; 4] = [const { OnceLock::new() }; 4];
         *CACHE[self as usize].get_or_init(|| {
             crate::probe::ensure_init();
-            let Some(codec) = encoder::find_by_name(self.ffmpeg_name()) else {
-                return false;
+            let settings = VideoSettings {
+                codec: self,
+                preset: self.default_preset().into(),
+                quality: self.default_quality(),
             };
-            let Ok(mut ctx) = codec::context::Context::new_with_codec(codec)
-                .encoder()
-                .video()
-            else {
-                return false;
-            };
-            ctx.set_width(256);
-            ctx.set_height(256);
-            ctx.set_format(Pixel::YUV420P);
-            ctx.set_time_base(ffmpeg::Rational::new(1, 25));
-            ctx.open().is_ok()
+            open_video_encoder(&settings, 256, 256, vv_core::Rational::new(25, 1), false).is_ok()
         })
     }
 }
@@ -148,6 +179,9 @@ struct VideoState {
     time_base: ffmpeg::Rational,
     ost_time_base: ffmpeg::Rational,
     next_pts: i64,
+    /// Staging frame of the encoders that take GPU frames (Vulkan): they
+    /// accept NV12, not three-plane I420.
+    nv12: Option<ffmpeg::frame::Video>,
 }
 
 struct AudioState {
@@ -194,50 +228,10 @@ impl Encoder {
         let mut octx = format::output(path)?;
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        let video_codec = encoder::find_by_name(video.codec.ffmpeg_name()).ok_or_else(|| {
-            crate::MediaError::NoStream(format!(
-                "encoder {} not available",
-                video.codec.ffmpeg_name()
-            ))
-        })?;
-        let video_ost = octx.add_stream(video_codec)?;
+        let (video_encoder, nv12) = open_video_encoder(video, width, height, fps, global_header)?;
+        let video_time_base = video_encoder.time_base();
+        let mut video_ost = octx.add_stream(video_encoder.codec())?;
         let video_stream_index = video_ost.index();
-
-        let video_time_base = ffmpeg::Rational::new(fps.den, fps.num);
-        let mut video_ctx = codec::context::Context::new_with_codec(video_codec)
-            .encoder()
-            .video()?;
-        video_ctx.set_width(width);
-        video_ctx.set_height(height);
-        video_ctx.set_format(Pixel::YUV420P);
-        video_ctx.set_time_base(video_time_base);
-        video_ctx.set_frame_rate(Some(ffmpeg::Rational::new(fps.num, fps.den)));
-        video_ctx.set_colorspace(ffmpeg::color::Space::BT709);
-        video_ctx.set_color_range(ffmpeg::color::Range::MPEG);
-        // ffmpeg-next has no setter for primaries/trc.
-        unsafe {
-            let raw = video_ctx.as_mut_ptr();
-            (*raw).color_primaries = ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_BT709;
-            (*raw).color_trc = ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
-        }
-        if global_header {
-            video_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
-        }
-        let mut video_opts = Dictionary::new();
-        video_opts.set("preset", &video.preset);
-        let quality = video.quality.to_string();
-        match video.codec {
-            VideoCodec::X264 => video_opts.set("crf", &quality),
-            VideoCodec::Nvenc => {
-                // Without bit_rate at 0, NVENC ignores `cq` and stays on the
-                // context's default bitrate.
-                video_ctx.set_bit_rate(0);
-                video_opts.set("rc", "vbr");
-                video_opts.set("cq", &quality);
-            }
-        }
-        let video_encoder = video_ctx.open_with(video_opts)?;
-        let mut video_ost = video_ost;
         video_ost.set_parameters(&video_encoder);
 
         // --- audio: AAC (optional) ---
@@ -336,6 +330,7 @@ impl Encoder {
             time_base: video_time_base,
             ost_time_base: video_ost_time_base,
             next_pts: 0,
+            nv12,
         };
 
         let audio = audio_state.map(|mut state| {
@@ -354,17 +349,28 @@ impl Encoder {
         let width = video.encoder.width() as usize;
         let height = video.encoder.height() as usize;
         let chroma_width = width.div_ceil(2);
-        let mut yuv = ffmpeg::frame::Video::new(Pixel::YUV420P, width as u32, height as u32);
         let (luma, chroma) = i420.split_at(width * height);
         let (u, v) = chroma.split_at(chroma.len() / 2);
-        fill_plane(&mut yuv, 0, luma, width);
-        fill_plane(&mut yuv, 1, u, chroma_width);
-        fill_plane(&mut yuv, 2, v, chroma_width);
-        yuv.set_pts(Some(video.next_pts));
-        yuv.set_kind(ffmpeg::picture::Type::None);
+        let mut frame = match &mut video.nv12 {
+            Some(nv12) => {
+                fill_plane(nv12, 0, luma, width);
+                interleave_chroma(nv12, u, v, chroma_width);
+                upload(&video.encoder, nv12)?
+            }
+            None => {
+                let mut yuv =
+                    ffmpeg::frame::Video::new(Pixel::YUV420P, width as u32, height as u32);
+                fill_plane(&mut yuv, 0, luma, width);
+                fill_plane(&mut yuv, 1, u, chroma_width);
+                fill_plane(&mut yuv, 2, v, chroma_width);
+                yuv
+            }
+        };
+        frame.set_pts(Some(video.next_pts));
+        frame.set_kind(ffmpeg::picture::Type::None);
         video.next_pts += 1;
 
-        video.encoder.send_frame(&yuv)?;
+        video.encoder.send_frame(&frame)?;
         drain_packets(
             &mut self.octx,
             &mut video.encoder,
@@ -462,6 +468,159 @@ fn write_audio_chunk(
         audio.time_base,
         audio.ost_time_base,
     )
+}
+
+/// The video encoder of `settings`, opened, and the NV12 staging frame if
+/// it takes GPU frames.
+fn open_video_encoder(
+    settings: &VideoSettings,
+    width: u32,
+    height: u32,
+    fps: vv_core::Rational,
+    global_header: bool,
+) -> Result<(encoder::Video, Option<ffmpeg::frame::Video>), crate::MediaError> {
+    let name = settings.codec.ffmpeg_name();
+    let codec = encoder::find_by_name(name)
+        .ok_or_else(|| crate::MediaError::NoStream(format!("encoder {name} not available")))?;
+    let mut ctx = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()?;
+    ctx.set_width(width);
+    ctx.set_height(height);
+    ctx.set_format(Pixel::YUV420P);
+    ctx.set_time_base(ffmpeg::Rational::new(fps.den, fps.num));
+    ctx.set_frame_rate(Some(ffmpeg::Rational::new(fps.num, fps.den)));
+    ctx.set_colorspace(ffmpeg::color::Space::BT709);
+    ctx.set_color_range(ffmpeg::color::Range::MPEG);
+    // ffmpeg-next has no setter for primaries/trc.
+    unsafe {
+        let raw = ctx.as_mut_ptr();
+        (*raw).color_primaries = ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_BT709;
+        (*raw).color_trc = ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
+    }
+    let mut flags = codec::Flags::empty();
+    if global_header {
+        flags |= codec::Flags::GLOBAL_HEADER;
+    }
+    let mut opts = Dictionary::new();
+    if !settings.codec.presets().is_empty() {
+        opts.set("preset", &settings.preset);
+    }
+    let quality = settings.quality.to_string();
+    let mut nv12 = None;
+    match settings.codec {
+        VideoCodec::X264 => opts.set("crf", &quality),
+        VideoCodec::Nvenc => {
+            // Without bit_rate at 0, NVENC ignores `cq` and stays on the
+            // context's default bitrate.
+            ctx.set_bit_rate(0);
+            opts.set("rc", "vbr");
+            opts.set("cq", &quality);
+        }
+        VideoCodec::VideoToolbox => {
+            // `-q:v`: constant quality, Apple Silicon only.
+            flags |= codec::Flags::QSCALE;
+            ctx.set_global_quality(settings.quality as i32 * ffmpeg::ffi::FF_QP2LAMBDA);
+        }
+        VideoCodec::Vulkan => {
+            // SAFETY: a context not opened yet.
+            unsafe { attach_vulkan_frames(ctx.as_mut_ptr())? };
+            opts.set("rc_mode", "cqp");
+            opts.set("qp", &quality);
+            nv12 = Some(ffmpeg::frame::Video::new(Pixel::NV12, width, height));
+        }
+    }
+    ctx.set_flags(flags);
+    Ok((ctx.open_with(opts)?, nv12))
+}
+
+/// Gives `ctx` a pool of NV12 frames on the first Vulkan device.
+///
+/// # Safety
+/// `ctx` must be a valid encoder context not opened yet, with its size set.
+unsafe fn attach_vulkan_frames(
+    ctx: *mut ffmpeg::ffi::AVCodecContext,
+) -> Result<(), crate::MediaError> {
+    use ffmpeg::ffi;
+    let check = |ret: i32| {
+        if ret < 0 {
+            Err(crate::MediaError::from(ffmpeg::Error::from(ret)))
+        } else {
+            Ok(())
+        }
+    };
+    unsafe {
+        let mut device = std::ptr::null_mut();
+        check(ffi::av_hwdevice_ctx_create(
+            &mut device,
+            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        ))?;
+        let mut frames = ffi::av_hwframe_ctx_alloc(device);
+        // The frames context holds its own reference to the device.
+        ffi::av_buffer_unref(&mut device);
+        if frames.is_null() {
+            return Err(ffmpeg::Error::Other {
+                errno: ffmpeg::error::ENOMEM,
+            }
+            .into());
+        }
+        let frames_ctx = &mut *((*frames).data as *mut ffi::AVHWFramesContext);
+        frames_ctx.format = ffi::AVPixelFormat::AV_PIX_FMT_VULKAN;
+        frames_ctx.sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
+        frames_ctx.width = (*ctx).width;
+        frames_ctx.height = (*ctx).height;
+        if let Err(e) = check(ffi::av_hwframe_ctx_init(frames)) {
+            ffi::av_buffer_unref(&mut frames);
+            return Err(e);
+        }
+        // Freed with the context.
+        (*ctx).hw_frames_ctx = frames;
+        (*ctx).pix_fmt = ffi::AVPixelFormat::AV_PIX_FMT_VULKAN;
+    }
+    Ok(())
+}
+
+/// `nv12` copied into a frame of `encoder`'s GPU pool.
+fn upload(
+    encoder: &encoder::Video,
+    nv12: &ffmpeg::frame::Video,
+) -> Result<ffmpeg::frame::Video, crate::MediaError> {
+    use ffmpeg::ffi;
+    let mut gpu = ffmpeg::frame::Video::empty();
+    // SAFETY: the encoder was opened with `hw_frames_ctx`
+    // (`attach_vulkan_frames`), and `gpu` is blank as both calls want it.
+    unsafe {
+        let frames = (*encoder.as_ptr()).hw_frames_ctx;
+        let ret = ffi::av_hwframe_get_buffer(frames, gpu.as_mut_ptr(), 0);
+        if ret < 0 {
+            return Err(ffmpeg::Error::from(ret).into());
+        }
+        let ret = ffi::av_hwframe_transfer_data(gpu.as_mut_ptr(), nv12.as_ptr(), 0);
+        if ret < 0 {
+            return Err(ffmpeg::Error::from(ret).into());
+        }
+    }
+    Ok(gpu)
+}
+
+/// Writes the dense `u` and `v` planes (rows of `row_width` samples) as
+/// NV12's interleaved chroma plane.
+fn interleave_chroma(frame: &mut ffmpeg::frame::Video, u: &[u8], v: &[u8], row_width: usize) {
+    let stride = frame.stride(1);
+    let data = frame.data_mut(1);
+    let rows = u
+        .chunks_exact(row_width.max(1))
+        .zip(v.chunks_exact(row_width.max(1)));
+    for (y, (u_row, v_row)) in rows.enumerate() {
+        let dst = &mut data[y * stride..y * stride + 2 * row_width];
+        let (pairs, _) = dst.as_chunks_mut::<2>();
+        for (pair, (&u, &v)) in pairs.iter_mut().zip(u_row.iter().zip(v_row)) {
+            *pair = [u, v];
+        }
+    }
 }
 
 /// Writes the packets already ready from `encoder` into the muxer.

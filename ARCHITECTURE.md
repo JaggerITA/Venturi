@@ -19,7 +19,7 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 | UI | egui + eframe | immediate-mode, pure Rust, shares the wgpu device with the compositor |
 | GPU | wgpu on Vulkan (Honeykrisp) | 1.3/1.4 conformant on M1/M2, one stack for UI and compositing |
 | Video decode | software FFmpeg (ffmpeg-next / libavcodec) | the V4L2/AVD HW decoder is still unstable with multi-reference frames (practically every real x264 file) |
-| Encode/export | FFmpeg via ffmpeg-next: NVENC if it really opens, otherwise libx264 | no reliable HW encoder on Asahi today |
+| Encode/export | FFmpeg via ffmpeg-next: libx264, or NVENC / Vulkan / VideoToolbox if they really open | no reliable HW encoder on Asahi today |
 | Audio time-stretch | libavfilter's `rubberband` filter (the system ffmpeg is already built with `--enable-librubberband`) | pitch preserved, no extra bindings to write |
 | Project persistence | RON, human-readable | debuggable, diffable with git |
 | Undo/redo | command pattern (invertible commands) | light, unbounded history, consistent with a data-oriented architecture |
@@ -323,8 +323,9 @@ Done:
 - Audio-only media (wav, mp3, flac…): nominal fps `AUDIO_ONLY_FPS`, no proxy
   or thumbnail, only audio clips on the timeline.
 - H.264 + AAC export in MP4 (Ctrl+Shift+E) from a settings window:
-  destination, in/out range or the whole timeline, video encoder
-  (x264/NVENC) with preset and quality, reduced resolution, audio encoder
+  destination, in/out range or the whole timeline, decoder (CPU or the GPU
+  of Settings > Playback), video encoder (x264, NVENC or Vulkan; x264 or
+  VideoToolbox on macOS) with preset and quality, reduced resolution, audio encoder
   (native AAC/FDK) with preset and bitrate. Default: NVENC and FDK if
   available, otherwise x264 `superfast` CRF 20 and native AAC. The last
   settings persist for the session.

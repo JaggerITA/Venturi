@@ -3759,8 +3759,13 @@ fn main() -> eframe::Result<()> {
         unsafe { hw_decode::enable_intel_experimental_decode() };
     }
     std::thread::spawn(vv_render::text::warm_up);
-    // The first NVENC check initializes CUDA: better not in the UI.
-    std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
+    // The first check of a GPU encoder initializes CUDA or Vulkan: better
+    // not in the UI.
+    std::thread::spawn(|| {
+        for codec in vv_media::VideoCodec::choices() {
+            codec.is_available();
+        }
+    });
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Venturi")

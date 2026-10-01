@@ -155,7 +155,7 @@ scripts/build-appimage.sh
 
 Produces `target/appimage/Venturi-<arch>.AppImage` with FFmpeg compiled from
 source inside it (shared libraries, with libx264, librubberband, zlib,
-NVENC and the encoders of the voiceover takes: libmp3lame, libopus,
+NVENC, Vulkan encode and the encoders of the voiceover takes: libmp3lame, libopus,
 libvorbis): the target machine needs neither FFmpeg nor RPM Fusion.
 glibc, ALSA, Vulkan and the NVIDIA driver, if any (NVENC requires >= 550),
 stay the system ones.

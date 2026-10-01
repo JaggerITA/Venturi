@@ -196,7 +196,7 @@ impl ExportDialog {
 
                 ui.label(t!("export.encoder"));
                 let before = video.codec;
-                let items: Vec<_> = VideoCodec::ALL
+                let items: Vec<_> = VideoCodec::choices()
                     .iter()
                     .map(|codec| {
                         (
@@ -217,34 +217,47 @@ impl ExportDialog {
                 );
                 if video.codec != before {
                     video.preset = video.codec.default_preset().into();
+                    video.quality = video.codec.default_quality();
                 }
                 ui.end_row();
 
-                ui.label(t!("export.preset"))
-                    .on_hover_text(t!("export.preset_hint"));
-                let items: Vec<_> = video
-                    .codec
-                    .presets()
-                    .iter()
-                    .map(|preset| (preset.to_string(), preset.to_string(), true))
-                    .collect();
-                preview_combo(
-                    ui,
-                    "export_video_preset",
-                    &mut video.preset,
-                    &items,
-                    None,
-                    None,
-                    None,
-                );
-                ui.end_row();
+                if !video.codec.presets().is_empty() {
+                    ui.label(t!("export.preset"))
+                        .on_hover_text(t!("export.preset_hint"));
+                    let items: Vec<_> = video
+                        .codec
+                        .presets()
+                        .iter()
+                        .map(|preset| (preset.to_string(), preset.to_string(), true))
+                        .collect();
+                    preview_combo(
+                        ui,
+                        "export_video_preset",
+                        &mut video.preset,
+                        &items,
+                        None,
+                        None,
+                        None,
+                    );
+                    ui.end_row();
+                }
 
                 ui.label(match video.codec {
                     VideoCodec::X264 => t!("export.quality_crf"),
                     VideoCodec::Nvenc => t!("export.quality_cq"),
+                    VideoCodec::Vulkan => t!("export.quality_qp"),
+                    VideoCodec::VideoToolbox => t!("export.quality"),
                 });
-                ui.add(egui::Slider::new(&mut video.quality, 0..=51))
-                    .on_hover_text(t!("export.quality_hint"));
+                let hint = if video.codec.quality_rises() {
+                    t!("export.quality_rising_hint")
+                } else {
+                    t!("export.quality_hint")
+                };
+                ui.add(egui::Slider::new(
+                    &mut video.quality,
+                    video.codec.quality_range(),
+                ))
+                .on_hover_text(hint);
                 ui.end_row();
 
                 ui.label(t!("export.resolution"));
@@ -429,6 +442,8 @@ fn video_codec_label(codec: VideoCodec) -> &'static str {
     match codec {
         VideoCodec::X264 => "H.264 – x264 (CPU)",
         VideoCodec::Nvenc => "H.264 – NVENC (GPU NVIDIA)",
+        VideoCodec::VideoToolbox => "H.264 – VideoToolbox (GPU)",
+        VideoCodec::Vulkan => "H.264 – Vulkan (GPU)",
     }
 }
 

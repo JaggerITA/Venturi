@@ -118,8 +118,8 @@ fn encodes_with_every_available_codec_and_preset_choice() {
             let path = dir.join(format!("{codec:?}-{i}.mp4"));
             let video = VideoSettings {
                 codec,
-                preset: codec.presets()[0].into(),
-                quality: 30,
+                preset: codec.presets().first().copied().unwrap_or_default().into(),
+                quality: codec.default_quality(),
             };
             let mut encoder =
                 Encoder::new(&path, 256, 256, fps, &video, Some((48000, 2, audio))).unwrap();
@@ -133,5 +133,38 @@ fn encodes_with_every_available_codec_and_preset_choice() {
             assert_eq!((meta.width, meta.height), (256, 256), "{codec:?} {audio:?}");
             assert!(meta.has_audio, "{codec:?} {audio:?}");
         }
+    }
+}
+
+/// Catches a chroma plane swapped or misplaced by an encoder's own pixel
+/// format (Vulkan's NV12).
+#[test]
+fn every_available_codec_keeps_the_colors() {
+    let dir = std::env::temp_dir().join("vv-media-encode-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fps = vv_core::Rational::new(25, 1);
+    let red = [63, 102, 240];
+    let frame = solid_i420(256, 256, red);
+    for codec in VideoCodec::ALL.into_iter().filter(|c| c.is_available()) {
+        let path = dir.join(format!("{codec:?}-colors.mp4"));
+        let video = VideoSettings {
+            codec,
+            preset: codec.default_preset().into(),
+            quality: codec.default_quality(),
+        };
+        let mut encoder = Encoder::new(&path, 256, 256, fps, &video, None).unwrap();
+        for _ in 0..10 {
+            encoder.write_video_frame(&frame).unwrap();
+        }
+        encoder.finish().unwrap();
+
+        let mut decoder = crate::decode::Decoder::open(&path).unwrap();
+        let (_, decoded) = decoder.next_frame().unwrap().unwrap();
+        let (u, v) = decoded.chroma_at(64, 64);
+        let got = [decoded.y[128 * 256 + 128], u, v];
+        assert!(
+            got.iter().zip(red).all(|(&g, w)| g.abs_diff(w) <= 4),
+            "{codec:?}: {got:?} instead of {red:?}"
+        );
     }
 }

@@ -60,6 +60,18 @@ export.quality_cq:
   en: "Quality (CQ)"
   it: "Qualità (CQ)"
 
+export.quality_qp:
+  en: "Quality (QP)"
+  it: "Qualità (QP)"
+
+export.quality:
+  en: "Quality"
+  it: "Qualità"
+
+export.quality_rising_hint:
+  en: "Higher = higher quality and bigger file"
+  it: "Più alto = qualità più alta e file più grande"
+
 export.quality_hint:
   en: "Lower = higher quality and bigger file"
   it: "Più basso = qualità più alta e file più grande"
