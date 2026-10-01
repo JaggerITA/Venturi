@@ -6,13 +6,22 @@
 
 use super::{MeasureTitle, OtioError, generator, resolve};
 use crate::model::{
-    Clip, ClipSource, Ease, EffectStack, FrameIdx, IMAGE_DURATION_FRAMES, Interpolation, Keyframed,
+    Clip, ClipId, ClipSource, CrossTransition, Ease, EffectStack, FrameIdx, IMAGE_DURATION_FRAMES, Interpolation, Keyframed,
     LinkGroupId, MediaId, MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline,
     TitleParams, Track, TrackKind, TransformParam, Transition, TransitionKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+
+enum PendingTransition {
+    In(Transition),
+    Crossing {
+        left_clip: ClipId,
+        transition: Transition,
+        into_previous: FrameIdx,
+    },
+}
 
 /// Metadata of a media and its `content_hash`, or a readable error.
 pub type ProbeResult = Result<(MediaMeta, u64), String>;
@@ -207,13 +216,13 @@ impl Importer<'_> {
             let mut track = Track::new(kind);
             track.muted = otio_track["enabled"] == false;
             let mut cursor = 0.0;
-            let mut pending_in = None;
+            let mut pending = None;
             for item in children(otio_track) {
                 let start = to_frames(cursor, fps);
                 let duration = match schema(item) {
                     // Takes no time on the track: it overlaps its neighbours.
                     "Transition" => {
-                        pending_in = self.transition(item, fps, &mut track);
+                        pending = self.transition(item, fps, start, &mut track);
                         continue;
                     }
                     "Gap" => item_duration(item),
@@ -221,8 +230,25 @@ impl Importer<'_> {
                         let (duration, clip) =
                             self.clip(item, kind, fps, start, cursor, &mut groups);
                         if let Some((mut clip, is_foreign)) = clip {
-                            if let Some(transition) = pending_in.take() {
-                                clip.effects.transition_in = Some(transition);
+                            match pending.take() {
+                                Some(PendingTransition::In(transition)) => {
+                                    clip.effects.transition_in = Some(transition);
+                                }
+                                Some(PendingTransition::Crossing { left_clip, transition, .. }) => {
+                                    let left_len =
+                                        track.clip(left_clip).map_or(1, |c| c.timeline_len);
+                                    let max_duration =
+                                        (2 * left_len.min(clip.timeline_len)).max(1);
+                                    track.crossings.push(CrossTransition {
+                                        left_clip,
+                                        right_clip: clip.id,
+                                        transition: Transition {
+                                            duration: transition.duration.clamp(1, max_duration),
+                                            ..transition
+                                        },
+                                    });
+                                }
+                                None => {}
                             }
                             if is_foreign {
                                 foreign.push(ForeignClip {
@@ -241,6 +267,19 @@ impl Importer<'_> {
                         item_duration(item)
                     }
                 };
+                // No clip right after the cut: only the half before it stays.
+                if let Some(PendingTransition::Crossing {
+                    left_clip,
+                    transition,
+                    into_previous,
+                }) = pending.take_if(|p| matches!(p, PendingTransition::Crossing { .. }))
+                    && let Some(clip) = track.clip_mut(left_clip)
+                {
+                    clip.effects.transition_out = Some(Transition {
+                        duration: into_previous,
+                        ..transition
+                    });
+                }
                 cursor += duration;
             }
             tracks.push(track);
@@ -268,9 +307,16 @@ impl Importer<'_> {
     }
 
     /// A transition straddles the cut: `in_offset` extends into the clip
-    /// before it, which takes it as its `transition_out`, and `out_offset`
-    /// into the one after, returned so the caller can attach it.
-    fn transition(&mut self, item: &Value, fps: Rational, track: &mut Track) -> Option<Transition> {
+    /// before it and `out_offset` into the one after. Reaching into both
+    /// adjacent clips it is one crossing, settled by the caller once the next
+    /// clip is known; on one side only it belongs to that clip's edge.
+    fn transition(
+        &mut self,
+        item: &Value,
+        fps: Rational,
+        start: FrameIdx,
+        track: &mut Track,
+    ) -> Option<PendingTransition> {
         let venturi = &item["metadata"]["venturi"];
         let saved = serde_json::from_value::<Transition>(venturi["transition"].clone()).ok();
         let offset = |key: &str| to_frames(seconds(&item[key]).unwrap_or(0.0), fps);
@@ -294,13 +340,23 @@ impl Importer<'_> {
                 }
             }
         };
+        if into_previous > 0
+            && into_next > 0
+            && let Some(left) = track.clips.last().filter(|c| c.timeline_end() == start)
+        {
+            return Some(PendingTransition::Crossing {
+                left_clip: left.id,
+                transition: build(into_previous + into_next),
+                into_previous,
+            });
+        }
         if into_previous > 0 {
             match track.clips.last_mut() {
                 Some(clip) => clip.effects.transition_out = Some(build(into_previous)),
                 None => self.warn(OtioWarning::TransitionIgnored),
             }
         }
-        (into_next > 0).then(|| build(into_next))
+        (into_next > 0).then(|| PendingTransition::In(build(into_next)))
     }
 
     /// Duration occupied on the track (even if the clip is not imported)

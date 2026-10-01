@@ -8,7 +8,6 @@
 use super::generator;
 use super::resolve::{self, Scale};
 use super::{MeasureTitle, OtioError};
-use crate::FadeEdge;
 use crate::model::{
     Clip, ClipSource, FrameIdx, Project, Rational, Rgba, TimelineId, Track, TrackKind,
 };
@@ -86,18 +85,36 @@ fn track_to_otio(
 ) -> Value {
     let mut children = Vec::new();
     let mut cursor = 0;
-    for clip in &track.clips {
+    for (i, clip) in track.clips.iter().enumerate() {
         if clip.timeline_start > cursor {
             children.push(gap(clip.timeline_start - cursor, fps));
         }
         if let Some(transition) = &clip.effects.transition_in {
-            children.push(resolve::transition_to_otio(transition, FadeEdge::In, fps));
+            children.push(resolve::transition_to_otio(
+                transition,
+                (0, transition.duration),
+                fps,
+            ));
         }
         children.push(clip_to_otio(
             project, clip, track.kind, fps, resolution, measure,
         ));
         if let Some(transition) = &clip.effects.transition_out {
-            children.push(resolve::transition_to_otio(transition, FadeEdge::Out, fps));
+            children.push(resolve::transition_to_otio(
+                transition,
+                (transition.duration, 0),
+                fps,
+            ));
+        }
+        let next = track.clips.get(i + 1);
+        if let Some(crossing) = track.crossing_from(clip.id)
+            && next.is_some_and(|n| n.id == crossing.right_clip && n.timeline_start == clip.timeline_end())
+        {
+            children.push(resolve::transition_to_otio(
+                &crossing.transition,
+                crossing.split(),
+                fps,
+            ));
         }
         cursor = clip.timeline_end();
     }

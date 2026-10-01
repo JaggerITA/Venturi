@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{BlendMode, ClipId};
+use crate::model::{BlendMode, ClipId, CrossTransition};
 use crate::otio::timeline_to_otio;
 use serde_json::json;
 
@@ -104,6 +104,19 @@ fn a_venturi_export_imports_back_unchanged() {
     tl.tracks[2].muted = true;
     let mut split = crate::SplitClip::new(timeline_id, 0, ClipId(1), 500);
     crate::Command::apply(&mut split, &mut project);
+    let track = &mut project.timelines[timeline_id].tracks[0];
+    let (left_clip, right_clip) = (track.clips[0].id, track.clips[1].id);
+    track.crossings.push(CrossTransition {
+        left_clip,
+        right_clip,
+        transition: Transition {
+            kind: TransitionKind::Push,
+            duration: 10,
+            direction: PushDirection::Right,
+            ease: Ease::None,
+            curve: 0.5,
+        },
+    });
 
     let otio = timeline_to_otio(&project, timeline_id, None);
     let mut probe = probe_from(vec![("/tmp/a.mp4", media_meta.clone())]);
@@ -144,6 +157,19 @@ fn a_venturi_export_imports_back_unchanged() {
         Some((PushDirection::Up, 9, Ease::In)),
         "the transition comes back whole from metadata.venturi"
     );
+    let cut = &back.tracks[0];
+    assert_eq!(cut.crossings.len(), 1);
+    let crossing = &cut.crossings[0];
+    assert_eq!(
+        (crossing.left_clip, crossing.right_clip),
+        (cut.clips[0].id, cut.clips[1].id)
+    );
+    assert_eq!(
+        (crossing.transition.duration, crossing.transition.direction),
+        (10, PushDirection::Right)
+    );
+    assert!(cut.clips[0].effects.transition_out.is_none());
+    assert!(cut.clips[1].effects.transition_in.is_none());
 }
 
 /// Generators go back and forth through Resolve's own blocks: the same
@@ -973,4 +999,55 @@ fn an_unknown_clip_color_imports_as_no_color() {
     otio["tracks"]["children"][0]["children"][0]["metadata"]["venturi"]["display_color"] =
         json!("Chocolate");
     assert_eq!(import(&otio), None);
+}
+
+/// Resolve writes a transition between two clips as one item reaching into
+/// both: it is a single crossing, not one transition per edge.
+#[test]
+fn a_transition_between_two_clips_imports_as_one_crossing() {
+    let push = |into_previous: f64, into_next: f64| {
+        json!({
+            "OTIO_SCHEMA": "Transition.1",
+            "in_offset": rt(into_previous, 24.0),
+            "out_offset": rt(into_next, 24.0),
+        })
+    };
+    let otio = json!({
+        "OTIO_SCHEMA": "Timeline.1",
+        "name": "Push",
+        "global_start_time": rt(0.0, 24.0),
+        "tracks": {
+            "OTIO_SCHEMA": "Stack.1",
+            "children": [{
+                "OTIO_SCHEMA": "Track.1",
+                "kind": "Video",
+                "children": [
+                    clip_1("a", B_ROLL, 86_400.0, 48.0, true),
+                    push(6.0, 6.0),
+                    clip_1("b", B_ROLL, 86_448.0, 48.0, true),
+                    push(4.0, 4.0),
+                    { "OTIO_SCHEMA": "Gap.1", "source_range": range(0.0, 24.0, 24.0) },
+                ],
+            }],
+        },
+    });
+    let mut probe = probe_from(vec![(
+        "/media/b roll.mov",
+        meta(Rational::new(24, 1), 2400),
+    )]);
+    let imported = project_from_otio(&otio, Path::new("/media"), &mut probe, None).unwrap();
+    let (_, tl) = imported.project.timelines.iter().next().unwrap();
+    let track = &tl.tracks[0];
+    let (a, b) = (&track.clips[0], &track.clips[1]);
+    assert!(a.effects.transition_out.is_none());
+    assert!(b.effects.transition_in.is_none());
+    assert_eq!(track.crossings.len(), 1);
+    let crossing = &track.crossings[0];
+    assert_eq!((crossing.left_clip, crossing.right_clip), (a.id, b.id));
+    assert_eq!(crossing.transition.duration, 12);
+    assert_eq!(
+        b.effects.transition_out.as_ref().map(|t| t.duration),
+        Some(4),
+        "followed by a gap: only the half inside the clip"
+    );
 }

@@ -8,7 +8,6 @@
 //! a parameter it does not find keeps the value of the imported clip.
 
 use super::export::rational_time;
-use crate::FadeEdge;
 use crate::model::{
     BlendMode, Clip, ClipSource, Ease, FrameIdx, Keyframed, Rational, TrackKind, TransformParam,
     TransformTracks, Transition,
@@ -482,11 +481,15 @@ fn local_frame(clip: &Clip, source_frame: FrameIdx) -> FrameIdx {
 
 /// A transition takes no time on the track: it straddles the cut, extending
 /// `in_offset` into what precedes it and `out_offset` into what follows.
-/// Ours always sit inside one clip, on the edge they belong to.
-pub(super) fn transition_to_otio(transition: &Transition, edge: FadeEdge, fps: Rational) -> Value {
-    let (into_previous, into_next) = match edge {
-        FadeEdge::In => (0, transition.duration),
-        FadeEdge::Out => (transition.duration, 0),
+pub(super) fn transition_to_otio(
+    transition: &Transition,
+    (into_previous, into_next): (FrameIdx, FrameIdx),
+    fps: Rational,
+) -> Value {
+    let edge = match (into_previous, into_next) {
+        (0, _) => "in",
+        (_, 0) => "out",
+        _ => "crossing",
     };
     let name = match transition.kind {
         crate::model::TransitionKind::Push => "Push",
@@ -518,7 +521,7 @@ pub(super) fn transition_to_otio(transition: &Transition, edge: FadeEdge, fps: R
                 },
             },
             // Direction and curve have no counterpart in Resolve's export.
-            "venturi": { "transition": transition, "edge": edge_name(edge) },
+            "venturi": { "transition": transition, "edge": edge },
         },
     })
 }
@@ -560,13 +563,6 @@ fn transition_curve(transition: &Transition) -> Value {
 
 fn ease_index(ease: Ease) -> u32 {
     Ease::ALL.iter().position(|e| *e == ease).unwrap_or(0) as u32
-}
-
-fn edge_name(edge: FadeEdge) -> &'static str {
-    match edge {
-        FadeEdge::In => "in",
-        FadeEdge::Out => "out",
-    }
 }
 
 #[cfg(test)]
