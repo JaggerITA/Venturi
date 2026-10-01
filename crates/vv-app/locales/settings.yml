@@ -120,6 +120,12 @@ settings.hw_decode_vulkan_hint:
 settings.hw_decode_failed:
   en: "⚠ %{devices} cannot decode video on this machine: decoding on the CPU."
   it: "⚠ %{devices} non può decodificare video su questa macchina: si decodifica sulla CPU."
+settings.hw_decode_intel_experimental:
+  en: "Experimental Intel Vulkan decoding (restart required)"
+  it: "Decodifica Vulkan Intel sperimentale (richiede riavvio)"
+settings.hw_decode_intel_experimental_hint:
+  en: "On Intel GPUs from Gen9 to Gen11 (Skylake to Ice Lake), Mesa offers Vulkan video decoding only as an experimental feature (ANV_DEBUG=video-decode). It can be faster and frees the CPU, but the driver may decode some files wrongly. Newer Intel GPUs do not need it."
+  it: "Sulle GPU Intel dalla Gen9 alla Gen11 (da Skylake a Ice Lake), Mesa offre la decodifica Vulkan video solo come funzione sperimentale (ANV_DEBUG=video-decode). Può essere più veloce e libera la CPU, ma il driver potrebbe decodificare male alcuni file. Le GPU Intel più recenti non ne hanno bisogno."
 settings.hw_decode_memory:
   en: "GPU decoding memory:"
   it: "Memoria decodifica GPU:"

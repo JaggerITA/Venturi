@@ -3749,6 +3749,15 @@ fn main() -> eframe::Result<()> {
     // Optional argument: path of a video to import immediately at startup
     // (handy for debugging/smoke tests, as well as for command-line use).
     let startup_path = first.map(PathBuf::from);
+    let settings_path = settings::Settings::default_path();
+    let settings = settings_path
+        .as_deref()
+        .map(settings::Settings::load)
+        .unwrap_or_default();
+    if settings.intel_experimental_decode {
+        // SAFETY: no other thread started yet.
+        unsafe { hw_decode::enable_intel_experimental_decode() };
+    }
     std::thread::spawn(vv_render::text::warm_up);
     // The first NVENC check initializes CUDA: better not in the UI.
     std::thread::spawn(|| vv_media::VideoCodec::Nvenc.is_available());
@@ -3796,10 +3805,8 @@ fn main() -> eframe::Result<()> {
             let egui_ctx = cc.egui_ctx.clone();
             app.session
                 .set_waker(vv_session::Waker::new(move || egui_ctx.request_repaint()));
-            app.settings_path = settings::Settings::default_path();
-            if let Some(path) = &app.settings_path {
-                app.settings = settings::Settings::load(path);
-            }
+            app.settings_path = settings_path;
+            app.settings = settings;
             app.settings.language.apply();
             vv_media::hw::set_budget_bytes(app.settings.hw_decode_budget_bytes());
             hw_decode::start(app.settings.hw_decode);

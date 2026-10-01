@@ -470,6 +470,15 @@ fn hw_decode_settings(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             );
         }
     }
+    if crate::hw_decode::has_intel_gpu() == Some(true) {
+        changed |= ui
+            .checkbox(
+                &mut settings.intel_experimental_decode,
+                t!("settings.hw_decode_intel_experimental"),
+            )
+            .on_hover_text(t!("settings.hw_decode_intel_experimental_hint"))
+            .changed();
+    }
     ui.add_enabled_ui(settings.hw_decode != HwDecodeMode::Off, |ui| {
         ui.horizontal(|ui| {
             ui.label(t!("settings.hw_decode_memory"))

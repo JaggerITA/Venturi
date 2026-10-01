@@ -513,6 +513,8 @@ pub struct Settings {
     pub hw_decode: crate::hw_decode::HwDecodeMode,
     /// `None`: `hw_decode::default_budget_bytes`, which follows the RAM.
     pub hw_decode_budget_bytes: Option<usize>,
+    /// Read at startup only, see `hw_decode::enable_intel_experimental_decode`.
+    pub intel_experimental_decode: bool,
     /// Recently opened projects, most recent first.
     pub recent_projects: Vec<PathBuf>,
     pub panels: PanelLayout,
@@ -550,6 +552,7 @@ impl Default for Settings {
             cache_budget_bytes: crate::DEFAULT_CACHE_BUDGET_BYTES,
             hw_decode: Default::default(),
             hw_decode_budget_bytes: None,
+            intel_experimental_decode: false,
             recent_projects: Vec::new(),
             panels: PanelLayout::default(),
             compressor_presets: Vec::new(),
@@ -606,6 +609,8 @@ struct SettingsFile {
     hw_decode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hw_decode_budget_mb: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    intel_experimental_decode: bool,
     #[serde(default)]
     recent_projects: Vec<PathBuf>,
     #[serde(default)]
@@ -696,6 +701,7 @@ impl Settings {
             .unwrap_or_default();
         settings.hw_decode_budget_bytes =
             file.hw_decode_budget_mb.map(|mb| mb as usize * 1_000_000);
+        settings.intel_experimental_decode = file.intel_experimental_decode;
         settings.recent_projects = file.recent_projects;
         settings.input_device = file.input_device;
         settings.recording_format = file
@@ -777,6 +783,7 @@ impl Settings {
             hw_decode_budget_mb: self
                 .hw_decode_budget_bytes
                 .map(|bytes| (bytes / 1_000_000) as u32),
+            intel_experimental_decode: self.intel_experimental_decode,
             recent_projects: self.recent_projects.clone(),
             panels: PanelLayoutFile {
                 media_pool_open: Some(self.panels.media_pool_open),

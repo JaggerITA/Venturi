@@ -42,6 +42,28 @@ impl HwDecodeMode {
 }
 
 const NVIDIA_VENDOR_ID: u32 = 0x10de;
+const INTEL_VENDOR_ID: u32 = 0x8086;
+
+/// Mesa's ANV offers Vulkan video before Gen12 only behind this flag, read
+/// when a Vulkan instance starts.
+///
+/// # Safety
+/// No other thread may be running (`std::env::set_var`).
+pub unsafe fn enable_intel_experimental_decode() {
+    const FLAG: &str = "video-decode";
+    let flags = match std::env::var("ANV_DEBUG") {
+        Ok(flags) if flags.split(',').any(|flag| flag == FLAG) => return,
+        Ok(flags) if !flags.is_empty() => format!("{flags},{FLAG}"),
+        _ => FLAG.to_owned(),
+    };
+    unsafe { std::env::set_var("ANV_DEBUG", flags) };
+}
+
+/// `None` while `start` is still enumerating the GPUs.
+pub fn has_intel_gpu() -> Option<bool> {
+    GPUS.get()
+        .map(|gpus| gpus.iter().any(|gpu| gpu.vendor == INTEL_VENDOR_ID))
+}
 
 /// The devices for `mode` on a machine with `gpus` (its Vulkan adapters).
 pub fn resolve(mode: HwDecodeMode, gpus: &[wgpu::AdapterInfo], macos: bool) -> Vec<HwDevice> {
