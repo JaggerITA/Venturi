@@ -2599,6 +2599,9 @@ pub struct SetMediaPath {
     /// `None` keeps the current one.
     new_meta: Option<MediaMeta>,
     old: RefCell<Option<(PathBuf, u64, MediaMeta)>>,
+    /// Effects of the clips adapted to the new file, as they were: the
+    /// rounding of the adaptation is not invertible.
+    old_effects: RefCell<Vec<(TimelineId, usize, ClipId, EffectStack)>>,
 }
 
 impl SetMediaPath {
@@ -2614,6 +2617,7 @@ impl SetMediaPath {
             new_content_hash,
             new_meta,
             old: RefCell::new(None),
+            old_effects: RefCell::new(Vec::new()),
         }
     }
 }
@@ -2627,7 +2631,8 @@ impl Command for SetMediaPath {
         let Some(item) = project.media_pool.get_mut(self.media) else {
             return;
         };
-        *self.old.borrow_mut() = Some((item.path.clone(), item.content_hash, item.meta.clone()));
+        let old_meta = item.meta.clone();
+        *self.old.borrow_mut() = Some((item.path.clone(), item.content_hash, old_meta.clone()));
         item.path = self.new_path.clone();
         item.content_hash = self.new_content_hash;
         let Some(meta) = &self.new_meta else {
@@ -2635,6 +2640,22 @@ impl Command for SetMediaPath {
         };
         item.meta = meta.clone();
         project.conform_clips_of(self.media);
+        let mut old_effects = self.old_effects.borrow_mut();
+        old_effects.clear();
+        if meta.fps == old_meta.fps {
+            return;
+        }
+        for (timeline_id, timeline) in project.timelines.iter_mut() {
+            for (track_index, track) in timeline.tracks.iter_mut().enumerate() {
+                for clip in &mut track.clips {
+                    if !matches!(clip.source, ClipSource::Media(id) if id == self.media) {
+                        continue;
+                    }
+                    old_effects.push((timeline_id, track_index, clip.id, clip.effects.clone()));
+                    clip.effects.rescale_keyframe_times(old_meta.fps, meta.fps);
+                }
+            }
+        }
     }
 
     fn undo(&self, project: &mut Project) {
@@ -2648,6 +2669,11 @@ impl Command for SetMediaPath {
         }
         if self.new_meta.is_some() {
             project.conform_clips_of(self.media);
+        }
+        for (timeline_id, track_index, clip_id, effects) in self.old_effects.borrow_mut().drain(..) {
+            if let Some(clip) = project.timelines[timeline_id].clip_mut(track_index, clip_id) {
+                clip.effects = effects;
+            }
         }
     }
 }

@@ -173,6 +173,49 @@ fn set_media_path_with_meta_keeps_the_clip_speed() {
     );
 }
 
+/// Keyframes are in source frames: a file at another fps keeps them on the
+/// same seconds; undo brings back the exact frames.
+#[test]
+fn set_media_path_to_another_fps_keeps_the_keyframe_seconds() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let media = insert_media(&mut project);
+    let mut meta = project.media_pool[media].meta.clone();
+    let conform = Rational::conform_rate(project.timelines[timeline].fps, meta.fps);
+    let clip_id = project.alloc_clip_id();
+    let mut clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 100, 0, conform);
+    clip.effects
+        .gain_db
+        .upsert(40, -6.0, Interpolation::Linear);
+    clip.effects
+        .transform
+        .track_mut(TransformParam::Opacity)
+        .upsert(100, 50.0, Interpolation::Linear);
+    project.timelines[timeline].tracks[0].clips.push(clip);
+    let keyframe_frames = |project: &Project| {
+        let effects = &project.timelines[timeline].clip(0, clip_id).unwrap().effects;
+        (
+            effects.gain_db.keyframes()[0].0,
+            effects.transform.track(TransformParam::Opacity).keyframes()[0].0,
+        )
+    };
+
+    meta.fps = Rational::new(50, 1);
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMediaPath::new(
+            media,
+            "/found/clip.mp4".into(),
+            1,
+            Some(meta),
+        )),
+    );
+    assert_eq!(keyframe_frames(&project), (80, 200));
+
+    history.undo(&mut project);
+    assert_eq!(keyframe_frames(&project), (40, 100));
+}
+
 #[test]
 fn add_track_appends_and_undo_removes_it() {
     let (mut project, timeline) = make_project_with_two_tracks();

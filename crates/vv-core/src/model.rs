@@ -428,6 +428,15 @@ impl<T: Clone> Keyframed<T> {
         Some(std::mem::replace(&mut self.keyframes[idx].2, interpolation))
     }
 
+    /// Re-expresses the keyframe times from `from` fps to `to` fps, keeping
+    /// their seconds. Keyframes rounding onto the same frame keep the first.
+    pub fn rescale_times(&mut self, from: Rational, to: Rational) {
+        for keyframe in &mut self.keyframes {
+            keyframe.0 = convert_frames(keyframe.0, from, to);
+        }
+        self.keyframes.dedup_by_key(|k| k.0);
+    }
+
     /// Moves every keyframe `delta` frames later.
     pub fn shift(&mut self, delta: FrameIdx) {
         for keyframe in &mut self.keyframes {
@@ -1211,6 +1220,14 @@ impl EffectStack {
         self.for_each_f32_track(|k| k.shift(delta));
         if let Some(c) = &mut self.color {
             c.shift(delta);
+        }
+    }
+
+    /// See `Keyframed::rescale_times`, on every animatable parameter.
+    pub fn rescale_keyframe_times(&mut self, from: Rational, to: Rational) {
+        self.for_each_f32_track(|k| k.rescale_times(from, to));
+        if let Some(c) = &mut self.color {
+            c.rescale_times(from, to);
         }
     }
 
