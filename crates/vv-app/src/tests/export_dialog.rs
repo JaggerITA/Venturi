@@ -82,3 +82,23 @@ fn gpu_decoding_is_kept_only_while_a_gpu_decoder_is_there() {
     dialog.decode_on_gpu = true;
     assert_eq!(dialog.selected_decoders(), [HwDevice::Cuda]);
 }
+
+fn wait_for_encoder_checks(dialog: &mut ExportDialog) {
+    while dialog.poll_encoder_checks() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn preferred_dialog_switches_to_nvenc_only_once_it_passed_its_check() {
+    let mut dialog = ExportDialog::preferred(PathBuf::from("out.mp4"), Vec::new());
+    assert_eq!(dialog.settings.video.codec, VideoCodec::X264);
+    wait_for_encoder_checks(&mut dialog);
+    let nvenc = VideoCodec::Nvenc.is_available();
+    assert_eq!(dialog.settings.video.codec == VideoCodec::Nvenc, nvenc);
+
+    let mut dialog = ExportDialog::preferred(PathBuf::from("out.mp4"), Vec::new());
+    dialog.nvenc_pending = false;
+    wait_for_encoder_checks(&mut dialog);
+    assert_eq!(dialog.settings.video.codec, VideoCodec::X264);
+}

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::properties_panel::preview_combo;
 use vv_core::{FrameIdx, Rational};
-use vv_media::{AudioCodec, HwDevice, VideoCodec};
+use vv_media::{AudioCodec, HwDevice, VideoCodec, VideoSettings};
 
 use crate::export::ExportSettings;
 use crate::format_duration;
@@ -38,6 +38,9 @@ pub struct ExportDialog {
     /// Those of Settings > Playback; empty if it decodes on the CPU.
     gpu_decoders: Vec<HwDevice>,
     decode_on_gpu: bool,
+    /// Switch to NVENC once its check passes, unless an encoder was picked
+    /// meanwhile (`ExportSettings::preferred` without blocking the UI).
+    nvenc_pending: bool,
     /// File dialog opened on a separate thread (on the GNOME/Wayland event
     /// loop thread it marks the app as unresponsive).
     browsing: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
@@ -51,12 +54,43 @@ impl ExportDialog {
             decode_on_gpu: !settings.hw_decode.is_empty() && !gpu_decoders.is_empty(),
             gpu_decoders,
             settings,
+            nvenc_pending: false,
             whole_timeline: false,
             browsing: None,
         }
     }
 
+    /// With the settings of `ExportSettings::preferred`.
+    pub fn preferred(output_path: PathBuf, gpu_decoders: Vec<HwDevice>) -> Self {
+        let settings = ExportSettings::with_preferred_audio(output_path);
+        Self {
+            nvenc_pending: true,
+            ..Self::new(settings, gpu_decoders)
+        }
+    }
+
+    /// Starts the encoders' checks; `true` while some is still running.
+    fn poll_encoder_checks(&mut self) -> bool {
+        if self.nvenc_pending
+            && let Some(available) = VideoCodec::Nvenc.availability()
+        {
+            self.nvenc_pending = false;
+            if available {
+                self.settings.video = VideoSettings::for_codec(VideoCodec::Nvenc);
+            }
+        }
+        // Not `any`: every check must start now, not one after the other.
+        let pending = VideoCodec::choices()
+            .iter()
+            .filter(|codec| codec.availability().is_none())
+            .count();
+        pending > 0
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, info: &TimelineInfo) -> ExportDialogAction {
+        if self.poll_encoder_checks() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         let mut action = ExportDialogAction::None;
         let mut open = true;
         egui::Window::new(t!("export.title"))
@@ -198,12 +232,15 @@ impl ExportDialog {
                 let before = video.codec;
                 let items: Vec<_> = VideoCodec::choices()
                     .iter()
-                    .map(|codec| {
-                        (
+                    .map(|codec| match codec.availability() {
+                        Some(available) => {
+                            (*codec, video_codec_label(*codec).to_string(), available)
+                        }
+                        None => (
                             *codec,
-                            video_codec_label(*codec).to_string(),
-                            codec.is_available(),
-                        )
+                            format!("{} – {}", video_codec_label(*codec), t!("export.checking")),
+                            false,
+                        ),
                     })
                     .collect();
                 preview_combo(
@@ -216,8 +253,8 @@ impl ExportDialog {
                     Some(&t!("export.unavailable_on_system")),
                 );
                 if video.codec != before {
-                    video.preset = video.codec.default_preset().into();
-                    video.quality = video.codec.default_quality();
+                    *video = VideoSettings::for_codec(video.codec);
+                    self.nvenc_pending = false;
                 }
                 ui.end_row();
 

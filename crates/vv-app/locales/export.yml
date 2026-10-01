@@ -40,6 +40,10 @@ export.encoder:
   en: "Encoder"
   it: "Encoder"
 
+export.checking:
+  en: "checking…"
+  it: "verifica in corso…"
+
 export.unavailable_on_system:
   en: "Not available on this system"
   it: "Non disponibile su questo sistema"

@@ -10,6 +10,7 @@ use ffmpeg::{ChannelLayout, Dictionary};
 use ffmpeg_next as ffmpeg;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -92,22 +93,89 @@ impl VideoCodec {
         }
     }
 
-    /// Tries to actually open the encoder (result cached): NVENC is
+    /// Tries to actually encode a few frames (result cached): NVENC is
     /// compiled into many ffmpeg builds even where there is no NVIDIA GPU,
     /// a Vulkan driver may have no encode queue, VideoToolbox has no
     /// constant quality on Intel Macs, and the first open can cost a second.
+    /// An encoder that opens but writes wrong colors is left out too: ANV's
+    /// experimental encode on Gen9 drops the Cr plane.
     pub fn is_available(self) -> bool {
-        static CACHE: [OnceLock<bool>; 4] = [const { OnceLock::new() }; 4];
-        *CACHE[self as usize].get_or_init(|| {
+        *AVAILABLE[self as usize].get_or_init(|| {
             crate::probe::ensure_init();
-            let settings = VideoSettings {
-                codec: self,
-                preset: self.default_preset().into(),
-                quality: self.default_quality(),
-            };
-            open_video_encoder(&settings, 256, 256, vv_core::Rational::new(25, 1), false).is_ok()
+            match self.check_colors() {
+                Ok(None) => true,
+                Ok(Some(got)) => {
+                    eprintln!(
+                        "{} encodes {CHECK_COLOR:?} as {got:?}: not offered, the export stays on the CPU",
+                        self.ffmpeg_name()
+                    );
+                    false
+                }
+                Err(_) => false,
+            }
         })
     }
+
+    /// Like `is_available` without blocking: the first call starts the check
+    /// on a thread, `None` until it is done.
+    pub fn availability(self) -> Option<bool> {
+        static STARTED: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+        if let Some(&available) = AVAILABLE[self as usize].get() {
+            return Some(available);
+        }
+        if !STARTED[self as usize].swap(true, Ordering::Relaxed) {
+            std::thread::spawn(move || self.is_available());
+        }
+        None
+    }
+
+    /// Encodes and decodes back a solid `CHECK_COLOR`: the YUV it came back
+    /// as if it is not the same.
+    fn check_colors(self) -> Result<Option<[u8; 3]>, crate::MediaError> {
+        const SIZE: usize = 256;
+        let settings = VideoSettings::for_codec(self);
+        let path = std::env::temp_dir().join(format!(
+            "venturi-encoder-check-{}-{self:?}.mp4",
+            std::process::id()
+        ));
+        let checked = (|| {
+            let fps = vv_core::Rational::new(25, 1);
+            let mut encoder = Encoder::new(&path, SIZE as u32, SIZE as u32, fps, &settings, None)?;
+            let frame = solid_i420(SIZE, SIZE, CHECK_COLOR);
+            for _ in 0..5 {
+                encoder.write_video_frame(&frame)?;
+            }
+            encoder.finish()?;
+            let mut decoder = crate::decode::Decoder::open(&path)?;
+            let (_, decoded) = decoder.next_frame()?.ok_or_else(|| {
+                crate::MediaError::NoStream(format!("{} wrote no frame", self.ffmpeg_name()))
+            })?;
+            let (u, v) = decoded.chroma_at(SIZE / 4, SIZE / 4);
+            let got = [decoded.y[SIZE / 2 * SIZE + SIZE / 2], u, v];
+            let same = got
+                .iter()
+                .zip(CHECK_COLOR)
+                .all(|(&g, w)| g.abs_diff(w) <= 4);
+            Ok(if same { None } else { Some(got) })
+        })();
+        let _ = std::fs::remove_file(&path);
+        checked
+    }
+}
+
+static AVAILABLE: [OnceLock<bool>; 4] = [const { OnceLock::new() }; 4];
+
+/// Red in BT.709 limited range: Y, U and V all far from each other and from
+/// the neutral 128, so a swapped or missing chroma plane shows.
+const CHECK_COLOR: [u8; 3] = [63, 102, 240];
+
+/// A dense I420 frame of one color, as `Encoder::write_video_frame` takes it.
+pub(crate) fn solid_i420(width: usize, height: usize, [y, u, v]: [u8; 3]) -> Vec<u8> {
+    let chroma = width.div_ceil(2) * height.div_ceil(2);
+    let mut data = vec![y; width * height];
+    data.extend(std::iter::repeat_n(u, chroma));
+    data.extend(std::iter::repeat_n(v, chroma));
+    data
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,13 +187,19 @@ pub struct VideoSettings {
     pub quality: u8,
 }
 
+impl VideoSettings {
+    pub fn for_codec(codec: VideoCodec) -> Self {
+        Self {
+            codec,
+            preset: codec.default_preset().into(),
+            quality: codec.default_quality(),
+        }
+    }
+}
+
 impl Default for VideoSettings {
     fn default() -> Self {
-        Self {
-            codec: VideoCodec::X264,
-            preset: VideoCodec::X264.default_preset().into(),
-            quality: 20,
-        }
+        Self::for_codec(VideoCodec::X264)
     }
 }
 

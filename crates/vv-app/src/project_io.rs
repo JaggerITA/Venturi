@@ -704,15 +704,16 @@ impl VenturiApp {
         if self.timeline_id.is_none() || self.export.is_some() || self.export_dialog.is_some() {
             return;
         }
-        let settings = self.last_export_settings.clone().unwrap_or_else(|| {
-            export::ExportSettings::preferred(export_dialog::default_output_path(
-                self.session.path(),
-            ))
-        });
-        self.export_dialog = Some(export_dialog::ExportDialog::new(
-            settings,
-            crate::hw_decode::devices(),
-        ));
+        let dialog = match self.last_export_settings.clone() {
+            Some(settings) => {
+                export_dialog::ExportDialog::new(settings, crate::hw_decode::devices())
+            }
+            None => export_dialog::ExportDialog::preferred(
+                export_dialog::default_output_path(self.session.path()),
+                crate::hw_decode::devices(),
+            ),
+        };
+        self.export_dialog = Some(dialog);
     }
 
     pub(crate) fn show_export_dialog(&mut self, ui: &mut egui::Ui) {

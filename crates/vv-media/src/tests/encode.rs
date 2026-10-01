@@ -7,14 +7,6 @@ use super::*;
 // implicit in the rest of the test suite (the fixtures generated with the
 // `ffmpeg` CLI are verified by decoding them with this crate).
 
-fn solid_i420(width: usize, height: usize, [y, u, v]: [u8; 3]) -> Vec<u8> {
-    let chroma = width.div_ceil(2) * height.div_ceil(2);
-    let mut data = vec![y; width * height];
-    data.extend(std::iter::repeat_n(u, chroma));
-    data.extend(std::iter::repeat_n(v, chroma));
-    data
-}
-
 #[test]
 fn encodes_video_only_file_with_correct_dimensions_and_frame_count() {
     let dir = std::env::temp_dir().join("vv-media-encode-test");
@@ -136,35 +128,10 @@ fn encodes_with_every_available_codec_and_preset_choice() {
     }
 }
 
-/// Catches a chroma plane swapped or misplaced by an encoder's own pixel
-/// format (Vulkan's NV12).
+/// x264 writes the colors right: the check of `is_available` must not
+/// reject a sound encoder.
 #[test]
-fn every_available_codec_keeps_the_colors() {
-    let dir = std::env::temp_dir().join("vv-media-encode-test");
-    std::fs::create_dir_all(&dir).unwrap();
-    let fps = vv_core::Rational::new(25, 1);
-    let red = [63, 102, 240];
-    let frame = solid_i420(256, 256, red);
-    for codec in VideoCodec::ALL.into_iter().filter(|c| c.is_available()) {
-        let path = dir.join(format!("{codec:?}-colors.mp4"));
-        let video = VideoSettings {
-            codec,
-            preset: codec.default_preset().into(),
-            quality: codec.default_quality(),
-        };
-        let mut encoder = Encoder::new(&path, 256, 256, fps, &video, None).unwrap();
-        for _ in 0..10 {
-            encoder.write_video_frame(&frame).unwrap();
-        }
-        encoder.finish().unwrap();
-
-        let mut decoder = crate::decode::Decoder::open(&path).unwrap();
-        let (_, decoded) = decoder.next_frame().unwrap().unwrap();
-        let (u, v) = decoded.chroma_at(64, 64);
-        let got = [decoded.y[128 * 256 + 128], u, v];
-        assert!(
-            got.iter().zip(red).all(|(&g, w)| g.abs_diff(w) <= 4),
-            "{codec:?}: {got:?} instead of {red:?}"
-        );
-    }
+fn x264_passes_the_color_check() {
+    assert_eq!(VideoCodec::X264.check_colors().unwrap(), None);
+    assert!(VideoCodec::X264.is_available());
 }
