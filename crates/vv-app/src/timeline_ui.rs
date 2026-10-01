@@ -125,6 +125,8 @@ pub struct TimelineState {
     /// "Change Clip Speed…" asked for these clips: the dialog lives in the
     /// app, which opens it and clears this.
     pub speed_dialog_requested: Option<Vec<ClipKey>>,
+    /// "Show in Media Pool" asked for this media: handled by the app.
+    pub reveal_in_pool_requested: Option<vv_core::MediaId>,
     marker_drag: Option<markers::MarkerDrag>,
     marker_editor: Option<markers::MarkerEditor>,
     /// Where each clip was drawn in the last frame: the tests aim their
@@ -404,6 +406,7 @@ impl Default for TimelineState {
             reveal_playhead: false,
             retime_controls: BTreeSet::new(),
             speed_dialog_requested: None,
+            reveal_in_pool_requested: None,
             marker_drag: None,
             marker_editor: None,
             #[cfg(test)]
@@ -3365,8 +3368,19 @@ pub fn show_timeline(
                                 ui.close();
                             }
                         });
-                        if matches!(visual.clip.source, ClipSource::Media(_)) {
+                        if let ClipSource::Media(media) = visual.clip.source {
                             ui.separator();
+                            if ui
+                                .add_enabled(
+                                    project.media_pool.contains_key(media),
+                                    egui::Button::new(t!("timeline.show_in_media_pool")),
+                                )
+                                .clicked()
+                            {
+                                state.reveal_in_pool_requested = Some(media);
+                                ui.ctx().request_repaint();
+                                ui.close();
+                            }
                             let key = (visual.track_index, visual.clip.id);
                             let targets = || -> Vec<ClipKey> {
                                 let base = if state.selected.contains(&key) {

@@ -3176,6 +3176,9 @@ impl VenturiApp {
         if let Some(targets) = self.timeline_state.speed_dialog_requested.take() {
             self.open_speed_dialog(targets);
         }
+        if let Some(media) = self.timeline_state.reveal_in_pool_requested.take() {
+            self.reveal_in_media_pool(media);
+        }
         self.show_speed_dialog(ui.ctx());
 
         // Targets of the panel: the selected clips by track kind, in order

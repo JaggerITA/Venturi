@@ -52,6 +52,10 @@ timeline.change_clip_speed:
   en: "Clip speed…"
   it: "Velocità clip…"
 
+timeline.show_in_media_pool:
+  en: "Show in Media Pool"
+  it: "Mostra nel media pool"
+
 timeline.make_compound_clip:
   en: "Compound Clip"
   it: "Compound Clip"

@@ -182,3 +182,34 @@ fn f2_renames_a_single_selected_timeline_or_folder() {
         Some(media_pool::RenameTarget::Folder(folder))
     );
 }
+
+#[test]
+fn revealing_a_media_opens_its_folders_and_drops_a_hiding_search() {
+    let mut app = VenturiApp::default();
+    let timeline_id = app.ensure_timeline();
+    let item = timeline_item(&app, timeline_id);
+    let outer = app.session.project.folders.insert(vv_core::MediaFolder {
+        name: "outer".into(),
+        parent: None,
+    });
+    let inner = app.session.project.folders.insert(vv_core::MediaFolder {
+        name: "inner".into(),
+        parent: Some(outer),
+    });
+    app.session.project.media_pool[item].folder = Some(inner);
+    app.media_pool_state.expanded.insert(inner);
+    app.media_pool_state.search = "no such name".into();
+    app.settings.panels.media_pool_open = false;
+
+    app.reveal_in_media_pool(item);
+
+    assert!(app.settings.panels.media_pool_open);
+    assert!(app.media_pool_state.search.is_empty());
+    assert!(app.media_pool_state.expanded.contains(&outer));
+    assert!(app.media_pool_state.expanded.contains(&inner));
+    assert_eq!(
+        app.media_pool_state.selected,
+        std::collections::BTreeSet::from([item])
+    );
+    assert_eq!(app.media_pool_state.reveal, Some(item));
+}

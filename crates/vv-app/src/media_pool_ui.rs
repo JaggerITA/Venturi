@@ -485,6 +485,32 @@ impl VenturiApp {
         }
     }
 
+    /// Selects `media` and makes it visible: opens the pool and the folders
+    /// containing it, drops a search hiding it, scrolls to it.
+    pub(crate) fn reveal_in_media_pool(&mut self, media: MediaId) {
+        let Some(item) = self.session.project.media_pool.get(media) else {
+            return;
+        };
+        self.settings.panels.media_pool_open = true;
+        let state = &mut self.media_pool_state;
+        if !media_pool::matches_search(&file_label(&item.path), &state.search) {
+            state.search.clear();
+        }
+        let mut visited = std::collections::HashSet::new();
+        let mut folder = item.folder;
+        while let Some(f) = folder
+            && let Some(parent) = self.session.project.folders.get(f).map(|f| f.parent)
+            && visited.insert(f)
+        {
+            state.expanded.insert(f);
+            folder = parent;
+        }
+        state.select_only([media]);
+        state.rename_pending = None;
+        state.scroll_vel = 0.0;
+        state.reveal = Some(media);
+    }
+
     fn start_folder_rename(&mut self, folder: FolderId) {
         let Some(f) = self.session.project.folders.get(folder) else {
             return;
@@ -1098,6 +1124,10 @@ impl VenturiApp {
                                 }
                             }
                             item_rects.push((id, group_resp.rect));
+                            if self.media_pool_state.reveal == Some(id) {
+                                self.media_pool_state.reveal = None;
+                                ui.scroll_to_rect(group_resp.rect, Some(egui::Align::Center));
+                            }
                             if self.media_pool_state.selected.contains(&id) {
                                 ui.painter().rect_stroke(
                                     group_resp.rect,

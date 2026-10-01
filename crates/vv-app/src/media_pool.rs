@@ -50,6 +50,8 @@ pub struct MediaPoolState {
     pub rename_pending: Option<(MediaId, f64)>,
     pub expanded: HashSet<FolderId>,
     pub search: String,
+    /// Scrolled into view the next time the pool is drawn.
+    pub reveal: Option<MediaId>,
     /// Residual touchpad inertia (px/s), see `timeline_ui::apply_kinetic_scroll`.
     pub scroll_vel: f32,
     /// The pool's ScrollArea as of the last frame: its offset is driven
