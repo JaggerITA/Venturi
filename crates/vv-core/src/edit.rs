@@ -596,7 +596,11 @@ pub fn move_clips(
 pub fn trim_range(project: &Project, clip: &Clip, edge: TrimEdge) -> (FrameIdx, FrameIdx) {
     match edge {
         TrimEdge::Start => {
-            let min_value = clip.timeline_frame_at(0).max(0);
+            let min_value = if clip.is_generator() {
+                0
+            } else {
+                clip.timeline_frame_at(0).max(0)
+            };
             let max_value = clip.timeline_end() - 1;
             (min_value, max_value.max(min_value))
         }

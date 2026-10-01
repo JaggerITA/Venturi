@@ -1258,7 +1258,7 @@ fn combined_trim_range_rolls_between_two_adjacent_clips() {
     let mut second = visual(0, 2, 10, 15);
     second.clip = std::borrow::Cow::Owned(Clip::from_source_range(
         ClipId(2),
-        vv_core::ClipSource::SolidColor,
+        vv_core::ClipSource::Media(<vv_core::MediaId as vv_core::Id>::from_raw(1)),
         5,
         20,
         10,

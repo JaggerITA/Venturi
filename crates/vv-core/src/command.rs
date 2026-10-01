@@ -1254,6 +1254,8 @@ pub struct TrimClip {
     pub new_value: FrameIdx,
     /// Previous `(timeline_start, source_offset, timeline_len)`.
     old: Option<(FrameIdx, FrameIdx, FrameIdx)>,
+    /// How far the keyframes moved to keep a generator's `source_offset` at 0.
+    keyframe_shift: FrameIdx,
 }
 
 impl TrimClip {
@@ -1271,6 +1273,7 @@ impl TrimClip {
             edge,
             new_value,
             old: None,
+            keyframe_shift: 0,
         }
     }
 }
@@ -1286,12 +1289,21 @@ impl Command for TrimClip {
             return;
         };
         self.old = Some((clip.timeline_start, clip.source_offset, clip.timeline_len));
+        self.keyframe_shift = 0;
         match self.edge {
             TrimEdge::Start => {
                 let delta = self.new_value - clip.timeline_start;
                 clip.timeline_start = self.new_value;
                 clip.source_offset += delta;
                 clip.timeline_len -= delta;
+                // A generator grows before its first frame by moving its
+                // origin: the keyframes follow, so they stay on the same
+                // content.
+                if clip.is_generator() && clip.source_offset < 0 {
+                    self.keyframe_shift = -clip.source_offset;
+                    clip.source_offset = 0;
+                    clip.effects.shift_keyframes(self.keyframe_shift);
+                }
             }
             TrimEdge::End => {
                 clip.timeline_len = self.new_value - clip.timeline_start;
@@ -1313,6 +1325,7 @@ impl Command for TrimClip {
             clip.timeline_start = timeline_start;
             clip.source_offset = source_offset;
             clip.timeline_len = timeline_len;
+            clip.effects.shift_keyframes(-self.keyframe_shift);
         }
         resort(track);
     }

@@ -428,6 +428,13 @@ impl<T: Clone> Keyframed<T> {
         Some(std::mem::replace(&mut self.keyframes[idx].2, interpolation))
     }
 
+    /// Moves every keyframe `delta` frames later.
+    pub fn shift(&mut self, delta: FrameIdx) {
+        for keyframe in &mut self.keyframes {
+            keyframe.0 += delta;
+        }
+    }
+
     /// The keyframe exactly at `frame`, if it exists.
     pub fn keyframe_at(&self, frame: FrameIdx) -> Option<(T, Interpolation)> {
         let idx = self
@@ -1199,6 +1206,14 @@ impl EffectStack {
         }
     }
 
+    /// See `Keyframed::shift`, on every animatable parameter.
+    pub fn shift_keyframes(&mut self, delta: FrameIdx) {
+        self.for_each_f32_track(|k| k.shift(delta));
+        if let Some(c) = &mut self.color {
+            c.shift(delta);
+        }
+    }
+
     fn for_each_f32_track(&mut self, mut f: impl FnMut(&mut Keyframed<f32>)) {
         for p in TransformParam::ALL {
             f(self.transform.track_mut(p));
@@ -1404,6 +1419,11 @@ impl Clip {
             fade_out: 0,
             display_color: None,
         }
+    }
+
+    /// Solid color, title or adjustment: no media bounds its length.
+    pub fn is_generator(&self) -> bool {
+        !matches!(self.source, ClipSource::Media(_))
     }
 
     pub fn is_adjustment(&self) -> bool {

@@ -589,3 +589,47 @@ fn media_ranges_outside_the_used_portion_remove_nothing() {
     assert!(removed.is_empty());
     assert_eq!(history.position(), before);
 }
+
+#[test]
+fn a_generator_grows_before_its_first_frame_and_keeps_its_keyframes() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video]);
+    let mut history = History::default();
+    let id = put(&mut project, &mut history, tl, 0, 50, 100);
+    let clip = project.timelines[tl].clip_mut(0, id).unwrap();
+    clip.effects
+        .transform
+        .track_mut(crate::TransformParam::Opacity)
+        .upsert(10, 40.0, crate::Interpolation::Linear);
+    let clip = project.timelines[tl].clip(0, id).unwrap();
+    assert_eq!(trim_range(&project, clip, TrimEdge::Start).0, 0);
+
+    trim_clip(&mut project, &mut history, tl, (0, id), TrimEdge::Start, 20);
+    let clip = project.timelines[tl].clip(0, id).unwrap();
+    assert_eq!(
+        (clip.timeline_start, clip.source_offset, clip.timeline_len),
+        (20, 0, 130)
+    );
+    let opacity = clip.effects.transform.track(crate::TransformParam::Opacity);
+    assert_eq!(opacity.keyframes()[0].0, 40, "still at timeline frame 60");
+
+    history.undo(&mut project);
+    let clip = project.timelines[tl].clip(0, id).unwrap();
+    assert_eq!((clip.timeline_start, clip.source_offset), (50, 0));
+    let opacity = clip.effects.transform.track(crate::TransformParam::Opacity);
+    assert_eq!(opacity.keyframes()[0].0, 10);
+}
+
+#[test]
+fn a_media_clip_still_stops_at_its_first_frame() {
+    let (mut project, _) = project_with_tracks(&[TrackKind::Video]);
+    let media_id = media(&mut project, 0);
+    let clip = Clip::from_source_range(
+        ClipId(1),
+        ClipSource::Media(media_id),
+        10,
+        100,
+        50,
+        Rational::one(),
+    );
+    assert_eq!(trim_range(&project, &clip, TrimEdge::Start).0, 40);
+}
