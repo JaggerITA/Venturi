@@ -264,6 +264,9 @@ action.select_all:
 action.select_from_playhead:
   en: Select forward from playhead
   it: Seleziona dal playhead in avanti
+action.rename:
+  en: Rename selected media pool item
+  it: Rinomina l'elemento selezionato nel media pool
 action.new_project:
   en: New project
   it: Nuovo progetto

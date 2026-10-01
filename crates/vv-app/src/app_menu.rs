@@ -85,6 +85,9 @@ impl VenturiApp {
                     self.select_all_clips();
                 }
             }
+            if pressed(Action::Rename) && self.media_pool_state.focused {
+                self.rename_selected_pool_item();
+            }
             if pressed(Action::SelectFromPlayhead) {
                 self.select_clips_from_playhead();
             }

@@ -413,6 +413,27 @@ impl VenturiApp {
         });
     }
 
+    /// Only folders and timelines can be renamed: a media keeps its file
+    /// name.
+    pub(crate) fn rename_selected_pool_item(&mut self) {
+        if let Some(folder) = self.media_pool_state.selected_folder {
+            self.start_folder_rename(folder);
+            return;
+        }
+        let mut selected = self.media_pool_state.selected.iter();
+        if let (Some(&id), None) = (selected.next(), selected.next())
+            && self
+                .session
+                .project
+                .media_pool
+                .get(id)
+                .is_some_and(|item| item.compound.is_some())
+        {
+            self.media_pool_state.rename_pending = None;
+            self.start_rename(id);
+        }
+    }
+
     fn start_folder_rename(&mut self, folder: FolderId) {
         let Some(f) = self.session.project.folders.get(folder) else {
             return;
@@ -585,7 +606,19 @@ impl VenturiApp {
                 );
             }
         }
+        if self.media_pool_state.selected_folder == Some(folder) {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter()
+                .rect_filled(rect, 3.0, egui::Color32::from_white_alpha(18));
+        }
         if resp.clicked() {
+            self.media_pool_state.select_folder(folder);
+            self.media_pool_state.rename_pending = None;
             if expanded {
                 self.media_pool_state.expanded.remove(&folder);
             } else {

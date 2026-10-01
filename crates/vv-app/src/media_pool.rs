@@ -31,6 +31,8 @@ impl Default for Sort {
 #[derive(Default)]
 pub struct MediaPoolState {
     pub selected: BTreeSet<MediaId>,
+    /// Exclusive with `selected`.
+    pub selected_folder: Option<FolderId>,
     /// Range origin for the next shift+click (which does *not* move it,
     /// as in `timeline_ui::TimelineState::selection_anchor`).
     anchor: Option<MediaId>,
@@ -88,6 +90,9 @@ impl MediaPoolState {
             self.renaming = None;
         }
         self.expanded.retain(|&id| project.folders.contains_key(id));
+        self.selected_folder = self
+            .selected_folder
+            .filter(|&id| project.folders.contains_key(id));
     }
 
     /// `order` is the order the items are drawn in the panel: that is what
@@ -97,6 +102,7 @@ impl MediaPoolState {
             apply_click(&self.selected, self.anchor, clicked, modifiers, order);
         self.selected = selected;
         self.anchor = anchor;
+        self.selected_folder = None;
     }
 
     /// Replaces the selection with `hits`, in drawing order: the first
@@ -105,6 +111,7 @@ impl MediaPoolState {
         let hits: Vec<MediaId> = hits.into_iter().collect();
         self.anchor = hits.first().copied();
         self.selected = hits.into_iter().collect();
+        self.selected_folder = None;
     }
 
     /// Click on a column header: sorts by that criterion, or flips the
@@ -120,9 +127,15 @@ impl MediaPoolState {
         }
     }
 
+    pub fn select_folder(&mut self, folder: FolderId) {
+        self.clear();
+        self.selected_folder = Some(folder);
+    }
+
     pub fn clear(&mut self) {
         self.selected.clear();
         self.anchor = None;
+        self.selected_folder = None;
     }
 }
 

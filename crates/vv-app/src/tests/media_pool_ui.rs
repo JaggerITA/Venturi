@@ -149,3 +149,36 @@ fn pool_swipe_keeps_scrolling_after_release_only_when_enabled() {
         }
     }
 }
+
+#[test]
+fn f2_renames_a_single_selected_timeline_or_folder() {
+    let mut app = VenturiApp::default();
+    let timeline_id = app.ensure_timeline();
+    let item = timeline_item(&app, timeline_id);
+
+    app.media_pool_state.select_only([item]);
+    app.rename_selected_pool_item();
+    assert_eq!(
+        app.media_pool_state.renaming.as_ref().map(|r| r.target),
+        Some(media_pool::RenameTarget::Media(item))
+    );
+
+    app.media_pool_state.renaming = None;
+    app.duplicate_timeline(item);
+    let copy = *app.media_pool_state.selected.first().unwrap();
+    app.media_pool_state.select_only([item, copy]);
+    app.rename_selected_pool_item();
+    assert!(app.media_pool_state.renaming.is_none());
+
+    let folder = app.session.project.folders.insert(vv_core::MediaFolder {
+        name: "footage".into(),
+        parent: None,
+    });
+    app.media_pool_state.select_folder(folder);
+    assert!(app.media_pool_state.selected.is_empty());
+    app.rename_selected_pool_item();
+    assert_eq!(
+        app.media_pool_state.renaming.as_ref().map(|r| r.target),
+        Some(media_pool::RenameTarget::Folder(folder))
+    );
+}
