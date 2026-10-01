@@ -702,7 +702,10 @@ impl VenturiApp {
     /// (`run_export`).
     pub(crate) fn start_export(&mut self) {
         // The button is disabled during an export, but Ctrl+Shift+E is not.
-        if self.timeline_id.is_none() || self.export.is_some() || self.export_dialog.is_some() {
+        let Some(timeline_id) = self.timeline_id else {
+            return;
+        };
+        if self.export.is_some() || self.export_dialog.is_some() {
             return;
         }
         let dialog = match self.last_export_settings.clone() {
@@ -710,7 +713,11 @@ impl VenturiApp {
                 export_dialog::ExportDialog::new(settings, crate::hw_decode::devices())
             }
             None => export_dialog::ExportDialog::preferred(
-                export_dialog::default_output_path(self.session.path()),
+                export_dialog::default_output_path(
+                    self.session.path(),
+                    &self.project_label(),
+                    &self.session.project.timelines[timeline_id].name,
+                ),
                 crate::hw_decode::devices(),
             ),
         };

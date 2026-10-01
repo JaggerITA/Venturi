@@ -102,3 +102,15 @@ fn preferred_dialog_switches_to_nvenc_only_once_it_passed_its_check() {
     wait_for_encoder_checks(&mut dialog);
     assert_eq!(dialog.settings.video.codec, VideoCodec::X264);
 }
+
+#[test]
+fn default_output_path_names_project_and_timeline_next_to_the_project() {
+    assert_eq!(
+        default_output_path(Some(Path::new("/videos/trip.vvproj")), "trip", "Cut 2"),
+        PathBuf::from("/videos/trip-Cut 2.mp4")
+    );
+    assert_eq!(
+        default_output_path(Some(Path::new("/videos/trip.vvproj")), "trip", "a/b"),
+        PathBuf::from("/videos/trip-a_b.mp4")
+    );
+}

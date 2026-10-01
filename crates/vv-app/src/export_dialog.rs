@@ -464,15 +464,24 @@ fn validate_path(text: &str) -> Result<PathBuf, Cow<'static, str>> {
     Ok(path)
 }
 
-/// Path proposed on the first export: next to the project, with its name.
-pub fn default_output_path(project_path: Option<&Path>) -> PathBuf {
-    match project_path {
-        Some(project) => project.with_extension("mp4"),
+/// Path proposed on the first export: "<project>-<timeline>.mp4", next to
+/// the project if it was saved.
+pub fn default_output_path(
+    project_path: Option<&Path>,
+    project_name: &str,
+    timeline_name: &str,
+) -> PathBuf {
+    let dir = match project_path.and_then(Path::parent) {
+        Some(dir) => dir.to_path_buf(),
         None => std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_default()
-            .join("export.mp4"),
-    }
+            .unwrap_or_default(),
+    };
+    let file_name: String = format!("{project_name}-{timeline_name}.mp4")
+        .chars()
+        .map(|c| if std::path::is_separator(c) { '_' } else { c })
+        .collect();
+    dir.join(file_name)
 }
 
 fn video_codec_label(codec: VideoCodec) -> &'static str {
