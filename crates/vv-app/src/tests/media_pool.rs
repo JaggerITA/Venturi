@@ -267,6 +267,32 @@ fn tree_rows_put_items_of_a_missing_folder_at_the_root() {
 }
 
 #[test]
+fn search_rows_open_only_the_folders_leading_to_a_match() {
+    let f = folder_ids(4);
+    let folders = [
+        (f[0], "footage", None),
+        (f[1], "day1", Some(f[0])),
+        (f[2], "audio", None),
+        (f[3], "empty", Some(f[0])),
+    ];
+    let names: Vec<(FolderId, &str)> = folders.iter().map(|(id, n, _)| (*id, *n)).collect();
+    let items = vec![("take.mp4", Some(f[1])), ("intro.mp4", None)];
+
+    let rows = search_rows(&folders, items);
+    assert_eq!(
+        describe(&rows, &names),
+        ["0:[footage]", "1:[day1]", "2:take.mp4", "0:intro.mp4"]
+    );
+}
+
+#[test]
+fn search_matches_substrings_ignoring_case() {
+    assert!(matches_search("Interview_A.MOV", "view_a"));
+    assert!(matches_search("clip.mp4", "  "));
+    assert!(!matches_search("clip.mp4", "take"));
+}
+
+#[test]
 fn offline_media_are_rechecked_when_their_path_changes() {
     let mut project = vv_core::Project::default();
     let item = |path: &str| vv_core::MediaItem {

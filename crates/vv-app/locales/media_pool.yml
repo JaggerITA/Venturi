@@ -191,3 +191,15 @@ pool.delete_folder_hint:
 pool.copy_suffix:
   en: "copy"
   it: "copia"
+
+pool.search:
+  en: "Search…"
+  it: "Cerca…"
+
+pool.search_clear:
+  en: "Clear search"
+  it: "Cancella ricerca"
+
+pool.search_no_results:
+  en: "No matching items"
+  it: "Nessun elemento corrispondente"

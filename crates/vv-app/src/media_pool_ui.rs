@@ -311,6 +311,31 @@ pub(crate) fn media_pool_header(ui: &mut egui::Ui, state: &mut media_pool::Media
     }
 }
 
+/// Returns whether the query changed.
+fn media_pool_search_field(ui: &mut egui::Ui, search: &mut String) -> bool {
+    let before = search.clone();
+    ui.horizontal(|ui| {
+        let clear_w = if search.is_empty() { 0.0 } else { 24.0 };
+        let resp = ui.add(
+            egui::TextEdit::singleline(search)
+                .hint_text(t!("pool.search"))
+                .desired_width(ui.available_width() - clear_w),
+        );
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            search.clear();
+        }
+        if !search.is_empty()
+            && ui
+                .small_button("×")
+                .on_hover_text(t!("pool.search_clear"))
+                .clicked()
+        {
+            search.clear();
+        }
+    });
+    *search != before
+}
+
 pub(crate) fn file_label(path: &std::path::Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -758,6 +783,7 @@ impl VenturiApp {
         }
         self.media_pool_state
             .refresh_offline(&self.session.project);
+        let search_changed = media_pool_search_field(ui, &mut self.media_pool_state.search);
         media_pool_header(ui, &mut self.media_pool_state);
         kinetic_pool_scroll(
             ui.ctx(),
@@ -784,6 +810,16 @@ impl VenturiApp {
                         )
                     })
                     .collect();
+                let query = self.media_pool_state.search.trim().to_string();
+                if !query.is_empty() {
+                    items.retain(|(_, label, ..)| media_pool::matches_search(label, &query));
+                }
+                // Hidden items must not stay selected: Del would delete them.
+                if search_changed {
+                    self.media_pool_state
+                        .selected
+                        .retain(|id| items.iter().any(|item| item.0 == *id));
+                }
                 media_pool::sort_items(
                     &mut items,
                     self.media_pool_state.sort,
@@ -804,7 +840,14 @@ impl VenturiApp {
                         (item, folder)
                     })
                     .collect();
-                let rows = media_pool::tree_rows(&folders, items, &self.media_pool_state.expanded);
+                let rows = if query.is_empty() {
+                    media_pool::tree_rows(&folders, items, &self.media_pool_state.expanded)
+                } else {
+                    media_pool::search_rows(&folders, items)
+                };
+                if rows.is_empty() && !query.is_empty() {
+                    ui.weak(t!("pool.search_no_results"));
+                }
                 let order: Vec<MediaId> = rows
                     .iter()
                     .filter_map(|row| match row {

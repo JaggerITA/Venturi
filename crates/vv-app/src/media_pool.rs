@@ -49,6 +49,7 @@ pub struct MediaPoolState {
     /// click").
     pub rename_pending: Option<(MediaId, f64)>,
     pub expanded: HashSet<FolderId>,
+    pub search: String,
     /// Residual touchpad inertia (px/s), see `timeline_ui::apply_kinetic_scroll`.
     pub scroll_vel: f32,
     /// The pool's ScrollArea as of the last frame: its offset is driven
@@ -206,6 +207,45 @@ pub fn tree_rows<T>(
     items: Vec<(T, Option<FolderId>)>,
     expanded: &HashSet<FolderId>,
 ) -> Vec<PoolRow<T>> {
+    build_rows(folders, items, expanded, None)
+}
+
+/// The rows while searching: `items` are the matches, and only the folders
+/// leading to one of them are shown, all expanded.
+pub fn search_rows<T>(
+    folders: &[(FolderId, &str, Option<FolderId>)],
+    items: Vec<(T, Option<FolderId>)>,
+) -> Vec<PoolRow<T>> {
+    let parent_of = |folder: FolderId| {
+        folders
+            .iter()
+            .find(|(id, ..)| *id == folder)
+            .map(|&(_, _, parent)| parent)
+    };
+    let mut open = HashSet::new();
+    for &(_, folder) in &items {
+        let mut current = folder;
+        while let Some(folder) = current
+            && let Some(parent) = parent_of(folder)
+            && open.insert(folder)
+        {
+            current = parent;
+        }
+    }
+    build_rows(folders, items, &open, Some(&open))
+}
+
+/// Case-insensitive substring match; an empty query matches everything.
+pub fn matches_search(name: &str, query: &str) -> bool {
+    name.to_lowercase().contains(&query.trim().to_lowercase())
+}
+
+fn build_rows<T>(
+    folders: &[(FolderId, &str, Option<FolderId>)],
+    items: Vec<(T, Option<FolderId>)>,
+    expanded: &HashSet<FolderId>,
+    visible: Option<&HashSet<FolderId>>,
+) -> Vec<PoolRow<T>> {
     let exists =
         |folder: Option<FolderId>| folder.filter(|f| folders.iter().any(|(id, ..)| id == f));
     let mut sorted: Vec<_> = folders.to_vec();
@@ -222,6 +262,7 @@ pub fn tree_rows<T>(
         &sorted,
         &mut items,
         expanded,
+        visible,
         &mut visited,
         &mut rows,
         &exists,
@@ -236,11 +277,15 @@ fn push_level<T>(
     folders: &[(FolderId, &str, Option<FolderId>)],
     items: &mut [(Option<T>, Option<FolderId>)],
     expanded: &HashSet<FolderId>,
+    visible: Option<&HashSet<FolderId>>,
     visited: &mut HashSet<FolderId>,
     rows: &mut Vec<PoolRow<T>>,
     exists: &dyn Fn(Option<FolderId>) -> Option<FolderId>,
 ) {
     for &(id, _, folder_parent) in folders {
+        if visible.is_some_and(|v| !v.contains(&id)) {
+            continue;
+        }
         // `visited`: a corrupted file with a parent cycle must not recurse forever.
         if exists(folder_parent) != parent || !visited.insert(id) {
             continue;
@@ -253,6 +298,7 @@ fn push_level<T>(
                 folders,
                 items,
                 expanded,
+                visible,
                 visited,
                 rows,
                 exists,
