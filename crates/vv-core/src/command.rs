@@ -2643,11 +2643,13 @@ impl Command for SetMediaPath {
             let rate = Rational::conform_rate(timeline.fps, meta.fps);
             for (track_index, track) in timeline.tracks.iter_mut().enumerate() {
                 for clip in &mut track.clips {
-                    if matches!(clip.source, ClipSource::Media(id) if id == self.media)
-                        && clip.rate != rate
-                    {
-                        old_rates.push((timeline_id, track_index, clip.id, clip.rate));
-                        clip.rate = rate;
+                    if !matches!(clip.source, ClipSource::Media(id) if id == self.media) {
+                        continue;
+                    }
+                    let old_rate = clip.rate;
+                    clip.conform(rate);
+                    if clip.rate != old_rate {
+                        old_rates.push((timeline_id, track_index, clip.id, old_rate));
                     }
                 }
             }

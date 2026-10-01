@@ -143,6 +143,36 @@ fn set_media_path_with_meta_updates_the_clip_rates() {
     assert_eq!(rate(&project), old_rate);
 }
 
+/// A sped-up clip keeps its speed: only the conform part of its rate follows
+/// the new fps.
+#[test]
+fn set_media_path_with_meta_keeps_the_clip_speed() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut history = History::default();
+    let media = insert_media(&mut project);
+    let meta = project.media_pool[media].meta.clone();
+    let conform = Rational::conform_rate(project.timelines[timeline].fps, meta.fps);
+    let clip_id = project.alloc_clip_id();
+    let mut clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 100, 0, conform);
+    clip.set_speed(Rational::new(2, 1), conform);
+    let sped_up_rate = clip.rate;
+    project.timelines[timeline].tracks[0].clips.push(clip);
+
+    history.do_command(
+        &mut project,
+        Box::new(command::SetMediaPath::new(
+            media,
+            "/found/clip.mp4".into(),
+            1,
+            Some(meta),
+        )),
+    );
+    assert_eq!(
+        project.timelines[timeline].clip(0, clip_id).unwrap().rate,
+        sped_up_rate
+    );
+}
+
 #[test]
 fn add_track_appends_and_undo_removes_it() {
     let (mut project, timeline) = make_project_with_two_tracks();
