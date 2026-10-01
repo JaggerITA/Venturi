@@ -1,7 +1,7 @@
 //! Which GPU decodes video (Settings > Playback): the setting resolved to
 //! the devices every decoder of the app tries, in order.
 
-use std::sync::{LazyLock, OnceLock, RwLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use vv_media::HwDevice;
 use vv_render::wgpu;
 
@@ -147,9 +147,37 @@ pub fn apply(mode: HwDecodeMode) {
     *DEVICES.write().unwrap() = devices;
 }
 
+/// A setting whose GPU decoders all failed to open, for the warning in
+/// Settings.
+#[derive(Clone, Debug)]
+pub struct Fallback {
+    pub mode: HwDecodeMode,
+    pub devices: Vec<HwDevice>,
+}
+
+/// Kept when the app then switches to `Off`, so the warning stays.
+static FALLBACK: Mutex<Option<Fallback>> = Mutex::new(None);
+
+pub fn fallback() -> Option<Fallback> {
+    FALLBACK.lock().unwrap().clone()
+}
+
 fn created(mode: HwDecodeMode) -> Vec<HwDevice> {
-    let mut devices = resolve(mode, gpus(), cfg!(target_os = "macos"));
-    devices.retain(vv_media::hw::available);
+    let resolved = resolve(mode, gpus(), cfg!(target_os = "macos"));
+    let devices: Vec<HwDevice> = resolved
+        .iter()
+        .filter(|device| vv_media::hw::available(device))
+        .cloned()
+        .collect();
+    let mut fallback = FALLBACK.lock().unwrap();
+    if !resolved.is_empty() && devices.is_empty() {
+        *fallback = Some(Fallback {
+            mode,
+            devices: resolved,
+        });
+    } else if mode != HwDecodeMode::Off {
+        *fallback = None;
+    }
     devices
 }
 

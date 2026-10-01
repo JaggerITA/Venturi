@@ -1809,6 +1809,18 @@ impl VenturiApp {
         self.persist_settings();
     }
 
+    /// A GPU decoder chosen explicitly that cannot open: the setting moves
+    /// to CPU, Settings says why.
+    fn follow_hw_decode_fallback(&mut self) {
+        if let Some(fallback) = hw_decode::fallback()
+            && fallback.mode != hw_decode::HwDecodeMode::Auto
+            && self.settings.hw_decode == fallback.mode
+        {
+            self.settings.hw_decode = hw_decode::HwDecodeMode::Off;
+            self.persist_settings();
+        }
+    }
+
     /// User settings on disk, including the panel layout: called
     /// from the Settings window and periodically/on close (see
     /// `eframe::App::save`).
@@ -3044,6 +3056,7 @@ impl VenturiApp {
         self.handle_close_request(&ui.ctx().clone());
         self.poll_pending_dialog(&ui.ctx().clone());
         self.poll_dropped_files(&ui.ctx().clone());
+        self.follow_hw_decode_fallback();
         // What the session applies would land inside the open group.
         if self.edit_drag_group.is_none() && !self.timeline_state.holds_undo_group() {
             self.poll_session(&ui.ctx().clone());

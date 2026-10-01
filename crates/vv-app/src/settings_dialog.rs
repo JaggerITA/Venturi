@@ -410,6 +410,19 @@ fn integrations_section(ui: &mut egui::Ui, settings: &mut Settings, forced: bool
     changed
 }
 
+/// Under `Auto` if it is what failed, else under `Off`, where the app
+/// moved the setting.
+fn warns_under(
+    fallback: &crate::hw_decode::Fallback,
+    mode: crate::hw_decode::HwDecodeMode,
+) -> bool {
+    use crate::hw_decode::HwDecodeMode;
+    match fallback.mode {
+        HwDecodeMode::Auto => mode == HwDecodeMode::Auto,
+        _ => mode == HwDecodeMode::Off,
+    }
+}
+
 fn hw_decode_settings(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     use crate::hw_decode::HwDecodeMode;
     let mut changed = false;
@@ -443,6 +456,19 @@ fn hw_decode_settings(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             None => response,
         };
         changed |= response.changed();
+        if let Some(fallback) = crate::hw_decode::fallback()
+            && warns_under(&fallback, mode)
+        {
+            let devices: Vec<String> = fallback
+                .devices
+                .iter()
+                .map(crate::hw_decode::device_label)
+                .collect();
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                t!("settings.hw_decode_failed", devices = devices.join(", ")),
+            );
+        }
     }
     ui.add_enabled_ui(settings.hw_decode != HwDecodeMode::Off, |ui| {
         ui.horizontal(|ui| {
