@@ -118,11 +118,29 @@ pub struct ExportProgress {
     pub decode: StageStats,
     pub compose: StageStats,
     pub encode: StageStats,
+    pub output_path: PathBuf,
+    /// Decode paths used so far, `None` being the CPU. Still images are left
+    /// out: decoded once, they say nothing about the speed.
+    pub decoders: Vec<Option<vv_media::HwDevice>>,
+    /// GPU adapter of the composition.
+    pub compositor: Option<String>,
+    pub encoder: Option<vv_media::VideoCodec>,
+    /// Until the first frame is written.
+    pub startup: Option<std::time::Duration>,
+    /// After the last frame is written: encoder flush and audio tail.
+    pub finalize: Option<std::time::Duration>,
 }
 
 impl ExportProgress {
     pub fn fps(&self) -> Option<f64> {
         rate(self.current_frame, self.elapsed)
+    }
+
+    /// Share of the elapsed time `stage` spent working; the rest it waited
+    /// on the other stages.
+    pub fn busy_share(&self, stage: &StageStats) -> Option<f64> {
+        (!self.elapsed.is_zero())
+            .then(|| (stage.busy.as_secs_f64() / self.elapsed.as_secs_f64()).min(1.0))
     }
 }
 
@@ -216,6 +234,8 @@ struct StreamingFrameProvider {
     /// Pruned by `retain_clips`.
     active: HashMap<ClipId, ActiveClipDecoder>,
     hw: Vec<vv_media::HwDevice>,
+    /// As `ExportProgress::decoders`.
+    used: Vec<Option<vv_media::HwDevice>>,
 }
 
 impl StreamingFrameProvider {
@@ -259,7 +279,12 @@ impl FrameProvider for StreamingFrameProvider {
                 &self.hw,
             )?),
         };
-        decoder.advance_to(source_frame)
+        let frame = decoder.advance_to(source_frame)?;
+        let device = decoder.decoder.hw_device();
+        if !is_image && !self.used.iter().any(|used| used.as_ref() == device) {
+            self.used.push(device.cloned());
+        }
+        Ok(frame)
     }
 }
 
@@ -275,7 +300,11 @@ pub fn export_timeline(
     let started = std::time::Instant::now();
     let finish = || {
         let mut p = progress.lock().unwrap();
-        p.elapsed = started.elapsed();
+        let now = started.elapsed();
+        if p.current_frame > 0 {
+            p.finalize = Some(now.saturating_sub(p.elapsed));
+        }
+        p.elapsed = now;
         p.done = true;
     };
     let timeline = project
@@ -322,6 +351,12 @@ pub fn export_timeline(
     // so they must be on the same device. Headless, so as not to contend
     // with the UI's.
     let compositor = vv_render::Compositor::new_headless();
+    {
+        let mut p = progress.lock().unwrap();
+        p.output_path = settings.output_path.clone();
+        p.compositor = compositor.adapter_name().map(str::to_owned);
+        p.encoder = Some(settings.video.codec);
+    }
     let compositor = &compositor;
     std::thread::scope(|scope| {
         let mut audio_mix = has_audio_track.then(|| {
@@ -348,7 +383,12 @@ pub fn export_timeline(
                     frame,
                     resolution,
                 );
-                progress.lock().unwrap().decode.add(t.elapsed());
+                let mut p = progress.lock().unwrap();
+                p.decode.add(t.elapsed());
+                if p.decoders != provider.used {
+                    p.decoders.clone_from(&provider.used);
+                }
+                drop(p);
                 let failed = decoded.is_err();
                 // `send` fails only if the next stage has already stopped.
                 if decoded_tx.send(decoded).is_err() || failed {
@@ -398,6 +438,9 @@ pub fn export_timeline(
             p.encode.add(t.elapsed());
             p.current_frame = frame - range.start + 1;
             p.elapsed = started.elapsed();
+            if p.startup.is_none() {
+                p.startup = Some(p.elapsed);
+            }
         }
         if audio_mix.is_some() {
             audio.mixed = Some(join_audio_mix(audio_mix)?);

@@ -612,7 +612,10 @@ fn assert_same_frames(got: &[(FrameIdx, Arc<FrameYuv420>)], want: &[(FrameIdx, A
 /// the fake "hardware" is expected to produce.
 fn fake_hw(path: &Path, pix_fmt: ffmpeg::ffi::AVPixelFormat, fail_after: Option<u32>) -> Decoder {
     let mut decoder = Decoder::open(path).unwrap();
-    decoder.hw = Some(crate::hw::HwState { pix_fmt });
+    decoder.hw = Some(crate::hw::HwState {
+        pix_fmt,
+        device: crate::hw::HwDevice::Cuda,
+    });
     decoder.fail_after = fail_after;
     decoder
 }

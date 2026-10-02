@@ -100,9 +100,45 @@ project.export_done_fps:
   en: "Export completed in %{elapsed} (%{fps} fps)."
   it: "Export completato in %{elapsed} (%{fps} fps)."
 
-project.export_stage_fps:
-  en: "Decode %{decode} fps · Compose %{compose} fps · Encode %{encode} fps"
-  it: "Decodifica %{decode} fps · Composizione %{compose} fps · Codifica %{encode} fps"
+project.export_window_title:
+  en: "Export"
+  it: "Esportazione"
+
+project.export_time:
+  en: "%{elapsed} elapsed · about %{remaining} left"
+  it: "%{elapsed} trascorsi · circa %{remaining} rimanenti"
+
+project.export_stages:
+  en: "Pipeline speed"
+  it: "Velocità della pipeline"
+
+project.export_stage_decode:
+  en: "Decode"
+  it: "Decodifica"
+
+project.export_stage_compose:
+  en: "Compose"
+  it: "Composizione"
+
+project.export_stage_encode:
+  en: "Encode"
+  it: "Codifica"
+
+project.export_stage_output:
+  en: "Output"
+  it: "Uscita"
+
+project.export_startup:
+  en: "Startup"
+  it: "Avvio"
+
+project.export_finalize:
+  en: "Finalize"
+  it: "Chiusura"
+
+project.export_stage_hint:
+  en: "Each stage: its speed on its own and the share of time it spent working, the rest waiting for the others. The slowest one (highlighted) limits the export. Output: frames actually written per second. Startup and finalize: time before the first frame and after the last one, counted in the final total."
+  it: "Per ogni fase: la velocità da sola e la quota di tempo passata a lavorare, il resto in attesa delle altre. La più lenta (evidenziata) limita l'export. Uscita: frame scritti davvero al secondo. Avvio e chiusura: tempo prima del primo frame e dopo l'ultimo, conteggiati nel totale finale."
 
 project.relink_none:
   en: "No media relinked: no matching file found in the chosen folder."

@@ -174,11 +174,12 @@ pub(crate) fn mark_failed(path: &Path) {
 }
 
 /// A codec context set up for a hwaccel, before `avcodec_open2`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct HwState {
     /// The format of the frames while the hwaccel works: any other means
     /// FFmpeg fell back to software on its own.
     pub pix_fmt: ffi::AVPixelFormat,
+    pub device: HwDevice,
 }
 
 /// Sets up `ctx` for the first of `devices` that the codec supports and
@@ -207,7 +208,10 @@ pub(crate) unsafe fn attach(
             // The decoder holds a frame (`Decoder::pending`) while it decodes on.
             (*ctx).extra_hw_frames = EXTRA_HW_FRAMES;
         }
-        return Some(HwState { pix_fmt });
+        return Some(HwState {
+            pix_fmt,
+            device: device.clone(),
+        });
     }
     None
 }

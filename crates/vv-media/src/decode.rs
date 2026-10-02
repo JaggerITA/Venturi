@@ -246,6 +246,11 @@ impl Decoder {
         self.hw.is_some()
     }
 
+    /// The device decoding now; `None` on the CPU.
+    pub fn hw_device(&self) -> Option<&crate::hw::HwDevice> {
+        self.hw.as_ref().map(|hw| &hw.device)
+    }
+
     /// Time spent so far bringing HW frames to system memory.
     pub fn transfer_time(&self) -> Duration {
         self.transfer_time
@@ -453,7 +458,7 @@ impl Decoder {
         &self,
         result: &Result<Option<(FrameIdx, ffmpeg::frame::Video)>, crate::MediaError>,
     ) -> bool {
-        let Some(hw) = self.hw else {
+        let Some(hw) = &self.hw else {
             return false;
         };
         match result {

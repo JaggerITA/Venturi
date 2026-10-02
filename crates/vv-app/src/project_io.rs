@@ -839,8 +839,36 @@ impl VenturiApp {
             return;
         };
 
-        let (current, total, done, error, elapsed, fps, stages) = {
+        let (current, total, done, error, elapsed, fps, file_name, pipeline) = {
             let p = state.progress.lock().unwrap();
+            let stage = |name, accelerator, stats| StageRow {
+                name,
+                accelerator,
+                fps: export::StageStats::fps(stats),
+                busy_share: p.busy_share(stats),
+            };
+            let pipeline = PipelineRows {
+                stages: [
+                    stage(
+                        t!("project.export_stage_decode"),
+                        decoders_label(&p.decoders),
+                        &p.decode,
+                    ),
+                    stage(
+                        t!("project.export_stage_compose"),
+                        p.compositor.clone(),
+                        &p.compose,
+                    ),
+                    stage(
+                        t!("project.export_stage_encode"),
+                        p.encoder.map(|codec| encoder_label(codec).to_owned()),
+                        &p.encode,
+                    ),
+                ],
+                output_fps: p.fps(),
+                startup: p.startup,
+                finalize: p.finalize,
+            };
             (
                 p.current_frame,
                 p.total_frames,
@@ -848,15 +876,28 @@ impl VenturiApp {
                 p.error.as_ref().map(export_error_message),
                 p.elapsed,
                 p.fps(),
-                [p.decode, p.compose, p.encode].map(|s| s.fps()),
+                p.output_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+                pipeline,
             )
         };
 
         let mut should_close = false;
-        egui::Window::new("Export")
+        let screen_center = ui.ctx().content_rect().center();
+        egui::Window::new(t!("project.export_window_title").into_owned())
+            .id(egui::Id::new("export_progress"))
             .collapsible(false)
             .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(screen_center)
             .show(ui.ctx(), |ui| {
+                ui.set_width(360.0);
+                if let Some(name) = &file_name {
+                    ui.label(egui::RichText::new(name).strong());
+                    ui.add_space(4.0);
+                }
+
                 let fraction = if total > 0 {
                     (current as f32 / total as f32).clamp(0.0, 1.0)
                 } else {
@@ -864,41 +905,59 @@ impl VenturiApp {
                 };
                 ui.add(
                     egui::ProgressBar::new(fraction)
-                        .text(t!(
-                            "project.export_progress",
-                            current = current,
-                            total = total
+                        .text(format!(
+                            "{:.0}% · {}",
+                            fraction * 100.0,
+                            t!("project.export_progress", current = current, total = total)
                         ))
                         .animate(!done),
                 );
-                if let [Some(decode), Some(compose), Some(encode)] = stages {
-                    ui.weak(t!(
-                        "project.export_stage_fps",
-                        decode = format_fps(decode),
-                        compose = format_fps(compose),
-                        encode = format_fps(encode)
-                    ));
+                if !done && let Some(fps) = fps {
+                    let remaining =
+                        std::time::Duration::from_secs_f64((total - current).max(0) as f64 / fps);
+                    ui.vertical_centered(|ui| {
+                        ui.weak(t!(
+                            "project.export_time",
+                            elapsed = format_elapsed(elapsed),
+                            remaining = format_elapsed(remaining)
+                        ));
+                    });
                 }
+
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new(t!("project.export_stages").into_owned())
+                    .id_salt("export_stages")
+                    .show(ui, |ui| pipeline.show(ui))
+                    .header_response
+                    .on_hover_text(t!("project.export_stage_hint"));
+
+                ui.add_space(6.0);
                 if let Some(err) = &error {
-                    ui.colored_label(egui::Color32::RED, err);
+                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {err}"));
                 } else if done {
                     let elapsed = format_elapsed(elapsed);
-                    ui.label(match fps {
+                    let text = match fps {
                         Some(fps) => t!(
                             "project.export_done_fps",
                             elapsed = elapsed,
                             fps = format_fps(fps)
                         ),
                         None => t!("project.export_done", elapsed = elapsed),
-                    });
+                    };
+                    ui.colored_label(egui::Color32::from_rgb(110, 205, 120), format!("✔ {text}"));
                 }
+
+                // `horizontal` first: a bare right-to-left layout takes all the
+                // height left and stretches the window.
                 ui.horizontal(|ui| {
-                    if !done && ui.button(t!("common.cancel")).clicked() {
-                        self.session.cancel_export(state.job);
-                    }
-                    if done && ui.button(t!("common.close")).clicked() {
-                        should_close = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !done && ui.button(t!("common.cancel")).clicked() {
+                            self.session.cancel_export(state.job);
+                        }
+                        if done && ui.button(t!("common.close")).clicked() {
+                            should_close = true;
+                        }
+                    });
                 });
             });
 
@@ -1126,6 +1185,111 @@ fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
         }
     }
     .into_owned()
+}
+
+struct StageRow {
+    name: std::borrow::Cow<'static, str>,
+    accelerator: Option<String>,
+    fps: Option<f64>,
+    busy_share: Option<f64>,
+}
+
+/// The "pipeline speed" details of the export window.
+struct PipelineRows {
+    stages: [StageRow; 3],
+    output_fps: Option<f64>,
+    startup: Option<std::time::Duration>,
+    finalize: Option<std::time::Duration>,
+}
+
+impl PipelineRows {
+    fn show(&self, ui: &mut egui::Ui) {
+        let bottleneck = self
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, stage)| stage.fps.map(|fps| (i, fps)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+        let fps_text = |fps: Option<f64>| {
+            fps.map_or_else(|| "—".to_owned(), |fps| format!("{} fps", format_fps(fps)))
+        };
+        let right = |ui: &mut egui::Ui, text: egui::RichText| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(text.monospace())
+            });
+        };
+
+        ui.set_width(ui.available_width());
+        egui::Grid::new("export_stages")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .show(ui, |ui| {
+                for (i, stage) in self.stages.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(stage.name.as_ref());
+                        if let Some(accelerator) = &stage.accelerator {
+                            ui.weak(format!("({accelerator})"));
+                        }
+                    });
+                    // One monospace label, so the two figures line up in columns.
+                    let share = stage
+                        .busy_share
+                        .map_or_else(String::new, |share| format!("{:.0}%", share * 100.0));
+                    let mut text =
+                        egui::RichText::new(format!("{}  {share:>4}", fps_text(stage.fps)));
+                    if bottleneck == Some(i) {
+                        text = text.color(ui.visuals().warn_fg_color);
+                    }
+                    right(ui, text);
+                    ui.end_row();
+                }
+
+                ui.strong(t!("project.export_stage_output"));
+                right(
+                    ui,
+                    egui::RichText::new(format!("{}      ", fps_text(self.output_fps))).strong(),
+                );
+                ui.end_row();
+
+                for (label, duration) in [
+                    (t!("project.export_startup"), self.startup),
+                    (t!("project.export_finalize"), self.finalize),
+                ] {
+                    if let Some(duration) = duration {
+                        ui.weak(label);
+                        right(
+                            ui,
+                            egui::RichText::new(format!("{}      ", format_elapsed(duration)))
+                                .weak(),
+                        );
+                        ui.end_row();
+                    }
+                }
+            });
+    }
+}
+
+fn decoders_label(decoders: &[Option<vv_media::HwDevice>]) -> Option<String> {
+    let labels: Vec<String> = decoders
+        .iter()
+        .map(|device| {
+            device
+                .as_ref()
+                .map_or("CPU".into(), crate::hw_decode::device_label)
+        })
+        .collect();
+    (!labels.is_empty()).then(|| labels.join(" + "))
+}
+
+fn encoder_label(codec: vv_media::VideoCodec) -> &'static str {
+    match codec {
+        vv_media::VideoCodec::X264 => "x264, CPU",
+        vv_media::VideoCodec::Nvenc => "NVENC",
+        vv_media::VideoCodec::VideoToolbox => "VideoToolbox",
+        vv_media::VideoCodec::Vulkan => "Vulkan",
+    }
 }
 
 fn format_fps(fps: f64) -> String {

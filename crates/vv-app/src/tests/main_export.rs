@@ -72,6 +72,15 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
         assert_eq!(stage.frames, total);
         assert!(stage.fps().is_some());
     }
+    assert_eq!(p.decoders, [None]);
+    assert!(p.compositor.is_some());
+    assert_eq!(p.encoder, Some(vv_media::VideoCodec::X264));
+    assert_eq!(p.output_path, output_path);
+    assert!(p.startup.is_some() && p.finalize.is_some());
+    assert!(
+        p.busy_share(&p.encode)
+            .is_some_and(|share| share > 0.0 && share <= 1.0)
+    );
     drop(p);
 
     let meta = vv_media::probe(&output_path).unwrap();

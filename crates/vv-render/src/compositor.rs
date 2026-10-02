@@ -348,6 +348,9 @@ pub struct Compositor {
     /// A separate pool for the intermediates (see `PooledTexture`): they go back
     /// there when whoever uses them lets them go, not at the end of the render.
     scratch: Arc<Mutex<Vec<wgpu::Texture>>>,
+    /// Known only for a headless device: with `new` the adapter stays with
+    /// whoever created the device.
+    adapter_name: Option<String>,
 }
 
 #[derive(Default)]
@@ -556,29 +559,38 @@ impl Compositor {
             i420_pipeline,
             pool: Mutex::default(),
             scratch: Arc::default(),
+            adapter_name: None,
         }
+    }
+
+    pub fn adapter_name(&self) -> Option<&str> {
+        self.adapter_name.as_deref()
     }
 
     /// Creates an independent wgpu device (headless, no surface) to
     /// use the compositor outside an eframe/egui-wgpu context — useful
     /// for the app today and for the tests.
     pub fn new_headless() -> Self {
-        let (device, queue) = pollster::block_on(async {
+        let (adapter_name, (device, queue)) = pollster::block_on(async {
             let instance = wgpu::Instance::default();
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions::default())
                 .await
                 .expect("no wgpu adapter available");
-            adapter
+            let device = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("vv-render headless device"),
                     required_limits: device_limits(&adapter),
                     ..Default::default()
                 })
                 .await
-                .expect("wgpu device request failed")
+                .expect("wgpu device request failed");
+            (adapter.get_info().name, device)
         });
-        Self::new(Arc::new(device), Arc::new(queue))
+        Self {
+            adapter_name: Some(adapter_name),
+            ..Self::new(Arc::new(device), Arc::new(queue))
+        }
     }
 
     /// Like `render_layers`, but dense I420 BT.709 limited: doing the conversion on
