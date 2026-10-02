@@ -65,7 +65,14 @@ fn export_timeline_produces_a_playable_file_matching_the_timeline() {
     )
     .expect("export failed");
 
-    assert!(progress.lock().unwrap().done);
+    let p = progress.lock().unwrap();
+    assert!(p.done);
+    assert!(p.fps().is_some());
+    for stage in [p.decode, p.compose, p.encode] {
+        assert_eq!(stage.frames, total);
+        assert!(stage.fps().is_some());
+    }
+    drop(p);
 
     let meta = vv_media::probe(&output_path).unwrap();
     assert_eq!(meta.width, 64);

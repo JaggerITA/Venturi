@@ -96,6 +96,14 @@ project.export_done:
   en: "Export completed in %{elapsed}."
   it: "Export completato in %{elapsed}."
 
+project.export_done_fps:
+  en: "Export completed in %{elapsed} (%{fps} fps)."
+  it: "Export completato in %{elapsed} (%{fps} fps)."
+
+project.export_stage_fps:
+  en: "Decode %{decode} fps · Compose %{compose} fps · Encode %{encode} fps"
+  it: "Decodifica %{decode} fps · Composizione %{compose} fps · Codifica %{encode} fps"
+
 project.relink_none:
   en: "No media relinked: no matching file found in the chosen folder."
   it: "Nessun media ricollegato: nessun file corrispondente trovato nella cartella scelta."

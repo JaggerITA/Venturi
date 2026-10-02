@@ -839,7 +839,7 @@ impl VenturiApp {
             return;
         };
 
-        let (current, total, done, error, elapsed) = {
+        let (current, total, done, error, elapsed, fps, stages) = {
             let p = state.progress.lock().unwrap();
             (
                 p.current_frame,
@@ -847,6 +847,8 @@ impl VenturiApp {
                 p.done,
                 p.error.as_ref().map(export_error_message),
                 p.elapsed,
+                p.fps(),
+                [p.decode, p.compose, p.encode].map(|s| s.fps()),
             )
         };
 
@@ -869,10 +871,26 @@ impl VenturiApp {
                         ))
                         .animate(!done),
                 );
+                if let [Some(decode), Some(compose), Some(encode)] = stages {
+                    ui.weak(t!(
+                        "project.export_stage_fps",
+                        decode = format_fps(decode),
+                        compose = format_fps(compose),
+                        encode = format_fps(encode)
+                    ));
+                }
                 if let Some(err) = &error {
                     ui.colored_label(egui::Color32::RED, err);
                 } else if done {
-                    ui.label(t!("project.export_done", elapsed = format_elapsed(elapsed)));
+                    let elapsed = format_elapsed(elapsed);
+                    ui.label(match fps {
+                        Some(fps) => t!(
+                            "project.export_done_fps",
+                            elapsed = elapsed,
+                            fps = format_fps(fps)
+                        ),
+                        None => t!("project.export_done", elapsed = elapsed),
+                    });
                 }
                 ui.horizontal(|ui| {
                     if !done && ui.button(t!("common.cancel")).clicked() {
@@ -1108,6 +1126,14 @@ fn otio_warning_text(warning: &vv_core::OtioWarning) -> String {
         }
     }
     .into_owned()
+}
+
+fn format_fps(fps: f64) -> String {
+    if fps < 10.0 {
+        format!("{fps:.1}")
+    } else {
+        format!("{fps:.0}")
+    }
 }
 
 fn format_elapsed(d: std::time::Duration) -> String {

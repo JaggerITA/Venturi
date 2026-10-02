@@ -113,7 +113,41 @@ pub struct ExportProgress {
     pub total_frames: FrameIdx,
     pub done: bool,
     pub error: Option<ExportError>,
+    /// Updated along with `current_frame`, not only at the end.
     pub elapsed: std::time::Duration,
+    pub decode: StageStats,
+    pub compose: StageStats,
+    pub encode: StageStats,
+}
+
+impl ExportProgress {
+    pub fn fps(&self) -> Option<f64> {
+        rate(self.current_frame, self.elapsed)
+    }
+}
+
+/// Time a pipeline stage spent working, without the waits on the other
+/// stages: its fps is how fast it would go alone, so the slowest one is the
+/// bottleneck.
+#[derive(Default, Clone, Copy)]
+pub struct StageStats {
+    pub frames: FrameIdx,
+    pub busy: std::time::Duration,
+}
+
+impl StageStats {
+    pub fn fps(&self) -> Option<f64> {
+        rate(self.frames, self.busy)
+    }
+
+    fn add(&mut self, busy: std::time::Duration) {
+        self.frames += 1;
+        self.busy += busy;
+    }
+}
+
+fn rate(frames: FrameIdx, time: std::time::Duration) -> Option<f64> {
+    (frames > 0 && !time.is_zero()).then(|| frames as f64 / time.as_secs_f64())
 }
 
 /// Decoder kept open for the active video clip, with a seek/reopen only
@@ -305,6 +339,7 @@ pub fn export_timeline(
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
+                let t = std::time::Instant::now();
                 let decoded = decode_video_frame(
                     project,
                     timeline,
@@ -313,6 +348,7 @@ pub fn export_timeline(
                     frame,
                     resolution,
                 );
+                progress.lock().unwrap().decode.add(t.elapsed());
                 let failed = decoded.is_err();
                 // `send` fails only if the next stage has already stopped.
                 if decoded_tx.send(decoded).is_err() || failed {
@@ -323,8 +359,10 @@ pub fn export_timeline(
 
         scope.spawn(move || {
             for decoded in decoded_rx {
+                let t = std::time::Instant::now();
                 let composed =
                     decoded.map(|layers| compose_video_frame(compositor, &layers, output));
+                progress.lock().unwrap().compose.add(t.elapsed());
                 let failed = composed.is_err();
                 if composed_tx.send(composed).is_err() || failed {
                     return;
@@ -347,6 +385,7 @@ pub fn export_timeline(
                 Ok(frame_i420) => frame_i420?,
                 Err(_) => return Err(ExportError::Cancelled),
             };
+            let t = std::time::Instant::now();
             encoder
                 .write_video_frame(&frame_i420)
                 .map_err(ExportError::failed)?;
@@ -355,7 +394,10 @@ pub fn export_timeline(
             }
             audio.write_until(&mut encoder, frame + 1)?;
 
-            progress.lock().unwrap().current_frame = frame - range.start + 1;
+            let mut p = progress.lock().unwrap();
+            p.encode.add(t.elapsed());
+            p.current_frame = frame - range.start + 1;
+            p.elapsed = started.elapsed();
         }
         if audio_mix.is_some() {
             audio.mixed = Some(join_audio_mix(audio_mix)?);

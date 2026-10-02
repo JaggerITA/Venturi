@@ -247,6 +247,12 @@ pub(crate) fn export_status(session: &Session, args: JobArgs) -> ToolResult {
         "current_frame": p.current_frame,
         "total_frames": p.total_frames,
         "elapsed_secs": p.elapsed.as_secs_f64(),
+        "fps": p.fps(),
+        "stage_fps": {
+            "decode": p.decode.fps(),
+            "compose": p.compose.fps(),
+            "encode": p.encode.fps(),
+        },
         "error": p.error.as_ref().map(ToString::to_string),
     })))
 }

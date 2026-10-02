@@ -153,7 +153,7 @@ Every call below is one undo step.
 | Tool | Notes |
 |---|---|
 | `export(timeline_id, path, range?, scale_percent?, audio?)` | Starts in the background and returns a `job_id`. Edits made afterwards do not affect it. One export at a time |
-| `export_status(job_id)` | `running`, `done`, `failed` or `cancelled`, with frames written of the total |
+| `export_status(job_id)` | `running`, `done`, `failed` or `cancelled`, with frames written of the total, overall `fps` and the `stage_fps` of decode, compose and encode (each stage's own speed, without waiting on the others) |
 | `cancel_export(job_id)` | |
 
 ### Editor window only
