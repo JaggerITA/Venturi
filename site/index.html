@@ -169,6 +169,8 @@ h3 { font: 600 20px/1.3 var(--display); letter-spacing: -.01em; margin: 0 0 8px;
 }
 .card:hover { border-color: #3a3b42; transform: translateY(-2px); }
 .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+.card-img { margin-top: 18px; border-radius: 8px; border: 1px solid var(--line); }
+.stage-img { margin-top: 14px; border-radius: 8px; border: 1px solid var(--line); width: 100%; max-width: 340px; }
 .icon {
   width: 42px; height: 42px; border-radius: 10px; margin-bottom: 20px;
   display: grid; place-items: center;
@@ -186,25 +188,24 @@ h3 { font: 600 20px/1.3 var(--display); letter-spacing: -.01em; margin: 0 0 8px;
 /* audio */
 .audio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .panel { border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); overflow: hidden; display: flex; flex-direction: column; }
-.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: #19191c; }
-.panel-head b { font: 600 15px var(--display); }
-.panel-head span { font: 12px var(--mono); color: var(--dim); }
-.panel .viz { display: block; width: 100%; height: auto; padding: 10px 6px 4px; background: #111113; }
 .panel .shot-img { display: block; width: 100%; height: auto; background: #111113; }
 .panel-body { padding: 20px 22px 24px; }
 .panel-body p { margin: 0; color: var(--muted); font-size: 15.5px; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
 .tags span { font-size: 12.5px; padding: 3px 9px; border-radius: 7px; border: 1px solid var(--line); color: var(--muted); }
-.gr { transform-box: fill-box; transform-origin: top; animation: gr 2.4s ease-in-out infinite alternate; }
-@keyframes gr { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
-.chain { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; font: 13px var(--mono); color: var(--muted); }
+.chain { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 18px 0 0; font: 13px var(--mono); color: var(--muted); }
 .chain i { font-style: normal; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
 .chain i.hot { border-color: rgba(255,106,31,.45); color: #ffb48e; background: var(--orange-soft); }
 .chain em { font-style: normal; color: var(--dim); }
-.audio-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 18px; }
+.audio-row { display: grid; grid-template-columns: minmax(0, 250px) 1fr; gap: 18px; margin-top: 18px; align-items: start; }
+.audio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.audio-cards .span2 { grid-column: span 2; }
+.panel-body h3 { margin-bottom: 8px; }
+.panel.mixer { background: #1b1b1d; }
 .rec { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff4d4d; box-shadow: 0 0 0 0 rgba(255,77,77,.6); animation: rec 1.6s infinite; vertical-align: 1px; margin-right: 8px; }
 @keyframes rec { 70% { box-shadow: 0 0 0 9px rgba(255,77,77,0); } 100% { box-shadow: 0 0 0 0 rgba(255,77,77,0); } }
-@media (max-width: 900px) { .audio-grid, .audio-row { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .audio-grid, .audio-row { grid-template-columns: 1fr; } .panel.mixer { max-width: 240px; margin: 0 auto; } }
+@media (max-width: 640px) { .audio-cards { grid-template-columns: 1fr; } .audio-cards .span2 { grid-column: auto; } }
 
 /* performance */
 .perf { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: start; }
@@ -323,7 +324,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .js .reveal { opacity: 1; transform: none; transition: none; }
-  .curve-demo .path, .dash, .cursor, .gr, .rec { animation: none; stroke-dashoffset: 0; }
+  .curve-demo .path, .dash, .cursor, .rec { animation: none; stroke-dashoffset: 0; }
 }
 </style>
 </head>
@@ -455,9 +456,10 @@ footer p { margin: 6px 0 0; max-width: 560px; }
         <p>Timelines move in and out through OpenTimelineIO, tested with DaVinci Resolve.</p>
       </article>
       <article class="card reveal">
-        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg></div>
-        <h3>Drivable by AI agents</h3>
-        <p>A built-in MCP server lets an agent import, cut, measure audio, look at frames and export.</p>
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13V8M10 2h4"/><circle cx="12" cy="13" r="8"/><path d="m16.5 8.5 1.5-1.5"/></svg></div>
+        <h3>Speed changes in place</h3>
+        <p>Show the speed handles and drag a clip's edge: from 1% to 10,000%, with its linked audio following and, if you want, keeping its pitch.</p>
+        <img class="card-img" src="assets/retime-controls.webp" width="862" height="200" loading="lazy" alt="Two linked clips with their speed bar set to 200%">
       </article>
       <article class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8"/></svg></div>
@@ -475,51 +477,45 @@ footer p { margin: 6px 0 0; max-width: 560px; }
       <h2>Sound that ships finished,<br>not just in sync.</h2>
       <p class="section-lede">A video is half audio. Venturi has a mixer with an effect chain on every track and on the master, and records your voiceover straight onto the timeline, so the sound doesn't need a trip to another program either.</p>
     </div>
-    <div class="chain reveal" aria-label="An example effect chain">
-      <i>Track A1</i><em>→</em><i class="hot">Equalizer</i><em>→</em><i class="hot">Multiband compressor</i><em>→</em><i class="hot">Normalize</i><em>→</em><i>Master</i>
-    </div>
     <div class="audio-grid">
       <div class="panel reveal">
-        <div class="panel-head"><b>Equalizer</b><span>6 bands · live spectrum</span></div>
-        <svg class="viz" viewBox="0 0 560 254" aria-hidden="true">
-            <g stroke="#26272b" stroke-width="1"><line x1="106.3" y1="20" x2="106.3" y2="230"/><line x1="156.5" y1="20" x2="156.5" y2="230"/><line x1="206.7" y1="20" x2="206.7" y2="230"/><line x1="273.0" y1="20" x2="273.0" y2="230"/><line x1="323.2" y1="20" x2="323.2" y2="230"/><line x1="373.3" y1="20" x2="373.3" y2="230"/><line x1="439.7" y1="20" x2="439.7" y2="230"/><line x1="489.8" y1="20" x2="489.8" y2="230"/><line x1="40" y1="120.0" x2="540" y2="120.0" stroke="#34353b"/></g>
-            <path d="M40 230 L40.0 118.9 L44.9 117.8 L49.8 121.3 L54.7 119.1 L59.6 121.5 L64.5 121.9 L69.4 120.0 L74.3 122.5 L79.2 120.5 L84.1 122.6 L89.0 121.2 L93.9 120.7 L98.8 123.1 L103.7 127.8 L108.6 125.3 L113.5 124.8 L118.4 127.7 L123.3 132.0 L128.2 131.9 L133.0 130.5 L137.9 134.2 L142.8 129.4 L147.7 132.9 L152.6 130.6 L157.5 128.3 L162.4 126.7 L167.3 127.3 L172.2 131.6 L177.1 129.3 L182.0 131.1 L186.9 132.6 L191.8 131.5 L196.7 132.2 L201.6 128.9 L206.5 126.9 L211.4 126.9 L216.3 130.4 L221.2 130.6 L226.1 129.9 L231.0 131.4 L235.9 131.3 L240.8 130.1 L245.7 133.0 L250.6 134.0 L255.5 131.1 L260.4 131.8 L265.3 131.7 L270.2 134.3 L275.1 134.6 L280.0 131.3 L284.9 134.6 L289.8 129.8 L294.7 129.1 L299.6 131.1 L304.5 127.6 L309.4 127.9 L314.2 124.5 L319.1 127.1 L324.0 129.3 L328.9 128.9 L333.8 130.8 L338.7 127.5 L343.6 128.2 L348.5 127.7 L353.4 127.1 L358.3 125.5 L363.2 127.3 L368.1 129.0 L373.0 126.1 L377.9 125.6 L382.8 120.5 L387.7 122.0 L392.6 122.3 L397.5 124.8 L402.4 124.8 L407.3 120.3 L412.2 118.1 L417.1 118.7 L422.0 113.8 L426.9 113.9 L431.8 111.4 L436.7 109.2 L441.6 107.1 L446.5 110.9 L451.4 108.0 L456.3 106.8 L461.2 106.8 L466.1 110.1 L471.0 105.7 L475.9 97.8 L480.8 93.4 L485.7 93.0 L490.6 91.8 L495.4 91.1 L500.3 85.7 L505.2 83.1 L510.1 80.7 L515.0 82.8 L519.9 84.3 L524.8 78.5 L529.7 74.7 L534.6 72.4 L539.5 70.6 L540 230 Z" fill="rgba(95,196,138,.10)" stroke="rgba(95,196,138,.35)" stroke-width="1"/>
-            <path d="M40.0 204.2 L42.1 200.7 L44.3 197.2 L46.4 193.8 L48.6 190.5 L50.7 187.2 L52.8 184.0 L55.0 180.9 L57.1 177.9 L59.3 175.0 L61.4 172.2 L63.5 169.5 L65.7 166.9 L67.8 164.3 L70.0 161.9 L72.1 159.6 L74.2 157.5 L76.4 155.4 L78.5 153.5 L80.7 151.7 L82.8 150.0 L84.9 148.5 L87.1 147.1 L89.2 145.9 L91.3 144.8 L93.5 143.8 L95.6 143.0 L97.8 142.3 L99.9 141.8 L102.0 141.4 L104.2 141.2 L106.3 141.1 L108.5 141.2 L110.6 141.3 L112.7 141.6 L114.9 142.1 L117.0 142.7 L119.2 143.6 L121.3 144.7 L123.4 145.7 L125.6 146.7 L127.7 147.6 L129.9 148.5 L132.0 149.2 L134.1 149.9 L136.3 150.4 L138.4 150.9 L140.6 151.2 L142.7 151.5 L144.8 151.6 L147.0 151.7 L149.1 151.7 L151.3 151.5 L153.4 151.3 L155.5 151.0 L157.7 150.7 L159.8 150.3 L162.0 149.8 L164.1 149.3 L166.2 148.8 L168.4 148.3 L170.5 147.8 L172.7 147.3 L174.8 146.8 L176.9 146.3 L179.1 145.8 L181.2 145.4 L183.3 145.0 L185.5 144.6 L187.6 144.3 L189.8 144.0 L191.9 143.7 L194.0 143.5 L196.2 143.3 L198.3 143.2 L200.5 143.1 L202.6 142.9 L204.7 142.9 L206.9 142.8 L209.0 142.7 L211.2 142.6 L213.3 142.5 L215.4 142.4 L217.6 142.3 L219.7 142.2 L221.9 142.1 L224.0 141.9 L226.1 141.7 L228.3 141.5 L230.4 141.2 L232.6 140.9 L234.7 140.6 L236.8 140.2 L239.0 139.8 L241.1 139.3 L243.3 138.9 L245.4 138.4 L247.5 137.8 L249.7 137.3 L251.8 136.7 L254.0 136.1 L256.1 135.5 L258.2 134.9 L260.4 134.2 L262.5 133.6 L264.7 133.0 L266.8 132.3 L268.9 131.7 L271.1 131.0 L273.2 130.4 L275.3 129.8 L277.5 129.2 L279.6 128.6 L281.8 128.0 L283.9 127.4 L286.0 126.9 L288.2 126.3 L290.3 125.8 L292.5 125.3 L294.6 124.8 L296.7 124.4 L298.9 123.9 L301.0 123.5 L303.2 123.1 L305.3 122.7 L307.4 122.3 L309.6 121.9 L311.7 121.6 L313.9 121.2 L316.0 120.9 L318.1 120.5 L320.3 120.1 L322.4 119.8 L324.6 119.4 L326.7 119.0 L328.8 118.7 L331.0 118.3 L333.1 117.8 L335.3 117.4 L337.4 117.0 L339.5 116.5 L341.7 116.0 L343.8 115.5 L346.0 114.9 L348.1 114.3 L350.2 113.7 L352.4 113.1 L354.5 112.4 L356.7 111.7 L358.8 111.0 L360.9 110.2 L363.1 109.5 L365.2 108.7 L367.3 107.9 L369.5 107.0 L371.6 106.2 L373.8 105.3 L375.9 104.4 L378.0 103.6 L380.2 102.7 L382.3 101.8 L384.5 101.0 L386.6 100.1 L388.7 99.3 L390.9 98.5 L393.0 97.7 L395.2 96.9 L397.3 96.2 L399.4 95.5 L401.6 94.9 L403.7 94.3 L405.9 93.8 L408.0 93.3 L410.1 92.8 L412.3 92.4 L414.4 92.0 L416.6 91.7 L418.7 91.5 L420.8 91.3 L423.0 91.1 L425.1 91.0 L427.3 91.0 L429.4 90.9 L431.5 91.0 L433.7 91.1 L435.8 91.2 L438.0 91.3 L440.1 91.5 L442.2 91.7 L444.4 92.0 L446.5 92.3 L448.7 92.6 L450.8 93.0 L452.9 93.4 L455.1 93.8 L457.2 94.2 L459.3 94.7 L461.5 95.2 L463.6 95.7 L465.8 96.2 L467.9 96.8 L470.0 97.4 L472.2 98.0 L474.3 98.6 L476.5 99.3 L478.6 100.0 L480.7 100.6 L482.9 101.3 L485.0 102.1 L487.2 102.8 L489.3 103.5 L491.4 104.3 L493.6 105.0 L495.7 105.7 L497.9 106.5 L500.0 107.2 L502.1 108.0 L504.3 108.7 L506.4 109.4 L508.6 110.1 L510.7 110.8 L512.8 111.4 L515.0 112.0 L517.1 112.6 L519.3 113.2 L521.4 113.8 L523.5 114.3 L525.7 114.8 L527.8 115.3 L530.0 115.7 L532.1 116.1 L534.2 116.5 L536.4 116.9 L538.5 117.2" fill="none" stroke="#ECECEE" stroke-width="2.4" stroke-linejoin="round"/>
-            <circle cx="140.3" cy="151.2" r="6" fill="#0E0E10" stroke="#FF6A1F" stroke-width="2"/><circle cx="222.8" cy="142.0" r="6" fill="#0E0E10" stroke="#FF6A1F" stroke-width="2"/><circle cx="336.4" cy="117.2" r="6" fill="#0E0E10" stroke="#FF6A1F" stroke-width="2"/><circle cx="413.8" cy="92.1" r="6" fill="#0E0E10" stroke="#FF6A1F" stroke-width="2"/><circle cx="473.7" cy="98.4" r="6" fill="#0E0E10" stroke="#FF6A1F" stroke-width="2"/><circle cx="98.7" cy="142.1" r="6" fill="#0E0E10" stroke="#FF6A1F" stroke-width="2"/>
-            <g fill="#6A6B73" font-family="JetBrains Mono, monospace" font-size="11" text-anchor="middle"><text x="156.5" y="246">100</text><text x="323.2" y="246">1k</text><text x="489.8" y="246">10k</text></g>
-          </svg>
+        <img class="shot-img" src="assets/eq.webp" width="1470" height="1268" loading="lazy" alt="The equalizer of track A1 with the Warmth preset: six bands drawn as a curve over the live spectrum, with a strip of knobs per band">
         <div class="panel-body">
-          <p>Shape the response by dragging points on the curve, drawn over the live spectrum of what is playing. Low and high cut, shelves and bells, each band with its own frequency, gain and Q.</p>
+          <h3>Equalizer</h3>
+          <p>Six bands you drag straight on the response curve, drawn over the live spectrum of what is playing. Low and high cut, shelves and bells, each with its own frequency, gain and Q.</p>
           <div class="tags"><span>Voice clarity</span><span>Warmth</span><span>Reduce mud</span><span>Rumble cut</span><span>Telephone</span></div>
         </div>
       </div>
       <div class="panel reveal">
-        <div class="panel-head"><b>Multiband compressor</b><span>3 bands · stereo-linked</span></div>
-        <svg class="viz" viewBox="0 0 560 254" aria-hidden="true">
-            <g font-family="JetBrains Mono, monospace" font-size="11" fill="#6A6B73"><rect x="40.0" y="20" width="166.7" height="210" fill="rgba(255,106,31,.05)"/><text x="123.3" y="40" text-anchor="middle">LOW</text><line x1="54.0" y1="102.5" x2="192.7" y2="102.5" stroke="#55565c" stroke-dasharray="4 5"/><rect class="gr" style="animation-delay:0.0s" x="113.3" y="120.0" width="20" height="35.0" rx="3" fill="#FF6A1F"/><text x="123.3" y="175.0" text-anchor="middle" fill="#ffb48e">-2.5 dB</text><rect x="206.7" y="20" width="196.0" height="210" fill="rgba(255,106,31,.09)"/><text x="304.7" y="40" text-anchor="middle">MID</text><line x1="220.7" y1="81.5" x2="388.7" y2="81.5" stroke="#55565c" stroke-dasharray="4 5"/><rect class="gr" style="animation-delay:-0.7s" x="294.7" y="120.0" width="20" height="77.0" rx="3" fill="#FF6A1F"/><text x="304.7" y="217.0" text-anchor="middle" fill="#ffb48e">-5.5 dB</text><rect x="402.7" y="20" width="137.3" height="210" fill="rgba(255,106,31,.05)"/><text x="471.3" y="40" text-anchor="middle">HIGH</text><line x1="416.7" y1="95.5" x2="526.0" y2="95.5" stroke="#55565c" stroke-dasharray="4 5"/><rect class="gr" style="animation-delay:-1.4s" x="461.3" y="120.0" width="20" height="49.0" rx="3" fill="#FF6A1F"/><text x="471.3" y="189.0" text-anchor="middle" fill="#ffb48e">-3.5 dB</text></g>
-            <line x1="40" y1="120.0" x2="540" y2="120.0" stroke="#34353b"/>
-            <line x1="206.7" y1="20" x2="206.7" y2="230" stroke="#ECECEE" stroke-width="1.5"/><circle cx="206.7" cy="230" r="5" fill="#ECECEE"/><line x1="402.7" y1="20" x2="402.7" y2="230" stroke="#ECECEE" stroke-width="1.5"/><circle cx="402.7" cy="230" r="5" fill="#ECECEE"/>
-            <g fill="#6A6B73" font-family="JetBrains Mono, monospace" font-size="11" text-anchor="middle"><text x="206.7" y="246">200</text><text x="402.7" y="246">3k</text></g>
-          </svg>
+        <img class="shot-img" src="assets/multiband-compressor.webp" width="1470" height="1080" loading="lazy" alt="The multiband compressor of track A1: three bands split at 200 Hz and 2 kHz over the live spectrum, each with threshold, ratio, gain, attack and release">
         <div class="panel-body">
-          <p>Linkwitz-Riley crossovers that sum back to a flat response, and a compressor per band with threshold, ratio, attack, release and gain. Start from a preset, then save your own.</p>
+          <h3>Multiband compressor</h3>
+          <p>Three stereo-linked bands split by Linkwitz-Riley crossovers that sum back to a flat response. Threshold, ratio, attack, release and gain per band, with live meters. Start from a preset, then save your own.</p>
           <div class="tags"><span>Voice clarity</span><span>De-esser</span><span>Broadcast loud</span><span>Gentle glue</span><span>Music mastering</span></div>
         </div>
       </div>
     </div>
     <div class="audio-row">
-      <article class="card reveal">
-        <h3><span class="rec"></span>Voiceover in place</h3>
-        <p>Arm a track with R and press Space: the microphone is recorded onto the timeline while it plays, with a live waveform. Takes are saved next to the project, as WAV, FLAC, MP3, AAC, Opus or Vorbis.</p>
-      </article>
-      <article class="card reveal">
-        <h3>A mixer, not a volume knob</h3>
-        <p>Per-track and master gain, balance, solo, mute and meters. Gain is keyframable on every clip, and the same mix plays in the preview and lands in the export.</p>
-      </article>
-      <article class="card reveal">
-        <h3>Normalize and mono, one click each</h3>
-        <p>Bring the loudest peak of a channel to a target level, or fold a voice recorded on one side into both: no settings to learn.</p>
-      </article>
+      <div class="panel mixer reveal">
+        <img class="shot-img" src="assets/mixer.webp" width="404" height="916" loading="lazy" alt="The audio mixer: track A1 with a multiband compressor and an equalizer, the master with a normalization, each with balance, fader and meters">
+      </div>
+      <div class="audio-cards">
+        <article class="card reveal span2">
+          <h3>A mixer, not a volume knob</h3>
+          <p>Every track and the master have their own strip: balance, solo, mute, fader and meters, and an effect chain in the order you choose. Clip gain is keyframable, and the same mix plays in the preview and lands in the export.</p>
+          <div class="chain" aria-label="The chains in the screenshot">
+            <i>A1</i><em>→</em><i class="hot">Multiband compressor</i><em>→</em><i class="hot">Equalizer</i><em>→</em><i>Master</i><em>→</em><i class="hot">Normalize</i>
+          </div>
+        </article>
+        <article class="card reveal">
+          <h3><span class="rec"></span>Voiceover in place</h3>
+          <p>Arm a track with R and press Space: the microphone is recorded onto the timeline while it plays, with a live waveform. Takes are saved next to the project, as WAV, FLAC, MP3, AAC, Opus or Vorbis.</p>
+        </article>
+        <article class="card reveal">
+          <h3>Normalize and mono</h3>
+          <p>Bring the loudest peak of a channel to a target level, or fold a voice recorded on one side into both. One click each, no settings to learn.</p>
+        </article>
+      </div>
     </div>
   </div>
 </section>
@@ -540,7 +536,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
     <div class="pipeline">
       <div class="stage reveal">
         <div class="n">01</div>
-        <div><h3>A cache that follows the playhead</h3><p>A background thread walks the timeline ahead of you, across cuts, gaps and tracks, filling a frame cache with a global memory budget. Eviction drops the frames farthest from the playhead first.</p></div>
+        <div><h3>A cache that follows the playhead</h3><p>A background thread walks the timeline ahead of you, across cuts, gaps and tracks, filling a frame cache with a global memory budget. Eviction drops the frames farthest from the playhead first. The blue bar on the ruler shows what is already decoded.</p><img class="stage-img" src="assets/playhead-buffer.webp" width="680" height="114" loading="lazy" alt="The timeline ruler with a blue bar spanning the decoded frames around the red playhead"></div>
       </div>
       <div class="stage reveal">
         <div class="n">02</div>
