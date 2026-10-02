@@ -17,9 +17,9 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 |---|---|---|
 | Language | Rust | mature media ecosystem, no GC, safety when editing fast with AI |
 | UI | egui + eframe | immediate-mode, pure Rust, shares the wgpu device with the compositor |
-| GPU | wgpu on Vulkan (Honeykrisp) | 1.3/1.4 conformant on M1/M2, one stack for UI and compositing |
-| Video decode | software FFmpeg (ffmpeg-next / libavcodec) | the V4L2/AVD HW decoder is still unstable with multi-reference frames (practically every real x264 file) |
-| Encode/export | FFmpeg via ffmpeg-next: libx264, or NVENC / Vulkan / VideoToolbox if they really open | no reliable HW encoder on Asahi today |
+| GPU | wgpu: Vulkan on Linux (Honeykrisp on Asahi), Metal on macOS | Honeykrisp is 1.3/1.4 conformant on M1/M2; one stack for UI and compositing |
+| Video decode | FFmpeg (ffmpeg-next / libavcodec) with its hwaccels: VideoToolbox on macOS, NVDEC or Vulkan video on Linux; software as the fallback | frees the CPU and roughly halves the first frame after a jump ([plans/HW_DECODE.md](plans/HW_DECODE.md)). No V4L2: the Asahi AVD decoder is still unstable with multi-reference frames (practically every real x264 file). No VA-API: libva is linked at build time, so the AppImage would not start without it |
+| Encode/export | FFmpeg via ffmpeg-next: libx264, or NVENC / Vulkan / VideoToolbox if they really open; NVENC by default when present | no reliable HW encoder on Asahi today |
 | Audio time-stretch | libavfilter's `rubberband` filter (the system ffmpeg is already built with `--enable-librubberband`) | pitch preserved, no extra bindings to write |
 | Project persistence | RON, human-readable | debuggable, diffable with git |
 | Undo/redo | command pattern (invertible commands) | light, unbounded history, consistent with a data-oriented architecture |
@@ -120,8 +120,25 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
 
 - **Decode** (`vv-media/src/decode.rs`): `Decoder` with `next_frame` and
   `seek_to_time` (keyframe ≤ target, then sequential decode). Every pixel
-  format is normalised to 8-bit YUV420P (`FrameYuv420`); the conversion to
-  RGB happens in the shader.
+  format is normalised to 8-bit 4:2:0 (`FrameYuv420`), with the chroma
+  planar or, for NV12 sources and HW frames, interleaved (read as `.rg` by
+  the shader, no sws); the conversion to RGB happens in the shader.
+- **HW decode** (`vv-media/src/hw.rs`, `Decoder::open_with`): one path over
+  FFmpeg's hwaccels for every backend (`HwDevice`: VideoToolbox, CUDA,
+  Vulkan on a named GPU), one device per backend per process. Frames are
+  downloaded to system memory (mapped on VideoToolbox) and go into the
+  same cache as software ones. FFmpeg falls back to software silently, so
+  HW is confirmed by the format of the frames: a media whose hwaccel does
+  not deliver, or errors mid-stream, reopens in software at the same
+  position and stays there (`hw::FAILED`). Each HW decoder leases its
+  surfaces from a global budget (Settings > Playback, default from the
+  physical RAM); over budget it opens in software, and the decoders behind
+  the playhead and the proxies (`HwPriority::Low`) may take only half.
+  Which GPU is the setting's (`vv-app/src/hw_decode.rs`): `Auto` is
+  VideoToolbox on macOS; on Linux Vulkan on the integrated GPU of a hybrid
+  laptop (NVDEC would wake the discrete one), else NVDEC if there is an
+  NVIDIA GPU, then Vulkan. Thumbnails and probing stay in software (device
+  setup would dominate).
 - **Timeline buffer** (`vv-app/src/render_ahead.rs`, `RenderAhead`): a
   thread walks the timeline forward from the playhead (`lookahead_secs`,
   default 3s; behind it keeps `behind_secs`, default 2s, with the budget
@@ -320,11 +337,13 @@ Done:
 - Text clips (`ClipSource::Text`): font, style, colour, alignment, shadow
   and background from the properties panel.
 - Proxies and waveforms in the background.
+- Hardware video decoding for playback, proxies and export, with software
+  fallback per media.
 - Audio-only media (wav, mp3, flac…): nominal fps `AUDIO_ONLY_FPS`, no proxy
   or thumbnail, only audio clips on the timeline.
 - H.264 + AAC export in MP4 (Ctrl+Shift+E) from a settings window:
-  destination, in/out range or the whole timeline, decoder (CPU or the GPU
-  of Settings > Playback), video encoder (x264, NVENC or Vulkan; x264 or
+  destination, in/out range or the whole timeline, decoder (CPU or any GPU
+  decoder of the machine, the one of Settings > Playback first), video encoder (x264, NVENC or Vulkan; x264 or
   VideoToolbox on macOS) with preset and quality, reduced resolution, audio encoder
   (native AAC/FDK) with preset and bitrate. Default: NVENC and FDK if
   available, otherwise x264 `superfast` CRF 20 and native AAC. The last
