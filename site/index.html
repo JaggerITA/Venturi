@@ -513,7 +513,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
         <p>The composed frame goes straight from the GPU texture into the interface, without a copy back to memory. On export the colour conversion runs in a compute shader before the encoder.</p>
       </div>
     </div>
-    <p class="footnote reveal">Measured on a 1080p H.264 clip on the development machine. Hardware decoding is on by default (Settings &gt; Playback). Export uses NVENC by default on NVIDIA, and lets you pick any decoder and encoder the machine has.</p>
+    <p class="footnote reveal">Measured with NVDEC on a heavy HEVC clip (4516×1080, 60 fps) on the development machine. Hardware decoding is on by default (Settings &gt; Playback). Export uses NVENC by default on NVIDIA, and lets you pick any decoder and encoder the machine has.</p>
   </div>
 </section>
 
