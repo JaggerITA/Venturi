@@ -32,10 +32,6 @@ export.decoder:
   en: "Decoder"
   it: "Decoder"
 
-export.gpu_decoder_off:
-  en: "No GPU decoder: turned off or unavailable in Settings > Playback"
-  it: "Nessun decoder GPU: disattivato o non disponibile in Impostazioni > Playback"
-
 export.encoder:
   en: "Encoder"
   it: "Encoder"

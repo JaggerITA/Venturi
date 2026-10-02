@@ -121,6 +121,32 @@ fn gpus() -> &'static [wgpu::AdapterInfo] {
     })
 }
 
+/// Every GPU decoder of this machine for the export window, the Playback
+/// setting's first. Starts checking them in the background, so the ones that
+/// do not open turn `known_unavailable` while the window is up.
+pub fn export_choices() -> Vec<HwDevice> {
+    let macos = cfg!(target_os = "macos");
+    let has_nvidia = gpus().iter().any(|gpu| gpu.vendor == NVIDIA_VENDOR_ID);
+    let mut choices = devices();
+    let candidates = [HwDecodeMode::Auto, HwDecodeMode::Vulkan]
+        .into_iter()
+        .flat_map(|mode| resolve(mode, gpus(), macos))
+        .chain(has_nvidia.then_some(HwDevice::Cuda));
+    for device in candidates {
+        if !choices.contains(&device) {
+            choices.push(device);
+        }
+    }
+    choices.retain(|device| !vv_media::hw::known_unavailable(device));
+    let check = choices.clone();
+    std::thread::spawn(move || {
+        for device in &check {
+            vv_media::hw::available(device);
+        }
+    });
+    choices
+}
+
 /// What `Auto` decodes on here, for the settings: `None` while `start` is
 /// still enumerating the GPUs, `Some(None)` if there is no GPU decoder.
 pub fn auto_device() -> Option<Option<HwDevice>> {

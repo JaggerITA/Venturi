@@ -711,7 +711,7 @@ impl VenturiApp {
         }
         let dialog = match self.last_export_settings.clone() {
             Some(settings) => {
-                export_dialog::ExportDialog::new(settings, crate::hw_decode::devices())
+                export_dialog::ExportDialog::new(settings, crate::hw_decode::export_choices())
             }
             None => export_dialog::ExportDialog::preferred(
                 export_dialog::default_output_path(
@@ -719,7 +719,7 @@ impl VenturiApp {
                     &self.project_label(),
                     &self.session.project.timelines[timeline_id].name,
                 ),
-                crate::hw_decode::devices(),
+                crate::hw_decode::export_choices(),
             ),
         };
         self.export_dialog = Some(dialog);

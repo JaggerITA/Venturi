@@ -79,8 +79,24 @@ fn gpu_decoding_is_kept_only_while_a_gpu_decoder_is_there() {
         vec![HwDevice::Cuda],
     );
     assert!(dialog.selected_decoders().is_empty());
-    dialog.decode_on_gpu = true;
+    dialog.decoder = Some(HwDevice::Cuda);
     assert_eq!(dialog.selected_decoders(), [HwDevice::Cuda]);
+}
+
+#[test]
+fn the_chosen_gpu_decoder_goes_first_and_is_remembered() {
+    let gpus = vec![HwDevice::Cuda, HwDevice::Vulkan(None)];
+    let mut dialog = ExportDialog::new(ExportSettings::new(PathBuf::from("out.mp4")), gpus.clone());
+    dialog.decoder = Some(HwDevice::Vulkan(None));
+    assert_eq!(
+        dialog.selected_decoders(),
+        [HwDevice::Vulkan(None), HwDevice::Cuda]
+    );
+
+    let mut settings = ExportSettings::new(PathBuf::from("out.mp4"));
+    settings.hw_decode = dialog.selected_decoders();
+    let dialog = ExportDialog::new(settings, gpus);
+    assert_eq!(dialog.decoder, Some(HwDevice::Vulkan(None)));
 }
 
 fn wait_for_encoder_checks(dialog: &mut ExportDialog) {

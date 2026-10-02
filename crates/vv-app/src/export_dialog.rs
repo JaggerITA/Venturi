@@ -35,9 +35,10 @@ pub struct ExportDialog {
     whole_timeline: bool,
     /// Kept aside while "Include audio" is off, so they can be restored.
     audio_settings: vv_media::AudioSettings,
-    /// Those of Settings > Playback; empty if it decodes on the CPU.
+    /// The GPU decoders of this machine, Settings > Playback's first.
     gpu_decoders: Vec<HwDevice>,
-    decode_on_gpu: bool,
+    /// `None` decodes on the CPU.
+    decoder: Option<HwDevice>,
     /// Switch to NVENC once its check passes, unless an encoder was picked
     /// meanwhile (`ExportSettings::preferred` without blocking the UI).
     nvenc_pending: bool,
@@ -51,7 +52,12 @@ impl ExportDialog {
         Self {
             path_text: settings.output_path.display().to_string(),
             audio_settings: settings.audio.clone().unwrap_or_default(),
-            decode_on_gpu: !settings.hw_decode.is_empty() && !gpu_decoders.is_empty(),
+            decoder: match settings.hw_decode.first() {
+                Some(last) if gpu_decoders.contains(last) => Some(last.clone()),
+                // The one used last time is gone: another GPU still beats the CPU.
+                Some(_) => gpu_decoders.first().cloned(),
+                None => None,
+            },
             gpu_decoders,
             settings,
             nvenc_pending: false,
@@ -209,22 +215,25 @@ impl ExportDialog {
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 ui.label(t!("export.decoder"));
-                let gpu_label = match self.gpu_decoders.first() {
-                    Some(device) => format!("GPU ({})", crate::hw_decode::device_label(device)),
-                    None => "GPU".to_owned(),
-                };
-                let items = [
-                    (false, "CPU".to_owned(), true),
-                    (true, gpu_label, !self.gpu_decoders.is_empty()),
-                ];
+                let mut items = vec![(None, "CPU".to_owned(), true)];
+                items.extend(self.gpu_decoders.iter().map(|device| {
+                    (
+                        Some(device.clone()),
+                        format!("GPU ({})", crate::hw_decode::device_label(device)),
+                        !vv_media::hw::known_unavailable(device),
+                    )
+                }));
+                if self.gpu_decoders.is_empty() {
+                    items.push((Some(HwDevice::Cuda), "GPU".to_owned(), false));
+                }
                 preview_combo(
                     ui,
                     "export_decoder",
-                    &mut self.decode_on_gpu,
+                    &mut self.decoder,
                     &items,
                     None,
                     None,
-                    Some(&t!("export.gpu_decoder_off")),
+                    Some(&t!("export.unavailable_on_system")),
                 );
                 ui.end_row();
 
@@ -408,12 +417,15 @@ impl ExportDialog {
         }
     }
 
+    /// The chosen decoder, then the other GPUs as fallbacks for the files it
+    /// refuses.
     fn selected_decoders(&self) -> Vec<HwDevice> {
-        if self.decode_on_gpu {
-            self.gpu_decoders.clone()
-        } else {
-            Vec::new()
-        }
+        let Some(chosen) = &self.decoder else {
+            return Vec::new();
+        };
+        std::iter::once(chosen.clone())
+            .chain(self.gpu_decoders.iter().filter(|d| *d != chosen).cloned())
+            .collect()
     }
 
     fn buttons(&mut self, ui: &mut egui::Ui, info: &TimelineInfo) -> ExportDialogAction {
