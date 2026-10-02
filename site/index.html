@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Venturi — a fast, cutting-focused video editor</title>
-<meta name="description" content="Venturi is a Linux-first, performance-oriented video editor written in Rust. Multi-track cutting, keyframes on every parameter, OpenTimelineIO round trips and a built-in MCP server for AI agents.">
+<meta name="description" content="Venturi is a Linux-first, performance-oriented video editor written in Rust, hardware accelerated on NVIDIA, Intel, AMD and Apple Silicon. Multi-track cutting, keyframes on every parameter, OpenTimelineIO round trips and a built-in MCP server for AI agents.">
 <meta name="theme-color" content="#0E0E10">
 <meta property="og:title" content="Venturi video editor">
 <meta property="og:description" content="A Linux-first, performance-oriented video editor written in Rust. Cutting, done right.">
@@ -197,6 +197,27 @@ h3 { font: 600 20px/1.3 var(--display); letter-spacing: -.01em; margin: 0 0 8px;
 .stage h3 { font-size: 18px; }
 @media (max-width: 900px) { .perf { grid-template-columns: 1fr; gap: 48px; } }
 
+/* gpu */
+.gpu { border-top: 1px solid var(--line); }
+.matrix { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; font-size: 15px; }
+.matrix th, .matrix td { padding: 18px 22px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+.matrix tr:last-child td { border-bottom: 0; }
+.matrix thead th { background: var(--surface); font: 500 12.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.matrix tbody th { font: 600 16px var(--display); width: 22%; }
+.matrix tbody th span { display: block; font: 400 13px var(--font); color: var(--dim); margin-top: 2px; }
+.matrix td { color: var(--muted); }
+.matrix td b { display: inline-block; color: var(--text); font-weight: 500; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 3px 9px; margin: 0 4px 4px 0; font-size: 14px; }
+.matrix td b.hot { border-color: rgba(255,106,31,.45); background: var(--orange-soft); color: #ffb48e; }
+.matrix tr.sw th, .matrix tr.sw td { background: var(--bg-2); }
+.matrix-wrap { overflow-x: auto; }
+.gains { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 18px; }
+.gain { padding: 26px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); }
+.gain b { display: block; font: 700 40px/1 var(--display); letter-spacing: -.03em; color: var(--orange); margin-bottom: 12px; }
+.gain h3 { font-size: 17px; }
+.gain p { margin: 0; color: var(--muted); font-size: 15px; }
+.footnote { margin: 18px 0 0; font-size: 12.5px; color: var(--dim); }
+@media (max-width: 900px) { .gains { grid-template-columns: 1fr; } .matrix { min-width: 640px; } }
+
 /* agents */
 .agents { display: grid; grid-template-columns: 1fr 1.1fr; gap: 56px; align-items: center; }
 .checks { list-style: none; padding: 0; margin: 28px 0 0; display: grid; gap: 14px; }
@@ -291,6 +312,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#performance">Performance</a>
+      <a href="#gpu">GPU</a>
       <a href="#agents">AI agents</a>
       <a href="#download">Download</a>
       <a href="https://github.com/morrolinux/VenturiVideo">GitHub</a>
@@ -304,7 +326,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
   <div class="wrap">
     <a class="pill" href="https://github.com/morrolinux/VenturiVideo/releases/latest"><b>ALPHA</b><span id="version">Open source · GPL-3.0</span></a>
     <h1>Cut fast.<br><span class="accent">Stay fluid.</span></h1>
-    <p class="lede">Venturi is a <strong>Linux-first, performance-oriented video editor</strong> written in Rust. It does one thing, cutting, and it is built to make that feel instant, even on modest hardware.</p>
+    <p class="lede">Venturi is a <strong>Linux-first, performance-oriented video editor</strong> written in Rust and hardware accelerated from decode to export. It does one thing, cutting, and it is built to make that feel instant, even on modest hardware.</p>
     <div class="cta">
       <a class="btn primary" href="#download">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 19h16"/></svg>
@@ -318,6 +340,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
     <div class="meta">
       <span><i></i>Linux x86_64 &amp; aarch64</span>
       <span><i></i>macOS on Apple Silicon</span>
+      <span><i></i>GPU accelerated</span>
       <span><i></i>Free &amp; open source</span>
     </div>
   </div>
@@ -366,7 +389,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
       <article class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg></div>
         <h3>Fast playback and scrubbing</h3>
-        <p>A timeline-wide frame cache, optional background proxies and playback up to 8x with pitch-preserved audio.</p>
+        <p>Hardware decoding, a timeline-wide frame cache, optional background proxies and playback up to 8x with pitch-preserved audio.</p>
       </article>
       <article class="card reveal">
         <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="11" height="4" rx="1"/><rect x="9" y="16" width="12" height="4" rx="1"/></svg></div>
@@ -426,7 +449,7 @@ footer p { margin: 6px 0 0; max-width: 560px; }
     <div class="reveal">
       <div class="eyebrow">Under the hood</div>
       <h2>Engineered for speed, not for spec sheets.</h2>
-      <p class="section-lede">Written in Rust, with one GPU stack for both the interface and the compositor. Every design choice aims at one thing: the playhead never waits for you.</p>
+      <p class="section-lede">Written in Rust, with one GPU stack for both the interface and the compositor: Vulkan on Linux, Metal on macOS. Every design choice aims at one thing: the playhead never waits for you.</p>
       <div class="stats">
         <div class="stat"><b>8<small>×</small></b><span>playback with pitch-preserved audio</span></div>
         <div class="stat"><b>3</b><span>pipelined threads on export: decode, compose, encode</span></div>
@@ -452,6 +475,45 @@ footer p { margin: 6px 0 0; max-width: 560px; }
         <div><h3>Audio is the clock</h3><p>The mixer drives the playhead and the video chases it, so picture and sound never drift. Mismatched frame rates are conformed, not stretched out of sync.</p></div>
       </div>
     </div>
+  </div>
+</section>
+
+<section class="gpu" id="gpu">
+  <div class="wrap">
+    <div class="head reveal">
+      <div class="eyebrow">Hardware accelerated</div>
+      <h2>The GPU does the heavy lifting.<br>From the first frame to the export.</h2>
+      <p class="section-lede">Decoding, compositing and encoding can all run on the hardware your machine already has. Venturi picks the GPU decoder on its own, the export window offers every hardware encoder it finds, and anything the GPU can't handle falls back to software.</p>
+    </div>
+    <div class="matrix-wrap reveal">
+      <table class="matrix">
+        <thead><tr><th></th><th>Decode</th><th>Compositing</th><th>Encode</th></tr></thead>
+        <tbody>
+          <tr><th>NVIDIA<span>Linux</span></th><td><b class="hot">NVDEC</b><b>Vulkan Video</b></td><td><b class="hot">Vulkan</b></td><td><b class="hot">NVENC</b><b>Vulkan Video</b></td></tr>
+          <tr><th>Intel &amp; AMD<span>Linux, Mesa</span></th><td><b class="hot">Vulkan Video</b></td><td><b class="hot">Vulkan</b></td><td><b class="hot">Vulkan Video</b></td></tr>
+          <tr><th>Apple Silicon<span>macOS</span></th><td><b class="hot">VideoToolbox</b></td><td><b class="hot">Metal</b></td><td><b class="hot">VideoToolbox</b></td></tr>
+          <tr class="sw"><th>Fallback<span>any machine</span></th><td><b>FFmpeg, multithreaded</b></td><td>always on the GPU</td><td><b>x264</b></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="gains">
+      <div class="gain reveal">
+        <b>10×</b>
+        <h3>Less CPU, longer battery</h3>
+        <p>Decoding on NVDEC took a tenth of the CPU time of software decoding in our benchmark. On hybrid laptops Venturi decodes on the integrated GPU, so the discrete one stays asleep.</p>
+      </div>
+      <div class="gain reveal">
+        <b>4×</b>
+        <h3>Up to four times faster to the first frame</h3>
+        <p>A hardware decoder opens a clip and delivers its first frame in 29–52 ms, against 126 ms in software: jumps and cuts feel immediate.</p>
+      </div>
+      <div class="gain reveal">
+        <b>0</b>
+        <h3>Readbacks of the composed preview</h3>
+        <p>The composed frame goes straight from the GPU texture into the interface, without a copy back to memory. On export the colour conversion runs in a compute shader before the encoder.</p>
+      </div>
+    </div>
+    <p class="footnote reveal">Measured on a 1080p H.264 clip on the development machine. Hardware decoding is on by default (Settings &gt; Playback). Export uses NVENC by default on NVIDIA, and lets you pick any decoder and encoder the machine has.</p>
   </div>
 </section>
 
