@@ -1,7 +1,7 @@
 # Building Venturi from source
 
 Prebuilt AppImages (x86_64, aarch64) and a macOS dmg are on the
-[Releases](https://github.com/morrolinux/VenturiVideo/releases) page. This
+[Releases](https://github.com/VenturiVideo/Venturi/releases) page. This
 document covers building, testing and packaging from the repository.
 
 ## Dependencies
