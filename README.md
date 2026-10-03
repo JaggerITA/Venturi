@@ -13,6 +13,7 @@ A cutting-focused editor, with timelines that travel to and from other NLEs via 
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://rustup.rs)
 
+[Website](https://venturivideo.github.io/Venturi/) •
 [Download](https://github.com/VenturiVideo/Venturi/releases/latest) •
 [Features](#features) •
 [Build from source](docs/BUILDING.md) •
