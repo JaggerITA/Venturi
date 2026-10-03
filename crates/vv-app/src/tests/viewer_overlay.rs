@@ -11,14 +11,14 @@ fn assert_close(a: [f32; 2], b: [f32; 2]) {
 
 #[test]
 fn a_narrower_source_is_pillarboxed() {
-    let b = ClipBox::new(TIMELINE, (1080, 1080), [0.0; 4]);
+    let b = ClipBox::new(TIMELINE, (1080, 1080), [0.0; 4], [false; 2]);
     assert_close([b.left, b.right], [-540.0, 540.0]);
     assert_close([b.bottom, b.top], [-540.0, 540.0]);
 }
 
 #[test]
 fn crop_is_scaled_from_source_pixels() {
-    let b = ClipBox::new(TIMELINE, (3840, 2160), [200.0, 0.0, 0.0, 100.0]);
+    let b = ClipBox::new(TIMELINE, (3840, 2160), [200.0, 0.0, 0.0, 100.0], [false; 2]);
     assert_close([b.left, b.bottom], [-860.0, -490.0]);
 }
 
@@ -47,7 +47,7 @@ fn moving_the_anchor_changes_only_the_anchor() {
         position: [50.0, -20.0],
         ..Default::default()
     };
-    let b = ClipBox::new(TIMELINE, TIMELINE, [0.0; 4]);
+    let b = ClipBox::new(TIMELINE, TIMELINE, [0.0; 4], [false; 2]);
     let t = drag_transform(&start, &b, Handle::Anchor, [120.0, 80.0], false);
     assert_close(t.position, start.position);
     assert_close(t.anchor, [120.0, 80.0]);
@@ -60,7 +60,7 @@ fn moving_the_anchor_changes_only_the_anchor() {
 #[test]
 fn a_corner_follows_the_pointer_and_scales_uniformly() {
     let start = Transform::default();
-    let b = ClipBox::new(TIMELINE, TIMELINE, [0.0; 4]);
+    let b = ClipBox::new(TIMELINE, TIMELINE, [0.0; 4], [false; 2]);
     let t = drag_transform(&start, &b, Handle::Scale(1.0, 1.0), [960.0, 540.0], false);
     assert_close(t.zoom, [2.0, 2.0]);
     assert_close(clip_to_frame(&t, b.point(1.0, 1.0)), [1920.0, 1080.0]);
@@ -73,9 +73,46 @@ fn clockwise_turn_is_positive_clockwise_and_wraps() {
 }
 
 #[test]
-fn a_side_scales_one_axis_only() {
+fn a_flipped_crop_is_mirrored() {
+    let b = ClipBox::new(TIMELINE, TIMELINE, [100.0, 0.0, 0.0, 0.0], [true, false]);
+    assert_close([b.left, b.right], [-960.0, 860.0]);
+}
+
+#[test]
+fn a_side_crops_its_edge_following_the_pointer() {
     let start = Transform::default();
-    let b = ClipBox::new(TIMELINE, TIMELINE, [0.0; 4]);
-    let t = drag_transform(&start, &b, Handle::Scale(-1.0, 0.0), [480.0, 300.0], false);
-    assert_close(t.zoom, [0.5, 1.0]);
+    let b = ClipBox::new(TIMELINE, (3840, 2160), [0.0; 4], [false; 2]);
+    let t = drag_transform(&start, &b, Handle::Crop(-1.0, 0.0), [100.0, 300.0], false);
+    assert_eq!(t.crop, [200.0, 0.0, 0.0, 0.0]);
+    let t = drag_transform(&start, &b, Handle::Crop(0.0, 1.0), [0.0, -50.0], false);
+    assert_eq!(t.crop, [0.0, 100.0, 0.0, 0.0]);
+    assert_eq!(t.zoom, start.zoom);
+}
+
+#[test]
+fn crop_follows_zoom_rotation_and_flip() {
+    let start = Transform {
+        zoom: [2.0, 2.0],
+        rotation: 90.0,
+        flip: [true, false],
+        ..Default::default()
+    };
+    let b = ClipBox::new(TIMELINE, TIMELINE, start.crop, start.flip);
+    // Rotated clockwise, the right side faces down; flipped, it cuts the
+    // left of the source.
+    let t = drag_transform(&start, &b, Handle::Crop(1.0, 0.0), [0.0, 40.0], false);
+    assert_eq!(t.crop, [20.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn crop_cannot_go_negative_or_past_the_opposite_side() {
+    let start = Transform {
+        crop: [0.0, 0.0, 900.0, 0.0],
+        ..Default::default()
+    };
+    let b = ClipBox::new(TIMELINE, TIMELINE, start.crop, start.flip);
+    let t = drag_transform(&start, &b, Handle::Crop(-1.0, 0.0), [5000.0, 0.0], false);
+    assert_eq!(t.crop[0], 1919.0 - 900.0);
+    let t = drag_transform(&start, &b, Handle::Crop(-1.0, 0.0), [-50.0, 0.0], false);
+    assert_eq!(t.crop[0], 0.0);
 }

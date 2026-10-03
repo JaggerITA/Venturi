@@ -1,4 +1,4 @@
-//! Position, scale and anchor point handles of the selected clip, drawn on
+//! Position, scale, crop and anchor point handles of the selected clip, drawn on
 //! top of the viewer. Same geometry as the shader (`transform.wgsl`): a
 //! point `p` of the clip (timeline pixels from its center, Y up) ends up at
 //! `position + anchor + R(zoom * (p - anchor))`, with `R` a clockwise
@@ -8,6 +8,8 @@ use vv_core::Transform;
 
 const HANDLE_RADIUS: f32 = 4.5;
 const ANCHOR_RADIUS: f32 = 6.5;
+/// Half length and half thickness of the crop bars.
+const CROP_BAR: (f32, f32) = (9.0, 2.5);
 /// On-screen distance of the rotation knob from the pivot.
 const ROTATION_ARM: f32 = 100.0;
 /// Rotation step with Shift held.
@@ -19,8 +21,10 @@ enum Handle {
     Move,
     Anchor,
     Rotate,
-    /// Sign of the scaled axes: (±1, ±1) a corner, (±1, 0)/(0, ±1) a side.
+    /// Corner being dragged: (±1, ±1).
     Scale(f32, f32),
+    /// Side being cropped: (±1, 0) or (0, ±1).
+    Crop(f32, f32),
 }
 
 pub struct OverlayDrag {
@@ -40,23 +44,54 @@ struct ClipBox {
     right: f32,
     bottom: f32,
     top: f32,
+    /// Timeline pixels per source pixel.
+    fit: f32,
+    source: [f32; 2],
+    flip: [bool; 2],
 }
 
 impl ClipBox {
-    fn new(timeline_size: (u32, u32), source_size: (u32, u32), crop: [f32; 4]) -> Self {
+    fn new(
+        timeline_size: (u32, u32),
+        source_size: (u32, u32),
+        crop: [f32; 4],
+        flip: [bool; 2],
+    ) -> Self {
         let (tw, th) = (timeline_size.0.max(1) as f32, timeline_size.1.max(1) as f32);
         let (sw, sh) = (source_size.0.max(1) as f32, source_size.1.max(1) as f32);
         let fit = (tw / sw).min(th / sh);
         let (w, h) = (sw * fit, sh * fit);
-        Self {
+        let mut b = Self {
             left: -w / 2.0 + crop[0] * fit,
             right: w / 2.0 - crop[2] * fit,
             top: h / 2.0 - crop[1] * fit,
             bottom: -h / 2.0 + crop[3] * fit,
+            fit,
+            source: [sw, sh],
+            flip,
+        };
+        // The shader mirrors the source after cropping it.
+        if flip[0] {
+            (b.left, b.right) = (-b.right, -b.left);
+        }
+        if flip[1] {
+            (b.bottom, b.top) = (-b.top, -b.bottom);
+        }
+        b
+    }
+
+    /// Index in `Transform::crop` of the side `(sx, sy)` of the box.
+    fn crop_index(&self, sx: f32, sy: f32) -> usize {
+        if sx != 0.0 {
+            if (sx < 0.0) != self.flip[0] { 0 } else { 2 }
+        } else if (sy > 0.0) != self.flip[1] {
+            1
+        } else {
+            3
         }
     }
 
-    /// Point of the clip for a scale handle: corner or midpoint of a side.
+    /// Point of the clip for a handle: corner or midpoint of a side.
     fn point(&self, sx: f32, sy: f32) -> [f32; 2] {
         let pick = |s: f32, lo: f32, hi: f32| match s {
             s if s < 0.0 => lo,
@@ -119,8 +154,7 @@ fn drag_transform(
             let moved = rotate_cw(delta, -start.rotation);
             let to = [from[0] + moved[0], from[1] + moved[1]];
             let ratio = |axis: usize| (from[axis].abs() > 1e-3).then(|| to[axis] / from[axis]);
-            let uniform = sx != 0.0 && sy != 0.0 && !free;
-            if uniform {
+            if !free {
                 let len2 = from[0] * from[0] + from[1] * from[1];
                 if len2 > 1e-6 {
                     let k = (to[0] * from[0] + to[1] * from[1]) / len2;
@@ -130,14 +164,22 @@ fn drag_transform(
                     ];
                 }
             } else {
-                for (axis, s) in [(0, sx), (1, sy)] {
-                    if s != 0.0
-                        && let Some(k) = ratio(axis)
-                    {
+                for axis in 0..2 {
+                    if let Some(k) = ratio(axis) {
                         t.zoom[axis] = (start.zoom[axis] * k).max(MIN_ZOOM);
                     }
                 }
             }
+        }
+        Handle::Crop(sx, sy) => {
+            let moved = rotate_cw(delta, -start.rotation);
+            let (axis, outward) = if sx != 0.0 { (0, sx) } else { (1, sy) };
+            let zoom = start.zoom[axis].abs().max(MIN_ZOOM);
+            let inward = -outward * moved[axis] / zoom / clip_box.fit;
+            let index = clip_box.crop_index(sx, sy);
+            let opposite = start.crop[(index + 2) % 4];
+            let max = (clip_box.source[axis] - 1.0 - opposite).max(0.0);
+            t.crop[index] = (start.crop[index] + inward).clamp(0.0, max);
         }
     }
     t
@@ -165,7 +207,7 @@ pub fn show(
 ) -> Option<Transform> {
     let scale = frame_rect.width() / timeline_size.0.max(1) as f32;
     let to_screen = |p: [f32; 2]| frame_rect.center() + egui::vec2(p[0] * scale, -p[1] * scale);
-    let clip_box = ClipBox::new(timeline_size, source_size, transform.crop);
+    let clip_box = ClipBox::new(timeline_size, source_size, transform.crop, transform.flip);
 
     let screen_of = |sx, sy| to_screen(clip_to_frame(transform, clip_box.point(sx, sy)));
     let pivot = to_screen([
@@ -176,19 +218,23 @@ pub fn show(
     let knob = pivot + egui::vec2(sn, -cs) * ROTATION_ARM;
     let corners =
         [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)].map(|(sx, sy)| screen_of(sx, sy));
-    let scale_handles: Vec<(Handle, egui::Pos2)> = [
-        (-1.0, 1.0),
-        (1.0, 1.0),
-        (1.0, -1.0),
-        (-1.0, -1.0),
-        (0.0, 1.0),
-        (1.0, 0.0),
-        (0.0, -1.0),
-        (-1.0, 0.0),
-    ]
-    .into_iter()
-    .map(|(sx, sy)| (Handle::Scale(sx, sy), screen_of(sx, sy)))
-    .collect();
+    let scale_handles = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
+        .map(|(sx, sy)| (Handle::Scale(sx, sy), screen_of(sx, sy)));
+    // Bar `i` lies along the side from `corners[i]` to `corners[i + 1]`.
+    let crop_bars =
+        [(0.0, 1.0, 0), (1.0, 0.0, 1), (0.0, -1.0, 2), (-1.0, 0.0, 3)].map(|(sx, sy, i)| {
+            let along = (corners[(i + 1) % 4] - corners[i]).normalized();
+            let along = if along.is_finite() {
+                along
+            } else {
+                egui::Vec2::X
+            };
+            let center = screen_of(sx, sy);
+            (
+                Handle::Crop(sx, sy),
+                [center - along * CROP_BAR.0, center + along * CROP_BAR.0],
+            )
+        });
 
     let grab = HANDLE_RADIUS + 4.0;
     let handle_at = |pos: egui::Pos2| {
@@ -199,6 +245,12 @@ pub fn show(
             return Some(Handle::Rotate);
         }
         if let Some((handle, _)) = scale_handles.iter().find(|(_, p)| pos.distance(*p) <= grab) {
+            return Some(*handle);
+        }
+        if let Some((handle, _)) = crop_bars
+            .iter()
+            .find(|(_, [a, b])| distance_to_segment(pos, *a, *b) <= CROP_BAR.1 + 4.0)
+        {
             return Some(*handle);
         }
         point_in_convex(pos, &corners).then_some(Handle::Move)
@@ -265,10 +317,10 @@ pub fn show(
                 Handle::Anchor => egui::CursorIcon::Crosshair,
                 Handle::Rotate if drag.is_some() => egui::CursorIcon::Grabbing,
                 Handle::Rotate => egui::CursorIcon::Grab,
-                Handle::Scale(0.0, _) => egui::CursorIcon::ResizeVertical,
-                Handle::Scale(_, 0.0) => egui::CursorIcon::ResizeHorizontal,
                 Handle::Scale(sx, sy) if sx * sy > 0.0 => egui::CursorIcon::ResizeNeSw,
                 Handle::Scale(..) => egui::CursorIcon::ResizeNwSe,
+                Handle::Crop(0.0, _) => egui::CursorIcon::ResizeRow,
+                Handle::Crop(..) => egui::CursorIcon::ResizeColumn,
             }
         });
     }
@@ -291,10 +343,24 @@ pub fn show(
     for (_, p) in &scale_handles {
         dot(*p, HANDLE_RADIUS);
     }
+    for (_, [a, b]) in &crop_bars {
+        let across = (*b - *a).normalized().rot90() * CROP_BAR.1;
+        painter.add(egui::Shape::convex_polygon(
+            vec![*a - across, *b - across, *b + across, *a + across],
+            egui::Color32::WHITE,
+            egui::Stroke::new(1.5, accent),
+        ));
+    }
     dot(knob, HANDLE_RADIUS);
     dot(pivot, ANCHOR_RADIUS);
 
     changed
+}
+
+fn distance_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
 }
 
 fn point_in_convex(p: egui::Pos2, polygon: &[egui::Pos2]) -> bool {
