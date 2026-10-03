@@ -27,6 +27,7 @@ mod proxy_worker;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
+mod slip_viewer;
 mod speed_dialog;
 mod theme;
 mod thumbnail_worker;
@@ -241,6 +242,8 @@ struct VenturiApp {
     /// Video buffer of the media pool preview: a `RenderAhead` on a
     /// timeline with only the clip of the media, and the id of the media in there.
     browsing_render_ahead: Option<(render_ahead::RenderAhead, MediaId)>,
+    /// Alive only during a slip drag.
+    slip_viewer: Option<slip_viewer::SlipViewer>,
 
     /// Created on the first import; thrown away when the user turns the proxies off.
     proxy_worker: Option<proxy_worker::ProxyWorker>,
@@ -406,6 +409,7 @@ impl Default for VenturiApp {
             last_viewer_frame_kind: None,
             egui_render_state: None,
             browsing_render_ahead: None,
+            slip_viewer: None,
             proxy_worker: None,
             proxy_paused_for_export: false,
             waveform_worker: None,
@@ -566,6 +570,21 @@ impl VenturiApp {
         &self,
         media_id: MediaId,
     ) -> (render_ahead::RenderAhead, MediaId) {
+        self.spawn_media_render_ahead(
+            media_id,
+            self.settings.cache_budget_bytes,
+            self.settings.lookahead_secs,
+            self.settings.behind_secs,
+        )
+    }
+
+    fn spawn_media_render_ahead(
+        &self,
+        media_id: MediaId,
+        cache_budget_bytes: usize,
+        lookahead_secs: f64,
+        behind_secs: f64,
+    ) -> (render_ahead::RenderAhead, MediaId) {
         let item = self.session.project.media_pool[media_id].clone();
         let meta = item.meta.clone();
         let mut project = vv_core::Project::default();
@@ -590,10 +609,10 @@ impl VenturiApp {
         let render_ahead = render_ahead::RenderAhead::spawn(
             project,
             timeline_id,
-            self.settings.cache_budget_bytes,
+            cache_budget_bytes,
             self.settings.proxy(),
-            self.settings.lookahead_secs,
-            self.settings.behind_secs,
+            lookahead_secs,
+            behind_secs,
         );
         (render_ahead, preview_media)
     }
@@ -1559,6 +1578,45 @@ impl VenturiApp {
         self.session.project.timelines[timeline_id]
             .clip(track_index, clip_id)
             .map(|c| &c.effects)
+    }
+
+    /// The viewer's split view during a slip: `None` when no slip is in
+    /// progress, `Some(None)` while its frames decode (the frame already shown
+    /// stays).
+    fn slip_split_layers(&mut self) -> Option<Option<Vec<frame_provider::OwnedLayer>>> {
+        let Some(preview) = self.timeline_state.slip_preview() else {
+            self.slip_viewer = None;
+            return None;
+        };
+        let item = self.session.project.media_pool.get(preview.media_id)?;
+        // A compound clip renders through its nested timeline, which the
+        // single-media buffer does not have.
+        if item.compound.is_some() || !item.meta.has_video {
+            return None;
+        }
+        let source_size = (item.meta.width, item.meta.height);
+        let timeline_size = self.session.project.timelines[self.timeline_id?].resolution;
+        if self
+            .slip_viewer
+            .as_ref()
+            .is_none_or(|v| v.media_id() != preview.media_id)
+        {
+            // Only the frame under each end matters: a small slice of the budget.
+            let spawn = || {
+                self.spawn_media_render_ahead(
+                    preview.media_id,
+                    self.settings.cache_budget_bytes / 8,
+                    0.0,
+                    0.0,
+                )
+            };
+            self.slip_viewer = Some(slip_viewer::SlipViewer::new(
+                preview.media_id,
+                [spawn(), spawn()],
+            ));
+        }
+        let frames = self.slip_viewer.as_mut()?.frames(preview);
+        Some(frames.map(|f| slip_viewer::split_layers(f, source_size, timeline_size)))
     }
 
     /// The frame of the media pool preview at its playhead, if already
@@ -2874,6 +2932,72 @@ fn magnet_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     response
 }
 
+/// The timeline tools are mutually exclusive: clicking the active one keeps it.
+fn timeline_tool_button(
+    ui: &mut egui::Ui,
+    current: &mut timeline_ui::TimelineTool,
+    tool: timeline_ui::TimelineTool,
+) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() && *current != tool {
+        *current = tool;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, *current == tool);
+        let painter = ui.painter();
+        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        let color = visuals.fg_stroke.color;
+        let stroke = egui::Stroke::new(1.3, color);
+        let c = rect.center();
+        match tool {
+            timeline_ui::TimelineTool::Select => {
+                let tip = c + egui::vec2(-3.5, -7.0);
+                let outline = [
+                    (0.0, 0.0),
+                    (0.0, 12.0),
+                    (3.0, 9.2),
+                    (5.2, 13.8),
+                    (7.2, 12.9),
+                    (5.0, 8.4),
+                    (8.8, 8.4),
+                ]
+                .map(|(x, y)| tip + egui::vec2(x, y));
+                painter.add(egui::Shape::closed_line(outline.to_vec(), stroke));
+            }
+            // "[ ]" with arrows inside, like the timeline cursor.
+            timeline_ui::TimelineTool::Slip => {
+                for (x, towards) in [(c.x - 7.0, 1.0), (c.x + 7.0, -1.0)] {
+                    painter.add(egui::Shape::line(
+                        vec![
+                            egui::pos2(x + towards * 3.0, c.y - 6.0),
+                            egui::pos2(x, c.y - 6.0),
+                            egui::pos2(x, c.y + 6.0),
+                            egui::pos2(x + towards * 3.0, c.y + 6.0),
+                        ],
+                        stroke,
+                    ));
+                }
+                painter.line_segment([c - egui::vec2(3.0, 0.0), c + egui::vec2(3.0, 0.0)], stroke);
+                for dir in [-1.0f32, 1.0] {
+                    let tip = c + egui::vec2(dir * 4.5, 0.0);
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            tip,
+                            tip - egui::vec2(dir * 3.0, 2.8),
+                            tip - egui::vec2(dir * 3.0, -2.8),
+                        ],
+                        color,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            }
+        }
+    }
+    response
+}
+
 /// Box with four corner handles and the pivot at the center.
 fn transform_overlay_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
     let size = egui::vec2(26.0, 22.0);
@@ -3499,6 +3623,17 @@ impl VenturiApp {
                             .on_hover_text(t!("toolbar.snapping"));
                         transform_overlay_toggle(ui, &mut self.show_transform_overlay)
                             .on_hover_text(t!("toolbar.transform_overlay"));
+                        ui.separator();
+                        let keymap = &self.settings.keymap;
+                        let tool = &mut self.timeline_state.tool;
+                        timeline_tool_button(ui, tool, timeline_ui::TimelineTool::Select)
+                            .on_hover_text(
+                                keymap.menu_label(&t!("toolbar.select_tool"), Action::SelectTool),
+                            );
+                        timeline_tool_button(ui, tool, timeline_ui::TimelineTool::Slip)
+                            .on_hover_text(
+                                keymap.menu_label(&t!("toolbar.slip_tool"), Action::SlipTool),
+                            );
                     });
                 });
             let (total, playhead, marks, playing) = self.transport_state();
@@ -3511,10 +3646,17 @@ impl VenturiApp {
             egui::Panel::top("viewer_zoom_bar")
                 .resizable(false)
                 .show(ui, |ui| self.show_viewer_zoom_bar(ui));
-            let media_offline = self.active_clip_media_offline();
+            let slip_split = self.slip_split_layers();
+            if slip_split.is_some() {
+                // The buffers of the two ends fill on their own threads.
+                ui.ctx().request_repaint();
+            }
+            let media_offline = slip_split.is_none() && self.active_clip_media_offline();
             // Browsing a "raw" media from the media pool there is no
             // timeline to compose: a single layer, its frame as it is.
-            let layers = if media_offline || self.browsing_media.is_some() {
+            let layers = if let Some(split) = slip_split {
+                split
+            } else if media_offline || self.browsing_media.is_some() {
                 None
             } else {
                 self.timeline_video_layers()

@@ -52,6 +52,12 @@ impl VenturiApp {
             if pressed(Action::Split) {
                 self.split_at_playhead();
             }
+            if pressed(Action::SelectTool) {
+                self.timeline_state.tool = timeline_ui::TimelineTool::Select;
+            }
+            if pressed(Action::SlipTool) {
+                self.timeline_state.tool = timeline_ui::TimelineTool::Slip;
+            }
             if pressed(Action::ToggleDisabled) {
                 self.toggle_disabled_selected();
             }
@@ -579,6 +585,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::RippleDelete => t!("history.ripple_delete"),
         L::MoveClips => t!("history.move_clips"),
         L::TrimClips => t!("history.trim_clips"),
+        L::SlipClips => t!("history.slip_clips"),
         L::UnlinkClips => t!("history.unlink_clips"),
         L::LinkClips => t!("history.link_clips"),
         L::SplitClips => t!("history.split_clips"),

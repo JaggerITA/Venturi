@@ -633,3 +633,63 @@ fn a_media_clip_still_stops_at_its_first_frame() {
     );
     assert_eq!(trim_range(&project, &clip, TrimEdge::Start).0, 40);
 }
+
+fn put_media(
+    project: &mut Project,
+    history: &mut History,
+    timeline: TimelineId,
+    track_index: usize,
+    media_id: MediaId,
+    source: (FrameIdx, FrameIdx),
+    start: FrameIdx,
+) -> ClipId {
+    let id = project.alloc_clip_id();
+    let clip = Clip::from_source_range(
+        id,
+        ClipSource::Media(media_id),
+        source.0,
+        source.1,
+        start,
+        Rational::one(),
+    );
+    history.do_command(
+        project,
+        Box::new(InsertClip {
+            timeline,
+            track_index,
+            clip,
+        }),
+    );
+    id
+}
+
+#[test]
+fn slip_range_is_the_media_left_on_each_side() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video]);
+    let mut history = History::default();
+    let media_id = media(&mut project, 0);
+    let id = put_media(&mut project, &mut history, tl, 0, media_id, (100, 300), 50);
+    let clip = project.timelines[tl].clip(0, id).unwrap();
+    assert_eq!(slip_range(&project, clip), Some((-100, 700)));
+
+    let generator = put(&mut project, &mut history, tl, 0, 400, 10);
+    let clip = project.timelines[tl].clip(0, generator).unwrap();
+    assert_eq!(slip_range(&project, clip), None);
+}
+
+#[test]
+fn slip_clips_moves_the_content_of_the_whole_group_and_undoes() {
+    let (mut project, tl) = project_with_tracks(&[TrackKind::Video, TrackKind::Audio]);
+    let mut history = History::default();
+    let media_id = media(&mut project, 1);
+    let v = put_media(&mut project, &mut history, tl, 0, media_id, (100, 300), 50);
+    let a = put_media(&mut project, &mut history, tl, 1, media_id, (100, 300), 50);
+    let before = snapshot(&project, tl);
+
+    slip_clips(&mut project, &mut history, tl, &[(0, v), (1, a)], -40);
+
+    assert_eq!(spans(&project, tl, 0), vec![(50, 250, 60)]);
+    assert_eq!(spans(&project, tl, 1), vec![(50, 250, 60)]);
+    history.undo(&mut project);
+    assert_eq!(snapshot(&project, tl), before);
+}

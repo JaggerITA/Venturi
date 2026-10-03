@@ -353,6 +353,54 @@ fn media_harness() -> Harness {
     h
 }
 
+/// `media_harness` with the clip showing source frames 200..300 and the
+/// slip tool active.
+fn slip_harness() -> Harness {
+    let mut h = media_harness();
+    h.project.timelines[h.timeline_id].tracks[0].clips[0].source_offset = 200;
+    h.state.tool = TimelineTool::Slip;
+    h.frame(Vec::new());
+    h
+}
+
+#[test]
+fn the_slip_tool_slides_the_content_and_keeps_the_clip_in_place() {
+    let mut h = slip_harness();
+    let from = h.rect(ClipId(1)).center();
+    h.drag(from, egui::vec2(-50.0 * PX_PER_FRAME, 0.0));
+    let clip = h.clip(0, ClipId(1));
+    assert_eq!(
+        (clip.timeline_start, clip.timeline_len, clip.source_in()),
+        (0, 100, 250)
+    );
+    assert_eq!(h.history.position(), 1);
+    assert!(h.no_gesture());
+}
+
+#[test]
+fn the_slip_tool_slips_from_the_edges_too_and_stops_at_the_first_frame() {
+    let mut h = slip_harness();
+    let rect = h.rect(ClipId(1));
+    h.drag(
+        egui::pos2(rect.left() + 2.0, rect.center().y),
+        egui::vec2(300.0 * PX_PER_FRAME, 0.0),
+    );
+    let clip = h.clip(0, ClipId(1));
+    assert_eq!(
+        (clip.timeline_start, clip.timeline_len, clip.source_in()),
+        (0, 100, 0)
+    );
+}
+
+#[test]
+fn the_slip_tool_leaves_generators_alone() {
+    let mut h = slip_harness();
+    let from = h.rect(ClipId(2)).center();
+    h.drag(from, egui::vec2(-10.0 * PX_PER_FRAME, 0.0));
+    assert_eq!(h.clip(0, ClipId(2)).timeline_start, 100);
+    assert_eq!(h.history.position(), 0);
+}
+
 #[test]
 fn with_the_retime_bar_the_right_edge_changes_the_speed() {
     let mut h = media_harness();

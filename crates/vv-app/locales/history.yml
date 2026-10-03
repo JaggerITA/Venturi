@@ -64,6 +64,10 @@ history.trim_clips:
   en: "Trim clips"
   it: "Rifila clip"
 
+history.slip_clips:
+  en: "Slip clips"
+  it: "Slip clip"
+
 history.unlink_clips:
   en: "Unlink clips"
   it: "Scollega clip"

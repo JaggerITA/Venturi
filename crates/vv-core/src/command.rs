@@ -43,6 +43,7 @@ pub enum CommandLabel {
     RippleDelete,
     MoveClips,
     TrimClips,
+    SlipClips,
     UnlinkClips,
     LinkClips,
     SplitClips,
@@ -1328,6 +1329,56 @@ impl Command for TrimClip {
             clip.effects.shift_keyframes(-self.keyframe_shift);
         }
         resort(track);
+    }
+}
+
+/// Slides the content under a clip by `delta` timeline frames, leaving its
+/// place on the timeline untouched. No clamping: the caller keeps it inside
+/// `edit::slip_range`.
+#[derive(Debug)]
+pub struct SlipClip {
+    pub timeline: TimelineId,
+    pub track_index: usize,
+    pub clip_id: ClipId,
+    pub delta: FrameIdx,
+    applied: bool,
+}
+
+impl SlipClip {
+    pub fn new(timeline: TimelineId, track_index: usize, clip_id: ClipId, delta: FrameIdx) -> Self {
+        Self {
+            timeline,
+            track_index,
+            clip_id,
+            delta,
+            applied: false,
+        }
+    }
+}
+
+impl Command for SlipClip {
+    fn label(&self) -> CommandLabel {
+        CommandLabel::SlipClips
+    }
+
+    fn apply(&mut self, project: &mut Project) {
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        self.applied = false;
+        if let Some(clip) = track.clip_mut(self.clip_id) {
+            clip.source_offset += self.delta;
+            debug_assert!(clip.source_offset >= 0, "slip out of bounds");
+            self.applied = true;
+        }
+    }
+
+    fn undo(&self, project: &mut Project) {
+        if !self.applied {
+            return;
+        }
+        let track = &mut project.timelines[self.timeline].tracks[self.track_index];
+        if let Some(clip) = track.clip_mut(self.clip_id) {
+            clip.source_offset -= self.delta;
+        }
     }
 }
 
