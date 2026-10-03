@@ -657,6 +657,33 @@ pub(crate) struct RowKeyframe {
     pub(crate) next: Option<FrameIdx>,
 }
 
+impl RowKeyframe {
+    /// The state of `track` at `frame`; the arrows only lead to keyframes
+    /// for which `reachable` holds.
+    pub(crate) fn of<T: Clone>(
+        track: &vv_core::Keyframed<T>,
+        frame: FrameIdx,
+        reachable: impl Fn(&FrameIdx) -> bool,
+    ) -> Self {
+        Self {
+            on_keyframe: track.keyframe_at(frame).is_some(),
+            prev: track.keyframe_before(frame).filter(&reachable),
+            next: track.keyframe_after(frame).filter(&reachable),
+        }
+    }
+}
+
+/// A keyframed row edited in the panel, before knowing whether the target
+/// clip animates it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum KeyframeEdit {
+    /// New value: the default of a track without keyframes, otherwise a
+    /// keyframe at the current frame.
+    Set(vv_core::KeyframeValue),
+    /// Diamond clicked; `true` if there was a keyframe to remove.
+    Toggle(bool),
+}
+
 /// What happened in a panel row during this UI frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RowResponse {
@@ -1133,6 +1160,14 @@ pub(crate) fn set_title((tl, track, clip): ClipRef, value: vv_core::TitleParams)
     Box::new(vv_core::set_clip_title(tl, track, clip, value))
 }
 
+pub(crate) fn blur_direction_label(direction: vv_core::BlurDirection) -> Cow<'static, str> {
+    match direction {
+        vv_core::BlurDirection::Both => t!("props.blur_both"),
+        vv_core::BlurDirection::Horizontal => t!("props.blur_horizontal"),
+        vv_core::BlurDirection::Vertical => t!("props.blur_vertical"),
+    }
+}
+
 pub(crate) fn blend_mode_label(mode: vv_core::BlendMode) -> Cow<'static, str> {
     use vv_core::BlendMode as B;
     match mode {
@@ -1395,7 +1430,19 @@ impl VenturiApp {
                 .map(|k| k.value_at(frame))
                 .unwrap_or(vv_core::edit::DEFAULT_SOLID_COLOR),
             title: clip.effects.title.clone(),
-            filters: clip.effects.filters.clone(),
+            filters: clip
+                .effects
+                .filters
+                .iter()
+                .map(|f| crate::FilterPanelInfo {
+                    kind: f.kind,
+                    enabled: f.enabled,
+                    radius: f.radius.value_at(frame),
+                    radius_key: RowKeyframe::of(&f.radius, frame, in_clip),
+                    direction: f.direction.value_at(frame),
+                    direction_key: RowKeyframe::of(&f.direction, frame, in_clip),
+                })
+                .collect(),
             blend_mode: clip.effects.blend_mode,
         })
     }
@@ -2033,48 +2080,130 @@ impl VenturiApp {
                                                 ui.add_space(6.0);
                                                 let (open, _) = section_header(ui, &t!("props.filters"), false);
                                                 for filter in info.filters.iter().filter(|_| open) {
+                                                    let kind = filter.kind;
                                                     let mut enabled = filter.enabled;
                                                     let reset = title_section_header(
                                                         ui,
-                                                        &timeline_ui::filter_label(filter.kind),
+                                                        &timeline_ui::filter_label(kind),
                                                         &mut enabled,
                                                     );
-                                                    let mut radius = filter.radius;
-                                                    let mut radius_changed = false;
-                                                    if filter.kind.is_blur() {
-                                                        let row = param_row(ui, &t!("props.blur_radius"), None, |ui| {
-                                                            slider_field(ui, &mut radius, 0.0..=vv_core::BLUR_RADIUS_MAX, 0.5, 1)
-                                                        });
-                                                        radius_changed = row.changed;
-                                                        if row.reset {
-                                                            radius = vv_core::DEFAULT_BLUR_RADIUS;
-                                                            radius_changed = true;
+                                                    let mut reset_radius = reset;
+                                                    let mut reset_direction = reset;
+                                                    let mut keyframes: Vec<(KeyframeEdit, vv_core::KeyframeTarget)> = Vec::new();
+                                                    if kind.is_blur() {
+                                                        let mut radius = filter.radius;
+                                                        let row = param_row(
+                                                            ui,
+                                                            &t!("props.blur_radius"),
+                                                            Some(filter.radius_key),
+                                                            |ui| slider_field(ui, &mut radius, 0.0..=vv_core::BLUR_RADIUS_MAX, 0.5, 1),
+                                                        );
+                                                        let target = vv_core::KeyframeTarget::FilterRadius(kind);
+                                                        if row.changed {
+                                                            keyframes.push((KeyframeEdit::Set(vv_core::KeyframeValue::FilterRadius(kind, radius)), target));
+                                                        }
+                                                        if row.toggled_keyframe {
+                                                            keyframes.push((KeyframeEdit::Toggle(filter.radius_key.on_keyframe), target));
+                                                        }
+                                                        reset_radius |= row.reset;
+                                                        let mut goto = row.goto;
+
+                                                        let mut direction = filter.direction;
+                                                        let row = param_row(
+                                                            ui,
+                                                            &t!("props.blur_direction"),
+                                                            Some(filter.direction_key),
+                                                            |ui| {
+                                                                let items: Vec<_> = vv_core::BlurDirection::ALL
+                                                                    .iter()
+                                                                    .map(|d| (*d, blur_direction_label(*d).to_string(), true))
+                                                                    .collect();
+                                                                preview_combo(
+                                                                    ui,
+                                                                    &format!("blur_direction_{kind:?}"),
+                                                                    &mut direction,
+                                                                    &items,
+                                                                    Some(ui.available_width()),
+                                                                    None,
+                                                                    None,
+                                                                )
+                                                            },
+                                                        );
+                                                        let target = vv_core::KeyframeTarget::FilterDirection(kind);
+                                                        if row.changed {
+                                                            keyframes.push((KeyframeEdit::Set(vv_core::KeyframeValue::FilterDirection(kind, direction)), target));
+                                                        }
+                                                        if row.toggled_keyframe {
+                                                            keyframes.push((KeyframeEdit::Toggle(filter.direction_key.on_keyframe), target));
+                                                        }
+                                                        reset_direction |= row.reset;
+                                                        goto = goto.or(row.goto);
+                                                        if let Some(source_frame) = goto {
+                                                            pending_playhead = self
+                                                                .timeline_id
+                                                                .and_then(|tid| {
+                                                                    self.session.project.timelines[tid]
+                                                                        .clip(primary.track_index, primary.clip_id)
+                                                                })
+                                                                .map(|c| c.timeline_frame_at(source_frame));
                                                         }
                                                     }
-                                                    if reset {
-                                                        enabled = true;
-                                                        radius = vv_core::DEFAULT_BLUR_RADIUS;
+                                                    if !reset && !reset_radius && !reset_direction && keyframes.is_empty() && enabled == filter.enabled {
+                                                        continue;
                                                     }
-                                                    if reset || radius_changed || enabled != filter.enabled {
-                                                        let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
-                                                        for t in targets {
-                                                            let Some(effects) = target_effects(tl, t) else {
-                                                                continue;
-                                                            };
-                                                            if let Some(pos) =
-                                                                effects.filters.iter().position(|f| f.kind == filter.kind)
-                                                            {
-                                                                let mut new_filters = effects.filters.clone();
-                                                                new_filters[pos].enabled = enabled;
-                                                                if reset || radius_changed {
-                                                                    new_filters[pos].radius = radius;
+                                                    let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
+                                                    for t in targets {
+                                                        let Some(effects) = target_effects(tl, t) else {
+                                                            continue;
+                                                        };
+                                                        let Some(pos) = effects.filters.iter().position(|f| f.kind == kind) else {
+                                                            continue;
+                                                        };
+                                                        let clip_ref = (t.timeline, t.track_index, t.clip_id);
+                                                        let mut new_filters = effects.filters.clone();
+                                                        let defaults = vv_core::ClipFilter::new(kind);
+                                                        let own = &mut new_filters[pos];
+                                                        if reset || enabled != filter.enabled {
+                                                            own.enabled = enabled || reset;
+                                                        }
+                                                        if reset_radius {
+                                                            own.radius = defaults.radius;
+                                                        }
+                                                        if reset_direction {
+                                                            own.direction = defaults.direction;
+                                                        }
+                                                        let mut pending_keyframes = Vec::new();
+                                                        for (edit, target) in &keyframes {
+                                                            let own = &mut new_filters[pos];
+                                                            match *edit {
+                                                                // Without keyframes the value is the track's default.
+                                                                KeyframeEdit::Set(vv_core::KeyframeValue::FilterRadius(_, v)) if own.radius.is_constant() => {
+                                                                    own.radius.default = v;
                                                                 }
-                                                                pending_effects.push(set_filters(
-                                                                    (t.timeline, t.track_index, t.clip_id),
-                                                                    new_filters,
-                                                                ));
+                                                                KeyframeEdit::Set(vv_core::KeyframeValue::FilterDirection(_, v)) if own.direction.is_constant() => {
+                                                                    own.direction.default = v;
+                                                                }
+                                                                KeyframeEdit::Set(value) => {
+                                                                    pending_keyframes.push(upsert_keyframe(clip_ref, t.source_frame, value));
+                                                                }
+                                                                KeyframeEdit::Toggle(true) => {
+                                                                    pending_keyframes.push(remove_keyframe(clip_ref, t.source_frame, *target));
+                                                                }
+                                                                KeyframeEdit::Toggle(false) => {
+                                                                    let value = match target {
+                                                                        vv_core::KeyframeTarget::FilterRadius(_) => {
+                                                                            vv_core::KeyframeValue::FilterRadius(kind, own.radius.value_at(t.source_frame))
+                                                                        }
+                                                                        _ => vv_core::KeyframeValue::FilterDirection(kind, own.direction.value_at(t.source_frame)),
+                                                                    };
+                                                                    pending_keyframes.push(upsert_keyframe(clip_ref, t.source_frame, value));
+                                                                }
                                                             }
                                                         }
+                                                        if new_filters != effects.filters {
+                                                            pending_effects.push(set_filters(clip_ref, new_filters));
+                                                        }
+                                                        pending_effects.append(&mut pending_keyframes);
                                                     }
                                                 }
                                             }

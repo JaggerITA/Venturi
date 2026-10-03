@@ -309,3 +309,26 @@ fn pasting_the_speed_retimes_the_target() {
         "a single undo step"
     );
 }
+
+#[test]
+fn pasted_filters_bring_their_keyframes_into_the_target_clip() {
+    let mut source = source_clip();
+    let mut filter = vv_core::ClipFilter::new(vv_core::FilterKind::BoxBlur);
+    filter.radius.upsert(5, 30.0, Interpolation::Linear);
+    filter
+        .direction
+        .upsert(5, vv_core::BlurDirection::Vertical, Interpolation::Linear);
+    source.effects.filters.push(filter);
+    let target = clip(2, 100, 120);
+
+    let pasted = merged_attributes(
+        &source,
+        &target,
+        &HashSet::from([Attribute::Filters]),
+        KeyframeMode::MaintainTiming,
+    );
+
+    let filter = &pasted.effects.filters[0];
+    assert_eq!(filter.radius.keyframes()[0].0, 105);
+    assert_eq!(filter.direction.keyframes()[0].0, 105);
+}

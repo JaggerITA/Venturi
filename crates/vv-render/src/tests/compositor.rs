@@ -1236,7 +1236,7 @@ fn the_first_layer_can_be_blended_over_the_clear() {
     assert_close_rgba(out.as_chunks::<4>().0[0], [255, 0, 0, 255]);
 }
 
-fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::ClipFilter]) -> Layer<'_> {
+fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::FilterValue]) -> Layer<'_> {
     Layer {
         content: LayerContent::Adjustment,
         transform,
@@ -1246,8 +1246,8 @@ fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::ClipFilter
     }
 }
 
-const GRAYSCALE: &[vv_core::ClipFilter] =
-    &[vv_core::ClipFilter::new(vv_core::FilterKind::Grayscale)];
+const GRAYSCALE: &[vv_core::FilterValue] =
+    &[vv_core::FilterValue::new(vv_core::FilterKind::Grayscale)];
 
 #[test]
 fn an_adjustment_filters_the_layers_below_but_not_those_above() {
@@ -1449,10 +1449,10 @@ fn an_interleaved_chroma_renders_like_the_planar_one() {
     assert!(planar == interleaved);
 }
 
-fn blur(kind: vv_core::FilterKind, radius: f32) -> vv_core::ClipFilter {
-    vv_core::ClipFilter {
+fn blur(kind: vv_core::FilterKind, radius: f32) -> vv_core::FilterValue {
+    vv_core::FilterValue {
         radius,
-        ..vv_core::ClipFilter::new(kind)
+        ..vv_core::FilterValue::new(kind)
     }
 }
 
@@ -1466,7 +1466,7 @@ fn split_frame() -> OwnedYuvFrame {
     frame
 }
 
-fn render_blurred(filters: &[vv_core::ClipFilter]) -> Vec<u8> {
+fn render_blurred(filters: &[vv_core::FilterValue]) -> Vec<u8> {
     let frame = split_frame();
     let out = Compositor::new_headless().render_layers(
         &[Layer {
@@ -1491,9 +1491,9 @@ fn render_blurred(filters: &[vv_core::ClipFilter]) -> Vec<u8> {
 fn filter_chain_splits_the_per_pixel_filters_at_the_blurs() {
     use vv_core::FilterKind::*;
     let filters = [
-        vv_core::ClipFilter::new(Grayscale),
+        vv_core::FilterValue::new(Grayscale),
         blur(BoxBlur, 3.0),
-        vv_core::ClipFilter::new(Grayscale),
+        vv_core::FilterValue::new(Grayscale),
         blur(GaussianBlur, 0.0),
         blur(GaussianBlur, 2.0),
     ];
@@ -1505,14 +1505,16 @@ fn filter_chain_splits_the_per_pixel_filters_at_the_blurs() {
             (
                 Blur {
                     gaussian: false,
-                    radius: 3.0
+                    radius: 3.0,
+                    direction: vv_core::BlurDirection::Both,
                 },
                 vec![Grayscale]
             ),
             (
                 Blur {
                     gaussian: true,
-                    radius: 2.0
+                    radius: 2.0,
+                    direction: vv_core::BlurDirection::Both,
                 },
                 vec![]
             ),
@@ -1540,6 +1542,22 @@ fn box_blur_averages_the_pixels_within_the_radius() {
     // Pixel 7 averages 5..=9: three black, two white.
     assert!(row[7].abs_diff(102) <= 2, "{row:?}");
     assert!(row[8].abs_diff(153) <= 2, "{row:?}");
+}
+
+#[test]
+fn a_blur_spreads_only_along_its_direction() {
+    let along = |direction| {
+        render_blurred(&[vv_core::FilterValue {
+            direction,
+            ..blur(vv_core::FilterKind::BoxBlur, 2.0)
+        }])
+    };
+    assert!(along(vv_core::BlurDirection::Horizontal)[7].abs_diff(102) <= 2);
+    let vertical = along(vv_core::BlurDirection::Vertical);
+    assert!(
+        vertical[7] <= 2 && vertical[8] >= 253,
+        "the edge is vertical: {vertical:?}"
+    );
 }
 
 #[test]

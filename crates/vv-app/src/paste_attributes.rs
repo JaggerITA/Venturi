@@ -480,7 +480,18 @@ fn merged_attributes(
             }
             Attribute::BlendMode => attributes.effects.blend_mode = source.effects.blend_mode,
             Attribute::Flip => attributes.effects.transform.flip = source.effects.transform.flip,
-            Attribute::Filters => attributes.effects.filters = source.effects.filters.clone(),
+            Attribute::Filters => {
+                attributes.effects.filters = source
+                    .effects
+                    .filters
+                    .iter()
+                    .map(|f| vv_core::ClipFilter {
+                        radius: remap.apply(&f.radius),
+                        direction: remap.apply(&f.direction),
+                        ..f.clone()
+                    })
+                    .collect();
+            }
             Attribute::Transitions => {
                 let clamped = |t: &Option<vv_core::Transition>| {
                     t.clone().map(|mut t| {

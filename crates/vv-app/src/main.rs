@@ -190,8 +190,19 @@ struct ClipPanelInfo {
     title: Option<vv_core::TitleParams>,
     /// Empty until a filter is dragged onto the clip from the Effects
     /// panel; then one per filter, in order of application.
-    filters: Vec<vv_core::ClipFilter>,
+    filters: Vec<FilterPanelInfo>,
     blend_mode: vv_core::BlendMode,
+}
+
+/// A filter of `ClipPanelInfo`, its parameters evaluated at the panel's frame.
+#[derive(Debug, Clone)]
+struct FilterPanelInfo {
+    kind: vv_core::FilterKind,
+    enabled: bool,
+    radius: f32,
+    radius_key: RowKeyframe,
+    direction: vv_core::BlurDirection,
+    direction_key: RowKeyframe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

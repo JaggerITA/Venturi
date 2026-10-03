@@ -358,7 +358,7 @@ fn bezier_ease(c1: [f32; 2], c2: [f32; 2], x: f32) -> f32 {
 }
 
 /// Parameter animatable via keyframes. Always sorted by increasing time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Keyframed<T> {
     /// If empty, the parameter is constant and must be read from `default`.
     keyframes: Vec<(FrameIdx, T, Interpolation)>,
@@ -366,7 +366,7 @@ pub struct Keyframed<T> {
 }
 
 impl<T: Clone> Keyframed<T> {
-    pub fn constant(value: T) -> Self {
+    pub const fn constant(value: T) -> Self {
         Self {
             keyframes: Vec::new(),
             default: value,
@@ -1015,7 +1015,7 @@ pub const GAIN_DB_MAX: f32 = 30.0;
 /// A filter of the Effects panel: the variety is open (new variants for
 /// new filters), the rendering translates it into a shader id — see
 /// `vv_render`, which does not know the meaning of each one, only its id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FilterKind {
     Grayscale,
     BoxBlur,
@@ -1023,7 +1023,7 @@ pub enum FilterKind {
 }
 
 impl FilterKind {
-    /// Whether `ClipFilter::radius` applies to it.
+    /// Whether `ClipFilter::radius` and `direction` apply to it.
     pub fn is_blur(self) -> bool {
         matches!(self, Self::BoxBlur | Self::GaussianBlur)
     }
@@ -1033,8 +1033,40 @@ impl FilterKind {
 pub const BLUR_RADIUS_MAX: f32 = 250.0;
 pub const DEFAULT_BLUR_RADIUS: f32 = 10.0;
 
-fn default_blur_radius() -> f32 {
-    DEFAULT_BLUR_RADIUS
+fn default_blur_radius() -> Keyframed<f32> {
+    Keyframed::constant(DEFAULT_BLUR_RADIUS)
+}
+
+fn default_blur_direction() -> Keyframed<BlurDirection> {
+    Keyframed::constant(BlurDirection::Both)
+}
+
+/// The axes a blur spreads along.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlurDirection {
+    #[default]
+    Both,
+    Horizontal,
+    Vertical,
+}
+
+impl BlurDirection {
+    pub const ALL: [Self; 3] = [Self::Both, Self::Horizontal, Self::Vertical];
+
+    pub fn horizontal(self) -> bool {
+        self != Self::Vertical
+    }
+
+    pub fn vertical(self) -> bool {
+        self != Self::Horizontal
+    }
+}
+
+/// No values in between: a keyframe holds until the next one.
+impl Lerp for BlurDirection {
+    fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        if t >= 1.0 { *b } else { *a }
+    }
 }
 
 /// A filter applied to a clip. The order in the `Vec` of
@@ -1047,7 +1079,27 @@ pub struct ClipFilter {
     pub enabled: bool,
     /// Blurs only: in timeline pixels, as seen with the clip at zoom 1.
     #[serde(default = "default_blur_radius")]
+    pub radius: Keyframed<f32>,
+    #[serde(default = "default_blur_direction")]
+    pub direction: Keyframed<BlurDirection>,
+}
+
+/// A `ClipFilter` evaluated at one frame: what the rendering needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FilterValue {
+    pub kind: FilterKind,
     pub radius: f32,
+    pub direction: BlurDirection,
+}
+
+impl FilterValue {
+    pub const fn new(kind: FilterKind) -> Self {
+        Self {
+            kind,
+            radius: DEFAULT_BLUR_RADIUS,
+            direction: BlurDirection::Both,
+        }
+    }
 }
 
 impl ClipFilter {
@@ -1055,7 +1107,16 @@ impl ClipFilter {
         Self {
             kind,
             enabled: true,
-            radius: DEFAULT_BLUR_RADIUS,
+            radius: Keyframed::constant(DEFAULT_BLUR_RADIUS),
+            direction: Keyframed::constant(BlurDirection::Both),
+        }
+    }
+
+    pub fn value_at(&self, frame: FrameIdx) -> FilterValue {
+        FilterValue {
+            kind: self.kind,
+            radius: self.radius.value_at(frame),
+            direction: self.direction.value_at(frame),
         }
     }
 }
@@ -1243,6 +1304,9 @@ impl EffectStack {
         if let Some(c) = &mut self.color {
             c.drop_before(start);
         }
+        for f in &mut self.filters {
+            f.direction.drop_before(start);
+        }
     }
 
     /// See `Keyframed::drop_from`, on every animatable parameter.
@@ -1251,6 +1315,9 @@ impl EffectStack {
         if let Some(c) = &mut self.color {
             c.drop_from(end);
         }
+        for f in &mut self.filters {
+            f.direction.drop_from(end);
+        }
     }
 
     /// See `Keyframed::shift`, on every animatable parameter.
@@ -1258,6 +1325,9 @@ impl EffectStack {
         self.for_each_f32_track(|k| k.shift(delta));
         if let Some(c) = &mut self.color {
             c.shift(delta);
+        }
+        for f in &mut self.filters {
+            f.direction.shift(delta);
         }
     }
 
@@ -1282,6 +1352,9 @@ impl EffectStack {
         if let Some(c) = &mut self.color {
             c.rescale_times(from, to);
         }
+        for f in &mut self.filters {
+            f.direction.rescale_times(from, to);
+        }
     }
 
     fn for_each_f32_track(&mut self, mut f: impl FnMut(&mut Keyframed<f32>)) {
@@ -1289,6 +1362,9 @@ impl EffectStack {
             f(self.transform.track_mut(p));
         }
         f(&mut self.gain_db);
+        for filter in &mut self.filters {
+            f(&mut filter.radius);
+        }
     }
 
     /// `true` if no property was touched relative to the default: the

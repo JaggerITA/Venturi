@@ -166,6 +166,22 @@ props.blur_radius:
   en: "Radius"
   it: "Raggio"
 
+props.blur_direction:
+  en: "Direction"
+  it: "Direzione"
+
+props.blur_both:
+  en: "Horizontal and vertical"
+  it: "Orizzontale e verticale"
+
+props.blur_horizontal:
+  en: "Horizontal"
+  it: "Orizzontale"
+
+props.blur_vertical:
+  en: "Vertical"
+  it: "Verticale"
+
 props.center:
   en: "Center"
   it: "Centro"

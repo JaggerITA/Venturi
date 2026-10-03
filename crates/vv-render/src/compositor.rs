@@ -99,7 +99,7 @@ pub struct Layer<'a> {
     /// they must be applied: vv-render does not know what each per-pixel one
     /// means, only the id of the shader corresponding to it
     /// (`filter_shader_id`). Blurs are passes of their own (`FilterChain`).
-    pub filters: &'a [vv_core::ClipFilter],
+    pub filters: &'a [vv_core::FilterValue],
     /// How the layer composes onto those below.
     pub blend: BlendMode,
 }
@@ -170,6 +170,7 @@ struct Blur {
     gaussian: bool,
     /// In timeline pixels (`ClipFilter::radius`).
     radius: f32,
+    direction: vv_core::BlurDirection,
 }
 
 /// A layer's filters split at the blurs: those need neighbouring pixels,
@@ -184,7 +185,7 @@ struct FilterChain {
 
 impl FilterChain {
     /// `uniform`: the layer is a single color, where a blur changes nothing.
-    fn new(filters: &[vv_core::ClipFilter], uniform: bool) -> Self {
+    fn new(filters: &[vv_core::FilterValue], uniform: bool) -> Self {
         let mut chain = Self::default();
         for filter in filters {
             if filter.kind.is_blur() {
@@ -192,6 +193,7 @@ impl FilterChain {
                     let blur = Blur {
                         gaussian: filter.kind == vv_core::FilterKind::GaussianBlur,
                         radius: filter.radius,
+                        direction: filter.direction,
                     };
                     chain.blurs.push((blur, Vec::new()));
                 }
@@ -1284,7 +1286,8 @@ impl Compositor {
 
         for (i, (blur, run)) in chain.blurs.iter().enumerate() {
             let radius = blur.radius * texels_per_pixel;
-            for axis in 0..2 {
+            let axes = [blur.direction.horizontal(), blur.direction.vertical()];
+            for axis in (0..2).filter(|&axis| axes[axis]) {
                 let target = self.scratch_texture(size.0, size.1);
                 self.blur_pass(
                     encoder,

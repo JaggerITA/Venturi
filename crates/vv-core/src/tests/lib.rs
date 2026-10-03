@@ -2282,3 +2282,87 @@ fn ripple_gap_moves_the_markers_after_it_and_undo_restores_them() {
     history.undo(&mut project);
     assert_eq!(spans(&project), [(5, 0), (25, 10), (40, 3)]);
 }
+
+#[test]
+fn filter_keyframes_are_set_replaced_and_removed_with_undo() {
+    let (mut project, timeline) = make_project_with_two_tracks();
+    let mut clip = make_clip(&mut project, 0, 20);
+    clip.effects.filters = vec![ClipFilter::new(FilterKind::GaussianBlur)];
+    let a_id = clip.id;
+    let mut history = History::default();
+    history.do_command(
+        &mut project,
+        Box::new(command::InsertClip {
+            timeline,
+            track_index: 0,
+            clip,
+        }),
+    );
+    let filter = |project: &Project| {
+        project.timelines[timeline].tracks[0].clips[0]
+            .effects
+            .filters[0]
+            .clone()
+    };
+    let upsert = |value| {
+        Box::new(command::UpsertKeyframe::new(
+            timeline,
+            0,
+            a_id,
+            5,
+            value,
+            Interpolation::Linear,
+        ))
+    };
+
+    history.do_command(
+        &mut project,
+        upsert(command::KeyframeValue::FilterRadius(
+            FilterKind::GaussianBlur,
+            30.0,
+        )),
+    );
+    history.do_command(
+        &mut project,
+        upsert(command::KeyframeValue::FilterRadius(
+            FilterKind::GaussianBlur,
+            40.0,
+        )),
+    );
+    history.do_command(
+        &mut project,
+        upsert(command::KeyframeValue::FilterDirection(
+            FilterKind::GaussianBlur,
+            BlurDirection::Vertical,
+        )),
+    );
+    assert_eq!(filter(&project).value_at(5).radius, 40.0);
+    assert_eq!(
+        filter(&project).value_at(5).direction,
+        BlurDirection::Vertical
+    );
+
+    history.do_command(
+        &mut project,
+        Box::new(command::RemoveKeyframe::new(
+            timeline,
+            0,
+            a_id,
+            command::KeyframeTarget::FilterDirection(FilterKind::GaussianBlur),
+            5,
+        )),
+    );
+    assert!(filter(&project).direction.is_constant());
+
+    history.undo(&mut project);
+    history.undo(&mut project);
+    assert!(filter(&project).direction.is_constant());
+    history.undo(&mut project);
+    assert_eq!(
+        filter(&project).radius.keyframe_at(5).unwrap().0,
+        30.0,
+        "the replaced value is back"
+    );
+    history.undo(&mut project);
+    assert!(filter(&project).radius.is_constant());
+}
