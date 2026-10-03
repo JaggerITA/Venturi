@@ -640,7 +640,7 @@ fn grayscale_flattens_a_solid_layer_to_its_luma() {
             content: LayerContent::Solid(RED),
             transform: Transform::default(),
             opacity: 1.0,
-            filters: &[vv_core::FilterKind::Grayscale],
+            filters: GRAYSCALE,
             blend: BlendMode::Normal,
         }],
         OutputFrame::exact(4, 4),
@@ -1236,7 +1236,7 @@ fn the_first_layer_can_be_blended_over_the_clear() {
     assert_close_rgba(out.as_chunks::<4>().0[0], [255, 0, 0, 255]);
 }
 
-fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::FilterKind]) -> Layer<'_> {
+fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::ClipFilter]) -> Layer<'_> {
     Layer {
         content: LayerContent::Adjustment,
         transform,
@@ -1246,7 +1246,8 @@ fn adjustment(transform: Transform, opacity: f32, filters: &[vv_core::FilterKind
     }
 }
 
-const GRAYSCALE: &[vv_core::FilterKind] = &[vv_core::FilterKind::Grayscale];
+const GRAYSCALE: &[vv_core::ClipFilter] =
+    &[vv_core::ClipFilter::new(vv_core::FilterKind::Grayscale)];
 
 #[test]
 fn an_adjustment_filters_the_layers_below_but_not_those_above() {
@@ -1446,4 +1447,164 @@ fn an_interleaved_chroma_renders_like_the_planar_one() {
     let planar = render(YuvChroma::Planar { u: &u, v: &v });
     let interleaved = render(YuvChroma::Interleaved(&uv));
     assert!(planar == interleaved);
+}
+
+fn blur(kind: vv_core::FilterKind, radius: f32) -> vv_core::ClipFilter {
+    vv_core::ClipFilter {
+        radius,
+        ..vv_core::ClipFilter::new(kind)
+    }
+}
+
+/// 16x4, black on the left half and white on the right one (neutral chroma,
+/// full range: R=G=B=Y).
+fn split_frame() -> OwnedYuvFrame {
+    let mut frame = solid_frame(16, 4, 0, 128, 128, ColorMatrix::Bt709, true);
+    for row in frame.y.chunks_mut(16) {
+        row[8..].fill(255);
+    }
+    frame
+}
+
+fn render_blurred(filters: &[vv_core::ClipFilter]) -> Vec<u8> {
+    let frame = split_frame();
+    let out = Compositor::new_headless().render_layers(
+        &[Layer {
+            filters,
+            ..Layer::new(
+                LayerContent::Video {
+                    frame: frame.as_yuv_frame(),
+                    source_size: (16, 4),
+                },
+                Transform::default(),
+            )
+        }],
+        OutputFrame::exact(16, 4),
+    );
+    out.as_chunks::<4>().0[16..32]
+        .iter()
+        .map(|px| px[0])
+        .collect()
+}
+
+#[test]
+fn filter_chain_splits_the_per_pixel_filters_at_the_blurs() {
+    use vv_core::FilterKind::*;
+    let filters = [
+        vv_core::ClipFilter::new(Grayscale),
+        blur(BoxBlur, 3.0),
+        vv_core::ClipFilter::new(Grayscale),
+        blur(GaussianBlur, 0.0),
+        blur(GaussianBlur, 2.0),
+    ];
+    let chain = FilterChain::new(&filters, false);
+    assert_eq!(chain.leading, [Grayscale]);
+    assert_eq!(
+        chain.blurs,
+        [
+            (
+                Blur {
+                    gaussian: false,
+                    radius: 3.0
+                },
+                vec![Grayscale]
+            ),
+            (
+                Blur {
+                    gaussian: true,
+                    radius: 2.0
+                },
+                vec![]
+            ),
+        ],
+        "a zero radius is no blur"
+    );
+
+    let uniform = FilterChain::new(&filters, true);
+    assert_eq!(uniform.leading, [Grayscale, Grayscale]);
+    assert!(uniform.blurs.is_empty(), "nothing to blur on a solid color");
+}
+
+#[test]
+fn box_blur_averages_the_pixels_within_the_radius() {
+    let row = render_blurred(&[blur(vv_core::FilterKind::BoxBlur, 2.0)]);
+    assert!(
+        row[0] <= 2,
+        "the edges repeat, nothing comes from outside: {row:?}"
+    );
+    assert!(row[15] >= 253, "{row:?}");
+    assert!(
+        row[5] <= 2,
+        "farther than the radius from the edge: {row:?}"
+    );
+    // Pixel 7 averages 5..=9: three black, two white.
+    assert!(row[7].abs_diff(102) <= 2, "{row:?}");
+    assert!(row[8].abs_diff(153) <= 2, "{row:?}");
+}
+
+#[test]
+fn gaussian_blur_is_a_symmetric_ramp_across_the_edge() {
+    let row = render_blurred(&[blur(vv_core::FilterKind::GaussianBlur, 4.0)]);
+    assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
+    assert!(row[7] > 0 && row[7] < 128, "{row:?}");
+    assert!((row[7] as i32 + row[8] as i32 - 255).abs() <= 2, "{row:?}");
+}
+
+#[test]
+fn blur_radius_is_in_timeline_pixels_whatever_the_output_resolution() {
+    let frame = split_frame();
+    let render = |output| {
+        let filters = [blur(vv_core::FilterKind::BoxBlur, 2.0)];
+        let out = Compositor::new_headless().render_layers(
+            &[Layer {
+                filters: &filters,
+                ..Layer::new(
+                    LayerContent::Video {
+                        frame: frame.as_yuv_frame(),
+                        source_size: (16, 4),
+                    },
+                    Transform::default(),
+                )
+            }],
+            output,
+        );
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[0])
+            .collect::<Vec<_>>()
+    };
+    let full = render(OutputFrame::exact(32, 8));
+    let half = render(OutputFrame::scaled(16, 4, (32, 8)));
+    // Same position on screen: pixel 7 at half resolution, 14-15 at full.
+    let full_at_7 = (full[32 * 4 + 14] as i32 + full[32 * 4 + 15] as i32) / 2;
+    assert!(
+        (half[16 * 2 + 7] as i32 - full_at_7).abs() <= 12,
+        "{half:?} {full:?}"
+    );
+}
+
+#[test]
+fn an_adjustment_blurs_the_stack_below() {
+    let compositor = Compositor::new_headless();
+    let filters = [blur(vv_core::FilterKind::BoxBlur, 2.0)];
+    let out = compositor.render_layers(
+        &[
+            Layer::new(
+                LayerContent::Solid(WHITE),
+                Transform {
+                    crop: [8.0, 0.0, 0.0, 0.0],
+                    ..Transform::default()
+                },
+            ),
+            adjustment(Transform::default(), 1.0, &filters),
+        ],
+        OutputFrame::exact(16, 4),
+    );
+    let row: Vec<u8> = out.as_chunks::<4>().0[16..32]
+        .iter()
+        .map(|px| px[0])
+        .collect();
+    assert!(row[0] <= 2 && row[15] >= 253, "{row:?}");
+    assert!(row[7] > 50 && row[8] < 205, "{row:?}");
 }

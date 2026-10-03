@@ -2039,10 +2039,23 @@ impl VenturiApp {
                                                         &timeline_ui::filter_label(filter.kind),
                                                         &mut enabled,
                                                     );
+                                                    let mut radius = filter.radius;
+                                                    let mut radius_changed = false;
+                                                    if filter.kind.is_blur() {
+                                                        let row = param_row(ui, &t!("props.blur_radius"), None, |ui| {
+                                                            slider_field(ui, &mut radius, 0.0..=vv_core::BLUR_RADIUS_MAX, 0.5, 1)
+                                                        });
+                                                        radius_changed = row.changed;
+                                                        if row.reset {
+                                                            radius = vv_core::DEFAULT_BLUR_RADIUS;
+                                                            radius_changed = true;
+                                                        }
+                                                    }
                                                     if reset {
                                                         enabled = true;
+                                                        radius = vv_core::DEFAULT_BLUR_RADIUS;
                                                     }
-                                                    if reset || enabled != filter.enabled {
+                                                    if reset || radius_changed || enabled != filter.enabled {
                                                         let tl = self.timeline_id.map(|id| &self.session.project.timelines[id]);
                                                         for t in targets {
                                                             let Some(effects) = target_effects(tl, t) else {
@@ -2053,6 +2066,9 @@ impl VenturiApp {
                                                             {
                                                                 let mut new_filters = effects.filters.clone();
                                                                 new_filters[pos].enabled = enabled;
+                                                                if reset || radius_changed {
+                                                                    new_filters[pos].radius = radius;
+                                                                }
                                                                 pending_effects.push(set_filters(
                                                                     (t.timeline, t.track_index, t.clip_id),
                                                                     new_filters,

@@ -92,7 +92,7 @@ pub struct OwnedLayer {
     pub transform: Transform,
     pub opacity: f32,
     /// Only the active filters of `EffectStack::filters`, in their order.
-    pub filters: Vec<vv_core::FilterKind>,
+    pub filters: Vec<vv_core::ClipFilter>,
     pub blend: vv_core::BlendMode,
 }
 
@@ -337,12 +337,12 @@ fn build_layer(
     content: ClipContent,
     timeline_size: (u32, u32),
 ) -> Option<OwnedLayer> {
-    let filters: Vec<vv_core::FilterKind> = clip
+    let filters: Vec<vv_core::ClipFilter> = clip
         .effects
         .filters
         .iter()
         .filter(|f| f.enabled)
-        .map(|f| f.kind)
+        .cloned()
         .collect();
     let blend = clip.effects.blend_mode;
     // The clip opacity is multiplied by the one already carried by the

@@ -1018,6 +1018,23 @@ pub const GAIN_DB_MAX: f32 = 30.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterKind {
     Grayscale,
+    BoxBlur,
+    GaussianBlur,
+}
+
+impl FilterKind {
+    /// Whether `ClipFilter::radius` applies to it.
+    pub fn is_blur(self) -> bool {
+        matches!(self, Self::BoxBlur | Self::GaussianBlur)
+    }
+}
+
+/// Bounds of `ClipFilter::radius`, in timeline pixels.
+pub const BLUR_RADIUS_MAX: f32 = 250.0;
+pub const DEFAULT_BLUR_RADIUS: f32 = 10.0;
+
+fn default_blur_radius() -> f32 {
+    DEFAULT_BLUR_RADIUS
 }
 
 /// A filter applied to a clip. The order in the `Vec` of
@@ -1028,6 +1045,19 @@ pub enum FilterKind {
 pub struct ClipFilter {
     pub kind: FilterKind,
     pub enabled: bool,
+    /// Blurs only: in timeline pixels, as seen with the clip at zoom 1.
+    #[serde(default = "default_blur_radius")]
+    pub radius: f32,
+}
+
+impl ClipFilter {
+    pub const fn new(kind: FilterKind) -> Self {
+        Self {
+            kind,
+            enabled: true,
+            radius: DEFAULT_BLUR_RADIUS,
+        }
+    }
 }
 
 /// A transition of the Effects panel, "Transitions" section: like

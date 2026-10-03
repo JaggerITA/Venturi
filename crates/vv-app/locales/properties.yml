@@ -162,6 +162,10 @@ props.corner_radius:
   en: "Corner radius"
   it: "Raggio angoli"
 
+props.blur_radius:
+  en: "Radius"
+  it: "Raggio"
+
 props.center:
   en: "Center"
   it: "Centro"
