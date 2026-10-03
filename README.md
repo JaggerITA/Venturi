@@ -6,7 +6,7 @@
 
 **A Linux-first, performance-oriented video editor written in Rust.**
 
-A cutting-focused editor, with timelines that travel to and from other NLEs via OpenTimelineIO.
+Built for editing, picture and sound, with timelines that travel to and from other NLEs via OpenTimelineIO.
 
 [![CI](https://github.com/VenturiVideo/Venturi/actions/workflows/ci.yml/badge.svg)](https://github.com/VenturiVideo/Venturi/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/VenturiVideo/Venturi?label=release)](https://github.com/VenturiVideo/Venturi/releases/latest)
@@ -26,11 +26,13 @@ A cutting-focused editor, with timelines that travel to and from other NLEs via 
 
 ---
 
-Venturi does little, and does it well. It is a cutting-only NLE:
+Venturi does little, and does it well. It is an editing-focused NLE:
 multi-track cutting, the transforms and tools you actually reach for while
 editing, keyframes on every parameter, transitions, compound clips, ripple
-delete. No node editor, no grading suite, no node-based compositor. Cutting
-is where the time goes, so that is the part that has to be perfect.
+delete, and the audio tools to finish the sound in place: a mixer with an
+effect chain per track and voiceover recording. No node editor, no grading
+suite, no node-based compositor. Editing is where the time goes, so that is
+the part that has to be perfect.
 
 **NOTE: Venturi is alpha software and is considered unstable, especially the save format. Please use at your own risk.**
 
@@ -39,11 +41,16 @@ is where the time goes, so that is the part that has to be perfect.
 
 - **Fast playback and scrubbing.** Timeline-wide frame cache, optional
   background proxies, playback up to 8x with pitch-preserved audio.
+- **Hardware accelerated.** Decoding on NVDEC, Vulkan video or VideoToolbox,
+  compositing on the GPU (Vulkan, Metal), export on NVENC, Vulkan or
+  VideoToolbox, with software as the fallback.
 - **Professional timeline workflow.** Track scrubbing with audio, ripple
-  delete, compound clips, copy/paste properties, magnet snapping, an audio
-  mixer with per-track and master gain, balance, meters and effect inserts
-  (normalization, multiband compressor, equalizer, mono), unlimited undo
-  with a jumpable history.
+  delete, compound clips, copy/paste properties, magnet snapping, clip speed
+  from 1% to 10,000%, unlimited undo with a jumpable history.
+- **Audio, finished in place.** A mixer with per-track and master gain,
+  balance, meters and an effect chain: 6-band equalizer and 3-band
+  multiband compressor over the live spectrum, normalization, mono.
+  Voiceover recorded straight onto the timeline.
 - **Keyframes done right.** Every parameter is keyframable: crop, zoom,
   rotation, position, speed, opacity, audio gain. A dedicated curve editor
   with custom curves.

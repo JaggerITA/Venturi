@@ -1,8 +1,9 @@
 # Venturi — architecture
 
-A cutting-only video editor: multi-track cutting,
+An editing-focused video editor: multi-track cutting,
 basic transforms (solid color, text, crop, zoom, speed, audio gain),
-ripple/normal delete. No node editor, no color correction.
+ripple/normal delete, an audio mixer with an effect chain per track and
+voiceover recording. No node editor, no color correction.
 
 Primary target: Asahi Linux (Fedora Asahi Remix) on Apple Silicon, sources
 mostly H.264 (x264) 1080p, within modest RAM/VRAM.
