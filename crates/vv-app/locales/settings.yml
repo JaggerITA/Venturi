@@ -294,3 +294,9 @@ action.zoom_out:
 action.add_marker:
   en: Add marker
   it: Aggiungi marker
+action.select_tool:
+  en: Selection tool
+  it: Strumento selezione
+action.slip_tool:
+  en: Slip tool
+  it: Strumento slip

@@ -46,10 +46,12 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     AddMarker,
+    SelectTool,
+    SlipTool,
 }
 
 impl Action {
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 34] = [
         Action::TogglePlayback,
         Action::FastPlayback,
         Action::StepBackward,
@@ -82,6 +84,8 @@ impl Action {
         Action::ZoomIn,
         Action::ZoomOut,
         Action::AddMarker,
+        Action::SelectTool,
+        Action::SlipTool,
     ];
 
     /// Key in the settings file: must never be changed.
@@ -119,6 +123,8 @@ impl Action {
             Action::ZoomIn => "zoom_in",
             Action::ZoomOut => "zoom_out",
             Action::AddMarker => "add_marker",
+            Action::SelectTool => "select_tool",
+            Action::SlipTool => "slip_tool",
         }
     }
 
@@ -157,7 +163,11 @@ impl Action {
             | Action::SaveProjectAs
             | Action::ImportMedia
             | Action::Export => t!("action_category.file"),
-            Action::ZoomIn | Action::ZoomOut | Action::AddMarker => {
+            Action::ZoomIn
+            | Action::ZoomOut
+            | Action::AddMarker
+            | Action::SelectTool
+            | Action::SlipTool => {
                 t!("action_category.timeline")
             }
         }
@@ -216,6 +226,8 @@ impl Action {
             Action::ZoomIn => vec![ctrl(Key::Plus), ctrl(Key::Equals)],
             Action::ZoomOut => vec![ctrl(Key::Minus)],
             Action::AddMarker => vec![plain(Key::M)],
+            Action::SelectTool => vec![plain(Key::V)],
+            Action::SlipTool => vec![plain(Key::B)],
         }
     }
 

@@ -3624,11 +3624,16 @@ impl VenturiApp {
                         transform_overlay_toggle(ui, &mut self.show_transform_overlay)
                             .on_hover_text(t!("toolbar.transform_overlay"));
                         ui.separator();
+                        let keymap = &self.settings.keymap;
                         let tool = &mut self.timeline_state.tool;
                         timeline_tool_button(ui, tool, timeline_ui::TimelineTool::Select)
-                            .on_hover_text(t!("toolbar.select_tool"));
+                            .on_hover_text(
+                                keymap.menu_label(&t!("toolbar.select_tool"), Action::SelectTool),
+                            );
                         timeline_tool_button(ui, tool, timeline_ui::TimelineTool::Slip)
-                            .on_hover_text(t!("toolbar.slip_tool"));
+                            .on_hover_text(
+                                keymap.menu_label(&t!("toolbar.slip_tool"), Action::SlipTool),
+                            );
                     });
                 });
             let (total, playhead, marks, playing) = self.transport_state();

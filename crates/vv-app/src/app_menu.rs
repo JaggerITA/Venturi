@@ -52,6 +52,12 @@ impl VenturiApp {
             if pressed(Action::Split) {
                 self.split_at_playhead();
             }
+            if pressed(Action::SelectTool) {
+                self.timeline_state.tool = timeline_ui::TimelineTool::Select;
+            }
+            if pressed(Action::SlipTool) {
+                self.timeline_state.tool = timeline_ui::TimelineTool::Slip;
+            }
             if pressed(Action::ToggleDisabled) {
                 self.toggle_disabled_selected();
             }
