@@ -3006,8 +3006,9 @@ pub fn show_timeline(
                         + (fade_in_preview as f32 * px_per_frame).min(clip_rect.width());
                     let fade_out_x = clip_rect.right()
                         - (fade_out_preview as f32 * px_per_frame).min(clip_rect.width());
-                    if show_fades && (visual.clip.fade_in > 0 || fade_in_dragging || resp.hovered())
-                    {
+                    // The slip tool can't grab them: no reveal on hover, nor while slipping.
+                    let reveal_fades = resp.hovered() && state.tool == TimelineTool::Select;
+                    if show_fades && (visual.clip.fade_in > 0 || fade_in_dragging || reveal_fades) {
                         paint_fade_wedge(
                             &painter,
                             clip_rect,
@@ -3016,8 +3017,7 @@ pub fn show_timeline(
                             fade_in_dragging,
                         );
                     }
-                    if show_fades
-                        && (visual.clip.fade_out > 0 || fade_out_dragging || resp.hovered())
+                    if show_fades && (visual.clip.fade_out > 0 || fade_out_dragging || reveal_fades)
                     {
                         paint_fade_wedge(
                             &painter,
