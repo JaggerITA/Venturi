@@ -38,6 +38,14 @@ toolbar.transform_overlay:
   en: "Position, scale and pivot handles on the viewer"
   it: "Maniglie di posizione, scala e pivot sul viewer"
 
+toolbar.select_tool:
+  en: "Selection: drag clips to move them, their edges to trim"
+  it: "Selezione: trascina le clip per spostarle, i bordi per rifilarle"
+
+toolbar.slip_tool:
+  en: "Slip: drag a clip to slide its content, keeping its place and length"
+  it: "Slip: trascina una clip per far scorrere il contenuto, senza cambiarne posizione e durata"
+
 viewer.player_error:
   en: "Player error: %{error}"
   it: "Errore player: %{error}"

@@ -64,7 +64,18 @@ pub struct RecordingView {
 
 pub const RECORDING_PEAKS_PER_SEC: f64 = 100.0;
 
+/// What a drag on a clip does; picked from the toolbar under the viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimelineTool {
+    /// Move, trim, roll, fades: the edge or handle under the pointer decides.
+    #[default]
+    Select,
+    /// Slides the media under the clip, which keeps its place and length.
+    Slip,
+}
+
 pub struct TimelineState {
+    pub tool: TimelineTool,
     /// Selected clips. Empty if no clip is selected (it must not
     /// be confused with "no timeline": here it is only the state of the
     /// selection inside an existing timeline).
@@ -175,6 +186,7 @@ enum Gesture {
     /// the gesture ends.
     DuplicateTransition(ClipId),
     Volume(VolumeDragState),
+    Slip(SlipState),
 }
 
 struct MarqueeDrag {
@@ -284,6 +296,40 @@ struct RetimeState {
     group: Vec<ClipKey>,
 }
 
+/// Slip drag: the pressed clip and its linked group slide their content by
+/// the same amount.
+struct SlipState {
+    clip_id: ClipId,
+    accum_px: f32,
+    /// Each slipped clip with its own `slip_range`, for the overlay of the
+    /// media left on each side.
+    group: Vec<(ClipKey, FrameIdx, FrameIdx)>,
+    /// `slip_range` shared by the whole group.
+    min_delta: FrameIdx,
+    max_delta: FrameIdx,
+    /// Recomputed every frame from `accum_px`.
+    delta: FrameIdx,
+    /// The video clip of the group as it was at the press, for the viewer.
+    video: Option<Box<Clip>>,
+}
+
+impl SlipState {
+    /// Dragging right brings earlier media into the clip.
+    fn delta_for(&self, px_per_frame: f32) -> FrameIdx {
+        let frames = (self.accum_px / px_per_frame).round() as FrameIdx;
+        (-frames).clamp(self.min_delta, self.max_delta)
+    }
+}
+
+/// What the viewer shows during a slip: the first and last source frame the
+/// video clip would play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlipPreview {
+    pub media_id: vv_core::MediaId,
+    pub first_frame: FrameIdx,
+    pub last_frame: FrameIdx,
+}
+
 /// Speed limits of the retime drag and the dialog, in percent.
 pub(crate) const SPEED_PERCENT_RANGE: std::ops::RangeInclusive<f64> = 1.0..=10_000.0;
 
@@ -380,6 +426,7 @@ pub(crate) const KINETIC_VELOCITY_GAIN: f32 = 1.6;
 impl Default for TimelineState {
     fn default() -> Self {
         Self {
+            tool: TimelineTool::default(),
             selected: BTreeSet::new(),
             can_record: false,
             record_needs_save: false,
@@ -442,6 +489,27 @@ impl TimelineState {
             Some(Gesture::Retime(r)) => Some(r),
             _ => None,
         }
+    }
+
+    fn slipping(&self) -> Option<&SlipState> {
+        match &self.gesture {
+            Some(Gesture::Slip(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn slip_preview(&self) -> Option<SlipPreview> {
+        let slip = self.slipping()?;
+        let mut clip = *slip.video.clone()?;
+        let ClipSource::Media(media_id) = clip.source else {
+            return None;
+        };
+        clip.source_offset += slip.delta;
+        Some(SlipPreview {
+            media_id,
+            first_frame: clip.source_in(),
+            last_frame: clip.source_out() - 1,
+        })
     }
 
     fn fading(&self) -> Option<&EdgeDragState> {
@@ -643,6 +711,11 @@ enum PendingAction {
     /// Timeline color of the listed clips; `None` goes back to the default one.
     SetDisplayColor(Vec<ClipKey>, Option<vv_core::ClipColor>),
     /// Constant speed of the listed clips (see `vv_core::SetClipSpeed`).
+    /// Slides the content of the listed clips (see `vv_core::SlipClip`).
+    Slip {
+        clips: Vec<ClipKey>,
+        delta: FrameIdx,
+    },
     SetSpeed {
         clips: Vec<ClipKey>,
         speed: vv_core::Rational,
@@ -1846,6 +1919,22 @@ pub fn show_timeline(
         let track_kinds: Vec<TrackKind> = tl.tracks.iter().map(|t| t.kind).collect();
         (tl.tracks.len(), track_kinds, visuals, max_end)
     };
+    if let Some(Gesture::Slip(slip)) = &mut state.gesture {
+        slip.delta = slip.delta_for(px_per_frame);
+    }
+    // The slipped clips are drawn with the content they will show.
+    let mut visuals = visuals;
+    if let Some(slip) = state.slipping() {
+        for v in &mut visuals {
+            if slip
+                .group
+                .iter()
+                .any(|&(key, _, _)| key == (v.track_index, v.clip.id))
+            {
+                v.clip.to_mut().source_offset += slip.delta;
+            }
+        }
+    }
     let track_labels: Vec<String> = (0..track_count)
         .map(|i| project.timelines[timeline_id].track_label(i))
         .collect();
@@ -3043,19 +3132,28 @@ pub fn show_timeline(
                             )
                     };
                     let idle_hover = resp.hovered() && state.gesture.is_none();
+                    let slip_tool = state.tool == TimelineTool::Slip;
+                    let select_hover = idle_hover && !slip_tool;
                     if idle_hover
+                        && slip_tool
+                        && !visual.locked
+                        && matches!(visual.clip.source, ClipSource::Media(_))
+                        && let Some(pos) = resp.hover_pos()
+                    {
+                        edge_cursor = Some((pos, EdgeCursor::Slip));
+                    } else if select_hover
                         && let Some(pos) = resp.hover_pos()
                         && transition_handle_at(pos, clip_rect, transition_in_x, transition_out_x)
                             .is_some()
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    } else if idle_hover
+                    } else if select_hover
                         && show_fades
                         && let Some(pos) = resp.hover_pos()
                         && fade_zone_at(pos, clip_rect, fade_in_x, fade_out_x).is_some()
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    } else if idle_hover
+                    } else if select_hover
                         && !visual.locked
                         && let Some(pos) = resp.hover_pos()
                         && let Some(zone) = edge_at(pos)
@@ -3066,7 +3164,7 @@ pub fn show_timeline(
                             EdgeCursor::from_zone(zone)
                         };
                         edge_cursor = Some((pos, cursor));
-                    } else if idle_hover
+                    } else if select_hover
                         && !visual.locked
                         && let Some(pos) = resp.hover_pos()
                         && volume_hit(pos)
@@ -3087,7 +3185,9 @@ pub fn show_timeline(
                                     == TransitionSelection::Crossing(d.track_index, d.left_clip)
                             })
                     };
-                    if resp.drag_started() {
+                    if resp.drag_started() && slip_tool {
+                        begin_slip(state, &visuals, project, &track_kinds, visual);
+                    } else if resp.drag_started() {
                         // `press_origin` and not the current position: egui declares the drag after a
                         // small movement, and towards the inside one would already have left the zone
                         // of the edge.
@@ -3208,6 +3308,9 @@ pub fn show_timeline(
                             Some(Gesture::Move(d)) if d.clip_id == visual.clip.id => {
                                 d.accum_px += delta.x
                             }
+                            Some(Gesture::Slip(s)) if s.clip_id == visual.clip.id => {
+                                s.accum_px += delta.x
+                            }
                             _ => {}
                         }
                     } else if resp.drag_stopped() {
@@ -3282,6 +3385,12 @@ pub fn show_timeline(
                                     &track_kinds,
                                     dragged_primary_new_start,
                                 ));
+                            }
+                            Some(Gesture::Slip(s)) if s.clip_id == visual.clip.id => {
+                                pending = Some(PendingAction::Slip {
+                                    clips: s.group.iter().map(|&(key, _, _)| key).collect(),
+                                    delta: s.delta_for(px_per_frame),
+                                });
                             }
                             _ => gesture_finished = false,
                         }
@@ -3469,6 +3578,42 @@ pub fn show_timeline(
                     && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
                 {
                     edge_cursor = Some((pos, EdgeCursor::Retime));
+                }
+                if let Some(slip) = state.slipping() {
+                    for &((track_index, clip_id), own_min, own_max) in &slip.group {
+                        let Some(v) = visuals
+                            .iter()
+                            .find(|v| v.track_index == track_index && v.clip.id == clip_id)
+                        else {
+                            continue;
+                        };
+                        let media_start = v.clip.timeline_start + own_min - slip.delta;
+                        let media_end = v.clip.timeline_end() + own_max - slip.delta;
+                        let y = origin.y + row_y[track_index];
+                        let extent = egui::Rect::from_min_max(
+                            egui::pos2(origin.x + media_start as f32 * px_per_frame, y + 1.0),
+                            egui::pos2(
+                                origin.x + media_end as f32 * px_per_frame,
+                                y + row_height - 1.0,
+                            ),
+                        );
+                        track_painter(track_index).rect_stroke(
+                            extent,
+                            4.0,
+                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        edge_cursor = Some((pos, EdgeCursor::Slip));
+                        let shift = -slip.delta;
+                        let sign = if shift < 0 { "-" } else { "+" };
+                        paint_pointer_overlay(
+                            ui.ctx(),
+                            pos,
+                            format!("{sign}{}", format_duration(shift.abs(), fps)),
+                        );
+                    }
                 }
                 if let Some((pos, cursor)) = edge_cursor {
                     paint_edge_cursor(ui.ctx(), pos, cursor);
@@ -4006,6 +4151,51 @@ fn begin_trim(
         max_value: max_value.max(min_value),
         followers,
         roll: matches!(zone, EdgeZone::Roll { .. }),
+    }));
+}
+
+/// Starts slipping `visual` with its linked group. Generators have no media
+/// to slide: the drag does nothing.
+fn begin_slip(
+    state: &mut TimelineState,
+    visuals: &[ClipVisual],
+    project: &Project,
+    track_kinds: &[TrackKind],
+    visual: &ClipVisual,
+) {
+    let key = (visual.track_index, visual.clip.id);
+    if vv_core::edit::slip_range(project, &visual.clip).is_none() {
+        return;
+    }
+    let mut group = Vec::new();
+    let (mut min_delta, mut max_delta) = (FrameIdx::MIN, FrameIdx::MAX);
+    let mut video: Option<&Clip> = None;
+    for k in expand_to_linked_groups(visuals, [key]) {
+        let Some(v) = visuals.iter().find(|v| (v.track_index, v.clip.id) == k) else {
+            continue;
+        };
+        let Some((lo, hi)) = vv_core::edit::slip_range(project, &v.clip) else {
+            continue;
+        };
+        min_delta = min_delta.max(lo);
+        max_delta = max_delta.min(hi);
+        if track_kinds[k.0] == TrackKind::Video && (video.is_none() || k == key) {
+            video = Some(&v.clip);
+        }
+        group.push((k, lo, hi));
+    }
+    state.selected = group.iter().map(|&(k, _, _)| k).collect();
+    state.selection_anchor = Some(key);
+    state.selected_gap = None;
+    state.selected_transition = None;
+    state.gesture = Some(Gesture::Slip(SlipState {
+        clip_id: visual.clip.id,
+        accum_px: 0.0,
+        group,
+        min_delta,
+        max_delta,
+        delta: 0,
+        video: video.cloned().map(Box::new),
     }));
 }
 
@@ -5096,6 +5286,9 @@ fn apply_pending_action(
                 return;
             }
             vv_core::edit::move_clips(project, history, timeline_id, moves);
+        }
+        PendingAction::Slip { clips, delta } => {
+            vv_core::edit::slip_clips(project, history, timeline_id, &clips, delta);
         }
         PendingAction::Trim { trims, overwritten } => {
             // The stretch gained by lengthening overwrites what was there; the trimmed
@@ -6229,6 +6422,7 @@ enum EdgeCursor {
     Roll,
     /// End of a clip with the retime bar: it changes the speed, not the trim.
     Retime,
+    Slip,
 }
 
 impl EdgeCursor {
@@ -6284,6 +6478,11 @@ fn paint_edge_cursor(ctx: &egui::Context, pos: egui::Pos2, cursor: EdgeCursor) {
         EdgeCursor::Roll => (
             vec![bracket(pos.x - 2.0, -1.0), bracket(pos.x + 2.0, 1.0)],
             vec![arrow(pos.x - 10.0, -1.0), arrow(pos.x + 10.0, 1.0)],
+        ),
+        // "[ ]" with the arrows inside: the clip stays, its content moves.
+        EdgeCursor::Slip => (
+            vec![bracket(pos.x - 10.0, 1.0), bracket(pos.x + 10.0, -1.0)],
+            vec![arrow(pos.x - 6.0, -1.0), arrow(pos.x + 6.0, 1.0)],
         ),
         EdgeCursor::Retime => unreachable!("drawn by paint_retime_cursor"),
     };

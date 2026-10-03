@@ -251,7 +251,7 @@ Project); }` in `vv-core/src/command.rs`. Every command captures the
 "before" state when it runs; `History` keeps the undo/redo stacks and a
 `generation` that changes on every edit (workers compare it to know when to
 resync). Several commands in a single step: `CompositeCommand`. Commands:
-`InsertClip`, `LiftDelete`, `RippleDeleteGap`, `MoveClips`, `TrimClip`,
+`InsertClip`, `LiftDelete`, `RippleDeleteGap`, `MoveClips`, `TrimClip`, `SlipClip`,
 `SplitClip`, `LinkClips`, `UnlinkClip`, `AddTrack`, `RemoveTrack`,
 `SetClipColor`, `UpsertKeyframe`, `RemoveKeyframe`, `RemoveMedia`,
 `RelinkMedia`; a clip's static values (transform parameters, flip, gain,
@@ -316,6 +316,11 @@ Done:
   normal delete (Del/Backspace), ripple delete ("<" key), copy/paste,
   link/unlink, multi-selection (click, ctrl, shift, rectangle), "selection
   follows playhead", snapping, zoom (Ctrl+/Ctrl-).
+- Slip tool (toolbar under the viewer, exclusive with the selection arrow):
+  dragging a clip slides its media (linked group included) without moving or
+  resizing it; the viewer splits into its first and last frame, two
+  single-media `RenderAhead`s (`vv-app/src/slip_viewer.rs`), and the timeline
+  outlines the media available on each side.
 - Transport bar under the viewer (`vv-app/src/transport.rs`): playhead,
   in/out markers (I/O keys), play/pause. On the media pool preview, in/out
   delimit the portion dragged from the viewer to the timeline; on the

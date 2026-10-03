@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::{
     AddTrack, Clip, ClipId, ClipSource, Command, CommandLabel, CompositeCommand, EffectStack,
     FrameIdx, History, Keyframed, LiftDelete, LinkClips, LinkGroupId, MediaId, MoveClips, Project,
-    Rational, Rgba, RippleDeleteGap, SplitClip, TimelineId, TitleParams, TrackKind, TrimClip,
-    TrimEdge,
+    Rational, Rgba, RippleDeleteGap, SlipClip, SplitClip, TimelineId, TitleParams, TrackKind,
+    TrimClip, TrimEdge,
 };
 
 pub type ClipRef = (usize, ClipId);
@@ -673,6 +673,45 @@ pub fn trim_clip(
     history.do_command(
         project,
         Box::new(CompositeCommand::new(CommandLabel::TrimClips, commands)),
+    );
+}
+
+/// How far the content of `clip` can slip, in timeline frames, before its
+/// in or out point leaves the media. `None` for generators (no source to
+/// slide) and offline media.
+pub fn slip_range(project: &Project, clip: &Clip) -> Option<(FrameIdx, FrameIdx)> {
+    let ClipSource::Media(media_id) = clip.source else {
+        return None;
+    };
+    let item = project.media_pool.get(media_id)?;
+    let media_end = clip.timeline_frame_at(item.meta.duration_frames);
+    Some((
+        -clip.source_offset,
+        (media_end - clip.timeline_end()).max(0),
+    ))
+}
+
+/// Slips every clip in `clips` by the same `delta`, so linked video and audio
+/// stay in sync. `delta` must be inside the `slip_range` of each one.
+pub fn slip_clips(
+    project: &mut Project,
+    history: &mut History,
+    timeline_id: TimelineId,
+    clips: &[ClipRef],
+    delta: FrameIdx,
+) {
+    if delta == 0 || clips.is_empty() {
+        return;
+    }
+    let commands: Vec<Box<dyn Command>> = clips
+        .iter()
+        .map(|&(track_index, clip_id)| {
+            Box::new(SlipClip::new(timeline_id, track_index, clip_id, delta)) as Box<dyn Command>
+        })
+        .collect();
+    history.do_command(
+        project,
+        Box::new(CompositeCommand::new(CommandLabel::SlipClips, commands)),
     );
 }
 
