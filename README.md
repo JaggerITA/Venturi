@@ -8,12 +8,12 @@
 
 A cutting-focused editor, with timelines that travel to and from other NLEs via OpenTimelineIO.
 
-[![CI](https://github.com/morrolinux/VenturiVideo/actions/workflows/ci.yml/badge.svg)](https://github.com/morrolinux/VenturiVideo/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/morrolinux/VenturiVideo?label=release)](https://github.com/morrolinux/VenturiVideo/releases/latest)
+[![CI](https://github.com/VenturiVideo/Venturi/actions/workflows/ci.yml/badge.svg)](https://github.com/VenturiVideo/Venturi/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/VenturiVideo/Venturi?label=release)](https://github.com/VenturiVideo/Venturi/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://rustup.rs)
 
-[Download](https://github.com/morrolinux/VenturiVideo/releases/latest) •
+[Download](https://github.com/VenturiVideo/Venturi/releases/latest) •
 [Features](#features) •
 [Build from source](docs/BUILDING.md) •
 [Architecture](ARCHITECTURE.md) •
@@ -59,7 +59,7 @@ is where the time goes, so that is the part that has to be perfect.
 ## Install
 
 Grab the latest build from the
-[Releases](https://github.com/morrolinux/VenturiVideo/releases/latest) page:
+[Releases](https://github.com/VenturiVideo/Venturi/releases/latest) page:
 
 | Platform | File | Notes |
 |---|---|---|
