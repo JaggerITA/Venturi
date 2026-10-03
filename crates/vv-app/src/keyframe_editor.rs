@@ -128,7 +128,19 @@ fn rows(effects: &EffectStack) -> Vec<KeyframeTarget> {
     if effects.color.as_ref().is_some_and(|c| !c.is_constant()) {
         rows.push(KeyframeTarget::Color);
     }
+    for filter in &effects.filters {
+        if !filter.radius.is_constant() {
+            rows.push(KeyframeTarget::FilterRadius(filter.kind));
+        }
+        if !filter.direction.is_constant() {
+            rows.push(KeyframeTarget::FilterDirection(filter.kind));
+        }
+    }
     rows
+}
+
+fn filter(effects: &EffectStack, kind: vv_core::FilterKind) -> Option<&vv_core::ClipFilter> {
+    effects.filters.iter().find(|f| f.kind == kind)
 }
 
 /// The frames of the keyframes of a row.
@@ -147,11 +159,17 @@ fn frames_of(effects: &EffectStack, target: KeyframeTarget) -> Vec<FrameIdx> {
             .as_ref()
             .map(|c| c.keyframes().iter().map(|k| k.0).collect())
             .unwrap_or_default(),
+        KeyframeTarget::FilterRadius(kind) => filter(effects, kind)
+            .map(|f| f.radius.keyframes().iter().map(|k| k.0).collect())
+            .unwrap_or_default(),
+        KeyframeTarget::FilterDirection(kind) => filter(effects, kind)
+            .map(|f| f.direction.keyframes().iter().map(|k| k.0).collect())
+            .unwrap_or_default(),
     }
 }
 
-/// Value and interpolation of a scalar keyframe; `None` for the color,
-/// which has no curve to draw.
+/// Value and interpolation of a scalar keyframe; `None` for the color and
+/// the blur direction, which have no curve to draw.
 fn scalar_at(
     effects: &EffectStack,
     target: KeyframeTarget,
@@ -160,7 +178,8 @@ fn scalar_at(
     match target {
         KeyframeTarget::TransformParam(p) => effects.transform.track(p).keyframe_at(frame),
         KeyframeTarget::Gain => effects.gain_db.keyframe_at(frame),
-        KeyframeTarget::Color => None,
+        KeyframeTarget::FilterRadius(kind) => filter(effects, kind)?.radius.keyframe_at(frame),
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => None,
     }
 }
 
@@ -172,7 +191,10 @@ fn scalar_keyframes(
     match target {
         KeyframeTarget::TransformParam(p) => effects.transform.track(p).keyframes().to_vec(),
         KeyframeTarget::Gain => effects.gain_db.keyframes().to_vec(),
-        KeyframeTarget::Color => Vec::new(),
+        KeyframeTarget::FilterRadius(kind) => filter(effects, kind)
+            .map(|f| f.radius.keyframes().to_vec())
+            .unwrap_or_default(),
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => Vec::new(),
     }
 }
 
@@ -197,7 +219,8 @@ fn scalar_value_at(effects: &EffectStack, target: KeyframeTarget, frame: FrameId
     match target {
         KeyframeTarget::TransformParam(p) => Some(effects.transform.track(p).value_at(frame)),
         KeyframeTarget::Gain => Some(effects.gain_db.value_at(frame)),
-        KeyframeTarget::Color => None,
+        KeyframeTarget::FilterRadius(kind) => Some(filter(effects, kind)?.radius.value_at(frame)),
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => None,
     }
 }
 
@@ -221,6 +244,16 @@ fn target_label(target: KeyframeTarget) -> String {
         },
         KeyframeTarget::Gain => t!("keyframes.gain").to_string(),
         KeyframeTarget::Color => t!("keyframes.color").to_string(),
+        KeyframeTarget::FilterRadius(kind) => format!(
+            "{} {}",
+            crate::timeline_ui::filter_label(kind),
+            t!("props.blur_radius")
+        ),
+        KeyframeTarget::FilterDirection(kind) => format!(
+            "{} {}",
+            crate::timeline_ui::filter_label(kind),
+            t!("props.blur_direction")
+        ),
     }
 }
 
@@ -904,8 +937,11 @@ fn keyframe_value(target: KeyframeTarget, value: f32) -> vv_core::KeyframeValue 
     match target {
         KeyframeTarget::TransformParam(p) => vv_core::KeyframeValue::TransformParam(p, value),
         KeyframeTarget::Gain => vv_core::KeyframeValue::Gain(value),
-        // Without a curve one does not get here; the color is edited from the Properties panel.
-        KeyframeTarget::Color => vv_core::KeyframeValue::Gain(value),
+        KeyframeTarget::FilterRadius(kind) => vv_core::KeyframeValue::FilterRadius(kind, value),
+        // Without a curve one does not get here: they are edited from the Properties panel.
+        KeyframeTarget::Color | KeyframeTarget::FilterDirection(_) => {
+            vv_core::KeyframeValue::Gain(value)
+        }
     }
 }
 

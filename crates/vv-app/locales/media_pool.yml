@@ -84,6 +84,14 @@ filter.grayscale:
   en: "Black & White"
   it: "Bianco e nero"
 
+filter.box_blur:
+  en: "Box Blur"
+  it: "Sfocatura box"
+
+filter.gaussian_blur:
+  en: "Gaussian Blur"
+  it: "Sfocatura gaussiana"
+
 pool.drag_to_clip:
   en: "Drag onto a video clip"
   it: "Trascina su una clip video"

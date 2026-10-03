@@ -2,10 +2,11 @@
 //! needed to invert itself at the moment it is applied.
 
 use crate::model::{
-    AudioEffect, ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter, ClipId, ClipSource,
-    CrossTransition, EffectStack, FrameIdx, GAIN_DB_MAX, GAIN_DB_MIN, Interpolation, Keyframed,
-    LinkGroupId, Marker, MarkerId, MediaId, MediaItem, MediaMeta, Project, Rational, Rgba,
-    Timeline, TimelineId, TitleParams, Track, TrackKind, Transform, TransformParam, Transition,
+    AudioEffect, BlurDirection, ChannelStrip, Clip, ClipAttributes, ClipColor, ClipFilter, ClipId,
+    ClipSource, CrossTransition, EffectStack, FilterKind, FrameIdx, GAIN_DB_MAX, GAIN_DB_MIN,
+    Interpolation, Keyframed, LinkGroupId, Marker, MarkerId, MediaId, MediaItem, MediaMeta,
+    Project, Rational, Rgba, Timeline, TimelineId, TitleParams, Track, TrackKind, Transform,
+    TransformParam, Transition,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -2165,6 +2166,9 @@ pub enum KeyframeValue {
     TransformParam(TransformParam, f32),
     Gain(f32),
     Color(Rgba),
+    /// Of the clip's filter of that kind (there is at most one per kind).
+    FilterRadius(FilterKind, f32),
+    FilterDirection(FilterKind, BlurDirection),
 }
 
 /// Inserts or replaces a keyframe of an animatable parameter.
@@ -2213,34 +2217,15 @@ impl Command for UpsertKeyframe {
         else {
             return;
         };
-        match self.value {
-            KeyframeValue::TransformParam(param, v) => {
-                let track = clip.effects.transform.track_mut(param);
-                self.previous = track
-                    .keyframe_at(self.frame)
-                    .map(|(v, i)| (KeyframeValue::TransformParam(param, v), i));
-                track.upsert(self.frame, v, self.interpolation);
-            }
-            KeyframeValue::Gain(v) => {
-                self.previous = clip
-                    .effects
-                    .gain_db
-                    .keyframe_at(self.frame)
-                    .map(|(v, i)| (KeyframeValue::Gain(v), i));
-                clip.effects
-                    .gain_db
-                    .upsert(self.frame, v, self.interpolation);
-            }
-            KeyframeValue::Color(v) => {
-                let Some(color) = &mut clip.effects.color else {
-                    return; // no color initialized: see the docs of SetClipColor
-                };
-                self.previous = color
-                    .keyframe_at(self.frame)
-                    .map(|(v, i)| (KeyframeValue::Color(v), i));
-                color.upsert(self.frame, v, self.interpolation);
-            }
-        }
+        let target = self.value.target();
+        // Without a color initialized nothing is put: see the docs of SetClipColor.
+        self.previous = take_keyframe(&mut clip.effects, target, self.frame);
+        put_keyframe(
+            &mut clip.effects,
+            self.value,
+            self.frame,
+            self.interpolation,
+        );
     }
 
     fn undo(&self, project: &mut Project) {
@@ -2248,37 +2233,9 @@ impl Command for UpsertKeyframe {
         else {
             return;
         };
-        match &self.previous {
-            Some((KeyframeValue::TransformParam(param, v), i)) => {
-                clip.effects
-                    .transform
-                    .track_mut(*param)
-                    .upsert(self.frame, *v, *i);
-            }
-            Some((KeyframeValue::Gain(v), i)) => {
-                clip.effects.gain_db.upsert(self.frame, *v, *i);
-            }
-            Some((KeyframeValue::Color(v), i)) => {
-                if let Some(color) = &mut clip.effects.color {
-                    color.upsert(self.frame, *v, *i);
-                }
-            }
-            None => match self.value {
-                KeyframeValue::TransformParam(param, _) => {
-                    clip.effects
-                        .transform
-                        .track_mut(param)
-                        .remove_at(self.frame);
-                }
-                KeyframeValue::Gain(_) => {
-                    clip.effects.gain_db.remove_at(self.frame);
-                }
-                KeyframeValue::Color(_) => {
-                    if let Some(color) = &mut clip.effects.color {
-                        color.remove_at(self.frame);
-                    }
-                }
-            },
+        take_keyframe(&mut clip.effects, self.value.target(), self.frame);
+        if let Some((value, interpolation)) = self.previous {
+            put_keyframe(&mut clip.effects, value, self.frame, interpolation);
         }
     }
 }
@@ -2288,6 +2245,8 @@ pub enum KeyframeTarget {
     TransformParam(TransformParam),
     Gain,
     Color,
+    FilterRadius(FilterKind),
+    FilterDirection(FilterKind),
 }
 
 impl KeyframeValue {
@@ -2296,8 +2255,14 @@ impl KeyframeValue {
             Self::TransformParam(param, _) => KeyframeTarget::TransformParam(param),
             Self::Gain(_) => KeyframeTarget::Gain,
             Self::Color(_) => KeyframeTarget::Color,
+            Self::FilterRadius(kind, _) => KeyframeTarget::FilterRadius(kind),
+            Self::FilterDirection(kind, _) => KeyframeTarget::FilterDirection(kind),
         }
     }
+}
+
+fn filter_mut(effects: &mut EffectStack, kind: FilterKind) -> Option<&mut ClipFilter> {
+    effects.filters.iter_mut().find(|f| f.kind == kind)
 }
 
 /// A keyframe named by parameter and frame: the currency with which the keyframe
@@ -2325,6 +2290,12 @@ fn take_keyframe(
             .as_mut()
             .and_then(|c| c.remove_at(frame))
             .map(|(v, i)| (KeyframeValue::Color(v), i)),
+        KeyframeTarget::FilterRadius(kind) => filter_mut(effects, kind)
+            .and_then(|f| f.radius.remove_at(frame))
+            .map(|(v, i)| (KeyframeValue::FilterRadius(kind, v), i)),
+        KeyframeTarget::FilterDirection(kind) => filter_mut(effects, kind)
+            .and_then(|f| f.direction.remove_at(frame))
+            .map(|(v, i)| (KeyframeValue::FilterDirection(kind, v), i)),
     }
 }
 
@@ -2347,6 +2318,16 @@ fn put_keyframe(
                 color.upsert(frame, v, interpolation);
             }
         }
+        KeyframeValue::FilterRadius(kind, v) => {
+            if let Some(filter) = filter_mut(effects, kind) {
+                filter.radius.upsert(frame, v, interpolation);
+            }
+        }
+        KeyframeValue::FilterDirection(kind, v) => {
+            if let Some(filter) = filter_mut(effects, kind) {
+                filter.direction.upsert(frame, v, interpolation);
+            }
+        }
     }
 }
 
@@ -2366,6 +2347,11 @@ fn set_keyframe_interpolation(
             .color
             .as_mut()
             .and_then(|c| c.set_interpolation(frame, interpolation)),
+        KeyframeTarget::FilterRadius(kind) => {
+            filter_mut(effects, kind).and_then(|f| f.radius.set_interpolation(frame, interpolation))
+        }
+        KeyframeTarget::FilterDirection(kind) => filter_mut(effects, kind)
+            .and_then(|f| f.direction.set_interpolation(frame, interpolation)),
     }
 }
 
@@ -2554,25 +2540,7 @@ impl Command for RemoveKeyframe {
         else {
             return;
         };
-        self.removed = match self.target {
-            KeyframeTarget::TransformParam(param) => clip
-                .effects
-                .transform
-                .track_mut(param)
-                .remove_at(self.frame)
-                .map(|(v, i)| (KeyframeValue::TransformParam(param, v), i)),
-            KeyframeTarget::Gain => clip
-                .effects
-                .gain_db
-                .remove_at(self.frame)
-                .map(|(v, i)| (KeyframeValue::Gain(v), i)),
-            KeyframeTarget::Color => clip
-                .effects
-                .color
-                .as_mut()
-                .and_then(|c| c.remove_at(self.frame))
-                .map(|(v, i)| (KeyframeValue::Color(v), i)),
-        };
+        self.removed = take_keyframe(&mut clip.effects, self.target, self.frame);
     }
 
     fn undo(&self, project: &mut Project) {
@@ -2583,19 +2551,7 @@ impl Command for RemoveKeyframe {
         else {
             return;
         };
-        match value {
-            KeyframeValue::TransformParam(param, v) => clip
-                .effects
-                .transform
-                .track_mut(param)
-                .upsert(self.frame, v, interp),
-            KeyframeValue::Gain(v) => clip.effects.gain_db.upsert(self.frame, v, interp),
-            KeyframeValue::Color(v) => {
-                if let Some(color) = &mut clip.effects.color {
-                    color.upsert(self.frame, v, interp);
-                }
-            }
-        }
+        put_keyframe(&mut clip.effects, value, self.frame, interp);
     }
 }
 

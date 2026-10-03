@@ -151,10 +151,7 @@ fn an_adjustment_inside_a_compound_clip_leaves_the_outer_timeline_alone() {
     });
     let mut adjustment =
         Clip::from_source_range(ClipId(4), ClipSource::Adjustment, 0, 10, 0, Rational::one());
-    adjustment.effects.filters = vec![vv_core::ClipFilter {
-        kind: vv_core::FilterKind::Grayscale,
-        enabled: true,
-    }];
+    adjustment.effects.filters = vec![vv_core::ClipFilter::new(vv_core::FilterKind::Grayscale)];
     let nested_id = project.timelines.insert(Timeline {
         name: "Nested".into(),
         fps: Rational::new(25, 1),

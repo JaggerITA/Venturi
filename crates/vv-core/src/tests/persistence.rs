@@ -125,6 +125,12 @@ fn unknown_clip_colors_load_as_no_color() {
 }
 
 #[test]
+fn filters_saved_without_a_radius_load_with_the_default_one() {
+    let filter: ClipFilter = ron::from_str("(kind: Grayscale, enabled: true)").unwrap();
+    assert_eq!(filter, ClipFilter::new(FilterKind::Grayscale));
+}
+
+#[test]
 fn timelines_saved_without_markers_load_with_none() {
     let text = r#"(name: "T", fps: (num: 25, den: 1), resolution: (1920, 1080), tracks: [])"#;
     let timeline: Timeline = ron::from_str(text).unwrap();

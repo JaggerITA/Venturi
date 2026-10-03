@@ -89,7 +89,7 @@ fn filter_id_at(filters: array<vec4<f32>, 2>, i: i32) -> f32 {
 }
 
 // Applies a filter in sequence to `rgb`; the call order (see the
-// loop in `fs_main`) is the order chosen by the user. New filters: a new
+// loop in `fs_main`) is the order chosen by the user. New per-pixel filters: a new
 // id (`filter_shader_id`) and a new branch here, nothing else in the pipeline.
 fn apply_filter(rgb: vec3<f32>, id: f32) -> vec3<f32> {
     if (id > 0.5 && id < 1.5) { // Grayscale

@@ -96,9 +96,10 @@ pub struct Layer<'a> {
     /// Alpha multiplier of the whole layer (clip fades): 1.0 = no attenuation.
     pub opacity: f32,
     /// Active filters of the clip (`EffectStack::filters`), in the order
-    /// they must be applied: vv-render does not know what each one means,
-    /// only the id of the shader corresponding to it (`filter_shader_id`).
-    pub filters: &'a [vv_core::FilterKind],
+    /// they must be applied: vv-render does not know what each per-pixel one
+    /// means, only the id of the shader corresponding to it
+    /// (`filter_shader_id`). Blurs are passes of their own (`FilterChain`).
+    pub filters: &'a [vv_core::FilterValue],
     /// How the layer composes onto those below.
     pub blend: BlendMode,
 }
@@ -151,10 +152,87 @@ pub enum LayerContent<'a> {
 /// for real use, avoids a dynamically sized buffer for the shader.
 const MAX_LAYER_FILTERS: usize = 8;
 
-/// Shader id of each `FilterKind`; 0 is reserved for "empty slot".
+/// Shader id of each `FilterKind`; 0 is reserved for "empty slot". The
+/// blurs never reach the uniform: see `FilterChain`.
 fn filter_shader_id(kind: vv_core::FilterKind) -> f32 {
     match kind {
         vv_core::FilterKind::Grayscale => 1.0,
+        vv_core::FilterKind::BoxBlur | vv_core::FilterKind::GaussianBlur => 0.0,
+    }
+}
+
+/// Past that many taps per side a blur samples every few texels instead of
+/// every one: the cost stays bounded at large radii.
+const MAX_BLUR_TAPS: f32 = 96.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Blur {
+    gaussian: bool,
+    /// In timeline pixels (`ClipFilter::radius`).
+    radius: f32,
+    direction: vv_core::BlurDirection,
+}
+
+/// A layer's filters split at the blurs: those need neighbouring pixels,
+/// so they cannot run inside the transform shader like the per-pixel ones.
+#[derive(Debug, Default, PartialEq)]
+struct FilterChain {
+    /// Per-pixel filters before the first blur.
+    leading: Vec<vv_core::FilterKind>,
+    /// Each blur with the per-pixel filters following it.
+    blurs: Vec<(Blur, Vec<vv_core::FilterKind>)>,
+}
+
+impl FilterChain {
+    /// `uniform`: the layer is a single color, where a blur changes nothing.
+    fn new(filters: &[vv_core::FilterValue], uniform: bool) -> Self {
+        let mut chain = Self::default();
+        for filter in filters {
+            if filter.kind.is_blur() {
+                if filter.radius > 0.0 && !uniform {
+                    let blur = Blur {
+                        gaussian: filter.kind == vv_core::FilterKind::GaussianBlur,
+                        radius: filter.radius,
+                        direction: filter.direction,
+                    };
+                    chain.blurs.push((blur, Vec::new()));
+                }
+            } else {
+                match chain.blurs.last_mut() {
+                    Some((_, run)) => run.push(filter.kind),
+                    None => chain.leading.push(filter.kind),
+                }
+            }
+        }
+        chain
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlurUniform {
+    step_taps: [f32; 4],
+    shape: [f32; 4],
+}
+
+impl BlurUniform {
+    /// `radius` in texels of a `size` texture, along `axis` (0 = x, 1 = y).
+    fn new(blur: Blur, radius: f32, size: (u32, u32), axis: usize) -> Self {
+        let stride = (radius / MAX_BLUR_TAPS).max(1.0);
+        let radius = radius / stride;
+        let taps = if radius > 0.0 { radius.ceil() } else { 0.0 };
+        let mut step = [0.0; 2];
+        step[axis] = stride / [size.0, size.1][axis].max(1) as f32;
+        Self {
+            step_taps: [
+                step[0],
+                step[1],
+                taps,
+                if blur.gaussian { 1.0 } else { 0.0 },
+            ],
+            // The kernel is cut at 3 sigma.
+            shape: [radius, radius / 3.0, 0.0, 0.0],
+        }
     }
 }
 
@@ -339,6 +417,7 @@ pub struct Compositor {
     /// Like `pipeline`, but in REPLACE: used by the compositing methods
     /// other than Normal (see `blend_shader_id`).
     blend_pipeline: wgpu::RenderPipeline,
+    blur_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     i420_pipeline: wgpu::ComputePipeline,
@@ -526,6 +605,36 @@ impl Compositor {
         let blend_pipeline =
             transform_pipeline("vv-render blend pipeline", Some(wgpu::BlendState::REPLACE));
 
+        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vv-render blur shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
+        });
+        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vv-render blur pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &blur_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blur_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OUTPUT_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vv-render transform sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -554,6 +663,7 @@ impl Compositor {
             queue,
             pipeline,
             blend_pipeline,
+            blur_pipeline,
             bind_group_layout,
             sampler,
             i420_pipeline,
@@ -832,6 +942,64 @@ impl Compositor {
                 backdrops.push(texture);
                 view
             };
+            let pipeline = if blend == BlendMode::Normal && !is_adjustment {
+                &self.pipeline
+            } else {
+                &self.blend_pipeline
+            };
+            let chain = FilterChain::new(filters, matches!(content, LayerContent::Solid(_)));
+            if let Some((_, trailing)) = chain.blurs.last() {
+                if first {
+                    self.pass(&mut encoder, &output_view, wgpu::LoadOp::Clear(clear), None);
+                    first = false;
+                }
+                let backdrop = (blend != BlendMode::Normal || is_adjustment).then(|| {
+                    let texture = self.scratch_texture(output.width, output.height);
+                    encoder.copy_texture_to_texture(
+                        output_texture.as_image_copy(),
+                        texture.as_image_copy(),
+                        output_texture.size(),
+                    );
+                    texture
+                });
+                let backdrop_view = backdrop.as_ref().map_or_else(
+                    || no_backdrop_view.clone(),
+                    |t| t.create_view(&wgpu::TextureViewDescriptor::default()),
+                );
+                let (blurred, fit_size, source_size) = self.blurred_source(
+                    &mut encoder,
+                    &mut planes,
+                    &mut backdrops,
+                    content,
+                    transform,
+                    output,
+                    &chain,
+                    &backdrop_view,
+                    &no_backdrop_view,
+                );
+                let bind_group = self.texture_bind_group(
+                    &mut planes,
+                    &blurred.create_view(&wgpu::TextureViewDescriptor::default()),
+                    fit_size,
+                    transform,
+                    output,
+                    source_size,
+                    *opacity,
+                    trailing,
+                    blend,
+                    &backdrop_view,
+                    is_adjustment.then_some(clear),
+                );
+                self.pass(
+                    &mut encoder,
+                    &output_view,
+                    wgpu::LoadOp::Load,
+                    Some((&bind_group, pipeline)),
+                );
+                backdrops.extend([backdrop, Some(blurred)]);
+                continue;
+            }
+            let filters = &chain.leading;
             let backdrop_start = backdrops.len();
             let bind_groups = match content {
                 LayerContent::Video { frame, source_size } => vec![self.layer_bind_group(
@@ -928,11 +1096,6 @@ impl Compositor {
                     groups
                 }
             };
-            let pipeline = if blend == BlendMode::Normal && !is_adjustment {
-                &self.pipeline
-            } else {
-                &self.blend_pipeline
-            };
             for (bind_group, backdrop) in bind_groups.iter().zip(&backdrops[backdrop_start..]) {
                 if let Some(backdrop) = backdrop {
                     // The backdrop must be read from a copy: the output texture
@@ -978,6 +1141,228 @@ impl Compositor {
             give_back(&mut pool.outputs, [output_texture.clone()]);
         }
         output_texture
+    }
+
+    /// Draws the source of a layer into a texture of its own, with the
+    /// identity transform, and blurs it there. The per-pixel filters of
+    /// `chain` go with it, except those after the last blur, left to the pass
+    /// composing it. `stack` is the source of an adjustment layer. Also returns
+    /// the fit size and the crop units of that pass.
+    fn blurred_source(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        planes: &mut Vec<wgpu::Texture>,
+        intermediates: &mut Vec<Option<wgpu::Texture>>,
+        content: &LayerContent,
+        transform: &Transform,
+        output: OutputFrame,
+        chain: &FilterChain,
+        stack: &wgpu::TextureView,
+        no_backdrop: &wgpu::TextureView,
+    ) -> (wgpu::Texture, (u32, u32), (u32, u32)) {
+        let (texture_size, source_size) = match content {
+            LayerContent::Video { frame, source_size } => {
+                ((frame.width, frame.height), *source_size)
+            }
+            LayerContent::Texture {
+                texture,
+                source_size,
+            } => ((texture.width(), texture.height()), *source_size),
+            _ => ((output.width, output.height), output.timeline_size),
+        };
+        let (sw, sh) = (texture_size.0.max(1) as f32, texture_size.1.max(1) as f32);
+        // Output pixels per source texel at zoom 1.
+        let fit_scale = (output.width as f32 / sw).min(output.height as f32 / sh);
+        let zoom = transform.zoom[0]
+            .abs()
+            .max(transform.zoom[1].abs())
+            .max(1.0);
+        // A blur costs by the pixel: no more of them than the output shows.
+        let scale = (fit_scale * zoom).min(1.0);
+        let size = (
+            ((sw * scale).round() as u32).max(1),
+            ((sh * scale).round() as u32).max(1),
+        );
+        let texels_per_pixel =
+            output.width as f32 / output.timeline_size.0.max(1) as f32 / fit_scale * scale;
+
+        let frame = OutputFrame::exact(size.0, size.1);
+        let identity = Transform::default();
+        let leading = &chain.leading;
+        let groups = match content {
+            LayerContent::Video { frame: yuv, .. } => vec![self.layer_bind_group(
+                planes,
+                yuv,
+                &identity,
+                frame,
+                size,
+                size,
+                Fill::Video,
+                1.0,
+                leading,
+                BlendMode::Normal,
+                no_backdrop,
+            )],
+            LayerContent::Texture { texture, .. } => vec![self.texture_bind_group(
+                planes,
+                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                size,
+                &identity,
+                frame,
+                size,
+                1.0,
+                leading,
+                BlendMode::Normal,
+                no_backdrop,
+                None,
+            )],
+            LayerContent::Adjustment => vec![self.texture_bind_group(
+                planes,
+                stack,
+                size,
+                &identity,
+                frame,
+                size,
+                1.0,
+                leading,
+                BlendMode::Normal,
+                no_backdrop,
+                None,
+            )],
+            LayerContent::Solid(color) => vec![self.layer_bind_group(
+                planes,
+                &SOLID_PLACEHOLDER,
+                &identity,
+                frame,
+                size,
+                size,
+                Fill::Solid(*color),
+                1.0,
+                leading,
+                BlendMode::Normal,
+                no_backdrop,
+            )],
+            LayerContent::Text(title) => {
+                let render = crate::text::render_title(
+                    title,
+                    output.timeline_size,
+                    (output.width, output.height),
+                );
+                render
+                    .layers
+                    .iter()
+                    .map(|(mask, color)| {
+                        let mask = YuvFrame {
+                            y: &mask.data,
+                            width: mask.width,
+                            height: mask.height,
+                            ..SOLID_PLACEHOLDER
+                        };
+                        self.layer_bind_group(
+                            planes,
+                            &mask,
+                            &identity,
+                            frame,
+                            size,
+                            size,
+                            Fill::Mask(*color),
+                            1.0,
+                            leading,
+                            BlendMode::Normal,
+                            no_backdrop,
+                        )
+                    })
+                    .collect()
+            }
+        };
+        // Alpha-over on a transparent clear: premultiplied, as `Fill::Rgba` wants.
+        let mut current = self.scratch_texture(size.0, size.1);
+        let current_view = current.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut load = wgpu::LoadOp::Clear(TRANSPARENT);
+        for group in &groups {
+            self.pass(encoder, &current_view, load, Some((group, &self.pipeline)));
+            load = wgpu::LoadOp::Load;
+        }
+
+        for (i, (blur, run)) in chain.blurs.iter().enumerate() {
+            let radius = blur.radius * texels_per_pixel;
+            let axes = [blur.direction.horizontal(), blur.direction.vertical()];
+            for axis in (0..2).filter(|&axis| axes[axis]) {
+                let target = self.scratch_texture(size.0, size.1);
+                self.blur_pass(
+                    encoder,
+                    &current,
+                    &target,
+                    BlurUniform::new(*blur, radius, size, axis),
+                );
+                intermediates.push(Some(std::mem::replace(&mut current, target)));
+            }
+            if i + 1 < chain.blurs.len() && !run.is_empty() {
+                let target = self.scratch_texture(size.0, size.1);
+                let group = self.texture_bind_group(
+                    planes,
+                    &current.create_view(&wgpu::TextureViewDescriptor::default()),
+                    size,
+                    &identity,
+                    frame,
+                    size,
+                    1.0,
+                    run,
+                    BlendMode::Normal,
+                    no_backdrop,
+                    None,
+                );
+                self.pass(
+                    encoder,
+                    &target.create_view(&wgpu::TextureViewDescriptor::default()),
+                    wgpu::LoadOp::Clear(TRANSPARENT),
+                    Some((&group, &self.pipeline)),
+                );
+                intermediates.push(Some(std::mem::replace(&mut current, target)));
+            }
+        }
+        (current, texture_size, source_size)
+    }
+
+    fn blur_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        target: &wgpu::Texture,
+        uniform: BlurUniform,
+    ) {
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vv-render blur uniform"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vv-render blur bind group"),
+            layout: &self.blur_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.pass(
+            encoder,
+            &target.create_view(&wgpu::TextureViewDescriptor::default()),
+            wgpu::LoadOp::Clear(TRANSPARENT),
+            Some((&bind_group, &self.blur_pipeline)),
+        );
     }
 
     /// Maps `buffer` for reading (waiting for the GPU) and passes the bytes to `read`.
@@ -1065,7 +1450,7 @@ impl Compositor {
     }
 
     /// Like `layer_bind_group`, but the source is an already composed RGBA
-    /// texture (`LayerContent::Texture`): it takes the Y plane slot — the layout
+    /// texture (`LayerContent::Texture`), letterboxed as if it were `fit_size`: it takes the Y plane slot — the layout
     /// only asks for a filterable float 2D texture, and `Rgba8Unorm` satisfies
     /// it as much as `R8Unorm` — and the other slots take the 1x1
     /// placeholders, which with `Fill::Rgba` the shader does not sample (except the alpha,
@@ -1075,7 +1460,7 @@ impl Compositor {
         &self,
         planes: &mut Vec<wgpu::Texture>,
         rgba_view: &wgpu::TextureView,
-        rgba_size: (u32, u32),
+        fit_size: (u32, u32),
         transform: &Transform,
         output: OutputFrame,
         source_size: (u32, u32),
@@ -1097,7 +1482,7 @@ impl Compositor {
             ColorMatrix::Bt709,
             false,
             fit_factors(
-                (rgba_size.0.max(1) as f32, rgba_size.1.max(1) as f32),
+                (fit_size.0.max(1) as f32, fit_size.1.max(1) as f32),
                 (output.width as f32, output.height as f32),
             ),
             output,

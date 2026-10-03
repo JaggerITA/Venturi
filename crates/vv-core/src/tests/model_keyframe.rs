@@ -230,3 +230,36 @@ fn rgba_lerp_interpolates_each_channel() {
     let mid = Rgba::lerp(&a, &b, 0.5);
     assert_eq!((mid.r, mid.g, mid.b, mid.a), (0.5, 0.25, 0.1, 0.5));
 }
+
+#[test]
+fn a_blur_direction_holds_until_the_next_keyframe() {
+    let mut direction = Keyframed::constant(BlurDirection::Both);
+    direction.upsert(0, BlurDirection::Horizontal, Interpolation::Linear);
+    direction.upsert(10, BlurDirection::Vertical, Interpolation::Linear);
+    assert_eq!(direction.value_at(9), BlurDirection::Horizontal);
+    assert_eq!(direction.value_at(10), BlurDirection::Vertical);
+}
+
+#[test]
+fn filter_keyframes_follow_trims_and_shifts_like_the_others() {
+    let mut effects = EffectStack::default();
+    let mut filter = ClipFilter::new(FilterKind::BoxBlur);
+    filter.radius.upsert(10, 0.0, Interpolation::Linear);
+    filter.radius.upsert(20, 20.0, Interpolation::Linear);
+    filter
+        .direction
+        .upsert(10, BlurDirection::Vertical, Interpolation::Hold);
+    effects.filters.push(filter);
+
+    effects.drop_keyframes_before(15);
+    let filter = &effects.filters[0];
+    assert_eq!(
+        filter.radius.value_at(15),
+        10.0,
+        "the value at the cut stays"
+    );
+    assert_eq!(filter.direction.value_at(15), BlurDirection::Vertical);
+
+    effects.shift_keyframes(5);
+    assert_eq!(effects.filters[0].radius.keyframes().last().unwrap().0, 25);
+}
