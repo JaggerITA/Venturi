@@ -35,8 +35,8 @@ toolbar.snapping:
   it: "Calamita: aggancia le clip trascinate ai bordi vicini"
 
 toolbar.transform_overlay:
-  en: "Position, scale and pivot handles on the viewer"
-  it: "Maniglie di posizione, scala e pivot sul viewer"
+  en: "Position, scale, crop and pivot handles on the viewer"
+  it: "Maniglie di posizione, scala, ritaglio e pivot sul viewer"
 
 toolbar.select_tool:
   en: "Selection: drag clips to move them, their edges to trim"
