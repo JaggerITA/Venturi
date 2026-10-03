@@ -313,9 +313,7 @@ fn offline_media_are_rechecked_when_their_path_changes() {
         compound: None,
         folder: None,
     };
-    let present = project
-        .media_pool
-        .insert(item(env!("CARGO_MANIFEST_PATH")));
+    let present = project.media_pool.insert(item(env!("CARGO_MANIFEST_PATH")));
     let missing = project.media_pool.insert(item("/missing/clip.mov"));
     let mut state = MediaPoolState::default();
 

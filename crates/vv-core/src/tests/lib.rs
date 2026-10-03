@@ -184,16 +184,17 @@ fn set_media_path_to_another_fps_keeps_the_keyframe_seconds() {
     let conform = Rational::conform_rate(project.timelines[timeline].fps, meta.fps);
     let clip_id = project.alloc_clip_id();
     let mut clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 100, 0, conform);
-    clip.effects
-        .gain_db
-        .upsert(40, -6.0, Interpolation::Linear);
+    clip.effects.gain_db.upsert(40, -6.0, Interpolation::Linear);
     clip.effects
         .transform
         .track_mut(TransformParam::Opacity)
         .upsert(100, 50.0, Interpolation::Linear);
     project.timelines[timeline].tracks[0].clips.push(clip);
     let keyframe_frames = |project: &Project| {
-        let effects = &project.timelines[timeline].clip(0, clip_id).unwrap().effects;
+        let effects = &project.timelines[timeline]
+            .clip(0, clip_id)
+            .unwrap()
+            .effects;
         (
             effects.gain_db.keyframes()[0].0,
             effects.transform.track(TransformParam::Opacity).keyframes()[0].0,
@@ -227,14 +228,21 @@ fn set_media_path_to_another_resolution_keeps_the_crop() {
     let conform = Rational::conform_rate(project.timelines[timeline].fps, meta.fps);
     let clip_id = project.alloc_clip_id();
     let mut clip = Clip::from_source_range(clip_id, ClipSource::Media(media), 0, 100, 0, conform);
-    clip.effects.transform.track_mut(TransformParam::CropLeft).default = 100.0;
+    clip.effects
+        .transform
+        .track_mut(TransformParam::CropLeft)
+        .default = 100.0;
     clip.effects
         .transform
         .track_mut(TransformParam::CropTop)
         .upsert(10, 54.0, Interpolation::Linear);
     project.timelines[timeline].tracks[0].clips.push(clip);
     let crop = |project: &Project| {
-        let transform = &project.timelines[timeline].clip(0, clip_id).unwrap().effects.transform;
+        let transform = &project.timelines[timeline]
+            .clip(0, clip_id)
+            .unwrap()
+            .effects
+            .transform;
         (
             transform.track(TransformParam::CropLeft).default,
             transform.track(TransformParam::CropTop).keyframes()[0].1,

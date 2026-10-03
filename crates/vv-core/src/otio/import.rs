@@ -6,9 +6,10 @@
 
 use super::{MeasureTitle, OtioError, generator, resolve};
 use crate::model::{
-    Clip, ClipId, ClipSource, CrossTransition, Ease, EffectStack, FrameIdx, IMAGE_DURATION_FRAMES, Interpolation, Keyframed,
-    LinkGroupId, MediaId, MediaItem, MediaMeta, Project, PushDirection, Rational, Rgba, Timeline,
-    TitleParams, Track, TrackKind, TransformParam, Transition, TransitionKind,
+    Clip, ClipId, ClipSource, CrossTransition, Ease, EffectStack, FrameIdx, IMAGE_DURATION_FRAMES,
+    Interpolation, Keyframed, LinkGroupId, MediaId, MediaItem, MediaMeta, Project, PushDirection,
+    Rational, Rgba, Timeline, TitleParams, Track, TrackKind, TransformParam, Transition,
+    TransitionKind,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -234,11 +235,14 @@ impl Importer<'_> {
                                 Some(PendingTransition::In(transition)) => {
                                     clip.effects.transition_in = Some(transition);
                                 }
-                                Some(PendingTransition::Crossing { left_clip, transition, .. }) => {
+                                Some(PendingTransition::Crossing {
+                                    left_clip,
+                                    transition,
+                                    ..
+                                }) => {
                                     let left_len =
                                         track.clip(left_clip).map_or(1, |c| c.timeline_len);
-                                    let max_duration =
-                                        (2 * left_len.min(clip.timeline_len)).max(1);
+                                    let max_duration = (2 * left_len.min(clip.timeline_len)).max(1);
                                     track.crossings.push(CrossTransition {
                                         left_clip,
                                         right_clip: clip.id,

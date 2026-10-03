@@ -2686,7 +2686,8 @@ impl Command for SetMediaPath {
         if self.new_meta.is_some() {
             project.conform_clips_of(self.media);
         }
-        for (timeline_id, track_index, clip_id, effects) in self.old_effects.borrow_mut().drain(..) {
+        for (timeline_id, track_index, clip_id, effects) in self.old_effects.borrow_mut().drain(..)
+        {
             if let Some(clip) = project.timelines[timeline_id].clip_mut(track_index, clip_id) {
                 clip.effects = effects;
             }

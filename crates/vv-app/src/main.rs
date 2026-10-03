@@ -2390,12 +2390,14 @@ impl VenturiApp {
                 if entry.timeline_fps != timeline_fps {
                     // A media gone from the pool keeps the conform rate it had.
                     let conform_rate = match &clip.source {
-                        vv_core::ClipSource::Media(media_id) => {
-                            self.session.project.media_pool.get(*media_id).map_or(
-                                clip.conform_rate(),
-                                |item| vv_core::Rational::conform_rate(timeline_fps, item.meta.fps),
-                            )
-                        }
+                        vv_core::ClipSource::Media(media_id) => self
+                            .session
+                            .project
+                            .media_pool
+                            .get(*media_id)
+                            .map_or(clip.conform_rate(), |item| {
+                                vv_core::Rational::conform_rate(timeline_fps, item.meta.fps)
+                            }),
                         vv_core::ClipSource::SolidColor
                         | vv_core::ClipSource::Text
                         | vv_core::ClipSource::Adjustment => clip.conform_rate(),
@@ -3076,8 +3078,7 @@ impl VenturiApp {
             self.mcp_screenshot(&image);
         }
         // Here and not in the pool: the viewer needs it with the pool closed too.
-        self.media_pool_state
-            .refresh_offline(&self.session.project);
+        self.media_pool_state.refresh_offline(&self.session.project);
         self.poll_thumbnails(&ui.ctx().clone());
         if self
             .thumbnail_worker

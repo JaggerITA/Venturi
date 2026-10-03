@@ -108,7 +108,9 @@ fn track_to_otio(
         }
         let next = track.clips.get(i + 1);
         if let Some(crossing) = track.crossing_from(clip.id)
-            && next.is_some_and(|n| n.id == crossing.right_clip && n.timeline_start == clip.timeline_end())
+            && next.is_some_and(|n| {
+                n.id == crossing.right_clip && n.timeline_start == clip.timeline_end()
+            })
         {
             children.push(resolve::transition_to_otio(
                 &crossing.transition,

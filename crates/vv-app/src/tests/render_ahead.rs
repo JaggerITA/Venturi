@@ -3774,7 +3774,10 @@ fn bench_backward_scrub_with_proxy() {
         DEFAULT_LOOKAHEAD_SECS * scale,
         DEFAULT_BEHIND_SECS * scale,
     );
-    let speed: f64 = std::env::var("VV_BENCH_SPEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let speed: f64 = std::env::var("VV_BENCH_SPEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0);
     for dir in [1.0f64, -1.0] {
         let start: FrameIdx = 20_000;
         render_ahead.jump_to(start);
@@ -3799,6 +3802,8 @@ fn bench_backward_scrub_with_proxy() {
             total += 1;
             std::thread::sleep(Duration::from_millis(16));
         }
-        eprintln!("dir {dir:+} speed {speed}: shown {hit}/{total} refreshes, longest black run {longest_miss}");
+        eprintln!(
+            "dir {dir:+} speed {speed}: shown {hit}/{total} refreshes, longest black run {longest_miss}"
+        );
     }
 }
