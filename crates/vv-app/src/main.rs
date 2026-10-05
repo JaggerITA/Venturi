@@ -346,7 +346,7 @@ struct VenturiApp {
     silence_params: vv_session::silence::SilenceParams,
     /// Speech detected in the streams already analyzed, per
     /// `(content_hash, stream)`.
-    silence_speech: HashMap<(u64, usize), vv_session::silence::SpeechProbabilities>,
+    silence_speech: HashMap<(u64, usize), vv_session::silence::SpeechAnalysis>,
     /// Attributes ticked in the last "paste attributes": proposed again the
     /// next time, as in the other NLEs.
     paste_attributes_selection: std::collections::HashSet<paste_attributes::Attribute>,

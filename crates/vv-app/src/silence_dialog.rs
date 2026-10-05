@@ -4,7 +4,7 @@
 use std::ops::ControlFlow;
 
 use super::*;
-use vv_session::silence::{self, SpeechProbabilities};
+use vv_session::silence::{self, SpeechAnalysis};
 
 /// `(content_hash, audio stream)`.
 type StreamKey = (u64, usize);
@@ -12,7 +12,7 @@ type StreamKey = (u64, usize);
 enum AnalysisEvent {
     /// Seconds analyzed of the stream in progress.
     Progress(f64),
-    Done(StreamKey, Result<SpeechProbabilities, String>),
+    Done(StreamKey, Result<SpeechAnalysis, String>),
 }
 
 pub(crate) struct SilenceDialog {
@@ -135,14 +135,14 @@ impl VenturiApp {
                 let speech = self
                     .silence_speech
                     .get(&(item.content_hash, clip.audio_stream_index))?;
-                let spans = silence::silent_spans(speech, &self.silence_params);
+                let spans = silence::non_speech_spans(speech, self.silence_params.threshold);
                 Some((
                     (clip.timeline_start, clip.timeline_end()),
-                    silence::clip_cut_ranges(clip, fps, &spans),
+                    silence::clip_ranges(clip, fps, &spans),
                 ))
             })
             .collect();
-        Some(silence::combine_clip_cuts(&clips))
+        Some(silence::timeline_cuts(&clips, fps, &self.silence_params))
     }
 
     pub(crate) fn show_silence_dialog(&mut self, ctx: &egui::Context) {
