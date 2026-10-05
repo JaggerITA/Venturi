@@ -400,6 +400,17 @@ impl VenturiApp {
                         }
                         if ui
                             .add_enabled(
+                                !self.timeline_state.selected.is_empty(),
+                                egui::Button::new(t!("timeline.remove_silences")),
+                            )
+                            .clicked()
+                        {
+                            self.timeline_state.silence_dialog_requested =
+                                Some(self.timeline_state.selected.iter().copied().collect());
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
                                 self.timeline_id.is_some(),
                                 egui::Button::new(
                                     keymap
@@ -619,6 +630,7 @@ fn command_label(label: vv_core::CommandLabel) -> std::borrow::Cow<'static, str>
         L::SetInterpolation => t!("history.set_interpolation"),
         L::PasteAttributes => t!("history.paste_attributes"),
         L::ClipSpeed => t!("history.clip_speed"),
+        L::RemoveSilences => t!("history.remove_silences"),
         L::AddMarker => t!("history.add_marker"),
         L::EditMarker => t!("history.edit_marker"),
         L::MoveMarker => t!("history.move_marker"),

@@ -52,6 +52,10 @@ timeline.change_clip_speed:
   en: "Clip speed…"
   it: "Velocità clip…"
 
+timeline.remove_silences:
+  en: "Remove silences…"
+  it: "Rimuovi silenzi…"
+
 timeline.show_in_media_pool:
   en: "Show in Media Pool"
   it: "Mostra nel media pool"
@@ -191,3 +195,55 @@ timeline.add_video_track:
 timeline.add_audio_track:
   en: "Add audio track"
   it: "Aggiungi traccia audio"
+
+silence.title:
+  en: "Remove Silences"
+  it: "Rimuovi silenzi"
+
+silence.threshold:
+  en: "Speech threshold"
+  it: "Soglia voce"
+
+silence.threshold_hint:
+  en: "How sure the voice detector must be that someone is speaking. Raise it to cut more; noises, clicks and music do not count as speech."
+  it: "Quanto il rilevatore di voce deve essere sicuro che qualcuno stia parlando. Alzala per tagliare di più; rumori, click e musica non contano come voce."
+
+silence.min_silence:
+  en: "Minimum silence"
+  it: "Silenzio minimo"
+
+silence.min_silence_hint:
+  en: "Shorter pauses, like a breath between words, are kept."
+  it: "Le pause più brevi, come il respiro tra due parole, vengono mantenute."
+
+silence.head:
+  en: "Head"
+  it: "Testa"
+
+silence.head_hint:
+  en: "Audio kept before the speech that ends a silence."
+  it: "Audio mantenuto prima del parlato che segue un silenzio."
+
+silence.tail:
+  en: "Tail"
+  it: "Coda"
+
+silence.tail_hint:
+  en: "Audio kept after the speech that precedes a silence."
+  it: "Audio mantenuto dopo il parlato che precede un silenzio."
+
+silence.analyzing:
+  en: "Detecting speech…"
+  it: "Rilevamento della voce…"
+
+silence.summary:
+  en: "%{count} cuts, %{secs} s removed. Without speech on all the selected audio; the cuts close up on all tracks."
+  it: "%{count} tagli, %{secs} s rimossi. Senza voce su tutto l'audio selezionato; i tagli si chiudono su tutte le tracce."
+
+silence.failed:
+  en: "Analysis failed: %{error}"
+  it: "Analisi fallita: %{error}"
+
+silence.apply:
+  en: "Remove"
+  it: "Rimuovi"

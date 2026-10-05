@@ -30,6 +30,7 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 | Cache | RAM frame cache with a global budget, eviction by distance from the playhead + all-intra proxies generated in the background | best perf/UX compromise on long-GOP x264 |
 | Target resolution | 1080p primarily | sizes the default cache budgets |
 | Waveform | yes, in the timeline | useful for cutting on speech pauses |
+| Silence removal | Silero VAD (MIT, 1.3 MB, embedded) run by tract, pure Rust | tells speech from clicks and room noise, which a volume threshold cannot; no native ML runtime to ship. The model is frozen to 16 kHz by `scripts/freeze_silero_vad.py`, since tract does not type its `If` nodes |
 
 ## Data model (data-oriented, no node graph)
 

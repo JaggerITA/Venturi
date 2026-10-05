@@ -136,6 +136,10 @@ pub struct TimelineState {
     /// "Change Clip Speed…" asked for these clips: the dialog lives in the
     /// app, which opens it and clears this.
     pub speed_dialog_requested: Option<Vec<ClipKey>>,
+    /// "Remove Silences…" asked for these clips: handled by the app.
+    pub silence_dialog_requested: Option<Vec<ClipKey>>,
+    /// Timeline ranges the open silence dialog would remove, painted red.
+    pub silence_preview: Vec<(FrameIdx, FrameIdx)>,
     /// "Show in Media Pool" asked for this media: handled by the app.
     pub reveal_in_pool_requested: Option<vv_core::MediaId>,
     marker_drag: Option<markers::MarkerDrag>,
@@ -453,6 +457,8 @@ impl Default for TimelineState {
             reveal_playhead: false,
             retime_controls: BTreeSet::new(),
             speed_dialog_requested: None,
+            silence_dialog_requested: None,
+            silence_preview: Vec::new(),
             reveal_in_pool_requested: None,
             marker_drag: None,
             marker_editor: None,
@@ -2926,6 +2932,16 @@ pub fn show_timeline(
                         );
                     }
 
+                    if !visual.locked {
+                        paint_silence_preview(
+                            &painter,
+                            clip_rect,
+                            &visual.clip,
+                            px_per_frame,
+                            &state.silence_preview,
+                        );
+                    }
+
                     let is_proxy_backed = proxy_ranges.iter().any(|&(s, e)| {
                         s < visual.clip.timeline_end() && e >= visual.clip.timeline_start
                     });
@@ -3530,6 +3546,19 @@ pub fn show_timeline(
                             }
                             if ui.button(t!("timeline.change_clip_speed")).clicked() {
                                 state.speed_dialog_requested = Some(targets());
+                                ui.close();
+                            }
+                            let has_audio = targets()
+                                .iter()
+                                .any(|&(track, _)| track_kinds[track] == TrackKind::Audio);
+                            if ui
+                                .add_enabled(
+                                    has_audio,
+                                    egui::Button::new(t!("timeline.remove_silences")),
+                                )
+                                .clicked()
+                            {
+                                state.silence_dialog_requested = Some(targets());
                                 ui.close();
                             }
                         }
@@ -5945,6 +5974,28 @@ fn clip_local_rect(
     egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(w, row_height - 4.0))
 }
 
+/// The ranges a silence removal would cut, over the part of the clip they
+/// cover; anchored to the clip so they follow it while it is dragged.
+fn paint_silence_preview(
+    painter: &egui::Painter,
+    clip_rect: egui::Rect,
+    clip: &Clip,
+    px_per_frame: f32,
+    ranges: &[(FrameIdx, FrameIdx)],
+) {
+    let x_at =
+        |frame: FrameIdx| clip_rect.left() + (frame - clip.timeline_start) as f32 * px_per_frame;
+    for &(start, end) in ranges {
+        let (start, end) = (start.max(clip.timeline_start), end.min(clip.timeline_end()));
+        if start >= end {
+            continue;
+        }
+        let rect = egui::Rect::from_x_y_ranges(x_at(start)..=x_at(end), clip_rect.y_range())
+            .intersect(clip_rect);
+        painter.rect_filled(rect, 0.0, SILENCE_PREVIEW_COLOR);
+    }
+}
+
 /// Waveform of an audio clip, one line per visible column. The bin of
 /// each column comes from the absolute time in the audio: splitting the clip does not
 /// move the waveform.
@@ -6648,6 +6699,9 @@ pub const PROXY_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(22
 
 /// Border of the clip while a filter from the Effects panel is dragged over it.
 const FILTER_HIGHLIGHT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 190, 60);
+
+const SILENCE_PREVIEW_COLOR: egui::Color32 =
+    egui::Color32::from_rgba_premultiplied(170, 25, 25, 150);
 
 fn paint_proxy_strip(painter: &egui::Painter, rect: egui::Rect) {
     let strip_rect = egui::Rect::from_min_size(

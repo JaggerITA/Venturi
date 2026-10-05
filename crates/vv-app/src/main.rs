@@ -27,6 +27,7 @@ mod proxy_worker;
 mod render_ahead;
 mod settings;
 mod settings_dialog;
+mod silence_dialog;
 mod slip_viewer;
 mod speed_dialog;
 mod theme;
@@ -340,6 +341,12 @@ struct VenturiApp {
     new_timeline_dialog: Option<NewTimelineDialog>,
     paste_attributes: Option<PasteAttributesDialog>,
     speed_dialog: Option<speed_dialog::SpeedDialog>,
+    silence_dialog: Option<silence_dialog::SilenceDialog>,
+    /// Proposed again at the next silence removal of the session.
+    silence_params: vv_session::silence::SilenceParams,
+    /// Speech detected in the streams already analyzed, per
+    /// `(content_hash, stream)`.
+    silence_speech: HashMap<(u64, usize), vv_session::silence::SpeechProbabilities>,
     /// Attributes ticked in the last "paste attributes": proposed again the
     /// next time, as in the other NLEs.
     paste_attributes_selection: std::collections::HashSet<paste_attributes::Attribute>,
@@ -455,6 +462,9 @@ impl Default for VenturiApp {
             new_timeline_dialog: None,
             paste_attributes: None,
             speed_dialog: None,
+            silence_dialog: None,
+            silence_params: Default::default(),
+            silence_speech: HashMap::new(),
             paste_attributes_selection: Default::default(),
             paste_attributes_keyframe_mode: paste_attributes::KeyframeMode::MaintainTiming,
             last_export_settings: None,
@@ -3319,6 +3329,10 @@ impl VenturiApp {
             self.reveal_in_media_pool(media);
         }
         self.show_speed_dialog(ui.ctx());
+        if let Some(targets) = self.timeline_state.silence_dialog_requested.take() {
+            self.open_silence_dialog(ui.ctx(), targets);
+        }
+        self.show_silence_dialog(ui.ctx());
 
         // Targets of the panel: the selected clips by track kind, in order
         // (track, start). The frame of each is the playhead in its own source

@@ -1,0 +1,10 @@
+[package]
+name = "vv-vad"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tract-onnx = "0.23"
