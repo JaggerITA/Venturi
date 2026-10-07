@@ -1,6 +1,6 @@
 //! Export: walks the timeline and writes H.264+AAC with the same layers and
 //! the same mix as the preview. Runs on a dedicated thread, on a
-//! snapshot of the project. `EffectStack::speed` is not applied yet.
+//! snapshot of the project.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

@@ -1,12 +1,16 @@
 # Venturi — architecture
 
 An editing-focused video editor: multi-track cutting,
-basic transforms (solid color, text, crop, zoom, speed, audio gain),
-ripple/normal delete, an audio mixer with an effect chain per track and
-voiceover recording. No node editor, no color correction.
+transforms, opacity and blend modes, filters, transitions, compound clips,
+solid color and text clips, clip speed, ripple/normal delete, an audio mixer
+with an effect chain per track and voiceover recording. No node editor, no
+color correction.
 
-Primary target: Asahi Linux (Fedora Asahi Remix) on Apple Silicon, sources
-mostly H.264 (x264) 1080p, within modest RAM/VRAM.
+Target: Linux first, on any architecture from Apple Silicon (Asahi) to x86;
+macOS too. Sources mostly H.264 (x264) 1080p, within modest RAM/VRAM.
+Hardware acceleration works on x86 Linux GPUs (NVDEC/NVENC, Vulkan video)
+and on macOS (VideoToolbox, Metal); on Asahi everything but compositing runs
+in software today, since its Vulkan driver has no video queues.
 
 This document describes the current state. The history of the choices is in
 the git history; the rules of the pipeline refactor (invariants,
@@ -20,13 +24,13 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 | UI | egui + eframe | immediate-mode, pure Rust, shares the wgpu device with the compositor |
 | GPU | wgpu: Vulkan on Linux (Honeykrisp on Asahi), Metal on macOS | Honeykrisp is 1.3/1.4 conformant on M1/M2; one stack for UI and compositing |
 | Video decode | FFmpeg (ffmpeg-next / libavcodec) with its hwaccels: VideoToolbox on macOS, NVDEC or Vulkan video on Linux; software as the fallback | frees the CPU and roughly halves the first frame after a jump ([plans/HW_DECODE.md](plans/HW_DECODE.md)). No V4L2: the Asahi AVD decoder is still unstable with multi-reference frames (practically every real x264 file). No VA-API: libva is linked at build time, so the AppImage would not start without it |
-| Encode/export | FFmpeg via ffmpeg-next: libx264, or NVENC / Vulkan / VideoToolbox if they really open; NVENC by default when present | no reliable HW encoder on Asahi today |
+| Encode/export | FFmpeg via ffmpeg-next: libx264, or NVENC / Vulkan / VideoToolbox; each HW encoder is offered only if a test encode decodes back with the right colours; NVENC by default when it passes | encoders compiled into FFmpeg often have no hardware behind them, or write wrong colours (ANV on Gen9); no HW encoder on Asahi today |
 | Audio time-stretch | libavfilter's `rubberband` filter (the system ffmpeg is already built with `--enable-librubberband`) | pitch preserved, no extra bindings to write |
-| Project persistence | RON, human-readable | debuggable, diffable with git |
+| Project persistence | RON, human-readable, no format version: older files load through serde defaults and custom deserializers | debuggable, diffable with git |
 | Undo/redo | command pattern (invertible commands) | light, unbounded history, consistent with a data-oriented architecture |
 | Frame rate | per Timeline (not per Project): a Project holds N Timelines, each with its own fps | Project = container, Timeline = sequence with its own fps; also how OTIO files from other NLEs are organised |
 | Ripple delete | global across all tracks (closes the gap everywhere, keeps A/V sync) | explicit choice for synchronised multi-track editing |
-| Keyframes | on every transform parameter (crop/zoom/gain/color) | a design requirement from the start |
+| Keyframes | on every animatable parameter: zoom, position, rotation, anchor, crop and its softness, opacity, gain, solid colour, blur radius and direction | a design requirement from the start |
 | Cache | RAM frame cache with a global budget, eviction by distance from the playhead + all-intra proxies generated in the background | best perf/UX compromise on long-GOP x264 |
 | Target resolution | 1080p primarily | sizes the default cache budgets |
 | Waveform | yes, in the timeline | useful for cutting on speech pauses |
@@ -38,21 +42,23 @@ constraints) are in [plans/REFACTOR_PIPELINE.md](plans/REFACTOR_PIPELINE.md).
 `IdMap`s (`vv-core/src/id_map.rs`): ids are never reused, and an undo puts an
 entity back under the id it had, so commands, selections and ids given to
 other programs stay valid. `Clip`s in a `Vec<Clip>` inside each `Track`, sorted by
-time, with a counter-based `ClipId`. A single `Project` struct is the source
-of truth, owned by the UI thread; workers receive copies or snapshots.
+time, with a counter-based `ClipId`. A single `Project` struct, held by the
+`vv_session::Session` with its `History`, is the source of truth; workers
+receive copies or snapshots.
 
 ```rust
 struct Project {
     media_pool: IdMap<MediaId, MediaItem>,
     timelines: IdMap<TimelineId, Timeline>,
     folders: IdMap<FolderId, MediaFolder>,
-    // + counters for ClipId and LinkGroupId
+    // + counters for ClipId, LinkGroupId and compound clips
 }
 
 struct MediaItem {
     path: PathBuf,
     meta: MediaMeta,     // duration, fps, resolution, audio (rate/channels)
     content_hash: u64,   // proxy and waveform key
+    compound: Option<TimelineId>, // compound clip: a nested timeline
 }
 
 struct Timeline {
@@ -60,12 +66,17 @@ struct Timeline {
     fps: Rational,
     resolution: (u32, u32),
     tracks: Vec<Track>,  // order = compositing order, bottom→top
+    markers: Vec<Marker>,
+    master: ChannelStrip, // gain, pan, audio effect chain on the sum
 }
 
 struct Track {
     kind: TrackKind,     // Video | Audio
     clips: Vec<Clip>,    // sorted by timeline_start, non-overlapping
     muted: bool,
+    solo: bool, locked: bool, armed: bool, // armed: voiceover lands here
+    crossings: Vec<CrossTransition>, // transitions straddling two adjacent clips
+    mix: ChannelStrip,   // audio tracks
 }
 
 struct Clip {
@@ -80,16 +91,22 @@ struct Clip {
     rate: Rational,                    // Timeline frames per source frame
     speed: Rational,                   // constant clip speed, 2/1 = 200%
     pitch_correction: bool,            // audio time-stretched, not varispeed
+    disabled: bool,                    // stays on the timeline, not rendered
+    fade_in: FrameIdx, fade_out: FrameIdx,
 }
 
 struct EffectStack {
-    transform: TransformTracks,  // one Keyframed<f32> per parameter + flip
+    transform: TransformTracks,  // one Keyframed<f32> per parameter (opacity too) + flip
     gain_db: Keyframed<f32>,
     color: Option<Keyframed<Rgba>>,   // SolidColor and Text
     title: Option<TitleParams>,       // Text only
+    filters: Vec<ClipFilter>,         // grayscale, box/gaussian blur, in order
+    transition_in: Option<Transition>, transition_out: Option<Transition>,
+    blend_mode: BlendMode,            // 15 separable modes
 }
 
 struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
+// Interpolation: Hold, Linear, EaseInOut, EaseIn, EaseOut, Bezier { c1, c2 }
 ```
 
 - Importing a media: one video clip plus one audio clip per audio stream,
@@ -207,14 +224,15 @@ struct Keyframed<T> { keyframes: Vec<(FrameIdx, T, Interpolation)>, default: T }
    is registered in `egui-wgpu`, with no readback. Export:
    `Compositor::render_layers_i420` composes at the timeline resolution,
    converts to BT.709 I420 on the GPU (compute shader) and reads back the
-   planes for the encoder. Decode, composition and encode run on three
-   pipelined threads.
+   planes for the encoder. Decode and composition run on two pipelined
+   threads, encode on the export thread itself, the audio mix on a fourth.
 6. No video clips (gap on every track): a black frame, the composition of an
    empty stack.
 
-There is no per-clip opacity or blend mode yet: an opaque layer covering the
-whole frame occludes those below, the only alpha in play is that of the
-letterbox bars.
+Each layer carries its `opacity` and `BlendMode`. `Normal` uses the
+pipeline's alpha blending; the other 14 modes copy the stack composed so far
+(the backdrop) and mix with it in the shader (`blend_channel` in
+`transform.wgsl`).
 
 ## Audio pipeline
 
@@ -235,6 +253,19 @@ letterbox bars.
   Buffers are decoded in the background per `(path, audio_stream_index)`
   (`mix_buffers.rs`) and published partially as they grow: the start of the
   track plays right away, silence only past the part already decoded.
+- **Channel strips**: every audio track and the timeline master have a
+  `ChannelStrip` (gain, pan, an insert chain before the fader): 6-band
+  equalizer, 3-band multiband compressor, mono and normalization. The mix is
+  per track, then the master strip on the sum.
+- **Normalization**: brings a channel to a target measured as sample peak,
+  true peak (BS.1770) or integrated loudness (EBU R128); per clip
+  (`SetLevel::Independent`) or one gain for all the clips of the track
+  (`Relative`). The levels are measured off the audio thread by the level
+  worker in `mix_buffers.rs` (`LevelAnalysis`); until a level is ready the
+  last one keeps playing.
+- **Clip speed with pitch correction**: the clip's source range is stretched
+  with `rubberband` by a third `mix_buffers` worker, silent until ready;
+  synchronous on export.
 - **Clock**: the mixer position, in timeline samples, is the playhead
   (`drive_playback`); the video chases it. A gap is just silence, the clock
   keeps advancing. With no audio device the clock is wall-clock.
@@ -255,41 +286,62 @@ resync). Several commands in a single step: `CompositeCommand`. Commands:
 `InsertClip`, `LiftDelete`, `RippleDeleteGap`, `MoveClips`, `TrimClip`, `SlipClip`,
 `SplitClip`, `LinkClips`, `UnlinkClip`, `AddTrack`, `RemoveTrack`,
 `SetClipColor`, `UpsertKeyframe`, `RemoveKeyframe`, `RemoveMedia`,
-`RelinkMedia`; a clip's static values (transform parameters, flip, gain,
-title) go through `SetClipValue` (`set_clip_*`). `insert_overwriting` clears
-the space under the inserted clips (paste, duplicate, drop from the media
-pool). `vv-core/src/edit.rs` builds the editing operations (split, delete,
-ripple, `delete_ranges`, insert) on explicit targets; the UI maps selection
-and playhead onto them and owns the undo grouping.
+`RelinkMedia` and more; a clip's static values (transform parameters, flip,
+gain, title) go through `SetClipValue` (`set_clip_*`). `insert_overwriting`
+clears the space under the inserted clips (paste, duplicate, drop from the
+media pool). `vv-core/src/edit.rs` builds the multi-step editing operations
+(split, delete, ripple, `delete_ranges`, insert) on explicit targets; the UI
+maps selection and playhead onto them and owns the undo grouping. Every
+project change, from the UI, MCP or a session job, is a `Command` run
+through the `Session`'s `History`, so undo and the unsaved flag see all of
+them.
 
 ## Threading
 
-- **UI**: owns `Project` and `History`, the egui loop, command dispatch,
-  preview compositing.
+- **UI**: the egui loop, command dispatch, preview compositing. It owns the
+  `Session`, or with MCP on checks it out of a shared slot for the length of
+  each frame (see MCP server).
 - **Audio**: the `Mixer`'s `cpal` callback, mixes straight from the current
-  snapshot, with no allocations or blocking locks.
-- **`RenderAhead`**: one decode thread for the timeline buffer (a
-  multi-worker pool has not been needed yet).
-- **`mix_buffers`**: decode and resample of the mixer's audio buffers.
-- **Stretch**: one thread per fast forward window, at most one request in
+  snapshot, with no allocations or blocking locks (`try_lock` only).
+- **`RenderAhead`**: one decode thread per buffer: the timeline, the media
+  pool preview and, while slipping, each of the two ends.
+- **`mix_buffers`**: three serial workers: decode and resample of the
+  mixer's audio buffers, pitch-corrected clip-speed stretch, normalization
+  levels.
+- **Fast forward stretch**: one thread per window, at most one request in
   flight.
-- **`proxy_worker`**, **`waveform_worker`**: serial queues, one thread each.
-- **Export**: a dedicated thread on a clone of `Project`, with shared
-  progress and cancellation.
+- **`proxy_worker`**, **`waveform_worker`**, **`thumbnail_worker`**: serial
+  queues, one thread each.
+- **Session jobs** (`vv-session/src/jobs.rs`): import probing on a pool of
+  one thread per core; OTIO import, relink and forced relink on a thread
+  each.
+- **Export**: a job thread on a clone of `Project`, with shared progress and
+  cancellation. It spawns scoped decode, compose and audio mix threads and
+  encodes itself.
+- **Silence analysis**: one thread for the media the dialog has not
+  measured yet.
+- **MCP**: the transport (stdio, or the socket listener on a tokio
+  runtime), the editor's host thread, a worker for slow tools.
+- **Short-lived**: file dialogs, HW decoder and encoder probes, text
+  warm-up, Wayland drag and drop.
 
 ## MCP server
 
 `vv-mcp` turns MCP tool calls into `ToolCall`s and runs them with
-`dispatch` on a `vv_session::Session`; the editing goes through
-`vv_core::edit`, like the UI's. The transport (rmcp, on a tokio thread) only
-submits calls through a channel (`McpHandle` → `McpInbox`); whoever owns the
-`Session` answers them. Headless (`vv-app mcp`) that is `run_headless`; in
-the editor window it is `vv-app/src/mcp_host.rs`, between two frames, which
-holds project-changing calls while the user is mid-gesture (so they never
-join the user's undo group) and refuses them while a dialog waits. Slow calls
-(`render_frame`, `get_audio_levels`) run on a worker thread and are polled.
-The window serves on a 0600 Unix socket; `vv-app mcp --attach` bridges a
-client's stdio to it. Usage: [docs/MCP.md](docs/MCP.md).
+`dispatch` on a `vv_session::Session`; edits are the same commands the UI
+runs. The transport (rmcp, on a tokio thread) only submits calls through a
+channel (`McpHandle` → `McpInbox`); whoever owns the `Session` answers them.
+Headless (`vv-app mcp`) that is `run_headless`. In the editor window it is a
+host thread of its own (`vv-app/src/mcp_host.rs`): between two frames the
+`Session` sits in a shared slot, and the UI checks it out for the length of
+each frame, so calls are answered even when the window is not drawn. The
+host holds project-changing calls while the user is mid-gesture (so they
+never join the user's undo group) and refuses them while a dialog waits.
+Slow calls (`render_frame`, `get_audio_levels`) run on a worker thread and
+are polled. The editor-only tools (`get_state`, `screenshot_ui`,
+`set_active_timeline`) return an error when headless. The window serves on a
+0600 Unix socket; `vv-app mcp --attach` bridges a client's stdio to it.
+Usage: [docs/MCP.md](docs/MCP.md).
 
 ## Cargo workspace layout
 
@@ -300,6 +352,7 @@ venturi/
     vv-media/    # probe, decode, frame cache, proxy, waveform, encode
     vv-render/   # wgpu compositor, wgsl shaders, text
     vv-audio/    # mixer, resample, time-stretch, cpal output
+    vv-vad/      # voice activity detection (Silero VAD on tract)
     vv-session/  # UI-free application core: export, import/relink workers
     vv-mcp/      # MCP server: tools over a Session, stdio and socket transports
     vv-app/      # egui UI (timeline, viewer, panels), playback, MCP editor host
@@ -330,7 +383,8 @@ Done:
   down they run at 0.5x), audio of all tracks, audio scrub, audio meter.
 - Effects: zoom X/Y (linkable), position, rotation, anchor point, flip, crop
   of the four sides with softness (inwards or outwards), all in pixels, gain,
-  SolidColor colour; static or keyframed (Hold/Linear/EaseInOut) from the
+  SolidColor colour; static or keyframed (Hold, Linear, ease in/out, free
+  Bezier curve in the keyframe editor) from the
   properties panel, split into the Video tab (Transform and Cropping
   sections, reset per parameter and per section) and the Audio tab (gain).
   Every transform parameter has its own keyframes (`TransformTracks`): the
@@ -343,6 +397,14 @@ Done:
   (`Clip::rate`), in preview and in export.
 - Text clips (`ClipSource::Text`): font, style, colour, alignment, shadow
   and background from the properties panel.
+- Opacity and 15 blend modes per clip; filters (grayscale, box and gaussian
+  blur with keyframable radius and direction); Push transitions on a clip's
+  edges or across a cut; fades; adjustment clips; compound clips (a nested
+  timeline in the media pool); markers.
+- Mixer: per-track and master gain, pan, solo, equalizer, multiband
+  compressor, mono and normalization (sample peak, true peak, loudness);
+  voiceover recording onto an armed track.
+- Silence removal driven by voice activity detection (`vv-vad`).
 - Proxies and waveforms in the background.
 - Hardware video decoding for playback, proxies and export, with software
   fallback per media.
@@ -366,7 +428,6 @@ Done:
 
 Not yet:
 - Speed ramps (keyframed speed), reverse and freeze frame.
-- Per-clip opacity/blend.
 
 ## Environment setup
 

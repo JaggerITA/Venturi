@@ -158,6 +158,8 @@ Every call below is one undo step.
 
 ### Editor window only
 
+Without `--attach` these return an error asking to attach to the window.
+
 | Tool | Notes |
 |---|---|
 | `get_state` | The open timeline, the playhead and your selection, so you can tell the agent "cut *this*" |
