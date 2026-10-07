@@ -44,13 +44,53 @@ mixer.effect_disabled:
   en: "Disabled: it has no effect on the mix."
   it: "Disabilitato: non ha effetto sul mix."
 
-mixer.normalize_target:
-  en: "Target peak (dBFS)"
-  it: "Picco obiettivo (dBFS)"
+mixer.normalize_mode:
+  en: "Mode"
+  it: "Modalità"
 
-mixer.normalize_hint:
-  en: "Brings the loudest peak of the whole channel to this level."
-  it: "Porta il picco più alto dell'intero canale a questo livello."
+mixer.normalize_sample_peak:
+  en: "Sample Peak Program"
+  it: "Sample Peak Program"
+
+mixer.normalize_true_peak:
+  en: "True Peak Program"
+  it: "True Peak Program"
+
+mixer.normalize_loudness:
+  en: "Loudness (EBU R128 / ITU-R BS.1770)"
+  it: "Loudness (EBU R128 / ITU-R BS.1770)"
+
+mixer.normalize_target:
+  en: "Target level (%{unit})"
+  it: "Livello obiettivo (%{unit})"
+
+mixer.normalize_set_level:
+  en: "Set level"
+  it: "Livello"
+
+mixer.set_level_independent:
+  en: "Independent"
+  it: "Indipendente"
+
+mixer.set_level_relative:
+  en: "Relative"
+  it: "Relativo"
+
+mixer.normalize_hint_independent:
+  en: "Each clip of the track gets its own gain: all of them reach the target."
+  it: "Ogni clip della traccia ha il suo guadagno: arrivano tutte al livello obiettivo."
+
+mixer.normalize_hint_relative:
+  en: "One gain for the whole track: the loudest clip reaches the target, the differences between the clips stay."
+  it: "Un unico guadagno per tutta la traccia: la clip più forte arriva al livello obiettivo, le differenze tra le clip restano."
+
+mixer.normalize_hint_master:
+  en: "Brings the level of the whole mix to the target."
+  it: "Porta il livello dell'intero mix al livello obiettivo."
+
+mixer.normalize_hint_loudness:
+  en: "Measured as the ear perceives it, not on the peaks: a high gain can clip the peaks."
+  it: "Misurata come la percepisce l'orecchio, non sui picchi: un guadagno alto può far clippare i picchi."
 
 mixer.effect_multiband:
   en: "Multiband compressor"

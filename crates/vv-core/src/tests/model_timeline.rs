@@ -459,6 +459,20 @@ fn transform_tracks_saved_without_a_newer_param_load_with_its_default() {
     assert_eq!(t.zoom, [1.0, 1.0]);
 }
 
+#[test]
+fn a_normalization_saved_before_its_modes_loads_as_a_relative_sample_peak() {
+    let older = "(enabled: true, kind: Normalize(target_db: -3.0))";
+    let effect: AudioEffect = ron::from_str(older).expect("load");
+    assert_eq!(
+        effect.kind,
+        AudioEffectKind::Normalize {
+            target_db: -3.0,
+            mode: NormalizeMode::SamplePeak,
+            set_level: SetLevel::Relative,
+        }
+    );
+}
+
 fn media_item(path: &str) -> MediaItem {
     MediaItem {
         path: path.into(),

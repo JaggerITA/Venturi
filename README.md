@@ -49,7 +49,8 @@ the part that has to be perfect.
   from 1% to 10,000%, unlimited undo with a jumpable history.
 - **Audio, finished in place.** A mixer with per-track and master gain,
   balance, meters and an effect chain: 6-band equalizer and 3-band
-  multiband compressor over the live spectrum, normalization, mono.
+  multiband compressor over the live spectrum, normalization (sample
+  peak, true peak or EBU R128 loudness, per clip or per track), mono.
   Voiceover recorded straight onto the timeline.
 - **Keyframes done right.** Every parameter is keyframable: crop, zoom,
   rotation, position, speed, opacity, audio gain. A dedicated curve editor
