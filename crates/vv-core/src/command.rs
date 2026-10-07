@@ -69,6 +69,7 @@ pub enum CommandLabel {
     SetInterpolation,
     PasteAttributes,
     ClipSpeed,
+    RemoveSilences,
     AddMarker,
     EditMarker,
     MoveMarker,

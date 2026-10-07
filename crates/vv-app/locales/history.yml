@@ -44,6 +44,10 @@ history.clip_speed:
   en: "Clip speed"
   it: "Velocità clip"
 
+history.remove_silences:
+  en: "Remove silences"
+  it: "Rimuovi silenzi"
+
 history.duplicate_clips:
   en: "Duplicate clips"
   it: "Duplica clip"
