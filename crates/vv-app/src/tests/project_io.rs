@@ -1,9 +1,16 @@
 use super::*;
 
 #[test]
-fn with_upper_case_adds_uppercase_variants() {
+#[cfg(target_os = "linux")]
+fn case_insensitive_matches_every_spelling() {
     assert_eq!(
-        with_upper_case(&["mp4", "mov"]),
-        ["mp4", "MP4", "mov", "MOV"]
+        case_insensitive(&["mp4", "tiff"]),
+        ["[mM][pP]4", "[tT][iI][fF][fF]"]
     );
+}
+
+#[test]
+#[cfg(not(target_os = "linux"))]
+fn case_insensitive_keeps_plain_extensions() {
+    assert_eq!(case_insensitive(&["mp4", "tiff"]), ["mp4", "tiff"]);
 }

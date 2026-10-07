@@ -4,10 +4,22 @@
 use super::*;
 use std::sync::Arc;
 
-/// Dialog glob filters are case-sensitive (GoPro writes `.MP4`).
-fn with_upper_case(exts: &[&str]) -> Vec<String> {
+/// Linux dialog filters are case-sensitive globs, so `mp4` becomes `[mM][pP]4`
+/// to show `.MP4` (GoPro). macOS and Windows are already case-insensitive and
+/// do not take globs here.
+fn case_insensitive(exts: &[&str]) -> Vec<String> {
     exts.iter()
-        .flat_map(|e| [e.to_string(), e.to_uppercase()])
+        .map(|e| {
+            if !cfg!(target_os = "linux") {
+                return e.to_string();
+            }
+            e.chars()
+                .map(|c| match c.is_ascii_alphabetic() {
+                    true => format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase()),
+                    false => c.to_string(),
+                })
+                .collect()
+        })
         .collect()
 }
 
@@ -359,12 +371,12 @@ impl VenturiApp {
         let media: Vec<&str> = [VIDEO, AUDIO, vv_media::IMAGE_EXTENSIONS].concat();
         self.spawn_dialog(DialogKind::ImportMedia, move |dlg| {
             DialogOutcome::Files(
-                dlg.add_filter("media", &with_upper_case(&media))
-                    .add_filter("video", &with_upper_case(VIDEO))
-                    .add_filter("audio", &with_upper_case(AUDIO))
+                dlg.add_filter("media", &case_insensitive(&media))
+                    .add_filter("video", &case_insensitive(VIDEO))
+                    .add_filter("audio", &case_insensitive(AUDIO))
                     .add_filter(
                         t!("file_filter.images"),
-                        &with_upper_case(vv_media::IMAGE_EXTENSIONS),
+                        &case_insensitive(vv_media::IMAGE_EXTENSIONS),
                     )
                     .pick_files(),
             )
